@@ -3998,6 +3998,12 @@ async function viewApprovals(main) {
         title: fmtTs(approval.requested_at),
       }, `waiting ${relativeTime(approval.requested_at).replace(" ago", "")}`));
     }
+    // v106-F3: an unconfirmed G10 verdict belongs ON the approval being
+    // granted, not in the response after the human already said yes.
+    if (approval.reverification_warning) {
+      card.append(el("p", { class: "note approval-reverify-warning" },
+        `⚠ ${approval.reverification_warning}`));
+    }
     if (approval.project_context) {
       card.append(el("p", { class: "note" },
         `project: ${formatProjectContext(approval.project_context)}`));

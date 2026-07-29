@@ -462,9 +462,13 @@ def reverification_warning(reverify: Any) -> str | None:
             "the supervisor could not re-verify this run "
             f"(re-verification outcome: {reverify.outcome}: {reverify.detail})"
         )
+    # v106-F3: exit codes exist, so re-verification RAN — saying "could not"
+    # here dressed a failing patch in toolchain-mismatch clothes (I8). The two
+    # states demand opposite reactions: failed → distrust the patch,
+    # unavailable → fix the supervisor's toolchain.
     return (
-        "the supervisor could not re-verify this run "
-        f"(re-verification outcome: {reverify.outcome}); review the patch before relying on it"
+        f"re-verification RAN and FAILED (exit codes {list(reverify.exit_codes)}): "
+        "the patch does not pass the verify command — review it before relying on it"
     )
 
 
@@ -1635,6 +1639,12 @@ def approval_view(
         stale = stale_base_info(store, str(approval.task_id))
         if stale is not None:
             row["stale_base"] = stale
+        # v106-F3: an unconfirmed re-verification must be visible ON the
+        # approval the human is about to grant, not only in the land response
+        # after the fact (four field patches landed confirmed=0 quietly).
+        warning = reverification_warning(store.reverification_for(str(approval.task_id)))
+        if warning is not None:
+            row["reverification_warning"] = warning
     if project_context is not None:
         row["project_context"] = project_context
     decision = None

@@ -916,11 +916,15 @@ def test_reverification_warning_tells_the_truth_per_state() -> None:
     )
     assert missing is not None and "no patch artifact" in missing
     assert "review the patch" not in missing
-    # A real failed re-run keeps the original warning verbatim.
+    # v106-F3: a re-run that HAPPENED and failed says so — "could not
+    # re-verify" is reserved for the states where nothing ran, because the two
+    # demand opposite reactions (distrust the patch vs fix the toolchain).
     failed = reverification_warning(
         _record(outcome="failed", detail="re-run exit codes [1]", exit_codes=[1])
     )
-    assert failed is not None and "review the patch before relying on it" in failed
+    assert failed is not None and "RAN and FAILED" in failed
+    assert "exit codes [1]" in failed
+    assert "could not re-verify" not in failed
 
 
 def test_unconfirmed_reverification_surfaces_on_every_completed_run_surface(
@@ -964,9 +968,14 @@ def test_unconfirmed_reverification_surfaces_on_every_completed_run_surface(
     assert "could NOT confirm" in detail["guidance"]
 
     review_id = client.post(f"/api/runs/{task_id}/approvals").json()["review_id"]
+    # v106-F3: the unconfirmed verdict is ON the pending approval the human is
+    # about to grant — not only in the response after they said yes.
+    pending = client.get("/api/approvals").json()["approvals"]
+    row = next(item for item in pending if item["review_id"] == review_id)
+    assert "RAN and FAILED" in row["reverification_warning"]
     approved = client.post(f"/api/approvals/{review_id}/approve", json={"actor": "tester"}).json()
     assert approved["action"] == "applied"
-    assert "could not re-verify" in approved["warning"]
+    assert "RAN and FAILED" in approved["warning"]
 
 
 def test_unbound_repo_dispatch_carries_binding_hint(repo: Path, tmp_path: Path) -> None:
