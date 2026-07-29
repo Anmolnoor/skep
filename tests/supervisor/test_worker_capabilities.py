@@ -313,6 +313,32 @@ def test_git_diff_excludes_toolchain_scratch(repo: Path) -> None:
     assert ".toolchain" not in diff
 
 
+def test_shell_run_heartbeats_while_the_command_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v106-F2: a worker blocked in a long subprocess must not read as dead —
+    three field runs were killed heartbeat_lost at exactly 3x10s while npm
+    installs ran. The capability layer heartbeats on the v94-F2 cadence."""
+    from skep.workers import capabilities as capabilities_module
+
+    monkeypatch.setattr(capabilities_module, "_EXEC_HEARTBEAT_SECONDS", 0.05)
+    events: list[tuple[EventType, dict[str, object]]] = []
+    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
+    argv = [sys.executable, "-c", "import time; time.sleep(0.4)"]
+
+    result = registry.invoke("shell.run", {"argv": argv, "purpose": "verify"})
+
+    assert result.exit_code == 0
+    beats = [p for t, p in events if t == EventType.HEARTBEAT]
+    assert beats, "no heartbeat during a 0.4s command at a 0.05s cadence"
+    assert beats[0] == {"phase": "executing"}
+    # The stream stays ordered: start, beats, result — never a beat after the
+    # command result.
+    types = [t for t, _ in events]
+    assert types[-1] == EventType.COMMAND_RESULT
+    assert types[0] == EventType.COMMAND_START
+
+
 def test_git_unstage_requires_approval(repo: Path) -> None:
     registry = CapabilityRegistry(repo, emit=lambda _t, _p: None)
 

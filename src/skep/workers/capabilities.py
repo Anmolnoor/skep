@@ -23,8 +23,27 @@ from skep.supervisor.netproxy import domain_allowed
 from skep.supervisor.spawner import build_worker_env
 from skep.worker_contract import PATCH_EXCLUDE_PATHSPECS, EventType
 from skep.workers.html_text import html_to_text
+from skep.workers.worker_runtime import Heartbeat
 
 EventEmitter = Callable[[EventType, dict[str, object]], None]
+
+# v106-F2: the monitor kills on 3x10s of event silence with a live process
+# (monitor.py) — correct policy, but a worker blocked in a long subprocess
+# (npm install, bash update-deps.sh) IS silent. Three field runs died at
+# exactly 30s. Same 5s cadence the CLI adapter adopted for the identical
+# problem in v94-F2.
+_EXEC_HEARTBEAT_SECONDS = 5.0
+
+
+class _EmitStream:
+    """Adapts the registry's bare emit callable to ``Heartbeat``'s stream shape."""
+
+    def __init__(self, emit: EventEmitter) -> None:
+        self._delegate = emit
+
+    def emit(self, event_type: EventType, payload: dict[str, object]) -> None:
+        self._delegate(event_type, payload)
+
 
 # v106-F1: ``npm_config_cache`` is supervisor-injected per-run config (a
 # workspace-local path, never a secret) — child commands need it or npm falls
@@ -1241,15 +1260,23 @@ class CapabilityRegistry:
         )
         started = time.monotonic()
         try:
-            proc = subprocess.run(
-                argv,
-                cwd=str(self._workspace),
-                capture_output=True,
-                text=True,
-                timeout=float(timeout),
-                check=False,
-                env=self._child_env,
-            )
+            # v106-F2: command.start reset the monitor's clock, but a command
+            # outliving 3xheartbeat_seconds got the worker killed mid-work.
+            with Heartbeat(
+                _EmitStream(self._emit),
+                "executing",
+                interval_seconds=_EXEC_HEARTBEAT_SECONDS,
+                emit_immediately=False,
+            ):
+                proc = subprocess.run(
+                    argv,
+                    cwd=str(self._workspace),
+                    capture_output=True,
+                    text=True,
+                    timeout=float(timeout),
+                    check=False,
+                    env=self._child_env,
+                )
         except OSError as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
             error = str(exc)
