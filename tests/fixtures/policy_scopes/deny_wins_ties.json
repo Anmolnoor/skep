@@ -1,0 +1,25 @@
+{
+  "base": {
+    "template": "strict",
+    "scopes": [
+      {
+        "scope": "network",
+        "allow": [
+          {"rule_id": "net-allow-pypi", "action": "connect", "pattern": "pypi.org"}
+        ],
+        "deny": [
+          {"rule_id": "net-deny-pypi", "action": "connect", "pattern": "pypi.org"}
+        ]
+      }
+    ]
+  },
+  "cases": [
+    {
+      "scope": "network",
+      "action": "connect",
+      "value": "pypi.org",
+      "verdict": "deny",
+      "decided_by": "strict/net-deny-pypi"
+    }
+  ]
+}

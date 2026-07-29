@@ -1,0 +1,46 @@
+{
+  "coding": [
+    {
+      "verdict": "require_approval",
+      "rule_id": "coding-gated",
+      "action": "edit",
+      "pattern": "*"
+    },
+    {
+      "verdict": "require_approval",
+      "rule_id": "verify-gated",
+      "action": "verify",
+      "pattern": "*"
+    }
+  ],
+  "filesystem": [
+    {
+      "verdict": "allow",
+      "rule_id": "fs-read",
+      "action": "read",
+      "pattern": "*"
+    },
+    {
+      "verdict": "require_approval",
+      "rule_id": "fs-write-gated",
+      "action": "write",
+      "pattern": "*"
+    }
+  ],
+  "network": [
+    {
+      "verdict": "require_approval",
+      "rule_id": "net-gated",
+      "action": "connect",
+      "pattern": "*"
+    }
+  ],
+  "shell": [
+    {
+      "verdict": "require_approval",
+      "rule_id": "shell-gated",
+      "action": "run",
+      "pattern": "*"
+    }
+  ]
+}

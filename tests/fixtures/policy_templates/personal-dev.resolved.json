@@ -1,0 +1,98 @@
+{
+  "coding": [
+    {
+      "verdict": "allow",
+      "rule_id": "coding-workspace",
+      "action": "edit",
+      "pattern": "workspace"
+    },
+    {
+      "verdict": "allow",
+      "rule_id": "verify-workspace",
+      "action": "verify",
+      "pattern": "workspace"
+    }
+  ],
+  "email": [
+    {
+      "verdict": "require_approval",
+      "rule_id": "email-read-gated",
+      "action": "read",
+      "pattern": "*"
+    },
+    {
+      "verdict": "require_approval",
+      "rule_id": "email-send-gated",
+      "action": "send",
+      "pattern": "*"
+    }
+  ],
+  "filesystem": [
+    {
+      "verdict": "allow",
+      "rule_id": "fs-read",
+      "action": "read",
+      "pattern": "*"
+    },
+    {
+      "verdict": "allow",
+      "rule_id": "fs-workspace",
+      "action": "write",
+      "pattern": "workspace"
+    },
+    {
+      "verdict": "require_approval",
+      "rule_id": "fs-write-gated",
+      "action": "write",
+      "pattern": "*"
+    }
+  ],
+  "mcp": [
+    {
+      "verdict": "require_approval",
+      "rule_id": "mcp-gated",
+      "action": "call",
+      "pattern": "*"
+    }
+  ],
+  "network": [
+    {
+      "verdict": "allow",
+      "rule_id": "net-pypi",
+      "action": "connect",
+      "pattern": "pypi.org"
+    },
+    {
+      "verdict": "allow",
+      "rule_id": "net-pythonhosted",
+      "action": "connect",
+      "pattern": "files.pythonhosted.org"
+    },
+    {
+      "verdict": "allow",
+      "rule_id": "net-npm",
+      "action": "connect",
+      "pattern": "registry.npmjs.org"
+    },
+    {
+      "verdict": "allow",
+      "rule_id": "net-go",
+      "action": "connect",
+      "pattern": "proxy.golang.org"
+    },
+    {
+      "verdict": "require_approval",
+      "rule_id": "net-gated",
+      "action": "connect",
+      "pattern": "*"
+    }
+  ],
+  "shell": [
+    {
+      "verdict": "require_approval",
+      "rule_id": "shell-learnable",
+      "action": "run",
+      "pattern": "*"
+    }
+  ]
+}

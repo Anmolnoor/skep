@@ -1,0 +1,55 @@
+{
+  "template": "personal-dev",
+  "pack": "trusted_local_dev",
+  "scopes": [
+    {
+      "scope": "coding",
+      "allow": [
+        {"rule_id": "coding-workspace", "action": "edit", "pattern": "workspace"},
+        {"rule_id": "verify-workspace", "action": "verify", "pattern": "workspace"}
+      ]
+    },
+    {
+      "scope": "shell",
+      "require_approval": [
+        {"rule_id": "shell-learnable", "action": "run", "pattern": "*"}
+      ]
+    },
+    {
+      "scope": "filesystem",
+      "allow": [
+        {"rule_id": "fs-read", "action": "read", "pattern": "*"},
+        {"rule_id": "fs-workspace", "action": "write", "pattern": "workspace"}
+      ],
+      "require_approval": [
+        {"rule_id": "fs-write-gated", "action": "write", "pattern": "*"}
+      ]
+    },
+    {
+      "scope": "network",
+      "allow": [
+        {"rule_id": "net-pypi", "action": "connect", "pattern": "pypi.org"},
+        {"rule_id": "net-pythonhosted", "action": "connect", "pattern": "files.pythonhosted.org"},
+        {"rule_id": "net-npm", "action": "connect", "pattern": "registry.npmjs.org"},
+        {"rule_id": "net-go", "action": "connect", "pattern": "proxy.golang.org"}
+      ],
+      "require_approval": [
+        {"rule_id": "net-gated", "action": "connect", "pattern": "*"}
+      ]
+    },
+    {
+      "scope": "mcp",
+      "require_approval": [
+        {"rule_id": "mcp-gated", "action": "call", "pattern": "*"}
+      ]
+    },
+    {
+      "scope": "email",
+      "require_approval": [
+        {"rule_id": "email-read-gated", "action": "read", "pattern": "*"},
+        {"rule_id": "email-send-gated", "action": "send", "pattern": "*"}
+      ]
+    }
+  ],
+  "learned": []
+}

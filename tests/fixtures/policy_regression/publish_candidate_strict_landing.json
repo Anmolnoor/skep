@@ -1,0 +1,11 @@
+{
+  "name": "publish-candidate-strict-landing",
+  "kind": "landing",
+  "strategy": "public_free",
+  "phase": "publish_candidate",
+  "config_rules": [],
+  "expected": {
+    "verdict": "require_approval",
+    "reason": "landing.require_approval.project_policy_disabled_auto_apply"
+  }
+}

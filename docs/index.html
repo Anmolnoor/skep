@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Skep supervises AI coding agents with sandboxing, verification, approvals, and a durable audit trail."
+    />
+    <title>skep - Govern your AI coding agent</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./landing.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="skep home">skep</a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#quickstart">Quickstart</a>
+        <a href="#how">How it works</a>
+        <a href="./workers.md">Workers</a>
+        <a href="https://github.com/Anmolnoor/skep">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Sandboxed agent supervision</p>
+          <h1 id="hero-title">Govern your AI coding agent</h1>
+          <p class="hero-subtitle">
+            <span>Sandbox it. Verify its work.</span>
+            <span>Approve before it lands.</span>
+          </p>
+          <div class="hero-actions" aria-label="Primary actions">
+            <a class="button primary" href="#quickstart">Get started in 5 minutes</a>
+            <a class="button secondary" href="https://github.com/Anmolnoor/skep">
+              View on GitHub
+            </a>
+            <a class="stars-badge" href="https://github.com/Anmolnoor/skep/stargazers">
+              <img
+                src="https://img.shields.io/github/stars/Anmolnoor/skep?style=social"
+                alt="GitHub stars"
+              />
+            </a>
+          </div>
+        </div>
+
+        <div class="terminal-demo" aria-label="Skep inline approval demo">
+          <div class="terminal-topbar">
+            <span>skep launch demo</span>
+            <span class="terminal-status">6.6 sec</span>
+          </div>
+          <img
+            class="demo-gif"
+            src="./assets/skep-demo.gif"
+            alt="Skep terminal demo showing inline shell approval, review, branch approval, and a remembered approval template on the next run."
+            width="720"
+            height="405"
+          />
+          <details class="demo-transcript">
+            <summary>Transcript</summary>
+            <ol class="terminal-lines" id="terminal-lines">
+              <li><span class="prompt">$</span> skep run ~/code/demo "add a health endpoint" --execution-mode workspace</li>
+              <li>worker started in isolated worktree skep/019f...</li>
+              <li class="warn">approval needed: shell.run</li>
+              <li>reason: shell.run requires approval for command: python -m pytest</li>
+              <li>[a] approve once  [b] approve + remember  [d] deny  [s] skip</li>
+              <li><span class="prompt">&gt;</span> b</li>
+              <li>resumed: original -> resumed-1</li>
+              <li>re-verify: passed on clean copy</li>
+              <li>review: patch + evidence ready</li>
+              <li>approved: patch applied on branch skep/019f...</li>
+              <li>saved template: health-endpoint</li>
+              <li><span class="prompt">$</span> skep run ~/code/demo "add a status endpoint" --execution-mode workspace</li>
+              <li>matched template: health-endpoint (shell: python -m pytest)</li>
+              <li>completed without new approvals</li>
+            </ol>
+          </details>
+        </div>
+      </section>
+
+      <section class="band problem" aria-labelledby="problem-title">
+        <div class="section-heading">
+          <p class="eyebrow">The risk</p>
+          <h2 id="problem-title">Raw coding agents move fast and wide</h2>
+        </div>
+        <div class="three-up">
+          <article>
+            <h3>They can mutate repos directly</h3>
+            <p>Agents can edit, commit, or push before you have reviewed the actual diff.</p>
+          </article>
+          <article>
+            <h3>They can run broad commands</h3>
+            <p>Package installs, shell commands, and network calls need a boundary.</p>
+          </article>
+          <article>
+            <h3>They can overstate verification</h3>
+            <p>A model saying "tests passed" is not the same as an independent check.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="band solution" aria-labelledby="solution-title">
+        <div class="section-heading">
+          <p class="eyebrow">The control plane</p>
+          <h2 id="solution-title">Skep puts the agent behind a contract</h2>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <span class="feature-kicker">Sandbox</span>
+            <h3>OS-level containment</h3>
+            <p>macOS Seatbelt and Linux bubblewrap keep writes and network inside policy.</p>
+          </article>
+          <article>
+            <span class="feature-kicker">Verify</span>
+            <h3>Evidence over claims</h3>
+            <p>Skep re-runs checks on a clean copy before you see the result.</p>
+          </article>
+          <article>
+            <span class="feature-kicker">Approve</span>
+            <h3>Patch-first review</h3>
+            <p>The agent produces a patch. You approve the branch when the evidence holds.</p>
+          </article>
+          <article>
+            <span class="feature-kicker">Audit</span>
+            <h3>Durable run history</h3>
+            <p>Events, commands, approvals, artifacts, and decisions are queryable later.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="band flow-band" id="how" aria-labelledby="how-title">
+        <div class="section-heading">
+          <p class="eyebrow">Flow</p>
+          <h2 id="how-title">From prompt to review branch</h2>
+        </div>
+        <ol class="flow">
+          <li><span>1</span> run</li>
+          <li><span>2</span> sandbox</li>
+          <li><span>3</span> worker edits</li>
+          <li><span>4</span> re-verify</li>
+          <li><span>5</span> review</li>
+          <li><span>6</span> approve branch</li>
+        </ol>
+      </section>
+
+      <section class="band quickstart" id="quickstart" aria-labelledby="quickstart-title">
+        <div class="section-heading">
+          <p class="eyebrow">Quickstart</p>
+          <h2 id="quickstart-title">Run your first supervised task</h2>
+        </div>
+        <div class="command-grid">
+          <div class="command-block">
+            <div class="command-header">
+              <span>Install from source</span>
+              <button type="button" data-copy="install-command">Copy</button>
+            </div>
+            <pre id="install-command"><code>git clone https://github.com/Anmolnoor/skep.git
+cd skep
+uv sync --frozen</code></pre>
+          </div>
+          <div class="command-block">
+            <div class="command-header">
+              <span>Run and review</span>
+              <button type="button" data-copy="run-command">Copy</button>
+            </div>
+            <pre id="run-command"><code>uv run skep run /path/to/repo "fix the failing test" --execution-mode workspace
+uv run skep status --personal
+uv run skep review &lt;task_id&gt;
+uv run skep review &lt;task_id&gt; --approve</code></pre>
+          </div>
+        </div>
+        <p class="quickstart-note">
+          Linux sandboxing requires bubblewrap. Claude Code users can run with
+          <code>--worker-cmd "python -m skep.workers.claude_code"</code>.
+        </p>
+      </section>
+
+      <section class="band comparison" aria-labelledby="comparison-title">
+        <div class="section-heading">
+          <p class="eyebrow">Why it is different</p>
+          <h2 id="comparison-title">Skep adds the missing control loop</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Capability</th>
+                <th scope="col">Raw coding agent</th>
+                <th scope="col">Agent Safehouse</th>
+                <th scope="col">Cursor sandbox</th>
+                <th scope="col">Skep</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Sandbox boundary</th>
+                <td>Depends on the agent</td>
+                <td>Primary focus</td>
+                <td>Editor-owned</td>
+                <td>Supervisor-owned</td>
+              </tr>
+              <tr>
+                <th scope="row">Independent verification</th>
+                <td>Usually absent</td>
+                <td>Not the core loop</td>
+                <td>Editor-dependent</td>
+                <td>Required evidence</td>
+              </tr>
+              <tr>
+                <th scope="row">Patch approval</th>
+                <td>Optional</td>
+                <td>Outside the wrapper</td>
+                <td>Editor workflow</td>
+                <td>Default landing path</td>
+              </tr>
+              <tr>
+                <th scope="row">Audit trail</th>
+                <td>Fragmented logs</td>
+                <td>Sandbox-level logs</td>
+                <td>Editor history</td>
+                <td>Durable run store</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="band workers" aria-labelledby="workers-title">
+        <div class="section-heading">
+          <p class="eyebrow">Workers</p>
+          <h2 id="workers-title">Use the agent you already trust</h2>
+        </div>
+        <div class="worker-list">
+          <article>
+            <h3>Claude Code</h3>
+            <code>--worker-cmd "python -m skep.workers.claude_code"</code>
+          </article>
+          <article>
+            <h3>Custom contract worker</h3>
+            <code>SKEP_WORKER_CMD="your-skep-worker"</code>
+          </article>
+          <article>
+            <h3>Codex and Aider</h3>
+            <code>--worker-cmd "python -m skep.workers.codex"</code>
+          </article>
+        </div>
+      </section>
+
+      <section class="band docs-band" id="docs" aria-labelledby="docs-title">
+        <div class="section-heading">
+          <p class="eyebrow">Documentation</p>
+          <h2 id="docs-title">Read the docs</h2>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <h3><a href="./quickstart.md">Quickstart</a></h3>
+            <p>First run in 5 minutes.</p>
+          </article>
+          <article>
+            <h3><a href="./how-it-works.md">How it works</a></h3>
+            <p>The Queen/worker split, the contract, and the life of a task.</p>
+          </article>
+          <article>
+            <h3><a href="./sandboxing.md">Sandboxing</a></h3>
+            <p>Seatbelt and bubblewrap; the network allowlist boundary.</p>
+          </article>
+          <article>
+            <h3><a href="./configuration.md">Configuration</a></h3>
+            <p>Home, worker, policy, and model settings.</p>
+          </article>
+          <article>
+            <h3><a href="./cli-reference.md">CLI reference</a></h3>
+            <p>Every command.</p>
+          </article>
+          <article>
+            <h3><a href="./README.md">Full index</a></h3>
+            <p>Every doc, curated — concepts, reference, releasing, decisions.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>MIT</span>
+      <a href="https://github.com/Anmolnoor/skep">GitHub</a>
+      <a href="mailto:anmolnoor59@gmail.com">Consulting: anmolnoor59@gmail.com</a>
+      <a href="https://anmolnoor.com">Built by Anmol Noor</a>
+    </footer>
+
+    <script src="./landing.js"></script>
+  </body>
+</html>

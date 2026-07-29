@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>skep</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="login" class="login hidden">
+    <div class="login-card">
+      <h1>skep</h1>
+      <p>Paste the access token from the server boot log.</p>
+      <input id="token-input" type="password" placeholder="access token" autocomplete="off">
+      <button id="token-save">Connect</button>
+      <p id="login-error" class="error"></p>
+    </div>
+  </div>
+
+  <div id="shell" class="shell hidden">
+    <nav class="sidebar" aria-label="Primary">
+      <a class="brand" href="#/home" title="skep" aria-label="skep — home">skep</a>
+      <div class="rail-group" data-group="daily">
+        <a href="#/home" data-ws="home" title="Home">Home</a>
+        <a id="sidebar-new-chat" href="#/chat" data-nav="new-chat" data-ws="chat" title="Chat">New Chat</a>
+        <a href="#/runs" data-ws="runs" title="Runs">Runs</a>
+        <a href="#/approvals" data-ws="approvals" title="Approvals">Approvals <span id="approvals-badge" class="badge hidden"></span></a>
+      </div>
+      <div class="rail-group" data-group="manage">
+        <a href="#/assign" data-ws="assign" title="Assign">Assign</a>
+        <a title="Projects" href="#/projects" data-ws="projects">Projects</a>
+        <a href="#/schedules" data-ws="schedules" title="Schedules">Schedules</a>
+        <a href="#/templates" data-ws="templates" title="Templates &amp; Skills">Templates &amp; Skills</a>
+      </div>
+      <div class="rail-group" data-group="configure">
+        <a href="#/notes" data-ws="notes" title="Notes &amp; Tasks">Notes &amp; Tasks <span id="tasks-badge" class="badge hidden"></span></a>
+        <a href="#/memory" data-ws="memory" title="Memory">Memory <span id="memory-badge" class="badge hidden"></span></a>
+        <a href="#/policies" data-ws="policies" title="Policies">Policies</a>
+        <a title="Setup" href="#/setup" data-ws="setup">Setup</a>
+        <a href="#/settings" data-ws="settings" title="Settings">Settings</a>
+      </div>
+      <div class="spacer"></div>
+      <div id="health" class="health" title="daemon status">…</div>
+    </nav>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div id="topbar-title" class="topbar-title">Home</div>
+        <label class="topbar-search">
+          <span class="topbar-search-icon" aria-hidden="true"></span>
+          <input id="app-search" type="search" autocomplete="off"
+                 placeholder="Search runs, tasks &amp; approvals" aria-label="Search this view">
+          <kbd class="topbar-kbd">⌘K</kbd>
+        </label>
+        <div id="topbar-queen-status" class="topbar-queen-status hidden">
+          <span class="queen-dot" aria-hidden="true"></span>
+          <span id="queen-model-label" class="queen-model-label mono"></span>
+        </div>
+        <a class="topbar-assign primary" href="#/assign">+ Assign</a>
+      </header>
+
+      <main id="main"></main>
+
+      <div id="dock" class="dock">
+        <form id="dock-form" class="dock-composer">
+          <span class="dock-dot" aria-hidden="true"></span>
+          <!-- v104-F0: the class is load-bearing. Every .dock-input rule
+               (flex: 1, transparent background, no border) matched nothing
+               while this carried only the id, so the home-page composer
+               rendered as a default boxed input ~20 characters wide with the
+               model label crammed against it. -->
+          <input id="dock-input" class="dock-input" type="text" autocomplete="off"
+                 placeholder="Message the hive — the Queen is listening…" aria-label="Message the hive">
+          <span id="dock-model" class="dock-model"></span>
+          <button type="submit" class="dock-send icon-button" title="send" aria-label="send message">
+            <span class="button-icon" aria-hidden="true">↑</span>
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

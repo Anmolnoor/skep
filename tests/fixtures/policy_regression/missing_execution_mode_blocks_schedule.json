@@ -1,0 +1,14 @@
+{
+  "name": "missing-execution-mode-blocks-schedule",
+  "kind": "dispatch",
+  "policy": {
+    "auto_dispatch_allowed": true,
+    "default_execution_mode": "ask"
+  },
+  "requested_execution_mode": null,
+  "explicit_run_overrides": false,
+  "expected": {
+    "verdict": "require_approval",
+    "reason": "dispatch.require_approval.project_policy_requires_explicit_mode"
+  }
+}

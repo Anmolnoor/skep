@@ -1,0 +1,26 @@
+# The one-command install (v5 Stage G):
+#
+#   docker compose up -d
+#
+# State (SQLite, audit evidence, cloned repos, and the access token)
+# all live in the named volume — the container itself is disposable. The access
+# token prints in the boot log: `docker compose logs skep`.
+services:
+  skep:
+    image: ghcr.io/anmolnoor/skep:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8765:8765"
+    volumes:
+      - skep-data:/data
+    environment:
+      HOME: /data/skep
+      # Secrets ride the environment by NAME (G2); skep stores only the names.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GH_TOKEN: ${GH_TOKEN:-}
+    restart: unless-stopped
+
+volumes:
+  skep-data:

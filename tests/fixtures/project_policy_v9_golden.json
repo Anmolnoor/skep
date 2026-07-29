@@ -1,0 +1,48 @@
+{
+  "project_id": "golden-trusted-local-dev",
+  "name": "Golden Trusted Local Dev",
+  "strategy": "trusted_local_dev",
+  "phase": "maintain",
+  "bindings": [
+    {
+      "kind": "repo_path",
+      "value": "/tmp/skep-golden-repo"
+    }
+  ],
+  "policy": {
+    "default_network": [
+      "pypi.org",
+      "api.github.com"
+    ],
+    "default_env_allowlist": [
+      "OLLAMA_API_KEY"
+    ],
+    "default_execution_mode": "workspace",
+    "default_wall_clock_seconds": 300,
+    "default_max_iterations": 8,
+    "default_max_actions": 40,
+    "default_max_provider_calls": 12,
+    "allowed_shell_commands": [
+      [
+        "python",
+        "-m",
+        "pytest"
+      ],
+      [
+        "uv",
+        "run",
+        "pytest"
+      ]
+    ],
+    "allowed_plugin_risks": [
+      "read",
+      "verify"
+    ],
+    "allow_git_mutation": false,
+    "auto_dispatch_allowed": true,
+    "auto_apply_verified_patch": true,
+    "trusted_workspace_roots": [
+      "/tmp"
+    ]
+  }
+}

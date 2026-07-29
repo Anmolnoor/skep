@@ -1,0 +1,65 @@
+{
+  "base": {
+    "template": "personal-dev",
+    "scopes": [
+      {
+        "scope": "network",
+        "allow": [
+          {"rule_id": "net-registries", "action": "connect", "pattern": "pypi.org"}
+        ],
+        "require_approval": [
+          {"rule_id": "net-anywhere", "action": "connect", "pattern": "*"}
+        ]
+      },
+      {
+        "scope": "shell",
+        "allow": [
+          {"rule_id": "shell-uv", "action": "run", "pattern": "uv run"}
+        ],
+        "require_approval": [
+          {"rule_id": "shell-any", "action": "run", "pattern": "*"}
+        ],
+        "deny": [
+          {"rule_id": "shell-no-sudo", "action": "run", "pattern": "sudo"}
+        ]
+      }
+    ]
+  },
+  "cases": [
+    {
+      "scope": "network",
+      "action": "connect",
+      "value": "pypi.org",
+      "verdict": "allow",
+      "decided_by": "personal-dev/net-registries"
+    },
+    {
+      "scope": "network",
+      "action": "connect",
+      "value": "example.com",
+      "verdict": "require_approval",
+      "decided_by": "personal-dev/net-anywhere"
+    },
+    {
+      "scope": "shell",
+      "action": "run",
+      "value": "uv run pytest -q",
+      "verdict": "allow",
+      "decided_by": "personal-dev/shell-uv"
+    },
+    {
+      "scope": "shell",
+      "action": "run",
+      "value": "rm -rf build",
+      "verdict": "require_approval",
+      "decided_by": "personal-dev/shell-any"
+    },
+    {
+      "scope": "shell",
+      "action": "run",
+      "value": "sudo systemctl restart nginx",
+      "verdict": "deny",
+      "decided_by": "personal-dev/shell-no-sudo"
+    }
+  ]
+}

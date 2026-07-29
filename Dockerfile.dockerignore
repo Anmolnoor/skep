@@ -1,0 +1,19 @@
+# BuildKit per-Dockerfile ignore. The build context is this skep checkout.
+.git
+.venv
+# Dev state carries secrets (llm-secret, serve-token) — never bake it in.
+.skep-dev*
+.uv-cache
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.DS_Store
+dist
+build
+*.egg-info
+output
+node_modules
+plans
+plan
+.claude

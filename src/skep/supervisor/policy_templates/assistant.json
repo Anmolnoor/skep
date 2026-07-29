@@ -1,0 +1,59 @@
+{
+  "template": "assistant",
+  "pack": null,
+  "scopes": [
+    {
+      "scope": "coding",
+      "require_approval": [
+        {
+          "rule_id": "coding-gated",
+          "action": "edit",
+          "pattern": "*"
+        },
+        {
+          "rule_id": "verify-gated",
+          "action": "verify",
+          "pattern": "*"
+        }
+      ]
+    },
+    {
+      "scope": "shell",
+      "require_approval": [
+        {
+          "rule_id": "shell-gated",
+          "action": "run",
+          "pattern": "*"
+        }
+      ]
+    },
+    {
+      "scope": "filesystem",
+      "allow": [
+        {
+          "rule_id": "fs-read",
+          "action": "read",
+          "pattern": "*"
+        }
+      ],
+      "require_approval": [
+        {
+          "rule_id": "fs-write-gated",
+          "action": "write",
+          "pattern": "*"
+        }
+      ]
+    },
+    {
+      "scope": "network",
+      "require_approval": [
+        {
+          "rule_id": "net-gated",
+          "action": "connect",
+          "pattern": "*"
+        }
+      ]
+    }
+  ],
+  "learned": []
+}

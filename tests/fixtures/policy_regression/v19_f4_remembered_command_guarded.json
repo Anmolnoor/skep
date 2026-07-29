@@ -1,0 +1,24 @@
+{
+  "name": "v19-f4-remembered-command-guarded",
+  "kind": "shell_guard",
+  "cases": [
+    {
+      "argv": ["git", "-C", "/home/u/.skep/worktrees/abc", "status"],
+      "normalized": ["git", "status"],
+      "is_remote_git": false,
+      "dangerous_prefix": false
+    },
+    {
+      "argv": ["uv", "run", "pytest"],
+      "normalized": ["uv", "run", "pytest"],
+      "is_remote_git": false,
+      "dangerous_prefix": false
+    },
+    {
+      "argv": ["git", "push"],
+      "normalized": ["git", "push"],
+      "is_remote_git": true,
+      "dangerous_prefix": true
+    }
+  ]
+}

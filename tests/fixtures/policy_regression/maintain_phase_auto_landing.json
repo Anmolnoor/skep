@@ -1,0 +1,11 @@
+{
+  "name": "maintain-phase-auto-landing",
+  "kind": "landing",
+  "strategy": "trusted_local_dev",
+  "phase": "maintain",
+  "config_rules": [],
+  "expected": {
+    "verdict": "allow",
+    "reason": "landing.auto_apply.project_policy_enabled"
+  }
+}
