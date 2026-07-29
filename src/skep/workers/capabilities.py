@@ -21,12 +21,15 @@ from typing import Any, Literal
 
 from skep.supervisor.netproxy import domain_allowed
 from skep.supervisor.spawner import build_worker_env
-from skep.worker_contract import EventType
+from skep.worker_contract import PATCH_EXCLUDE_PATHSPECS, EventType
 from skep.workers.html_text import html_to_text
 
 EventEmitter = Callable[[EventType, dict[str, object]], None]
 
-_CHILD_ENV_PASSTHROUGH: tuple[str, ...] = ("SKEP_HOME",)
+# v106-F1: ``npm_config_cache`` is supervisor-injected per-run config (a
+# workspace-local path, never a secret) — child commands need it or npm falls
+# back to a read-only ``~/.npm`` inside the sandbox and dies on rofs.
+_CHILD_ENV_PASSTHROUGH: tuple[str, ...] = ("SKEP_HOME", "npm_config_cache")
 
 _PROXY_ENV_PASSTHROUGH: tuple[str, ...] = (
     "HTTP_PROXY",
@@ -1327,8 +1330,7 @@ class CapabilityRegistry:
         diff_args += [
             "--",
             ".",
-            ":!.events",
-            ":!.artifacts",
+            *PATCH_EXCLUDE_PATHSPECS,
             ":(exclude)__pycache__/",
             ":(exclude)*.pyc",
         ]

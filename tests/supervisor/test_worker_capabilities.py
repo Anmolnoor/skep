@@ -297,6 +297,22 @@ def test_git_diff_excludes_pycache_noise(repo: Path) -> None:
     assert ".pyc" not in diff
 
 
+def test_git_diff_excludes_toolchain_scratch(repo: Path) -> None:
+    """v106-F1: per-run toolchain state (npm cache, agent config) is
+    bookkeeping, never work — it must not ride the patch."""
+    registry = CapabilityRegistry(repo, emit=lambda _t, _p: None)
+
+    (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+    cache = repo / ".toolchain" / "npm-cache" / "_cacache"
+    cache.mkdir(parents=True)
+    (cache / "index-entry").write_text("cache junk\n")
+
+    diff = registry.invoke("git.diff", {}).output or ""
+
+    assert "calc.py" in diff
+    assert ".toolchain" not in diff
+
+
 def test_git_unstage_requires_approval(repo: Path) -> None:
     registry = CapabilityRegistry(repo, emit=lambda _t, _p: None)
 

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from skep.worker_contract import (
     CONTRACT_VERSION,
+    PATCH_EXCLUDE_PATHSPECS,
     SUPPORTED_CONTRACT_RANGE,
     Artifact,
     CodingWorkerResult,
@@ -146,7 +147,7 @@ def _execute(task: CodingWorkerTask, workspace: Path, stream: _EventStream, out_
     )
     changed_files = _changed_files(workspace, timeout=timeout)
 
-    verify_argv = ["git", "diff", "--check", "--", ".", ":!.events", ":!.artifacts"]
+    verify_argv = ["git", "diff", "--check", "--", ".", *PATCH_EXCLUDE_PATHSPECS]
     verify_proc, verify_record = _run(
         verify_argv,
         cwd=workspace,

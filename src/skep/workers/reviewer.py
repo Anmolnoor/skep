@@ -42,6 +42,7 @@ from pydantic import ValidationError
 
 from skep.worker_contract import (
     CONTRACT_VERSION,
+    PATCH_EXCLUDE_PATHSPECS,
     SUPPORTED_CONTRACT_RANGE,
     Artifact,
     CodingWorkerResult,
@@ -130,8 +131,7 @@ def collect_diff(workspace: Path, baseline: str | None) -> str:
     args += [
         "--",
         ".",
-        ":!.events",
-        ":!.artifacts",
+        *PATCH_EXCLUDE_PATHSPECS,
         ":(exclude)__pycache__/",
         ":(exclude)*.pyc",
     ]
