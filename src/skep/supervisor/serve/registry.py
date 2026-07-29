@@ -385,7 +385,18 @@ def remove_registered_repo(store: RunStore, root: Path, name: str) -> dict[str, 
     would corrupt its worktree; waiting (or stopping the run) is the honest
     path. The route previously had no such guard."""
     if not _SLUG_RE.match(name) or not (root / name).is_dir():
-        raise HTTPException(status_code=404, detail=f"no repo named {name!r}")
+        # v106-F8 (I9): the bare refusal taught nothing — the Queen retried
+        # blind names in the field. Name what CAN be removed here, and where
+        # workon-bound repos are removed instead.
+        clones = ", ".join(
+            sorted(item["name"] for item in known_repos(root, store) if item["source"] == "clone")
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"no registered clone named {name!r}; clones: {clones or 'none'}. "
+            "A workon-bound directory is removed by deleting its project "
+            "(DELETE /api/projects/<id>), not by repo removal.",
+        )
     from ..cli_cmds import STATE_EXIT_CODES
 
     target = str((root / name).resolve())
