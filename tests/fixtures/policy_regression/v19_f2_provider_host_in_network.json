@@ -1,0 +1,25 @@
+{
+  "name": "v19-f2-provider-host-in-network",
+  "kind": "network_merge",
+  "execution_mode": "sandbox",
+  "cases": [
+    {
+      "caste": "coding",
+      "network": [],
+      "provider_hosts": ["provider.example"],
+      "network_out": ["provider.example"]
+    },
+    {
+      "caste": "coding",
+      "network": ["*"],
+      "provider_hosts": ["provider.example"],
+      "network_out": ["*"]
+    },
+    {
+      "caste": "audit",
+      "network": [],
+      "provider_hosts": ["provider.example"],
+      "network_out": []
+    }
+  ]
+}

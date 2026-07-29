@@ -1,0 +1,147 @@
+"""Supervisor core: the control plane for contract-governed disposable workers."""
+
+from .apply import apply_patch_on_branch
+from .config import SUPPORTED_CONTRACT_RANGE, SupervisorConfig
+from .contracts_io import (
+    DEFAULT_BUDGET,
+    DEFAULT_PERMISSIONS,
+    mint_task,
+    read_event_log,
+    read_result,
+    write_task_file,
+)
+from .dispatch import run_task
+from .ids import mint_uuid7
+from .ingest import EvidenceIntegrityError, IngestOutcome, ingest_run
+from .memory import (
+    MEMORY_CLASSES,
+    MEMORY_PROPOSAL_STATES,
+    MemoryError,
+    MemoryItem,
+    MemoryProposal,
+    MemorySource,
+)
+from .monitor import MonitorVerdict, watch_worker
+from .policy import (
+    AutoApproval,
+    AutoApprovalContext,
+    AutoApprovalRule,
+    evaluate,
+    maybe_auto_approve,
+    rule_block_reason,
+)
+from .reverify import ReverifyOutcome, reverify, reverify_run
+from .sandbox import (
+    ALLOW_ALL_NETWORK,
+    DENY_ALL_NETWORK,
+    NetworkPolicy,
+    SandboxAllowlistUnsupported,
+    build_profile,
+    write_profile,
+)
+from .skills import (
+    APPROVED,
+    DRAFT,
+    REJECTED,
+    TESTED,
+    GeneratedSkill,
+    RunShape,
+    SkillCandidate,
+    candidate_name,
+    candidate_signature,
+    draft_candidates,
+    generate,
+    promote_to_template,
+)
+from .spawner import build_worker_env, spawn_worker
+from .store import (
+    ApprovalRecord,
+    ReverifyRecord,
+    RunRecord,
+    RunStore,
+    ScheduleHealth,
+    UsageRecord,
+)
+from .templates import (
+    TemplateError,
+    TemplateInstance,
+    TemplateParam,
+    WorkflowTemplate,
+    instantiate,
+    load_template_file,
+    template_from_dict,
+    template_to_dict,
+)
+from .worktree import WorktreeError, cleanup_orphans, create_worktree, remove_worktree
+
+__all__ = [
+    "ALLOW_ALL_NETWORK",
+    "APPROVED",
+    "DEFAULT_BUDGET",
+    "DEFAULT_PERMISSIONS",
+    "DENY_ALL_NETWORK",
+    "DRAFT",
+    "MEMORY_CLASSES",
+    "MEMORY_PROPOSAL_STATES",
+    "REJECTED",
+    "SUPPORTED_CONTRACT_RANGE",
+    "TESTED",
+    "ApprovalRecord",
+    "AutoApproval",
+    "AutoApprovalContext",
+    "AutoApprovalRule",
+    "EvidenceIntegrityError",
+    "GeneratedSkill",
+    "IngestOutcome",
+    "MemoryError",
+    "MemoryItem",
+    "MemoryProposal",
+    "MemorySource",
+    "MonitorVerdict",
+    "NetworkPolicy",
+    "ReverifyOutcome",
+    "ReverifyRecord",
+    "RunRecord",
+    "RunShape",
+    "RunStore",
+    "SandboxAllowlistUnsupported",
+    "ScheduleHealth",
+    "SkillCandidate",
+    "SupervisorConfig",
+    "TemplateError",
+    "TemplateInstance",
+    "TemplateParam",
+    "UsageRecord",
+    "WorkflowTemplate",
+    "WorktreeError",
+    "apply_patch_on_branch",
+    "build_profile",
+    "build_worker_env",
+    "candidate_name",
+    "candidate_signature",
+    "cleanup_orphans",
+    "create_worktree",
+    "draft_candidates",
+    "evaluate",
+    "generate",
+    "ingest_run",
+    "instantiate",
+    "load_template_file",
+    "maybe_auto_approve",
+    "mint_task",
+    "mint_uuid7",
+    "promote_to_template",
+    "read_event_log",
+    "read_result",
+    "remove_worktree",
+    "reverify",
+    "reverify_run",
+    "rule_block_reason",
+    "run_task",
+    "spawn_worker",
+    "template_from_dict",
+    "template_to_dict",
+    "watch_worker",
+    "write_profile",
+    "write_task_file",
+]

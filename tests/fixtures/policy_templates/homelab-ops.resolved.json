@@ -1,0 +1,104 @@
+{
+  "coding": [
+    {
+      "verdict": "require_approval",
+      "rule_id": "coding-gated",
+      "action": "edit",
+      "pattern": "*"
+    },
+    {
+      "verdict": "require_approval",
+      "rule_id": "verify-gated",
+      "action": "verify",
+      "pattern": "*"
+    }
+  ],
+  "email": [
+    {
+      "verdict": "require_approval",
+      "rule_id": "email-read-gated",
+      "action": "read",
+      "pattern": "*"
+    },
+    {
+      "verdict": "require_approval",
+      "rule_id": "email-send-gated",
+      "action": "send",
+      "pattern": "*"
+    }
+  ],
+  "filesystem": [
+    {
+      "verdict": "allow",
+      "rule_id": "fs-read",
+      "action": "read",
+      "pattern": "*"
+    },
+    {
+      "verdict": "allow",
+      "rule_id": "fs-var-log",
+      "action": "write",
+      "pattern": "/var/log/*"
+    },
+    {
+      "verdict": "allow",
+      "rule_id": "fs-ops-tmp",
+      "action": "write",
+      "pattern": "/tmp/ops/*"
+    },
+    {
+      "verdict": "require_approval",
+      "rule_id": "fs-write-gated",
+      "action": "write",
+      "pattern": "*"
+    }
+  ],
+  "mcp": [
+    {
+      "verdict": "require_approval",
+      "rule_id": "mcp-gated",
+      "action": "call",
+      "pattern": "*"
+    }
+  ],
+  "network": [
+    {
+      "verdict": "require_approval",
+      "rule_id": "net-gated",
+      "action": "connect",
+      "pattern": "*"
+    }
+  ],
+  "shell": [
+    {
+      "verdict": "allow",
+      "rule_id": "shell-journalctl",
+      "action": "run",
+      "pattern": "journalctl"
+    },
+    {
+      "verdict": "allow",
+      "rule_id": "shell-systemctl-status",
+      "action": "run",
+      "pattern": "systemctl status"
+    },
+    {
+      "verdict": "allow",
+      "rule_id": "shell-df",
+      "action": "run",
+      "pattern": "df"
+    },
+    {
+      "verdict": "allow",
+      "rule_id": "shell-du",
+      "action": "run",
+      "pattern": "du"
+    },
+    {
+      "verdict": "require_approval",
+      "rule_id": "shell-gated",
+      "action": "run",
+      "pattern": "*"
+    }
+  ]
+}

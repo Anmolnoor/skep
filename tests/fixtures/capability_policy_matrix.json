@@ -1,0 +1,229 @@
+[
+  {
+    "name": "verify shell is allowed",
+    "capability": "shell.run",
+    "argv": [
+      "echo",
+      "ok"
+    ],
+    "purpose": "verify",
+    "verdict": "allow",
+    "reason": "capability.allow.shell_verify",
+    "detail": "echo ok"
+  },
+  {
+    "name": "allowlisted non-verify shell is constrained",
+    "capability": "shell.run",
+    "argv": [
+      "echo",
+      "ok"
+    ],
+    "purpose": "modify",
+    "shell_allowlist": [
+      [
+        "echo"
+      ]
+    ],
+    "verdict": "allow_with_constraints",
+    "reason": "capability.allow.shell_allowlist_prefix",
+    "detail": "echo ok"
+  },
+  {
+    "name": "non-verify shell without allowlist requires approval",
+    "capability": "shell.run",
+    "argv": [
+      "echo",
+      "ok"
+    ],
+    "purpose": "modify",
+    "verdict": "require_approval",
+    "reason": "capability.require_approval.shell_nonverify_not_allowlisted",
+    "detail": "echo ok"
+  },
+  {
+    "name": "git stage requires approval by default",
+    "capability": "git.stage",
+    "verdict": "require_approval",
+    "reason": "capability.require_approval.git_mutation_task_permission_missing",
+    "detail": "git.stage"
+  },
+  {
+    "name": "git stage is constrained with mutation grant",
+    "capability": "git.stage",
+    "allow_git_mutation": true,
+    "verdict": "allow_with_constraints",
+    "reason": "capability.allow.git_mutation_task_permission",
+    "detail": "git.stage"
+  },
+  {
+    "name": "git commit still requires approval with mutation grant",
+    "capability": "git.commit",
+    "allow_git_mutation": true,
+    "verdict": "require_approval",
+    "reason": "capability.require_approval.git_mutation_task_permission_missing",
+    "detail": "git.commit"
+  },
+  {
+    "name": "git commit is constrained when explicitly resumed",
+    "capability": "git.commit",
+    "approved_capability_ids": [
+      "git.commit"
+    ],
+    "verdict": "allow_with_constraints",
+    "reason": "capability.allow.resume_approved.git_mutation",
+    "detail": "git.commit"
+  },
+  {
+    "name": "network fetch without allowlist requires approval",
+    "capability": "network.fetch",
+    "url": "https://example.com/",
+    "verdict": "require_approval",
+    "reason": "capability.require_approval.network_allowlist_missing",
+    "detail": "example.com"
+  },
+  {
+    "name": "network fetch outside allowlist is denied",
+    "capability": "network.fetch",
+    "url": "https://example.com/",
+    "network_allowlist": [
+      "pypi.org"
+    ],
+    "verdict": "deny",
+    "reason": "capability.deny.network_host_not_allowed",
+    "detail": "example.com"
+  },
+  {
+    "name": "network fetch inside allowlist is constrained",
+    "capability": "network.fetch",
+    "url": "https://example.com/",
+    "network_allowlist": [
+      "example.com"
+    ],
+    "verdict": "allow_with_constraints",
+    "reason": "capability.allow.network_allowlist_match",
+    "detail": "example.com"
+  },
+  {
+    "name": "network fetch approved resume host is constrained",
+    "capability": "network.fetch",
+    "url": "https://example.com/",
+    "approved_network_hosts": [
+      "example.com"
+    ],
+    "verdict": "allow_with_constraints",
+    "reason": "capability.allow.resume_approved.network_host",
+    "detail": "example.com"
+  },
+  {
+    "name": "network read without allowlist requires approval",
+    "capability": "network.read",
+    "url": "https://example.com/",
+    "verdict": "require_approval",
+    "reason": "capability.require_approval.network_allowlist_missing",
+    "detail": "example.com"
+  },
+  {
+    "name": "network read outside allowlist is denied",
+    "capability": "network.read",
+    "url": "https://example.com/",
+    "network_allowlist": [
+      "pypi.org"
+    ],
+    "verdict": "deny",
+    "reason": "capability.deny.network_host_not_allowed",
+    "detail": "example.com"
+  },
+  {
+    "name": "network read inside allowlist is constrained",
+    "capability": "network.read",
+    "url": "https://example.com/",
+    "network_allowlist": [
+      "example.com"
+    ],
+    "verdict": "allow_with_constraints",
+    "reason": "capability.allow.network_allowlist_match",
+    "detail": "example.com"
+  },
+  {
+    "name": "network read approved resume host is constrained",
+    "capability": "network.read",
+    "url": "https://example.com/",
+    "approved_network_hosts": [
+      "example.com"
+    ],
+    "verdict": "allow_with_constraints",
+    "reason": "capability.allow.resume_approved.network_host",
+    "detail": "example.com"
+  },
+  {
+    "name": "read plugin is allowed",
+    "capability": "reader.peek",
+    "verdict": "allow",
+    "reason": "capability.allow.plugin_safe_risk",
+    "detail": "read"
+  },
+  {
+    "name": "write plugin requires allowed risk",
+    "capability": "writer.write",
+    "verdict": "require_approval",
+    "reason": "capability.require_approval.plugin_risk_not_allowed",
+    "detail": "write"
+  },
+  {
+    "name": "write plugin is constrained with risk grant",
+    "capability": "writer.write",
+    "allowed_plugin_risks": [
+      "write"
+    ],
+    "verdict": "allow_with_constraints",
+    "reason": "capability.allow.plugin_risk_task_permission",
+    "detail": "write"
+  },
+  {
+    "name": "write plugin is constrained with matching resume approval",
+    "capability": "writer.write",
+    "approved_capability_ids": [
+      "writer.write"
+    ],
+    "approved_plugin_risks": {
+      "writer.write": "write"
+    },
+    "verdict": "allow_with_constraints",
+    "reason": "capability.allow.resume_approved.plugin_tool",
+    "detail": "writer.write"
+  },
+  {
+    "name": "git plugin requires git mutation grant",
+    "capability": "git_plugin.commit",
+    "verdict": "require_approval",
+    "reason": "capability.require_approval.plugin_git_task_permission_missing",
+    "detail": "git_plugin.commit"
+  },
+  {
+    "name": "network plugin without task allowlist is denied",
+    "capability": "net.fetch",
+    "verdict": "deny",
+    "reason": "capability.deny.plugin_network_task_allowlist_missing",
+    "detail": "net.fetch"
+  },
+  {
+    "name": "network plugin is constrained with network and risk grants",
+    "capability": "net.fetch",
+    "network_allowlist": [
+      "example.com"
+    ],
+    "allowed_plugin_risks": [
+      "network"
+    ],
+    "verdict": "allow_with_constraints",
+    "reason": "capability.allow.plugin_risk_task_permission",
+    "detail": "network"
+  },
+  {
+    "name": "external side effect plugin requires approval",
+    "capability": "external.post",
+    "verdict": "require_approval",
+    "reason": "capability.require_approval.plugin_external_side_effect_not_auto_allowed",
+    "detail": "external.post"
+  }
+]

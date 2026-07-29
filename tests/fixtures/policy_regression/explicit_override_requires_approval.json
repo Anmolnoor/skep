@@ -1,0 +1,12 @@
+{
+  "name": "explicit-override-requires-approval",
+  "kind": "dispatch",
+  "strategy": "trusted_local_dev",
+  "phase": "maintain",
+  "requested_execution_mode": null,
+  "explicit_run_overrides": true,
+  "expected": {
+    "verdict": "require_approval",
+    "reason": "dispatch.require_approval.explicit_run_overrides"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "base": {
+    "template": "personal-dev",
+    "scopes": [
+      {
+        "scope": "filesystem",
+        "allow": [
+          {"rule_id": "fs-workspace", "action": "write", "pattern": "/work/*"}
+        ]
+      }
+    ]
+  },
+  "overlays": [
+    {
+      "scopes": [
+        {
+          "scope": "filesystem",
+          "deny": [
+            {"rule_id": "fs-no-secrets", "action": "write", "pattern": "/work/secrets/*"}
+          ]
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "scope": "filesystem",
+      "action": "write",
+      "value": "/work/app.py",
+      "verdict": "allow",
+      "decided_by": "personal-dev/fs-workspace"
+    },
+    {
+      "scope": "filesystem",
+      "action": "write",
+      "value": "/work/secrets/key.pem",
+      "verdict": "deny",
+      "decided_by": "personal-dev/fs-no-secrets"
+    },
+    {
+      "scope": "filesystem",
+      "action": "read",
+      "value": "/etc/passwd",
+      "verdict": "deny",
+      "decided_by": "personal-dev/default-deny"
+    }
+  ]
+}

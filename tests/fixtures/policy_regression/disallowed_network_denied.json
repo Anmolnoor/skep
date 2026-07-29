@@ -1,0 +1,12 @@
+{
+  "name": "disallowed-network-denied",
+  "kind": "capability",
+  "capability": "network.fetch",
+  "arguments": {"url": "https://evil.example.com/"},
+  "grants": {"network_allowlist": ["pypi.org"]},
+  "expected": {
+    "verdict": "deny",
+    "reason": "capability.deny.network_host_not_allowed",
+    "detail": "evil.example.com"
+  }
+}

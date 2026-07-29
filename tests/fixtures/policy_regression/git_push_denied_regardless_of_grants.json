@@ -1,0 +1,16 @@
+{
+  "name": "git-push-denied-regardless-of-grants",
+  "kind": "capability",
+  "capability": "shell.run",
+  "arguments": {"argv": ["git", "push", "origin", "add-readme:main"], "purpose": "modify"},
+  "grants": {
+    "allow_git_mutation": true,
+    "shell_allowlist": [["git"]],
+    "approved_capability_ids": ["shell.run"]
+  },
+  "expected": {
+    "verdict": "deny",
+    "reason": "capability.deny.remote_git_managed_by_supervisor",
+    "detail": "remote git operations are managed by the skep supervisor; your patch is landed after approval"
+  }
+}

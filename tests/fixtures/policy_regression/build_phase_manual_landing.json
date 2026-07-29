@@ -1,0 +1,11 @@
+{
+  "name": "build-phase-manual-landing",
+  "kind": "landing",
+  "strategy": "trusted_local_dev",
+  "phase": "build",
+  "config_rules": [],
+  "expected": {
+    "verdict": "require_approval",
+    "reason": "landing.require_approval.project_policy_disabled_auto_apply"
+  }
+}

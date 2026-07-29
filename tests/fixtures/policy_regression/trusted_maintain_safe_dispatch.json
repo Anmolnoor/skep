@@ -1,0 +1,12 @@
+{
+  "name": "trusted-maintain-safe-dispatch",
+  "kind": "dispatch",
+  "strategy": "trusted_local_dev",
+  "phase": "maintain",
+  "requested_execution_mode": null,
+  "explicit_run_overrides": false,
+  "expected": {
+    "verdict": "allow",
+    "reason": "dispatch.auto_allowed.project_policy_match"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "v19-f3-remote-git-denied",
+  "kind": "shell_guard",
+  "cases": [
+    {
+      "argv": ["git", "push", "origin", "main"],
+      "normalized": ["git", "push", "origin", "main"],
+      "is_remote_git": true,
+      "dangerous_prefix": true
+    },
+    {
+      "argv": ["git", "pull"],
+      "normalized": ["git", "pull"],
+      "is_remote_git": true,
+      "dangerous_prefix": true
+    },
+    {
+      "argv": ["git", "fetch", "--all"],
+      "normalized": ["git", "fetch", "--all"],
+      "is_remote_git": true,
+      "dangerous_prefix": true
+    },
+    {
+      "argv": ["git", "-C", "/some/path", "push"],
+      "normalized": ["git", "push"],
+      "is_remote_git": true,
+      "dangerous_prefix": true
+    }
+  ]
+}

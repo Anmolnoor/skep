@@ -1,0 +1,30 @@
+{
+  "name": "remembered-command-normalized-and-guarded",
+  "kind": "shell_guard",
+  "cases": [
+    {
+      "argv": ["git", "-C", "/home/x/.skep/worktrees/abc", "status"],
+      "normalized": ["git", "status"],
+      "is_remote_git": false,
+      "dangerous_prefix": false
+    },
+    {
+      "argv": ["git", "push", "origin", "main"],
+      "normalized": ["git", "push", "origin", "main"],
+      "is_remote_git": true,
+      "dangerous_prefix": true
+    },
+    {
+      "argv": [" bash ", "-c"],
+      "normalized": ["bash", "-c"],
+      "is_remote_git": false,
+      "dangerous_prefix": true
+    },
+    {
+      "argv": ["pytest", "-q"],
+      "normalized": ["pytest", "-q"],
+      "is_remote_git": false,
+      "dangerous_prefix": false
+    }
+  ]
+}
