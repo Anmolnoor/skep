@@ -222,3 +222,69 @@ skep skill ...
 
 The skill lifecycle promotes tested learned recipes into the same template
 registry. Use `skep skill --help` for the full subcommand list.
+
+## Projects and Policy
+
+```sh
+skep project preview REPO [--pack PACK] [--phase PHASE]
+skep project setup   REPO [--engine ENGINE] [--verify-command CMD] [--group NAME]
+skep project list
+skep project show    PROJECT_ID
+skep project set-phase PROJECT_ID PHASE
+```
+
+`project setup` binds a repo to a policy pack and infers a `verify_command`
+from the repo's own entry point (v91); an explicit `--verify-command` always
+wins. `set-phase` moves the trust-ramp defaults (build → maintain).
+
+## Memory
+
+```sh
+skep memory list|search|show|forget
+skep memory proposals|propose|approve|reject
+skep memory approve-batch|reject-batch
+```
+
+Durable memory is proposal-gated: nothing becomes standing context without an
+approval, and `forget` is a soft delete that keeps the audit trail.
+
+## Channels and Providers
+
+```sh
+skep channel status
+skep provider list
+skep provider health
+```
+
+`channel status` prints one honest line per messenger channel: config state,
+secret presence, last delivery. `provider` reads the registered LLM providers
+and their latest health probes.
+
+## Nodes and Ops
+
+```sh
+skep node add|list
+skep ops run CHECK --node NODE [--approve] [--arg KEY=VALUE]
+skep ops schedule ...
+```
+
+Ops checks resolve against a registered node and execute only with
+`--approve` — the CLI face of the carded ops lane.
+
+## Imports
+
+```sh
+skep hermes import [--hermes-home PATH] [--dry-run]
+```
+
+Stages Hermes memory, skills, and sessions behind skep's existing gates —
+imported items arrive as proposals and drafts, never as standing state.
+
+## Dashboard
+
+```sh
+skep start [--host HOST] [--port PORT]
+```
+
+`start` serves the legacy dashboard; `skep serve` is the full supervisor
+daemon (web UI, chat, ticker) and is what you normally want.

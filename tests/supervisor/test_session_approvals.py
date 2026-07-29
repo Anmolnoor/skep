@@ -70,3 +70,25 @@ def test_policy_view_shows_the_session_tier_separately(tmp_path: Path) -> None:
         assert view["allowed_shell_commands"] == []
     finally:
         store.close()
+
+
+def test_serve_startup_clears_the_session_tier(config) -> None:  # type: ignore[no-untyped-def]
+    """v86-F1's plan named this test; the 2026-07-29 audit found it was never
+    written. A serve restart ends the approval session — grants collected by
+    the previous process must not survive into the next one."""
+    from .conftest import serve_client
+
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting(SESSION_ALLOWED_SHELL_COMMANDS, [["yarn", "install"]])
+    finally:
+        store.close()
+
+    with serve_client(config):  # entering the lifespan IS the restart
+        pass
+
+    store = RunStore(config.db_path)
+    try:
+        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) == []
+    finally:
+        store.close()

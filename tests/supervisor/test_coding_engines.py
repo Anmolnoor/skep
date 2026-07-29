@@ -272,3 +272,34 @@ def test_dispatch_refuses_an_external_engine_without_a_usable_sandbox(
             verify_command="pytest -q",
         )
     assert "sandbox" in str(excinfo.value)
+
+
+def test_an_invalid_verify_command_is_rejected_at_resolve_time(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """v88-F4's plan named this test; the 2026-07-29 audit found it was never
+    written. A non-string verify_command in the stored overlay would reach
+    subprocess as the thing G10 re-runs — the resolver rejects it fail-closed,
+    naming the fix. The write path validates too, so the bad value is injected
+    the way a raw writer (or an older store) could leave it."""
+    import json as json_mod
+    import sqlite3
+
+    _bind(config, repo, {"verify_command": "uv run pytest"})
+    raw = sqlite3.connect(config.db_path)
+    raw.execute(
+        "UPDATE project_policies SET policy_json = ? WHERE project_id = 'engine-project'",
+        (
+            json_mod.dumps(
+                {"default_execution_mode": "workspace", "verify_command": ["uv", "run", "pytest"]}
+            ),
+        ),
+    )
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(PolicyResolutionError) as excinfo:
+        _resolve(config, repo)
+    message = str(excinfo.value)
+    assert "verify_command must be a string" in message
+    assert "list" in message

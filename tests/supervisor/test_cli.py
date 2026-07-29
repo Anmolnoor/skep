@@ -2573,3 +2573,21 @@ def test_the_new_groups_are_registered() -> None:
         assert exit_code.value.code == 0, group
         assert "usage: skep " + group in out.getvalue()
     assert argparse  # imported for the reader: this is the argparse tree
+
+
+def test_every_parser_group_is_in_the_cli_reference() -> None:
+    """v104-F5 promised this drift gate; the 2026-07-29 audit found it never
+    written. A command group that exists in the parser but not in
+    docs/cli-reference.md is invisible to the operator reading the manual —
+    the exact shape ADR 0050 exists to prevent."""
+    import argparse
+
+    from skep.cli import _parser
+
+    subparsers = next(
+        action for action in _parser()._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    groups = sorted(subparsers.choices)
+    doc = (Path(__file__).parents[2] / "docs" / "cli-reference.md").read_text()
+    missing = [group for group in groups if f"skep {group}" not in doc]
+    assert not missing, f"CLI groups absent from docs/cli-reference.md: {missing}"
