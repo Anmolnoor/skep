@@ -95,6 +95,45 @@ def test_fresh_card_is_untouched(
     assert store.chat_messages(chat_id) == [] and ticker.notes == []
 
 
+def test_card_survives_while_the_operator_is_present(
+    rig: tuple[_NotingTicker, RunStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v106-F6: the timeout measures operator ABSENCE. 15 cards auto-denied in
+    one field day, batches dying while the operator was mid-conversation in
+    the owning chat — a human who is typing has not walked away (ADR 0032's
+    own rationale)."""
+    ticker, store = rig
+    chat_id, action_id = _card(store, monkeypatch, age_seconds=3600)
+    store.add_chat_message(chat_id, role="user", content="still here — deciding")
+
+    ticker._expire_cards()
+
+    action = store.get_chat_action(action_id)
+    assert action is not None and action.status == "proposed"
+    assert ticker.notes == []
+
+
+def test_model_chatter_does_not_keep_a_card_alive(
+    rig: tuple[_NotingTicker, RunStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v106-F6: only the OPERATOR's presence extends a card — the model must
+    never hold its own trigger open (ADR 0019). A silent chat's card dies with
+    the unchanged v54-F1 note even when assistant/tool rows are fresh."""
+    ticker, store = rig
+    chat_id, action_id = _card(store, monkeypatch, age_seconds=3600)
+    stale = (datetime.now(UTC) - timedelta(seconds=3600)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with monkeypatch.context() as m:
+        m.setattr("skep.supervisor.store._now", lambda: stale)
+        store.add_chat_message(chat_id, role="user", content="an hour-old question")
+    store.add_chat_message(chat_id, role="assistant", content="fresh model prose")
+
+    ticker._expire_cards()
+
+    action = store.get_chat_action(action_id)
+    assert action is not None and action.status == "denied"
+    assert action.result is not None and action.result["note"] == "auto-denied: card timed out"
+
+
 def test_zero_timeout_disables_the_sweep(
     rig: tuple[_NotingTicker, RunStore], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -3690,13 +3690,23 @@ class RunStore:
 
     @_locked
     def pending_cards_older_than(self, seconds: int) -> list[ChatActionRecord]:
-        """v54-F1: proposed cards across ALL chats created before the cutoff —
-        the ticker's auto-deny sweep. ISO-Z timestamps compare lexically."""
+        """v54-F1: proposed cards across ALL chats stale past the cutoff —
+        the ticker's auto-deny sweep. ISO-Z timestamps compare lexically.
+
+        v106-F6: the clock measures OPERATOR ABSENCE, not card age. The sweep
+        exists because "a timeout is the human not pulling it" (ADR 0032) —
+        but 15 cards auto-denied in one field day while the operator was
+        actively typing in the owning chat. A card now expires only when both
+        its creation AND the chat's last operator message are older than the
+        cutoff; cards in an abandoned chat die exactly as before.
+        """
         cutoff = (datetime.now(UTC) - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
         rows = self._conn.execute(
-            f"SELECT {self._ACTION_COLS} FROM chat_actions"
-            " WHERE status = 'proposed' AND created_at < ?",
-            (cutoff,),
+            f"SELECT {self._ACTION_COLS} FROM chat_actions a"
+            " WHERE a.status = 'proposed' AND a.created_at < ?"
+            " AND COALESCE((SELECT MAX(m.created_at) FROM chat_messages m"
+            "               WHERE m.chat_id = a.chat_id AND m.role = 'user'), '') < ?",
+            (cutoff, cutoff),
         ).fetchall()
         return [self._row_to_action(row) for row in rows]
 
