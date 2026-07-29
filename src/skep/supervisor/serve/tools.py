@@ -4055,8 +4055,10 @@ def _execute_mutation(
         )
         return {"merged": merge.merged, "detail": merge.detail}
     if name == "close_pr":
-        # v58-F1: the un-merge verb — reversible (a closed PR reopens on
-        # GitHub), so it rides the standard card like delete_branch.
+        # v58-F1: the un-merge verb. Reversible for the PR itself (a closed PR
+        # reopens) — but NOT with delete_branch: deleting the head ref cascade-
+        # closes every other PR built on it, upstream included, and the ref
+        # does not come back (v106-F5 / v101-F16 — the card says so).
         from .. import github
 
         repo_path = resolve_repo_arg(str(args["repo"]), repos_root(holder), store)
