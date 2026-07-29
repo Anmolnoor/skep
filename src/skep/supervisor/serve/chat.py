@@ -1516,15 +1516,18 @@ class ChatEngine:
                         # everything already listening for "tool" (the
                         # transcript group, maybeMountWorkerActivity for
                         # auto-dispatched runs) keeps working untouched.
-                        yield (
-                            "tool",
-                            {
-                                "tool": name,
-                                "decision": asdict(decision),
-                                "result": payload,
-                                "card": card_summary(name, args, tool_description(name)),
-                            },
-                        )
+                        receipt: dict[str, Any] = {
+                            "tool": name,
+                            "decision": asdict(decision),
+                            "result": payload,
+                            "card": card_summary(name, args, tool_description(name)),
+                        }
+                        # v106-F11 (v90-F3): the receipt names the covering
+                        # grant's tier and when the operator gave it.
+                        grant = actions.learned_rule_grant_view(self.store, decision.decided_by)
+                        if grant is not None:
+                            receipt["grant"] = grant
+                        yield ("tool", receipt)
                         continue
                     action_id = self.store.add_chat_action(
                         chat_id,

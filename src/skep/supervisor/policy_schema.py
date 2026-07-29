@@ -102,6 +102,9 @@ class LearnedRule(PolicyRule):
 
     scope: Scope
     provenance: str = "learned"
+    # v106-F11 (v90-F3's unkept clause): when the operator granted it. None on
+    # rules written before the field existed — the receipt says so honestly.
+    created_at: str | None = None
 
     @model_validator(mode="after")
     def _action_fits_scope(self) -> LearnedRule:

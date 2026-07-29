@@ -240,3 +240,53 @@ def test_a_pinned_command_that_failed_reverification_still_blocks() -> None:
     assert rule_block_reason(VERIFIED_PATCH_RULE, ctx) == (
         "supervisor re-verification did not confirm the result"
     )
+
+
+def test_a_blocked_auto_apply_writes_its_reason_to_the_audit_trail(
+    tmp_path: Path,
+) -> None:
+    """v106-F11 (v90-F4's unkept clause): version-history claimed the blocked
+    lane leaves 'the missing key named' — the runtime computed the reason and
+    dropped it. The run's transitions now carry which requirement each
+    configured rule tripped on."""
+    import json
+
+    from skep.supervisor import mint_task
+    from skep.supervisor.policy import VERIFIED_PATCH_RULE, maybe_auto_approve
+
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        task = mint_task(workspace=tmp_path / "ws", instructions="maintain tick")
+        store.create_run(task, repo=tmp_path, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "completed", None)
+        store.record_reverification(
+            task.task_id,
+            outcome="passed",
+            worker_outcome="passed",
+            confirmed=True,
+            commands=["true"],
+            exit_codes=[0],
+            detail="re-ran clean",
+        )
+
+        approved = maybe_auto_approve(
+            store=store,
+            rules=(VERIFIED_PATCH_RULE,),
+            repo=tmp_path,
+            task_id=task.task_id,
+            verification_outcome="passed",
+            risk_flags=(),
+            changed_files=("a.py",),
+            verify_pinned=False,  # the field shape: unpinned project, maintain lane
+        )
+        assert approved is None
+
+        details = [detail for _, detail, _ in store.transitions_for(task.task_id) if detail]
+        blocked = next(
+            json.loads(detail)["auto_apply_blocked"]
+            for detail in details
+            if "auto_apply_blocked" in detail
+        )
+        assert "verify_command" in blocked[VERIFIED_PATCH_RULE.name]
+    finally:
+        store.close()

@@ -179,6 +179,19 @@ def maybe_auto_approve(
     )
     matched = evaluate(rules, ctx)
     if matched is None:
+        # v106-F11 (v90-F4's unkept clause): the reason the lane did NOT fire
+        # goes on the run's audit trail. version-history claimed "with the
+        # missing key named" for four rounds while the runtime computed the
+        # reason and dropped it (I8) — the record now says exactly which
+        # requirement each configured rule tripped on.
+        import json as json_module
+
+        reasons = {rule.name: rule_block_reason(rule, ctx) for rule in rules}
+        store.transition(
+            task_id,
+            "completed",
+            json_module.dumps({"auto_apply_blocked": reasons}, ensure_ascii=True),
+        )
         return None
     rule, note = matched
 

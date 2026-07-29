@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from skep.supervisor.config import SupervisorConfig
 from skep.supervisor.policy_schema import PolicyDocument
 from skep.supervisor.serve import actions
@@ -98,5 +100,39 @@ def test_a_plain_shell_command_grants_its_exact_argv(config: SupervisorConfig) -
             is None
         )
         assert len(_doc(store).learned) == 1
+    finally:
+        store.close()
+
+
+def test_the_receipt_knows_the_grant_tier_and_time(tmp_path: Path) -> None:
+    """v106-F11 (v90-F3's unkept clause): the 'ran without asking' receipt was
+    specified to carry its tier and grant time — the operator could see THAT a
+    grant covered the action but not which kind or when they gave it."""
+    from skep.supervisor.serve.actions import (
+        learned_rule_grant_view,
+        remember_action_for_session,
+    )
+
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        granted = remember_action_for_session(
+            store, tool="read_url", args={"url": "https://docs.example/x"}, actor="chat-user"
+        )
+        assert granted is not None and granted["tier"] == "session"
+        from skep.supervisor.policy_schema import (
+            POLICY_DOCUMENT_SETTINGS_KEY,
+            document_from_settings,
+        )
+
+        document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+        assert document is not None
+        (rule,) = document.learned
+        view = learned_rule_grant_view(store, rule.rule_id)
+        assert view is not None
+        assert view["tier"] == "session"
+        assert view["granted_at"].endswith("Z")  # a real timestamp, not a shrug
+        # An id that names no rule renders nothing rather than guessing.
+        assert learned_rule_grant_view(store, "no-such-rule") is None
+        assert learned_rule_grant_view(store, None) is None
     finally:
         store.close()

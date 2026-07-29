@@ -57,3 +57,21 @@ already exists as learned rules (`allow_mcp_tool`,
 - The trust surface an operator holds in their head shrinks to two
   questions: "is this fine today?" (approve) and "is this fine
   forever?" (remember) — with the guarded classes exempt from both.
+
+## Amended: the session tier has two mechanisms (v90-F3, recorded v106-F11)
+
+The text above describes the tier as it shipped in v86: the
+`session_allowed_shell_commands` settings key, read-side merged into the
+worker's shell allowlist. v90-F3 extended the same operator promise —
+"an approval holds until the daemon restarts" — to the Queen's own
+fetch/shell actions with a second mechanism: **session-provenance learned
+rules** (`provenance: "session:<actor>"`) on the one learned-rule list the
+policy engine already resolves (I5). Same lifecycle (serve startup drops
+both, logging what went), same guard-class exemptions (remote git,
+dangerous commands, outbound content can never session-persist), one
+authorization boundary.
+
+This amendment was promised by v90-F5 and never written; the 2026-07-29
+audit found the ADR describing half the architecture. Since v106-F11 a
+learned rule also records `created_at`, and the "ran without asking"
+receipt names the covering grant's tier and grant time.

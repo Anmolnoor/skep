@@ -3027,7 +3027,12 @@ def learn_policy_rule(
     raw = store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)
     document = document_from_settings(raw) or PolicyDocument()
     rule = LearnedRule(
-        rule_id=rule_id, action=action, pattern=pattern, scope=scope, provenance=provenance
+        rule_id=rule_id,
+        action=action,
+        pattern=pattern,
+        scope=scope,
+        provenance=provenance,
+        created_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     for existing in document.learned:
         if (
@@ -3045,6 +3050,31 @@ def learn_policy_rule(
         raise ValueError(str(exc)) from exc
     store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
     return rule.rule_id
+
+
+def learned_rule_grant_view(store: RunStore, rule_id: str | None) -> dict[str, str] | None:
+    """v106-F11 (v90-F3's unkept clause): the tier and grant time of the
+    covering learned rule, for the 'ran without asking' receipt — the operator
+    could see THAT a grant covered the action but not which kind or when they
+    gave it."""
+    if not rule_id:
+        return None
+    from ..policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        document_from_settings,
+        is_session_rule,
+    )
+
+    document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    if document is None:
+        return None
+    for rule in document.learned:
+        if rule.rule_id == rule_id:
+            return {
+                "tier": "session" if is_session_rule(rule) else "always",
+                "granted_at": rule.created_at or "before v106 (no timestamp recorded)",
+            }
+    return None
 
 
 def remember_action_for_session(

@@ -2824,7 +2824,10 @@ async function viewChat(main, chatId) {
       el("p", { class: "card-headline mono" }, card.headline || d.tool),
       card.risk ? el("p", { class: "card-risk" },
         el("span", { class: "card-risk-label" }, "Risk: "), card.risk) : null,
-      covered ? el("p", { class: "card-purpose" }, `covered by ${covered}`) : null));
+      covered ? el("p", { class: "card-purpose" }, `covered by ${covered}`) : null,
+      // v106-F11 (v90-F3): which tier of grant, given when.
+      d.grant ? el("p", { class: "note" },
+        `${d.grant.tier} grant · given ${d.grant.granted_at}`) : null));
     scrollBottom();
   };
 
