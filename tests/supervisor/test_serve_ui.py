@@ -1753,3 +1753,12 @@ def test_a_steer_typed_mid_turn_is_queued_not_discarded() -> None:
     flush = chat[chat.index("const flushQueued") :]
     flush = flush[: flush.index("\n  };")]
     assert flush.index("if (!queuedMessage") < flush.index("deliver()")
+
+
+def test_diff_is_fetched_only_when_a_patch_artifact_exists() -> None:
+    """v106-F9: no-patch completions were a steady GET /diff 404 drumbeat in
+    serve.log — both fetch sites now check the run's artifacts first."""
+    app_js = (STATIC_DIR / "app.js").read_text()
+    guards = app_js.count('(detail.artifacts || []).some((a) => a.kind === "patch")')
+    fetches = app_js.count("`/api/runs/${taskId}/diff`")
+    assert guards == fetches == 2

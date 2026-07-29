@@ -1344,6 +1344,10 @@ function renderWorkerActivity(log, taskId, options = {}) {
     setState(state);
     if (state === "completed") {
       try {
+        // v106-F9: only ask for a diff that exists — no-patch completions
+        // were a steady 404 drumbeat in serve.log.
+        const detail = await api("GET", `/api/runs/${taskId}`);
+        if (!(detail.artifacts || []).some((a) => a.kind === "patch")) return;
         const diff = await api("GET", `/api/runs/${taskId}/diff`);
         const { added, removed } = diffstat(diff);
         diffPill.classList.remove("hidden");
@@ -3937,8 +3941,9 @@ async function viewRunDetail(main, taskId) {
 
   main.append(tabs.bar, tabs.content);
 
-  // The final diff, syntax-lit by line.
-  try {
+  // The final diff, syntax-lit by line. v106-F9: fetched only when the run
+  // recorded a patch artifact — a no-patch run has nothing to 404 about.
+  if ((detail.artifacts || []).some((a) => a.kind === "patch")) try {
     const diff = await api("GET", `/api/runs/${taskId}/diff`);
     const pre = el("pre", { class: "diff" });
     for (const line of String(diff).split("\n")) {

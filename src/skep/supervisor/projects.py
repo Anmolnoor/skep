@@ -297,7 +297,9 @@ BUILTIN_POLICY_GROUPS: dict[str, dict[str, Any]] = {
         ],
     },
     "node-dev": {
-        "default_network": ["registry.npmjs.org"],
+        # v106-F9: yarn resolves through its own registry host — a node
+        # project using yarn got a 403 from the egress proxy in the field.
+        "default_network": ["registry.npmjs.org", "registry.yarnpkg.com"],
         "allowed_shell_commands": [["npm", "install"], ["npm", "ci"]],
     },
 }
