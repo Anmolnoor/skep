@@ -1036,10 +1036,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE promoting a drafted skill pack (a SKILL.md skill shipping "
         "scripts; see list_skills' packs) to ACTIVE (requires user "
         "confirmation). On confirm, every shipped script must pass a "
-        "parse-only syntax trial before the pack's skill enters the "
-        "registry. allow_scripts grants shell commands, each shown verbatim "
-        "on the card; omit to keep the grants requested at import. Also "
-        "reactivates a suspended pack. Fails honestly if the trial fails.",
+        "syntax trial, and a pack declaring self_test also runs that "
+        "command for real in a sandboxed no-network script run (v100-F5) — "
+        "the result rides the card. allow_scripts grants shell commands, "
+        "each shown verbatim on the card; omit to keep the grants requested "
+        "at import. Also reactivates a suspended pack. Fails honestly if "
+        "the trial fails.",
         {
             "pack_id": {"type": "string", "description": "from list_skills packs"},
             "allow_scripts": {
