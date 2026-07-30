@@ -32,7 +32,11 @@ jobs:
             --pattern 'gitleaks_*_linux_x64.tar.gz' --output - | tar -xz gitleaks
           sudo mv gitleaks /usr/local/bin/gitleaks
       - name: Gate
-        run: UV_CACHE_DIR=.uv-cache scripts/local-release-gates.sh
+        # TMPDIR outside /tmp, same rule as ci.yml's unit tests and
+        # CLAUDE.md's local gates: bwrap tmpfs-masks /tmp.
+        run: |
+          mkdir -p "$HOME/.cache/skep-test-tmp"
+          TMPDIR="$HOME/.cache/skep-test-tmp" UV_CACHE_DIR=.uv-cache scripts/local-release-gates.sh
 
   package:
     needs: release-gate

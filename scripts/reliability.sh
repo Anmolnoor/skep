@@ -9,7 +9,8 @@ cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 RUNS="${RELIABILITY_RUNS:-10}"
 
-BASE="$(mktemp -d -t skep-reliability)"
+# Portable form (GNU mktemp rejects -t templates without X's; BSD allowed it).
+BASE="$(mktemp -d "${TMPDIR:-/tmp}/skep-reliability.XXXXXX")"
 trap 'rm -rf "$BASE"' EXIT
 HOME_DIR="$BASE/home"
 TOY="$BASE/toyrepo"
