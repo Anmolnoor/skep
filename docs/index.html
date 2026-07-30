@@ -152,27 +152,27 @@
         <div class="command-grid">
           <div class="command-block">
             <div class="command-header">
-              <span>Install from source</span>
+              <span>Install</span>
               <button type="button" data-copy="install-command">Copy</button>
             </div>
-            <pre id="install-command"><code>git clone https://github.com/Anmolnoor/skep.git
-cd skep
-uv sync --frozen</code></pre>
+            <pre id="install-command"><code>pip install skep</code></pre>
           </div>
           <div class="command-block">
             <div class="command-header">
               <span>Run and review</span>
               <button type="button" data-copy="run-command">Copy</button>
             </div>
-            <pre id="run-command"><code>uv run skep run /path/to/repo "fix the failing test" --execution-mode workspace
-uv run skep status --personal
-uv run skep review &lt;task_id&gt;
-uv run skep review &lt;task_id&gt; --approve</code></pre>
+            <pre id="run-command"><code>skep run /path/to/repo "fix the failing test" --execution-mode workspace
+skep status --personal
+skep review &lt;task_id&gt;
+skep review &lt;task_id&gt; --approve</code></pre>
           </div>
         </div>
         <p class="quickstart-note">
           Linux sandboxing requires bubblewrap. Claude Code users can run with
           <code>--worker-cmd "python -m skep.workers.claude_code"</code>.
+          Prefer source? <code>git clone https://github.com/Anmolnoor/skep.git</code>
+          and <code>uv sync --frozen</code> work too.
         </p>
       </section>
 
