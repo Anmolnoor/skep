@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="skep privacy — the tool is local-first with no telemetry; here's exactly what the website and the tool do and don't collect." />
+<title>Privacy — skep</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./site.css" />
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.js"></script>
+<script src="./site.js" defer></script>
+<style>
+.crumb { display: flex; align-items: center; gap: 9px; padding-top: 20px; font-size: 13px; color: var(--text-void); }
+.crumb i { width: 13px; height: 13px; }
+.prose { max-width: 760px; font-size: 15px; line-height: 1.7; color: var(--text-mid); }
+.prose h2 { margin: 36px 0 12px; font-size: 21px; font-weight: 700; letter-spacing: -0.02em; color: var(--text-bright); }
+.prose p { margin: 0 0 14px; }
+.prose ul { margin: 0 0 14px; padding-left: 24px; }
+.prose li { margin-bottom: 8px; }
+.prose code { padding: 2px 6px; border: 1px solid var(--line-inner); border-radius: 5px; background: var(--bg-chip); font-family: var(--mono); font-size: 12.5px; color: var(--text-soft); }
+</style>
+</head>
+<body data-page="">
+
+<main>
+
+  <nav class="wrap crumb" aria-label="Breadcrumb">
+    <a href="./index.html" style="display: flex; align-items: center; gap: 6px;"><i data-lucide="house"></i><span>Home</span></a>
+    <i data-lucide="chevron-right"></i>
+    <span style="color: var(--text-muted);">Privacy</span>
+  </nav>
+
+  <section class="wrap" style="padding-top: clamp(28px, 3.5vw, 44px); padding-bottom: clamp(52px, 6vw, 84px);">
+    <div class="eyebrow green">Privacy</div>
+    <h1 style="margin: 0 0 14px; max-width: 20ch; font-size: clamp(34px, 3.8vw, 54px); font-weight: 700; line-height: 1.0; letter-spacing: -0.034em; color: var(--text-bright);">Local-first means exactly that.</h1>
+
+    <div class="prose">
+      <p>This page states plainly what the skep tool and this website do and do not collect. Last updated 2026-07-30.</p>
+
+      <h2>The skep tool</h2>
+      <ul>
+        <li><strong>No account, no cloud, no telemetry.</strong> Skep runs entirely on your machine. It does not phone home, report usage, or send analytics anywhere.</li>
+        <li><strong>Your code stays with you.</strong> Runs, patches, evidence, approvals, and the audit ledger live in a local SQLite store under <code>~/.skep</code>.</li>
+        <li><strong>Secrets ride by name.</strong> Skep stores environment-variable <em>names</em>, never their values. Values are read from your environment at run time and passed only through the explicit allowlist.</li>
+        <li><strong>Network is policy.</strong> Workers get no outbound network unless your policy or an approval grants specific domains. The only external traffic skep itself makes is to the model provider <em>you</em> configure (Anthropic, Ollama, or another endpoint) — under your keys, under your control.</li>
+        <li><strong>The web UI binds to loopback.</strong> <code>skep serve</code> listens on 127.0.0.1 only, token-gated. Nothing is exposed to your network unless you expose it.</li>
+      </ul>
+
+      <h2>This website</h2>
+      <ul>
+        <li><strong>No cookies, no analytics scripts, no trackers.</strong> This is a static site; we run no analytics of our own.</li>
+        <li><strong>Hosting.</strong> The site is served by GitHub Pages, so GitHub's standard server logs apply (see <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement" style="color: var(--green);">GitHub's privacy statement</a>).</li>
+        <li><strong>Third-party requests your browser makes.</strong> Fonts load from Google Fonts, icons from unpkg, and the live repository numbers (stars, forks, issues, latest version) are fetched by your browser directly from the GitHub and PyPI public APIs. Those services see the requests your browser sends them; we receive nothing.</li>
+      </ul>
+
+      <h2>Questions</h2>
+      <p>Email <a href="mailto:anmolnoor59@gmail.com" style="color: var(--green);">anmolnoor59@gmail.com</a>, or open an issue on <a href="https://github.com/Anmolnoor/skep" style="color: var(--green);">GitHub</a>. For security reports, see the <a href="./security.html" style="color: var(--green);">security policy</a>.</p>
+    </div>
+  </section>
+
+</main>
+
+</body>
+</html>

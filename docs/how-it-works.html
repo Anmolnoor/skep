@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="How skep works: isolated worktrees, the worker contract, sandbox boundary, approvals, independent re-verification, and patch approval." />
+<title>How it works — skep</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./site.css" />
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.js"></script>
+<script src="./site.js" defer></script>
+<style>
+.crumb { display: flex; align-items: center; gap: 9px; padding-top: 20px; font-size: 13px; color: var(--text-void); }
+.crumb i { width: 13px; height: 13px; }
+.stage-eyebrow { margin-bottom: 14px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--orange); }
+.h2s { font-size: clamp(28px, 2.9vw, 40px); font-weight: 700; line-height: 1.06; letter-spacing: -0.03em; color: var(--text-bright); }
+.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr)); gap: clamp(28px, 4vw, 56px); align-items: center; }
+.chip-no { display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; margin-bottom: 16px; border-radius: 50%; background: var(--green); font-family: var(--mono); font-size: 12px; font-weight: 600; color: #0A1A0E; }
+.verdict { padding: 18px; border-radius: 11px; }
+.verdict .vh { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; font-family: var(--mono); font-size: 13px; font-weight: 600; }
+.verdict .vh i { width: 16px; height: 16px; }
+.verdict p { font-size: 13.5px; line-height: 1.55; color: var(--text-dim); }
+</style>
+</head>
+<body data-page="how-it-works">
+
+<main>
+
+  <nav class="wrap crumb" aria-label="Breadcrumb">
+    <a href="./index.html" style="display: flex; align-items: center; gap: 6px;"><i data-lucide="house"></i><span>Home</span></a>
+    <i data-lucide="chevron-right"></i>
+    <span style="color: var(--text-muted);">How it works</span>
+  </nav>
+
+  <!-- Hero -->
+  <section style="position: relative; overflow: hidden;">
+    <div style="position: absolute; top: -160px; right: -120px; width: 620px; height: 620px; background: radial-gradient(circle, rgba(123,224,140,0.09), transparent 62%); pointer-events: none;"></div>
+    <div class="wrap" style="position: relative; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: center; gap: clamp(32px, 4.5vw, 64px); padding-top: clamp(36px, 4.5vw, 60px); padding-bottom: clamp(48px, 6vw, 76px);">
+      <div style="min-width: 0;">
+        <div style="display: inline-flex; align-items: center; gap: 8px; margin-bottom: 22px; padding: 6px 12px; border: 1px solid rgba(123,224,140,0.35); border-radius: 6px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--green);">
+          <i data-lucide="workflow" style="width: 13px; height: 13px;"></i>
+          <span>The run lifecycle</span>
+        </div>
+        <h1 style="margin: 0 0 22px; max-width: 16ch; font-size: clamp(40px, 4.6vw, 68px); font-weight: 700; line-height: 0.98; letter-spacing: -0.035em; color: var(--text-bright);">The agent writes code. Skep owns <span style="color: var(--green);">everything else.</span></h1>
+        <p style="margin: 0 0 30px; max-width: 52ch; font-size: clamp(16px, 1.2vw, 18px); line-height: 1.62; color: var(--text-muted);">Skep is a local supervisor around a coding agent. It controls where the agent runs, what it can reach, what evidence it must produce, and how the final patch lands.</p>
+        <div style="display: flex; flex-wrap: wrap; gap: 12px;">
+          <a href="./install.html" class="btn btn-primary" style="height: 48px; font-size: 15px;"><i data-lucide="terminal" style="width: 16px; height: 16px;"></i><span>Get started</span></a>
+          <a href="https://github.com/Anmolnoor/skep/blob/main/docs/how-it-works.md" class="btn btn-ghost" style="height: 48px; font-size: 15px;"><i data-lucide="book-open" style="width: 16px; height: 16px;"></i><span>Read the docs</span></a>
+        </div>
+      </div>
+
+      <div style="min-width: 0; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--bg-panel); box-shadow: 0 36px 80px rgba(0,0,0,0.5); overflow: hidden;">
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line-inner); font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.1em; color: var(--text-ghost);">
+          <span>LIFECYCLE</span>
+          <span style="color: var(--green);">skep run</span>
+        </div>
+        <pre style="padding: 22px 20px; font-size: 13px; line-height: 2; color: var(--text-muted); overflow-x: auto;"><span class="c-green">skep run</span>
+  -&gt; create isolated worktree
+  -&gt; write task contract
+  -&gt; start worker in <span style="color: #D6DAD8;">workspace</span> or <span style="color: #D6DAD8;">sandbox</span> mode
+  -&gt; collect events, logs, patch, evidence
+  -&gt; <span style="color: var(--text-bright);">re-verify the patch on a clean worktree</span>
+  -&gt; wait for review and approval
+  -&gt; apply the patch on <span class="c-orange">skep/&lt;task_id&gt;</span></pre>
+        <div style="display: flex; align-items: flex-start; gap: 11px; padding: 14px 20px; border-top: 1px solid var(--line-inner); background: var(--bg-card);">
+          <i data-lucide="info" style="width: 15px; height: 15px; margin-top: 2px; flex: 0 0 auto; color: var(--text-ghost);"></i>
+          <p style="margin: 0; font-size: 13px; line-height: 1.55; color: var(--text-faint);">The worker never edits your current checkout and never lands changes on <span class="mono" style="font-size: 12.5px; color: #A9B2AE;">main</span>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Six checkpoints -->
+  <section class="band reveal">
+    <div class="wrap" style="padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+      <h2 style="margin: 0 0 8px; font-size: clamp(26px, 2.6vw, 36px); font-weight: 700; letter-spacing: -0.028em; color: var(--text-bright);">Six checkpoints, in order</h2>
+      <p style="margin: 0 0 32px; max-width: 58ch; font-size: 15.5px; line-height: 1.6; color: var(--text-dim);">Each stage produces an artifact the next stage can be checked against.</p>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px;">
+        <div class="card" style="padding: 20px;"><div class="chip-no">1</div><div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Worktree</div><div style="font-size: 13px; line-height: 1.55; color: var(--text-faint);">A disposable Git worktree at your baseline ref.</div></div>
+        <div class="card" style="padding: 20px;"><div class="chip-no">2</div><div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Contract</div><div style="font-size: 13px; line-height: 1.55; color: var(--text-faint);">Task JSON: repo, instructions, permissions, budget.</div></div>
+        <div class="card" style="padding: 20px;"><div class="chip-no">3</div><div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Sandbox</div><div style="font-size: 13px; line-height: 1.55; color: var(--text-faint);">Seatbelt or bubblewrap constrain the worker process.</div></div>
+        <div class="card" style="padding: 20px;"><div class="chip-no">4</div><div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Approvals</div><div style="font-size: 13px; line-height: 1.55; color: var(--text-faint);">The run stops at a gate when more permission is needed.</div></div>
+        <div class="card" style="padding: 20px;"><div class="chip-no">5</div><div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Re-verify</div><div style="font-size: 13px; line-height: 1.55; color: var(--text-faint);">Replay the patch on a fresh baseline and re-run the checks.</div></div>
+        <div style="padding: 20px; border: 1px solid rgba(255,107,31,0.4); border-radius: 12px; background: rgba(255,107,31,0.05);"><div class="chip-no" style="background: var(--orange); color: var(--on-orange);">6</div><div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Approve</div><div style="font-size: 13px; line-height: 1.55; color: #A9887A;">You land the patch on a review branch. Skep never pushes.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 1: worktree -->
+  <section class="wrap section reveal" style="border-bottom: 1px solid var(--line-hair); padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+    <div class="split">
+      <div style="min-width: 0;">
+        <div class="stage-eyebrow">1 — Isolated worktree</div>
+        <h2 class="h2s" style="margin: 0 0 14px; max-width: 18ch;">The agent never sees your checkout.</h2>
+        <p style="margin: 0 0 18px; max-width: 50ch; font-size: 15.5px; line-height: 1.62; color: var(--text-dim);">Skep records the source repo and baseline ref, then creates a separate worktree for the worker. The worker changes files there without touching your active branch.</p>
+        <p style="margin: 0; max-width: 50ch; font-size: 15.5px; line-height: 1.62; color: var(--text-dim);">At the end of the run, Skep captures a binary-safe git patch from that worktree. That patch is the unit you review, approve, merge, or discard.</p>
+      </div>
+      <div data-copy-scope style="min-width: 0; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-panel); overflow: hidden;">
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line-inner); font-family: var(--mono); font-size: 12px; color: var(--text-ghost);">
+          <span>terminal</span>
+          <button class="copy-btn" aria-label="Copy" style="width: 26px; height: 26px;"><i data-lucide="copy"></i></button>
+        </div>
+        <pre style="padding: 18px; font-size: 13px; line-height: 1.9; color: var(--text-mid); overflow-x: auto;"><span class="c-green">$</span> skep run /path/to/repo \
+    "fix the failing test" \
+    --execution-mode workspace
+
+<span class="c-dim">baseline:</span> main@a19c4f2
+<span class="c-dim">worktree:</span> ~/.skep/worktrees/7d31f9c2
+<span class="c-dim">patch:</span>    ~/.skep/artifacts/7d31f9c2.patch</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2: contract -->
+  <section class="reveal" style="background: var(--bg-alt); border-bottom: 1px solid var(--line-hair);">
+    <div class="wrap" style="padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+      <div style="margin-bottom: 30px;">
+        <div class="stage-eyebrow">2 — The worker contract</div>
+        <h2 class="h2s" style="margin: 0 0 12px; max-width: 22ch;">Skep does not need to be the coding agent.</h2>
+        <p style="margin: 0; max-width: 60ch; font-size: 15.5px; line-height: 1.62; color: var(--text-dim);">It launches a worker process that speaks one local task/result contract (v0.3.5 today). The in-repo worker, the Claude Code adapter, Codex, Aider, and Ollama all fit behind the same boundary — the adapter can be thin because Skep owns supervision, not code generation.</p>
+      </div>
+      <div class="grid grid-3">
+        <article class="card" style="padding: 22px;">
+          <div style="display: flex; align-items: center; gap: 9px; margin-bottom: 14px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.1em; color: var(--green);"><i data-lucide="arrow-down-to-line" style="width: 14px; height: 14px;"></i><span>TASK JSON IN</span></div>
+          <p style="margin: 0 0 14px; font-size: 14px; line-height: 1.6;">Everything the worker is allowed to know and do, up front.</p>
+          <div style="display: grid; gap: 7px; font-family: var(--mono); font-size: 12.5px; color: #A9B2AE;"><span>repo · worktree</span><span>instructions</span><span>permissions · budget</span><span>resume state</span></div>
+        </article>
+        <article class="card" style="padding: 22px;">
+          <div style="display: flex; align-items: center; gap: 9px; margin-bottom: 14px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.1em; color: var(--green);"><i data-lucide="activity" style="width: 14px; height: 14px;"></i><span>EVENT STREAM OUT</span></div>
+          <p style="margin: 0 0 14px; font-size: 14px; line-height: 1.6;">NDJSON, written as the run happens — not reconstructed after.</p>
+          <div style="display: grid; gap: 7px; font-family: var(--mono); font-size: 12.5px; color: #A9B2AE;"><span>progress</span><span>commands</span><span>approvals</span><span>verification · artifacts</span></div>
+        </article>
+        <article class="card" style="padding: 22px;">
+          <div style="display: flex; align-items: center; gap: 9px; margin-bottom: 14px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.1em; color: var(--green);"><i data-lucide="arrow-up-from-line" style="width: 14px; height: 14px;"></i><span>RESULT JSON OUT</span></div>
+          <p style="margin: 0 0 14px; font-size: 14px; line-height: 1.6;">The claim — which Skep then checks for itself.</p>
+          <div style="display: grid; gap: 7px; font-family: var(--mono); font-size: 12.5px; color: #A9B2AE;"><span>final state</span><span>summary</span><span>patch path</span><span>evidence paths</span></div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3: sandbox -->
+  <section class="wrap section reveal" style="border-bottom: 1px solid var(--line-hair); padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+    <div class="split" style="align-items: start;">
+      <div style="min-width: 0;">
+        <div class="stage-eyebrow">3 — Sandbox boundary</div>
+        <h2 class="h2s" style="margin: 0 0 14px; max-width: 18ch;">Defense in depth, not a substitute for review.</h2>
+        <p style="margin: 0 0 22px; max-width: 50ch; font-size: 15.5px; line-height: 1.62; color: var(--text-dim);">In sandbox mode, Skep asks the host OS to constrain the worker process. If sandbox mode is requested but no backend can be applied, the worker does not start unsandboxed — the run fails instead.</p>
+        <a href="./security.html" class="link-arrow"><span>The full security model</span><i data-lucide="arrow-right"></i></a>
+      </div>
+      <div style="min-width: 0; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-card); overflow: hidden;">
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1.4fr; gap: 1px; background: var(--line-inner);">
+          <div style="padding: 12px 16px; background: var(--bg-panel); font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; color: var(--text-ghost);">PLATFORM</div>
+          <div style="padding: 12px 16px; background: var(--bg-panel); font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; color: var(--text-ghost);">BACKEND</div>
+          <div style="padding: 12px 16px; background: var(--bg-panel); font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; color: var(--text-ghost);">STATUS</div>
+          <div style="padding: 14px 16px; background: var(--bg-card); font-size: 14px; color: var(--text-soft);">macOS</div>
+          <div style="padding: 14px 16px; background: var(--bg-card); font-family: var(--mono); font-size: 13px; color: #A9B2AE;">sandbox-exec</div>
+          <div style="padding: 14px 16px; background: var(--bg-card); font-size: 13.5px; color: var(--green);">Supported when the host allows profiles</div>
+          <div style="padding: 14px 16px; background: var(--bg-card); font-size: 14px; color: var(--text-soft);">Linux</div>
+          <div style="padding: 14px 16px; background: var(--bg-card); font-family: var(--mono); font-size: 13px; color: #A9B2AE;">bwrap</div>
+          <div style="padding: 14px 16px; background: var(--bg-card); font-size: 13.5px; color: var(--green);">Supported when bubblewrap probes clean</div>
+          <div style="padding: 14px 16px; background: var(--bg-card); font-size: 14px; color: var(--text-soft);">Other</div>
+          <div style="padding: 14px 16px; background: var(--bg-card); font-family: var(--mono); font-size: 13px; color: var(--text-ghost);">none</div>
+          <div style="padding: 14px 16px; background: var(--bg-card); font-size: 13.5px; color: var(--red);">Unavailable — sandbox runs refuse to start</div>
+        </div>
+        <div style="display: grid; gap: 10px; padding: 18px 16px; border-top: 1px solid var(--line-inner); background: var(--bg-panel);">
+          <div style="font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; color: var(--text-ghost);">NETWORK MODES</div>
+          <div style="display: flex; align-items: center; gap: 12px; font-size: 13.5px; color: #A9B2AE;"><span class="mono" style="font-size: 12.5px; min-width: 92px; color: var(--red);">[ ]</span><span>Empty list — deny all outbound.</span></div>
+          <div style="display: flex; align-items: center; gap: 12px; font-size: 13.5px; color: #A9B2AE;"><span class="mono" style="font-size: 12.5px; min-width: 92px; color: var(--yellow);">[ * ]</span><span>Allow all outbound.</span></div>
+          <div style="display: flex; align-items: center; gap: 12px; font-size: 13.5px; color: #A9B2AE;"><span class="mono" style="font-size: 12.5px; min-width: 92px; color: var(--green);">[ domains ]</span><span>Only those domains, via the loopback filtering proxy.</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4: approvals -->
+  <section class="reveal" style="background: var(--bg-alt); border-bottom: 1px solid var(--line-hair);">
+    <div class="wrap split" style="padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+      <div style="min-width: 0;">
+        <div class="stage-eyebrow">4 — Approvals</div>
+        <h2 class="h2s" style="margin: 0 0 14px; max-width: 18ch;">The run stops and asks, in your terminal.</h2>
+        <p style="margin: 0 0 20px; max-width: 50ch; font-size: 15.5px; line-height: 1.62; color: var(--text-dim);">Approving once resumes only the current run. Approving with remember records the permission in the durable ledger — and a successful resumed run can save a learned template for similar future tasks.</p>
+        <div style="display: grid; gap: 10px;">
+          <div style="display: flex; gap: 12px; font-size: 14px; color: #A9B2AE;"><span class="mono" style="font-weight: 600; color: var(--green); min-width: 26px;">a</span><span>Resume this run only.</span></div>
+          <div style="display: flex; gap: 12px; font-size: 14px; color: #A9B2AE;"><span class="mono" style="font-weight: 600; color: var(--green); min-width: 26px;">b</span><span>Resume and record the permission for template learning.</span></div>
+          <div style="display: flex; gap: 12px; font-size: 14px; color: #A9B2AE;"><span class="mono" style="font-weight: 600; color: var(--red); min-width: 26px;">d</span><span>Deny the request.</span></div>
+          <div style="display: flex; gap: 12px; font-size: 14px; color: #A9B2AE;"><span class="mono" style="font-weight: 600; color: var(--yellow); min-width: 26px;">s</span><span>Leave it pending for <span class="mono" style="font-size: 13px;">skep review</span> later.</span></div>
+        </div>
+      </div>
+      <div class="term" style="min-width: 0;">
+        <div class="term-bar"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <pre style="line-height: 1.95;"><span class="c-yellow">approval needed: shell.run</span>
+  reason:  shell.run requires approval for
+           command: python -m pytest
+
+  <span class="c-dim">[a] approve once   [b] approve + remember</span>
+  <span class="c-dim">[d] deny           [s] skip</span>
+<span class="c-green">&gt;</span> <span style="color: var(--text-bright);">b</span>
+
+<span class="c-dim">recorded in ledger:</span>
+  repo    /path/to/repo
+  action  shell.run
+  actor   operator
+  outcome <span class="c-green">resumed → completed</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5: re-verify -->
+  <section class="wrap section reveal" style="border-bottom: 1px solid var(--line-hair); padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+    <div style="margin-bottom: 30px;">
+      <div class="stage-eyebrow">5 — Re-verification</div>
+      <h2 class="h2s" style="margin: 0 0 12px; max-width: 24ch;">Skep replays the patch on a clean copy, itself.</h2>
+      <p style="margin: 0; max-width: 62ch; font-size: 15.5px; line-height: 1.62; color: var(--text-dim);">The replay uses only <span class="mono" style="font-size: 14px; color: #A9B2AE;">PATH</span> and <span class="mono" style="font-size: 14px; color: #A9B2AE;">HOME</span> from the supervisor environment. When the sandbox is available, it runs with deny-all network and writes confined to the clean worktree.</p>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 16px;">
+      <div style="min-width: 0;">
+        <div style="display: grid; gap: 10px;">
+          <div style="display: flex; align-items: center; gap: 13px; padding: 15px 18px; border: 1px solid var(--line-card); border-radius: 11px; background: var(--bg-card);"><span class="mono" style="font-size: 12px; color: var(--text-ghost);">01</span><span style="font-size: 14.5px; color: var(--text-mid);">Create a fresh worktree at the original baseline.</span></div>
+          <div style="display: flex; align-items: center; gap: 13px; padding: 15px 18px; border: 1px solid var(--line-card); border-radius: 11px; background: var(--bg-card);"><span class="mono" style="font-size: 12px; color: var(--text-ghost);">02</span><span style="font-size: 14.5px; color: var(--text-mid);">Apply the worker's patch artifact.</span></div>
+          <div style="display: flex; align-items: center; gap: 13px; padding: 15px 18px; border: 1px solid var(--line-card); border-radius: 11px; background: var(--bg-card);"><span class="mono" style="font-size: 12px; color: var(--text-ghost);">03</span><span style="font-size: 14.5px; color: var(--text-mid);">Pick the check: the project's pinned <span class="mono" style="font-size: 13px; color: #A9B2AE;">verify_command</span>, or the worker's recorded <span class="mono" style="font-size: 13px; color: #A9B2AE;">verify.result</span> commands when no pin exists.</span></div>
+          <div style="display: flex; align-items: center; gap: 13px; padding: 15px 18px; border: 1px solid var(--line-card); border-radius: 11px; background: var(--bg-card);"><span class="mono" style="font-size: 12px; color: var(--text-ghost);">04</span><span style="font-size: 14.5px; color: var(--text-mid);">Re-run those commands from the clean worktree.</span></div>
+          <div style="display: flex; align-items: center; gap: 13px; padding: 15px 18px; border: 1px solid var(--line-card); border-radius: 11px; background: var(--bg-card);"><span class="mono" style="font-size: 12px; color: var(--text-ghost);">05</span><span style="font-size: 14.5px; color: var(--text-mid);">Record the outcome, exit codes, and detail message.</span></div>
+        </div>
+      </div>
+      <div style="display: grid; gap: 12px; min-width: 0;">
+        <div class="verdict" style="border: 1px solid rgba(123,224,140,0.3); background: rgba(123,224,140,0.04);">
+          <div class="vh" style="color: var(--green);"><i data-lucide="circle-check"></i><span>passed</span></div>
+          <p>Patch applied and every recorded command exited 0.</p>
+        </div>
+        <div class="verdict" style="border: 1px solid rgba(240,96,91,0.3); background: rgba(240,96,91,0.04);">
+          <div class="vh" style="color: var(--red);"><i data-lucide="circle-x"></i><span>failed</span></div>
+          <p>The patch did not apply, a command timed out, or one exited non-zero. Auto-approval is blocked.</p>
+        </div>
+        <div class="verdict" style="border: 1px solid rgba(242,179,94,0.3); background: rgba(242,179,94,0.04);">
+          <div class="vh" style="color: var(--yellow);"><i data-lucide="circle-help"></i><span>unavailable</span></div>
+          <p>Skep could not honestly re-run the check — no patch, no recorded command, or the tool is missing.</p>
+        </div>
+        <div style="padding: 16px 18px; border: 1px solid var(--line-card); border-radius: 11px; background: var(--bg-card-2); font-size: 13.5px; line-height: 1.6; color: var(--text-dim);">A run is <span class="mono" style="font-size: 13px; color: var(--text-bright);">confirmed</span> only when the worker reported <span class="mono" style="font-size: 13px; color: var(--green);">passed</span> and Skep's replay is also <span class="mono" style="font-size: 13px; color: var(--green);">passed</span>.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6: approval -->
+  <section class="reveal" style="background: var(--bg-alt); border-bottom: 1px solid var(--line-hair);">
+    <div class="wrap split" style="padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+      <div style="min-width: 0;">
+        <div class="stage-eyebrow">6 — Patch approval</div>
+        <h2 class="h2s" style="margin: 0 0 14px; max-width: 18ch;">Approval lands a branch. You do the rest.</h2>
+        <p style="margin: 0 0 20px; max-width: 50ch; font-size: 15.5px; line-height: 1.62; color: var(--text-dim);">The branch is named <span class="mono" style="font-size: 14px; color: var(--orange-soft);">skep/&lt;task_id&gt;</span>. Skep does not push it. You keep the normal Git decision: inspect, merge, edit, or delete.</p>
+        <a href="./cli.html" class="btn btn-ghost btn-sm"><span>CLI reference</span><i data-lucide="arrow-right" style="width: 15px; height: 15px;"></i></a>
+      </div>
+      <div style="min-width: 0; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-panel); overflow: hidden;">
+        <pre style="padding: 20px; font-size: 13px; line-height: 1.95; color: var(--text-mid); overflow-x: auto;"><span class="c-green">$</span> skep review 7d31f9c2
+
+task 7d31f9c2
+  state:        <span class="c-green">completed</span>
+  verification: passed <span class="c-dim">(worker says tests passed)</span>
+  re-verify:    <span class="c-green">passed [confirmed]</span> (G10)
+                re-ran ['uv run pytest'] -&gt; exit [0]
+
+<span class="c-green">$</span> skep review 7d31f9c2 --approve
+  applied on branch <span class="c-orange">skep/7d31f9c2</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- Beyond the terminal -->
+  <section class="wrap section reveal" style="padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+    <div style="margin-bottom: 28px;">
+      <div class="eyebrow green" style="font-size: 11.5px;">Beyond the terminal</div>
+      <h2 class="h2s" style="margin: 0 0 12px; max-width: 24ch;">Same gates, wherever you are.</h2>
+      <p style="margin: 0; max-width: 62ch; font-size: 15.5px; line-height: 1.62; color: var(--text-dim);">Operate Skep from Telegram, Slack, or Discord. An allow-listed message runs the same turn, with the same approval gates, as the web composer. Shell commands, policy changes, and landings are never confirmable from a messenger.</p>
+    </div>
+    <div class="grid grid-4" style="gap: 14px;">
+      <div class="card" style="padding: 20px;"><i data-lucide="monitor" style="width: 19px; height: 19px; margin-bottom: 14px; color: var(--text-muted);"></i><div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Web dashboard</div><div style="font-size: 13.5px; line-height: 1.55; color: var(--text-faint);"><span class="mono" style="font-size: 13px;">skep serve</span> on 127.0.0.1, token-gated.</div></div>
+      <div class="card" style="padding: 20px;"><i data-lucide="square-terminal" style="width: 19px; height: 19px; margin-bottom: 14px; color: var(--text-muted);"></i><div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Terminal chat</div><div style="font-size: 13.5px; line-height: 1.55; color: var(--text-faint);"><span class="mono" style="font-size: 13px;">skep chat</span> — same store, same cards.</div></div>
+      <div class="card" style="padding: 20px;"><i data-lucide="message-circle" style="width: 19px; height: 19px; margin-bottom: 14px; color: var(--text-muted);"></i><div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Messengers</div><div style="font-size: 13.5px; line-height: 1.55; color: var(--text-faint);">Telegram, Slack, Discord — low-risk actions only.</div></div>
+      <div class="card" style="padding: 20px;"><i data-lucide="clock" style="width: 19px; height: 19px; margin-bottom: 14px; color: var(--text-muted);"></i><div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Schedules</div><div style="font-size: 13.5px; line-height: 1.55; color: var(--text-faint);"><span class="mono" style="font-size: 13px;">skep tick</span> dispatches due runs from cron.</div></div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="wrap" style="padding-bottom: clamp(52px, 6vw, 84px);">
+    <div style="position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 28px; padding: clamp(30px, 4vw, 46px); border: 1px solid var(--line-strong); border-radius: 16px; background: var(--bg-card-2); overflow: hidden;">
+      <div style="position: absolute; top: -140px; right: -80px; width: 440px; height: 440px; background: radial-gradient(circle, rgba(123,224,140,0.12), transparent 62%); pointer-events: none;"></div>
+      <div style="position: relative; min-width: 0;">
+        <h2 style="margin: 0 0 10px; max-width: 22ch; font-size: clamp(24px, 2.4vw, 34px); font-weight: 700; line-height: 1.12; letter-spacing: -0.028em; color: var(--text-bright);">Run one supervised task and see the evidence yourself.</h2>
+        <p style="margin: 0; max-width: 50ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Five minutes from install to an approved patch on a review branch.</p>
+      </div>
+      <div style="position: relative; display: flex; flex-wrap: wrap; gap: 12px;">
+        <a href="./install.html" class="btn btn-primary" style="height: 48px; font-size: 15px;"><i data-lucide="terminal" style="width: 16px; height: 16px;"></i><span>Install skep</span></a>
+        <a href="./docs.html" class="btn btn-ghost" style="height: 48px; font-size: 15px; background: var(--bg-chip);"><i data-lucide="book-open" style="width: 16px; height: 16px;"></i><span>Documentation</span></a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+</body>
+</html>

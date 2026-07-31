@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Skep's security model: OS-level sandboxing, independent re-verification, approval gates, git protections — and its honest limits." />
+<title>Security — skep</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./site.css" />
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.js"></script>
+<script src="./site.js" defer></script>
+<style>
+.sec-eyebrow { margin-bottom: 14px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.13em; text-transform: uppercase; color: var(--orange); }
+.listline { display: flex; align-items: flex-start; gap: 9px; }
+.listline i { width: 15px; height: 15px; margin-top: 2px; flex: 0 0 auto; }
+</style>
+</head>
+<body data-page="security">
+
+<main>
+
+  <!-- Hero -->
+  <section style="position: relative; overflow: hidden; border-bottom: 1px solid var(--line-hair);">
+    <div style="position: absolute; top: -180px; left: -140px; width: 640px; height: 640px; background: radial-gradient(circle, rgba(255,107,31,0.10), transparent 62%); pointer-events: none;"></div>
+    <div class="wrap" style="position: relative; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: center; gap: clamp(32px, 4.5vw, 64px); padding-top: clamp(44px, 5.5vw, 72px); padding-bottom: clamp(48px, 6vw, 76px);">
+      <div style="min-width: 0;">
+        <div style="display: inline-flex; align-items: center; gap: 8px; margin-bottom: 24px; padding: 6px 12px; border: 1px solid rgba(255,107,31,0.4); border-radius: 6px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--orange);">
+          <i data-lucide="lock" style="width: 13px; height: 13px;"></i>
+          <span>Security by design</span>
+        </div>
+        <h1 style="margin: 0 0 22px; max-width: 14ch; font-size: clamp(40px, 4.8vw, 70px); font-weight: 700; line-height: 0.98; letter-spacing: -0.035em; color: var(--text-bright);">The worker's claim is never <span style="color: var(--orange);">the evidence.</span></h1>
+        <p style="margin: 0 0 30px; max-width: 50ch; font-size: clamp(16px, 1.2vw, 18px); line-height: 1.62; color: var(--text-muted);">Skep isolates coding agents, independently verifies their work, and gives you the final say before anything lands in your repository.</p>
+        <div style="display: flex; flex-wrap: wrap; gap: 22px; font-size: 14.5px; color: var(--text-dim);">
+          <span style="display: flex; align-items: center; gap: 9px;"><i data-lucide="monitor" style="width: 16px; height: 16px; color: var(--text-muted);"></i>Local-first</span>
+          <span style="display: flex; align-items: center; gap: 9px;"><i data-lucide="code-xml" style="width: 16px; height: 16px; color: var(--text-muted);"></i>Open source</span>
+          <span style="display: flex; align-items: center; gap: 9px;"><i data-lucide="cloud-off" style="width: 16px; height: 16px; color: var(--text-muted);"></i>No cloud required</span>
+        </div>
+      </div>
+
+      <div style="min-width: 0; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--bg-panel); box-shadow: 0 36px 80px rgba(0,0,0,0.5); overflow: hidden;">
+        <div style="padding: 13px 18px; border-bottom: 1px solid var(--line-inner); font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em; color: var(--text-ghost);">THE SKEP SECURITY MODEL</div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; padding: 24px 20px;">
+          <div>
+            <div class="card-icon" style="width: 42px; height: 42px; margin-bottom: 16px;"><i data-lucide="scan" style="width: 19px; height: 19px;"></i></div>
+            <div style="margin-bottom: 7px; font-size: 15.5px; font-weight: 650; color: var(--text-bright);">Sandbox</div>
+            <p style="margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-faint);">The agent runs in an isolated worktree with controlled filesystem and network access.</p>
+          </div>
+          <div>
+            <div class="card-icon" style="width: 42px; height: 42px; margin-bottom: 16px;"><i data-lucide="terminal" style="width: 19px; height: 19px;"></i></div>
+            <div style="margin-bottom: 7px; font-size: 15.5px; font-weight: 650; color: var(--text-bright);">Execute</div>
+            <p style="margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-faint);">The agent works, runs commands, and produces changes plus an event log.</p>
+          </div>
+          <div>
+            <div class="card-icon green" style="width: 42px; height: 42px; margin-bottom: 16px;"><i data-lucide="shield-check" style="width: 19px; height: 19px;"></i></div>
+            <div style="margin-bottom: 7px; font-size: 15.5px; font-weight: 650; color: var(--text-bright);">Verify</div>
+            <p style="margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-faint);">Skep re-runs the project's pinned verify command on a fresh copy, independently.</p>
+          </div>
+          <div>
+            <div class="card-icon green" style="width: 42px; height: 42px; margin-bottom: 16px;"><i data-lucide="user-check" style="width: 19px; height: 19px;"></i></div>
+            <div style="margin-bottom: 7px; font-size: 15.5px; font-weight: 650; color: var(--text-bright);">Approve</div>
+            <p style="margin: 0; font-size: 13px; line-height: 1.6; color: var(--text-faint);">You review the patch and evidence. Only then does it land on a dedicated branch.</p>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 11px; padding: 14px 20px; border-top: 1px solid var(--line-inner); background: var(--bg-card);">
+          <i data-lucide="lock" style="width: 15px; height: 15px; flex: 0 0 auto; color: var(--orange);"></i>
+          <p style="margin: 0; font-size: 13.5px; color: #A9B2AE;">The agent cannot modify your repository, push, or bypass approval.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Sandboxing -->
+  <section class="reveal" style="background: var(--bg-alt); border-bottom: 1px solid var(--line-hair);">
+    <div class="wrap" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: clamp(28px, 4vw, 52px); align-items: start; padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+      <div style="min-width: 0;">
+        <div class="sec-eyebrow">1. Sandboxing</div>
+        <h2 style="margin: 0 0 14px; max-width: 17ch; font-size: clamp(28px, 2.9vw, 40px); font-weight: 700; line-height: 1.06; letter-spacing: -0.03em; color: var(--text-bright);">Everything the agent can do is intentionally constrained.</h2>
+        <p style="margin: 0 0 18px; max-width: 48ch; font-size: 15.5px; line-height: 1.62; color: var(--text-dim);">Skep uses OS-level sandboxing to limit what the agent can reach. Each run happens in a disposable Git worktree, isolated from your main repository.</p>
+        <p style="margin: 0; max-width: 48ch; font-size: 15.5px; line-height: 1.62; color: var(--text-dim);">The sandbox mounts the root filesystem read-only and binds back only the intended writable roots: the workspace, the results directory, and task-specific temp locations.</p>
+      </div>
+
+      <div style="min-width: 0; padding: 24px; border: 1px solid var(--line-card); border-radius: 14px; background: var(--bg-card-2);">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 24px;">
+          <div>
+            <div style="margin-bottom: 16px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; color: var(--red);">WHAT'S RESTRICTED</div>
+            <div style="display: grid; gap: 11px; font-size: 13.5px; color: #A9B2AE;">
+              <span class="listline"><i data-lucide="circle-x" style="color: var(--red);"></i>Writes outside the worktree</span>
+              <span class="listline"><i data-lucide="circle-x" style="color: var(--red);"></i>Git push, pull, and fetch</span>
+              <span class="listline"><i data-lucide="circle-x" style="color: var(--red);"></i>Outbound network by default</span>
+              <span class="listline"><i data-lucide="circle-x" style="color: var(--red);"></i>Environment secrets and tokens</span>
+              <span class="listline"><i data-lucide="circle-x" style="color: var(--red);"></i>Modifying Skep's own configuration</span>
+              <span class="listline"><i data-lucide="circle-x" style="color: var(--red);"></i>Committing to your repository</span>
+            </div>
+          </div>
+          <div>
+            <div style="margin-bottom: 16px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; color: var(--green);">WHAT'S ALLOWED</div>
+            <div style="display: grid; gap: 11px; font-size: 13.5px; color: #A9B2AE;">
+              <span class="listline"><i data-lucide="check" style="color: var(--green);"></i>Read and write inside the worktree</span>
+              <span class="listline"><i data-lucide="check" style="color: var(--green);"></i>Run allowlisted commands</span>
+              <span class="listline"><i data-lucide="check" style="color: var(--green);"></i>Use approved tools and MCP servers</span>
+              <span class="listline"><i data-lucide="check" style="color: var(--green);"></i>Network to approved domains</span>
+              <span class="listline"><i data-lucide="check" style="color: var(--green);"></i>Write to the results directory</span>
+              <span class="listline"><i data-lucide="check" style="color: var(--green);"></i>Request more permission at a gate</span>
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 10px; margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line-inner); font-size: 13px; color: var(--text-faint);">
+          <i data-lucide="info" style="width: 14px; height: 14px; flex: 0 0 auto;"></i>
+          <span>Sandbox backends: macOS Seatbelt (<span class="mono" style="font-size: 12.5px;">sandbox-exec</span>) / Linux bubblewrap (<span class="mono" style="font-size: 12.5px;">bwrap</span>). Reads are not fully confined — the env allowlist closes secret exposure.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2/3/4 cards -->
+  <section class="reveal" style="border-bottom: 1px solid var(--line-hair);">
+    <div class="wrap" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr)); gap: 16px; padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+
+      <article style="display: flex; flex-direction: column; min-width: 0; padding: 26px; border: 1px solid var(--line-card); border-radius: 14px; background: var(--bg-card-2);">
+        <div class="sec-eyebrow">2. Independent verification</div>
+        <h3 style="margin: 0 0 12px; font-size: clamp(21px, 1.9vw, 26px); font-weight: 700; line-height: 1.14; letter-spacing: -0.024em; color: var(--text-bright);">Verify every claim. Independently.</h3>
+        <p style="margin: 0 0 20px; font-size: 14.5px; line-height: 1.62; color: var(--text-dim);">Skep never trusts the agent's claim. It runs the project's pinned verification command on a clean copy of the worktree.</p>
+        <pre style="margin: 0 0 18px; padding: 16px; border: 1px solid var(--line-inner); border-radius: 10px; background: #08090B; font-size: 12.5px; line-height: 1.8; color: var(--text-muted); overflow-x: auto;"><span class="c-green">$</span> uv run pytest
+<span style="color: #4A5350;">========== test session starts ==========</span>
+platform linux -- Python 3.12
+collected 142 items
+<span class="c-dim">.........................</span> <span class="c-green">[100%]</span>
+<span class="c-green">142 passed in 18.4s</span>
+<span style="color: #4A5350;">=========== 142 passed ===========</span></pre>
+        <div style="display: flex; flex-wrap: wrap; gap: 18px; margin-top: auto; font-size: 13px; color: var(--text-dim);">
+          <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="copy-plus" style="width: 15px; height: 15px; color: var(--green);"></i>Fresh copy</span>
+          <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="equal" style="width: 15px; height: 15px; color: var(--green);"></i>Pinned command</span>
+          <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="check-check" style="width: 15px; height: 15px; color: var(--green);"></i>Real results</span>
+        </div>
+      </article>
+
+      <article style="display: flex; flex-direction: column; min-width: 0; padding: 26px; border: 1px solid var(--line-card); border-radius: 14px; background: var(--bg-card-2);">
+        <div class="sec-eyebrow">3. Approval gates</div>
+        <h3 style="margin: 0 0 12px; font-size: clamp(21px, 1.9vw, 26px); font-weight: 700; line-height: 1.14; letter-spacing: -0.024em; color: var(--text-bright);">You control what happens next.</h3>
+        <p style="margin: 0 0 20px; font-size: 14.5px; line-height: 1.62; color: var(--text-dim);">Skep asks for permission when needed and before landing changes. Allow once, remember, or deny.</p>
+        <div style="margin-bottom: 18px; border: 1px solid var(--line-inner); border-radius: 10px; background: #08090B; overflow: hidden;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--line-inner);">
+            <span style="font-size: 13.5px; font-weight: 600; color: var(--text-soft);">Permission requested</span>
+            <span style="padding: 4px 9px; border: 1px solid #2B3134; border-radius: 5px; font-family: var(--mono); font-size: 11px; color: var(--text-muted);">network.access</span>
+          </div>
+          <div style="display: grid; gap: 9px; padding: 14px; font-size: 13px; color: var(--text-dim);">
+            <div class="mono" style="font-size: 13px; color: var(--text-bright);">registry.npmjs.org</div>
+            <div>Install the package pinned in <span class="mono" style="font-size: 12.5px; color: #A9B2AE;">package-lock.json</span></div>
+            <div>Scope: <span style="color: #A9B2AE;">this run only</span></div>
+            <div class="mono" style="font-size: 12.5px; color: #A9B2AE;">npm install axios@1.6.7</div>
+          </div>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 9px; margin-top: auto;">
+          <button style="display: flex; align-items: center; justify-content: center; gap: 7px; height: 40px; border: 1px solid #2B3134; border-radius: 9px; background: var(--bg-chip); font-family: var(--sans); font-size: 13px; font-weight: 600; color: var(--red); cursor: pointer;"><i data-lucide="x" style="width: 14px; height: 14px;"></i><span>Deny</span></button>
+          <button style="display: flex; align-items: center; justify-content: center; gap: 7px; height: 40px; border: 1px solid #2B3134; border-radius: 9px; background: var(--bg-chip); font-family: var(--sans); font-size: 13px; font-weight: 600; color: var(--text-mid); cursor: pointer;"><i data-lucide="check" style="width: 14px; height: 14px;"></i><span>Approve once</span></button>
+          <button style="display: flex; align-items: center; justify-content: center; gap: 7px; height: 40px; border: 0; border-radius: 9px; background: var(--orange); font-family: var(--sans); font-size: 13px; font-weight: 650; color: var(--on-orange); cursor: pointer;"><span>Approve &amp; remember</span></button>
+        </div>
+      </article>
+
+      <article style="display: flex; flex-direction: column; min-width: 0; padding: 26px; border: 1px solid var(--line-card); border-radius: 14px; background: var(--bg-card-2);">
+        <div class="sec-eyebrow">4. Git protections</div>
+        <h3 style="margin: 0 0 12px; font-size: clamp(21px, 1.9vw, 26px); font-weight: 700; line-height: 1.14; letter-spacing: -0.024em; color: var(--text-bright);">Your repository stays safe. Always.</h3>
+        <p style="margin: 0 0 20px; font-size: 14.5px; line-height: 1.62; color: var(--text-dim);">Workers cannot push, pull, fetch, or change your Git history — no permission grant overrides that. Approved work lands on a dedicated branch, never on main.</p>
+        <div style="display: grid; gap: 10px; margin-bottom: 22px; font-size: 13.5px; color: #A9B2AE;">
+          <span style="display: flex; align-items: center; gap: 9px;"><i data-lucide="x" style="width: 15px; height: 15px; flex: 0 0 auto; color: var(--red);"></i>Cannot push</span>
+          <span style="display: flex; align-items: center; gap: 9px;"><i data-lucide="x" style="width: 15px; height: 15px; flex: 0 0 auto; color: var(--red);"></i>Cannot pull or fetch</span>
+          <span style="display: flex; align-items: center; gap: 9px;"><i data-lucide="x" style="width: 15px; height: 15px; flex: 0 0 auto; color: var(--red);"></i>Cannot checkout or switch branches</span>
+          <span style="display: flex; align-items: center; gap: 9px;"><i data-lucide="x" style="width: 15px; height: 15px; flex: 0 0 auto; color: var(--red);"></i>Cannot commit to your repository</span>
+          <span style="display: flex; align-items: center; gap: 9px;"><i data-lucide="x" style="width: 15px; height: 15px; flex: 0 0 auto; color: var(--red);"></i>Cannot modify <span class="mono" style="font-size: 12.5px;">.git</span> or Git config</span>
+          <span style="display: flex; align-items: center; gap: 9px;"><i data-lucide="check" style="width: 15px; height: 15px; flex: 0 0 auto; color: var(--green);"></i>Approved patch lands on <span class="mono" style="font-size: 12.5px; color: var(--orange-soft);">skep/&lt;id&gt;</span></span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 0; margin-top: auto; padding: 16px 14px; border: 1px solid var(--line-inner); border-radius: 10px; background: #08090B; overflow-x: auto;">
+          <span style="flex: 0 0 auto; padding: 5px 11px; border: 1px solid #2B3134; border-radius: 5px; font-family: var(--mono); font-size: 12px; color: #A9B2AE;">main</span>
+          <span style="flex: 0 0 auto; width: 22px; height: 1px; background: #2B3134;"></span>
+          <span style="flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: #4A5350;"></span>
+          <span style="flex: 0 0 auto; width: 22px; height: 1px; background: #2B3134;"></span>
+          <span style="flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: #4A5350;"></span>
+          <span style="flex: 0 0 auto; width: 22px; height: 1px; background: var(--orange);"></span>
+          <span style="flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: var(--orange);"></span>
+          <span style="flex: 0 0 auto; width: 16px; height: 1px; background: var(--orange);"></span>
+          <span style="flex: 0 0 auto; padding: 5px 11px; border: 1px solid rgba(255,107,31,0.5); border-radius: 5px; font-family: var(--mono); font-size: 12px; color: var(--orange-soft);">skep/7d31f9c2</span>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <!-- Limits + reporting -->
+  <section class="reveal" style="background: var(--bg-alt); border-bottom: 1px solid var(--line-hair);">
+    <div class="wrap" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr)); gap: clamp(28px, 4vw, 52px); padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+      <div style="min-width: 0;">
+        <div style="margin-bottom: 14px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.13em; text-transform: uppercase; color: var(--yellow);">Security limitations</div>
+        <h2 style="margin: 0 0 12px; max-width: 18ch; font-size: clamp(26px, 2.6vw, 36px); font-weight: 700; line-height: 1.08; letter-spacing: -0.028em; color: var(--text-bright);">Skep makes agents safer. It's not a silver bullet.</h2>
+        <p style="margin: 0 0 24px; max-width: 46ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">No system is perfect. These are the limits, stated plainly.</p>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px;">
+          <div class="listline" style="gap: 11px;"><i data-lucide="triangle-alert" style="width: 16px; height: 16px; color: var(--yellow);"></i><div><div style="margin-bottom: 3px; font-size: 14px; font-weight: 600; color: var(--text-soft);">Agents still make logic mistakes</div><div style="font-size: 13px; line-height: 1.5; color: var(--text-faint);">Verification helps, but it isn't foolproof.</div></div></div>
+          <div class="listline" style="gap: 11px;"><i data-lucide="triangle-alert" style="width: 16px; height: 16px; color: var(--yellow);"></i><div><div style="margin-bottom: 3px; font-size: 14px; font-weight: 600; color: var(--text-soft);">Local machine risks remain</div><div style="font-size: 13px; line-height: 1.5; color: var(--text-faint);">Malware or a compromised OS is out of scope.</div></div></div>
+          <div class="listline" style="gap: 11px;"><i data-lucide="triangle-alert" style="width: 16px; height: 16px; color: var(--yellow);"></i><div><div style="margin-bottom: 3px; font-size: 14px; font-weight: 600; color: var(--text-soft);">Dependencies can be malicious</div><div style="font-size: 13px; line-height: 1.5; color: var(--text-faint);">Skep cannot control what you install.</div></div></div>
+          <div class="listline" style="gap: 11px;"><i data-lucide="triangle-alert" style="width: 16px; height: 16px; color: var(--yellow);"></i><div><div style="margin-bottom: 3px; font-size: 14px; font-weight: 600; color: var(--text-soft);">Secrets in your repo are still at risk</div><div style="font-size: 13px; line-height: 1.5; color: var(--text-faint);">Don't commit secrets. Use env vars.</div></div></div>
+          <div class="listline" style="gap: 11px;"><i data-lucide="triangle-alert" style="width: 16px; height: 16px; color: var(--yellow);"></i><div><div style="margin-bottom: 3px; font-size: 14px; font-weight: 600; color: var(--text-soft);">Verification command trust</div><div style="font-size: 13px; line-height: 1.5; color: var(--text-faint);">If your command lies, Skep can't detect it.</div></div></div>
+          <div class="listline" style="gap: 11px;"><i data-lucide="triangle-alert" style="width: 16px; height: 16px; color: var(--yellow);"></i><div><div style="margin-bottom: 3px; font-size: 14px; font-weight: 600; color: var(--text-soft);">Human decisions matter</div><div style="font-size: 13px; line-height: 1.5; color: var(--text-faint);">Approval is the final safety net.</div></div></div>
+        </div>
+      </div>
+
+      <div style="min-width: 0; align-self: start; padding: 26px; border: 1px solid var(--line-card); border-radius: 14px; background: var(--bg-card-2);">
+        <div class="sec-eyebrow">Report a security issue</div>
+        <p style="margin: 0 0 22px; font-size: 15px; line-height: 1.62; color: var(--text-dim);">Skep is a security-posture project — a hole in any layer is a security bug even if no data was touched. Please report privately rather than opening a public issue.</p>
+        <div style="display: grid; gap: 12px; margin-bottom: 22px;">
+          <a href="mailto:anmolnoor59@gmail.com?subject=%5Bskep%20security%5D" style="display: flex; align-items: center; gap: 11px; padding: 14px 16px; border: 1px solid var(--line-card); border-radius: 10px; background: var(--bg-card); font-size: 14px; color: var(--text-mid);"><i data-lucide="mail" style="width: 16px; height: 16px; color: var(--text-muted);"></i><span class="mono" style="font-size: 13.5px;">anmolnoor59@gmail.com</span><span style="font-size: 12.5px; color: var(--text-ghost);">— subject tag [skep security]</span></a>
+          <a href="https://github.com/Anmolnoor/skep/security/advisories" style="display: flex; align-items: center; gap: 11px; padding: 14px 16px; border: 1px solid var(--line-card); border-radius: 10px; background: var(--bg-card); font-size: 14px; color: var(--text-mid);"><i data-lucide="shield-alert" style="width: 16px; height: 16px; color: var(--text-muted);"></i><span>GitHub Security Advisories</span></a>
+        </div>
+        <p style="margin: 0 0 16px; font-size: 13px; line-height: 1.6; color: var(--text-faint);">Include your skep version (<span class="mono" style="font-size: 12.5px;">skep --version</span>), sandbox backend (<span class="mono" style="font-size: 12.5px;">skep doctor</span>), the boundary affected, and reproduction steps. You'll get an acknowledgment within a week.</p>
+        <a href="https://github.com/Anmolnoor/skep/blob/main/SECURITY.md" class="link-arrow" style="font-size: 14px;"><span>See SECURITY.md for details</span><i data-lucide="arrow-right" style="width: 14px; height: 14px;"></i></a>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="wrap" style="padding-top: clamp(48px, 5.5vw, 76px); padding-bottom: clamp(48px, 5.5vw, 76px);">
+    <div style="position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 28px; padding: clamp(30px, 4vw, 46px); border: 1px solid var(--line-strong); border-radius: 16px; background: var(--bg-card-2); overflow: hidden;">
+      <div style="position: absolute; top: -160px; left: -60px; width: 460px; height: 460px; background: radial-gradient(circle, rgba(255,107,31,0.14), transparent 62%); pointer-events: none;"></div>
+      <div style="position: relative; min-width: 0;">
+        <h2 style="margin: 0 0 10px; max-width: 20ch; font-size: clamp(24px, 2.4vw, 34px); font-weight: 700; line-height: 1.12; letter-spacing: -0.028em; color: var(--text-bright);">Secure by default. Transparent by design.</h2>
+        <p style="margin: 0; max-width: 50ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Open source, auditable, and built for developers who take safety seriously.</p>
+      </div>
+      <div style="position: relative; display: flex; flex-wrap: wrap; gap: 12px;">
+        <a href="./install.html" class="btn btn-primary" style="height: 48px; font-size: 15px;"><i data-lucide="terminal" style="width: 16px; height: 16px;"></i><span>Install skep</span></a>
+        <a href="./docs.html" class="btn btn-ghost" style="height: 48px; font-size: 15px; background: var(--bg-chip);"><i data-lucide="book-open" style="width: 16px; height: 16px;"></i><span>Read the docs</span></a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+</body>
+</html>

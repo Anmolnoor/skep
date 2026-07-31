@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Skep's CLI: run, review, chat, serve, status, doctor, templates, schedules — and the command deck." />
+<title>CLI — skep</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./site.css" />
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.js"></script>
+<script src="./site.js" defer></script>
+<style>
+@keyframes skepCaret { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+.crumb { display: flex; align-items: center; gap: 9px; padding-top: 20px; font-size: 13px; color: var(--text-void); }
+.crumb i { width: 13px; height: 13px; }
+[data-term-line] { opacity: 0; animation: lineIn 220ms ease forwards; }
+@keyframes lineIn { to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { [data-term-line] { opacity: 1; animation: none; } }
+.cmd-card { padding: 20px; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-card); }
+.cmd-card .head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.cmd-card .chip { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; flex: 0 0 auto; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--bg-chip); color: var(--orange); }
+.cmd-card .chip i { width: 16px; height: 16px; }
+.cmd-card pre { padding: 11px 12px; border: 1px solid var(--line-inner); border-radius: 8px; background: #08090B; font-size: 12px; line-height: 1.6; color: var(--green); overflow-x: auto; }
+.deck-item { display: flex; align-items: center; gap: 11px; padding: 14px 16px; border: 1px solid var(--line-card); border-radius: 10px; background: var(--bg-card); }
+.deck-item i { width: 16px; height: 16px; flex: 0 0 auto; color: var(--green); }
+.deck-item.confirm { border-color: rgba(255,107,31,0.3); background: rgba(255,107,31,0.04); }
+.deck-item.confirm i { color: var(--orange); }
+.opt-cell { padding: 18px 20px; background: var(--bg-card-2); }
+.opt-cell .opt { margin-bottom: 6px; font-family: var(--mono); font-size: 13.5px; font-weight: 600; color: var(--green); }
+.opt-cell .what { font-size: 13.5px; line-height: 1.55; color: var(--text-dim); }
+</style>
+</head>
+<body data-page="cli">
+
+<main>
+
+  <nav class="wrap crumb" aria-label="Breadcrumb">
+    <a href="./index.html" style="display: flex; align-items: center; gap: 6px;"><i data-lucide="house"></i><span>Home</span></a>
+    <i data-lucide="chevron-right"></i>
+    <span style="color: var(--text-muted);">CLI</span>
+  </nav>
+
+  <!-- Hero -->
+  <section style="position: relative; overflow: hidden;">
+    <div style="position: absolute; top: -180px; right: -140px; width: 660px; height: 660px; background: radial-gradient(circle, rgba(123,224,140,0.10), transparent 62%); pointer-events: none;"></div>
+    <div class="wrap" style="position: relative; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); align-items: center; gap: clamp(30px, 4vw, 56px); padding-top: clamp(32px, 4vw, 52px); padding-bottom: clamp(44px, 5.5vw, 72px);">
+      <div style="min-width: 0;">
+        <div style="display: inline-flex; align-items: center; gap: 8px; margin-bottom: 22px; padding: 6px 12px; border: 1px solid rgba(123,224,140,0.35); border-radius: 6px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--green);">
+          <i data-lucide="square-terminal" style="width: 13px; height: 13px;"></i>
+          <span>CLI first</span>
+        </div>
+        <h1 style="margin: 0 0 22px; max-width: 14ch; font-size: clamp(38px, 4.4vw, 64px); font-weight: 700; line-height: 0.99; letter-spacing: -0.035em; color: var(--text-bright);">Govern agents. Right from your <span style="color: var(--green);">terminal.</span></h1>
+        <p style="margin: 0 0 30px; max-width: 50ch; font-size: clamp(16px, 1.2vw, 18px); line-height: 1.62; color: var(--text-muted);">Skep's CLI gives you complete control over tasks, runs, approvals, policies, and everything in between. Powerful, scriptable, local-first.</p>
+        <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 18px;">
+          <a href="./install.html" style="display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 20px; border: 1px solid rgba(123,224,140,0.4); border-radius: 10px; background: var(--bg-inset); font-family: var(--mono); font-size: 14px; font-weight: 500; color: var(--text-soft);"><span style="color: var(--green);">$</span><span>skep chat</span></a>
+          <a href="./doc.html?d=cli" class="btn btn-ghost" style="height: 48px; font-size: 15px;"><i data-lucide="book-open" style="width: 16px; height: 16px;"></i><span>View CLI docs</span></a>
+        </div>
+        <p style="margin: 0; font-size: 13.5px; color: var(--text-void);">Tip: start the daemon in another terminal with <span class="mono" style="padding: 2px 7px; border: 1px solid var(--line-card); border-radius: 5px; background: var(--bg-card); font-size: 12.5px; color: var(--green);">skep serve</span></p>
+      </div>
+
+      <div style="min-width: 0; border: 1px solid var(--line-strong); border-radius: 12px; background: #0A0C0E; box-shadow: 0 36px 80px rgba(0,0,0,0.55); overflow: hidden;">
+        <div class="term-bar"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <div style="padding: 20px; font-family: var(--mono); font-size: 12.5px; line-height: 1.9; color: var(--text-mid); overflow-x: auto;">
+          <div data-term-line style="animation-delay: 320ms;"><span class="c-green">$</span> skep chat</div>
+          <div data-term-line style="animation-delay: 490ms; color: var(--text-dim);">Connected to Skep daemon at http://127.0.0.1:8765</div>
+          <div data-term-line style="animation-delay: 660ms; color: var(--text-dim);">You are in the command deck. Type /help for available commands.</div>
+          <div data-term-line style="animation-delay: 830ms; height: 12px;"></div>
+          <div data-term-line style="animation-delay: 1000ms;"><span class="c-green">skep &gt;</span> /help</div>
+          <div data-term-line style="animation-delay: 1170ms; height: 12px;"></div>
+          <div data-term-line style="animation-delay: 1340ms; color: var(--text-dim);">Available commands:</div>
+          <div data-term-line style="animation-delay: 1510ms; display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 0 24px; margin-top: 8px;">
+            <div><span style="display: inline-block; min-width: 94px; color: var(--orange-soft);">/setup</span><span style="color: var(--text-dim);">Bind a repo</span></div>
+            <div><span style="display: inline-block; min-width: 94px; color: var(--orange-soft);">/repos</span><span style="color: var(--text-dim);">Registered repos</span></div>
+            <div><span style="display: inline-block; min-width: 94px; color: var(--orange-soft);">/workon</span><span style="color: var(--text-dim);">Select a repo</span></div>
+            <div><span style="display: inline-block; min-width: 94px; color: var(--orange-soft);">/policy</span><span style="color: var(--text-dim);">Effective policy</span></div>
+            <div><span style="display: inline-block; min-width: 94px; color: var(--orange-soft);">/runs</span><span style="color: var(--text-dim);">Recent runs</span></div>
+            <div><span style="display: inline-block; min-width: 94px; color: var(--orange-soft);">/state</span><span style="color: var(--text-dim);">Repo git state</span></div>
+            <div><span style="display: inline-block; min-width: 94px; color: var(--orange-soft);">/approvals</span><span style="color: var(--text-dim);">Pending queue</span></div>
+            <div><span style="display: inline-block; min-width: 94px; color: var(--orange-soft);">/land</span><span style="color: var(--text-dim);">Land a patch</span></div>
+          </div>
+          <div data-term-line style="animation-delay: 1680ms; height: 12px;"></div>
+          <div data-term-line style="animation-delay: 1850ms;"><span class="c-green">skep &gt;</span> <span style="display: inline-block; width: 8px; height: 15px; margin-bottom: -2px; background: var(--green); animation: skepCaret 1.05s step-end infinite;"></span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Core commands -->
+  <section class="band reveal">
+    <div class="wrap" style="padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px);">
+      <div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 26px;">
+        <div>
+          <h2 style="margin: 0 0 8px; font-size: clamp(24px, 2.4vw, 32px); font-weight: 700; letter-spacing: -0.026em; color: var(--text-bright);">Core commands</h2>
+          <p style="margin: 0; font-size: 15px; color: var(--text-dim);">Everything you need to run, review, and control your workflows.</p>
+        </div>
+        <a href="./doc.html?d=cli" class="link-arrow" style="color: var(--orange);"><span>See the full CLI reference</span><i data-lucide="arrow-right"></i></a>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 14px;">
+        <article class="cmd-card">
+          <div class="head"><div class="chip"><i data-lucide="square-terminal"></i></div><div><div class="mono" style="font-size: 14.5px; font-weight: 600; color: var(--text-bright);">skep run</div><div style="font-size: 12.5px; color: var(--text-faint);">Start a new supervised task.</div></div></div>
+          <pre>skep run ~/code/app \
+  "fix the failing test"</pre>
+        </article>
+        <article class="cmd-card">
+          <div class="head"><div class="chip"><i data-lucide="search-check"></i></div><div><div class="mono" style="font-size: 14.5px; font-weight: 600; color: var(--text-bright);">skep review</div><div style="font-size: 12.5px; color: var(--text-faint);">Inspect evidence, then approve.</div></div></div>
+          <pre>skep review 7d31f9c2 --approve</pre>
+        </article>
+        <article class="cmd-card">
+          <div class="head"><div class="chip"><i data-lucide="message-square"></i></div><div><div class="mono" style="font-size: 14.5px; font-weight: 600; color: var(--text-bright);">skep chat</div><div style="font-size: 12.5px; color: var(--text-faint);">The terminal command deck.</div></div></div>
+          <pre>skep chat --continue</pre>
+        </article>
+        <article class="cmd-card">
+          <div class="head"><div class="chip"><i data-lucide="server"></i></div><div><div class="mono" style="font-size: 14.5px; font-weight: 600; color: var(--text-bright);">skep serve</div><div style="font-size: 12.5px; color: var(--text-faint);">Local HTTP API + dashboard.</div></div></div>
+          <pre>skep serve --port 8765</pre>
+        </article>
+        <article class="cmd-card">
+          <div class="head"><div class="chip"><i data-lucide="activity"></i></div><div><div class="mono" style="font-size: 14.5px; font-weight: 600; color: var(--text-bright);">skep status</div><div style="font-size: 12.5px; color: var(--text-faint);">Runs, approvals, re-verify state.</div></div></div>
+          <pre>skep status --personal --json</pre>
+        </article>
+        <article class="cmd-card">
+          <div class="head"><div class="chip"><i data-lucide="stethoscope"></i></div><div><div class="mono" style="font-size: 14.5px; font-weight: 600; color: var(--text-bright);">skep doctor</div><div style="font-size: 12.5px; color: var(--text-faint);">Readiness and sandbox probe.</div></div></div>
+          <pre>skep doctor</pre>
+        </article>
+        <article class="cmd-card">
+          <div class="head"><div class="chip"><i data-lucide="settings"></i></div><div><div class="mono" style="font-size: 14.5px; font-weight: 600; color: var(--text-bright);">skep setup</div><div style="font-size: 12.5px; color: var(--text-faint);">Create or update your profile.</div></div></div>
+          <pre>skep setup --personal</pre>
+        </article>
+        <article class="cmd-card">
+          <div class="head"><div class="chip"><i data-lucide="layout-template"></i></div><div><div class="mono" style="font-size: 14.5px; font-weight: 600; color: var(--text-bright);">skep template</div><div style="font-size: 12.5px; color: var(--text-faint);">Inspect learned templates.</div></div></div>
+          <pre>skep template list</pre>
+        </article>
+        <article class="cmd-card">
+          <div class="head"><div class="chip"><i data-lucide="calendar-clock"></i></div><div><div class="mono" style="font-size: 14.5px; font-weight: 600; color: var(--text-bright);">skep schedule</div><div style="font-size: 12.5px; color: var(--text-faint);">Recurring runs, dispatched by <span class="mono">tick</span>.</div></div></div>
+          <pre>skep schedule add nightly ~/app \
+  "run the lint fixer" --every 1d</pre>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Command deck -->
+  <section class="wrap reveal" style="padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px); border-bottom: 1px solid var(--line-hair);">
+    <h2 style="margin: 0 0 8px; font-size: clamp(24px, 2.4vw, 32px); font-weight: 700; letter-spacing: -0.026em; color: var(--text-bright);">The command deck</h2>
+    <p style="margin: 0 0 26px; max-width: 66ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Deterministic operator commands the assistant's model never sees. Reads render immediately; mutations show a confirmation card, audited under actor <span class="mono" style="font-size: 14px; color: var(--orange-soft);">operator-command</span>.</p>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px;">
+      <div class="deck-item"><i data-lucide="circle-help"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/help</div><div style="font-size: 12px; color: var(--text-faint);">List the deck</div></div></div>
+      <div class="deck-item"><i data-lucide="folder-git-2"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/repos</div><div style="font-size: 12px; color: var(--text-faint);">Registered repos</div></div></div>
+      <div class="deck-item"><i data-lucide="crosshair"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/workon</div><div style="font-size: 12px; color: var(--text-faint);">Select a repository</div></div></div>
+      <div class="deck-item"><i data-lucide="scale"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/policy</div><div style="font-size: 12px; color: var(--text-faint);">Effective policy</div></div></div>
+      <div class="deck-item"><i data-lucide="list"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/runs</div><div style="font-size: 12px; color: var(--text-faint);">Recent runs</div></div></div>
+      <div class="deck-item"><i data-lucide="git-compare"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/state</div><div style="font-size: 12px; color: var(--text-faint);">Repo git state</div></div></div>
+      <div class="deck-item"><i data-lucide="circle-check-big"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/approvals</div><div style="font-size: 12px; color: var(--text-faint);">Pending queue</div></div></div>
+      <div class="deck-item confirm"><i data-lucide="git-merge"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/land</div><div style="font-size: 12px; color: #A9887A;">Land a patch · confirm</div></div></div>
+      <div class="deck-item confirm"><i data-lucide="settings-2"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/setup</div><div style="font-size: 12px; color: #A9887A;">Bind a repo · confirm</div></div></div>
+      <div class="deck-item confirm"><i data-lucide="check"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/approve</div><div style="font-size: 12px; color: #A9887A;">Approve review · confirm</div></div></div>
+      <div class="deck-item confirm"><i data-lucide="x"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/deny</div><div style="font-size: 12px; color: #A9887A;">Deny review · confirm</div></div></div>
+      <div class="deck-item confirm"><i data-lucide="git-fork"></i><div><div class="mono" style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">/phase</div><div style="font-size: 12px; color: #A9887A;">Trust phase · confirm</div></div></div>
+    </div>
+  </section>
+
+  <!-- Full workflow -->
+  <section class="reveal" style="background: var(--bg-alt); border-bottom: 1px solid var(--line-hair);">
+    <div class="wrap" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: clamp(24px, 3vw, 44px); align-items: start; padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px);">
+      <div style="min-width: 0;">
+        <h2 style="margin: 0 0 8px; font-size: clamp(24px, 2.4vw, 32px); font-weight: 700; letter-spacing: -0.026em; color: var(--text-bright);">A full workflow</h2>
+        <p style="margin: 0 0 22px; max-width: 46ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Serve, chat, select a repo, run a task, check state, approve, land — all without leaving the terminal.</p>
+        <div style="display: grid; gap: 12px;">
+          <div style="display: flex; align-items: flex-start; gap: 12px;"><i data-lucide="check" style="width: 16px; height: 16px; margin-top: 3px; flex: 0 0 auto; color: var(--green);"></i><div><div style="font-size: 14.5px; font-weight: 600; color: var(--text-soft);">Scriptable</div><div style="font-size: 13.5px; line-height: 1.55; color: var(--text-faint);"><span class="mono" style="font-size: 12.5px;">--oneshot</span> sends one message, streams the reply, exits 0.</div></div></div>
+          <div style="display: flex; align-items: flex-start; gap: 12px;"><i data-lucide="check" style="width: 16px; height: 16px; margin-top: 3px; flex: 0 0 auto; color: var(--green);"></i><div><div style="font-size: 14.5px; font-weight: 600; color: var(--text-soft);">One store, two surfaces</div><div style="font-size: 13.5px; line-height: 1.55; color: var(--text-faint);">Skip a card here, click it in the web UI. That's expected, not a leak.</div></div></div>
+          <div style="display: flex; align-items: flex-start; gap: 12px;"><i data-lucide="check" style="width: 16px; height: 16px; margin-top: 3px; flex: 0 0 auto; color: var(--green);"></i><div><div style="font-size: 14.5px; font-weight: 600; color: var(--text-soft);">Ctrl-C stops watching</div><div style="font-size: 13.5px; line-height: 1.55; color: var(--text-faint);">It never stops the run itself.</div></div></div>
+        </div>
+      </div>
+      <div data-copy-scope style="min-width: 0; border: 1px solid var(--line-card); border-radius: 12px; background: #0A0C0E; overflow: hidden;">
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line-inner);">
+          <span class="mono" style="font-size: 12px; color: var(--text-ghost);">a typical session</span>
+          <button class="copy-btn" aria-label="Copy" style="width: 26px; height: 26px;"><i data-lucide="copy"></i></button>
+        </div>
+        <pre style="padding: 18px; font-size: 12.5px; line-height: 2.05; color: var(--text-mid); overflow-x: auto;"><span class="c-green">$</span> skep serve                        <span style="color: #4A5350;"># start the daemon</span>
+<span class="c-green">$</span> skep chat                         <span style="color: #4A5350;"># open the deck</span>
+<span class="c-green">skep &gt;</span> /workon ~/code/app          <span style="color: #4A5350;"># select repository</span>
+<span class="c-green">skep &gt;</span> /run "add rate limiting"    <span style="color: #4A5350;"># start a task</span>
+<span class="c-green">skep &gt;</span> /state                      <span style="color: #4A5350;"># check current status</span>
+<span class="c-green">skep &gt;</span> /approvals                  <span style="color: #4A5350;"># view pending gates</span>
+<span class="c-green">skep &gt;</span> /approve 7d31f9c2           <span style="color: #4A5350;"># approve the review</span>
+<span class="c-green">skep &gt;</span> /land 7d31f9c2              <span style="color: #4A5350;"># land the patch</span>
+<span class="c-green">skep &gt;</span> /runs 5                     <span style="color: #4A5350;"># list recent runs</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- Options -->
+  <section class="wrap reveal" style="padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px);">
+    <h2 style="margin: 0 0 8px; font-size: clamp(24px, 2.4vw, 32px); font-weight: 700; letter-spacing: -0.026em; color: var(--text-bright);">Options worth knowing</h2>
+    <p style="margin: 0 0 26px; max-width: 62ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Use <span class="mono" style="font-size: 14px; color: #A9B2AE;">skep &lt;command&gt; --help</span> for the exact parser output.</p>
+    <div style="border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-card-2); overflow: hidden;">
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1px; background: var(--line-inner);">
+        <div class="opt-cell"><div class="opt">--execution-mode workspace|sandbox</div><div class="what">Host-visible workspace execution, or the host sandbox backend.</div></div>
+        <div class="opt-cell"><div class="opt">--worker-cmd COMMAND</div><div class="what">The worker adapter for this run. Or set <span class="mono" style="font-size: 12.5px;">SKEP_WORKER_CMD</span> once.</div></div>
+        <div class="opt-cell"><div class="opt">--minimal</div><div class="what">Start with empty network, env, shell, and git grants — learn through approvals.</div></div>
+        <div class="opt-cell"><div class="opt">--network DOMAIN</div><div class="what">Allow one domain; repeatable. Omitted means deny all outbound.</div></div>
+        <div class="opt-cell"><div class="opt">--env-allow ENV</div><div class="what">Pass one environment variable through the boundary; repeatable.</div></div>
+        <div class="opt-cell"><div class="opt">--no-template</div><div class="what">Skip learned-template auto-match for this run.</div></div>
+        <div class="opt-cell"><div class="opt">--pr</div><div class="what">On <span class="mono" style="font-size: 12.5px;">review --approve</span>, open a GitHub pull request after applying.</div></div>
+        <div class="opt-cell"><div class="opt">--home HOME</div><div class="what">Select the Skep state directory. Defaults to <span class="mono" style="font-size: 12.5px;">~/.skep</span>.</div></div>
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 11px; margin-top: 14px; padding: 15px 18px; border: 1px solid var(--line-card); border-radius: 11px; background: var(--bg-card-2);">
+      <i data-lucide="triangle-alert" style="width: 16px; height: 16px; flex: 0 0 auto; color: var(--yellow);"></i>
+      <p style="margin: 0; font-size: 13.5px; color: var(--text-dim);"><span class="mono" style="font-size: 13px; color: #A9B2AE;">--minimal</span> cannot be combined with <span class="mono" style="font-size: 13px; color: #A9B2AE;">--template</span>, <span class="mono" style="font-size: 13px; color: #A9B2AE;">--network</span>, or <span class="mono" style="font-size: 13px; color: #A9B2AE;">--env-allow</span>.</p>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="wrap" style="padding-bottom: clamp(48px, 5.5vw, 76px);">
+    <div style="position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 28px; padding: clamp(28px, 3.5vw, 44px); border: 1px solid var(--line-strong); border-radius: 16px; background: var(--bg-card-2); overflow: hidden;">
+      <div style="position: absolute; top: -140px; left: -60px; width: 440px; height: 440px; background: radial-gradient(circle, rgba(123,224,140,0.13), transparent 62%); pointer-events: none;"></div>
+      <div style="position: relative; min-width: 0;">
+        <h2 style="margin: 0 0 10px; max-width: 22ch; font-size: clamp(23px, 2.3vw, 32px); font-weight: 700; line-height: 1.12; letter-spacing: -0.028em; color: var(--text-bright);">The full power of Skep, in your terminal.</h2>
+        <p style="margin: 0; max-width: 48ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Script it, automate it, and make it yours.</p>
+      </div>
+      <div style="position: relative; display: flex; flex-wrap: wrap; gap: 12px;">
+        <a href="./install.html" style="display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 20px; border-radius: 10px; background: var(--orange); font-family: var(--mono); font-size: 14px; font-weight: 600; color: var(--on-orange);"><span>$ pip install skep</span></a>
+        <a href="./doc.html?d=cli" class="btn btn-ghost" style="height: 48px; font-size: 15px; background: var(--bg-chip);"><i data-lucide="book-open" style="width: 16px; height: 16px;"></i><span>Read CLI reference</span></a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+</body>
+</html>

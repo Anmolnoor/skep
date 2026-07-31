@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Use the coding agent you already have — Claude Code, Codex, Aider, Ollama, or your own — behind Skep's contract, sandbox, and approvals." />
+<title>Agents — skep</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./site.css" />
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.js"></script>
+<script src="./site.js" defer></script>
+<style>
+.crumb { display: flex; align-items: center; gap: 9px; padding-top: 20px; font-size: 13px; color: var(--text-void); }
+.crumb i { width: 13px; height: 13px; }
+.agent-card { display: flex; flex-direction: column; padding: 22px; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-card); }
+.agent-card > i { width: 26px; height: 26px; margin-bottom: 18px; color: var(--text-mid); }
+.agent-card .titlerow { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-bottom: 10px; }
+.agent-card h3 { margin: 0; font-size: 17px; font-weight: 650; color: var(--text-bright); }
+.agent-card .tag { padding: 3px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
+.agent-card .blurb { margin: 0 0 16px; font-size: 13.5px; line-height: 1.6; color: var(--text-faint); }
+.agent-card .feats { display: grid; gap: 8px; margin-bottom: 18px; font-size: 13px; color: #A9B2AE; }
+.agent-card .feats span { display: flex; align-items: center; gap: 8px; }
+.agent-card .feats i { width: 14px; height: 14px; flex: 0 0 auto; color: var(--green); }
+.agent-card .cmd { margin-top: auto; padding: 9px 11px; border: 1px solid var(--line-inner); border-radius: 8px; background: #08090B; font-family: var(--mono); font-size: 11.5px; color: var(--green); overflow-x: auto; }
+.cmp td, .cmp th { padding: 14px; border-bottom: 1px solid var(--line-hair); border-left: 1px solid var(--line-hair); text-align: left; }
+.cmp td:first-child, .cmp th:first-child { padding-left: 18px; border-left: 0; }
+</style>
+</head>
+<body data-page="agents">
+
+<main>
+
+  <nav class="wrap crumb" aria-label="Breadcrumb">
+    <a href="./index.html" style="display: flex; align-items: center; gap: 6px;"><i data-lucide="house"></i><span>Home</span></a>
+    <i data-lucide="chevron-right"></i>
+    <span style="color: var(--text-muted);">Agents</span>
+  </nav>
+
+  <!-- Hero + adapter cards -->
+  <section class="wrap" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: clamp(28px, 4vw, 52px); align-items: start; padding-top: clamp(28px, 3.5vw, 44px); padding-bottom: clamp(44px, 5vw, 64px);">
+    <div style="min-width: 0; position: sticky; top: 92px;">
+      <div style="display: inline-flex; align-items: center; gap: 8px; margin-bottom: 22px; padding: 6px 12px; border: 1px solid rgba(255,107,31,0.4); border-radius: 6px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--orange);">
+        <i data-lucide="plug" style="width: 13px; height: 13px;"></i>
+        <span>Work with the agent you prefer</span>
+      </div>
+      <h1 style="margin: 0 0 20px; max-width: 15ch; font-size: clamp(34px, 3.6vw, 52px); font-weight: 700; line-height: 1.0; letter-spacing: -0.034em; color: var(--text-bright);">Use the coding agent you already have. <span style="color: var(--orange);">Skep governs the rest.</span></h1>
+      <p style="margin: 0 0 26px; max-width: 46ch; font-size: 16px; line-height: 1.62; color: var(--text-muted);">Skep supervises workers through one local contract. Pick an engine with <span class="mono" style="font-size: 14.5px; color: #A9B2AE;">skep project setup --engine</span> or point a run at any adapter with <span class="mono" style="font-size: 14.5px; color: #A9B2AE;">--worker-cmd</span> — Skep handles isolation, verification, and approvals.</p>
+      <div style="display: grid; gap: 14px; margin-bottom: 28px;">
+        <div style="display: flex; align-items: center; gap: 12px; font-size: 14.5px; color: #A9B2AE;"><i data-lucide="plug-zap" style="width: 18px; height: 18px; flex: 0 0 auto; color: var(--green);"></i><span>Bring your favorite agent</span></div>
+        <div style="display: flex; align-items: center; gap: 12px; font-size: 14.5px; color: #A9B2AE;"><i data-lucide="scan" style="width: 18px; height: 18px; flex: 0 0 auto; color: var(--green);"></i><span>Run it in a safe, isolated workspace</span></div>
+        <div style="display: flex; align-items: center; gap: 12px; font-size: 14.5px; color: #A9B2AE;"><i data-lucide="shield-check" style="width: 18px; height: 18px; flex: 0 0 auto; color: var(--green);"></i><span>Independently verify every result</span></div>
+      </div>
+      <a href="./doc.html?d=workers" class="btn btn-ghost" style="height: 48px; font-size: 15px;"><i data-lucide="book-open" style="width: 16px; height: 16px;"></i><span>Read the worker setup guide</span></a>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; min-width: 0;">
+      <article class="agent-card" style="border-color: rgba(255,107,31,0.35);">
+        <i data-lucide="sparkles" style="color: var(--orange);"></i>
+        <div class="titlerow"><h3>Claude Code</h3><span class="tag" style="background: rgba(255,107,31,0.14); color: var(--orange-soft);">Recommended</span></div>
+        <p class="blurb">A thin adapter around the local <span class="mono" style="font-size: 12.5px;">claude</span> CLI. Claude Code edits the disposable worktree; Skep owns everything else.</p>
+        <div class="feats">
+          <span><i data-lucide="check"></i>Complex, multi-file refactors</span>
+          <span><i data-lucide="check"></i>Patch captured via <span class="mono" style="font-size: 12px;">git diff --binary</span></span>
+          <span><i data-lucide="check"></i>Expects <span class="mono" style="font-size: 12px;">claude</span> on PATH</span>
+        </div>
+        <div class="cmd">skep project setup --engine claude_code</div>
+      </article>
+
+      <article class="agent-card">
+        <i data-lucide="circle-dot"></i>
+        <div class="titlerow"><h3>Codex</h3><span class="tag" style="background: rgba(123,224,140,0.12); color: var(--green);">CLI adapter</span></div>
+        <p class="blurb">A thin <span class="mono" style="font-size: 12.5px;">AdapterSpec</span> on the shared CLI adapter. Same contract body, same evidence capture.</p>
+        <div class="feats">
+          <span><i data-lucide="check"></i>Coding tasks and debugging</span>
+          <span><i data-lucide="check"></i>Runs inside the worker sandbox</span>
+          <span><i data-lucide="check"></i>Landing is the only commit</span>
+        </div>
+        <div class="cmd">skep project setup --engine codex</div>
+      </article>
+
+      <article class="agent-card">
+        <i data-lucide="git-branch"></i>
+        <div class="titlerow"><h3>Aider</h3><span class="tag" style="background: rgba(103,211,232,0.12); color: #67D3E8;">Git-native</span></div>
+        <p class="blurb">Terminal pair programming with Git superpowers — pinned to <span class="mono" style="font-size: 12.5px;">--no-auto-commit</span> so it can never slip a commit past the gate.</p>
+        <div class="feats">
+          <span><i data-lucide="check"></i>Focused edits and Git workflows</span>
+          <span><i data-lucide="check"></i>Works with many LLMs</span>
+          <span><i data-lucide="check"></i>Auto-commit disabled by contract</span>
+        </div>
+        <div class="cmd">skep project setup --engine aider</div>
+      </article>
+
+      <article class="agent-card">
+        <i data-lucide="hard-drive"></i>
+        <div class="titlerow"><h3>Ollama</h3><span class="tag" style="background: rgba(167,139,250,0.14); color: #A78BFA;">Fully local</span></div>
+        <p class="blurb">The first-party LLM-planning worker pointed at a local Ollama model. Your code and your model both stay on your machine.</p>
+        <div class="feats">
+          <span><i data-lucide="check"></i>100% local, no API costs</span>
+          <span><i data-lucide="check"></i>Reuses your assistant config by default</span>
+          <span><i data-lucide="check"></i><span class="mono" style="font-size: 12px;">SKEP_OLLAMA_MODEL</span> to differ</span>
+        </div>
+        <div class="cmd">python -m skep.workers.ollama</div>
+      </article>
+
+      <article class="agent-card">
+        <i data-lucide="box"></i>
+        <div class="titlerow"><h3>Built-in worker</h3><span class="tag" style="background: rgba(255,255,255,0.06); color: #A9B2AE;">Default</span></div>
+        <p class="blurb">Skep's in-repo deterministic coding worker. No adapter, no external CLI — the fastest way to see the whole lifecycle work.</p>
+        <div class="feats">
+          <span><i data-lucide="check"></i>Deterministic local runs</span>
+          <span><i data-lucide="check"></i>Many model providers</span>
+          <span><i data-lucide="check"></i>Tool and MCP support</span>
+        </div>
+        <div class="cmd" style="color: var(--text-ghost);">(no --worker-cmd needed)</div>
+      </article>
+
+      <article class="agent-card">
+        <i data-lucide="square-terminal"></i>
+        <div class="titlerow"><h3>Custom worker</h3><span class="tag" style="background: rgba(103,211,232,0.12); color: #67D3E8;">Extensible</span></div>
+        <p class="blurb">Any command that reads Skep task JSON and writes Skep result JSON. Or wrap a local CLI agent with the generic shell worker.</p>
+        <div class="feats">
+          <span><i data-lucide="check"></i>Simple worker contract</span>
+          <span><i data-lucide="check"></i>Structured progress events</span>
+          <span><i data-lucide="check"></i>Open interfaces, contract 0.3.5</span>
+        </div>
+        <div class="cmd">skep run … --worker-cmd "your-agent"</div>
+      </article>
+    </div>
+  </section>
+
+  <!-- Compare -->
+  <section class="band reveal">
+    <div class="wrap" style="padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px);">
+      <div style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 24px;">
+        <div>
+          <h2 style="margin: 0 0 8px; font-size: clamp(24px, 2.4vw, 32px); font-weight: 700; letter-spacing: -0.026em; color: var(--text-bright);">Compare adapters</h2>
+          <p style="margin: 0; font-size: 15px; color: var(--text-dim);">Every worker runs inside Skep's boundary and follows your policy.</p>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 18px; font-size: 13px; color: var(--text-dim);">
+          <span style="display: flex; align-items: center; gap: 7px;"><i data-lucide="circle-check" style="width: 14px; height: 14px; color: var(--green);"></i>Yes</span>
+          <span style="display: flex; align-items: center; gap: 7px;"><i data-lucide="circle-dashed" style="width: 14px; height: 14px; color: var(--yellow);"></i>Partial</span>
+          <span style="display: flex; align-items: center; gap: 7px;"><i data-lucide="circle-x" style="width: 14px; height: 14px; color: var(--red);"></i>No</span>
+        </div>
+      </div>
+
+      <div style="border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-card-2); overflow-x: auto;">
+        <table class="cmp" style="width: 100%; min-width: 880px; border-collapse: collapse; font-size: 13.5px;">
+          <thead>
+            <tr style="background: var(--bg-panel);">
+              <th style="font-size: 12.5px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--line-card);">Capability</th>
+              <th style="font-size: 12.5px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--line-card);">Claude Code</th>
+              <th style="font-size: 12.5px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--line-card);">Codex</th>
+              <th style="font-size: 12.5px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--line-card);">Aider</th>
+              <th style="font-size: 12.5px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--line-card);">Ollama</th>
+              <th style="font-size: 12.5px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--line-card);">Built-in</th>
+              <th style="font-size: 12.5px; font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--line-card);">Custom</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="color: var(--text-mid);">Runs fully local</td>
+              <td style="color: var(--yellow);">Partial</td><td style="color: var(--yellow);">Partial</td><td style="color: var(--yellow);">Partial</td>
+              <td style="color: var(--green);">Yes</td><td style="color: var(--green);">Yes</td><td style="color: var(--text-muted);">Depends</td>
+            </tr>
+            <tr style="background: var(--bg-panel);">
+              <td style="color: var(--text-mid);">External API required</td>
+              <td style="color: var(--red);">Yes</td><td style="color: var(--red);">Yes</td><td style="color: var(--yellow);">Optional</td>
+              <td style="color: var(--green);">No</td><td style="color: var(--yellow);">Optional</td><td style="color: var(--green);">No</td>
+            </tr>
+            <tr>
+              <td style="color: var(--text-mid);">Patch captured by Skep</td>
+              <td style="color: var(--green);">Yes</td><td style="color: var(--green);">Yes</td><td style="color: var(--green);">Yes</td>
+              <td style="color: var(--green);">Yes</td><td style="color: var(--green);">Yes</td><td style="color: var(--green);">Yes</td>
+            </tr>
+            <tr style="background: var(--bg-panel);">
+              <td style="color: var(--text-mid);">Requires a pinned verify command</td>
+              <td style="color: var(--yellow);">Yes — forced sandbox</td><td style="color: var(--yellow);">Yes — forced sandbox</td><td style="color: var(--yellow);">Yes — forced sandbox</td>
+              <td style="color: var(--green);">Contract-native</td><td style="color: var(--green);">Contract-native</td><td style="color: var(--green);">Contract-native</td>
+            </tr>
+            <tr>
+              <td style="color: var(--text-mid);">Best for</td>
+              <td style="color: var(--text-dim);">Large refactors</td><td style="color: var(--text-dim);">Coding &amp; debugging</td><td style="color: var(--text-dim);">Focused Git edits</td>
+              <td style="color: var(--text-dim);">Privacy-first work</td><td style="color: var(--text-dim);">Deterministic runs</td><td style="color: var(--text-dim);">Your own agent</td>
+            </tr>
+            <tr style="background: var(--bg-panel);">
+              <td style="color: var(--text-mid); border-bottom: 0;">Requires approval to land</td>
+              <td style="color: var(--green); border-bottom: 0;">Yes</td><td style="color: var(--green); border-bottom: 0;">Yes</td><td style="color: var(--green); border-bottom: 0;">Yes</td>
+              <td style="color: var(--green); border-bottom: 0;">Yes</td><td style="color: var(--green); border-bottom: 0;">Yes</td><td style="color: var(--green); border-bottom: 0;">Yes</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 11px; margin-top: 14px; padding: 15px 18px; border: 1px solid var(--line-card); border-radius: 11px; background: var(--bg-card-2);">
+        <i data-lucide="info" style="width: 16px; height: 16px; flex: 0 0 auto; color: var(--text-ghost);"></i>
+        <p style="margin: 0; font-size: 13.5px; line-height: 1.55; color: var(--text-dim);">External CLI agents don't pass Skep's capability layer command-by-command — the sandbox confines them instead, so they require a project-pinned verify command and are forced into sandbox execution. <span class="mono" style="font-size: 12.5px;">skep doctor</span> probes each binary.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Build your own -->
+  <section class="wrap reveal" style="padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px);">
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: clamp(24px, 3vw, 44px); align-items: start;">
+      <div style="min-width: 0;">
+        <div style="margin-bottom: 14px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.13em; text-transform: uppercase; color: #A78BFA;">The worker contract</div>
+        <h2 style="margin: 0 0 14px; max-width: 16ch; font-size: clamp(26px, 2.6vw, 36px); font-weight: 700; line-height: 1.08; letter-spacing: -0.028em; color: var(--text-bright);">Build your own worker.</h2>
+        <p style="margin: 0 0 24px; max-width: 46ch; font-size: 15.5px; line-height: 1.62; color: var(--text-dim);">The contract is small on purpose: read task JSON, emit NDJSON events, write result JSON. Skep supplies the worktree, the sandbox, the budget, and the approval gates.</p>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 26px;">
+          <div style="display: flex; align-items: flex-start; gap: 10px;"><i data-lucide="plus" style="width: 16px; height: 16px; margin-top: 2px; flex: 0 0 auto; color: #A78BFA;"></i><span style="font-size: 13.5px; line-height: 1.5; color: #A9B2AE;">Simple JSON interface</span></div>
+          <div style="display: flex; align-items: flex-start; gap: 10px;"><i data-lucide="sliders-horizontal" style="width: 16px; height: 16px; margin-top: 2px; flex: 0 0 auto; color: #A78BFA;"></i><span style="font-size: 13.5px; line-height: 1.5; color: #A9B2AE;">Full control over execution</span></div>
+          <div style="display: flex; align-items: flex-start; gap: 10px;"><i data-lucide="radio" style="width: 16px; height: 16px; margin-top: 2px; flex: 0 0 auto; color: #A78BFA;"></i><span style="font-size: 13.5px; line-height: 1.5; color: #A9B2AE;">Stream events in real time</span></div>
+          <div style="display: flex; align-items: flex-start; gap: 10px;"><i data-lucide="blocks" style="width: 16px; height: 16px; margin-top: 2px; flex: 0 0 auto; color: #A78BFA;"></i><span style="font-size: 13.5px; line-height: 1.5; color: #A9B2AE;">Works with any coding agent</span></div>
+        </div>
+        <a href="https://github.com/Anmolnoor/skep/blob/main/agent-task-contract-spec-v0.1.md" class="btn btn-ghost btn-sm" style="height: 46px;"><span>Read the contract spec</span><i data-lucide="arrow-right" style="width: 15px; height: 15px;"></i></a>
+      </div>
+
+      <div data-copy-scope style="min-width: 0; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-panel); overflow: hidden;">
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line-inner);">
+          <span class="mono" style="font-size: 12px; color: var(--text-ghost);">the contract, in one glance</span>
+          <button class="copy-btn" aria-label="Copy" style="width: 26px; height: 26px;"><i data-lucide="copy"></i></button>
+        </div>
+        <pre style="padding: 18px; font-size: 12.5px; line-height: 1.85; color: var(--text-mid); overflow-x: auto;"><span style="color: #4A5350;"># stdin: the task</span>
+{ <span class="c-yellow">"task_id"</span>: <span class="c-yellow">"7d31f9c2"</span>,
+  <span class="c-yellow">"worktree"</span>: <span class="c-yellow">"~/.skep/worktrees/7d31f9c2"</span>,
+  <span class="c-yellow">"instructions"</span>: <span class="c-yellow">"fix the failing test"</span>,
+  <span class="c-yellow">"permissions"</span>: { <span class="c-dim">…network, env, shell…</span> } }
+
+<span style="color: #4A5350;"># stdout: NDJSON events while working</span>
+{ <span class="c-yellow">"type"</span>: <span class="c-yellow">"progress"</span>, <span class="c-yellow">"message"</span>: <span class="c-yellow">"editing session.py"</span> }
+{ <span class="c-yellow">"type"</span>: <span class="c-yellow">"verify.result"</span>, <span class="c-yellow">"commands"</span>: [<span class="c-yellow">"uv run pytest"</span>],
+  <span class="c-yellow">"outcome"</span>: <span class="c-green">"passed"</span> }
+
+<span style="color: #4A5350;"># result: the claim skep re-checks</span>
+{ <span class="c-yellow">"state"</span>: <span class="c-green">"completed"</span>,
+  <span class="c-yellow">"patch"</span>: <span class="c-yellow">"artifacts/7d31f9c2.patch"</span> }</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="wrap" style="padding-bottom: clamp(48px, 5.5vw, 76px);">
+    <div style="position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 28px; padding: clamp(28px, 3.5vw, 44px); border: 1px solid var(--line-strong); border-radius: 16px; background: var(--bg-card-2); overflow: hidden;">
+      <div style="position: absolute; top: -140px; left: -60px; width: 440px; height: 440px; background: radial-gradient(circle, rgba(255,107,31,0.13), transparent 62%); pointer-events: none;"></div>
+      <div style="position: relative; min-width: 0;">
+        <h2 style="margin: 0 0 10px; max-width: 22ch; font-size: clamp(23px, 2.3vw, 32px); font-weight: 700; line-height: 1.12; letter-spacing: -0.028em; color: var(--text-bright);">Any agent. Every workflow. Zero compromises.</h2>
+        <p style="margin: 0; max-width: 48ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Pick an agent, connect it, and let Skep protect your code.</p>
+      </div>
+      <div style="position: relative; display: flex; flex-wrap: wrap; gap: 12px;">
+        <a href="./install.html" class="btn btn-primary" style="height: 48px; font-size: 15px;"><i data-lucide="terminal" style="width: 16px; height: 16px;"></i><span>Install skep</span></a>
+        <a href="./docs.html" class="btn btn-ghost" style="height: 48px; font-size: 15px; background: var(--bg-chip);"><i data-lucide="book-open" style="width: 16px; height: 16px;"></i><span>View documentation</span></a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+</body>
+</html>

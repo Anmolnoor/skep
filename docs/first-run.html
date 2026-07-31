@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="skep first-run setup — from a fresh install to your first approved patch, step by step." />
+<title>First-Run Setup — skep</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./site.css" />
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.js"></script>
+<script src="./site.js" defer></script>
+<style>
+.crumb { display: flex; align-items: center; gap: 9px; padding-top: 20px; font-size: 13px; color: var(--text-void); }
+.crumb i { width: 13px; height: 13px; }
+.setup-step { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 18px; padding-bottom: 36px; position: relative; }
+.setup-step::before { content: ""; position: absolute; left: 21px; top: 48px; bottom: 8px; width: 1px; background: var(--line-strong); }
+.setup-step:last-child::before { display: none; }
+.setup-no { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border: 1px solid rgba(123,224,140,0.4); border-radius: 12px; background: var(--bg-chip); font-family: var(--mono); font-size: 15px; font-weight: 600; color: var(--green); }
+.setup-step h2 { margin: 8px 0 8px; font-size: 20px; font-weight: 650; letter-spacing: -0.015em; color: var(--text-bright); }
+.setup-step p { margin: 0 0 14px; max-width: 62ch; font-size: 14.5px; line-height: 1.62; color: var(--text-dim); }
+.setup-step .snippet { position: relative; max-width: 640px; }
+.setup-step pre { padding: 14px 44px 14px 14px; border: 1px solid var(--line-inner); border-radius: 9px; background: #08090B; font-size: 12.5px; line-height: 1.9; color: var(--text-mid); overflow-x: auto; }
+.setup-step .copy-btn { position: absolute; top: 9px; right: 9px; width: 26px; height: 26px; }
+.note { display: flex; align-items: flex-start; gap: 10px; max-width: 640px; margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line-card); border-radius: 9px; background: var(--bg-card); font-size: 13px; line-height: 1.55; color: var(--text-faint); }
+.note i { width: 14px; height: 14px; margin-top: 2px; flex: 0 0 auto; color: var(--text-ghost); }
+</style>
+</head>
+<body data-page="docs">
+
+<main>
+
+  <nav class="wrap crumb" aria-label="Breadcrumb">
+    <a href="./index.html" style="display: flex; align-items: center; gap: 6px;"><i data-lucide="house"></i><span>Home</span></a>
+    <i data-lucide="chevron-right"></i>
+    <a href="./docs.html">Docs</a>
+    <i data-lucide="chevron-right"></i>
+    <span style="color: var(--text-muted);">First-Run Setup</span>
+  </nav>
+
+  <section class="wrap" style="padding-top: clamp(28px, 3.5vw, 44px); padding-bottom: clamp(24px, 3vw, 36px);">
+    <div class="eyebrow green">First-run setup</div>
+    <h1 style="margin: 0 0 14px; max-width: 20ch; font-size: clamp(34px, 3.8vw, 54px); font-weight: 700; line-height: 1.0; letter-spacing: -0.034em; color: var(--text-bright);">From install to your first approved patch.</h1>
+    <p style="margin: 0; max-width: 60ch; font-size: 16px; line-height: 1.62; color: var(--text-muted);">Seven steps, one terminal. At the end you'll have watched Skep sandbox a worker, re-verify its patch on a clean copy, and land it on a review branch only after you said yes.</p>
+  </section>
+
+  <section class="wrap" style="padding-bottom: clamp(44px, 5vw, 68px);">
+
+    <div class="setup-step">
+      <div class="setup-no">1</div>
+      <div data-copy-scope>
+        <h2>Install skep</h2>
+        <p>From PyPI. On Linux, install <span class="mono" style="font-size: 13px;">bubblewrap</span> too so the sandbox backend probes clean.</p>
+        <div class="snippet">
+          <pre>pip install skep
+sudo apt install bubblewrap   <span style="color: #4A5350;"># Linux only (dnf on Fedora)</span></pre>
+          <button class="copy-btn" aria-label="Copy"><i data-lucide="copy"></i></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="setup-step">
+      <div class="setup-no">2</div>
+      <div data-copy-scope>
+        <h2>Create your profile</h2>
+        <p>Sets up the personal profile in <span class="mono" style="font-size: 13px;">~/.skep</span> — provider, model, and endpoint for the assistant. Secrets ride by environment-variable name; Skep never stores values.</p>
+        <div class="snippet">
+          <pre>skep setup --personal</pre>
+          <button class="copy-btn" aria-label="Copy"><i data-lucide="copy"></i></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="setup-step">
+      <div class="setup-no">3</div>
+      <div data-copy-scope>
+        <h2>Check readiness</h2>
+        <p>Doctor reports profile readiness, sandbox backend availability, and probes each configured engine binary. Fix anything red before the first run.</p>
+        <div class="snippet">
+          <pre>skep doctor</pre>
+          <button class="copy-btn" aria-label="Copy"><i data-lucide="copy"></i></button>
+        </div>
+        <div class="note"><i data-lucide="info"></i><span>If sandbox mode is requested and no backend can be applied, workers refuse to start rather than run unconfined.</span></div>
+      </div>
+    </div>
+
+    <div class="setup-step">
+      <div class="setup-no">4</div>
+      <div data-copy-scope>
+        <h2>Start the daemon</h2>
+        <p>The web UI and HTTP API bind to loopback only, token-gated. The access token prints on startup.</p>
+        <div class="snippet">
+          <pre>skep serve
+<span style="color: #4A5350;"># then open</span> <span class="c-green">http://127.0.0.1:8765</span></pre>
+          <button class="copy-btn" aria-label="Copy"><i data-lucide="copy"></i></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="setup-step">
+      <div class="setup-no">5</div>
+      <div data-copy-scope>
+        <h2>Register a repository</h2>
+        <p>In the chat (web or <span class="mono" style="font-size: 13px;">skep chat</span>), make any local directory a first-class workspace. Project setup infers the verify command from the repo's own entry point and pins it — that pin is what re-verification runs.</p>
+        <div class="snippet">
+          <pre>/workon ~/code/your-app</pre>
+          <button class="copy-btn" aria-label="Copy"><i data-lucide="copy"></i></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="setup-step">
+      <div class="setup-no">6</div>
+      <div data-copy-scope>
+        <h2>Pick a coding engine</h2>
+        <p>The built-in worker is the default. To run Claude Code, Codex, or Aider through Skep, set the engine once per project — external engines are forced into sandbox execution and require the pinned verify command.</p>
+        <div class="snippet">
+          <pre>skep project setup ~/code/your-app --engine claude_code</pre>
+          <button class="copy-btn" aria-label="Copy"><i data-lucide="copy"></i></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="setup-step">
+      <div class="setup-no">7</div>
+      <div data-copy-scope>
+        <h2>Run, review, approve</h2>
+        <p>Start a supervised task. When it completes, read the patch and the evidence — including the independent re-verify verdict — then approve. The patch lands on <span class="mono" style="font-size: 13px; color: var(--orange-soft);">skep/&lt;task_id&gt;</span>; merging into main stays your call, in your normal git flow.</p>
+        <div class="snippet">
+          <pre>skep run ~/code/your-app "fix the failing test" --execution-mode workspace
+skep status --personal
+skep review &lt;task_id&gt;
+skep review &lt;task_id&gt; --approve</pre>
+          <button class="copy-btn" aria-label="Copy"><i data-lucide="copy"></i></button>
+        </div>
+        <div class="note"><i data-lucide="sparkles"></i><span>Hit an approval gate mid-run? Choose <span class="mono" style="font-size: 12px;">b</span> (approve + remember) and a successful resume saves a learned template — similar future runs in that repo move with less friction.</span></div>
+      </div>
+    </div>
+
+  </section>
+
+  <section class="band">
+    <div class="wrap" style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 24px; padding-top: clamp(36px, 4vw, 52px); padding-bottom: clamp(36px, 4vw, 52px);">
+      <div style="min-width: 0;">
+        <h2 style="margin: 0 0 8px; font-size: clamp(22px, 2.2vw, 30px); font-weight: 700; letter-spacing: -0.024em; color: var(--text-bright);">Stuck on a step?</h2>
+        <p style="margin: 0; max-width: 54ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">The quickstart has the full detail, including worker adapters and sandbox notes for each platform.</p>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; gap: 12px;">
+        <a href="./doc.html?d=quickstart" class="btn btn-ghost btn-sm" style="height: 46px;"><i data-lucide="book-open" style="width: 15px; height: 15px;"></i><span>Full quickstart</span></a>
+        <a href="https://github.com/Anmolnoor/skep/issues" class="btn btn-ghost btn-sm" style="height: 46px;"><i data-lucide="message-circle" style="width: 15px; height: 15px;"></i><span>Report a problem</span></a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+</body>
+</html>

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="skep blog — launch notes and engineering write-ups." />
+<title>Blog — skep</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./site.css" />
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.js"></script>
+<script src="./site.js" defer></script>
+<style>
+.crumb { display: flex; align-items: center; gap: 9px; padding-top: 20px; font-size: 13px; color: var(--text-void); }
+.crumb i { width: 13px; height: 13px; }
+.post { display: block; padding: clamp(22px, 3vw, 30px); border: 1px solid var(--line-card); border-radius: 14px; background: var(--bg-card); }
+.post:hover { border-color: var(--line-hover); color: inherit; }
+</style>
+</head>
+<body data-page="">
+
+<main style="min-height: 60vh;">
+
+  <nav class="wrap crumb" aria-label="Breadcrumb">
+    <a href="./index.html" style="display: flex; align-items: center; gap: 6px;"><i data-lucide="house"></i><span>Home</span></a>
+    <i data-lucide="chevron-right"></i>
+    <span style="color: var(--text-muted);">Blog</span>
+  </nav>
+
+  <section class="wrap" style="padding-top: clamp(28px, 3.5vw, 44px); padding-bottom: clamp(24px, 3vw, 36px);">
+    <div class="eyebrow">Blog</div>
+    <h1 style="margin: 0 0 14px; max-width: 20ch; font-size: clamp(34px, 3.8vw, 54px); font-weight: 700; line-height: 1.0; letter-spacing: -0.034em; color: var(--text-bright);">Notes from building skep.</h1>
+    <p style="margin: 0; max-width: 58ch; font-size: 16px; line-height: 1.62; color: var(--text-muted);">Launch notes and engineering write-ups. New posts land here and in the GitHub discussions.</p>
+  </section>
+
+  <section class="wrap" style="display: grid; gap: 16px; max-width: calc(880px + 2 * var(--pad-x)); margin-left: auto; margin-right: auto; padding-bottom: clamp(52px, 6vw, 84px);">
+    <a class="post" href="https://github.com/Anmolnoor/skep/releases/tag/v1.0.1">
+      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 12px;">
+        <span class="mono" style="font-size: 12.5px; letter-spacing: 0.08em; color: var(--text-ghost);">2026-07-30</span>
+        <span style="padding: 3px 9px; border-radius: 5px; background: rgba(255,107,31,0.12); font-size: 11.5px; font-weight: 600; color: var(--orange-soft);">Launch</span>
+      </div>
+      <h2 style="margin: 0 0 10px; font-size: clamp(20px, 2vw, 26px); font-weight: 700; letter-spacing: -0.022em; color: var(--text-bright);">skep v1.0.1 — govern your AI coding agent</h2>
+      <p style="margin: 0 0 16px; max-width: 72ch; font-size: 14.5px; line-height: 1.65; color: var(--text-dim);">The public launch. Skep is a local-first supervisor for coding agents: sandboxed execution in a disposable worktree, independent re-verification of whatever the agent claims, and a patch that reaches your repository only when you approve it. Daily-driven in the field since mid-July, roughly a hundred internal versions deep, and now one <span class="mono" style="font-size: 13px;">pip install skep</span> away.</p>
+      <span class="link-arrow" style="font-size: 13.5px;"><span>Read the release notes</span><i data-lucide="arrow-right" style="width: 14px; height: 14px;"></i></span>
+    </a>
+
+    <div style="display: flex; align-items: center; gap: 11px; padding: 18px 20px; border: 1px dashed var(--line-strong); border-radius: 12px; color: var(--text-ghost);">
+      <i data-lucide="pen-line" style="width: 16px; height: 16px; flex: 0 0 auto;"></i>
+      <span style="font-size: 13.5px;">More posts are on the way. Watch the repo or the discussions to catch them.</span>
+    </div>
+  </section>
+
+</main>
+
+</body>
+</html>

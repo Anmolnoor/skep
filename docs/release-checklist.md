@@ -101,8 +101,8 @@ Check that these files exist and are current:
 - `docs/post-launch.md`
 - `docs/version-history.md`
 - `docs/index.html`
-- `docs/landing.css`
-- `docs/landing.js`
+- `docs/site.css`
+- `docs/site.js`
 - `docs/assets/skep-demo.gif`
 - `examples/skep-demo/README.md`
 - `scripts/package-install-smoke.sh`

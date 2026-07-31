@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Skep documentation: install, configure, and run governed AI coding agents on your own machine." />
+<title>Docs — skep</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./site.css" />
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.js"></script>
+<script src="./site.js" defer></script>
+<style>
+.docs-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr) 270px; align-items: start; max-width: 1560px; margin: 0 auto; width: 100%; }
+@media (max-width: 1180px) { .docs-layout { grid-template-columns: 250px minmax(0, 1fr); } .rail-right { display: none; } }
+@media (max-width: 860px) { .docs-layout { grid-template-columns: minmax(0, 1fr); } .rail-left { display: none; } }
+.rail-left { position: sticky; top: 68px; max-height: calc(100vh - 68px); padding: 24px 20px 40px; border-right: 1px solid var(--line-hair); overflow-y: auto; }
+.rail-right { position: sticky; top: 68px; padding: clamp(24px, 3vw, 40px) 20px 40px; display: grid; gap: 14px; align-content: start; }
+.nav-group-title { margin-bottom: 10px; padding-left: 12px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.13em; text-transform: uppercase; color: var(--text-void); }
+.nav-group { display: grid; gap: 1px; margin-bottom: 24px; font-size: 13.5px; color: var(--text-muted); }
+.nav-group a { padding: 7px 12px; border-radius: 7px; }
+.nav-group a:hover { background: #0F1214; color: var(--text-bright); }
+.doc-tile { display: block; padding: 22px; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-card-2); }
+.doc-tile:hover { border-color: #2B3134; color: inherit; }
+.doc-tile i { width: 22px; height: 22px; margin-bottom: 16px; }
+.doc-row { display: flex; align-items: center; gap: 16px; padding: 18px 20px; background: var(--bg-card-2); }
+.doc-row:hover { background: #0F1315; color: inherit; }
+.doc-row > i:first-child { width: 22px; height: 22px; flex: 0 0 auto; }
+.doc-row > i:last-child { width: 17px; height: 17px; flex: 0 0 auto; color: #4A5350; }
+.search-btn { display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line-card); border-radius: 9px; background: var(--bg-card); font-family: var(--sans); color: var(--text-ghost); cursor: pointer; text-align: left; }
+.search-btn:hover { border-color: #2B3134; }
+.kbd { padding: 2px 6px; border: 1px solid var(--line-strong); border-radius: 5px; font-family: var(--mono); font-size: 10.5px; }
+#search-overlay { position: fixed; inset: 0; z-index: 90; display: none; align-items: flex-start; justify-content: center; padding: 12vh 20px 20px; background: rgba(4,5,6,0.72); backdrop-filter: blur(6px); }
+#search-overlay.open { display: flex; }
+#search-results a { display: flex; align-items: center; gap: 13px; padding: 13px 18px; border-bottom: 1px solid var(--line-hair); }
+#search-results a:hover, #search-results a.sel { background: #0F1315; color: inherit; }
+</style>
+</head>
+<body data-page="docs">
+
+<div class="docs-layout">
+
+  <aside class="rail-left">
+    <button class="search-btn" data-open-search style="width: 100%; height: 38px; margin-bottom: 26px; padding: 0 11px; font-size: 13.5px;">
+      <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="search" style="width: 14px; height: 14px;"></i><span>Search docs…</span></span>
+      <span class="kbd">⌘K</span>
+    </button>
+
+    <div style="margin-bottom: 12px; padding: 9px 12px; border-radius: 8px; background: rgba(123,224,140,0.09); font-size: 13.5px; font-weight: 600; color: var(--green);">Overview</div>
+
+    <div>
+      <div class="nav-group-title">Get started</div>
+      <div class="nav-group">
+        <a href="./doc.html?d=quickstart">Quickstart</a>
+        <a href="./doc.html?d=new-machine">Use on a new machine</a>
+        <a href="./install.html">Installation</a>
+        <a href="./first-run.html">First-Run Setup</a>
+      </div>
+    </div>
+    <div>
+      <div class="nav-group-title">Core concepts</div>
+      <div class="nav-group">
+        <a href="./doc.html?d=how-it-works">How Skep Works</a>
+        <a href="./doc.html?d=sandboxing">Sandboxing</a>
+        <a href="./doc.html?d=verification">Re-Verification</a>
+        <a href="./doc.html?d=approvals">Approvals &amp; Templates</a>
+        <a href="./doc.html?d=workers">Worker Adapters</a>
+      </div>
+    </div>
+    <div>
+      <div class="nav-group-title">Reference</div>
+      <div class="nav-group">
+        <a href="./doc.html?d=cli">CLI Reference</a>
+        <a href="./doc.html?d=configuration">Configuration</a>
+        <a href="./doc.html?d=brain">The Brain Dial</a>
+        <a href="./doc.html?d=assistant-tools">Assistant Tools</a>
+        <a href="./doc.html?d=browser">Browser MCP</a>
+        <a href="./doc.html?d=mobile">Mobile</a>
+        <a href="./doc.html?d=invariants">Invariants</a>
+        <a href="./changelog.html">Version History</a>
+      </div>
+    </div>
+    <div>
+      <div class="nav-group-title">Community</div>
+      <div class="nav-group">
+        <a href="https://github.com/Anmolnoor/skep/blob/main/CONTRIBUTING.md">Contributing</a>
+        <a href="./security.html">Security Policy</a>
+        <a href="./open-source.html">Open Source</a>
+        <a href="./roadmap.html">Roadmap</a>
+        <a href="https://github.com/Anmolnoor/skep/tree/main/docs/adr">ADRs (51)</a>
+        <a href="./README.md">Curated index (raw)</a>
+      </div>
+    </div>
+
+    <div style="padding: 16px; border: 1px solid var(--line-card); border-radius: 11px; background: var(--bg-card-2);">
+      <div style="display: flex; align-items: center; gap: 9px; margin-bottom: 8px;"><i data-lucide="circle-help" style="width: 15px; height: 15px; color: #67D3E8;"></i><span style="font-size: 13.5px; font-weight: 600; color: var(--text-bright);">Need help?</span></div>
+      <a href="https://github.com/Anmolnoor/skep/discussions" style="font-size: 13px; font-weight: 600; color: var(--green);">Start a discussion →</a>
+    </div>
+  </aside>
+
+  <main style="min-width: 0; padding: clamp(24px, 3vw, 40px) clamp(16px, 2.5vw, 40px) 64px;">
+    <div style="display: inline-flex; margin-bottom: 20px; padding: 5px 11px; border: 1px solid var(--line-card); border-radius: 6px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim);">Documentation</div>
+    <h1 style="margin: 0 0 14px; font-size: clamp(34px, 3.8vw, 52px); font-weight: 700; line-height: 1.02; letter-spacing: -0.034em; color: var(--text-bright);">Welcome to <span style="color: var(--green);">Skep Docs</span></h1>
+    <p style="margin: 0 0 26px; max-width: 58ch; font-size: 17px; line-height: 1.6; color: var(--text-muted);">Everything you need to install, configure, and run governed AI coding agents on your own machine.</p>
+
+    <button class="search-btn" data-open-search style="width: 100%; max-width: 720px; height: 50px; margin-bottom: 42px; padding: 0 16px; border-radius: 11px; background: var(--bg-card-2); font-size: 15px;">
+      <span style="display: flex; align-items: center; gap: 11px;"><i data-lucide="search" style="width: 17px; height: 17px;"></i><span>Search the documentation…</span></span>
+      <span class="kbd" style="padding: 3px 8px; font-size: 11px;">⌘K</span>
+    </button>
+
+    <h2 style="margin: 0 0 16px; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; color: var(--text-bright);">Get started</h2>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin-bottom: 44px;">
+      <a href="./doc.html?d=quickstart" class="doc-tile">
+        <i data-lucide="rocket" style="color: var(--green);"></i>
+        <div style="margin-bottom: 6px; font-size: 16px; font-weight: 650; color: var(--text-bright);">Quickstart</div>
+        <p style="margin: 0 0 14px; font-size: 13.5px; line-height: 1.55; color: var(--text-faint);">From install to an approved patch in five minutes.</p>
+        <i data-lucide="arrow-right" style="width: 15px; height: 15px; margin: 0; color: var(--green);"></i>
+      </a>
+      <a href="./install.html" class="doc-tile">
+        <i data-lucide="download" style="color: #A78BFA;"></i>
+        <div style="margin-bottom: 6px; font-size: 16px; font-weight: 650; color: var(--text-bright);">Installation</div>
+        <p style="margin: 0 0 14px; font-size: 13.5px; line-height: 1.55; color: var(--text-faint);">pip, uv, pipx, source, or Docker — plus the Linux sandbox dependency.</p>
+        <i data-lucide="arrow-right" style="width: 15px; height: 15px; margin: 0; color: #A78BFA;"></i>
+      </a>
+      <a href="./first-run.html" class="doc-tile">
+        <i data-lucide="square-terminal" style="color: #67D3E8;"></i>
+        <div style="margin-bottom: 6px; font-size: 16px; font-weight: 650; color: var(--text-bright);">First-Run Setup</div>
+        <p style="margin: 0 0 14px; font-size: 13.5px; line-height: 1.55; color: var(--text-faint);">Configure your environment and verify everything works.</p>
+        <i data-lucide="arrow-right" style="width: 15px; height: 15px; margin: 0; color: #67D3E8;"></i>
+      </a>
+    </div>
+
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px;">
+      <h2 style="margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; color: var(--text-bright);">Core concepts</h2>
+      <a href="./doc.html?d=how-it-works" style="display: flex; align-items: center; gap: 7px; padding: 6px 11px; border: 1px solid var(--line-card); border-radius: 7px; font-size: 12.5px; font-weight: 600; color: var(--text-muted);"><span>View all</span><i data-lucide="arrow-right" style="width: 13px; height: 13px;"></i></a>
+    </div>
+    <div style="display: grid; gap: 1px; margin-bottom: 44px; border: 1px solid var(--line-card); border-radius: 12px; background: var(--line-inner); overflow: hidden;">
+      <a href="./doc.html?d=how-it-works" class="doc-row">
+        <i data-lucide="box" style="color: var(--green);"></i>
+        <div style="flex: 1 1 auto; min-width: 0;"><div style="margin-bottom: 3px; font-size: 15.5px; font-weight: 650; color: var(--text-bright);">How Skep Works</div><div style="font-size: 13.5px; color: var(--text-faint);">The supervisor/worker split, the contract, and the life of a task.</div></div>
+        <i data-lucide="chevron-right"></i>
+      </a>
+      <a href="./doc.html?d=sandboxing" class="doc-row">
+        <i data-lucide="scan" style="color: #67D3E8;"></i>
+        <div style="flex: 1 1 auto; min-width: 0;"><div style="margin-bottom: 3px; font-size: 15.5px; font-weight: 650; color: var(--text-bright);">Sandboxing</div><div style="font-size: 13.5px; color: var(--text-faint);">Seatbelt, bubblewrap, and the network allowlist boundary.</div></div>
+        <i data-lucide="chevron-right"></i>
+      </a>
+      <a href="./doc.html?d=verification" class="doc-row">
+        <i data-lucide="shield-check" style="color: var(--green);"></i>
+        <div style="flex: 1 1 auto; min-width: 0;"><div style="margin-bottom: 3px; font-size: 15.5px; font-weight: 650; color: var(--text-bright);">Re-Verification</div><div style="font-size: 13.5px; color: var(--text-faint);">Independent patch re-verification, outcomes, and honest limits.</div></div>
+        <i data-lucide="chevron-right"></i>
+      </a>
+      <a href="./doc.html?d=approvals" class="doc-row">
+        <i data-lucide="user-check" style="color: var(--yellow);"></i>
+        <div style="flex: 1 1 auto; min-width: 0;"><div style="margin-bottom: 3px; font-size: 15.5px; font-weight: 650; color: var(--text-bright);">Approvals &amp; Learned Templates</div><div style="font-size: 13.5px; color: var(--text-faint);">Inline approval gates and learned command templates.</div></div>
+        <i data-lucide="chevron-right"></i>
+      </a>
+      <a href="./doc.html?d=workers" class="doc-row">
+        <i data-lucide="plug" style="color: #A78BFA;"></i>
+        <div style="flex: 1 1 auto; min-width: 0;"><div style="margin-bottom: 3px; font-size: 15.5px; font-weight: 650; color: var(--text-bright);">Worker Adapters</div><div style="font-size: 13.5px; color: var(--text-faint);">Claude Code, Codex, Aider, Ollama, and the custom worker contract.</div></div>
+        <i data-lucide="chevron-right"></i>
+      </a>
+    </div>
+
+    <h2 style="margin: 0 0 16px; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; color: var(--text-bright);">Reference</h2>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 44px;">
+      <a href="./doc.html?d=cli" class="doc-tile" style="padding: 20px;">
+        <i data-lucide="square-terminal" style="width: 20px; height: 20px; margin-bottom: 14px; color: var(--text-muted);"></i>
+        <div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">CLI Reference</div>
+        <p style="margin: 0; font-size: 13px; line-height: 1.55; color: var(--text-faint);">Every command and the options that matter.</p>
+      </a>
+      <a href="./doc.html?d=configuration" class="doc-tile" style="padding: 20px;">
+        <i data-lucide="settings-2" style="width: 20px; height: 20px; margin-bottom: 14px; color: var(--text-muted);"></i>
+        <div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Configuration</div>
+        <p style="margin: 0; font-size: 13px; line-height: 1.55; color: var(--text-faint);">Home, worker, policy, and model settings.</p>
+      </a>
+      <a href="./doc.html?d=invariants" class="doc-tile" style="padding: 20px;">
+        <i data-lucide="anchor" style="width: 20px; height: 20px; margin-bottom: 14px; color: var(--text-muted);"></i>
+        <div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Invariants</div>
+        <p style="margin: 0; font-size: 13px; line-height: 1.55; color: var(--text-faint);">The traits that make skep skep — never traded away.</p>
+      </a>
+      <a href="https://github.com/Anmolnoor/skep/blob/main/CONTRIBUTING.md" class="doc-tile" style="padding: 20px;">
+        <i data-lucide="git-pull-request" style="width: 20px; height: 20px; margin-bottom: 14px; color: var(--text-muted);"></i>
+        <div style="margin-bottom: 5px; font-size: 15px; font-weight: 650; color: var(--text-bright);">Contributing</div>
+        <p style="margin: 0; font-size: 13px; line-height: 1.55; color: var(--text-faint);">Dev setup, gates, and PR expectations.</p>
+      </a>
+    </div>
+
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px;">
+      <h2 style="margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; color: var(--text-bright);">Latest release</h2>
+      <a href="./changelog.html" style="display: flex; align-items: center; gap: 7px; padding: 6px 11px; border: 1px solid var(--line-card); border-radius: 7px; font-size: 12.5px; font-weight: 600; color: var(--text-muted);"><span>All releases</span><i data-lucide="arrow-right" style="width: 13px; height: 13px;"></i></a>
+    </div>
+    <a href="./changelog.html" style="display: flex; flex-wrap: wrap; align-items: center; gap: 20px; padding: 22px; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-card-2);">
+      <div style="flex: 0 0 auto;">
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 4px;">
+          <span class="mono" style="font-size: 19px; font-weight: 600; color: var(--text-bright);" data-version>v1.0.1</span>
+          <span style="padding: 3px 8px; border-radius: 5px; background: rgba(123,224,140,0.13); font-size: 11px; font-weight: 600; color: var(--green);">Latest</span>
+        </div>
+        <div style="font-size: 12.5px; color: var(--text-ghost);">Public launch</div>
+      </div>
+      <div style="flex: 1 1 240px; min-width: 0;">
+        <p style="margin: 0 0 10px; font-size: 14.5px; line-height: 1.55; color: #A9B2AE;">Sandboxed worker execution, independent re-verification, patch approval, durable audit evidence, learned approval templates, and Claude Code / Codex / Aider adapters.</p>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+          <span style="padding: 3px 9px; border-radius: 5px; background: rgba(123,224,140,0.1); font-size: 11.5px; color: var(--green);">Sandbox</span>
+          <span style="padding: 3px 9px; border-radius: 5px; background: rgba(103,211,232,0.1); font-size: 11.5px; color: #67D3E8;">Re-verify</span>
+          <span style="padding: 3px 9px; border-radius: 5px; background: rgba(255,107,31,0.1); font-size: 11.5px; color: var(--orange-soft);">Approvals</span>
+        </div>
+      </div>
+      <i data-lucide="chevron-right" style="width: 18px; height: 18px; flex: 0 0 auto; color: #4A5350;"></i>
+    </a>
+  </main>
+
+  <aside class="rail-right">
+    <div style="padding: 20px; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-card-2);">
+      <div style="margin-bottom: 4px; font-size: 15.5px; font-weight: 650; color: var(--text-bright);">Quickstart</div>
+      <p style="margin: 0 0 16px; font-size: 13px; line-height: 1.5; color: var(--text-faint);">Get Skep running in five steps.</p>
+      <div style="display: grid; gap: 12px; margin-bottom: 18px; font-size: 13.5px; color: #A9B2AE;">
+        <div style="display: flex; align-items: center; gap: 11px;"><span class="launchno">1</span>Install skep</div>
+        <div style="display: flex; align-items: center; gap: 11px;"><span class="launchno">2</span>Pick a worker</div>
+        <div style="display: flex; align-items: center; gap: 11px;"><span class="launchno">3</span>Run a task</div>
+        <div style="display: flex; align-items: center; gap: 11px;"><span class="launchno">4</span>Review the evidence</div>
+        <div style="display: flex; align-items: center; gap: 11px;"><span class="launchno">5</span>Approve the branch</div>
+      </div>
+      <a href="./doc.html?d=quickstart" style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 40px; border: 1px solid rgba(123,224,140,0.35); border-radius: 9px; background: rgba(123,224,140,0.07); font-size: 13.5px; font-weight: 600; color: var(--green);"><span>Go to Quickstart</span><i data-lucide="arrow-right" style="width: 14px; height: 14px;"></i></a>
+    </div>
+
+    <div style="padding: 20px; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-card-2);">
+      <div style="margin-bottom: 6px; font-size: 15.5px; font-weight: 650; color: var(--text-bright);">Stay in the loop</div>
+      <p style="margin: 0 0 16px; font-size: 13px; line-height: 1.5; color: var(--text-faint);">Watch the repo for releases and important changes.</p>
+      <a href="https://github.com/Anmolnoor/skep" style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 40px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--bg-chip); font-size: 13.5px; font-weight: 600; color: var(--text-soft);"><i data-lucide="github" style="width: 15px; height: 15px;"></i><span>Watch on GitHub</span></a>
+    </div>
+  </aside>
+</div>
+
+<!-- Search overlay -->
+<div id="search-overlay">
+  <div style="width: 100%; max-width: 620px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--bg-card-2); box-shadow: 0 40px 100px rgba(0,0,0,0.6); overflow: hidden;">
+    <div style="display: flex; align-items: center; gap: 12px; padding: 16px 18px; border-bottom: 1px solid var(--line-inner);">
+      <i data-lucide="search" style="width: 17px; height: 17px; flex: 0 0 auto; color: var(--text-ghost);"></i>
+      <input id="search-input" placeholder="Search the documentation…" style="flex: 1 1 auto; min-width: 0; border: 0; background: transparent; outline: none; font-family: var(--sans); font-size: 15.5px; color: var(--text-bright);" />
+      <span class="kbd" style="padding: 3px 8px; color: var(--text-ghost);">ESC</span>
+    </div>
+    <div id="search-results" style="max-height: 52vh; overflow-y: auto;"></div>
+  </div>
+</div>
+
+<style>.launchno { display: flex; align-items: center; justify-content: center; width: 21px; height: 21px; flex: 0 0 auto; border: 1px solid rgba(123,224,140,0.4); border-radius: 50%; font-family: var(--mono); font-size: 10.5px; color: var(--green); }</style>
+
+<script>
+  // Search index — the real docs on this site.
+  const DOCS_INDEX = [
+    { title: 'Quickstart', section: 'Get started', href: 'doc.html?d=quickstart' },
+    { title: 'Use on a new machine', section: 'Get started', href: 'doc.html?d=new-machine' },
+    { title: 'Installation', section: 'Get started', href: 'install.html' },
+    { title: 'First-Run Setup', section: 'Get started', href: 'first-run.html' },
+    { title: 'How Skep Works', section: 'Core concepts', href: 'doc.html?d=how-it-works' },
+    { title: 'Sandboxing', section: 'Core concepts', href: 'doc.html?d=sandboxing' },
+    { title: 'Re-Verification', section: 'Core concepts', href: 'doc.html?d=verification' },
+    { title: 'Approvals & Learned Templates', section: 'Core concepts', href: 'doc.html?d=approvals' },
+    { title: 'Worker Adapters', section: 'Core concepts', href: 'doc.html?d=workers' },
+    { title: 'CLI Reference', section: 'Reference', href: 'doc.html?d=cli' },
+    { title: 'Configuration', section: 'Reference', href: 'doc.html?d=configuration' },
+    { title: 'The Brain Dial', section: 'Reference', href: 'doc.html?d=brain' },
+    { title: 'Assistant Tools', section: 'Reference', href: 'doc.html?d=assistant-tools' },
+    { title: 'Browser MCP', section: 'Reference', href: 'doc.html?d=browser' },
+    { title: 'Mobile', section: 'Reference', href: 'doc.html?d=mobile' },
+    { title: 'Invariants', section: 'Reference', href: 'doc.html?d=invariants' },
+    { title: 'Version History', section: 'Reference', href: 'changelog.html' },
+    { title: 'Contributing', section: 'Community', href: 'https://github.com/Anmolnoor/skep/blob/main/CONTRIBUTING.md' },
+    { title: 'Security Policy', section: 'Community', href: 'security.html' },
+    { title: 'Open Source', section: 'Community', href: 'open-source.html' },
+    { title: 'Roadmap', section: 'Community', href: 'roadmap.html' },
+  ];
+
+  const overlay = document.getElementById('search-overlay');
+  const input = document.getElementById('search-input');
+  const resultsEl = document.getElementById('search-results');
+
+  function renderResults(q) {
+    const query = q.trim().toLowerCase();
+    const hits = query
+      ? DOCS_INDEX.filter((d) => (d.title + ' ' + d.section).toLowerCase().includes(query))
+      : DOCS_INDEX.slice(0, 8);
+    resultsEl.innerHTML = hits.map((r) => `
+      <a href="${r.href}">
+        <i data-lucide="file-text" style="width:15px;height:15px;flex:0 0 auto;color:var(--text-ghost)"></i>
+        <span style="flex:1 1 auto;min-width:0">
+          <span style="display:block;font-size:14.5px;font-weight:600;color:var(--text-bright)">${r.title}</span>
+          <span style="display:block;margin-top:2px;font-size:12.5px;color:var(--text-faint)">${r.section}</span>
+        </span>
+        <i data-lucide="corner-down-left" style="width:14px;height:14px;flex:0 0 auto;color:#4A5350"></i>
+      </a>`).join('');
+    if (window.lucide) window.lucide.createIcons();
+  }
+
+  function openSearch() { overlay.classList.add('open'); input.value = ''; renderResults(''); input.focus(); }
+  function closeSearch() { overlay.classList.remove('open'); }
+
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('[data-open-search]')) openSearch();
+    else if (e.target === overlay) closeSearch();
+  });
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openSearch(); }
+    if (e.key === 'Escape') closeSearch();
+    if (e.key === 'Enter' && overlay.classList.contains('open')) {
+      const first = resultsEl.querySelector('a');
+      if (first) location.href = first.href;
+    }
+  });
+  input.addEventListener('input', () => renderResults(input.value));
+</script>
+</body>
+</html>

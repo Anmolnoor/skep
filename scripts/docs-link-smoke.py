@@ -31,7 +31,13 @@ def _relative_targets(path: Path) -> list[str]:
             # (uploaded snapshots carry author-machine paths).
             if target.startswith("/"):
                 continue
-            target = target.split("#", 1)[0]
+            # LAUNCH-2: JS template/replace placeholders in inline scripts are
+            # not links, and a query string addresses the same file on disk.
+            if "$" in target:
+                continue
+            target = target.split("#", 1)[0].split("?", 1)[0]
+            if not target:
+                continue
             if target.endswith("/"):
                 continue
             targets.append(target)

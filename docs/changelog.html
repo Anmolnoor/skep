@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="skep changelog — public releases and the milestone history behind them." />
+<title>Changelog — skep</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./site.css" />
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.js"></script>
+<script src="./site.js" defer></script>
+<style>
+.crumb { display: flex; align-items: center; gap: 9px; padding-top: 20px; font-size: 13px; color: var(--text-void); }
+.crumb i { width: 13px; height: 13px; }
+.timeline { position: relative; padding-left: 28px; }
+.timeline::before { content: ""; position: absolute; left: 5px; top: 6px; bottom: 6px; width: 1px; background: var(--line-strong); }
+.t-item { position: relative; padding-bottom: 34px; }
+.t-item::before { content: ""; position: absolute; left: -28px; top: 6px; width: 11px; height: 11px; border-radius: 50%; background: var(--line-hover); border: 2px solid var(--bg); }
+.t-item.major::before { background: var(--orange); }
+.t-item .when { margin-bottom: 6px; font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; color: var(--text-ghost); }
+.t-item h3 { margin: 0 0 8px; font-size: 18px; font-weight: 650; color: var(--text-bright); }
+.t-item p { margin: 0; max-width: 70ch; font-size: 14.5px; line-height: 1.62; color: var(--text-dim); }
+.pill { padding: 3px 9px; border-radius: 5px; font-size: 11.5px; font-weight: 600; }
+</style>
+</head>
+<body data-page="changelog">
+
+<main>
+
+  <nav class="wrap crumb" aria-label="Breadcrumb">
+    <a href="./index.html" style="display: flex; align-items: center; gap: 6px;"><i data-lucide="house"></i><span>Home</span></a>
+    <i data-lucide="chevron-right"></i>
+    <span style="color: var(--text-muted);">Changelog</span>
+  </nav>
+
+  <section class="wrap" style="padding-top: clamp(28px, 3.5vw, 44px); padding-bottom: clamp(24px, 3vw, 36px);">
+    <div class="eyebrow green">Changelog</div>
+    <h1 style="margin: 0 0 14px; max-width: 18ch; font-size: clamp(34px, 3.8vw, 54px); font-weight: 700; line-height: 1.0; letter-spacing: -0.034em; color: var(--text-bright);">What shipped, and when.</h1>
+    <p style="margin: 0 0 20px; max-width: 62ch; font-size: 16px; line-height: 1.62; color: var(--text-muted);">Skep was daily-driven through roughly a hundred internal versions before the public launch. The public repository opens at v1.0.1 — because that is what the code was when it was published. The full engineering record lives in the version history.</p>
+    <div style="display: flex; flex-wrap: wrap; gap: 12px;">
+      <a href="https://github.com/Anmolnoor/skep/releases" class="btn btn-ghost btn-sm"><i data-lucide="github" style="width: 15px; height: 15px;"></i><span>GitHub releases</span></a>
+      <a href="./doc.html?d=version-history" class="btn btn-ghost btn-sm"><i data-lucide="scroll-text" style="width: 15px; height: 15px;"></i><span>Full version history</span></a>
+    </div>
+  </section>
+
+  <!-- Latest release -->
+  <section class="wrap" style="padding-bottom: clamp(32px, 4vw, 48px);">
+    <div style="padding: clamp(22px, 3vw, 32px); border: 1px solid rgba(123,224,140,0.3); border-radius: 14px; background: var(--bg-card);">
+      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 14px;">
+        <span class="mono" style="font-size: 22px; font-weight: 600; color: var(--text-bright);">v1.0.1</span>
+        <span class="pill" style="background: rgba(123,224,140,0.13); color: var(--green);">Latest</span>
+        <span class="mono" style="font-size: 12.5px; color: var(--text-ghost);">2026-07-30 · PyPI + GitHub release</span>
+      </div>
+      <p style="margin: 0 0 16px; max-width: 74ch; font-size: 15px; line-height: 1.65; color: var(--text-mid);">The public launch. Everything the private field-testing arc proved, in one package: sandboxed worker execution (Seatbelt / bubblewrap), independent re-verification with the pinned verify command (G10), patch-as-approval landing on <span class="mono" style="font-size: 13.5px; color: var(--orange-soft);">skep/&lt;task_id&gt;</span>, a durable audit ledger, learned approval templates, coding engines (Claude Code, Codex, Aider, Ollama, built-in), the chat Queen with web / terminal / messenger surfaces, the command deck, schedules, MCP tools, and Agent Skills shelves.</p>
+      <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+        <span class="pill" style="background: rgba(123,224,140,0.1); color: var(--green);">Sandbox</span>
+        <span class="pill" style="background: rgba(103,211,232,0.1); color: #67D3E8;">Re-verify</span>
+        <span class="pill" style="background: rgba(255,107,31,0.1); color: var(--orange-soft);">Approvals</span>
+        <span class="pill" style="background: rgba(167,139,250,0.12); color: #A78BFA;">Engines</span>
+        <span class="pill" style="background: rgba(242,179,94,0.12); color: var(--yellow);">Command deck</span>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; gap: 18px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line-inner); font-size: 13.5px; color: var(--text-dim);">
+        <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="package" style="width: 15px; height: 15px; color: var(--green);"></i><span class="mono" style="font-size: 12.5px;">pip install skep</span></span>
+        <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="file-code-2" style="width: 15px; height: 15px; color: var(--green);"></i>worker contract 0.3.5</span>
+        <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="scale" style="width: 15px; height: 15px; color: var(--green);"></i>MIT license</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Milestone history -->
+  <section class="band">
+    <div class="wrap" style="padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px);">
+      <h2 style="margin: 0 0 8px; font-size: clamp(24px, 2.4vw, 32px); font-weight: 700; letter-spacing: -0.026em; color: var(--text-bright);">The road to launch</h2>
+      <p style="margin: 0 0 34px; max-width: 62ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Milestones from the internal version history — each one field-tested, fixed, and landed with its own evidence before the next began.</p>
+
+      <div class="timeline">
+        <div class="t-item major">
+          <div class="when">2026-07-30 · v1.0.1</div>
+          <h3>Public launch</h3>
+          <p>The repository goes public, the package lands on PyPI, and skep.anmolnoor.com goes live. Local release gates: lint, types, unit, smoke, reliability, sandbox smoke, hygiene scan, docs link check, wheel and container smokes.</p>
+        </div>
+        <div class="t-item">
+          <div class="when">2026-07-25 → 07-29 · v88–v104</div>
+          <h3>Invariant hardening and coding engines</h3>
+          <p>G10 re-verifies with the project's pinned verify command instead of the worker's own nomination; project setup infers that pin from the repo's entry point by default. Claude Code, Codex, and Aider become first-class coding engines (ADR 0047) — forced into sandbox execution with doctor probes per binary. Every mutating verb gains an operator face, enforced by a surface-parity test (ADR 0050).</p>
+        </div>
+        <div class="t-item">
+          <div class="when">2026-07-23 · v85–v86</div>
+          <h3>Agent Skills shelves and session approvals</h3>
+          <p>External Agent Skills shelves register with instruction packs loading zero-grant; script-shipping packs draft onto the promotion ladder and activate only through an explicit promote (ADR 0045). A session approval tier joins the once/remember pair (ADR 0046).</p>
+        </div>
+        <div class="t-item">
+          <div class="when">2026-07-17 → 07-22 · v52–v84</div>
+          <h3>The Queen learns; daily-driver era begins</h3>
+          <p>Operator policy layer, pinned prompt assembly, observer ticker, cron chaining, per-chat context management, the full git/PR surface with carded mutations, Discord/Telegram/Slack approval cards, and the Streamable HTTP MCP runner. Skep becomes the operator's daily driver on 2026-07-17.</p>
+        </div>
+        <div class="t-item">
+          <div class="when">2026-07-10 · v25</div>
+          <h3>The command deck</h3>
+          <p>Chat messages starting with <span class="mono" style="font-size: 13px;">/</span> parse client-side and map onto existing verbs — the model never sees them. Mutations become audited operator-command actions with the same confirmation cards.</p>
+        </div>
+        <div class="t-item">
+          <div class="when">2026-07-08 → 07-10 · v9–v24</div>
+          <h3>The roadmap and the field-test arc</h3>
+          <p>Six roadmap versions landed in one unattended run, then two rounds of field-test friction fixes: deterministic baselines, policy that actually applies, scheduler blind spots, and the landing/policy arc that produced the patch-as-approval rule.</p>
+        </div>
+        <div class="t-item">
+          <div class="when">v3–v8</div>
+          <h3>Contract v0.2, castes, and per-domain network</h3>
+          <p>The worker contract becomes an open caste registry with per-task domain allowlists (<span class="mono" style="font-size: 13px;">[]</span> means deny all). The nightly dependency/audit bot proves the spine offline and deterministically.</p>
+        </div>
+        <div class="t-item">
+          <div class="when">v2</div>
+          <h3>Sandbox and re-verification</h3>
+          <p>Workers run under macOS Seatbelt with escape tests proving the boundary. A completed claim is no longer trusted: the supervisor re-applies the patch to a clean worktree and re-runs the recorded verification itself (ADR 0006). Suspend/resume, auto-approval rules, and usage accounting land in the same push.</p>
+        </div>
+        <div class="t-item">
+          <div class="when">v1</div>
+          <h3>The spine</h3>
+          <p>One worker, one lifecycle, proven end-to-end: worktree → contract task → sandboxed worker → events and evidence → durable audit record → teardown. Including the death path: hung workers killed on heartbeat loss, crashed workers get a synthesized terminal event, orphaned worktrees swept.</p>
+        </div>
+        <div class="t-item">
+          <div class="when">v0.1.0</div>
+          <h3>First public baseline</h3>
+          <p>The launch feature set frozen: sandboxed execution, independent re-verification, patch approval, durable audit evidence, learned approval templates, and a Claude Code adapter.</p>
+        </div>
+      </div>
+
+      <a href="./doc.html?d=version-history" class="link-arrow"><span>Read the complete version history</span><i data-lucide="arrow-right"></i></a>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="wrap" style="padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px);">
+    <div style="position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 28px; padding: clamp(28px, 3.5vw, 44px); border: 1px solid var(--line-strong); border-radius: 16px; background: var(--bg-card-2); overflow: hidden;">
+      <div style="position: absolute; top: -140px; right: -80px; width: 440px; height: 440px; background: radial-gradient(circle, rgba(255,107,31,0.13), transparent 62%); pointer-events: none;"></div>
+      <div style="position: relative; min-width: 0;">
+        <h2 style="margin: 0 0 10px; max-width: 22ch; font-size: clamp(23px, 2.3vw, 32px); font-weight: 700; line-height: 1.12; letter-spacing: -0.028em; color: var(--text-bright);">Run the latest release today.</h2>
+        <p style="margin: 0; max-width: 48ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">One command from PyPI. Watch the repo for what ships next.</p>
+      </div>
+      <div style="position: relative; display: flex; flex-wrap: wrap; gap: 12px;">
+        <a href="./install.html" class="btn btn-primary" style="height: 48px; font-size: 15px;"><i data-lucide="terminal" style="width: 16px; height: 16px;"></i><span>Install skep</span></a>
+        <a href="./roadmap.html" class="btn btn-ghost" style="height: 48px; font-size: 15px; background: var(--bg-chip);"><i data-lucide="map" style="width: 16px; height: 16px;"></i><span>See the roadmap</span></a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+</body>
+</html>

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="skep roadmap — what works today, what's being wired up, and what waits for real demand." />
+<title>Roadmap — skep</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./site.css" />
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.js"></script>
+<script src="./site.js" defer></script>
+<style>
+.crumb { display: flex; align-items: center; gap: 9px; padding-top: 20px; font-size: 13px; color: var(--text-void); }
+.crumb i { width: 13px; height: 13px; }
+.lane { padding: 24px; border: 1px solid var(--line-card); border-radius: 14px; background: var(--bg-card); }
+.lane-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.lane-head i { width: 18px; height: 18px; }
+.lane-head h2 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.02em; color: var(--text-bright); }
+.lane .sub { margin: 0 0 18px; font-size: 13px; color: var(--text-ghost); }
+.lane-item { padding: 14px 16px; border: 1px solid var(--line-inner); border-radius: 10px; background: var(--bg-panel); margin-bottom: 10px; }
+.lane-item:last-child { margin-bottom: 0; }
+.lane-item .t { margin-bottom: 4px; font-size: 14.5px; font-weight: 650; color: var(--text-bright); }
+.lane-item .d { font-size: 13px; line-height: 1.55; color: var(--text-faint); }
+</style>
+</head>
+<body data-page="">
+
+<main>
+
+  <nav class="wrap crumb" aria-label="Breadcrumb">
+    <a href="./index.html" style="display: flex; align-items: center; gap: 6px;"><i data-lucide="house"></i><span>Home</span></a>
+    <i data-lucide="chevron-right"></i>
+    <span style="color: var(--text-muted);">Roadmap</span>
+  </nav>
+
+  <section class="wrap" style="padding-top: clamp(28px, 3.5vw, 44px); padding-bottom: clamp(28px, 3.5vw, 40px);">
+    <div class="eyebrow">Roadmap</div>
+    <h1 style="margin: 0 0 14px; max-width: 20ch; font-size: clamp(34px, 3.8vw, 54px); font-weight: 700; line-height: 1.0; letter-spacing: -0.034em; color: var(--text-bright);">Opinions arrive as code, not promises.</h1>
+    <p style="margin: 0; max-width: 64ch; font-size: 16px; line-height: 1.62; color: var(--text-muted);">Skep is v1 and single-operator by design. The roadmap follows real usage: what launch users actually hit gets built first, and anything speculative stays parked until there's demand. This mirrors the status table in the README — kept honest on purpose.</p>
+  </section>
+
+  <section class="wrap reveal" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(310px, 100%), 1fr)); gap: 16px; padding-bottom: clamp(44px, 5vw, 68px);">
+    <div class="lane" style="border-color: rgba(123,224,140,0.3);">
+      <div class="lane-head"><i data-lucide="circle-check" style="color: var(--green);"></i><h2>Works today</h2></div>
+      <p class="sub">Shipped in v1.0.1, field-tested daily since 2026-07-17.</p>
+      <div class="lane-item"><div class="t">Sandboxed runs + re-verification</div><div class="d">Seatbelt / bubblewrap isolation, independent patch replay with the pinned verify command (G10), full audit trail.</div></div>
+      <div class="lane-item"><div class="t">Patch approval</div><div class="d">Landing IS the commit — on <span class="mono" style="font-size: 12px; color: var(--orange-soft);">skep/&lt;task_id&gt;</span>, never main. Workers can never push, pull, fetch, or switch branches.</div></div>
+      <div class="lane-item"><div class="t">Chat Queen on every surface</div><div class="d">Web, terminal, Telegram / Slack / Discord — with carded mutations and the command deck.</div></div>
+      <div class="lane-item"><div class="t">Coding engines</div><div class="d">Claude Code, Codex, and Aider adapters, plus the built-in and Ollama workers.</div></div>
+      <div class="lane-item"><div class="t">Schedules, digests, MCP, Agent Skills</div><div class="d">Recurring runs via <span class="mono" style="font-size: 12px;">skep tick</span>, MCP tools, and skill shelves on the promotion ladder.</div></div>
+    </div>
+
+    <div class="lane" style="border-color: rgba(242,179,94,0.3);">
+      <div class="lane-head"><i data-lucide="circle-dashed" style="color: var(--yellow);"></i><h2>Being wired up</h2></div>
+      <p class="sub">In progress now.</p>
+      <div class="lane-item"><div class="t">PyPI release automation</div><div class="d">The tag → CI → GitHub release → PyPI pipeline, hardened release by release.</div></div>
+      <div class="lane-item"><div class="t">macOS CI matrix</div><div class="d">The Seatbelt path exercised in CI, not just on the dev machine.</div></div>
+      <div class="lane-item"><div class="t">Closing the remember→improve loop</div><div class="d">Usage signals and recurrence counting so learned templates get sharper with use, not just broader.</div></div>
+      <div class="lane-item"><div class="t">Template narrowing + ledger UI</div><div class="d">Tighter learned templates and a first-class view of the decision ledger.</div></div>
+    </div>
+
+    <div class="lane">
+      <div class="lane-head"><i data-lucide="circle" style="color: #4A5350;"></i><h2>Opinions pending code</h2></div>
+      <p class="sub">Built only if launch users repeatedly ask.</p>
+      <div class="lane-item"><div class="t">Multi-operator / team use</div><div class="d">Skep is deliberately single-operator today. Team semantics change the trust model and deserve their own design.</div></div>
+      <div class="lane-item"><div class="t">Hosted skep</div><div class="d">Cloud sandboxes, GitHub App integration, tenant auth, billing — a later product, not part of the local tool.</div></div>
+      <div class="lane-item"><div class="t">Ambient / self-directed learning</div><div class="d">The Queen proposing its own work stays behind explicit operator control until the trust engine earns more.</div></div>
+      <div class="lane-item"><div class="t">Advanced verification</div><div class="d">Test discovery, coverage gating, static analysis layered onto the re-verify step.</div></div>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="wrap" style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 24px; padding-top: clamp(36px, 4vw, 52px); padding-bottom: clamp(36px, 4vw, 52px);">
+      <div style="min-width: 0;">
+        <h2 style="margin: 0 0 8px; font-size: clamp(22px, 2.2vw, 30px); font-weight: 700; letter-spacing: -0.024em; color: var(--text-bright);">Want something on this list sooner?</h2>
+        <p style="margin: 0; max-width: 54ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Open a discussion — real usage reports move items between lanes.</p>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; gap: 12px;">
+        <a href="https://github.com/Anmolnoor/skep/discussions" class="btn btn-ghost btn-sm" style="height: 46px;"><i data-lucide="message-circle" style="width: 15px; height: 15px;"></i><span>Start a discussion</span></a>
+        <a href="./changelog.html" class="btn btn-ghost btn-sm" style="height: 46px;"><i data-lucide="scroll-text" style="width: 15px; height: 15px;"></i><span>See what shipped</span></a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+</body>
+</html>

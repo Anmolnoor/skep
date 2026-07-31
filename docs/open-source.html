@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Skep is MIT-licensed and built in the open. Live repository stats, ways to contribute, and what's next." />
+<title>Open Source — skep</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./site.css" />
+<script src="https://unpkg.com/lucide@0.454.0/dist/umd/lucide.js"></script>
+<script src="./site.js" defer></script>
+<style>
+.crumb { display: flex; align-items: center; gap: 9px; padding-top: 20px; font-size: 13px; color: var(--text-void); }
+.crumb i { width: 13px; height: 13px; }
+.why-card { padding: 22px; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-card); }
+.why-card i { width: 22px; height: 22px; margin-bottom: 16px; }
+.why-card h3 { margin: 0 0 7px; font-size: 16px; font-weight: 650; color: var(--text-bright); }
+.why-card p { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--text-faint); }
+.contrib-card { display: flex; flex-direction: column; padding: 22px; border: 1px solid var(--line-card); border-radius: 12px; background: var(--bg-card); }
+.contrib-card > i { width: 22px; height: 22px; margin-bottom: 16px; }
+.contrib-card h3 { margin: 0 0 8px; font-size: 16px; font-weight: 650; color: var(--text-bright); }
+.contrib-card .blurb { margin: 0 0 14px; font-size: 13.5px; line-height: 1.6; color: var(--text-faint); }
+.contrib-card .list { display: grid; gap: 8px; margin-bottom: 16px; font-size: 13px; color: #A9B2AE; }
+.contrib-card .list span { display: flex; align-items: center; gap: 8px; }
+.contrib-card .list i { width: 14px; height: 14px; }
+.stat-tile { padding: 18px; border: 1px solid var(--line-card); border-radius: 11px; background: #0A0C0E; text-align: center; }
+.stat-tile i { width: 17px; height: 17px; margin: 0 auto 10px; }
+.stat-tile .n { font-family: var(--mono); font-size: 22px; font-weight: 600; color: var(--text-bright); }
+.stat-tile .l { margin-top: 3px; font-size: 12px; color: var(--text-faint); }
+.next-row { display: flex; align-items: flex-start; gap: 13px; }
+.next-row > i { width: 17px; height: 17px; margin-top: 2px; flex: 0 0 auto; }
+</style>
+</head>
+<body data-page="open-source">
+
+<main>
+
+  <nav class="wrap crumb" aria-label="Breadcrumb">
+    <a href="./index.html" style="display: flex; align-items: center; gap: 6px;"><i data-lucide="house"></i><span>Home</span></a>
+    <i data-lucide="chevron-right"></i>
+    <span style="color: var(--text-muted);">Open Source</span>
+  </nav>
+
+  <!-- Hero -->
+  <section style="position: relative; overflow: hidden;">
+    <div style="position: absolute; top: -180px; left: -140px; width: 620px; height: 620px; background: radial-gradient(circle, rgba(123,224,140,0.09), transparent 62%); pointer-events: none;"></div>
+    <div class="wrap" style="position: relative; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr)); align-items: center; gap: clamp(30px, 4vw, 56px); padding-top: clamp(30px, 4vw, 50px); padding-bottom: clamp(44px, 5.5vw, 72px);">
+      <div style="min-width: 0;">
+        <div style="display: inline-flex; align-items: center; gap: 8px; margin-bottom: 22px; padding: 6px 12px; border: 1px solid rgba(123,224,140,0.35); border-radius: 6px; font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--green);">
+          <i data-lucide="git-fork" style="width: 13px; height: 13px;"></i><span>Open source</span>
+        </div>
+        <h1 style="margin: 0 0 22px; max-width: 14ch; font-size: clamp(36px, 4.2vw, 60px); font-weight: 700; line-height: 1.0; letter-spacing: -0.035em; color: var(--text-bright);">Open by design. Safer by <span style="color: var(--green);">community.</span></h1>
+        <p style="margin: 0 0 30px; max-width: 50ch; font-size: clamp(16px, 1.2vw, 18px); line-height: 1.62; color: var(--text-muted);">Skep is MIT-licensed and built in the open. A supervisor you cannot inspect is just another black box — transparency, audits, and collaboration are the point.</p>
+        <div style="display: flex; flex-wrap: wrap; gap: 12px;">
+          <a href="https://github.com/Anmolnoor/skep" class="btn btn-ghost" style="height: 48px; font-size: 15px;"><i data-lucide="github" style="width: 16px; height: 16px;"></i><span>View on GitHub</span></a>
+          <a href="https://github.com/Anmolnoor/skep/stargazers" class="btn btn-ghost" style="height: 48px; font-size: 15px;"><i data-lucide="star" style="width: 16px; height: 16px;"></i><span>Star the repo</span></a>
+        </div>
+      </div>
+
+      <div style="min-width: 0; border: 1px solid var(--line-strong); border-radius: 12px; background: #0A0C0E; box-shadow: 0 36px 80px rgba(0,0,0,0.5); overflow: hidden;">
+        <div class="term-bar"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <pre style="padding: 18px; font-size: 13px; line-height: 1.95; color: var(--text-mid); overflow-x: auto;"><span class="c-green">$</span> git clone https://github.com/Anmolnoor/skep.git
+<span class="c-green">$</span> cd skep &amp;&amp; uv sync --frozen
+<span class="c-green">$</span> bash scripts/local-release-gates.sh</pre>
+        <div style="padding: 18px; border-top: 1px solid var(--line-inner); background: var(--bg-card-2);">
+          <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 12px;">
+            <svg width="34" height="34" viewBox="0 0 32 32" fill="none" aria-hidden="true" style="flex: 0 0 auto;">
+              <path d="M16 1.6 29.2 9.2v15.2L16 32 2.8 24.4V9.2L16 1.6Z" fill="#FF6B1F"></path>
+              <path d="M16 9.4 22.6 13.2v7.6L16 24.6 9.4 20.8v-7.6L16 9.4Z" stroke="#0A0B0C" stroke-width="1.8" fill="none"></path>
+            </svg>
+            <span style="font-size: 16px; font-weight: 650; color: var(--text-bright);">Anmolnoor / skep</span>
+            <span style="padding: 3px 9px; border: 1px solid #2B3134; border-radius: 5px; font-size: 11.5px; color: var(--text-muted);">Public</span>
+          </div>
+          <p style="margin: 0 0 14px; font-size: 14px; line-height: 1.55; color: var(--text-dim);">A local supervisor for AI coding agents. Sandboxed execution · independent verification · human approvals.</p>
+          <div style="display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: var(--text-faint);">
+            <span style="display: flex; align-items: center; gap: 7px;"><i data-lucide="star" style="width: 14px; height: 14px;"></i><span class="mono" data-stat="stars">—</span></span>
+            <span style="display: flex; align-items: center; gap: 7px;"><i data-lucide="git-fork" style="width: 14px; height: 14px;"></i><span class="mono" data-stat="forks">—</span></span>
+            <span style="display: flex; align-items: center; gap: 7px;"><i data-lucide="scale" style="width: 14px; height: 14px;"></i>MIT</span>
+            <span style="display: flex; align-items: center; gap: 7px;"><span style="width: 7px; height: 7px; border-radius: 50%; background: var(--green);"></span>Active · pushed <span class="mono" data-stat="pushed">recently</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Why open source -->
+  <section class="band reveal">
+    <div class="wrap" style="padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px);">
+      <h2 style="margin: 0 0 24px; font-size: clamp(24px, 2.4vw, 32px); font-weight: 700; letter-spacing: -0.026em; color: var(--text-bright);">Why Skep is open source</h2>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px;">
+        <article class="why-card"><i data-lucide="lock-open" style="color: var(--green);"></i><h3>Transparency</h3><p>Every line of the boundary is open for inspection. No black boxes, no hidden policy.</p></article>
+        <article class="why-card"><i data-lucide="shield-check" style="color: #A78BFA;"></i><h3>Security through audits</h3><p>More eyes on a sandbox means faster discovery and stronger guarantees.</p></article>
+        <article class="why-card"><i data-lucide="users" style="color: #67D3E8;"></i><h3>Community driven</h3><p>Built with feedback, ideas, and contributions from developers who run agents daily.</p></article>
+        <article class="why-card"><i data-lucide="blocks" style="color: var(--yellow);"></i><h3>Interoperability</h3><p>One documented worker contract means any agent can plug in and be governed.</p></article>
+        <article class="why-card"><i data-lucide="code-xml" style="color: var(--orange);"></i><h3>Freedom to build</h3><p>Use, modify, and distribute Skep to fit your workflow — personal or commercial.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <!-- How to contribute -->
+  <section class="wrap reveal" style="padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px); border-bottom: 1px solid var(--line-hair);">
+    <h2 style="margin: 0 0 8px; font-size: clamp(24px, 2.4vw, 32px); font-weight: 700; letter-spacing: -0.026em; color: var(--text-bright);">How you can contribute</h2>
+    <p style="margin: 0 0 24px; max-width: 62ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Whether you write code, docs, or bug reports — there's a way to help. Changes should preserve the safety model: sandbox when requested, record durable evidence, re-verify claims, land only through review.</p>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px;">
+      <article class="contrib-card">
+        <i data-lucide="code-xml" style="color: var(--green);"></i>
+        <h3>Code</h3>
+        <p class="blurb">Fix bugs, build adapters, harden the boundary.</p>
+        <div class="list">
+          <span><i data-lucide="check" style="color: var(--green);"></i>Issues</span>
+          <span><i data-lucide="check" style="color: var(--green);"></i>Pull requests</span>
+          <span><i data-lucide="check" style="color: var(--green);"></i>Code reviews</span>
+        </div>
+        <a href="https://github.com/Anmolnoor/skep/blob/main/CONTRIBUTING.md" class="link-arrow" style="margin-top: auto; font-size: 13.5px;"><span>Developer guide</span><i data-lucide="arrow-right" style="width: 14px; height: 14px;"></i></a>
+      </article>
+      <article class="contrib-card">
+        <i data-lucide="file-text" style="color: #A78BFA;"></i>
+        <h3>Docs</h3>
+        <p class="blurb">Help keep the docs honest about what is enforced versus planned.</p>
+        <div class="list">
+          <span><i data-lucide="check" style="color: #A78BFA;"></i>Fix typos</span>
+          <span><i data-lucide="check" style="color: #A78BFA;"></i>Add examples</span>
+          <span><i data-lucide="check" style="color: #A78BFA;"></i>Improve clarity</span>
+        </div>
+        <a href="./docs.html" class="link-arrow" style="margin-top: auto; font-size: 13.5px; color: #A78BFA;"><span>Documentation</span><i data-lucide="arrow-right" style="width: 14px; height: 14px;"></i></a>
+      </article>
+      <article class="contrib-card">
+        <i data-lucide="flask-conical" style="color: var(--yellow);"></i>
+        <h3>Testing</h3>
+        <p class="blurb">Run it on your platform and report what breaks.</p>
+        <div class="list">
+          <span><i data-lucide="check" style="color: var(--yellow);"></i>Report bugs</span>
+          <span><i data-lucide="check" style="color: var(--yellow);"></i>Reproduce issues</span>
+          <span><i data-lucide="check" style="color: var(--yellow);"></i>Sandbox escape tests</span>
+        </div>
+        <a href="https://github.com/Anmolnoor/skep/issues" class="link-arrow" style="margin-top: auto; font-size: 13.5px; color: var(--yellow);"><span>Open an issue</span><i data-lucide="arrow-right" style="width: 14px; height: 14px;"></i></a>
+      </article>
+      <article class="contrib-card">
+        <i data-lucide="message-circle" style="color: #67D3E8;"></i>
+        <h3>Discussions</h3>
+        <p class="blurb">Share ideas, ask questions, and help others.</p>
+        <div class="list">
+          <span><i data-lucide="check" style="color: #67D3E8;"></i>Answer questions</span>
+          <span><i data-lucide="check" style="color: #67D3E8;"></i>Share feedback</span>
+          <span><i data-lucide="check" style="color: #67D3E8;"></i>Propose features</span>
+        </div>
+        <a href="https://github.com/Anmolnoor/skep/discussions" class="link-arrow" style="margin-top: auto; font-size: 13.5px; color: #67D3E8;"><span>Join discussions</span><i data-lucide="arrow-right" style="width: 14px; height: 14px;"></i></a>
+      </article>
+      <article class="contrib-card">
+        <i data-lucide="megaphone" style="color: var(--orange);"></i>
+        <h3>Spread the word</h3>
+        <p class="blurb">Help more developers find a safer way to run agents.</p>
+        <div class="list">
+          <span><i data-lucide="check" style="color: var(--orange);"></i>Star the repo</span>
+          <span><i data-lucide="check" style="color: var(--orange);"></i>Write about Skep</span>
+          <span><i data-lucide="check" style="color: var(--orange);"></i>Tell your team</span>
+        </div>
+        <a href="./blog.html" class="link-arrow" style="margin-top: auto; font-size: 13.5px; color: var(--orange);"><span>Read the blog</span><i data-lucide="arrow-right" style="width: 14px; height: 14px;"></i></a>
+      </article>
+    </div>
+  </section>
+
+  <!-- Repo health + what's next -->
+  <section class="reveal" style="background: var(--bg-alt); border-bottom: 1px solid var(--line-hair);">
+    <div class="wrap" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 16px; padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px);">
+      <div style="min-width: 0; padding: 26px; border: 1px solid var(--line-card); border-radius: 14px; background: var(--bg-card-2);">
+        <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 22px;">
+          <h2 style="margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.022em; color: var(--text-bright);">Repository health</h2>
+          <a href="https://github.com/Anmolnoor/skep" style="display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 13px; border: 1px solid var(--line-strong); border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--text-mid);"><i data-lucide="github" style="width: 14px; height: 14px;"></i><span>Open repo</span></a>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 22px;">
+          <div class="stat-tile"><i data-lucide="star" style="color: var(--yellow);"></i><div class="n" data-stat="stars">—</div><div class="l">Stars</div></div>
+          <div class="stat-tile"><i data-lucide="git-fork" style="color: #A78BFA;"></i><div class="n" data-stat="forks">—</div><div class="l">Forks</div></div>
+          <div class="stat-tile"><i data-lucide="circle-dot" style="color: #67D3E8;"></i><div class="n" data-stat="issues">—</div><div class="l">Open issues</div></div>
+          <div class="stat-tile"><i data-lucide="users" style="color: var(--green);"></i><div class="n" data-stat="contributors">—</div><div class="l">Contributors</div></div>
+        </div>
+        <p style="margin: 0 0 22px; font-size: 13px; line-height: 1.55; color: var(--text-void);">Live from the GitHub API — real numbers, not invented ones. Latest release: <span class="mono" data-version>v1.0.1</span> on PyPI.</p>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; padding: 16px 18px; border: 1px solid var(--line-card); border-radius: 11px; background: #0A0C0E;">
+          <div style="display: flex; align-items: center; gap: 12px;"><i data-lucide="scale" style="width: 19px; height: 19px; color: var(--text-muted);"></i><div><div style="font-size: 14.5px; font-weight: 650; color: var(--text-bright);">MIT License</div><div style="font-size: 12.5px; color: var(--text-faint);">Use it, fork it, ship it.</div></div></div>
+          <a href="https://github.com/Anmolnoor/skep/blob/main/LICENSE" style="display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 13px; border: 1px solid var(--line-strong); border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--text-mid); white-space: nowrap;"><span>View license</span><i data-lucide="arrow-right" style="width: 14px; height: 14px;"></i></a>
+        </div>
+      </div>
+
+      <div style="min-width: 0; padding: 26px; border: 1px solid var(--line-card); border-radius: 14px; background: var(--bg-card-2);">
+        <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 8px;">
+          <h2 style="margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.022em; color: var(--text-bright);">What's next</h2>
+          <a href="./roadmap.html" style="display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 13px; border: 1px solid var(--line-strong); border-radius: 8px; font-size: 13px; font-weight: 600; color: var(--text-mid);"><span>Full roadmap</span><i data-lucide="arrow-right" style="width: 14px; height: 14px;"></i></a>
+        </div>
+        <p style="margin: 0 0 22px; font-size: 14.5px; line-height: 1.6; color: var(--text-dim);">The post-launch path, in the order it is being worked.</p>
+        <div style="display: grid; gap: 12px;">
+          <div class="next-row"><i data-lucide="circle-check" style="color: var(--green);"></i><div><div style="margin-bottom: 2px; font-size: 14.5px; font-weight: 650; color: var(--text-bright);">Foundation</div><div style="font-size: 13px; line-height: 1.5; color: var(--text-faint);">Core runtime, sandbox, verification layer, approvals, CLI.</div></div></div>
+          <div class="next-row"><i data-lucide="circle-check" style="color: var(--green);"></i><div><div style="margin-bottom: 2px; font-size: 14.5px; font-weight: 650; color: var(--text-bright);">Package publishing</div><div style="font-size: 13px; line-height: 1.5; color: var(--text-faint);">Live on PyPI — <span class="mono" style="font-size: 12.5px;">pip install skep</span> / <span class="mono" style="font-size: 12.5px;">uvx skep</span>.</div></div></div>
+          <div class="next-row"><i data-lucide="circle-dashed" style="color: var(--yellow);"></i><div><div style="margin-bottom: 2px; font-size: 14.5px; font-weight: 650; color: var(--text-bright);">Release automation &amp; macOS CI</div><div style="font-size: 13px; line-height: 1.5; color: var(--text-faint);">PyPI release automation and a macOS CI matrix.</div></div></div>
+          <div class="next-row"><i data-lucide="circle-dashed" style="color: var(--yellow);"></i><div><div style="margin-bottom: 2px; font-size: 14.5px; font-weight: 650; color: var(--text-bright);">Closing the remember→improve loop</div><div style="font-size: 13px; line-height: 1.5; color: var(--text-faint);">Usage signals and recurrence counting for learned templates.</div></div></div>
+          <div class="next-row"><i data-lucide="circle" style="color: #4A5350;"></i><div><div style="margin-bottom: 2px; font-size: 14.5px; font-weight: 650; color: var(--text-bright);">Multi-operator &amp; hosted</div><div style="font-size: 13px; line-height: 1.5; color: var(--text-faint);">Opinions pending code — built only if launch users ask for it.</div></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="wrap" style="padding-top: clamp(44px, 5vw, 68px); padding-bottom: clamp(44px, 5vw, 68px);">
+    <div style="position: relative; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 28px; padding: clamp(28px, 3.5vw, 44px); border: 1px solid var(--line-strong); border-radius: 16px; background: var(--bg-card-2); overflow: hidden;">
+      <div style="position: absolute; top: -140px; left: -60px; width: 440px; height: 440px; background: radial-gradient(circle, rgba(123,224,140,0.13), transparent 62%); pointer-events: none;"></div>
+      <div style="position: relative; min-width: 0;">
+        <h2 style="margin: 0 0 10px; max-width: 22ch; font-size: clamp(23px, 2.3vw, 32px); font-weight: 700; line-height: 1.12; letter-spacing: -0.028em; color: var(--text-bright);">Build together. Make agent systems safer for everyone.</h2>
+        <p style="margin: 0; max-width: 50ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Star the repo, open an issue, or send the adapter you wish existed.</p>
+      </div>
+      <div style="position: relative; display: flex; flex-wrap: wrap; gap: 12px;">
+        <a href="https://github.com/Anmolnoor/skep" style="display: flex; align-items: center; gap: 9px; height: 48px; padding: 0 22px; border-radius: 10px; background: var(--green); font-size: 15px; font-weight: 650; color: #08160C;"><i data-lucide="star" style="width: 16px; height: 16px;"></i><span>Star on GitHub</span></a>
+        <a href="https://github.com/Anmolnoor/skep/discussions" class="btn btn-ghost" style="height: 48px; font-size: 15px; background: var(--bg-chip);"><i data-lucide="message-circle" style="width: 16px; height: 16px;"></i><span>Join the discussion</span></a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script>
+  // Contributors count — the one stat site.js doesn't fetch.
+  fetch('https://api.github.com/repos/Anmolnoor/skep/contributors?per_page=100')
+    .then((r) => (r.ok ? r.json() : Promise.reject()))
+    .then((list) => {
+      document.querySelectorAll('[data-stat="contributors"]').forEach((el) => { el.textContent = list.length; });
+    })
+    .catch(() => {});
+</script>
+</body>
+</html>
