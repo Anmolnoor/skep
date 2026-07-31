@@ -64,9 +64,10 @@ secret_patterns='sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0
 
 scan_pattern "old project names" "$old_names"
 scan_pattern "personal machine paths" "$personal_paths"
-# The three excluded files carry a published contact address on purpose
-# (security contact, consulting links); a scanner that flags them teaches the
-# operator to ignore the scanner. SECURITY.md is dropped from the path list
+# The excluded files carry a published contact address on purpose (security
+# and conduct reporting need a private channel; launch.md publishes the
+# consulting contact); a scanner that flags them teaches the operator to
+# ignore the scanner. SECURITY.md is dropped from the path list
 # rather than globbed out — rg -g globs filter traversal, not explicitly
 # named files.
 all_scan_paths=("${scan_paths[@]}")
@@ -75,7 +76,7 @@ for scan_path in "${all_scan_paths[@]}"; do
   [[ "$scan_path" == "SECURITY.md" ]] || scan_paths+=("$scan_path")
 done
 scan_pattern "personal email addresses" "$personal_emails" \
-  -g '!docs/index.html' -g '!docs/launch.md'
+  -g '!docs/security.html' -g '!docs/code-of-conduct.html' -g '!docs/launch.md'
 scan_paths=("${all_scan_paths[@]}")
 
 set +e

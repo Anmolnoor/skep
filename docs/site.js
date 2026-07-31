@@ -55,7 +55,7 @@
       <div class="footer-social">
         <a href="${GH_URL}" aria-label="GitHub"><i data-lucide="github"></i></a>
         <a href="https://pypi.org/project/skep/" aria-label="PyPI"><i data-lucide="package"></i></a>
-        <a href="mailto:anmolnoor59@gmail.com" aria-label="Email"><i data-lucide="mail"></i></a>
+        <a href="./security.html" aria-label="Security contact"><i data-lucide="shield"></i></a>
       </div>
     </div>
     <div style="min-width:0">

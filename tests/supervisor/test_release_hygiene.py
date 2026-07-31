@@ -72,7 +72,11 @@ def test_scan_covers_personal_email_addresses() -> None:
     # The published contact addresses are deliberate; the scanner must not
     # teach the operator to ignore it.
     assert '"$scan_path" == "SECURITY.md"' in script
-    assert "-g '!docs/index.html'" in script
+    # LAUNCH-2: the site's private-channel pages (security, conduct) carry
+    # the published contact; the rest of the site must stay address-free.
+    assert "-g '!docs/security.html'" in script
+    assert "-g '!docs/code-of-conduct.html'" in script
+    assert "-g '!docs/launch.md'" in script
     assert "gitleaks" in script
     assert "agent-task-contract-spec-v0.1.md" in script
 
