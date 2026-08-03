@@ -341,3 +341,21 @@ def test_heartbeat_loop_outlives_a_failing_emit() -> None:
         while flaky.calls < 3 and time.monotonic() < deadline:
             time.sleep(0.01)
     assert flaky.calls >= 3
+
+
+def test_unattended_preamble_rides_every_external_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Headless agents that ask questions die patchless (019fc70f) and ones
+    that tidy the workspace delete the supervisor's bookkeeping (019fc719) —
+    the standing rules ride every dispatch, not the operator's typing."""
+    _run_fake_codex(
+        tmp_path,
+        monkeypatch,
+        "from pathlib import Path\n"
+        "Path('argv.txt').write_text(' '.join(sys.argv), encoding='utf-8')\n",
+    )
+    argv_text = (tmp_path / "repo" / "argv.txt").read_text(encoding="utf-8")
+    assert "never ask questions" in argv_text
+    assert "never modify or delete them" in argv_text
+    assert "do the thing" in argv_text  # the operator's instructions still ride

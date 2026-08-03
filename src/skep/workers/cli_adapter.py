@@ -127,6 +127,20 @@ def _task_start_payload(task: CodingWorkerTask, spec: AdapterSpec) -> dict[str, 
     return payload
 
 
+# Every external agent runs headless — one that asks a clarifying question
+# dies patchless (authwapi acceptance 019fc70f: claude found yarn where the
+# operator said npm and politely asked a question nobody could answer), and
+# one that tidies the workspace deletes the supervisor's own bookkeeping
+# (019fc719: git clean -fd shape took .events/ mid-run). The standing rules
+# ride EVERY dispatch instead of depending on the operator to retype them.
+UNATTENDED_PREAMBLE = (
+    "You run unattended inside a sandbox: never ask questions - when a choice "
+    "arises, take the minimal conservative option and note it in your summary. "
+    "Never run git clean, git stash, or git commit. The .events/, .artifacts/ "
+    "and .toolchain/ directories are the supervisor's bookkeeping - never "
+    "modify or delete them.\n\n"
+)
+
 # v94-F2: well under the monitor's 3x10s heartbeat-loss threshold. The agent
 # call is one silent minutes-long subprocess; without beats the supervisor
 # cannot tell thinking from hung and kills the tree (field run 019f9e9f,
@@ -276,7 +290,7 @@ def _execute(
     stream.emit(EventType.PLAN_CREATED, {"steps": list(spec.plan_steps)})
 
     timeout = task.budget.wall_clock_seconds
-    agent_argv = spec.build_argv(spec.command_from_env(), task.instructions)
+    agent_argv = spec.build_argv(spec.command_from_env(), UNATTENDED_PREAMBLE + task.instructions)
     agent_proc, agent_record = _run(
         agent_argv, cwd=workspace, timeout=timeout, stream=stream, purpose="agent"
     )
