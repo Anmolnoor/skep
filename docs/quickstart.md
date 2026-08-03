@@ -23,7 +23,31 @@ sudo dnf install bubblewrap
 sudo apt install bubblewrap
 ```
 
-## 2. Install from source
+## 2. Install
+
+From PyPI, as an isolated app (recommended for daily use). On Debian/Ubuntu
+the system Python refuses bare `pip install` (PEP 668) — pipx is the way
+around it, and the PATH/completions steps are part of the install, not
+optional extras:
+
+```sh
+sudo apt install pipx   # Debian/Ubuntu (Fedora: sudo dnf install pipx)
+pipx ensurepath         # puts ~/.local/bin on your PATH for future sessions
+source ~/.bashrc        # reload so the PATH change takes effect now
+pipx completions        # prints the completion setup for your shell
+```
+
+`pipx completions` prints the exact line for your shell — for bash it is
+`eval "$(register-python-argcomplete pipx)"`; add it to `~/.bashrc` and
+`source ~/.bashrc` again. Then:
+
+```sh
+pipx install skep
+skep --help             # verify it resolves
+```
+
+Or from source (what contributors use, and what the rest of this guide's
+`uv run` commands assume):
 
 ```sh
 git clone https://github.com/Anmolnoor/skep.git

@@ -108,9 +108,14 @@ skep serve
           </div>
           <p style="margin: 0 0 16px; font-size: 14px; line-height: 1.6; color: var(--text-faint);">Installed as an isolated app, then <span class="mono" style="font-size: 13px;">skep</span> is on your PATH. On Debian/Ubuntu the system Python refuses bare <span class="mono" style="font-size: 13px;">pip install</span> (PEP 668) — pipx is the way around it, not <span class="mono" style="font-size: 13px;">--break-system-packages</span>.</p>
           <div class="snippet">
-            <pre>sudo apt install pipx   <span style="color: #4A5350;"># Debian/Ubuntu; then: pipx ensurepath</span>
-pipx install skep
-skep --version</pre>
+            <pre>sudo apt install pipx      <span style="color: #4A5350;"># 1. Debian/Ubuntu (Fedora: dnf install pipx)</span>
+pipx ensurepath            <span style="color: #4A5350;"># 2. puts ~/.local/bin on your PATH</span>
+source ~/.bashrc           <span style="color: #4A5350;"># 3. reload so the PATH change lands now</span>
+pipx completions           <span style="color: #4A5350;"># 4. prints the completion setup for YOUR shell;</span>
+                           <span style="color: #4A5350;">#    bash: eval "$(register-python-argcomplete pipx)" → ~/.bashrc</span>
+pipx install skep          <span style="color: #4A5350;"># 5.</span>
+skep --help                <span style="color: #4A5350;"># 6. verify it resolves</span>
+skep serve                 <span style="color: #4A5350;"># 7. start the daemon</span></pre>
             <button class="copy-btn" aria-label="Copy"><i data-lucide="copy"></i></button>
           </div>
           <div class="checks">
