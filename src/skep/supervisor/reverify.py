@@ -73,7 +73,21 @@ def _needs_uv_priming(worktree: Path, commands: list[str]) -> bool:
     return wants_uv and (worktree / "pyproject.toml").is_file()
 
 
-def _run_command(command: str, *, cwd: Path, env: dict[str, str], profile_path: Path | None) -> int:
+def command_timeout_seconds(budget_seconds: float | None) -> float:
+    """The re-run bound: the run's own wall-clock budget, floored at the
+    historic 300s default — a small budget must never tighten G10 below what
+    it has always been afforded."""
+    return max(budget_seconds or 0.0, _REVERIFY_TIMEOUT_SECONDS)
+
+
+def _run_command(
+    command: str,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    profile_path: Path | None,
+    timeout: float = _REVERIFY_TIMEOUT_SECONDS,
+) -> int:
     argv: list[str] = ["/bin/sh", "-c", command]
     if profile_path is not None:
         argv = sandbox.wrap_command(argv, profile_path)
@@ -85,7 +99,7 @@ def _run_command(command: str, *, cwd: Path, env: dict[str, str], profile_path: 
             capture_output=True,
             text=True,
             check=False,
-            timeout=_REVERIFY_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return -1
@@ -102,8 +116,15 @@ def reverify(
     profile_path: Path | None,
     env: dict[str, str],
     changed_files: tuple[str, ...] | None = None,
+    timeout_seconds: float | None = None,
 ) -> ReverifyOutcome:
-    """Apply the patch to a clean worktree and re-run the verification command(s)."""
+    """Apply the patch to a clean worktree and re-run the verification command(s).
+
+    ``timeout_seconds`` bounds each re-run command; the 300s default predates
+    real pinned suites (skep's own takes ~10min serially — the dogfood run
+    019fc72c timed out at -1 while perfectly healthy). Callers with the run's
+    budget in hand pass it so the re-run is afforded what the worker was.
+    """
     if patch_path is None or not patch_path.is_file():
         # v65-F1: 58 of the first 94 reverifications were patch-less runs
         # (script/researcher by design, no-change audits and reviews) rendered
@@ -199,8 +220,15 @@ def reverify(
                 f"{applied.stderr.strip()}",
             )
         exit_codes: list[int] = []
+        command_timeout = command_timeout_seconds(timeout_seconds)
         for command in commands:
-            code = _run_command(command, cwd=worktree, env=env, profile_path=profile_path)
+            code = _run_command(
+                command,
+                cwd=worktree,
+                env=env,
+                profile_path=profile_path,
+                timeout=command_timeout,
+            )
             exit_codes.append(code)
         if any(code == _COMMAND_NOT_FOUND for code in exit_codes):
             return ReverifyOutcome(
@@ -233,6 +261,7 @@ def reverify_run(
     config: SupervisorConfig,
     changed_files: tuple[str, ...] | None = None,
     verify_command: str = "",
+    timeout_seconds: float | None = None,
 ) -> ReverifyOutcome:
     """Re-verify one completed run from its stored evidence; record the result.
 
@@ -262,6 +291,7 @@ def reverify_run(
         profile_path=profile_path,
         env={name: os.environ[name] for name in ("PATH", "HOME") if name in os.environ},
         changed_files=changed_files,
+        timeout_seconds=timeout_seconds,
     )
     # I8: the record says WHAT it re-ran, not just how it went — "passed" means
     # something different when the worker chose the command than when the

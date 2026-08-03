@@ -665,6 +665,10 @@ def run_task(
                 # v88-F4 (I2): when the project pinned what verification means,
                 # G10 re-runs THAT — not the command the worker nominated.
                 verify_command=verify_command,
+                # The re-run is afforded the run's own wall-clock budget —
+                # the flat 300s cap timed out a healthy 10-minute pinned
+                # suite (dogfood 019fc72c, exit -1).
+                timeout_seconds=float(task.budget.wall_clock_seconds),
             )
             # D3: a declarative rule may now auto-apply the patch (dormant unless
             # rules are configured). Runs after re-verification so a rule can

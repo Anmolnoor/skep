@@ -346,3 +346,14 @@ def test_slug_bound_pin_survives_the_run_task_fallback(
     assert reverify_record is not None
     assert reverify_record.commands == ['grep -q "value = 1" existing.py']
     assert "the project's pinned verify_command" in reverify_record.detail
+
+
+def test_reverify_timeout_is_the_budget_floored_at_the_default() -> None:
+    """The flat 300s cap timed out a healthy 10-minute pinned suite (dogfood
+    019fc72c, exit -1) — the re-run is afforded the run's own budget, and a
+    small budget never tightens G10 below the historic default."""
+    from skep.supervisor.reverify import _REVERIFY_TIMEOUT_SECONDS, command_timeout_seconds
+
+    assert command_timeout_seconds(None) == _REVERIFY_TIMEOUT_SECONDS
+    assert command_timeout_seconds(60.0) == _REVERIFY_TIMEOUT_SECONDS
+    assert command_timeout_seconds(6000.0) == 6000.0
