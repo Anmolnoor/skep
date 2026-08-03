@@ -1,6 +1,6 @@
 [project]
 name = "skep"
-version = "1.0.1"
+version = "1.0.2"
 description = "Govern AI coding agents with sandboxing, verification, approvals, and audit trails."
 readme = "README.md"
 requires-python = ">=3.12"

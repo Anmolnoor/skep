@@ -13,7 +13,7 @@ def test_pyproject_has_public_release_metadata() -> None:
     assert project["name"] == "skep"
     # v27-F2: a public v1.0.0 tag already exists; the next release must sort
     # after it and PyPI rejects re-uploads.
-    assert project["version"] == "1.0.1"
+    assert project["version"] == "1.0.2"
     assert project["requires-python"] == ">=3.12"
     assert project["authors"] == [{"name": "Anmol Noor"}]
     assert {"ai-agents", "sandbox", "verification", "approval-workflow"} <= set(project["keywords"])

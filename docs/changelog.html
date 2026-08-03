@@ -50,17 +50,17 @@
   <section class="wrap" style="padding-bottom: clamp(32px, 4vw, 48px);">
     <div style="padding: clamp(22px, 3vw, 32px); border: 1px solid rgba(123,224,140,0.3); border-radius: 14px; background: var(--bg-card);">
       <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 14px;">
-        <span class="mono" style="font-size: 22px; font-weight: 600; color: var(--text-bright);">v1.0.1</span>
+        <span class="mono" style="font-size: 22px; font-weight: 600; color: var(--text-bright);">v1.0.2</span>
         <span class="pill" style="background: rgba(123,224,140,0.13); color: var(--green);">Latest</span>
-        <span class="mono" style="font-size: 12.5px; color: var(--text-ghost);">2026-07-30 · PyPI + GitHub release</span>
+        <span class="mono" style="font-size: 12.5px; color: var(--text-ghost);">2026-08-03 · PyPI + GitHub release</span>
       </div>
-      <p style="margin: 0 0 16px; max-width: 74ch; font-size: 15px; line-height: 1.65; color: var(--text-mid);">The public launch. Everything the private field-testing arc proved, in one package: sandboxed worker execution (Seatbelt / bubblewrap), independent re-verification with the pinned verify command (G10), patch-as-approval landing on <span class="mono" style="font-size: 13.5px; color: var(--orange-soft);">skep/&lt;task_id&gt;</span>, a durable audit ledger, learned approval templates, coding engines (Claude Code, Codex, Aider, Ollama, built-in), the chat Queen with web / terminal / messenger surfaces, the command deck, schedules, MCP tools, and Agent Skills shelves.</p>
+      <p style="margin: 0 0 16px; max-width: 74ch; font-size: 15px; line-height: 1.65; color: var(--text-mid);">The v106 audit round. External coding engines get a writable <span class="mono" style="font-size: 13.5px; color: var(--orange-soft);">.toolchain/</span> home inside the sandboxed workspace — Claude Code's own tooling and <span class="mono" style="font-size: 13.5px;">npm install</span> now survive a run; the worker heartbeats through long commands instead of reading as dead. Re-verification stops saying "could not re-verify" when it ran and failed — the unconfirmed verdict is on the approval card <em>before</em> you say yes. Tool results pair by call id, Discord approval buttons ack inside the 3-second deadline, card timeouts measure operator absence, and <span class="mono" style="font-size: 13.5px;">skep doctor</span> names poisoned and dead repo registrations.</p>
       <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-        <span class="pill" style="background: rgba(123,224,140,0.1); color: var(--green);">Sandbox</span>
-        <span class="pill" style="background: rgba(103,211,232,0.1); color: #67D3E8;">Re-verify</span>
-        <span class="pill" style="background: rgba(255,107,31,0.1); color: var(--orange-soft);">Approvals</span>
-        <span class="pill" style="background: rgba(167,139,250,0.12); color: #A78BFA;">Engines</span>
-        <span class="pill" style="background: rgba(242,179,94,0.12); color: var(--yellow);">Command deck</span>
+        <span class="pill" style="background: rgba(123,224,140,0.1); color: var(--green);">Engine toolchains</span>
+        <span class="pill" style="background: rgba(103,211,232,0.1); color: #67D3E8;">Honest re-verify</span>
+        <span class="pill" style="background: rgba(255,107,31,0.1); color: var(--orange-soft);">Discord ack</span>
+        <span class="pill" style="background: rgba(167,139,250,0.12); color: #A78BFA;">Doctor</span>
+        <span class="pill" style="background: rgba(242,179,94,0.12); color: var(--yellow);">Parallel CI</span>
       </div>
       <div style="display: flex; flex-wrap: wrap; gap: 18px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line-inner); font-size: 13.5px; color: var(--text-dim);">
         <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="package" style="width: 15px; height: 15px; color: var(--green);"></i><span class="mono" style="font-size: 12.5px;">pipx install skep</span></span>
@@ -77,6 +77,11 @@
       <p style="margin: 0 0 34px; max-width: 62ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Milestones from the internal version history — each one field-tested, fixed, and landed with its own evidence before the next began.</p>
 
       <div class="timeline">
+        <div class="t-item">
+          <div class="when">2026-08-03 · v1.0.2</div>
+          <h3>The v106 audit round goes public</h3>
+          <p>Thirteen fixes from the 2026-07-29 full audit, ported commit-by-commit onto the public tree: workspace toolchain homes for external engines, worker heartbeats under long commands, honest re-verification wording on every approval surface, tool-call-id pairing with a store migration, deferred Discord interaction acks, operator-absence card timeouts, and doctor advisories for poisoned registrations. CI unit tests now run under pytest-xdist on both platforms.</p>
+        </div>
         <div class="t-item major">
           <div class="when">2026-07-30 · v1.0.1</div>
           <h3>Public launch</h3>
