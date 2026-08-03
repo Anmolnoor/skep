@@ -89,7 +89,13 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         argv=(sys.executable, "-m", "skep.workers.claude_code"),
         binary="claude",
         network_host="api.anthropic.com",
-        env_vars=("USER", "LOGNAME"),
+        # CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY: v106-F1's per-run
+        # CLAUDE_CONFIG_DIR redirect orphans Linux file-based logins
+        # (~/.claude/.credentials.json never reaches the run — the authwapi
+        # acceptance died on "Not logged in" in 1s). Headless auth rides the
+        # environment instead: `claude setup-token` mints the long-lived
+        # token. Names only (G2); unset vars are inert allowlist entries.
+        env_vars=("USER", "LOGNAME", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
         toolchain_env=(("CLAUDE_CONFIG_DIR", "claude"),),
         summary=(
             "Claude Code, headless (--print). Confined by the sandbox, not the capability layer."

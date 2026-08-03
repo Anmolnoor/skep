@@ -166,6 +166,10 @@ def test_a_cli_engine_gets_the_env_it_declares(repo: Path, config: SupervisorCon
     resolved = _resolve(config, repo)
     assert "USER" in resolved.permissions.env_allowlist
     assert "LOGNAME" in resolved.permissions.env_allowlist
+    # The CLAUDE_CONFIG_DIR redirect (v106-F1) orphans file-based logins, so
+    # headless auth must be able to ride the environment.
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in resolved.permissions.env_allowlist
+    assert "ANTHROPIC_API_KEY" in resolved.permissions.env_allowlist
 
 
 def test_the_builtin_engine_adds_no_env(repo: Path, config: SupervisorConfig) -> None:
