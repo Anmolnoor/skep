@@ -55,7 +55,7 @@ _SUBJECT_KEYS: tuple[str, ...] = (
 
 # Risk classes. Membership is the claim; the text is written once per class so
 # it cannot drift tool by tool.
-_SHELL_TOOLS = frozenset({"run_shell", "run_code", "start_process"})
+_SHELL_TOOLS = frozenset({"run_shell", "run_code", "start_process", "diagnose_run"})
 _PUBLISHING_TOOLS = frozenset({"push_branch", "push_baseline", "open_pr", "merge_pr", "close_pr"})
 _LANDING_TOOLS = frozenset({"land_run", "approve_review"})
 _POLICY_TOOLS = frozenset(

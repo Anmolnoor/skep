@@ -40,6 +40,7 @@ from .actions import (
     created_transition_views_for_task,
     current_events,
     delete_policy_group,
+    diagnose_run,
     effective_policy_view,
     land_run,
     list_policy_groups,
@@ -129,6 +130,16 @@ class ResolveRequest(BaseModel):
     note: str | None = None
     # v20-F5: optional named landing branch on approve (default skep/<task_id>).
     branch: str | None = None
+
+
+class DiagnoseRequest(BaseModel):
+    """Body of ``POST /api/runs/{task_id}/diagnose`` (v107-F2).
+
+    The operator face of diagnose_run: one bounded, sandboxed command in a
+    kept run worktree. The authenticated operator IS the human — no card."""
+
+    command: str = Field(min_length=1, max_length=4000)
+    timeout_seconds: float | None = Field(default=None, ge=1, le=600)
 
 
 class SteerRequest(BaseModel):
@@ -619,6 +630,21 @@ def create_app(
         by the operator having initiated this exact call."""
         run = _require_run(task_id)
         return land_run(run_store, run, body.actor, note=body.note, branch=body.branch)
+
+    @app.post("/api/runs/{task_id}/diagnose")
+    def diagnose_run_route(task_id: str, body: DiagnoseRequest) -> dict[str, Any]:
+        """v107-F2: run one bounded command in the run's kept worktree."""
+        run = _require_run(task_id)
+        try:
+            return diagnose_run(
+                run_store,
+                holder.current,
+                str(run["task_id"]),
+                command=body.command,
+                timeout_seconds=body.timeout_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/runs/{task_id}/steer", status_code=201)
     def steer_run(task_id: str, body: SteerRequest) -> dict[str, Any]:

@@ -799,6 +799,27 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         ["task_id"],
     ),
     _tool(
+        "diagnose_run",
+        "PROPOSE running ONE bounded shell command inside a kept run worktree "
+        "(requires user confirmation — always cards, never auto-allowed). Use "
+        "it to diagnose a failed or unconfirmed run: re-run the failing test, "
+        "cat a log, inspect state — in the run's own preserved evidence. The "
+        "command executes sandboxed (no network, writes confined to that "
+        "worktree) and its output returns here, capped at 10k chars. Only "
+        "failed/unconfirmed runs keep their worktree, and only for 24h; when "
+        "the tree is gone, read the audit trail via get_run instead. This "
+        "cannot land, push, or modify anything outside the kept worktree.",
+        {
+            "task_id": {"type": "string", "description": "the run whose kept worktree to inspect"},
+            "command": {"type": "string", "description": "the shell command to run in it"},
+            "timeout_seconds": {
+                "type": "integer",
+                "description": "wall-clock bound (default 120, max 600)",
+            },
+        },
+        ["task_id", "command"],
+    ),
+    _tool(
         "batch_dispatch",
         "PROPOSE dispatching up to 3 worker runs IN PARALLEL — one card, one "
         "confirm for the whole batch (auto-resolves only when EVERY task "
@@ -2004,6 +2025,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "delegate_analysis",
         "quick_edit",
         "resume_run",
+        "diagnose_run",
         "run_code",
         "approve_review",
         "deny_review",
@@ -3448,6 +3470,18 @@ def _execute_mutation(
         # the existing resume seam does the work; landing rules unchanged (I1).
         return actions.resume_crashed_run(
             store, holder.current, runner, str(args["task_id"]), actor
+        )
+    if name == "diagnose_run":
+        # v107-F2: one bounded command in the kept evidence — sandboxed like
+        # re-verification (I5), always carded (I6), reads the tree it names.
+        return actions.diagnose_run(
+            store,
+            holder.current,
+            str(args["task_id"]),
+            command=str(args["command"]),
+            timeout_seconds=float(args["timeout_seconds"])
+            if args.get("timeout_seconds") is not None
+            else None,
         )
     if name == "delegate_analysis":
         # v83-F7 (ADR 0041): reasoning-only delegation — read-only LLM turns

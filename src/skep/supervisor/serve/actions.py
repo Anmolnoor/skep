@@ -9,6 +9,7 @@ returns it as-is, the chat layer catches it and shows the model the failure.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -2271,6 +2272,95 @@ def apply_patch(
         raise HTTPException(status_code=409, detail=failure)
     store.resolve_approval(review_id, approved=True, actor=actor, note=note, landing_branch=target)
     return target
+
+
+# v107-F2: diagnose_run bounds — generous enough for one test file, capped
+# so a card can never grant an unbounded supervisor-side process.
+DIAGNOSE_DEFAULT_TIMEOUT_SECONDS = 120.0
+DIAGNOSE_MAX_TIMEOUT_SECONDS = 600.0
+DIAGNOSE_OUTPUT_CAP = 10_000
+
+
+def diagnose_run(
+    store: RunStore,
+    config: SupervisorConfig,
+    task_id: str,
+    *,
+    command: str,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    """v107-F2: one bounded, carded command inside a KEPT run worktree.
+
+    The Queen's diagnosis surface for unconfirmed/failed runs ("re-run the
+    failing test, show me"): the command executes under the same sandbox
+    machinery as re-verification (DENY_ALL network, workspace-confined
+    writes — I5), inside the preserved tree, output capped for the chat.
+    This is not run_shell-with-a-repo-cwd: the sandbox is the wall, the
+    card is the trigger (I6), and nothing here can land or push (I1/I4).
+    """
+    from .. import sandbox
+    from ..worktree import git_metadata_writable_roots
+
+    record = store.get_run(task_id)
+    if record is None:
+        raise ValueError(f"no run {task_id!r} — list_runs shows recent task ids")
+    workspace = Path(record.workspace or "")
+    if not record.workspace or not workspace.is_dir():
+        raise ValueError(
+            f"run {task_id[:13]}…'s worktree is gone — preserved trees (failed/"
+            "unconfirmed runs) live 24h before the sweep; dispatch a fresh run, "
+            "or read the audit trail via get_run instead"
+        )
+    timeout = min(
+        float(timeout_seconds or DIAGNOSE_DEFAULT_TIMEOUT_SECONDS),
+        DIAGNOSE_MAX_TIMEOUT_SECONDS,
+    )
+    argv: list[str] = ["/bin/sh", "-c", command]
+    if config.sandbox and sandbox.available():
+        profile = config.audit_dir / task_id / "diagnose.profile.sb"
+        sandbox.write_profile(
+            profile,
+            workspace=workspace,
+            extra_writable=git_metadata_writable_roots(workspace),
+            network=sandbox.DENY_ALL_NETWORK,
+        )
+        argv = sandbox.wrap_command(argv, profile)
+    env = {name: os.environ[name] for name in ("PATH", "HOME") if name in os.environ}
+    # F3's lesson applied here too: TMPDIR must live inside the wall.
+    tmp_dir = workspace / ".toolchain" / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    env["TMPDIR"] = str(tmp_dir)
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=workspace,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+        exit_code = proc.returncode
+        stdout, stderr = proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as exc:
+        exit_code = -1
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = f"command timed out after {int(timeout)}s"
+
+    def _cap(text: str) -> str:
+        if len(text) <= DIAGNOSE_OUTPUT_CAP:
+            return text
+        return text[-DIAGNOSE_OUTPUT_CAP:] + "\n… (truncated)"
+
+    return {
+        "task_id": record.task_id,
+        "command": command,
+        "exit_code": exit_code,
+        "stdout": _cap(stdout),
+        "stderr": _cap(stderr),
+        "workspace": str(workspace),
+        "sandboxed": config.sandbox and sandbox.available(),
+    }
 
 
 def _resumable_states() -> frozenset[str]:

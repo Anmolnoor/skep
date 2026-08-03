@@ -1762,3 +1762,66 @@ def test_diff_is_fetched_only_when_a_patch_artifact_exists() -> None:
     guards = app_js.count('(detail.artifacts || []).some((a) => a.kind === "patch")')
     fetches = app_js.count("`/api/runs/${taskId}/diff`")
     assert guards == fetches == 2
+
+
+def test_diagnose_run_executes_in_the_kept_worktree_and_teaches_when_gone(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v107-F2: one bounded command in the kept evidence — output capped,
+    refusals teach (I9), the REST face is the operator's half (ADR 0050)."""
+    from skep.supervisor import RunStore
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+    from skep.supervisor.serve.actions import diagnose_run
+
+    store = RunStore(config.db_path)
+    try:
+        workspace = tmp_path / "kept-tree"
+        workspace.mkdir()
+        (workspace / "clue.txt").write_text("the failing thing\n", encoding="utf-8")
+        task = mint_task(workspace=workspace, instructions="x", budget=DEFAULT_BUDGET)
+        store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
+        store.transition(task.task_id, "failed", "agent exited 1")
+
+        out = diagnose_run(store, config, task.task_id, command="cat clue.txt")
+        assert out["exit_code"] == 0
+        assert "the failing thing" in out["stdout"]
+
+        # Output is capped, and the cap says so.
+        big = diagnose_run(store, config, task.task_id, command="yes x | head -c 20000")
+        assert len(big["stdout"]) <= 10_000 + 32
+        assert "truncated" in big["stdout"]
+
+        # A swept tree refuses with the alternative, not a bare no (I9).
+        import shutil
+
+        shutil.rmtree(workspace)
+        try:
+            diagnose_run(store, config, task.task_id, command="true")
+            raise AssertionError("must refuse a swept worktree")
+        except ValueError as exc:
+            assert "dispatch a fresh run" in str(exc)
+            assert "get_run" in str(exc)
+    finally:
+        store.close()
+
+
+def test_diagnose_run_rest_face(repo: Path, config: SupervisorConfig, tmp_path: Path) -> None:
+    from skep.supervisor import RunStore
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+
+    from .conftest import serve_client
+
+    store = RunStore(config.db_path)
+    try:
+        workspace = tmp_path / "kept"
+        workspace.mkdir()
+        task = mint_task(workspace=workspace, instructions="x", budget=DEFAULT_BUDGET)
+        store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
+        store.transition(task.task_id, "failed", "agent exited 1")
+    finally:
+        store.close()
+    client = serve_client(config)
+    ok = client.post(f"/api/runs/{task.task_id}/diagnose", json={"command": "echo hi"})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["exit_code"] == 0
+    assert "hi" in ok.json()["stdout"]
