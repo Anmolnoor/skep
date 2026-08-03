@@ -79,7 +79,9 @@ def _deposit_completed_result(
 
 def test_recovery_ingests_a_late_deposited_result(repo: Path, config: SupervisorConfig) -> None:
     """A valid envelope on disk is a deposit — the run completes with its
-    evidence, gets re-verified (G10), and the worktree is torn down."""
+    evidence and gets re-verified (G10). This deposit claims changed files
+    without a patch (the v65-F1 suspicious shape), so its re-verification is
+    unconfirmed — and v107-F1 keeps the worktree as diagnosis evidence."""
     store = RunStore(config.db_path)
     notified: list[str] = []
     try:
@@ -94,8 +96,13 @@ def test_recovery_ingests_a_late_deposited_result(repo: Path, config: Supervisor
         assert record.state == "completed"
         assert record.verification_outcome == "passed"
         assert dict((k, p) for k, p, _ in store.artifacts_for(task_id)).get("event_log")
-        assert store.reverification_for(task_id) is not None  # G10 ran
-        assert not workspace.exists()  # torn down like any terminal run
+        reverify = store.reverification_for(task_id)
+        assert reverify is not None  # G10 ran
+        assert reverify.confirmed is False  # claims without a patch
+        # v107-F1: an unconfirmed completed run keeps its tree — it is the
+        # evidence for diagnose_run and the warm workspace for the retry.
+        assert workspace.exists()
+        assert workspace.name in {Path(w).name for w in store.preserved_run_workspaces()}
         assert notified == [task_id]
     finally:
         store.close()

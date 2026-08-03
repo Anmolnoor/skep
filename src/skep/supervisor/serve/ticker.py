@@ -259,6 +259,17 @@ class Ticker(threading.Thread):
             except Exception:
                 logger.exception("observation harvest sweep failed")
             try:
+                # v107-F1: preserved worktrees (failed/unconfirmed runs) are
+                # collected once their TTL passes — kept trees are a warm
+                # workspace and diagnosis evidence, never tenure.
+                from ..dispatch import sweep_expired_preserved_worktrees
+
+                swept = sweep_expired_preserved_worktrees(self._store, self._holder.current)
+                if swept:
+                    logger.info("swept %d expired preserved worktree(s)", swept)
+            except Exception:
+                logger.exception("preserved worktree TTL sweep failed")
+            try:
                 results = run_due(
                     store=self._store,
                     config=self._holder.current,

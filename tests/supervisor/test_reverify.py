@@ -17,6 +17,12 @@ def _no_leftovers(repo: Path, config: SupervisorConfig) -> None:
     assert listed.count("worktree ") == 1, f"git still tracks extra worktrees:\n{listed}"
 
 
+def _kept_as_evidence(repo: Path, config: SupervisorConfig, task_id: str) -> None:
+    """v107-F1: an unconfirmed completed run keeps its tree for diagnosis."""
+    worktrees = [p.name for p in config.worktrees_root.iterdir()]
+    assert worktrees == [task_id], f"expected only the preserved tree: {worktrees}"
+
+
 def test_completed_run_is_reverified_and_confirmed(repo: Path, config: SupervisorConfig) -> None:
     outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
     assert outcome.record.state == "completed"
@@ -51,7 +57,7 @@ def test_lying_worker_is_caught_by_reverification(repo: Path, config: Supervisor
     assert reverify.outcome == "failed"
     assert reverify.confirmed is False
     assert reverify.exit_codes and reverify.exit_codes[0] != 0
-    _no_leftovers(repo, config)
+    _kept_as_evidence(repo, config, outcome.record.task_id)
 
 
 def _patchless(
@@ -168,7 +174,7 @@ def test_pinned_verify_command_catches_the_vacuous_worker(
     assert reverify.confirmed is False
     # I8: the record says which command it actually re-ran.
     assert "the project's pinned verify_command" in reverify.detail
-    _no_leftovers(repo, config)
+    _kept_as_evidence(repo, config, outcome.record.task_id)
 
 
 def test_pinned_verify_command_still_confirms_honest_work(

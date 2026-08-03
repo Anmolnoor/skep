@@ -177,7 +177,14 @@ def test_completed_terminal_without_valid_result_fails_evidence_chain(
     finally:
         store.close()
     assert "result envelope" in str(transitions[-1][1])
-    _no_leftovers(repo, config)
+    # v107-F1: a failed run keeps its worktree (warm tree for the retry,
+    # evidence for diagnosis) — the TTL sweep collects it, not the terminal.
+    store = RunStore(config.db_path)
+    try:
+        preserved = {Path(w).name for w in store.preserved_run_workspaces()}
+    finally:
+        store.close()
+    assert outcome.record.task_id in preserved
 
 
 def test_hang_is_killed_and_synthesized_as_timeout(repo: Path, config: SupervisorConfig) -> None:

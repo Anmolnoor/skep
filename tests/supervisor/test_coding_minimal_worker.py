@@ -71,6 +71,12 @@ def _no_leftovers(repo: Path, worktrees_root: Path) -> None:
     assert listed.count("worktree ") == 1
 
 
+def _only_preserved(worktrees_root: Path, task_id: str) -> None:
+    """v107-F1: a failed run's tree is preserved for the retry, not swept."""
+    leftover = [p.name for p in worktrees_root.iterdir()]
+    assert leftover == [task_id], f"expected only the preserved tree: {leftover}"
+
+
 def test_default_coding_worker_creates_python_hello_world(repo: Path, tmp_path: Path) -> None:
     config = build_config(tmp_path / "home", None)
 
@@ -171,7 +177,7 @@ def test_default_coding_worker_git_negative_instruction_fails_without_crashing(
         "detail": "git.commit",
     }
     assert not (repo / "hello.py").exists()
-    _no_leftovers(repo, config.worktrees_root)
+    _only_preserved(config.worktrees_root, outcome.record.task_id)
 
 
 def test_default_coding_worker_structured_intent_requests_commit_without_prompt_word(
@@ -796,7 +802,7 @@ def test_empty_deliverable_fails_verification_even_behind_test_f(
     assert verify_events, "the verify verdict must be evidenced"
     assert verify_events[-1].payload["outcome"] == "failed"
     assert "empty" in str(verify_events[-1].payload["details"])
-    _no_leftovers(repo, config.worktrees_root)
+    _only_preserved(config.worktrees_root, outcome.record.task_id)
 
 
 def test_default_coding_worker_tool_plan_rejects_git_stage_before_path_validation(
@@ -4116,7 +4122,7 @@ def test_default_coding_worker_reports_missing_llm_tool(
     assert outcome.record.summary == "LLM coding plan requested unavailable tool(s)."
     assert outcome.record.verification_outcome == "not_attempted"
     assert outcome.record.verification_details == "missing tools: package.install"
-    _no_leftovers(repo, config.worktrees_root)
+    _only_preserved(config.worktrees_root, outcome.record.task_id)
 
 
 def test_default_coding_worker_executes_plugin_tool_plan(

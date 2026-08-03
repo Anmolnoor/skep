@@ -2273,6 +2273,15 @@ def apply_patch(
     return target
 
 
+def _resumable_states() -> frozenset[str]:
+    # v107-F1: one source of truth — dispatch owns the list (crash states plus
+    # "failed", whose preserved tree is the resume value even with no
+    # checkpoint). Imported lazily like every other dispatch symbol here.
+    from ..dispatch import RESUMABLE_STATES
+
+    return frozenset(RESUMABLE_STATES)
+
+
 RESUMABLE_CRASH_STATES = frozenset({"worker_crashed", "worker_timeout"})
 
 
@@ -2297,13 +2306,17 @@ def resume_crashed_run(
     record = store.get_run(task_id)
     if record is None:
         raise ValueError(f"no run {task_id!r}")
-    if record.state not in RESUMABLE_CRASH_STATES:
+    if record.state not in _resumable_states():
         raise ValueError(
-            f"run {task_id[:13]}… is {record.state!r} — resume_run only continues "
-            "worker_crashed/worker_timeout runs with a checkpoint; for anything "
-            "else dispatch a fresh run"
+            f"run {task_id[:13]}… is {record.state!r} — resume_run continues "
+            "worker_crashed/worker_timeout runs (from their checkpoint) and "
+            "failed runs (fresh attempt in the preserved worktree); for "
+            "anything else dispatch a fresh run"
         )
-    if salvaged_checkpoint_version(config, task_id) < 2:
+    # v107-F1: only the crash states carry a cursor to demand a checkpoint
+    # for. A failed run resumes as a fresh attempt in its warm worktree —
+    # there is nothing to "continue from", and that is fine.
+    if record.state in RESUMABLE_CRASH_STATES and salvaged_checkpoint_version(config, task_id) < 2:
         raise ValueError(
             f"run {task_id[:13]}… left no resume checkpoint — there is nothing to "
             "continue from; dispatch a fresh run instead"
@@ -2356,6 +2369,10 @@ def resume_crashed_run(
         raise ValueError(str(exc)) from exc
     if preserved is None:
         fate = "gone — honest replay from step 0 in a fresh worktree"
+    elif record.state == "failed":
+        # v107-F1: no checkpoint exists for a failed run; the value is the
+        # warm tree itself (toolchain caches, installed deps, prior edits).
+        fate = "preserved — fresh attempt in the warm worktree (prior work and deps intact)"
     elif cursor is None:
         # v73-F5: react checkpoints carry rounds, not a plan cursor — a
         # perfect resume must not read as breakage ("cursor None").

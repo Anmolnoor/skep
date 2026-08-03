@@ -786,15 +786,16 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "resume_run",
-        "PROPOSE resuming a crashed or timed-out run from its saved checkpoint "
-        "(requires user confirmation). When the run's worktree survived, the "
-        "worker continues IN PLACE from the checkpoint cursor; when it is gone, "
-        "the resume honestly replays from step 0 in a fresh worktree "
-        "(accumulated grants make the replay converge). Only worker_crashed / "
-        "worker_timeout runs WITH a checkpoint qualify — the crash notification "
-        "and get_run say so. Landing rules unchanged: the resumed run still "
-        "lands through its own approval.",
-        {"task_id": {"type": "string", "description": "the crashed run's task id"}},
+        "PROPOSE resuming a crashed, timed-out, or FAILED run (requires user "
+        "confirmation). Crashed/timed-out runs continue IN PLACE from their "
+        "saved checkpoint cursor (checkpoint required); failed runs get a "
+        "fresh attempt in their preserved worktree — prior edits, toolchain "
+        "caches and installed deps intact, so the retry skips the cold "
+        "setup. When the worktree is gone (preserved trees expire after 24h) "
+        "the resume honestly replays from step 0 in a fresh worktree. "
+        "Landing rules unchanged: the resumed run still lands through its "
+        "own approval.",
+        {"task_id": {"type": "string", "description": "the run's task id"}},
         ["task_id"],
     ),
     _tool(

@@ -158,7 +158,7 @@ def test_resume_refuses_wrong_state_and_missing_checkpoint(
         done = mint_task(workspace=tmp_path / "ws", instructions="x", budget=DEFAULT_BUDGET)
         store.create_run(done, repo=repo, ref=None, execution_mode="sandbox")
         store.transition(done.task_id, "completed", None)
-        with pytest.raises(ValueError, match="only continues"):
+        with pytest.raises(ValueError, match="dispatch a fresh run"):
             resume_crashed_run(store, config, NeverRunner(), done.task_id, "op")  # type: ignore[arg-type]
 
         # Crashed but checkpoint-less: the error teaches the alternative.
@@ -226,6 +226,69 @@ def test_a_resumed_chain_releases_the_worktree_to_the_sweep(
         )
         store.create_run(successor, repo=repo, ref=None, execution_mode="sandbox")
         store.transition(successor.task_id, "completed", None)
-        assert workspace.name not in {Path(w).name for w in store.crashed_run_workspaces()}
+        # v107-F1: a completed successor holds the tree until ITS OWN
+        # re-verification confirms — the keep answer needs the confirmed bit.
+        assert workspace.name in {Path(w).name for w in store.preserved_run_workspaces()}
+        store.record_reverification(
+            successor.task_id,
+            outcome="passed",
+            worker_outcome="passed",
+            confirmed=True,
+            commands=["true"],
+            exit_codes=[0],
+            detail="test",
+        )
+        assert workspace.name not in {Path(w).name for w in store.preserved_run_workspaces()}
+    finally:
+        store.close()
+
+
+def test_failed_run_keeps_its_worktree_and_resumes_in_place(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """v107-F1: a failed run's warm tree IS the resume value (five cold yarn
+    installs across the 2026-08-03 acceptance arc) — no checkpoint needed."""
+    store = RunStore(config.db_path)
+    try:
+        task_id, workspace = _strand_run(store, config, repo)
+        store.transition(task_id, "failed", "agent exited 1")
+        assert workspace.name in _keep_worktree_names(store)
+        assert salvaged_checkpoint_version(config, task_id) < 2  # no checkpoint
+
+        class _Runner:
+            def submit(self, *args: Any, **kwargs: Any) -> str:
+                self.kwargs = kwargs
+                return "resumed-1"
+
+        runner = _Runner()
+        out = resume_crashed_run(store, config, runner, task_id, "tester")  # type: ignore[arg-type]
+        assert out["resumed_as"] == "resumed-1"
+        assert "warm worktree" in out["worktree"]
+        assert runner.kwargs["resume_of"] == task_id
+    finally:
+        store.close()
+
+
+def test_preserved_worktree_ttl_expires_and_sweeps(repo: Path, config: SupervisorConfig) -> None:
+    """v107-F1: preserved trees are not tenure — past the TTL the keep set
+    releases them and the ticker sweep collects them."""
+    from skep.supervisor.dispatch import sweep_expired_preserved_worktrees
+
+    store = RunStore(config.db_path)
+    try:
+        task_id, workspace = _strand_run(store, config, repo)
+        store.transition(task_id, "failed", "agent exited 1")
+        assert workspace.name in _keep_worktree_names(store)
+        # Age the run past the TTL directly (the sweep compares updated_at).
+        store._conn.execute(
+            "UPDATE runs SET updated_at = '2020-01-01T00:00:00Z' WHERE task_id = ?",
+            (task_id,),
+        )
+        store._conn.commit()
+        assert workspace.name not in _keep_worktree_names(store)
+        pairs = store.expired_preserved_worktrees(max_age_seconds=86_400.0)
+        assert (str(repo), str(workspace)) in pairs
+        assert sweep_expired_preserved_worktrees(store, config) == 1
+        assert not workspace.exists()
     finally:
         store.close()

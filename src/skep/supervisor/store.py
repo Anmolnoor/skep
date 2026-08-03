@@ -3277,19 +3277,49 @@ class RunStore:
             thread_ref=str(row[3]) if row[3] is not None else None,
         )
 
+    # v107-F1: one predicate, two views. Preserved = crashed/timed-out/failed
+    # with no successor (v72-F8 widened — a failed external-engine run's warm
+    # tree is the resume value), plus completed runs whose re-verification is
+    # absent (still running) or unconfirmed-with-a-patch (the evidence for
+    # diagnose_run). A resume releases the tree; confirmed/patch-less
+    # completions never enter the set (dispatch removes those directly).
+    _PRESERVED_PREDICATE = (
+        " FROM runs r"
+        " WHERE r.workspace IS NOT NULL"
+        " AND NOT EXISTS (SELECT 1 FROM runs s WHERE s.resume_of = r.task_id)"
+        " AND (r.state IN ('worker_crashed', 'worker_timeout', 'failed')"
+        "      OR (r.state = 'completed' AND EXISTS ("
+        "            SELECT 1 FROM reverifications v WHERE v.task_id = r.task_id"
+        "            AND v.confirmed = 0 AND v.outcome != 'not_applicable'))"
+        "      OR (r.state = 'completed' AND NOT EXISTS ("
+        "            SELECT 1 FROM reverifications v WHERE v.task_id = r.task_id)))"
+    )
+
     @_locked
-    def crashed_run_workspaces(self) -> list[str]:
-        """v72-F8: workspaces of crashed/timed-out runs with NO successor —
-        the orphan sweep spares them so resume_run can continue in place.
-        Any resume (a run with resume_of = this id) releases the worktree
-        back to the sweep once the chain moves on."""
-        rows = self._conn.execute(
-            "SELECT r.workspace FROM runs r"
-            " WHERE r.state IN ('worker_crashed', 'worker_timeout')"
-            " AND r.workspace IS NOT NULL"
-            " AND NOT EXISTS (SELECT 1 FROM runs s WHERE s.resume_of = r.task_id)"
-        ).fetchall()
+    def preserved_run_workspaces(self, *, max_age_seconds: float | None = None) -> list[str]:
+        """Workspaces the orphan sweep must spare (fresh preserved trees)."""
+        sql = "SELECT r.workspace" + self._PRESERVED_PREDICATE
+        params: tuple[Any, ...] = ()
+        if max_age_seconds is not None:
+            cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            sql += " AND r.updated_at >= ?"
+            params = (cutoff,)
+        rows = self._conn.execute(sql, params).fetchall()
         return [str(row[0]) for row in rows]
+
+    @_locked
+    def expired_preserved_worktrees(self, *, max_age_seconds: float) -> list[tuple[str, str]]:
+        """(repo, workspace) pairs past the preservation TTL — sweep targets."""
+        cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        rows = self._conn.execute(
+            "SELECT r.repo, r.workspace" + self._PRESERVED_PREDICATE + " AND r.updated_at < ?",
+            (cutoff,),
+        ).fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
 
     @_locked
     def latest_channel_chat(self) -> str | None:

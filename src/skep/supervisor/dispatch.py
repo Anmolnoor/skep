@@ -174,13 +174,29 @@ def _keep_worktree_names(store: RunStore) -> set[str]:
         _ACTIVE.snapshot()
         | {Path(workspace).name for workspace in store.pending_gate_workspaces()}
         | {Path(workspace).name for workspace in store.active_run_workspaces()}
-        | {Path(workspace).name for workspace in store.crashed_run_workspaces()}
+        | {
+            Path(workspace).name
+            for workspace in store.preserved_run_workspaces(
+                max_age_seconds=PRESERVED_WORKTREE_TTL_SECONDS
+            )
+        }
     )
 
 
 # v72-F8: the strandable states whose preserved worktree + salvaged checkpoint
 # make "continue from step N" real. pending_approval keeps its own rule.
 _RESUMABLE_CRASH_STATES = (TaskState.WORKER_CRASHED.value, TaskState.WORKER_TIMEOUT.value)
+
+# v107-F1: failed runs keep their tree too — for an external engine the tree
+# itself is the value (warm toolchain, installed deps; five cold yarn installs
+# across the 2026-08-03 acceptance arc), and no checkpoint ever exists for it.
+# The single source of truth for "resumable" — serve/actions imports this.
+RESUMABLE_STATES = (*_RESUMABLE_CRASH_STATES, TaskState.FAILED.value)
+
+# v107-F1: preserved worktrees are evidence and warm workspaces, not tenure.
+# After the TTL the ticker sweep collects them; resuming a run re-activates
+# its tree before the sweep can (the keep set spares only fresh ones).
+PRESERVED_WORKTREE_TTL_SECONDS = 86_400.0
 
 
 def salvaged_checkpoint_version(config: SupervisorConfig, task_id: str) -> int:
@@ -400,9 +416,17 @@ def run_task(
         # step 0, so the cursor must be stripped (grants make replay converge).
         resume_workspace: Path | None = None
         if resume_of is not None:
-            if resume_checkpoint_version(effective_worker_state) >= 2:
+            # v107-F1: a FAILED run's retry reuses its warm tree even with no
+            # checkpoint (the tree is the value; external engines read the
+            # prior state and continue). Checkpointed resumes keep v72-F8
+            # semantics; checkpoint-less replays of other shapes (e.g. a v1
+            # approve-resume) keep their honest fresh-tree step-0 replay.
+            with_cursor = resume_checkpoint_version(effective_worker_state) >= 2
+            prior_record = run_store.get_run(resume_of)
+            warm_retry = prior_record is not None and prior_record.state == TaskState.FAILED.value
+            if with_cursor or warm_retry:
                 resume_workspace = _resume_workspace(run_store, repo, worktrees_root, resume_of)
-            if resume_workspace is None:
+            if resume_workspace is None or not with_cursor:
                 effective_worker_state = strip_resume_cursor(effective_worker_state)
         # v89-F1: shield registration and the sweep share one lock, and the
         # keep-set snapshot sits INSIDE it with the sweep it feeds — a snapshot
@@ -645,13 +669,22 @@ def run_task(
         # continue in-place; the chain's terminal run removes it here.
         # v72-F8: a crashed/timed-out run whose checkpoint was salvaged keeps
         # its worktree too — resume_run continues in place from the cursor.
-        keep_for_resume = (
+        # v107-F1: failed runs keep their tree unconditionally (the warm
+        # workspace IS the resume value; external engines never checkpoint);
+        # completed runs defer the keep answer until re-verification below —
+        # it is unknowable before the confirmed bit exists.
+        keep_for_resume = outcome.record.state == TaskState.FAILED.value or (
             outcome.record.state in _RESUMABLE_CRASH_STATES
             and salvaged_checkpoint_version(config, task.task_id) >= 2
         )
-        if outcome.record.state != TaskState.PENDING_APPROVAL.value and not keep_for_resume:
+        completed = outcome.record.state == TaskState.COMPLETED.value
+        if (
+            outcome.record.state != TaskState.PENDING_APPROVAL.value
+            and not keep_for_resume
+            and not completed
+        ):
             remove_worktree(repo, workspace)
-        if outcome.record.state == TaskState.COMPLETED.value:
+        if completed:
             reverify_run(
                 store=run_store,
                 task_id=task.task_id,
@@ -688,6 +721,16 @@ def run_task(
                     # said what verification means (v88-F4).
                     verify_pinned=bool(verify_command),
                 )
+            # v107-F1: the keep answer, now that it exists. A confirmed (or
+            # patch-less) run's tree is spent; an unconfirmed one is the
+            # evidence for diagnose_run and the warm tree for the retry.
+            reverify_record = run_store.reverification_for(task.task_id)
+            if (
+                reverify_record is None
+                or reverify_record.confirmed
+                or (reverify_record.outcome == "not_applicable")
+            ):
+                remove_worktree(repo, workspace)
             with TREE_LOCK:  # v89-F1: snapshot + walk, atomic against creators
                 cleanup_orphans(repo, worktrees_root, keep=_keep_worktree_names(run_store))
         return outcome
@@ -863,13 +906,18 @@ def recover_interrupted_runs(
         )
         # v72-F8: the whole point of the salvaged checkpoint — a restart-
         # crashed run keeps its worktree so resume_run continues in place.
-        keep_for_resume = (
+        keep_for_resume = outcome.record.state == TaskState.FAILED.value or (
             outcome.record.state in _RESUMABLE_CRASH_STATES
             and salvaged_checkpoint_version(config, task_id) >= 2
         )
-        if outcome.record.state != TaskState.PENDING_APPROVAL.value and not keep_for_resume:
+        recovered_completed = outcome.record.state == TaskState.COMPLETED.value
+        if (
+            outcome.record.state != TaskState.PENDING_APPROVAL.value
+            and not keep_for_resume
+            and not recovered_completed
+        ):
             remove_worktree(repo, workspace)
-        if outcome.record.state == TaskState.COMPLETED.value:
+        if recovered_completed:
             # G10 unchanged: a late-ingested completed claim is re-verified in
             # a clean worktree before anyone may trust it. Auto-apply rules are
             # deliberately NOT replayed on recovery — landing stays human.
@@ -878,7 +926,14 @@ def recover_interrupted_runs(
             # crash must not silently downgrade G10 to the worker's own claim.
             from .policy_resolver import run_policy_for_repo
 
-            recovery_policy = run_policy_for_repo(run_store, config, repo)
+            # Slug-bound projects keep their pin on recovery too (0bda59d
+            # closed this for the live path; same candidates here).
+            recovery_candidates = (
+                [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+            )
+            recovery_policy = run_policy_for_repo(
+                run_store, config, repo, binding_candidates=recovery_candidates
+            )
             reverify_run(
                 store=run_store,
                 task_id=task_id,
@@ -891,6 +946,14 @@ def recover_interrupted_runs(
                 else None,
                 verify_command=str(recovery_policy.get("verify_command") or ""),
             )
+            # v107-F1: same post-reverify keep answer as the live path.
+            reverify_record = run_store.reverification_for(task_id)
+            if (
+                reverify_record is None
+                or reverify_record.confirmed
+                or (reverify_record.outcome == "not_applicable")
+            ):
+                remove_worktree(repo, workspace)
         recovered.append(task_id)
         if on_run_finished is not None:
             on_run_finished(task_id)
@@ -905,3 +968,24 @@ def _task_from_audit(config: SupervisorConfig, task_id: str) -> CodingWorkerTask
         return CodingWorkerTask.model_validate_json(task_path.read_text(encoding="utf-8"))
     except (ValidationError, OSError):
         return None
+
+
+def sweep_expired_preserved_worktrees(store: RunStore, config: SupervisorConfig) -> int:
+    """v107-F1: collect preserved worktrees past their TTL (ticker-driven).
+
+    Fresh preserved trees are spared by the keep set; expired ones are only
+    ever removed here and by ``cleanup_orphans`` walks that no longer see
+    them in the keep set. Removal happens under ``TREE_LOCK`` and re-checks
+    the live shields so an in-flight resume can never lose its tree (v89-F1).
+    """
+    expired = store.expired_preserved_worktrees(max_age_seconds=PRESERVED_WORKTREE_TTL_SECONDS)
+    removed = 0
+    with TREE_LOCK:
+        keep = _keep_worktree_names(store)
+        for repo_path, workspace in expired:
+            name = Path(workspace).name
+            if name in keep:
+                continue
+            remove_worktree(Path(repo_path), Path(workspace))
+            removed += 1
+    return removed
