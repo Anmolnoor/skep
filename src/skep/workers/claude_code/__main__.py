@@ -15,14 +15,18 @@ CLAUDE_SPEC = AdapterSpec(
     worker_version=WORKER_VERSION,
     command_env="SKEP_CLAUDE_CODE_CMD",
     default_command=("claude",),
-    # Claude Code's headless one-shot: --print runs and exits. acceptEdits is
-    # load-bearing (v94-F1): --print cannot prompt, so without it every file
-    # write is rejected and the engine can never produce a patch. Confinement
-    # is the sandbox's job, not Claude's prompts (ADR 0047).
+    # Claude Code's headless one-shot: --print runs and exits. bypassPermissions
+    # is load-bearing: --print cannot prompt, so anything short of it silently
+    # denies the un-promptable tools. v94-F1's acceptEdits stopped halfway —
+    # edits flowed but every Bash call was denied, so a dependency update
+    # ended "produced no patch" with the agent apologizing about its allowed
+    # list (authwapi acceptance, task 019fc711). Confinement is the sandbox's
+    # job, not Claude's prompts (ADR 0047): the run is FORCED into sandbox
+    # execution (v94-F4), which is the wall.
     build_argv=lambda base, instructions: [
         *base,
         "--permission-mode",
-        "acceptEdits",
+        "bypassPermissions",
         "--print",
         instructions,
     ],

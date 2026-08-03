@@ -42,7 +42,7 @@ def test_claude_code_adapter_runs_claude_and_writes_contract_result(
         "#!/usr/bin/env python3\n"
         "import sys\n"
         "from pathlib import Path\n"
-        "ok = sys.argv[1:4] == ['--permission-mode', 'acceptEdits', '--print']\n"
+        "ok = sys.argv[1:4] == ['--permission-mode', 'bypassPermissions', '--print']\n"
         "if not ok or len(sys.argv) != 5:\n"
         "    raise SystemExit(12)\n"
         "Path('claude_created.py').write_text('print(\"from claude\")\\n', encoding='utf-8')\n"

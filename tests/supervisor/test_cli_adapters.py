@@ -280,10 +280,19 @@ def test_agent_command_heartbeats_while_it_runs(tmp_path: Path) -> None:
 
 
 def test_claude_argv_grants_headless_edit_permission() -> None:
-    """v94-F1: headless --print cannot prompt, so without acceptEdits every
-    file write is rejected and the engine can never produce a patch (field
-    run 019f9e9e). The sandbox is the wall, not Claude's prompts (ADR 0047)."""
+    """--print cannot prompt, so anything short of bypassPermissions silently
+    denies un-promptable tools. v94-F1's acceptEdits let edits flow but every
+    Bash call was denied (authwapi acceptance, task 019fc711 — the agent
+    could not run yarn at all). The sandbox is the wall, not Claude's
+    prompts (ADR 0047); external engines are forced into sandbox execution
+    (v94-F4)."""
     from skep.workers.claude_code.__main__ import CLAUDE_SPEC
 
     argv = CLAUDE_SPEC.build_argv(["claude"], "add multiply")
-    assert argv == ["claude", "--permission-mode", "acceptEdits", "--print", "add multiply"]
+    assert argv == [
+        "claude",
+        "--permission-mode",
+        "bypassPermissions",
+        "--print",
+        "add multiply",
+    ]
