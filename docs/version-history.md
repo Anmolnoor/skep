@@ -2541,3 +2541,26 @@ undocumented command groups on first run. F11 implements v90's unkept
 visibility clauses (grant tier + time on the receipt, blocked
 auto-apply reasons on the audit trail, the ADR 0046 amendment). F12 is
 this file catching up.
+
+## v107 — the kept worktree (2026-08-03)
+
+The first public-tree plan round, seeded entirely by the 2026-08-03
+dogfood arc (the day the v106 port shipped as 1.0.2 and skep started
+fixing skep with Claude Code as its own worker). F1: failed and
+unconfirmed-completed runs keep their worktree — the keep answer for a
+completed run is deferred until re-verification writes the confirmed
+bit; a failed run's retry resumes into its warm tree (no checkpoint
+needed — the tree IS the value); a 24h TTL sweep on the ticker collects
+what nobody resumes. F2: diagnose_run — one bounded, always-carded
+command inside a kept worktree, sandboxed like re-verification, with a
+REST face (POST /api/runs/{id}/diagnose); the Queen finally gets "re-run
+the failing test, show me" without a terminal. F3: TMPDIR moves inside
+the wall (workspace .toolchain/tmp for workers, a worktree-local dir for
+re-verify) — the "~184 tests blocked by network isolation" was a
+misdiagnosis, bwrap already brings loopback up; the nested-bwrap /tmp
+mask was the whole story, and with it fixed the skep suite passes inside
+the sandbox, making G10 confirmable for skep-shaped repos. Plus the
+re-run now gets the run's own wall-clock budget (the flat 300s cap timed
+out healthy 10-minute suites), and the plugin scratch copy learned to
+exclude bookkeeping dirs. Recorded seed: macOS seatbelt's bare
+(deny network*) blocks loopback binds — unverified from a Linux host.
