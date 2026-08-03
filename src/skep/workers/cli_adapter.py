@@ -101,6 +101,9 @@ class _EventStream:
                 type=event_type,
                 payload=payload,
             )
+            # Same self-heal as worker_runtime.EventStream: the agent owns the
+            # workspace and may clean the bookkeeping dirs away mid-run.
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(event.model_dump_json() + "\n")
 
@@ -148,7 +151,10 @@ def _run(
     def _beat() -> None:
         while not done.wait(heartbeat_seconds):
             elapsed = int(time.monotonic() - started)
-            stream.emit(EventType.HEARTBEAT, {"phase": f"{purpose} running ({elapsed}s)"})
+            try:
+                stream.emit(EventType.HEARTBEAT, {"phase": f"{purpose} running ({elapsed}s)"})
+            except Exception:  # a dead beat thread kills the run
+                continue
 
     beater = threading.Thread(target=_beat, name="cli-adapter-heartbeat", daemon=True)
     beater.start()

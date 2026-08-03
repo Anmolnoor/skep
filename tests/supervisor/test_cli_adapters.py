@@ -296,3 +296,48 @@ def test_claude_argv_grants_headless_edit_permission() -> None:
         "--print",
         "add multiply",
     ]
+
+
+def test_event_streams_survive_the_agent_deleting_the_events_dir(tmp_path: Path) -> None:
+    """The event channel lives inside the agent-writable workspace; a tidy
+    `git clean -fd` deletes it mid-run (authwapi acceptance, 019fc719 — the
+    beat thread died on FileNotFoundError and the monitor reaped a healthy
+    run 30s later). emit() must recreate the dir, in both stream impls."""
+    import shutil
+
+    from skep.worker_contract import EventType
+    from skep.workers.cli_adapter import _EventStream
+    from skep.workers.worker_runtime import EventStream
+
+    for stream_cls in (EventStream, _EventStream):
+        path = tmp_path / stream_cls.__name__ / ".events" / "t.ndjson"
+        stream = stream_cls(path, task_id="t", trace_id="tr")
+        stream.emit(EventType.HEARTBEAT, {"phase": "one"})
+        shutil.rmtree(path.parent)
+        stream.emit(EventType.HEARTBEAT, {"phase": "two"})  # must not raise
+        assert len(path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_heartbeat_loop_outlives_a_failing_emit() -> None:
+    """One transient emit failure must not kill the beat thread — a dead
+    beat thread kills the whole run at the monitor's 3x window."""
+    import time
+
+    from skep.worker_contract import EventType
+    from skep.workers.worker_runtime import Heartbeat
+
+    class Flaky:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def emit(self, event_type: EventType, payload: dict[str, object]) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("events dir vanished")
+
+    flaky = Flaky()
+    with Heartbeat(flaky, "x", interval_seconds=0.01, emit_immediately=False):
+        deadline = time.monotonic() + 2.0
+        while flaky.calls < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    assert flaky.calls >= 3

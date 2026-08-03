@@ -60,6 +60,10 @@ class EventStream:
                 type=event_type,
                 payload=payload,
             )
+            # The channel lives inside the agent-writable workspace; a tidy
+            # `git clean -fd` deletes it mid-run (authwapi acceptance,
+            # 019fc719: dead beats -> heartbeat_lost 30s later). Self-heal.
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as handle:
                 handle.write(event.model_dump_json() + "\n")
 
@@ -99,7 +103,10 @@ class Heartbeat:
 
     def _loop(self) -> None:
         while not self._stop.wait(self._interval_seconds):
-            self._emit()
+            try:
+                self._emit()
+            except Exception:  # a dead beat thread kills the run
+                continue
 
     def __exit__(
         self,
