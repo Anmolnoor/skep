@@ -234,6 +234,13 @@ def _toolchain_env(workspace: Path, engine: CodingEngine) -> dict[str, str]:
     """
     scratch = workspace / TOOLCHAIN_DIR
     env = {"npm_config_cache": str(scratch / "npm-cache")}
+    # v107-F3: TMPDIR lives inside the wall too. Unset, Python and every
+    # tool fall back to /tmp — which any NESTED bwrap the run spawns (skep's
+    # own test suite does) re-mounts as a fresh tmpfs, masking the outer
+    # process's tmp files. The 2026-08-03 dogfood run's "~184 tests blocked
+    # by network isolation" was THIS: loopback was fine (bwrap brings lo up);
+    # the suite passes in-sandbox once TMPDIR points into the workspace.
+    env["TMPDIR"] = str(scratch / "tmp")
     for name, subdir in engine.toolchain_env:
         env[name] = str(scratch / subdir)
     for target in env.values():

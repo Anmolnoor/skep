@@ -21,7 +21,7 @@ from typing import Any, Literal
 
 from skep.supervisor.netproxy import domain_allowed
 from skep.supervisor.spawner import build_worker_env
-from skep.worker_contract import PATCH_EXCLUDE_PATHSPECS, EventType
+from skep.worker_contract import BOOKKEEPING_DIRS, PATCH_EXCLUDE_PATHSPECS, EventType
 from skep.workers.html_text import html_to_text
 from skep.workers.worker_runtime import Heartbeat
 
@@ -332,7 +332,13 @@ def _workspace_fingerprint(root: Path) -> dict[str, str]:
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
-        fingerprint[str(path.relative_to(root))] = sha256(path.read_bytes()).hexdigest()
+        relative = path.relative_to(root)
+        # v107-F3: bookkeeping churns during a run (heartbeats append to
+        # .events, TMPDIR now lives under .toolchain) — it is not the
+        # workspace content a "safe" plugin must leave untouched.
+        if relative.parts and relative.parts[0] in BOOKKEEPING_DIRS:
+            continue
+        fingerprint[str(relative)] = sha256(path.read_bytes()).hexdigest()
     return fingerprint
 
 
@@ -1144,7 +1150,17 @@ class CapabilityRegistry:
         if safe_risk:
             temp_workspace = tempfile.TemporaryDirectory(prefix="skep-plugin-")
             run_workspace = Path(temp_workspace.name) / "workspace"
-            shutil.copytree(self._workspace, run_workspace, symlinks=True)
+            # v107-F3: never copy the supervisor's bookkeeping into the plugin
+            # scratch — with TMPDIR inside the workspace the copy otherwise
+            # recurses into its own destination (.toolchain/tmp/skep-plugin-*)
+            # until ENAMETOOLONG, and the plugin has no business reading
+            # .events/.artifacts either way.
+            shutil.copytree(
+                self._workspace,
+                run_workspace,
+                symlinks=True,
+                ignore=shutil.ignore_patterns(*BOOKKEEPING_DIRS),
+            )
             original_fingerprint = _workspace_fingerprint(self._workspace)
         stdin = json.dumps(
             {"tool": spec.tool_id, "args": dict(arguments), "workspace": str(run_workspace)}

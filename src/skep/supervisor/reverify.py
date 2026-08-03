@@ -160,6 +160,12 @@ def reverify(
         worktree = create_worktree(repo, config.worktrees_root, f"reverify-{patch_path.stem}", ref)
     try:
         env = dict(env)
+        # v107-F3: TMPDIR inside the wall — unset, tools fall back to /tmp,
+        # and any nested bwrap the verify command spawns (skep's own suite)
+        # tmpfs-masks it. Same fix as the worker's toolchain env.
+        reverify_tmp = worktree / ".reverify-tmp"
+        reverify_tmp.mkdir(parents=True, exist_ok=True)
+        env["TMPDIR"] = str(reverify_tmp)
         primed = ""
         if _needs_uv_priming(worktree, commands):
             # v94-F7: prime the BASELINE env before the patch is applied — only

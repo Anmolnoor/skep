@@ -336,6 +336,11 @@ def test_toolchain_state_gets_a_writable_workspace_home(
     cache = child_env.get("npm_config_cache", "")
     assert f"{os.sep}.toolchain{os.sep}npm-cache" in cache
     assert outcome.record.workspace in cache
+    # v107-F3: TMPDIR rides inside the wall too — unset, tools fell back to
+    # /tmp, which any nested bwrap tmpfs-masks (the "~184 blocked tests").
+    tmpdir = child_env.get("TMPDIR", "")
+    assert f"{os.sep}.toolchain{os.sep}tmp" in tmpdir
+    assert outcome.record.workspace in tmpdir
 
 
 def test_toolchain_env_resolves_engine_declarations() -> None:
@@ -355,9 +360,12 @@ def test_toolchain_env_resolves_engine_declarations() -> None:
         assert config_dir.is_dir()
         assert Path(env["npm_config_cache"]).is_dir()
 
+        assert Path(env["TMPDIR"]) == workspace / ".toolchain" / "tmp"
+        assert Path(env["TMPDIR"]).is_dir()
+
         builtin = _toolchain_env(workspace, resolve_engine(None))
         assert "CLAUDE_CONFIG_DIR" not in builtin
-        assert set(builtin) == {"npm_config_cache"}
+        assert set(builtin) == {"npm_config_cache", "TMPDIR"}
 
 
 # ---------- v13 Step 8: curated-memory injection ----------

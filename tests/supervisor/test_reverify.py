@@ -363,3 +363,29 @@ def test_reverify_timeout_is_the_budget_floored_at_the_default() -> None:
     assert command_timeout_seconds(None) == _REVERIFY_TIMEOUT_SECONDS
     assert command_timeout_seconds(60.0) == _REVERIFY_TIMEOUT_SECONDS
     assert command_timeout_seconds(6000.0) == 6000.0
+
+
+def test_reverify_env_carries_a_worktree_local_tmpdir(repo: Path, config: SupervisorConfig) -> None:
+    """v107-F3: the re-run's TMPDIR lives inside its own worktree — unset it
+    fell back to /tmp, which a nested bwrap (skep's own suite) tmpfs-masks."""
+    happy = run_task(repo, "Fix the bug. MODE:happy", config=config)
+    store = RunStore(config.db_path)
+    try:
+        from skep.supervisor.reverify import reverify_run
+
+        reverify_run(
+            store=store,
+            task_id=happy.record.task_id,
+            worker_outcome="passed",
+            repo=repo,
+            ref=None,
+            config=config,
+            verify_command=(
+                'sh -c \'case "$TMPDIR" in *".reverify-tmp") exit 0;; *) exit 7;; esac\''
+            ),
+        )
+        record = store.reverification_for(happy.record.task_id)
+    finally:
+        store.close()
+    assert record is not None
+    assert record.exit_codes == [0], record.detail
