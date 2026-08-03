@@ -2860,6 +2860,12 @@ def submit_run(
             planning_protocol=protocol or resolved_policy.worker_protocol,
             # v90-F1 (ADR 0047): the project's chosen coding agent.
             coding_engine=resolved_policy.coding_engine,
+            # The pin this resolve already found MUST ride to G10: run_task's
+            # own fallback lookup has no binding candidates, so a slug-bound
+            # project's pin silently degraded to the worker's own verify step
+            # (authwapi acceptance, 019fc724: confirmed=true on git diff
+            # --check while verify_command="npm test" sat pinned).
+            verify_command=str(resolved_policy.policy.get("verify_command") or ""),
         )
     except DispatchError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

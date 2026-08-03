@@ -363,7 +363,16 @@ def run_task(
     if not verify_command:
         from .policy_resolver import run_policy_for_repo
 
-        pinned = run_policy_for_repo(run_store, config, repo).get("verify_command")
+        # Managed clones are slug-bound (registry name == directory name), so
+        # the safety-net lookup must offer the slug too — path-only matching
+        # dropped the pin for every slug-bound project that reached run_task
+        # without an explicit verify_command (the authwapi acceptance hole).
+        candidates = (
+            [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+        )
+        pinned = run_policy_for_repo(run_store, config, repo, binding_candidates=candidates).get(
+            "verify_command"
+        )
         # A non-string overlay value is treated as unset; resolve_run_policy is
         # the surface that rejects it loudly on the dispatch path (I9).
         verify_command = pinned if isinstance(pinned, str) else ""

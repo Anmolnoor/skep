@@ -300,3 +300,49 @@ def test_failed_prime_is_unavailable_not_patch_guilt(
     assert outcome.outcome == "unavailable"
     assert "prime" in outcome.detail
     assert "was not run" in outcome.detail
+
+
+def test_slug_bound_pin_survives_the_run_task_fallback(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """The authwapi acceptance hole (019fc724): a managed clone's project is
+    bound by repo_slug, run_task's safety-net pin lookup offered only the
+    repo_path candidate, and G10 silently degraded to the worker's own verify
+    step — confirmed=true on `git diff --check` while `npm test` sat pinned.
+    The fallback must offer the slug for repos under <home>/repos."""
+    slug = "slug-fixture"
+    repo = config.home.parent / "repos" / slug
+    repo.mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    (repo / "existing.py").write_text("value = 0\n")
+    git(repo, "add", "existing.py")
+    git(repo, "commit", "-qm", "seed")
+
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="slugged",
+            name="slug bound",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"verify_command": 'grep -q "value = 1" existing.py'},
+        )
+        store.add_project_binding(
+            project_id="slugged", binding_kind="repo_slug", binding_value=slug
+        )
+    finally:
+        store.close()
+
+    outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
+    assert outcome.record.state == "completed"
+
+    store = RunStore(config.db_path)
+    try:
+        reverify_record = store.reverification_for(outcome.record.task_id)
+    finally:
+        store.close()
+    assert reverify_record is not None
+    assert reverify_record.commands == ['grep -q "value = 1" existing.py']
+    assert "the project's pinned verify_command" in reverify_record.detail
