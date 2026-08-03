@@ -59,7 +59,9 @@ def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
-    git(repo, "init", "-q")
+    # CI runners have no init.defaultBranch; pin it so tests that name the
+    # default branch (e.g. the merge-refusal route test) hold everywhere.
+    git(repo, "init", "-q", "-b", "main")
     git(repo, "config", "user.email", "test@example.com")
     git(repo, "config", "user.name", "Test")
     (repo / "existing.py").write_text("value = 0\n")
