@@ -60,7 +60,9 @@ exceptions go in its `CHAT_ONLY` map with a reason.
 Field test → reconstruct findings from the store/audit trail → write an
 executor-style plan in `plans/vNN/README.md` (observed failure, root cause
 with file:line anchors, change, tests, acceptance) → implement fix-by-fix,
-one commit per fix (`vNN-F<N>: title`) → push to main. History:
+one commit per fix (`vNN-F<N>: title`) → push to main. `plans/` is
+gitignored on the public tree: plans stay local, only the fix commits push
+(the v107 plan predates this rule and remains in history). History:
 
 - v1–v17: the roadmap (v12–v17 implemented in one unattended run; the
   authoritative record is `plans/EXECUTION_LEDGER.md`).
