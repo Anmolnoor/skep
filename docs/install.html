@@ -72,7 +72,7 @@
           <button class="copy-btn" aria-label="Copy"><i data-lucide="copy"></i></button>
         </div>
         <pre style="padding: 10px 18px 20px; font-size: 13px; line-height: 2; color: var(--text-mid); overflow-x: auto;"><span style="color: #4A5350;"># Install from PyPI</span>
-pip install skep
+pipx install skep
 
 <span style="color: #4A5350;"># Start the Skep daemon</span>
 skep serve
@@ -94,7 +94,7 @@ skep serve
       <p style="margin: 0 0 24px; max-width: 62ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Three supported paths. The PyPI package is the default; the source checkout is what the installer script detects and what contributors use.</p>
 
       <div class="tabbar" role="tablist">
-        <button data-tab="pypi" class="on">pip / uv / pipx</button>
+        <button data-tab="pypi" class="on">pipx / uv / pip</button>
         <button data-tab="source">From source</button>
         <button data-tab="docker">Docker</button>
       </div>
@@ -103,12 +103,13 @@ skep serve
         <div data-copy-scope class="install-card" style="border-color: rgba(123,224,140,0.3);">
           <div class="head">
             <i data-lucide="package" style="color: var(--green);"></i>
-            <h3>pip</h3>
+            <h3>pipx</h3>
             <span class="badge" style="background: rgba(123,224,140,0.13); color: var(--green);">Recommended</span>
           </div>
-          <p style="margin: 0 0 16px; font-size: 14px; line-height: 1.6; color: var(--text-faint);">Published on PyPI. One command, then <span class="mono" style="font-size: 13px;">skep</span> is on your PATH.</p>
+          <p style="margin: 0 0 16px; font-size: 14px; line-height: 1.6; color: var(--text-faint);">Installed as an isolated app, then <span class="mono" style="font-size: 13px;">skep</span> is on your PATH. On Debian/Ubuntu the system Python refuses bare <span class="mono" style="font-size: 13px;">pip install</span> (PEP 668) — pipx is the way around it, not <span class="mono" style="font-size: 13px;">--break-system-packages</span>.</p>
           <div class="snippet">
-            <pre>pip install skep
+            <pre>sudo apt install pipx   <span style="color: #4A5350;"># Debian/Ubuntu; then: pipx ensurepath</span>
+pipx install skep
 skep --version</pre>
             <button class="copy-btn" aria-label="Copy"><i data-lucide="copy"></i></button>
           </div>
@@ -120,14 +121,14 @@ skep --version</pre>
         <div data-copy-scope class="install-card">
           <div class="head">
             <i data-lucide="zap" style="color: var(--yellow);"></i>
-            <h3>uv / pipx</h3>
+            <h3>uv / pip</h3>
             <span class="badge" style="background: rgba(242,179,94,0.13); color: var(--yellow);">No install needed</span>
           </div>
-          <p style="margin: 0 0 16px; font-size: 14px; line-height: 1.6; color: var(--text-faint);">Try it without installing with <span class="mono" style="font-size: 13px;">uvx</span>, or keep it isolated as a tool.</p>
+          <p style="margin: 0 0 16px; font-size: 14px; line-height: 1.6; color: var(--text-faint);">Try it without installing with <span class="mono" style="font-size: 13px;">uvx</span>, or keep it isolated as a tool. <span class="mono" style="font-size: 13px;">pip install skep</span> is still fine inside a virtual environment.</p>
           <div class="snippet">
             <pre>uvx skep
 uv tool install skep
-pipx install skep</pre>
+pip install skep   <span style="color: #4A5350;"># inside a venv</span></pre>
             <button class="copy-btn" aria-label="Copy"><i data-lucide="copy"></i></button>
           </div>
           <div class="checks">

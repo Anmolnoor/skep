@@ -313,6 +313,46 @@ def test_env_allowlist_is_a_boundary(
     assert os.environ["CANARY_SECRET"] == "leak-me-if-you-can"
 
 
+def test_toolchain_state_gets_a_writable_workspace_home(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """v106-F1: npm's cache is pointed INSIDE the workspace wall, not at the
+    read-only ``~/.npm`` the sandbox exposes ("npm error rofs", field run
+    0aaac9c4). The worker env carries the workspace-local path on every run."""
+    permissions = Permissions(read=["workspace"], write=["workspace"], env_allowlist=[])
+
+    outcome = run_task(repo, "Dump env. MODE:envdump", config=config, permissions=permissions)
+    assert outcome.record.state == "completed"
+
+    dump_path = config.results_dir / f"envdump-{outcome.record.task_id}.json"
+    child_env = json.loads(dump_path.read_text())
+    cache = child_env.get("npm_config_cache", "")
+    assert f"{os.sep}.toolchain{os.sep}npm-cache" in cache
+    assert outcome.record.workspace in cache
+
+
+def test_toolchain_env_resolves_engine_declarations() -> None:
+    """v106-F1: the engine registry's (env var, subdir) pairs land under the
+    run's ``.toolchain/`` scratch — Claude Code's config dir, created and
+    writable before the agent starts."""
+    import tempfile
+
+    from skep.supervisor.dispatch import _toolchain_env
+    from skep.supervisor.engines import resolve_engine
+
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        env = _toolchain_env(workspace, resolve_engine("claude_code"))
+        config_dir = Path(env["CLAUDE_CONFIG_DIR"])
+        assert config_dir == workspace / ".toolchain" / "claude"
+        assert config_dir.is_dir()
+        assert Path(env["npm_config_cache"]).is_dir()
+
+        builtin = _toolchain_env(workspace, resolve_engine(None))
+        assert "CLAUDE_CONFIG_DIR" not in builtin
+        assert set(builtin) == {"npm_config_cache"}
+
+
 # ---------- v13 Step 8: curated-memory injection ----------
 
 

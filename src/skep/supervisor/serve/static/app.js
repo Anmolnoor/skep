@@ -1344,6 +1344,10 @@ function renderWorkerActivity(log, taskId, options = {}) {
     setState(state);
     if (state === "completed") {
       try {
+        // v106-F9: only ask for a diff that exists — no-patch completions
+        // were a steady 404 drumbeat in serve.log.
+        const detail = await api("GET", `/api/runs/${taskId}`);
+        if (!(detail.artifacts || []).some((a) => a.kind === "patch")) return;
         const diff = await api("GET", `/api/runs/${taskId}/diff`);
         const { added, removed } = diffstat(diff);
         diffPill.classList.remove("hidden");
@@ -2820,7 +2824,10 @@ async function viewChat(main, chatId) {
       el("p", { class: "card-headline mono" }, card.headline || d.tool),
       card.risk ? el("p", { class: "card-risk" },
         el("span", { class: "card-risk-label" }, "Risk: "), card.risk) : null,
-      covered ? el("p", { class: "card-purpose" }, `covered by ${covered}`) : null));
+      covered ? el("p", { class: "card-purpose" }, `covered by ${covered}`) : null,
+      // v106-F11 (v90-F3): which tier of grant, given when.
+      d.grant ? el("p", { class: "note" },
+        `${d.grant.tier} grant · given ${d.grant.granted_at}`) : null));
     scrollBottom();
   };
 
@@ -3937,8 +3944,9 @@ async function viewRunDetail(main, taskId) {
 
   main.append(tabs.bar, tabs.content);
 
-  // The final diff, syntax-lit by line.
-  try {
+  // The final diff, syntax-lit by line. v106-F9: fetched only when the run
+  // recorded a patch artifact — a no-patch run has nothing to 404 about.
+  if ((detail.artifacts || []).some((a) => a.kind === "patch")) try {
     const diff = await api("GET", `/api/runs/${taskId}/diff`);
     const pre = el("pre", { class: "diff" });
     for (const line of String(diff).split("\n")) {
@@ -3997,6 +4005,12 @@ async function viewApprovals(main) {
         class: `approval-age${waitedMs > 3600000 ? " urgent" : ""}`,
         title: fmtTs(approval.requested_at),
       }, `waiting ${relativeTime(approval.requested_at).replace(" ago", "")}`));
+    }
+    // v106-F3: an unconfirmed G10 verdict belongs ON the approval being
+    // granted, not in the response after the human already said yes.
+    if (approval.reverification_warning) {
+      card.append(el("p", { class: "note approval-reverify-warning" },
+        `⚠ ${approval.reverification_warning}`));
     }
     if (approval.project_context) {
       card.append(el("p", { class: "note" },

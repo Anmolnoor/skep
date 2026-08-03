@@ -48,6 +48,7 @@ def build_status(
             + _auto_approve_advisories(home)
             + _browse_advisories(home)
             + _verify_pin_advisories(home)
+            + _repo_registry_advisories(home)
         )
         payload["stale_pending"] = stale_pending
         return payload
@@ -74,6 +75,7 @@ def build_status(
         + _auto_approve_advisories(home)
         + _browse_advisories(home)
         + _verify_pin_advisories(home)
+        + _repo_registry_advisories(home)
     )
     payload["stale_pending"] = stale_pending
     return payload
@@ -279,6 +281,77 @@ def _verify_pin_advisories(home: Path) -> list[str]:
             "this host, so re-verification (G10) can never confirm — every run reports "
             f"`unavailable`, not `failed`: {', '.join(sorted(unrunnable))}. Re-pin with "
             '`skep project setup <repo> --verify-command "<runnable command>"`.'
+        )
+    return advisories
+
+
+def _repo_registry_advisories(home: Path) -> list[str]:
+    """v106-F8: name the registry shapes that quietly poison daily use.
+
+    Umbrella registrations — a project bound to a directory that CONTAINS
+    other registered repos — make queen-shell-guard deny every Queen shell
+    command under that tree (`shell.deny.repo_cwd`): 8 denials in one field
+    day, including inside repos the operator was actively working. Not
+    invalid, but a footgun with a blast radius nothing measured (I8).
+
+    Dead bindings fail only at dispatch time, and their schedules die one
+    failure at a time until auto-disabled — silently unless someone asks.
+    Doctor advises; unregistering stays the operator's call (I6).
+    """
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.projects import list_projects
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        bound: dict[str, str] = {}
+        dead: list[str] = []
+        for project in list_projects(store):
+            for binding in project.bindings:
+                if binding.kind != "repo_path":
+                    continue
+                path = Path(binding.value)
+                if path.is_dir():
+                    bound[str(path.resolve())] = project.project_id
+                else:
+                    dead.append(f"{project.project_id} ({binding.value})")
+        umbrellas = []
+        for bound_path, project_id in sorted(bound.items()):
+            shadowed = sorted(
+                other_id
+                for other, other_id in bound.items()
+                if other != bound_path and Path(other).is_relative_to(bound_path)
+            )
+            if shadowed:
+                umbrellas.append(f"{project_id} ({bound_path}) contains: {', '.join(shadowed)}")
+        disabled = [
+            f"{health.name} ({health.disabled_reason})"
+            for health in store.list_schedule_health()
+            if health.disabled_reason
+        ]
+    finally:
+        store.close()
+    advisories: list[str] = []
+    if umbrellas:
+        advisories.append(
+            f"{len(umbrellas)} umbrella project(s) are bound to a directory that contains "
+            f"other registered repos, so the Queen's shell is denied EVERYWHERE under that "
+            f"tree (shell.deny.repo_cwd), including inside the repos it shadows: "
+            f"{'; '.join(umbrellas)}. Unregister the umbrella (`skep repo remove <name>`) "
+            "or re-bind it to the specific directory you meant."
+        )
+    if dead:
+        advisories.append(
+            f"{len(dead)} project binding(s) point at a directory that no longer exists — "
+            f"dispatch fails and their schedules auto-disable one failure at a time: "
+            f"{', '.join(sorted(dead))}. Unregister them or restore the directory."
+        )
+    if disabled:
+        advisories.append(
+            f"{len(disabled)} schedule(s) are auto-disabled after repeated failures: "
+            f"{', '.join(sorted(disabled))}. Fix the cause and re-enable, or delete them."
         )
     return advisories
 

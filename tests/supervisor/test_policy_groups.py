@@ -78,6 +78,9 @@ def test_groups_round_trip_and_builtins_resolve_without_a_row(
         assert "extra.example" in stored_policy_groups(store)["node-dev"]["default_network"]
         delete_policy_group_record(store, "node-dev")
         assert stored_policy_groups(store)["node-dev"] == BUILTIN_POLICY_GROUPS["node-dev"]
+        # v106-F9: yarn's registry rides the builtin — a yarn install got a
+        # 403 from the egress proxy on an npm-only allowlist in the field.
+        assert "registry.yarnpkg.com" in BUILTIN_POLICY_GROUPS["node-dev"]["default_network"]
     finally:
         store.close()
 

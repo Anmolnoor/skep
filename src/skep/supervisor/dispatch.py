@@ -37,6 +37,7 @@ from pydantic import ValidationError
 
 from skep.worker_contract import (
     APPROVAL_GRANTS_STATE_KEY,
+    TOOLCHAIN_DIR,
     ApprovalVerdict,
     AutonomyDecisionPayload,
     Budget,
@@ -79,6 +80,7 @@ from .worktree import (
 if TYPE_CHECKING:
     # Runtime import stays inside _resolve_provider_routing: packs → scheduler
     # → dispatch is a cycle at module-init time.
+    from .engines import CodingEngine
     from .packs import RoutingDecision
 
 
@@ -200,6 +202,27 @@ def _resume_workspace(
     if workspace.parent != worktrees_root or not is_linked_worktree(repo, workspace):
         return None
     return workspace
+
+
+def _toolchain_env(workspace: Path, engine: CodingEngine) -> dict[str, str]:
+    """v106-F1: a writable home for per-run toolchain state, inside the wall.
+
+    The sandbox confines writes to the workspace (I12) — correct, but nothing
+    gave runtime toolchain state a home *inside* it, so npm died on a read-only
+    ``~/.npm`` and Claude Code's Bash tool died on a read-only ``~/.claude``
+    ("completed but produced no patch", six field runs). Everything lands under
+    ``<workspace>/.toolchain/``: npm's cache for every worker (npm derives its
+    logs dir from the cache, so one variable covers both failures), plus
+    whatever the engine registry declares (``CLAUDE_CONFIG_DIR``). Excluded
+    from the patch with the other bookkeeping dirs; swept with the worktree.
+    """
+    scratch = workspace / TOOLCHAIN_DIR
+    env = {"npm_config_cache": str(scratch / "npm-cache")}
+    for name, subdir in engine.toolchain_env:
+        env[name] = str(scratch / subdir)
+    for target in env.values():
+        Path(target).mkdir(parents=True, exist_ok=True)
+    return env
 
 
 def _resolve_provider_routing(
@@ -550,6 +573,9 @@ def run_task(
                 "SKEP_OLLAMA_URL": routed_profile.base_url,
                 "SKEP_OLLAMA_MODEL": routed_profile.model,
             }
+        # v106-F1: same non-secret supervisor-injected class as the routed
+        # provider env above.
+        routed_env.update(_toolchain_env(workspace, engine))
         run_store.transition(task.task_id, "dispatched", dispatched_detail)
         log_path = audit_task_dir / "worker.log"
         try:

@@ -280,3 +280,42 @@ def test_run_code_auto_runs_on_a_trusted_project(
     # The run is a real, separately audited worker run.
     run = client.get(f"/api/runs/{payload['task_id']}").json()["run"]
     assert run["state"] == "completed"
+
+
+def test_run_code_timeout_seconds_is_honored_and_capped(
+    repo: Path, config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """v106-F7: a caller who knows the work is slow raises the wall clock
+    (two field npm scripts died at exactly the 120s default); the ceiling
+    still binds — a wild ask clamps to 600."""
+    import json as json_mod
+
+    client, chat_id = chat_client(config, ollama)
+    client.post(
+        "/api/projects",
+        json={
+            "project_id": "trusted-timeout",
+            "name": "Trusted Timeout",
+            "strategy": "trusted_local_dev",
+            "phase": "build",
+            "policy": {
+                "default_execution_mode": "workspace",
+                "auto_dispatch_allowed": True,
+            },
+            "bindings": [{"kind": "repo_path", "value": str(repo)}],
+        },
+    )
+    ollama.script_tool_call(
+        "run_code",
+        {"repo": str(repo), "code": "print('ok')", "timeout_seconds": 9999},
+    )
+    ollama.script_reply("ran it")
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "slow calc"}).text
+    )
+    tool_events = [d for name, d in events if name == "tool"]
+    payload = tool_events[0]["result"]["result"]
+    assert payload["state"] == "completed"
+    # The audited task envelope carries the clamped budget: 9999 → 600.
+    task = json_mod.loads((config.audit_dir / payload["task_id"] / "task.json").read_text())
+    assert task["budget"]["wall_clock_seconds"] == 600

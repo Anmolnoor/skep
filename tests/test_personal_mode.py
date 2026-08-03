@@ -170,6 +170,51 @@ class PersonalModeTests(unittest.TestCase):
             self.assertNotIn("pinned-proj", report)
             self.assertIn("verify_command", report)
 
+    def test_doctor_names_umbrella_and_dead_repos(self) -> None:
+        """v106-F8: an umbrella binding (a dir containing other registered
+        repos) poisons the Queen's shell everywhere under it, and a dead
+        binding fails only at dispatch time — doctor names both, and the
+        clean project stays unnamed."""
+        from skep.supervisor.store import RunStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / "supervisor").mkdir(parents=True)
+            umbrella = Path(tmp) / "developers"
+            inner = umbrella / "code" / "inner-proj"
+            inner.mkdir(parents=True)
+            clean = Path(tmp) / "clean-proj"
+            clean.mkdir()
+            store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+            try:
+                for project_id, path in (
+                    ("developers", umbrella),
+                    ("inner-proj", inner),
+                    ("clean-proj", clean),
+                    ("dead-proj", Path(tmp) / "gone"),
+                ):
+                    store.add_project_policy(
+                        project_id=project_id,
+                        name=project_id,
+                        strategy="trusted_local_dev",
+                        phase="build",
+                        policy={"verify_command": "true"},
+                    )
+                    store.add_project_binding(
+                        project_id=project_id, binding_kind="repo_path", binding_value=str(path)
+                    )
+            finally:
+                store.close()
+
+            report = format_doctor_report(build_status(home))
+
+            self.assertIn("umbrella", report)
+            self.assertIn("developers", report)
+            self.assertIn("inner-proj", report)
+            self.assertIn("shell.deny.repo_cwd", report)
+            self.assertIn("dead-proj", report)
+            self.assertNotIn("clean-proj (", report)
+
     def test_doctor_reports_sandbox_even_when_profile_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "missing-home"

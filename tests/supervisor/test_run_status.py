@@ -304,6 +304,65 @@ def test_completed_run_with_unlanded_patch_always_notifies(
         store.close()
 
 
+def test_unavailable_reverification_rides_the_call_to_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v106-F3: four field patches landed confirmed=0 because outcome
+    'unavailable' said nothing louder than a JSON warning — the ready-to-land
+    line now carries the truth."""
+    store = RunStore(tmp_path / "s.sqlite3")
+    pushed: list[tuple[str, str, str]] = []
+
+    def _fake_push(
+        _store: object,
+        _home: object,
+        chat_id: str,
+        text: str,
+        *,
+        kind: str = "info",
+        **_kw: object,
+    ) -> bool:
+        pushed.append((chat_id, text, kind))
+        return True
+
+    monkeypatch.setattr("skep.supervisor.serve.run_status.push_to_chat_channel", _fake_push)
+    try:
+        chat = store.create_chat(title="ops", model=None)
+        task = mint_task(workspace=tmp_path / "ws", instructions="deps", budget=DEFAULT_BUDGET)
+        store.create_run(task, repo=tmp_path, ref=None, execution_mode="workspace")
+        action_id = store.add_chat_action(chat.chat_id, tool="dispatch_run", args={})
+        store.resolve_chat_action(
+            action_id,
+            status="confirmed",
+            result={"ok": True, "result": {"task_id": task.task_id}},
+        )
+        audit_dir = tmp_path / "audit" / task.task_id
+        audit_dir.mkdir(parents=True)
+        patch = audit_dir / f"{task.task_id}.patch"
+        patch.write_text("diff --git a/package.json b/package.json\n")
+        store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="x")
+        store.transition(task.task_id, "completed", None)
+        store.record_reverification(
+            task.task_id,
+            outcome="unavailable",
+            worker_outcome="passed",
+            confirmed=False,
+            commands=["npm test"],
+            exit_codes=[],
+            detail="verification command not found on the supervisor (toolchain mismatch)",
+        )
+
+        notify_run_terminal(store, tmp_path, task.task_id)
+        (message,) = store.chat_messages(chat.chat_id)
+        assert "ready to land" in message.content
+        assert "could NOT re-verify" in message.content
+        assert "toolchain mismatch" in message.content
+        assert "unconfirmed" in message.content
+        assert pushed[0][2] == "action_needed"
+    finally:
+        store.close()
+
+
 def test_auto_dispatched_run_notifies_via_recorded_action_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

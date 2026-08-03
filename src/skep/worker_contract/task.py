@@ -26,6 +26,13 @@ KNOWN_PLUGIN_RISKS: tuple[str, ...] = (
 )
 KNOWN_BOOTSTRAP_TASKS: tuple[str, ...] = ("python_hello_world",)
 KNOWN_REQUESTED_ACTIONS: tuple[str, ...] = ("git.commit",)
+# v106-F1: workspace dirs that are supervisor/worker bookkeeping, never work —
+# excluded from every patch. ``.toolchain`` is the per-run writable home for
+# toolchain state (npm cache, external-agent config) that must live inside the
+# sandbox's workspace wall instead of a read-only $HOME.
+BOOKKEEPING_DIRS: tuple[str, ...] = (".events", ".artifacts", ".toolchain")
+TOOLCHAIN_DIR = ".toolchain"
+PATCH_EXCLUDE_PATHSPECS: tuple[str, ...] = tuple(f":!{d}" for d in BOOKKEEPING_DIRS)
 
 
 class Permissions(BaseModel):

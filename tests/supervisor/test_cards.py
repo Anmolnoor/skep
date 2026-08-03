@@ -30,6 +30,39 @@ def test_headline_picks_the_subject_across_tool_families() -> None:
     assert headline("run_shell", {"command": "echo 'a b'"}) == "run_shell — echo 'a b'"
 
 
+def test_pr_verbs_name_which_pr() -> None:
+    """v106-F5 (v101-F16): two close_pr cards in one batch must be
+    distinguishable — repo alone swallowed the number that mattered."""
+    assert headline("close_pr", {"repo": "code-review-graph", "pr": 1}) == (
+        "close_pr — code-review-graph#1"
+    )
+    assert headline("merge_pr", {"repo": "my-portfolio", "pr": 38}) == (
+        "merge_pr — my-portfolio#38"
+    )
+    # The two-card field batch renders two different headlines.
+    a = headline("close_pr", {"repo": "code-review-graph", "pr": 1, "delete_branch": True})
+    b = headline("close_pr", {"repo": "my-portfolio", "pr": 38, "delete_branch": True})
+    assert a != b
+    # Without a pr the generic subject rules stand.
+    assert headline("close_pr", {"repo": "code-review-graph"}) == "close_pr — code-review-graph"
+
+
+def test_close_pr_with_delete_branch_names_the_cascade() -> None:
+    """v106-F5 (v101-F16): the approved card said 'publishes to the remote';
+    what it did was cascade-close an upstream PR by deleting the shared head
+    ref. The risk line now discloses the blast radius above the fold."""
+    line = risk("close_pr", {"repo": "r", "pr": 1, "delete_branch": True})
+    assert line is not None
+    assert "deletes its head ref" in line
+    assert "every other PR built on that branch" in line
+    assert "upstream" in line
+    # Without delete_branch the standard publishing line stands.
+    plain = risk("close_pr", {"repo": "r", "pr": 1})
+    assert plain == (
+        "publishes to the remote — visible outside this machine, and not undone by a revert"
+    )
+
+
 def test_headline_is_bounded_and_single_line() -> None:
     line = headline("run_code", {"code": "x = 1\n" * 200})
     assert "\n" not in line

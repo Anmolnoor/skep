@@ -28,6 +28,7 @@ from pydantic import ValidationError
 
 from skep.worker_contract import (
     CONTRACT_VERSION,
+    PATCH_EXCLUDE_PATHSPECS,
     SUPPORTED_CONTRACT_RANGE,
     Artifact,
     CodingWorkerResult,
@@ -206,7 +207,7 @@ def _git(workspace: Path, *args: str, timeout: int) -> subprocess.CompletedProce
 def _changed_files(workspace: Path, *, timeout: int) -> list[str]:
     _git(workspace, "add", "-N", ".", timeout=timeout)
     proc = _git(
-        workspace, "diff", "--name-only", "--", ".", ":!.events", ":!.artifacts", timeout=timeout
+        workspace, "diff", "--name-only", "--", ".", *PATCH_EXCLUDE_PATHSPECS, timeout=timeout
     )
     if proc.returncode != 0:
         return []
@@ -215,9 +216,7 @@ def _changed_files(workspace: Path, *, timeout: int) -> list[str]:
 
 def _write_patch(workspace: Path, patch_path: Path, *, timeout: int) -> bool:
     _git(workspace, "add", "-N", ".", timeout=timeout)
-    diff = _git(
-        workspace, "diff", "--binary", "--", ".", ":!.events", ":!.artifacts", timeout=timeout
-    )
+    diff = _git(workspace, "diff", "--binary", "--", ".", *PATCH_EXCLUDE_PATHSPECS, timeout=timeout)
     if diff.returncode != 0 or not diff.stdout.strip():
         return False
     patch_path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,7 +276,7 @@ def _execute(
     )
     changed_files = _changed_files(workspace, timeout=timeout)
 
-    verify_argv = ["git", "diff", "--check", "--", ".", ":!.events", ":!.artifacts"]
+    verify_argv = ["git", "diff", "--check", "--", ".", *PATCH_EXCLUDE_PATHSPECS]
     verify_proc, verify_record = _run(
         verify_argv, cwd=workspace, timeout=timeout, stream=stream, purpose="verify"
     )

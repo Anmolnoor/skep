@@ -24,16 +24,20 @@ purpose and keeps the worker-nominated fallback.
 ## Gates (run after every fix commit, all green before moving on)
 
 ```sh
-TMPDIR=$HOME/.cache/skep-test-tmp uv run pytest   # TMPDIR outside /tmp is
-uv run ruff check .                               # MANDATORY on Linux: bwrap
-uv run ruff format --check src/skep tests scripts # tmpfs-masks /tmp
-uv run mypy
+TMPDIR=$HOME/.cache/skep-test-tmp uv run --with pytest-xdist pytest -q -n auto
+uv run ruff check .                               # TMPDIR outside /tmp is
+uv run ruff format --check src/skep tests scripts # MANDATORY on Linux: bwrap
+uv run mypy                                       # tmpfs-masks /tmp
 TMPDIR=$HOME/.cache/skep-test-tmp uv run python scripts/scorecard.py  # Overall: PASS
 ```
 
 (`ruff format --check` joined the list at LAUNCH-1: CI always ran it, the
 local ritual never did, and 174 files drifted before the public repo's first
-CI run caught it.)
+CI run caught it. Parallel pytest joined with the v106 port: the suite is
+xdist-safe, ~1min vs ~10min serial, and CI runs the same `-n auto` line —
+xdist is injected per-run by `--with`, never a project dependency. The G10
+re-verify default pin stays plain `uv run pytest`; that pin is a project
+policy, not this ritual.)
 
 The suite is fully green — NO pre-existing failures are allowed. (History: the
 stale-links failure was fixed in v27-F1; the Linux per-domain egress skip —

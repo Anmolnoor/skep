@@ -122,6 +122,8 @@ def test_readme_installs_above_the_fold() -> None:
     # LAUNCH-1-L5: "install one-liner and the security model above the fold"
     # is a checkable claim, not an aspiration.
     head = "\n".join((ROOT / "README.md").read_text(encoding="utf-8").splitlines()[:40])
+    assert "pipx install skep" in head
+    # pip stays documented, but only as the inside-a-venv path (PEP 668).
     assert "pip install skep" in head
     assert any(word in head.lower() for word in ("sandbox", "verif", "approv"))
 

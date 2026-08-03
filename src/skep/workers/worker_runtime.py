@@ -8,6 +8,7 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
+from typing import Protocol
 from uuid import uuid4
 
 from skep.worker_contract import CONTRACT_VERSION, CodingWorkerResult, Event, EventType
@@ -63,10 +64,17 @@ class EventStream:
                 handle.write(event.model_dump_json() + "\n")
 
 
+class SupportsEmit(Protocol):
+    """Anything that can put an event on the wire — an ``EventStream``, or an
+    adapter over a bare emit callable (v106-F2: the capability registry)."""
+
+    def emit(self, event_type: EventType, payload: dict[str, object]) -> None: ...
+
+
 class Heartbeat:
     def __init__(
         self,
-        stream: EventStream,
+        stream: SupportsEmit,
         phase: str,
         *,
         interval_seconds: float = 5.0,

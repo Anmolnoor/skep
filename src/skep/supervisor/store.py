@@ -328,6 +328,10 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     thinking TEXT,
     tool_calls_json TEXT,
     tool_name TEXT,
+    -- v106-F4 (v101-F15): WHICH call a tool result answers. Position is not a
+    -- link once cards resolve out of emission order — two same-named calls
+    -- resolved in reverse reported the operator's verdicts inverted (I6/I8).
+    tool_call_id TEXT,
     created_at TEXT NOT NULL,
     -- v44-F9: image attachments (stored file names under chat-attachments/).
     attachments_json TEXT
@@ -361,7 +365,11 @@ CREATE TABLE IF NOT EXISTS chat_actions (
     resolved_at TEXT,
     -- v25-F1: who proposed it — 'assistant' (the model) or 'operator' (a typed
     -- /command). Operator actions resolve without the model ever seeing them.
-    source TEXT NOT NULL DEFAULT 'assistant'
+    source TEXT NOT NULL DEFAULT 'assistant',
+    -- v106-F4 (v101-F15): the model's own call id. A card resolves minutes
+    -- after its call, in a different request — the id must survive on the
+    -- action row so the result row can carry it back.
+    tool_call_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_actions_pending ON chat_actions (chat_id, status);
 -- v7 Stage B: inert notes and tasks the assistant may append to freely; due
@@ -659,6 +667,9 @@ class ChatMessageRecord:
     created_at: str
     # v44-F9: stored image file names (under home/chat-attachments/<chat_id>/).
     attachments: list[str] | None = None
+    # v106-F4 (v101-F15): which call this tool result answers. NULL on rows
+    # older than the column — those replay by position, as they always did.
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -688,6 +699,7 @@ class ChatActionRecord:
     resolved_at: str | None
     source: str = "assistant"  # 'assistant' (model-proposed) | 'operator' (/command)
     decided_by: str | None = None  # v40-F8: the routing policy decision, when any
+    tool_call_id: str | None = None  # v106-F4: the model's call id, for the result row
 
 
 @dataclass(frozen=True)
@@ -935,6 +947,11 @@ class RunStore:
         }
         if "thinking" not in chat_message_columns:
             self._conn.execute("ALTER TABLE chat_messages ADD COLUMN thinking TEXT")
+        if "tool_call_id" not in chat_message_columns:
+            # v106-F4 (v101-F15): pair a tool result with ITS call, not with
+            # whatever position it landed in. Old rows keep NULL — replay falls
+            # back to arrival order for them, never for new rows (I11).
+            self._conn.execute("ALTER TABLE chat_messages ADD COLUMN tool_call_id TEXT")
         project_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(project_policies)")
         }
@@ -961,6 +978,10 @@ class RunStore:
         if "decided_by" not in action_columns:
             # v40-F8: the policy decision that routed a confirm card, when any.
             self._conn.execute("ALTER TABLE chat_actions ADD COLUMN decided_by TEXT")
+        if "tool_call_id" not in action_columns:
+            # v106-F4 (v101-F15): a card resolves in a later request — the
+            # call id survives on the action row so the result row carries it.
+            self._conn.execute("ALTER TABLE chat_actions ADD COLUMN tool_call_id TEXT")
         chat_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(chats)")}
         if "personality" not in chat_columns:
             # v44-F10: per-chat style preamble.
@@ -3528,11 +3549,13 @@ class RunStore:
         tool_calls: list[dict[str, Any]] | None = None,
         tool_name: str | None = None,
         attachments: list[str] | None = None,
+        tool_call_id: str | None = None,
     ) -> int:
         now = _now()
         cursor = self._conn.execute(
             "INSERT INTO chat_messages (chat_id, role, content, thinking, tool_calls_json,"
-            " tool_name, created_at, attachments_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " tool_name, tool_call_id, created_at, attachments_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 chat_id,
                 role,
@@ -3540,6 +3563,7 @@ class RunStore:
                 thinking,
                 None if tool_calls is None else json.dumps(tool_calls, ensure_ascii=True),
                 tool_name,
+                tool_call_id,
                 now,
                 None if not attachments else json.dumps(attachments),
             ),
@@ -3550,7 +3574,7 @@ class RunStore:
 
     _ACTION_COLS = (
         "action_id, chat_id, tool, args_json, status, result_json, created_at, resolved_at,"
-        " source, decided_by"
+        " source, decided_by, tool_call_id"
     )
 
     @staticmethod
@@ -3566,6 +3590,7 @@ class RunStore:
             resolved_at=None if row[7] is None else str(row[7]),
             source=str(row[8]),
             decided_by=None if row[9] is None else str(row[9]),
+            tool_call_id=None if row[10] is None else str(row[10]),
         )
 
     @_locked
@@ -3577,12 +3602,14 @@ class RunStore:
         args: dict[str, Any],
         source: str = "assistant",
         decided_by: str | None = None,
+        tool_call_id: str | None = None,
     ) -> str:
         action_id = str(uuid.uuid4())
         self._conn.execute(
             "INSERT INTO chat_actions"
-            " (action_id, chat_id, tool, args_json, status, created_at, source, decided_by)"
-            " VALUES (?, ?, ?, ?, 'proposed', ?, ?, ?)",
+            " (action_id, chat_id, tool, args_json, status, created_at, source, decided_by,"
+            "  tool_call_id)"
+            " VALUES (?, ?, ?, ?, 'proposed', ?, ?, ?, ?)",
             (
                 action_id,
                 chat_id,
@@ -3591,6 +3618,7 @@ class RunStore:
                 _now(),
                 source,
                 decided_by,
+                tool_call_id,
             ),
         )
         self._conn.commit()
@@ -3662,13 +3690,23 @@ class RunStore:
 
     @_locked
     def pending_cards_older_than(self, seconds: int) -> list[ChatActionRecord]:
-        """v54-F1: proposed cards across ALL chats created before the cutoff —
-        the ticker's auto-deny sweep. ISO-Z timestamps compare lexically."""
+        """v54-F1: proposed cards across ALL chats stale past the cutoff —
+        the ticker's auto-deny sweep. ISO-Z timestamps compare lexically.
+
+        v106-F6: the clock measures OPERATOR ABSENCE, not card age. The sweep
+        exists because "a timeout is the human not pulling it" (ADR 0032) —
+        but 15 cards auto-denied in one field day while the operator was
+        actively typing in the owning chat. A card now expires only when both
+        its creation AND the chat's last operator message are older than the
+        cutoff; cards in an abandoned chat die exactly as before.
+        """
         cutoff = (datetime.now(UTC) - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
         rows = self._conn.execute(
-            f"SELECT {self._ACTION_COLS} FROM chat_actions"
-            " WHERE status = 'proposed' AND created_at < ?",
-            (cutoff,),
+            f"SELECT {self._ACTION_COLS} FROM chat_actions a"
+            " WHERE a.status = 'proposed' AND a.created_at < ?"
+            " AND COALESCE((SELECT MAX(m.created_at) FROM chat_messages m"
+            "               WHERE m.chat_id = a.chat_id AND m.role = 'user'), '') < ?",
+            (cutoff, cutoff),
         ).fetchall()
         return [self._row_to_action(row) for row in rows]
 
@@ -3773,11 +3811,12 @@ class RunStore:
             tool_name=None if row[6] is None else str(row[6]),
             created_at=str(row[7]),
             attachments=None if row[8] is None else list(json.loads(str(row[8]))),
+            tool_call_id=None if row[9] is None else str(row[9]),
         )
 
     _CHAT_MESSAGE_COLS = (
         "id, chat_id, role, content, thinking, tool_calls_json, tool_name,"
-        " created_at, attachments_json"
+        " created_at, attachments_json, tool_call_id"
     )
 
     @_locked

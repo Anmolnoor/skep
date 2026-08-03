@@ -420,6 +420,12 @@ def test_repo_registry_clone_run_by_slug_and_delete(repo: Path, config: Supervis
 
     assert client.delete("/api/repos/fixture").json() == {"removed": True}
     assert client.get("/api/repos").json()["repos"] == []
+    # v106-F8 (I9): a second delete of the same name teaches instead of the
+    # bare 404 that had the Queen retrying blind names in the field.
+    gone = client.delete("/api/repos/fixture")
+    assert gone.status_code == 404
+    assert "no registered clone named 'fixture'" in gone.json()["detail"]
+    assert "deleting its project" in gone.json()["detail"]
     # The slug no longer resolves, and 'fixture' is not a host path either.
     assert (
         client.post(
@@ -1153,3 +1159,30 @@ def test_a_makefile_only_repo_infers_nothing_when_make_is_absent(
     (repo / "Makefile").write_text("test:\n\techo t\n", encoding="utf-8")
     monkeypatch.setattr("skep.supervisor.serve.registry.shutil.which", lambda _: None)
     assert verify_command_seed(repo) == ""
+
+
+def test_rest_branch_routes_create_and_merge_refusing_default(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """v104-F4's plan named these route tests; the 2026-07-29 audit found the
+    wiring untested. The routes are one-line wrappers over heavily-tested
+    actions — this pins that the wrappers are actually hung on the app and
+    that the actions' refusals surface as status codes."""
+    client = _client(config)
+    assert client.post("/api/repos", json={"url": str(repo), "name": "fixture"}).status_code == 201
+
+    created = client.post("/api/repos/fixture/branches", json={"name": "feature-x"})
+    assert created.status_code == 201, created.text
+    assert (
+        client.post("/api/repos/fixture/branches", json={"name": "integration"}).status_code == 201
+    )
+
+    merged = client.post(
+        "/api/repos/fixture/branches/integration/merge", json={"source": "feature-x"}
+    )
+    assert merged.status_code == 200, merged.text
+
+    # The default branch never moves through these routes (I1).
+    default = client.post("/api/repos/fixture/branches/main/merge", json={"source": "feature-x"})
+    assert default.status_code in (400, 409), default.text
+    assert "default" in default.json()["detail"]

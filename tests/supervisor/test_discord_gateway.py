@@ -79,6 +79,9 @@ class _DiscordHarness:
         self.connect_urls: list[str] = []
         self.sent: list[tuple[str, str, dict[str, object]]] = []
         self.acks: list[tuple[str, str, str]] = []
+        self.deferred_acks: list[tuple[str, str]] = []
+        self.followups: list[tuple[str, str, str]] = []
+        self.spawned_inline = 0
         self.threads: list[tuple[str, str, str, str]] = []
         self.thread_id: str | None = "t-900"
         self.attachment_fetches: list[str] = []
@@ -93,6 +96,9 @@ class _DiscordHarness:
             connect=self._connect,
             send=self._send,
             ack=self._ack,
+            ack_deferred=self._ack_deferred,
+            followup=self._followup,
+            spawn=self._spawn,
             register=self._register,
             create_thread=self._create_thread,
             fetch_attachment=self._fetch_attachment,
@@ -113,6 +119,21 @@ class _DiscordHarness:
     def _ack(self, interaction_id: str, interaction_token: str, text: str) -> bool:
         self.acks.append((interaction_id, interaction_token, text))
         return True
+
+    def _ack_deferred(self, interaction_id: str, interaction_token: str) -> bool:
+        self.deferred_acks.append((interaction_id, interaction_token))
+        return True
+
+    def _followup(self, application_id: str, interaction_token: str, text: str) -> bool:
+        self.followups.append((application_id, interaction_token, text))
+        return True
+
+    def _spawn(self, work) -> None:  # type: ignore[no-untyped-def]
+        # Inline: the suite must observe the verdict deterministically. The
+        # ORDER is still honest — _handle_interaction defers the ack before
+        # this runs.
+        self.spawned_inline += 1
+        work()
 
     def _register(self, token: str, application_id: str, commands: list[dict[str, object]]) -> int:
         self.registrations.append((token, application_id, commands))
@@ -334,12 +355,14 @@ def test_discord_button_confirm_is_gated_by_the_v16_allowlist(
                     },
                 }
             )
-            harness.script(HELLO, READY, interaction)
+            harness.script(HELLO, READY_APP, interaction)
             assert harness.gateway.session_once() is True
-            assert harness.acks, "the refusal must be acked back to the interaction"
-            ack_text = harness.acks[-1][2]
-            assert "channel.confirm.denied.web_ui_only_action_class" in ack_text
-            assert "web UI" in ack_text
+            # v106-F13: the click is deferred-acked inside Discord's 3s
+            # window; the refusal text arrives as the follow-up.
+            assert harness.deferred_acks, "the click must be acked before any work"
+            reply = harness.followups[-1][2]
+            assert "channel.confirm.denied.web_ui_only_action_class" in reply
+            assert "web UI" in reply
             refreshed = harness.store.get_chat_action(action_id)
             assert refreshed is not None and refreshed.status == "proposed"  # card waits
         finally:
@@ -388,12 +411,13 @@ def test_discord_button_confirms_a_low_risk_dispatch(
                     },
                 }
             )
-            harness.script(HELLO, READY, interaction)
+            harness.script(HELLO, READY_APP, interaction)
             assert harness.gateway.session_once() is True
             resolved = harness.store.get_chat_action(action_id)
             assert resolved is not None and resolved.status == "confirmed"
             assert harness.store.recent_runs(5), "the confirmed dispatch_run must dispatch"
-            assert "dispatched" in harness.acks[-1][2]
+            assert harness.deferred_acks, "the click must be acked before any work"
+            assert "dispatched" in harness.followups[-1][2]
         finally:
             harness.close()
     finally:
@@ -449,11 +473,12 @@ def test_discord_button_from_a_session_bound_thread_confirms_its_own_card(
                     },
                 }
             )
-            harness.script(HELLO, READY, interaction)
+            harness.script(HELLO, READY_APP, interaction)
             assert harness.gateway.session_once() is True
             resolved = harness.store.get_chat_action(action_id)
             assert resolved is not None and resolved.status == "confirmed"
-            assert "dispatched" in harness.acks[-1][2]
+            assert harness.deferred_acks, "the click must be acked before any work"
+            assert "dispatched" in harness.followups[-1][2]
         finally:
             harness.close()
     finally:
@@ -503,9 +528,9 @@ def test_discord_button_from_a_foreign_thread_stays_gated(
                         },
                     }
                 )
-                harness.script(HELLO, READY, interaction)
+                harness.script(HELLO, READY_APP, interaction)
                 assert harness.gateway.session_once() is True
-                assert "channel.confirm.denied.identity_not_allowlisted" in harness.acks[-1][2]
+                assert "channel.confirm.denied.identity_not_allowlisted" in harness.followups[-1][2]
             refreshed = harness.store.get_chat_action(action_id)
             assert refreshed is not None and refreshed.status == "proposed"  # card waits
         finally:
@@ -997,12 +1022,14 @@ def test_discord_slash_approve_confirms_the_bound_chats_card(
         harness = _DiscordHarness(config)
         try:
             ollama.script_reply("dispatched — I will report back")
-            harness.script(HELLO, READY, _slash("approve"))
+            harness.script(HELLO, READY_APP, _slash("approve"))
             assert harness.gateway.session_once() is True
             resolved = harness.store.get_chat_action(action_id)
             assert resolved is not None and resolved.status == "confirmed"
             assert harness.store.recent_runs(5), "the confirmed dispatch_run must dispatch"
-            assert "dispatched" in harness.acks[-1][2]
+            # v106-F13: /skep approve rides the same deferred flow as buttons.
+            assert harness.deferred_acks, "the verdict must be acked before any work"
+            assert "dispatched" in harness.followups[-1][2]
         finally:
             harness.close()
     finally:
@@ -1038,11 +1065,11 @@ def test_discord_slash_approve_with_a_web_only_card_stays_gated(
             store.close()
         harness = _DiscordHarness(config)
         try:
-            harness.script(HELLO, READY, _slash("approve"))
+            harness.script(HELLO, READY_APP, _slash("approve"))
             assert harness.gateway.session_once() is True
-            ack_text = harness.acks[-1][2]
-            assert "channel.confirm.denied.web_ui_only_action_class" in ack_text
-            assert "web UI" in ack_text
+            reply = harness.followups[-1][2]
+            assert "channel.confirm.denied.web_ui_only_action_class" in reply
+            assert "web UI" in reply
             refreshed = harness.store.get_chat_action(action_id)
             assert refreshed is not None and refreshed.status == "proposed"
         finally:
@@ -1080,13 +1107,13 @@ def test_discord_slash_deny_and_the_empty_queue_teach(
         harness = _DiscordHarness(config)
         try:
             ollama.script_reply("okay, not dispatching")
-            harness.script(HELLO, READY, _slash("deny", seq=2), _slash("approve", seq=3))
+            harness.script(HELLO, READY_APP, _slash("deny", seq=2), _slash("approve", seq=3))
             assert harness.gateway.session_once() is True
             resolved = harness.store.get_chat_action(action_id)
             assert resolved is not None and resolved.status == "denied"
             assert harness.store.recent_runs(5) == []  # nothing executed
             # The follow-up /skep approve finds no card and says so (I9).
-            assert "no card is waiting" in harness.acks[-1][2]
+            assert "no card is waiting" in harness.followups[-1][2]
         finally:
             harness.close()
     finally:
@@ -1122,3 +1149,110 @@ def test_gateway_session_outcome_leaves_a_health_breadcrumb(
         assert _crumb()["state"] == "session ok"
     finally:
         rig.close()
+
+
+def test_button_click_is_acked_before_the_verdict_runs(
+    config: SupervisorConfig,
+) -> None:
+    """v106-F13 (field, 2026-07-29): Discord invalidates an unacknowledged
+    interaction after 3 seconds, and a verdict runs a mutation plus a model
+    continuation. The old ack-last flow meant every Allow click read 'This
+    interaction failed' and the reply died with the token. The deferred ack
+    must land BEFORE any verdict work starts."""
+    from skep.supervisor import RunStore
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_discord(config, ollama, can_confirm=True)
+    finally:
+        ollama.stop()
+    store = RunStore(config.db_path)
+    try:
+        chat = store.create_chat(title="discord 42", model=None)
+        action_id = store.add_chat_action(chat.chat_id, tool="read_url", args={"url": "x"})
+    finally:
+        store.close()
+    harness = _DiscordHarness(config)
+    try:
+        timeline: list[str] = []
+        real_deferred = harness._ack_deferred
+
+        def deferred(interaction_id: str, interaction_token: str) -> bool:
+            timeline.append("deferred-ack")
+            return real_deferred(interaction_id, interaction_token)
+
+        def verdict(*_a: object, **_k: object) -> str:
+            timeline.append("verdict")
+            return "skep: done."
+
+        harness.gateway._ack_deferred = deferred
+        harness.gateway._resolve_verdict = verdict  # type: ignore[method-assign]
+        interaction = json.dumps(
+            {
+                "op": 0,
+                "t": "INTERACTION_CREATE",
+                "s": 2,
+                "d": {
+                    "id": "i-9",
+                    "token": "itok-9",
+                    "channel_id": "42",
+                    "data": {"custom_id": f"confirm:{action_id}"},
+                },
+            }
+        )
+        harness.script(HELLO, READY_APP, interaction)
+        assert harness.gateway.session_once() is True
+        assert timeline == ["deferred-ack", "verdict"]
+        assert harness.followups[-1][2] == "skep: done."
+        assert harness.followups[-1][0] == "app-1"  # READY_APP's application id
+    finally:
+        harness.close()
+
+
+def test_followup_failure_falls_back_to_a_channel_message(
+    config: SupervisorConfig,
+) -> None:
+    """v106-F13: a verdict can outlive the follow-up webhook's 15 minutes —
+    the reply must still reach the channel instead of dying with the token."""
+    from skep.supervisor import RunStore
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_discord(config, ollama, can_confirm=True)
+    finally:
+        ollama.stop()
+    store = RunStore(config.db_path)
+    try:
+        chat = store.create_chat(title="discord 42", model=None)
+        action_id = store.add_chat_action(chat.chat_id, tool="read_url", args={"url": "x"})
+    finally:
+        store.close()
+    harness = _DiscordHarness(config)
+    try:
+        harness.gateway._resolve_verdict = (  # type: ignore[method-assign]
+            lambda *a, **k: "skep: late but honest."
+        )
+        harness.gateway._followup = lambda *a: False
+        interaction = json.dumps(
+            {
+                "op": 0,
+                "t": "INTERACTION_CREATE",
+                "s": 2,
+                "d": {
+                    "id": "i-10",
+                    "token": "itok-10",
+                    "channel_id": "42",
+                    "data": {"custom_id": f"deny:{action_id}"},
+                },
+            }
+        )
+        harness.script(HELLO, READY_APP, interaction)
+        assert harness.gateway.session_once() is True
+        sent_texts = [str(payload.get("content", "")) for _, _, payload in harness.sent]
+        assert any("late but honest" in text for text in sent_texts)
+    finally:
+        harness.close()

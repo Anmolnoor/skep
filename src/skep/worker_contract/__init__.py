@@ -25,8 +25,11 @@ from .result import (
 )
 from .states import TERMINAL_STATES, TaskState
 from .task import (
+    BOOKKEEPING_DIRS,
     KNOWN_PLUGIN_RISKS,
     KNOWN_WORKER_KINDS,
+    PATCH_EXCLUDE_PATHSPECS,
+    TOOLCHAIN_DIR,
     ApprovalVerdict,
     AutonomyDecisionPayload,
     Budget,
@@ -56,14 +59,17 @@ from .worker_state import (
 
 __all__ = [
     "APPROVAL_GRANTS_STATE_KEY",
+    "BOOKKEEPING_DIRS",
     "CONTRACT_VERSION",
     "KNOWN_PLUGIN_RISKS",
     "KNOWN_WORKER_KINDS",
+    "PATCH_EXCLUDE_PATHSPECS",
     "PAYLOAD_MODELS",
     "RESUME_CHECKPOINT_ARTIFACT_NAME",
     "RESUME_CHECKPOINT_STATE_KEY",
     "SUPPORTED_CONTRACT_RANGE",
     "TERMINAL_STATES",
+    "TOOLCHAIN_DIR",
     "ApprovalRequestedPayload",
     "ApprovalVerdict",
     "Artifact",

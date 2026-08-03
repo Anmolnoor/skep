@@ -63,6 +63,13 @@ class CodingEngine:
     # USER/LOGNAME — without them every run dies on "Not logged in". Identity
     # names, never secrets; the registry naming them keeps G2 intact.
     env_vars: tuple[str, ...] = ()
+    # v106-F1: runtime state the engine must be able to WRITE, declared as
+    # (env var, subdirectory) pairs resolved under the run's workspace-local
+    # ``.toolchain/`` scratch dir. The sandbox makes only the workspace
+    # writable (I12); Claude Code writes session-env/shell snapshots under
+    # ``~/.claude``, so without this its Bash tool dies on a read-only mount
+    # and every shell-needing task ends "completed but produced no patch".
+    toolchain_env: tuple[tuple[str, str], ...] = ()
     # True when the agent's own commands do NOT pass skep's capability layer.
     external: bool = True
     summary: str = ""
@@ -83,6 +90,7 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         binary="claude",
         network_host="api.anthropic.com",
         env_vars=("USER", "LOGNAME"),
+        toolchain_env=(("CLAUDE_CONFIG_DIR", "claude"),),
         summary=(
             "Claude Code, headless (--print). Confined by the sandbox, not the capability layer."
         ),

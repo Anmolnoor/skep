@@ -1990,7 +1990,9 @@ question — phase-targeted defaults rather than global.
   any confirmed re-verification, including one earned by re-running
   `true`. It now requires the project to have said what verification
   means. An unpinned project is not blocked; its patch simply waits for
-  a human, with the missing key named.
+  a human. (The "missing key named on the record" half of this claim was
+  not true until v106-F11 wrote the block reason to the audit trail —
+  v90 shipped the enforcement, not the visibility.)
 - **F1 CLI-agent engines become selectable** (ADR 0047) — the Claude
   Code, Codex and Aider adapters have been complete since v33 and
   unreachable because nothing mapped a name to them. A `coding_engine`
@@ -2464,3 +2466,78 @@ No new ADR — ADR 0045's ceiling bullet is amended (R13 is its own named upgrad
 path), F1–F4 are shelf content under ADR 0043, and F6–F10 are bug fixes to
 existing decisions. Not exercised live: a real self-test pack promotion end to
 end (the harness is executed for real in tests; the dispatch seam is stubbed).
+
+## v101 (2026-07-29, F1–F14; F15/F16 landed in v106)
+
+The caste roster becomes a registry (ADR 0049): the contract owns the
+names, `castes.py` owns routing and description, a test pins the two sets
+equal, and every surface reads the registry. The verifier and reviewer
+castes become real workers; the store records `worker_kind` and the
+RESOLVED `coding_engine` on every run (I8). The UI gains its type/spacing
+scale, accessibility floor, two breakpoints and the `.chip` primitive,
+all linted; `GET /api/workers` and the Assign panel expose the whole
+roster; the Queen's dispatch enums generate from it. Setup writes the
+slug binding it always implied, and an un-runnable inferred pin is
+refused by the same host probes that seeded it (F14).
+
+**Part E (F15 tool-call pairing, F16 the close_pr card) entered the plan
+mid-round and did NOT ship with v101** — recorded complete by mistake,
+found by the 2026-07-29 audit, landed as v106-F4/F5. The plan's own words
+for F15: "the one fix here that should not be dropped."
+
+## v103 (2026-07-29, F1–F5)
+
+The git surface round. Mid-turn steering is queued with a receipt instead
+of discarded (and the queue state's declaration order is pinned — a TDZ
+stopped the chat rendering entirely once). `merge_branch` lands
+supervisor-side, carded, refusing the default branch, conflict-aborting
+in a temp worktree. **F3 closed a live hole:** `git merge`, `rebase`,
+`cherry-pick`, `revert` and `reset --hard` were never denied to workers —
+one broad allowlist entry would have let a worker merge another branch
+into its worktree, and the patch (diffing against the baseline) would
+land that work under the wrong approval. Denied with the rest, before
+the verify fast-path and every grant lane; the Queen is bound by the same
+predicates; stored grants are swept, not grandfathered.
+
+## v104 (2026-07-29, F0–F5, ADR 0050)
+
+One verb, three faces. The surface-parity gate
+(`tests/supervisor/test_surface_parity.py`) turns "someone will notice
+the next chat-only verb in a field test" into "the next gap fails a
+gate" — on first run it reported 35 of 74 mutating verbs faceless, not
+the estimated fifteen. `skep branch`, `skep pr`, and `skep repo refresh`
+close the git family's operator half; two REST routes give the web UI
+branch create/merge; every remaining chat-only verb sits in `CHAT_ONLY`
+with a written reason. ADR 0050 makes it a rule: a new mutating verb
+ships with its operator face or its recorded exemption.
+
+## v105 (2026-07-29, F1)
+
+The conversation continues when the work does: a completed run's owning
+chat gets one unattended, read-only continuation turn — fact-seeded,
+once per run, mutations card instead of executing (the pinned test
+proves a scripted dispatch_run becomes a CARD). `continue_chat_after_run`
+opts out.
+
+## v106 (2026-07-29, F1–F12)
+
+The audit round — seeded not by a field test but by a nine-agent
+plan-vs-code audit of v85–v105 plus a read-only reconstruction of the
+live home's week. The code was faithful; the felt breakage was
+operational. F1 gives per-run toolchain state a writable home inside the
+sandbox wall (`CLAUDE_CONFIG_DIR`, `npm_config_cache` →
+`<workspace>/.toolchain/`) — Claude Code's Bash tool and npm both died
+against a read-only $HOME. F2 heartbeats through long shell commands
+(three workers killed at exactly 3×10s mid-npm-install). F3 stops
+"could not re-verify" covering for "ran and FAILED", puts the
+unconfirmed verdict on the pending approval card, and makes an
+`unavailable` outcome ride the ready-to-land line. F4/F5 land v101's
+Part E. F6 re-clocks card timeouts to operator absence. F7 gives
+run_code a 600s ceiling. F8 teaches doctor to name umbrella and dead
+registrations. F9 adds yarn's registry to node-dev and stops the UI
+404-polling diffs that don't exist. F10 writes the four tests the plans
+named and nobody wrote — its CLI-reference drift gate flagged eight
+undocumented command groups on first run. F11 implements v90's unkept
+visibility clauses (grant tier + time on the receipt, blocked
+auto-apply reasons on the audit trail, the ADR 0046 amendment). F12 is
+this file catching up.

@@ -12,10 +12,16 @@ daily-driven in the field since 2026-07-17.
 ## Install
 
 ```sh
-pip install skep
+pipx install skep
 ```
 
-Or `uvx skep` to try it without installing. From a checkout,
+Or `uvx skep` to try it without installing. On Debian/Ubuntu and other
+PEP 668 distros, the system Python refuses bare `pip install` with an
+externally-managed-environment error — install skep as an app instead:
+`sudo apt install pipx && pipx install skep`, then `pipx ensurepath`.
+Inside a virtual environment, `pip install skep` works as ever. Please
+don't reach for `--break-system-packages` — least privilege applies to
+installers too. From a checkout,
 `bash scripts/install.sh` detects the source tree and runs `uv sync`.
 Linux sandboxing needs `bubblewrap` (`sudo dnf install bubblewrap` /
 `sudo apt install bubblewrap`); macOS uses Seatbelt out of the box.

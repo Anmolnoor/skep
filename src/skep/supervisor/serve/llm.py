@@ -392,7 +392,13 @@ def _final_openai_tool_calls(calls: dict[int, dict[str, str]]) -> list[dict[str,
             arguments = {}
         if not isinstance(arguments, dict):
             arguments = {}
-        normalized.append({"function": {"name": call["name"], "arguments": arguments}})
+        final: dict[str, Any] = {"function": {"name": call["name"], "arguments": arguments}}
+        # v106-F4 (v101-F15): the provider's call id survives normalization —
+        # it is the only durable link between a call and its result once
+        # cards resolve out of emission order.
+        if call.get("id"):
+            final["id"] = call["id"]
+        normalized.append(final)
     return normalized
 
 
@@ -468,6 +474,8 @@ def _openai_chat_stream(
                 for tool_call in delta.get("tool_calls") or []:
                     index = int(tool_call.get("index") or 0)
                     current = pending_calls.setdefault(index, {"name": "", "arguments": ""})
+                    if tool_call.get("id"):
+                        current["id"] = str(tool_call["id"])
                     function = tool_call.get("function") or {}
                     if function.get("name"):
                         current["name"] = str(function["name"])
@@ -558,10 +566,11 @@ def _anthropic_payload(
 ) -> dict[str, Any]:
     """Ollama-shaped history → Messages API body.
 
-    The normalized history carries no tool-call ids, so ids are synthesized
-    here and results pair with the OLDEST unanswered call in order — the
-    engine always appends results immediately after the calling message, so
-    FIFO pairing is exact.
+    v106-F4 (v101-F15): when the history carries real call ids (every row
+    written since the tool_call_id column), each tool result pairs with ITS
+    call. The synthesized-id FIFO remains only for older, id-less rows —
+    there the engine appended results immediately after the calling message,
+    so arrival order is call order.
     """
     system_parts: list[str] = []
     converted: list[dict[str, Any]] = []
@@ -582,7 +591,7 @@ def _anthropic_payload(
             for call in message.get("tool_calls") or []:
                 function = call.get("function") or {}
                 counter += 1
-                call_id = f"call_{counter}"
+                call_id = str(call.get("id") or "") or f"call_{counter}"
                 pending_ids.append(call_id)
                 blocks.append(
                     {
@@ -597,8 +606,20 @@ def _anthropic_payload(
             continue
         if role == "tool":
             content = str(message.get("content") or "")
-            if pending_ids:
+            result_id = str(message.get("tool_call_id") or "")
+            if result_id and result_id in pending_ids:
+                # v106-F4: exact pairing — the id names the call regardless of
+                # the order the operator resolved the cards in.
+                pending_ids.remove(result_id)
                 block: dict[str, Any] = {
+                    "type": "tool_result",
+                    "tool_use_id": result_id,
+                    "content": content,
+                }
+            elif pending_ids:
+                # FIFO fallback for pre-column rows (NULL id) only — never the
+                # primary mechanism again (the inverted-verdicts field test).
+                block = {
                     "type": "tool_result",
                     "tool_use_id": pending_ids.pop(0),
                     "content": content,

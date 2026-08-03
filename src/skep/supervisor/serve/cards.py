@@ -122,6 +122,13 @@ def _render_value(value: Any) -> str:
 
 def headline(tool: str, args: dict[str, Any]) -> str:
     """One line: the verb and the thing it acts on, verbatim."""
+    # v106-F5 (v101-F16): a PR verb names WHICH PR. "close_pr — repo" made two
+    # cards in one batch indistinguishable, and the first subject key (repo)
+    # swallowed the number that mattered. One branch, not a per-tool table —
+    # it disambiguates merge_pr/close_pr batches generally.
+    repo, pr = args.get("repo"), args.get("pr")
+    if repo not in (None, "") and pr not in (None, ""):
+        return f"{tool} — {_render_value(repo).strip()}#{_render_value(pr).strip()}"
     for key in _SUBJECT_KEYS:
         value = args.get(key)
         if value in (None, "", [], {}):
@@ -203,6 +210,16 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
                 "attached projects stay untouched"
             )
         return "a group edit reaches EVERY project attached to this group on its next dispatch"
+    if tool == "close_pr" and args.get("delete_branch"):
+        # v106-F5 (v101-F16): the field cascade — deleting the head ref made
+        # GitHub close an UPSTREAM PR built on it, and the card never said the
+        # ref was part of the deal. Static text: no network call on a card the
+        # operator is already waiting behind.
+        return (
+            "closes the PR AND deletes its head ref — GitHub then closes every "
+            "other PR built on that branch, including PRs on upstream repos, "
+            "and the ref deletion is not undone by a revert"
+        )
     if tool in _PUBLISHING_TOOLS:
         return "publishes to the remote — visible outside this machine, and not undone by a revert"
     if tool in _LANDING_TOOLS:

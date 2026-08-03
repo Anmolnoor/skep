@@ -31,6 +31,7 @@ from pydantic import ValidationError
 
 from skep.worker_contract import (
     CONTRACT_VERSION,
+    PATCH_EXCLUDE_PATHSPECS,
     SUPPORTED_CONTRACT_RANGE,
     Artifact,
     CodingWorkerResult,
@@ -163,7 +164,7 @@ def _write_patch(workspace: Path, patch_path: Path) -> bool:
         ["git", "-C", str(workspace), "add", "-N", "."], capture_output=True, check=False
     )
     diff = subprocess.run(
-        ["git", "-C", str(workspace), "diff", "--binary", "--", ".", ":!.events", ":!.artifacts"],
+        ["git", "-C", str(workspace), "diff", "--binary", "--", ".", *PATCH_EXCLUDE_PATHSPECS],
         capture_output=True,
         text=True,
         check=False,

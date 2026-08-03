@@ -40,7 +40,7 @@ jobs:
         # local gates).
         run: |
           mkdir -p "$HOME/.cache/skep-test-tmp"
-          TMPDIR="$HOME/.cache/skep-test-tmp" uv run pytest -m "not smoke and not container"
+          TMPDIR="$HOME/.cache/skep-test-tmp" uv run --with pytest-xdist pytest -n auto -m "not smoke and not container"
       - name: First-party smoke
         run: make smoke
       - name: Linux sandbox smoke

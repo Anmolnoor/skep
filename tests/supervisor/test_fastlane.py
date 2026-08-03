@@ -117,7 +117,7 @@ def test_run_code_fast_request_falls_back_to_worker_dispatch(
     monkeypatch.setattr(
         tools,
         "_script_run_result",
-        lambda store, task_id: {"task_id": task_id, "state": "completed"},
+        lambda store, task_id, **kw: {"task_id": task_id, "state": "completed"},
     )
     store = RunStore(tmp_path / "s.sqlite3")
     try:

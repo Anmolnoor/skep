@@ -952,7 +952,16 @@ class ChatEngine:
                 # Older ones are history, not working data — the tighter cap.
                 cap = TOOL_REPLAY_CAP if record.id < last_user_id else CURRENT_TOOL_REPLAY_CAP
                 content = _truncate_tool_result(content, cap, record.tool_name)
-                messages.append({"role": "tool", "tool_name": record.tool_name, "content": content})
+                message: dict[str, Any] = {
+                    "role": "tool",
+                    "tool_name": record.tool_name,
+                    "content": content,
+                }
+                # v106-F4 (v101-F15): the pairing survives replay. Rows older
+                # than the column have NULL and keep pairing by position.
+                if record.tool_call_id:
+                    message["tool_call_id"] = record.tool_call_id
+                messages.append(message)
             elif record.role == "assistant" and record.tool_calls:
                 messages.append(
                     {
@@ -1127,11 +1136,12 @@ class ChatEngine:
         """
         seeds: dict[tuple[str, str], str] = {}
         rows = self.store.chat_messages(chat_id)[-self._REPEAT_SEED_ROWS :]
-        pending: list[tuple[str, str]] = []
+        pending: list[tuple[str | None, str, str]] = []
         for row in rows:
             if row.role == "assistant":
                 pending = [
                     (
+                        str(call.get("id") or "") or None,
                         str(call.get("function", {}).get("name") or ""),
                         json.dumps(_call_args(call), sort_keys=True, ensure_ascii=True),
                     )
@@ -1140,11 +1150,18 @@ class ChatEngine:
                 continue
             if row.role != "tool" or not pending:
                 continue
-            name, args_key = pending[0]
-            if row.tool_name != name:
-                pending = []
-                continue
-            pending.pop(0)
+            # v106-F4 (v101-F15): when both sides carry the call id the pairing
+            # is exact whatever order results landed in; the positional guess
+            # (with its abandon-on-drift guard) remains only for id-less rows.
+            if row.tool_call_id and any(cid == row.tool_call_id for cid, _, _ in pending):
+                index = next(i for i, (cid, _, _) in enumerate(pending) if cid == row.tool_call_id)
+                _, name, args_key = pending.pop(index)
+            else:
+                _, name, args_key = pending[0]
+                if row.tool_name != name:
+                    pending = []
+                    continue
+                pending.pop(0)
             if name not in READ_TOOL_NAMES:
                 continue
             try:
@@ -1350,6 +1367,9 @@ class ChatEngine:
             for call in tool_calls:
                 name = str(call.get("function", {}).get("name") or "")
                 args = _call_args(call)
+                # v106-F4 (v101-F15): the model's own call id rides every row
+                # this call produces — position stops being the only link.
+                call_id = str(call.get("id") or "") or None
                 if name == CLARIFY_TOOL_NAME:
                     # v51-F7: a turn-ENDING prompt — the third interaction
                     # type (not a read, not a card). The question lands as a
@@ -1367,6 +1387,7 @@ class ChatEngine:
                             chat_id,
                             role="tool",
                             tool_name=name,
+                            tool_call_id=call_id,
                             content=json.dumps(
                                 {"ok": True, "result": {"asked": question, "choices": choices}},
                                 ensure_ascii=True,
@@ -1388,6 +1409,7 @@ class ChatEngine:
                         chat_id,
                         role="tool",
                         tool_name=name,
+                        tool_call_id=call_id,
                         content=json.dumps(result, ensure_ascii=True),
                     )
                     yield ("tool", {"tool": name, "result": result})
@@ -1411,6 +1433,7 @@ class ChatEngine:
                             chat_id,
                             role="tool",
                             tool_name=name,
+                            tool_call_id=call_id,
                             content=json.dumps(refusal, ensure_ascii=True),
                         )
                         yield ("tool", {"tool": name, "result": refusal})
@@ -1436,6 +1459,7 @@ class ChatEngine:
                             chat_id,
                             role="tool",
                             tool_name=name,
+                            tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
                         yield (
@@ -1478,6 +1502,7 @@ class ChatEngine:
                             chat_id,
                             role="tool",
                             tool_name=name,
+                            tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
                         # v90-F3: a grant-covered action leaves a receipt. The
@@ -1491,20 +1516,24 @@ class ChatEngine:
                         # everything already listening for "tool" (the
                         # transcript group, maybeMountWorkerActivity for
                         # auto-dispatched runs) keeps working untouched.
-                        yield (
-                            "tool",
-                            {
-                                "tool": name,
-                                "decision": asdict(decision),
-                                "result": payload,
-                                "card": card_summary(name, args, tool_description(name)),
-                            },
-                        )
+                        receipt: dict[str, Any] = {
+                            "tool": name,
+                            "decision": asdict(decision),
+                            "result": payload,
+                            "card": card_summary(name, args, tool_description(name)),
+                        }
+                        # v106-F11 (v90-F3): the receipt names the covering
+                        # grant's tier and when the operator gave it.
+                        grant = actions.learned_rule_grant_view(self.store, decision.decided_by)
+                        if grant is not None:
+                            receipt["grant"] = grant
+                        yield ("tool", receipt)
                         continue
                     action_id = self.store.add_chat_action(
                         chat_id,
                         tool=name,
                         args=args,
+                        tool_call_id=call_id,
                         # v40-F8: when a policy decision routed this gate,
                         # the card row records which rule (the rule id when the
                         # decision names one, else its reason code).
@@ -1618,6 +1647,7 @@ class ChatEngine:
                     chat_id,
                     role="tool",
                     tool_name=name,
+                    tool_call_id=call_id,
                     content=json.dumps(result, ensure_ascii=True),
                 )
                 # The live event carries the full result for EVERY tool — the
@@ -1820,6 +1850,12 @@ class ChatEngine:
             chat_id,
             role="tool",
             tool_name=action.tool,
+            # v106-F4 (v101-F15): the id recorded at card time comes back on
+            # the result row — this write fires when the OPERATOR clicks, so
+            # with two cards open the rows land in resolution order and
+            # position no longer names the call (the inverted-verdicts field
+            # test, msg 4874-4877).
+            tool_call_id=action.tool_call_id,
             content=json.dumps(payload, ensure_ascii=True),
         )
         # v49-F3: the confirmer's stream carries what the mutation actually did

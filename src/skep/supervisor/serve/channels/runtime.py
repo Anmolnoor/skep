@@ -664,6 +664,14 @@ DISCORD_INTENTS = (1 << 9) | (1 << 10) | (1 << 12) | (1 << 13) | (1 << 15)
 
 SendDiscordPayload = Callable[[str, str, dict[str, object]], bool]
 AckInteraction = Callable[[str, str, str], bool]
+# v106-F13: (interaction_id, interaction_token) -> acked. Type 5, sent BEFORE
+# any verdict work — Discord invalidates an unacknowledged interaction in 3s.
+AckDeferred = Callable[[str, str], bool]
+# v106-F13: (application_id, interaction_token, text) -> delivered.
+Followup = Callable[[str, str, str], bool]
+# v106-F13: runs the verdict off the gateway loop; injectable so the suite
+# resolves inline instead of racing a thread.
+SpawnVerdict = Callable[[Callable[[], None]], None]
 GatewayConnect = Callable[[str], Any]
 # v78-F4: (token, application_id, commands) -> HTTP status of the bulk PUT.
 RegisterCommands = Callable[[str, str, "list[dict[str, object]]"], int]
@@ -736,6 +744,30 @@ def _default_discord_ack(interaction_id: str, interaction_token: str, text: str)
         timeout=httpx.Timeout(30.0, connect=10.0),
     )
     return response.status_code == 204
+
+
+def _default_discord_ack_deferred(interaction_id: str, interaction_token: str) -> bool:
+    # v106-F13: type 5 = "deferred channel message" — Discord shows a thinking
+    # state and the follow-up webhook stays valid for 15 minutes. This is the
+    # only response that can beat the 3-second interaction deadline when the
+    # verdict runs a mutation plus a model continuation.
+    response = httpx.post(
+        f"{DISCORD_API}/interactions/{interaction_id}/{interaction_token}/callback",
+        json={"type": 5},
+        timeout=httpx.Timeout(30.0, connect=10.0),
+    )
+    return response.status_code == 204
+
+
+def _default_discord_followup(application_id: str, interaction_token: str, text: str) -> bool:
+    # v106-F13: the follow-up completes the deferred ack — it lands as the
+    # reply to the click, in-thread, exactly where the button lives.
+    response = httpx.post(
+        f"{DISCORD_API}/webhooks/{application_id}/{interaction_token}",
+        json={"content": text},
+        timeout=httpx.Timeout(30.0, connect=10.0),
+    )
+    return response.status_code in (200, 204)
 
 
 # v78-F4: the /skep command tree — deterministic store reads plus the two
@@ -840,6 +872,10 @@ def _discord_action_payload(
     return payload
 
 
+def _spawn_daemon_thread(work: Callable[[], None]) -> None:
+    threading.Thread(target=work, name="discord-verdict", daemon=True).start()
+
+
 class DiscordGateway(threading.Thread):
     """The Discord gateway on a Ticker-style thread.
 
@@ -858,6 +894,9 @@ class DiscordGateway(threading.Thread):
         connect: GatewayConnect | None = None,
         send: SendDiscordPayload | None = None,
         ack: AckInteraction | None = None,
+        ack_deferred: AckDeferred | None = None,
+        followup: Followup | None = None,
+        spawn: SpawnVerdict | None = None,
         register: RegisterCommands | None = None,
         create_thread: CreateThread | None = None,
         fetch_attachment: Callable[[str], bytes | None] | None = None,
@@ -873,6 +912,11 @@ class DiscordGateway(threading.Thread):
         self._connect = connect if connect is not None else _default_gateway_connect
         self._send = send if send is not None else _default_discord_send
         self._ack = ack if ack is not None else _default_discord_ack
+        self._ack_deferred = (
+            ack_deferred if ack_deferred is not None else _default_discord_ack_deferred
+        )
+        self._followup = followup if followup is not None else _default_discord_followup
+        self._spawn = spawn if spawn is not None else _spawn_daemon_thread
         self._register = register if register is not None else _default_register_commands
         self._typing = typing if typing is not None else _default_discord_typing
         self._create_thread = (
@@ -1226,7 +1270,7 @@ class DiscordGateway(threading.Thread):
         # anything else stays silent.
         interaction_type = data.get("type")
         if interaction_type == 2:
-            self._handle_slash_command(data, config)
+            self._handle_slash_command(data, config, token)
             return
         if interaction_type not in (None, 3):
             return
@@ -1239,11 +1283,59 @@ class DiscordGateway(threading.Thread):
             channel=discord_adapter.CHANNEL, identity_id=str(data.get("channel_id") or "")
         )
         if verb not in {"confirm", "deny"}:
-            text = "skep: that card is gone or resolved."
-        else:
-            text = self._resolve_verdict(action_id, confirm=verb == "confirm", identity=identity)
-        if not self._ack(interaction_id, interaction_token, text):
-            logger.warning("discord interaction ack failed")
+            # Instant answer — the type-4 ack fits inside the 3s window here.
+            gone = "skep: that card is gone or resolved."
+            if not self._ack(interaction_id, interaction_token, gone):
+                logger.warning("discord interaction ack failed")
+            return
+        # v106-F13 (field, 2026-07-29): Discord invalidates an unacknowledged
+        # interaction after 3 seconds, and _resolve_verdict runs the mutation
+        # PLUS a full model continuation — minutes on a slow provider. The old
+        # ack-last flow meant every Allow click read "This interaction failed"
+        # and the reply text died with the token; worse, the verdict ran on
+        # the gateway loop, so one slow click blocked every later message and
+        # click (a card auto-denied at the 5-minute sweep while its Allow sat
+        # unprocessed). Ack deferred FIRST, resolve off-loop, deliver via the
+        # follow-up webhook, and fall back to a plain channel message when the
+        # token has expired (a verdict can outlive the webhook's 15 minutes).
+        confirm = verb == "confirm"
+        self._defer_and_finish(
+            interaction_id=interaction_id,
+            interaction_token=interaction_token,
+            channel_id=str(data.get("channel_id") or ""),
+            token=token,
+            resolve=lambda: self._resolve_verdict(action_id, confirm=confirm, identity=identity),
+        )
+
+    def _defer_and_finish(
+        self,
+        *,
+        interaction_id: str,
+        interaction_token: str,
+        channel_id: str,
+        token: str,
+        resolve: Callable[[], str],
+    ) -> None:
+        """v106-F13: the one shape that survives a slow verdict — deferred ack
+        inside Discord's 3s window, the work off the gateway loop, the reply
+        via the follow-up webhook, a plain channel message when the token has
+        already expired (a verdict can outlive the webhook's 15 minutes)."""
+        if not self._ack_deferred(interaction_id, interaction_token):
+            logger.warning("discord deferred ack failed; resolving anyway")
+
+        def _finish() -> None:
+            try:
+                text = resolve()
+            except Exception:
+                logger.exception("discord verdict resolution failed")
+                text = "skep: that verdict crashed mid-resolve — check the web UI."
+            delivered = False
+            if self._application_id:
+                delivered = self._followup(self._application_id, interaction_token, text)
+            if not delivered and channel_id:
+                self._deliver(token, channel_id, text)
+
+        self._spawn(_finish)
 
     # -- v78-F4: the /skep slash deck — deterministic store reads plus the two
     # verdict spellings; the v25 command-deck pattern, server-side. No model
@@ -1270,7 +1362,9 @@ class DiscordGateway(threading.Thread):
                 return False
         return True
 
-    def _handle_slash_command(self, data: dict[str, Any], config: ChannelConfig) -> None:
+    def _handle_slash_command(
+        self, data: dict[str, Any], config: ChannelConfig, token: str
+    ) -> None:
         if not self._slash_admitted(data, config):
             # A stranger gets no ack — Discord shows its own generic failure;
             # we volunteer nothing.
@@ -1286,12 +1380,21 @@ class DiscordGateway(threading.Thread):
             else ""
         )
         channel_id = str(data.get("channel_id") or "")
+        if sub in ("approve", "deny"):
+            # v106-F13: a verdict runs a mutation plus a model continuation —
+            # the same 3-second trap the buttons had; same deferred flow.
+            self._defer_and_finish(
+                interaction_id=str(data.get("id") or ""),
+                interaction_token=str(data.get("token") or ""),
+                channel_id=channel_id,
+                token=token,
+                resolve=lambda: self._slash_verdict(channel_id, confirm=sub == "approve"),
+            )
+            return
         if sub == "status":
             text = self._slash_status()
         elif sub == "runs":
             text = self._slash_runs()
-        elif sub in ("approve", "deny"):
-            text = self._slash_verdict(channel_id, confirm=sub == "approve")
         else:
             return  # unknown subcommands resolve nothing
         if not self._ack(str(data.get("id") or ""), str(data.get("token") or ""), text):

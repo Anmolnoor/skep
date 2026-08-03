@@ -50,6 +50,10 @@ FAILED_RUN_STATES = {"failed", "rejected", "worker_timeout", "worker_crashed"}
 # v44-F4 script-schedule lane; the output cap keeps a chatty script from
 # flooding the transcript (full output stays in the run's output artifact).
 SCRIPT_RUN_WALL_CLOCK_SECONDS = 120
+# v106-F7: the per-call ceiling. Two field scripts driving npm died at exactly
+# 120s — the default stays right for smoke scripts, but a caller who KNOWS the
+# work is slow may ask for up to this much.
+SCRIPT_RUN_MAX_WALL_CLOCK_SECONDS = 600
 SCRIPT_RUN_OUTPUT_CAP = 4000
 _SCRIPT_RUN_POLL_SECONDS = 0.1
 
@@ -72,7 +76,9 @@ def _search_hit_payload(hit: ChatSearchHit) -> dict[str, Any]:
     return payload
 
 
-def _script_run_result(store: RunStore, task_id: str) -> dict[str, Any]:
+def _script_run_result(
+    store: RunStore, task_id: str, *, wall_clock_seconds: int = SCRIPT_RUN_WALL_CLOCK_SECONDS
+) -> dict[str, Any]:
     """Block until the script run finishes, then return its output.
 
     stdout/stderr ride the run's command.result event (full text stays in the
@@ -81,7 +87,7 @@ def _script_run_result(store: RunStore, task_id: str) -> dict[str, Any]:
     """
     import time
 
-    deadline = time.monotonic() + SCRIPT_RUN_WALL_CLOCK_SECONDS + 30
+    deadline = time.monotonic() + wall_clock_seconds + 30
     state = ""
     while time.monotonic() < deadline:
         record = store.get_run(task_id)
@@ -909,6 +915,11 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "boolean",
                 "description": "supervisor-side sandboxed 10s lane for pure computation",
             },
+            "timeout_seconds": {
+                "type": "integer",
+                "description": "wall clock for the run (default 120, max 600) — "
+                "raise it for slow toolchain work like npm install",
+            },
         },
         ["repo", "code"],
     ),
@@ -1025,10 +1036,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE promoting a drafted skill pack (a SKILL.md skill shipping "
         "scripts; see list_skills' packs) to ACTIVE (requires user "
         "confirmation). On confirm, every shipped script must pass a "
-        "parse-only syntax trial before the pack's skill enters the "
-        "registry. allow_scripts grants shell commands, each shown verbatim "
-        "on the card; omit to keep the grants requested at import. Also "
-        "reactivates a suspended pack. Fails honestly if the trial fails.",
+        "syntax trial, and a pack declaring self_test also runs that "
+        "command for real in a sandboxed no-network script run (v100-F5) — "
+        "the result rides the card. allow_scripts grants shell commands, "
+        "each shown verbatim on the card; omit to keep the grants requested "
+        "at import. Also reactivates a suspended pack. Fails honestly if "
+        "the trial fails.",
         {
             "pack_id": {"type": "string", "description": "from list_skills packs"},
             "allow_scripts": {
@@ -3573,6 +3586,14 @@ def _execute_mutation(
             fast = run_code_fast(language, str(args["code"]))
             if fast is not None:
                 return fast
+        # v106-F7: the caller may raise the wall clock up to the ceiling —
+        # npm-driving scripts outlive the 120s smoke default.
+        wall_clock = min(
+            int(args.get("timeout_seconds") or SCRIPT_RUN_WALL_CLOCK_SECONDS),
+            SCRIPT_RUN_MAX_WALL_CLOCK_SECONDS,
+        )
+        if wall_clock <= 0:
+            wall_clock = SCRIPT_RUN_WALL_CLOCK_SECONDS
         task_id = actions.submit_run(
             holder,
             runner,
@@ -3582,10 +3603,10 @@ def _execute_mutation(
             caste="script",
             execution_mode="sandbox",
             network=[],  # deny-all egress: a script computes, it never phones out
-            wall_clock_seconds=SCRIPT_RUN_WALL_CLOCK_SECONDS,
+            wall_clock_seconds=wall_clock,
             dispatch_decision=decision,
         )
-        result = _script_run_result(store, task_id)
+        result = _script_run_result(store, task_id, wall_clock_seconds=wall_clock)
         if fast_requested:
             from .fastlane import FAST_LANE_FALLBACK_NOTE
 
@@ -4055,8 +4076,10 @@ def _execute_mutation(
         )
         return {"merged": merge.merged, "detail": merge.detail}
     if name == "close_pr":
-        # v58-F1: the un-merge verb — reversible (a closed PR reopens on
-        # GitHub), so it rides the standard card like delete_branch.
+        # v58-F1: the un-merge verb. Reversible for the PR itself (a closed PR
+        # reopens) — but NOT with delete_branch: deleting the head ref cascade-
+        # closes every other PR built on it, upstream included, and the ref
+        # does not come back (v106-F5 / v101-F16 — the card says so).
         from .. import github
 
         repo_path = resolve_repo_arg(str(args["repo"]), repos_root(holder), store)

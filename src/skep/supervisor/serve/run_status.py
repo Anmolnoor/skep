@@ -218,10 +218,19 @@ def run_terminal_text(
             shown = ", ".join(str(entry["path"]) for entry in digest["files"][:3])
             more = ", …" if changed > 3 else ""
             files = f" ({changed} file{'s' if changed != 1 else ''}: {shown}{more})"
+        # v106-F3: an "unavailable" re-verification landed patches with
+        # confirmed=0 and nothing louder than a JSON warning nobody surfaced —
+        # four node-project field runs. The call to action now carries it.
+        unverified = ""
+        if reverify is not None and not reverify.confirmed and reverify.outcome == "unavailable":
+            unverified = (
+                f" — the supervisor could NOT re-verify it ({reverify.detail}); "
+                "landing would be unconfirmed"
+            )
         text = (
             f"run {task_id[:13]}… completed — patch ready to land{files}: "
             f"land_run {task_id} (landing IS how skep commits; until then the "
-            "work is on no branch)"
+            f"work is on no branch){unverified}"
         )
         kind = "action_needed"
     elif completed_opt_in:
