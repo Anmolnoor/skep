@@ -141,6 +141,21 @@ def store_provider_api_key(home: Path, provider_id: str, value: str) -> None:
 
 
 def resolve_provider_api_key(home: Path, profile: ProviderProfile) -> str | None:
+    key = _raw_provider_api_key(home, profile)
+    if key is None:
+        return None
+    from ..providers import provider_host
+
+    if provider_host(profile.base_url) == "api.githubcopilot.com":
+        # v108-F7: a Copilot endpoint takes a short-lived bearer, not the
+        # GitHub token itself — exchange (and cache) it transparently.
+        from .llm_copilot import resolve_copilot_bearer
+
+        return resolve_copilot_bearer(key)
+    return key
+
+
+def _raw_provider_api_key(home: Path, profile: ProviderProfile) -> str | None:
     if profile.api_key_env:
         env = os.environ.get(profile.api_key_env, "").strip()
         if env:
