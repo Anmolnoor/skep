@@ -259,6 +259,7 @@ skep provider add ID --preset PRESET [--model M] [--base-url URL] [--activate]
 skep provider add ID --protocol P --base-url URL --model M [--api-key-env ENV]
                      [--cost-class C] [--order N] [--host H]... [--activate]
 skep provider use ID
+skep provider set-key ID [--clear]   # value from stdin, 0600 file
 skep provider remove ID
 ```
 

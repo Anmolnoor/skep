@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import time
 from collections.abc import Callable
@@ -40,20 +39,18 @@ DEFAULT_PROVIDER_HEALTH_INTERVAL = 300
 
 def _probe_list_models(home: Path) -> Callable[[ProviderProfile], list[str]]:
     """Production ``list_models`` for health checks: the profile's endpoint,
-    its env credential when named, the daemon's llm-secret otherwise."""
+    authenticated per profile (named env var → own key file → llm-secret)."""
     # v108-F1: the bridge is the shared REGISTRY_PROTOCOLS map, not a local
     # two-entry dict — the old one omitted anthropic, so an anthropic profile
     # was recorded permanently unreachable and routing never picked it.
-    from .llm import REGISTRY_PROTOCOLS, list_models, resolve_api_key
+    from .llm import REGISTRY_PROTOCOLS, list_models, resolve_provider_api_key
 
     def _list(profile: ProviderProfile) -> list[str]:
         protocol = REGISTRY_PROTOCOLS.get(profile.protocol)
         if protocol is None:
             raise RuntimeError(f"health probe not supported for protocol {profile.protocol!r}")
-        if profile.api_key_env:
-            api_key: str | None = os.environ.get(profile.api_key_env) or None
-        else:
-            api_key = resolve_api_key(home)
+        # v108-F4: named env var → the profile's own 0600 file → llm-secret.
+        api_key = resolve_provider_api_key(home, profile)
         return list_models(profile.base_url, api_key, protocol=protocol)
 
     return _list

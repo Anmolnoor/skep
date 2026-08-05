@@ -1700,6 +1700,43 @@ def cmd_provider_remove(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provider_set_key(args: argparse.Namespace) -> int:
+    """v108-F4: store one profile's key in its own 0600 file. The value is
+    read from stdin (tty: hidden prompt) — never from argv, which would leak
+    into shell history and the process table."""
+    from .serve.llm import provider_secret_path, store_provider_api_key
+
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        return _err("no providers configured")
+    store = RunStore(config.db_path)
+    try:
+        profile = store.get_provider_profile(args.provider_id)
+    finally:
+        store.close()
+    if profile is None:
+        return _err(f"unknown provider {args.provider_id!r}")
+    if args.clear:
+        store_provider_api_key(config.home, args.provider_id, "")
+        print(f"cleared key for {args.provider_id}")
+        return 0
+    if sys.stdin.isatty():
+        import getpass
+
+        value = getpass.getpass(f"API key for {args.provider_id}: ")
+    else:
+        value = sys.stdin.readline()
+    value = value.strip()
+    if not value:
+        return _err("empty key (pass --clear to remove a stored one)")
+    store_provider_api_key(config.home, args.provider_id, value)
+    path = provider_secret_path(config.home, args.provider_id)
+    print(f"stored key for {args.provider_id} ({path.name}, 0600 — never sqlite, never a GET)")
+    if profile.api_key_env:
+        print(f"note: env var {profile.api_key_env} still wins over the file when set")
+    return 0
+
+
 def cmd_provider_health(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     if not config.db_path.is_file():
@@ -2609,6 +2646,12 @@ def register_supervisor_commands(
     )
     prov_use.add_argument("provider_id")
     prov_use.set_defaults(func=cmd_provider_use)
+    prov_key = provider_sub.add_parser(
+        "set-key", help="store a profile's API key (stdin, 0600 file — v108)"
+    )
+    prov_key.add_argument("provider_id")
+    prov_key.add_argument("--clear", action="store_true", help="remove the stored key")
+    prov_key.set_defaults(func=cmd_provider_set_key)
     prov_remove = provider_sub.add_parser("remove", help="delete a provider profile")
     prov_remove.add_argument("provider_id")
     prov_remove.set_defaults(func=cmd_provider_remove)

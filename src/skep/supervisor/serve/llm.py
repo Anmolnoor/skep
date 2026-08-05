@@ -21,13 +21,16 @@ import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Literal, TypeGuard, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeGuard, get_args
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from ..store import RunStore
+
+if TYPE_CHECKING:
+    from ..providers import ProviderProfile
 
 LLMProtocol = Literal["ollama", "openai-compat", "anthropic", "openai-responses", "bedrock"]
 _PROTOCOL_VALUES: tuple[str, ...] = get_args(LLMProtocol)
@@ -109,6 +112,61 @@ def store_api_key(home: Path, value: str) -> None:
     home.mkdir(parents=True, exist_ok=True)
     path.write_text(value + "\n", encoding="utf-8")
     path.chmod(0o600)
+
+
+# v108-F4: per-profile keys. One llm-secret could not serve a multi-provider
+# registry — chat, workers, and probes all collapsed onto it, so a second
+# provider's credential had nowhere to live. Each profile gets its own 0600
+# file beside llm-secret (the ADR 0019 exception extended per profile,
+# ADR 0051). Resolution order everywhere: the profile's NAMED env var → its
+# own file → the legacy llm-secret (v19-F9 compatibility).
+_PROVIDER_SECRET_PREFIX = "llm-secret-"
+
+
+def provider_secret_path(home: Path, provider_id: str) -> Path:
+    # provider_id is slug-validated at the registry write path, so it cannot
+    # traverse out of home.
+    return home / f"{_PROVIDER_SECRET_PREFIX}{provider_id}"
+
+
+def store_provider_api_key(home: Path, provider_id: str, value: str) -> None:
+    """Persist (or, for an empty value, remove) one profile's key — 0600."""
+    path = provider_secret_path(home, provider_id)
+    if not value:
+        path.unlink(missing_ok=True)
+        return
+    home.mkdir(parents=True, exist_ok=True)
+    path.write_text(value + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def resolve_provider_api_key(home: Path, profile: ProviderProfile) -> str | None:
+    if profile.api_key_env:
+        env = os.environ.get(profile.api_key_env, "").strip()
+        if env:
+            return env
+    path = provider_secret_path(home, profile.provider_id)
+    if path.is_file():
+        value = path.read_text(encoding="utf-8").strip()
+        if value:
+            return value
+    return resolve_api_key(home)
+
+
+def resolve_active_api_key(
+    store: RunStore, home: Path, *, base_url: str | None = None
+) -> str | None:
+    """The key for the ACTIVE registry profile — what chat and the model
+    listing authenticate with. ``base_url`` guards divergence: when the
+    saved llm_* settings no longer match the active profile (a manual PUT
+    /api/llm/config), the profile's credential must not leak onto a
+    different endpoint, so the legacy single secret applies instead."""
+    active = store.active_provider_profile()
+    if active is None:
+        return resolve_api_key(home)
+    if base_url is not None and active.base_url.rstrip("/") != base_url.strip().rstrip("/"):
+        return resolve_api_key(home)
+    return resolve_provider_api_key(home, active)
 
 
 def llm_config_view(store: RunStore, home: Path) -> dict[str, Any]:
@@ -904,7 +962,9 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
         if not base_url:
             raise HTTPException(status_code=409, detail="configure the LLM base URL first")
         protocol = _protocol(run_store.get_setting(LLM_PROTOCOL))
+        # v108-F4: the active profile's own credential, when settings match it.
+        api_key = resolve_active_api_key(run_store, home, base_url=str(base_url))
         try:
-            return {"models": list_models(str(base_url), resolve_api_key(home), protocol=protocol)}
+            return {"models": list_models(str(base_url), api_key, protocol=protocol)}
         except OllamaError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc

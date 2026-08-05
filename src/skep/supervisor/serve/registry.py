@@ -176,6 +176,12 @@ class ProviderCreateRequest(BaseModel):
     activate: bool = False
 
 
+class ProviderKeyRequest(BaseModel):
+    """v108-F4: write-only key delivery; an empty value clears the file."""
+
+    api_key: str
+
+
 class ChannelConfigRequest(BaseModel):
     """v26-F1: partial channel config update; secrets are write-only."""
 
@@ -1212,7 +1218,20 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.get("/api/providers")
     def list_providers() -> dict[str, Any]:
-        return {"providers": [asdict(p) for p in run_store.list_provider_profiles()]}
+        import os
+
+        from .llm import provider_secret_path
+
+        def _view(profile: Any) -> dict[str, Any]:
+            view = asdict(profile)
+            # v108-F4: presence only, never the value — "does this profile
+            # hold ITS OWN credential" (named env var set, or its key file).
+            has_env = bool(profile.api_key_env and os.environ.get(profile.api_key_env))
+            has_file = provider_secret_path(holder.current.home, profile.provider_id).is_file()
+            view["api_key_set"] = has_env or has_file
+            return view
+
+        return {"providers": [_view(p) for p in run_store.list_provider_profiles()]}
 
     @app.get("/api/providers/health")
     def provider_health() -> dict[str, Any]:
@@ -1269,11 +1288,30 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
     def remove_provider_route(provider_id: str) -> dict[str, Any]:
         from ..providers import ProviderError
         from . import actions
+        from .llm import store_provider_api_key
 
         try:
-            return actions.remove_provider(run_store, provider_id=provider_id)
+            result = actions.remove_provider(run_store, provider_id=provider_id)
         except ProviderError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # v108-F4: a removed profile leaves no orphaned credential behind.
+        store_provider_api_key(holder.current.home, provider_id, "")
+        return result
+
+    @app.put("/api/providers/{provider_id}/key")
+    def set_provider_key_route(provider_id: str, body: ProviderKeyRequest) -> dict[str, Any]:
+        # v108-F4: the ONE write-only route for a profile's key value (G2 /
+        # ADR 0019's exception, extended per profile by ADR 0051). Empty
+        # clears. The value never appears in sqlite or any GET.
+        from .llm import provider_secret_path, store_provider_api_key
+
+        if run_store.get_provider_profile(provider_id) is None:
+            raise HTTPException(status_code=404, detail=f"unknown provider {provider_id!r}")
+        store_provider_api_key(holder.current.home, provider_id, body.api_key.strip())
+        return {
+            "provider_id": provider_id,
+            "api_key_set": provider_secret_path(holder.current.home, provider_id).is_file(),
+        }
 
     # -- v15: ops node registry ----------------------------------------------
 

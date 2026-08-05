@@ -18,6 +18,7 @@ through its OpenAI-compatible endpoint as a preset instead.)
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -173,12 +174,20 @@ def provider_host(base_url: str) -> str | None:
     return parsed.hostname
 
 
+# v108-F4: the id names a per-profile secret FILE (llm-secret-<id>), so it
+# must be a plain slug — no separators that could traverse out of home.
+_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
 def validate_provider_profile(profile: ProviderProfile) -> ProviderProfile:
     """Validate and normalize a profile. Ensures the endpoint host is present in
     the network allowlist (explicit + reproducible), so a provider can never be
     reached through a host the operator did not list."""
-    if not profile.provider_id.strip():
-        raise ProviderError("provider_id must be non-empty")
+    if not _PROVIDER_ID_RE.match(profile.provider_id.strip()):
+        raise ProviderError(
+            f"provider_id must be a slug ([A-Za-z0-9._-], no leading dot), "
+            f"got {profile.provider_id!r}"
+        )
     if profile.protocol not in PROVIDER_PROTOCOLS:
         raise ProviderError(
             f"protocol must be one of {sorted(PROVIDER_PROTOCOLS)!r}, got {profile.protocol!r}"

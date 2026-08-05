@@ -122,9 +122,34 @@ def worker_provider_from_home(home: Path) -> WorkerProvider | None:
         return _assistant_provider_from_home(home)
     # v19-F9: a profile written through from the daemon carries api_key_env=None
     # (the daemon keeps its secret in supervisor/llm-secret, not an env var), so
-    # fall back to that secret to authenticate.
-    api_key = None if provider.api_key_env else resolve_api_key(home / "supervisor")
+    # fall back to that secret to authenticate. v108-F4: the active registry
+    # profile's own key file outranks the legacy secret when the endpoints match.
+    api_key = None
+    if not provider.api_key_env:
+        api_key = _active_profile_key(home, provider.endpoint or "") or resolve_api_key(
+            home / "supervisor"
+        )
     return WorkerProvider(profile=provider, api_key=api_key)
+
+
+def _active_profile_key(personal_home: Path, endpoint: str) -> str | None:
+    """v108-F4: the active registry profile's per-profile credential — only
+    while the profile's endpoint matches the one this worker will dial (a
+    diverged config must not leak another provider's key onto its URL)."""
+    supervisor_home = personal_home / "supervisor"
+    db_path = supervisor_home / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return None
+    store = RunStore(db_path)
+    try:
+        active = store.active_provider_profile()
+    finally:
+        store.close()
+    if active is None or active.base_url.rstrip("/") != endpoint.strip().rstrip("/"):
+        return None
+    from skep.supervisor.serve.llm import resolve_provider_api_key
+
+    return resolve_provider_api_key(supervisor_home, active)
 
 
 def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
@@ -137,6 +162,7 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
         base_url = store.get_setting(LLM_BASE_URL)
         model = store.get_setting(LLM_DEFAULT_MODEL)
         protocol = store.get_setting(LLM_PROTOCOL)
+        active = store.active_provider_profile()
     finally:
         store.close()
     if not isinstance(base_url, str) or not base_url.strip():
@@ -145,9 +171,17 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
         return None
     known = get_args(LLMProtocol)
     name = str(protocol) if protocol in known else DEFAULT_LLM_PROTOCOL
+    # v108-F4: the active registry profile's own credential — but only while
+    # the saved settings still point at that profile's endpoint (a manual
+    # config PUT must not leak another provider's key onto its URL).
+    api_key = resolve_api_key(supervisor_home)
+    if active is not None and active.base_url.rstrip("/") == base_url.strip().rstrip("/"):
+        from skep.supervisor.serve.llm import resolve_provider_api_key
+
+        api_key = resolve_provider_api_key(supervisor_home, active)
     return WorkerProvider(
         profile=ProviderProfile(name=name, model=model, endpoint=base_url),
-        api_key=resolve_api_key(supervisor_home),
+        api_key=api_key,
     )
 
 
