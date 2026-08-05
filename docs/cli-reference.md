@@ -260,6 +260,7 @@ skep provider add ID --protocol P --base-url URL --model M [--api-key-env ENV]
                      [--cost-class C] [--order N] [--host H]... [--activate]
 skep provider use ID
 skep provider set-key ID [--clear]   # value from stdin, 0600 file
+skep provider login ID --client-id CID [--device-url U --token-url U --scope S]
 skep provider remove ID
 ```
 
@@ -272,7 +273,10 @@ model/key-env from it. `provider add/use/remove` (v108) are the
 registry's write faces — the same verbs as `POST/DELETE /api/providers` and
 the carded chat tools. `--api-key-env` names the env var holding the key;
 key values never ride the command line, and `use` writes the profile through
-to the saved assistant config so the Queen actually speaks it.
+to the saved assistant config so the Queen actually speaks it. `login` (v108)
+runs the RFC 8628 device-code flow with the OPERATOR'S own `--client-id` —
+skep ships no OAuth client id for any provider — and stores the access token
+it returns exactly where `set-key` would.
 
 ## Nodes and Ops
 

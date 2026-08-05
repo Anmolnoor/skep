@@ -1737,6 +1737,51 @@ def cmd_provider_set_key(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provider_login(args: argparse.Namespace) -> int:
+    """v108-F8: the RFC 8628 device flow, ending in the same 0600 file
+    ``set-key`` writes. ``--client-id`` is required and has no default: skep
+    ships no OAuth client id for any provider (ADR 0051), so the app being
+    authorized is always one the operator registered or was handed."""
+    from .provider_login import KNOWN_LOGIN_ENDPOINTS, DeviceEndpoints, ProviderLoginError
+    from .provider_login import device_login as run_device_login
+    from .serve.llm import provider_secret_path, store_provider_api_key
+
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        return _err("no providers configured")
+    store = RunStore(config.db_path)
+    try:
+        profile = store.get_provider_profile(args.provider_id)
+    finally:
+        store.close()
+    if profile is None:
+        return _err(
+            f"unknown provider {args.provider_id!r}",
+            next_command=f"skep provider add {args.provider_id} --preset <preset>",
+        )
+    known = KNOWN_LOGIN_ENDPOINTS.get(args.provider_id)
+    device_url = args.device_url or (known.device_url if known else None)
+    token_url = args.token_url or (known.token_url if known else None)
+    if not device_url or not token_url:
+        return _err(
+            f"no device-flow endpoints known for {args.provider_id!r}",
+            evidence=f"known: {', '.join(sorted(KNOWN_LOGIN_ENDPOINTS)) or 'none'}",
+            next_command="skep provider login ID --client-id CID --device-url U --token-url U",
+        )
+    scope = args.scope if args.scope is not None else (known.scope if known else "")
+    endpoints = DeviceEndpoints(device_url=device_url, token_url=token_url, scope=scope)
+    try:
+        token = run_device_login(endpoints, args.client_id, printer=print, sleeper=time.sleep)
+    except ProviderLoginError as exc:
+        return _err(str(exc))
+    store_provider_api_key(config.home, args.provider_id, token)
+    path = provider_secret_path(config.home, args.provider_id)
+    print(f"stored key for {args.provider_id} ({path.name}, 0600 — never sqlite, never a GET)")
+    if profile.api_key_env:
+        print(f"note: env var {profile.api_key_env} still wins over the file when set")
+    return 0
+
+
 def cmd_provider_health(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     if not config.db_path.is_file():
@@ -2652,6 +2697,24 @@ def register_supervisor_commands(
     prov_key.add_argument("provider_id")
     prov_key.add_argument("--clear", action="store_true", help="remove the stored key")
     prov_key.set_defaults(func=cmd_provider_set_key)
+    prov_login = provider_sub.add_parser(
+        "login", help="OAuth device-code login, storing the token as the key (v108)"
+    )
+    prov_login.add_argument("provider_id")
+    prov_login.add_argument(
+        "--client-id",
+        dest="client_id",
+        required=True,
+        help="YOUR OAuth client id — skep ships none for any provider (ADR 0051)",
+    )
+    prov_login.add_argument(
+        "--device-url", dest="device_url", default=None, help="device authorization endpoint"
+    )
+    prov_login.add_argument(
+        "--token-url", dest="token_url", default=None, help="token endpoint polled for the grant"
+    )
+    prov_login.add_argument("--scope", default=None, help="OAuth scope requested")
+    prov_login.set_defaults(func=cmd_provider_login)
     prov_remove = provider_sub.add_parser("remove", help="delete a provider profile")
     prov_remove.add_argument("provider_id")
     prov_remove.set_defaults(func=cmd_provider_remove)
