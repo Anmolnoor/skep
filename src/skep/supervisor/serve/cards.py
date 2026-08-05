@@ -29,6 +29,7 @@ from typing import Any
 from ..shell_prefixes import (
     is_ops_mutating_command,
     is_outbound_content_prefix,
+    queen_command_line_refusal,
     queen_shell_refusal,
 )
 
@@ -196,7 +197,12 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
             return "privilege escalation — it would launder every command guard beneath it"
         if is_ops_mutating_command(argv):
             return "changes machine state (service, files, or backups) — approve-once only"
-        refusal = queen_shell_refusal(argv)
+        command_line = args.get("command") or args.get("shell_command")
+        refusal = (
+            queen_command_line_refusal(command_line)
+            if isinstance(command_line, str) and command_line.strip()
+            else queen_shell_refusal(argv)
+        )
         if refusal is not None:
             # Should never reach a card (the verb refuses it outright), but if a
             # path ever proposes one, say the engine's own reason, not a guess.

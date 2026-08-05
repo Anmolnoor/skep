@@ -16,7 +16,7 @@ from typing import Any, Literal
 # shape v101-F1 spent a whole fix removing from the caste roster. This one is
 # not going to be the sixth. (Workers already import from skep.supervisor:
 # netproxy, store, serve.llm.)
-from skep.supervisor.shell_prefixes import is_history_rewrite_command
+from skep.supervisor.shell_prefixes import argv_segments, is_history_rewrite_command
 from skep.worker_contract import (
     RESUME_CHECKPOINT_ARTIFACT_NAME,
     RESUME_CHECKPOINT_STATE_KEY,
@@ -450,6 +450,83 @@ def is_git_mutation_argv(argv: Sequence[str]) -> bool:
     return subcommand not in _READONLY_GIT_SUBCOMMANDS
 
 
+def _git_floor_decision(segment: Sequence[str]) -> RuntimePolicyDecision | None:
+    """The v19-F3/F5 + v22-F2 + v103-F3 hard denies for ONE command segment.
+
+    v109-F1 runs every hidden segment of a command through this (compound
+    lines, `bash -c` payloads); sudo/doas is peeled first so it cannot launder
+    what follows.
+    """
+    stripped = list(segment)
+    while stripped and stripped[0] in {"sudo", "doas"}:
+        stripped = stripped[1:]
+    stripped = _strip_git_chdir(stripped)
+    # v19-F5: branch/HEAD switching is managed by the supervisor, which lands
+    # changes as a patch. Deny checkout/switch (the ``git checkout -- <path>``
+    # file-restore form stays legal) with a teaching message. This fires
+    # before the verify fast-path and the allowlist/grant checks so no plan
+    # or grant can switch the worktree's branch.
+    if (
+        _argv_matches_prefix(stripped, [("git", "checkout"), ("git", "switch")])
+        and "--" not in stripped
+    ):
+        return RuntimePolicyDecision(
+            verdict="deny",
+            reason="capability.deny.git_branch_ops_managed_by_supervisor",
+            detail="branch operations are managed by the skep supervisor; edit files in place",
+        )
+    # v19-F3: remote git operations bypass the patch -> approval -> branch
+    # pipeline. Deny push/pull/fetch outright, before the allowlist/grant
+    # checks, so no resume grant or policy prefix can enable a push.
+    if _argv_matches_prefix(stripped, [("git", "push"), ("git", "pull"), ("git", "fetch")]):
+        return RuntimePolicyDecision(
+            verdict="deny",
+            reason="capability.deny.remote_git_managed_by_supervisor",
+            detail=(
+                "remote git operations are managed by the skep supervisor; "
+                "your patch is landed after approval"
+            ),
+        )
+    # v103-F3: merge/rebase/cherry-pick/revert/reset --hard. These were never
+    # denied — only kept off the verify fast-path — so a broad `git`
+    # allowlist entry or one remembered grant let a worker run them. They
+    # belong in this block, not a lesser one, because the patch is a
+    # working-tree diff against the STARTUP BASELINE: a worker that merges
+    # another branch produces a patch carrying that branch's work, and it
+    # lands under THIS task's approval. The operator approves the task they
+    # asked for and gets somebody else's commits — the substitution I1
+    # exists to prevent. Rebase is worse: rebasing onto a newer default
+    # branch puts every intervening commit into the diff the card shows.
+    if is_history_rewrite_command(stripped):
+        return RuntimePolicyDecision(
+            verdict="deny",
+            reason="capability.deny.git_history_rewrite_managed_by_supervisor",
+            detail=(
+                "merge, rebase, cherry-pick, revert and reset --hard are managed by "
+                "the skep supervisor: your patch diffs against the baseline this run "
+                "started from, so merged or rebased commits would land under this "
+                "task's approval. Edit files in place. To combine branches, the "
+                "operator runs merge_branch"
+            ),
+        )
+    # v22-F2: staging/committing is the landing approval's job. A plan-level
+    # ``git add``/``git commit`` is either discarded at landing or fails with
+    # "nothing to commit" — deny it before the allowlist/grant checks so no
+    # stored prefix or resume grant can re-enable it. The explicit-intent
+    # ``git.stage``/``git.commit`` capability path (requested_actions) does
+    # not go through shell.run and is unaffected.
+    if _argv_matches_prefix(stripped, [("git", "add"), ("git", "commit")]):
+        return RuntimePolicyDecision(
+            verdict="deny",
+            reason="capability.deny.git_commit_managed_by_supervisor",
+            detail=(
+                "staging and committing are managed by the skep supervisor; "
+                "edit files in place — the landing approval is the commit"
+            ),
+        )
+    return None
+
+
 class ShellExecPlugin:
     plugin_id = "shell_exec"
     version = "0.1.0"
@@ -472,76 +549,38 @@ class ShellExecPlugin:
         approved_shell_commands: Sequence[Sequence[str]],
         shell_allowlist: Sequence[Sequence[str]],
     ) -> RuntimePolicyDecision:
-        stripped = _strip_git_chdir(argv)
-        # v19-F5: branch/HEAD switching is managed by the supervisor, which lands
-        # changes as a patch. Deny checkout/switch (the ``git checkout -- <path>``
-        # file-restore form stays legal) with a teaching message. This fires
-        # before the verify fast-path and the allowlist/grant checks so no plan
-        # or grant can switch the worktree's branch.
-        if (
-            _argv_matches_prefix(stripped, [("git", "checkout"), ("git", "switch")])
-            and "--" not in argv
-        ):
+        # v109-F1: judge segments, not lines. `bash -c 'git push'` and a spaced
+        # `cd x && git checkout b` hide the git behind argv[0]; every deny in
+        # ``_git_floor_decision`` keys on the segment's own command word, so
+        # decompose first — before the verify fast-path, for the same reason
+        # the git blocks fire there: a self-labeled purpose must not skip a
+        # hard deny. A wrapper payload the gate cannot read fails closed; the
+        # worker can always rewrite it as a direct command.
+        segments = argv_segments(argv)
+        if segments is None:
             return RuntimePolicyDecision(
                 verdict="deny",
-                reason="capability.deny.git_branch_ops_managed_by_supervisor",
-                detail="branch operations are managed by the skep supervisor; edit files in place",
-            )
-        # v19-F3: remote git operations bypass the patch -> approval -> branch
-        # pipeline. Deny push/pull/fetch outright, before the allowlist/grant
-        # checks, so no resume grant or policy prefix can enable a push.
-        if _argv_matches_prefix(stripped, [("git", "push"), ("git", "pull"), ("git", "fetch")]):
-            return RuntimePolicyDecision(
-                verdict="deny",
-                reason="capability.deny.remote_git_managed_by_supervisor",
+                reason="capability.deny.shell_wrapper_unparseable",
                 detail=(
-                    "remote git operations are managed by the skep supervisor; "
-                    "your patch is landed after approval"
+                    "this command wraps a payload the capability gate cannot "
+                    "statically read (unbalanced quotes, backtick substitution, "
+                    "or deep nesting); run it as a direct command instead"
                 ),
             )
-        # v103-F3: merge/rebase/cherry-pick/revert/reset --hard. These were never
-        # denied — only kept off the verify fast-path — so a broad `git`
-        # allowlist entry or one remembered grant let a worker run them. They
-        # belong in this block, not a lesser one, because the patch is a
-        # working-tree diff against the STARTUP BASELINE: a worker that merges
-        # another branch produces a patch carrying that branch's work, and it
-        # lands under THIS task's approval. The operator approves the task they
-        # asked for and gets somebody else's commits — the substitution I1
-        # exists to prevent. Rebase is worse: rebasing onto a newer default
-        # branch puts every intervening commit into the diff the card shows.
-        if is_history_rewrite_command(stripped):
-            return RuntimePolicyDecision(
-                verdict="deny",
-                reason="capability.deny.git_history_rewrite_managed_by_supervisor",
-                detail=(
-                    "merge, rebase, cherry-pick, revert and reset --hard are managed by "
-                    "the skep supervisor: your patch diffs against the baseline this run "
-                    "started from, so merged or rebased commits would land under this "
-                    "task's approval. Edit files in place. To combine branches, the "
-                    "operator runs merge_branch"
-                ),
-            )
-        # v22-F2: staging/committing is the landing approval's job. A plan-level
-        # ``git add``/``git commit`` is either discarded at landing or fails with
-        # "nothing to commit" — deny it before the allowlist/grant checks so no
-        # stored prefix or resume grant can re-enable it. The explicit-intent
-        # ``git.stage``/``git.commit`` capability path (requested_actions) does
-        # not go through shell.run and is unaffected.
-        if _argv_matches_prefix(stripped, [("git", "add"), ("git", "commit")]):
-            return RuntimePolicyDecision(
-                verdict="deny",
-                reason="capability.deny.git_commit_managed_by_supervisor",
-                detail=(
-                    "staging and committing are managed by the skep supervisor; "
-                    "edit files in place — the landing approval is the commit"
-                ),
-            )
+        for segment in segments:
+            denied = _git_floor_decision(segment)
+            if denied is not None:
+                return denied
         # v20-F1: keep git mutations out of the verify fast-path. A
         # ``git add``/``git commit`` mislabeled ``purpose: "verify"`` must fall
         # through to the allowlist/grant/approval path — never bypass the
         # ``git.commit`` capability gate. Non-git verify commands (pytest,
         # ``python -m ...``) and read-only git commands keep the fast-path.
-        if purpose == "verify" and not is_git_mutation_argv(stripped):
+        # v109-F1: the same rule reads through wrappers — `bash -c 'git tag'`
+        # labeled verify is still a git mutation.
+        if purpose == "verify" and not any(
+            is_git_mutation_argv(_strip_git_chdir(segment)) for segment in segments
+        ):
             return RuntimePolicyDecision(
                 verdict="allow",
                 reason="capability.allow.shell_verify",

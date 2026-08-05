@@ -7,6 +7,7 @@ therefore can never be allowlisted, remembered, or persisted into a policy.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Sequence
 
 # v19-F3: git subcommands the worker denies outright. The supervisor lands
@@ -157,6 +158,126 @@ def is_ops_mutating_command(argv: Sequence[str]) -> bool:
     return head == "journalctl" and any(token.startswith("--vacuum") for token in argv[1:])
 
 
+# v109-F1: the Aug 3 field test ran `cd <repo> && git checkout <branch> && …`
+# from chat with exit code 0. Every predicate above keys on a segment's own
+# command word, and a compound line hides the git behind `cd` — so guards judge
+# SEGMENTS, not lines: split at shell operators, unwrap `bash -c` payloads and
+# `env` prefixes, deny the line if any segment is denied. A line that cannot be
+# tokenized returns None; each caller chooses its failure mode (queen lane:
+# card, so a human reads the raw string; persistence and worker lanes: fail
+# closed — an entry we cannot judge is an entry we do not trust).
+_SEGMENT_OPERATOR_CHARS = frozenset("|&;()<>")
+_WRAPPER_SHELLS = frozenset({"bash", "sh", "zsh", "fish"})
+_MAX_UNWRAP_DEPTH = 4
+
+
+def _strip_env_prefix(tokens: list[str]) -> list[str]:
+    """Drop a leading ``env`` and its assignments/flags — `env A=1 git push`
+    executes `git push`."""
+    if not tokens or tokens[0] != "env":
+        return tokens
+    rest = tokens[1:]
+    while rest and (rest[0].startswith("-") or "=" in rest[0]):
+        # -u/--unset and -C/--chdir consume an operand; assignments stand alone.
+        if rest[0] in {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"} and len(rest) > 1:
+            rest = rest[2:]
+        else:
+            rest = rest[1:]
+    return rest
+
+
+def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None:
+    """The argvs one exec-style argv would run: itself, plus the decomposed
+    payload of a ``bash -c``-style wrapper (whose operand is a whole shell
+    line). ``python -c`` payloads are Python, not shell — never decomposed.
+    None when a wrapper payload cannot be tokenized."""
+    tokens = _strip_env_prefix([str(token) for token in argv])
+    if not tokens:
+        return []
+    result = [tokens]
+    if tokens[0] in _WRAPPER_SHELLS:
+        payload: str | None = None
+        for index, token in enumerate(tokens[1:], start=1):
+            if not token.startswith("-"):
+                break  # `sh script.sh` — a script file, not an inline payload
+            if not token.startswith("--") and "c" in token[1:]:
+                payload = next(
+                    (
+                        candidate
+                        for candidate in tokens[index + 1 :]
+                        if not candidate.startswith("-")
+                    ),
+                    None,
+                )
+                break
+        if payload is not None:
+            nested = command_line_segments(payload, _depth + 1)
+            if nested is None:
+                return None
+            result.extend(nested)
+    return result
+
+
+def command_line_segments(command: str, _depth: int = 0) -> list[list[str]] | None:
+    """Split a raw shell line into the argvs it would execute, or None when it
+    cannot be judged (unbalanced quotes, backtick substitution, or wrappers
+    nested past ``_MAX_UNWRAP_DEPTH``)."""
+    if _depth >= _MAX_UNWRAP_DEPTH:
+        return None
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    if any("`" in token for token in tokens):
+        # Backtick substitution runs a nested command we cannot see statically.
+        return None
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token and all(char in _SEGMENT_OPERATOR_CHARS for char in token):
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    unwrapped: list[list[str]] = []
+    for segment in segments:
+        expanded = _unwrap_argv(segment, _depth)
+        if expanded is None:
+            return None
+        unwrapped.extend(expanded)
+    return unwrapped
+
+
+def argv_segments(argv: Sequence[str]) -> list[list[str]] | None:
+    """Every argv hidden inside an exec-style argv: operator tokens split it
+    (a shlex.split of `cd x && git push` keeps `&&` as a token), wrappers are
+    unwrapped. None when a wrapper payload cannot be judged."""
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in argv:
+        text = str(token)
+        if text and all(char in _SEGMENT_OPERATOR_CHARS for char in text):
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(text)
+    if current:
+        segments.append(current)
+    unwrapped: list[list[str]] = []
+    for segment in segments:
+        expanded = _unwrap_argv(segment)
+        if expanded is None:
+            return None
+        unwrapped.extend(expanded)
+    return unwrapped
+
+
 # v64-F3: an unexplained "too broad" reads as a retry prompt to a small model
 # (field test: told ['python3'] was too broad, the Queen answered with
 # 'python3 -c' and then 'python3' again). Every too-broad verdict carries the
@@ -166,6 +287,36 @@ _TOO_BROAD_TEACH = (
     "interpreters and -c/-lc forms can never be allowlisted, and a task's "
     "verify commands never need the allowlist"
 )
+
+
+def hard_denied_segment_reason(entry: Sequence[str]) -> str | None:
+    """Why a hidden segment of ``entry`` puts it on the deny floor, else None.
+
+    v109-F1: `['bash', '-c', 'git push origin']` was persistable (three tokens
+    clears the too-broad rules) and its argv[0] dodges every git predicate —
+    judged per segment it is a remote-git grant. Unjudgeable entries (backtick
+    substitution, unbalanced wrapper payloads) fail closed here: persistence
+    is exactly where "cannot tell" must mean "no"."""
+    segments = argv_segments(entry)
+    if segments is None:
+        return "the command wraps a payload that cannot be statically judged"
+    for segment in segments:
+        stripped = segment
+        while stripped and stripped[0] in {"sudo", "doas"}:
+            stripped = stripped[1:]
+        if len(stripped) < len(segment):
+            return "privilege escalation cannot be allowlisted"
+        if is_remote_git_command(stripped):
+            return "it hides a remote git command; skep lands patches after approval"
+        if is_worker_commit_command(stripped):
+            return "it hides git add/commit; the landing approval is the commit (v22-F2)"
+        if is_branch_switch_command(stripped):
+            return "it hides a branch switch; a run picks its ref at dispatch"
+        if is_history_rewrite_command(stripped):
+            return "it hides a history rewrite (merge/rebase/cherry-pick/revert/reset --hard)"
+        if is_outbound_content_prefix(stripped):
+            return "it hides an outbound post/send, which always runs carded (ADR 0044)"
+    return None
 
 
 def dangerous_prefix_reason(prefix: list[str]) -> str | None:
@@ -200,6 +351,11 @@ def dangerous_prefix_reason(prefix: list[str]) -> str | None:
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
     if prefix in (["npm", "run"], ["uv", "run"]):
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
+    hidden = hard_denied_segment_reason(prefix)
+    if hidden is not None:
+        # v109-F1: compound/wrapped entries are judged per segment — an argv[0]
+        # of `cd` or `bash` must not launder what follows it.
+        return f"this command cannot be allowlisted: {hidden}"
     return None
 
 
@@ -219,13 +375,34 @@ def queen_shell_refusal(argv: Sequence[str]) -> str | None:
     if is_worker_commit_command(argv):
         return "git add/commit never runs from chat — the landing approval IS the commit"
     if is_branch_switch_command(argv):
-        return "branch switching never runs from chat — a run picks its ref at dispatch"
+        return (
+            "branch switching never runs from chat — a run picks its ref at "
+            "dispatch; read a branch without switching: git show <branch>:<path>"
+        )
     if is_history_rewrite_command(argv):
         return (
             "merge/rebase/cherry-pick/revert/reset --hard never run from chat as raw "
             "shell — use merge_branch, which is carded, refuses the default branch, "
             "and aborts cleanly on conflict instead of leaving a half-merged tree"
         )
+    return None
+
+
+def queen_command_line_refusal(command: str) -> str | None:
+    """``queen_shell_refusal`` over every segment of a raw command line.
+
+    v109-F1: the Aug 3 field test's `cd <repo> && git checkout <branch>` had
+    argv[0] `cd`, so no predicate fired and the branch switch ran from chat.
+    A line that cannot be tokenized returns None — the verb falls back to its
+    card, so a human reads the raw string before anything runs (the same
+    malformed-goes-to-card behavior the lane always had)."""
+    segments = command_line_segments(command)
+    if segments is None:
+        return None
+    for argv in segments:
+        reason = queen_shell_refusal(argv)
+        if reason is not None:
+            return reason
     return None
 
 
@@ -270,6 +447,10 @@ def filter_forbidden_shell_commands(
             # v84-F4: a pre-v84 stored outbound grant (e.g. bare `xurl`) would
             # keep auto-allowing posts — swept, not grandfathered.
             or is_outbound_content_prefix(argv)
+            # v109-F1: entries hiding a denied command behind a compound or
+            # wrapper form (`bash -c 'git push …'`) — swept on the same
+            # sweep-don't-grandfather rule.
+            or hard_denied_segment_reason(argv) is not None
         ):
             removed.append(argv)
         else:

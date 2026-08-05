@@ -2403,19 +2403,16 @@ def queen_shell_decision(
     ``run_background`` action instead — a daemon is a different promise
     than a 60s one-off, so a 'run' grant never covers it (review item 3);
     repo cwds refuse flat (daemons do not belong in checkouts)."""
-    import shlex
-
     from ..policy_resolver import resolve_operator_policy
     from ..policy_schema import DEFAULT_DENY_RULE_ID
-    from ..shell_prefixes import queen_shell_refusal
+    from ..shell_prefixes import queen_command_line_refusal
 
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        return None  # malformed → card; the honest error surfaces on confirm
-    if not argv:
+    if not command.strip():
         return None
-    reason = queen_shell_refusal(argv)
+    # v109-F1: judged per segment — `cd <repo> && git checkout <branch>` ran
+    # from chat because argv[0] was `cd`. Malformed lines still fall to the
+    # card so the honest error surfaces on confirm.
+    reason = queen_command_line_refusal(command)
     if reason is not None:
         return AutonomyDecision(
             verdict="deny",

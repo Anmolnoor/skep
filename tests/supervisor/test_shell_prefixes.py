@@ -191,3 +191,102 @@ def test_filter_forbidden_shell_commands_sweeps_pre_v19_residue() -> None:
         ["git", "commit", "-m", "Add README with project details"],
         ["git", "push"],
     ]
+
+
+# v109-F1: the Aug 3 field test ran `cd <repo> && git checkout <branch>` from
+# chat with exit code 0 — every guard keyed on argv[0] and a compound line
+# hides the git behind `cd`. Segments, not lines, are the unit of judgment.
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("git status", [["git", "status"]]),
+        ("cd /x && git push", [["cd", "/x"], ["git", "push"]]),
+        ("true; git fetch", [["true"], ["git", "fetch"]]),
+        ("echo hi | wc -l", [["echo", "hi"], ["wc", "-l"]]),
+        # Unspaced operators still split — shlex punctuation, not whitespace.
+        ("cd /x&&git push", [["cd", "/x"], ["git", "push"]]),
+        # A quoted operator is data, not a separator.
+        ("echo 'a && git push'", [["echo", "a && git push"]]),
+        # $(…) command substitution surfaces as its own segment.
+        ("echo $(git push)", [["echo", "$"], ["git", "push"]]),
+        # env assignments peel off; the real command is judged.
+        ("env A=1 git fetch", [["git", "fetch"]]),
+        # A `bash -c` payload is a whole nested shell line.
+        (
+            "bash -c 'cd /x && git push origin'",
+            [["bash", "-c", "cd /x && git push origin"], ["cd", "/x"], ["git", "push", "origin"]],
+        ),
+    ],
+)
+def test_command_line_segments(command: str, expected: list[list[str]]) -> None:
+    from skep.supervisor.shell_prefixes import command_line_segments
+
+    assert command_line_segments(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo `git push`",  # backtick substitution cannot be judged statically
+        "echo 'unbalanced",  # shlex ValueError
+        'bash -c "bash -c \'bash -c \\"bash -c \\\\\\"git push\\\\\\"\\"\'"',  # depth cap
+    ],
+)
+def test_unjudgeable_lines_return_none(command: str) -> None:
+    from skep.supervisor.shell_prefixes import command_line_segments
+
+    assert command_line_segments(command) is None
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        # Three tokens clears the old too-broad rules; per segment it is a push.
+        ["bash", "-c", "git push origin main"],
+        ["cd", "/x", "&&", "git", "push"],
+        ["env", "A=1", "git", "fetch"],
+        ["cd", "/x", "&&", "sudo", "rm", "-rf", "cache"],
+        ["sh", "-lc", "git checkout main"],
+        # An entry we cannot read is an entry we do not trust (fail closed).
+        ["bash", "-c", "echo `git push`"],
+    ],
+)
+def test_hidden_segments_cannot_be_allowlisted(entry: list[str]) -> None:
+    """v109-F1: `['bash','-c','git push …']` was persistable — argv[0] dodged
+    every predicate. Judged per segment, persistence refuses it."""
+    reason = dangerous_prefix_reason(entry)
+    assert reason is not None
+    assert "cannot be allowlisted" in reason
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ["bash", "-c", "pytest -q"],
+        ["cd", "/x", "&&", "git", "status"],
+        ["python3", "-c", "print('git push')"],  # python payloads are not shell
+        ["echo", "a && git push"],  # quoted operator: data, not a separator
+    ],
+)
+def test_benign_compound_entries_stay_grantable(entry: list[str]) -> None:
+    assert dangerous_prefix_reason(entry) is None
+
+
+def test_hidden_denied_entries_are_swept_not_grandfathered() -> None:
+    """The v84-F4 sweep rule applied to wrapped/compound entries: a store that
+    already holds `['bash','-c','git push']` must stop auto-allowing it."""
+    kept, removed = filter_forbidden_shell_commands(
+        [
+            ["bash", "-c", "git push origin"],
+            ["cd", "/x", "&&", "git", "checkout", "main"],
+            ["bash", "-c", "pytest -q"],
+            ["git", "status"],
+        ]
+    )
+    assert kept == [["bash", "-c", "pytest -q"], ["git", "status"]]
+    assert removed == [
+        ["bash", "-c", "git push origin"],
+        ["cd", "/x", "&&", "git", "checkout", "main"],
+    ]
