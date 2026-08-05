@@ -49,6 +49,7 @@ _SUBJECT_KEYS: tuple[str, ...] = (
     "repo",
     "task_id",
     "review_id",
+    "rule_id",  # v109-F9: revoke_policy_rule — the card names WHICH grant goes
     "name",
     "project_id",
     "query",
@@ -240,6 +241,13 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
         return "publishes to the remote — visible outside this machine, and not undone by a revert"
     if tool in _LANDING_TOOLS:
         return "applies a patch to a real branch — landing IS the commit"
+    if tool == "revoke_policy_rule":
+        # v109-F9: the one policy verb that NARROWS — the _POLICY_TOOLS line
+        # ("widens…") would be a lie on this card.
+        return (
+            "removes a standing grant — the next matching action cards again "
+            "instead of auto-running"
+        )
     if tool in _POLICY_TOOLS:
         return "widens what future runs may do without asking you again"
     if tool in _DESTRUCTIVE_TOOLS:

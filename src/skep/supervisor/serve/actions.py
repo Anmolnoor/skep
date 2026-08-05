@@ -1553,6 +1553,14 @@ def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> d
             "verify_command": resolved.verify_command or "(worker-nominated fallback)",
         }
     )
+    # v109-F9 (RSoP): every effective policy key with its value and the layer
+    # that decided it — "why is this the effective policy" answered per key
+    # (I8). Keys the layering never touched read "global".
+    view["policy_provenance"] = {
+        key: {"value": value, "decided_by": resolved.provenance.get(key, "global")}
+        for key, value in sorted(resolved.policy.items())
+        if not key.startswith("_")
+    }
     # v97-F5 (ADR 0048): attached groups WITH what each contributes, so
     # "why is this host allowed" has an answer (I8) — the composed lists
     # above stay the truth; this is their provenance.
@@ -3519,6 +3527,101 @@ def remember_action_for_session(
             return None
         return {"scope": "shell", "pattern": pattern, "tier": "session"}
     return None
+
+
+def list_policy_rules(store: RunStore) -> dict[str, Any]:
+    """v109-F9: every learned rule (durable AND session) plus the Queen's
+    standing operator rules — the read behind ``GET /api/policy/rules``.
+
+    The rules auto-run things the operator once approved; until this list they
+    had no surface at all — the operator could grant standing allowances
+    (allow_fetch_domain, allow_mcp_tool, a confirmed card's session grant) but
+    never see or revoke what auto-runs (I8).
+    """
+    from ..policy_schema import (
+        OPERATOR_POLICY_SETTINGS_KEY,
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        PolicyDocument,
+        document_from_settings,
+        is_session_rule,
+        operator_document_from_settings,
+    )
+
+    document = (
+        document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
+    )
+    operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
+    return {
+        "rules": [
+            {
+                "rule_id": rule.rule_id,
+                "scope": rule.scope,
+                "action": rule.action,
+                "pattern": rule.pattern,
+                # A learned rule always resolves as allow (policy_schema.resolve).
+                "verdict": "allow",
+                "provenance": rule.provenance,
+                "tier": "session" if is_session_rule(rule) else "always",
+                "created_at": rule.created_at,
+            }
+            for rule in document.learned
+        ],
+        # Read-only context for the Policies page's Operator tier: the Queen's
+        # standing document (set_operator_policy). Not revocable here — it is
+        # authored rules, not learned grants.
+        "operator_rules": [
+            {
+                "rule_id": rule.rule_id,
+                "scope": scope_policy.scope,
+                "action": rule.action,
+                "pattern": rule.pattern,
+                "verdict": verdict,
+            }
+            for scope_policy in operator.scopes
+            for verdict, group in (("allow", scope_policy.allow), ("deny", scope_policy.deny))
+            for rule in group
+        ],
+    }
+
+
+def revoke_policy_rule(store: RunStore, *, rule_id: str) -> dict[str, Any]:
+    """v109-F9: remove ONE learned rule (durable or session) by id.
+
+    The narrowing half of ``learn_policy_rule`` — after the revoke, the next
+    matching action cards again instead of auto-running. An unknown id refuses
+    naming the known set (I9). Shared verb: the chat ``revoke_policy_rule``
+    card and ``DELETE /api/policy/rules/{rule_id}`` both land here (I5).
+    """
+    from ..policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        PolicyDocument,
+        document_from_settings,
+        is_session_rule,
+    )
+
+    document = (
+        document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
+    )
+    revoked = next((rule for rule in document.learned if rule.rule_id == rule_id), None)
+    if revoked is None:
+        known = ", ".join(rule.rule_id for rule in document.learned) or "(none)"
+        raise HTTPException(
+            status_code=404, detail=f"no learned rule {rule_id!r}; known rules: {known}"
+        )
+    kept = [rule for rule in document.learned if rule.rule_id != rule_id]
+    updated = document.model_copy(update={"learned": kept})
+    store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
+    return {
+        "revoked": {
+            "rule_id": revoked.rule_id,
+            "scope": revoked.scope,
+            "action": revoked.action,
+            "pattern": revoked.pattern,
+            "provenance": revoked.provenance,
+            "tier": "session" if is_session_rule(revoked) else "always",
+        },
+        "remaining_rules": len(kept),
+    }
 
 
 def clear_session_policy_rules(store: RunStore) -> int:

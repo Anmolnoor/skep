@@ -785,6 +785,24 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         ["domain"],
     ),
     _tool(
+        "revoke_policy_rule",
+        "PROPOSE revoking ONE learned policy rule by id (requires user "
+        "confirmation). Removes the standing grant — allow-always or "
+        "session — so the next matching action cards again instead of "
+        "auto-running; this NARROWS policy, it can never widen it. Rule ids "
+        "are deterministic and returned by the grant that made them (e.g. "
+        "'network:fetch:docs.python.org', 'shell:run:uv run pytest'); a "
+        "wrong id refuses listing the known rules. Offer it when the user "
+        "asks why something ran without asking, or wants a grant undone.",
+        {
+            "rule_id": {
+                "type": "string",
+                "description": "the learned rule's id, e.g. 'network:fetch:docs.python.org'",
+            }
+        },
+        ["rule_id"],
+    ),
+    _tool(
         "resume_run",
         "PROPOSE resuming a crashed, timed-out, or FAILED run (requires user "
         "confirmation). Crashed/timed-out runs continue IN PLACE from their "
@@ -2089,6 +2107,8 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "delete_policy_group",
         "attach_policy_group",
         "detach_policy_group",
+        # v109-F9: the narrowing half of the learned-grant verbs.
+        "revoke_policy_rule",
     ),
     "chats & memory": (
         "search_chats",
@@ -4017,6 +4037,11 @@ def _execute_mutation(
             "rule_id": rule_id or f"{rule_scope}:{server_id}:{tool_name}",
             "scope": rule_scope,
         }
+    if name == "revoke_policy_rule":
+        # v109-F9: the narrowing half of allow_fetch_domain / allow_mcp_tool /
+        # the session grants — one shared verb; the REST DELETE is the
+        # operator-direct face of the same function (I5).
+        return actions.revoke_policy_rule(store, rule_id=str(args["rule_id"]))
     if name == "set_policy":
         return actions.update_policy(store, holder, args)
     if name == "apply_policy_preset":

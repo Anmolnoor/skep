@@ -47,6 +47,7 @@ from .actions import (
     landing_reason,
     ledger_remember_suggestions,
     list_policy_groups,
+    list_policy_rules,
     merge_branch,
     open_pr_from_branch,
     patch_path,
@@ -62,6 +63,7 @@ from .actions import (
     resume_past_gate,
     reverification_event_view_for_task,
     reverification_warning,
+    revoke_policy_rule,
     run_summary_view,
     set_policy_group,
     submit_run,
@@ -510,6 +512,21 @@ def create_app(
     @app.put("/api/policy")
     def put_policy(body: PolicyUpdate) -> dict[str, Any]:
         return update_policy(run_store, holder, body.model_dump())
+
+    # -- learned policy rules (v109-F9): the standing grants that auto-run
+    # things. The GET is the operator's first surface over them; the DELETE is
+    # the operator-direct face of the carded revoke_policy_rule chat verb —
+    # both land on the same shared verbs (I5).
+
+    @app.get("/api/policy/rules")
+    def get_policy_rules() -> dict[str, Any]:
+        return list_policy_rules(run_store)
+
+    # {rule_id:path} — shell rule ids embed the command (`shell:run:scripts/x`),
+    # so the id may carry slashes the default converter would reject (v48-F4).
+    @app.delete("/api/policy/rules/{rule_id:path}")
+    def delete_policy_rule(rule_id: str) -> dict[str, Any]:
+        return revoke_policy_rule(run_store, rule_id=rule_id)
 
     # -- policy groups (v97-F5, ADR 0048): operator-direct UI routes. The
     # authenticated UI is the human, same standing as the /api/policy PUTs;

@@ -232,7 +232,10 @@ def test_projects_cards_and_detail_route() -> None:
     # Only reads: the detail page mutates nothing.
     for verb in ('api("POST"', 'api("PUT"', 'api("PATCH"', 'api("DELETE"'):
         assert verb not in detail, verb
-    assert '"effective policy"' in detail  # the JSON moved here, reachable
+    # v109-F9: the effective policy renders as the decided-by table (RSoP);
+    # the raw overlay JSON stays reachable one disclosure deeper.
+    assert "effective policy — who decided each key" in detail
+    assert '"project overlay (raw)"' in detail  # the JSON stays reachable
     assert "Project not found" in detail
     assert "buildRunCard" in detail  # rung-2 reuse of the v75 card builder
 
