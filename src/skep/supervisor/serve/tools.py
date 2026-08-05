@@ -1256,7 +1256,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "create branches or commit, so never dispatch a run to 'commit' finished work "
         "and never suggest auto_approve — use this. Only a COMPLETED run with a "
         "patch can land: a failed run is never landable, and a run that changed "
-        "nothing has no patch — do not propose landing either.",
+        "nothing has no patch — do not propose landing either. Propose it ONCE "
+        "per task: the result says when the patch landed, and a landed task "
+        "never needs a second land_run.",
         {
             "task_id": {"type": "string"},
             "note": {"type": "string"},

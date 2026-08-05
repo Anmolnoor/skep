@@ -43,6 +43,7 @@ from .actions import (
     diagnose_run,
     effective_policy_view,
     land_run,
+    landing_reason,
     list_policy_groups,
     merge_branch,
     open_pr_from_branch,
@@ -558,7 +559,9 @@ def create_app(
                 status_code=409, detail="nothing to approve: no pending gate and no patch"
             )
         review_id = run_store.enqueue_approval(
-            task_id, action="apply_patch", reason="patch application review"
+            task_id,
+            action="apply_patch",
+            reason=landing_reason(str(run.get("instructions") or ""), None),
         )
         return {"review_id": review_id}
 

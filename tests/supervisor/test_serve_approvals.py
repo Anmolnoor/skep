@@ -624,7 +624,8 @@ def test_approving_a_completed_run_applies_the_patch_on_a_branch(
         == {
             "review_id": review_id,
             "action": "apply_patch",
-            "reason": "patch application review",
+            # v109-F3: the reason names what lands, not a generic ritual line.
+            "reason": 'land "Fix the bug. MODE:happy"',
             "project_context": {
                 "project_id": "project-1",
                 "name": "trusted repo",

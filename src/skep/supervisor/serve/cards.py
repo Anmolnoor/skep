@@ -130,6 +130,16 @@ def headline(tool: str, args: dict[str, Any]) -> str:
     repo, pr = args.get("repo"), args.get("pr")
     if repo not in (None, "") and pr not in (None, ""):
         return f"{tool} — {_render_value(repo).strip()}#{_render_value(pr).strip()}"
+    # v109-F3: a review card's subject is the approval's reason, not its UUID.
+    # The gate mirror carries the reason in args (run_status.py), and since the
+    # landing reason now names the task ('land "…" → branch'), the operator
+    # reads WHAT is waiting instead of `approve_review — <36 hex chars>`.
+    if tool in {"approve_review", "deny_review"}:
+        reason = str(args.get("reason") or "").strip().replace("\n", " ")
+        if reason:
+            if len(reason) > 160:
+                reason = f"{reason[:157]}…"
+            return f"{tool} — {reason}"
     for key in _SUBJECT_KEYS:
         value = args.get(key)
         if value in (None, "", [], {}):

@@ -2301,10 +2301,17 @@ def test_land_run_tool_lands_completed_run_without_preexisting_review(
             runner=Dispatcher(ConfigHolder(config, store), store),
             actor="tester",
         )
+        # v109-F3: the review it opened is titled by the task, not a ritual line.
+        (approval,) = store.approvals_for(task_id)
+        assert approval.reason == 'land "Fix the bug. MODE:happy"'
     finally:
         store.close()
 
-    assert landed == {"action": "applied", "branch": f"skep/{task_id}"}
+    assert landed["action"] == "applied"
+    assert landed["branch"] == f"skep/{task_id}"
+    # v109-F3: the result says the terminal state in words a small model acts
+    # on — the Aug 3 model re-proposed land_run a minute after landing.
+    assert "do not propose land_run for it again" in landed["next"]
     assert git(repo, "rev-parse", "--verify", f"refs/heads/skep/{task_id}").returncode == 0
 
 

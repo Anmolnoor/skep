@@ -1108,9 +1108,12 @@ def cmd_review(args: argparse.Namespace) -> int:
             return 0
 
         actor = args.actor or getpass.getuser()
+        from .serve.actions import landing_reason
 
         if args.deny:
-            review_id = _pending_or_new(store, record, reason="patch application review")
+            review_id = _pending_or_new(
+                store, record, reason=landing_reason(record.instructions, None)
+            )
             store.resolve_approval(review_id, approved=False, actor=actor, note=args.note)
             print(f"denied: task {record.task_id} (by {actor})")
             print(f'  next: skep run {record.repo} "..." --resume-of {record.task_id}')
@@ -1178,7 +1181,7 @@ def cmd_review(args: argparse.Namespace) -> int:
                 evidence=str(audit_dir),
                 next_command=f"skep review {record.task_id}  # re-inspect",
             )
-        review_id = _pending_or_new(store, record, reason="patch application review")
+        review_id = _pending_or_new(store, record, reason=landing_reason(record.instructions, None))
         store.resolve_approval(review_id, approved=True, actor=actor, note=args.note)
         print(f"approved: task {record.task_id} (by {actor})")
         print(f"  patch applied on branch {branch} in {record.repo}")

@@ -1253,6 +1253,20 @@ def merge_branch(
     }
 
 
+def landing_reason(instructions: str | None, branch: str | None) -> str:
+    """v109-F3: a landing approval's reason names WHAT lands and, when known,
+    WHERE. The Aug 3 field test rendered three same-day landings as identical
+    'apply_patch: patch application review' rows — a title carrying zero task
+    identity on every surface that shows approvals. The branch joins only when
+    the caller pinned one; guessing the default here could put a wrong branch
+    on the record (I8)."""
+    snippet = " ".join((instructions or "").split())
+    if len(snippet) > 80:
+        snippet = f"{snippet[:77]}…"
+    label = f'land "{snippet}"' if snippet else "land this run's patch"
+    return f"{label} → {branch}" if branch else label
+
+
 def land_run(
     store: RunStore,
     run: dict[str, Any],
@@ -1284,10 +1298,15 @@ def land_run(
                 status_code=409, detail="nothing to land: this run produced no patch"
             )
         review_id = store.enqueue_approval(
-            task_id, action="apply_patch", reason="patch application review"
+            task_id,
+            action="apply_patch",
+            reason=landing_reason(str(run.get("instructions") or ""), branch),
         )
     landed = apply_patch(store, run, review_id, actor, note, branch=branch)
     result: dict[str, Any] = {"action": "applied", "branch": landed}
+    # v109-F3: the Aug 3 model re-proposed land_run a minute after this very
+    # result — say the terminal state in words a small model acts on (I9).
+    result["next"] = f"landed on {landed} — this task is done; do not propose land_run for it again"
     warning = reverification_warning(store.reverification_for(task_id))
     if warning is not None:
         result["warning"] = warning
