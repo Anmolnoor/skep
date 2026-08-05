@@ -3322,6 +3322,41 @@ class RunStore:
         return [(str(row[0]), str(row[1])) for row in rows]
 
     @_locked
+    def preserved_resumable_runs(
+        self,
+        *,
+        repo: str,
+        states: Sequence[str],
+        ref: str | None = None,
+        max_age_seconds: float | None = None,
+    ) -> list[tuple[str, str, str, str]]:
+        """v109-F6: (task_id, state, workspace, updated_at) rows for this
+        repo's preserved runs in the given resumable states, newest first —
+        the dispatch surface's "a warm tree already exists" lookup. Same
+        predicate as the sweep views (one source of truth); the state filter
+        drops the completed-unconfirmed half, which diagnose_run serves but
+        resume never will. The caller checks the tree still exists on disk."""
+        placeholders = ", ".join("?" for _ in states)
+        sql = (
+            "SELECT r.task_id, r.state, r.workspace, r.updated_at"
+            + self._PRESERVED_PREDICATE
+            + f" AND r.repo = ? AND r.state IN ({placeholders})"
+        )
+        params: list[Any] = [repo, *states]
+        if ref is not None:
+            sql += " AND r.ref = ?"
+            params.append(ref)
+        if max_age_seconds is not None:
+            cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            sql += " AND r.updated_at >= ?"
+            params.append(cutoff)
+        sql += " ORDER BY r.updated_at DESC"
+        rows = self._conn.execute(sql, params).fetchall()
+        return [(str(row[0]), str(row[1]), str(row[2]), str(row[3])) for row in rows]
+
+    @_locked
     def latest_channel_chat(self) -> str | None:
         """v72-F3: the newest messenger-bound chat that still exists — the
         delivery target for system alarms that belong to no particular chat

@@ -793,6 +793,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "caches and installed deps intact, so the retry skips the cold "
         "setup. When the worktree is gone (preserved trees expire after 24h) "
         "the resume honestly replays from step 0 in a fresh worktree. "
+        "Prefer this over a fresh dispatch_run of the same task — that redoes "
+        "the work cold; diagnose_run inspects the kept tree first. "
         "Landing rules unchanged: the resumed run still lands through its "
         "own approval.",
         {"task_id": {"type": "string", "description": "the run's task id"}},
@@ -808,7 +810,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "worktree) and its output returns here, capped at 10k chars. Only "
         "failed/unconfirmed runs keep their worktree, and only for 24h; when "
         "the tree is gone, read the audit trail via get_run instead. This "
-        "cannot land, push, or modify anything outside the kept worktree.",
+        "cannot land, push, or modify anything outside the kept worktree. "
+        "After diagnosis, resume_run continues the work in that same tree — "
+        "no fresh dispatch_run needed.",
         {
             "task_id": {"type": "string", "description": "the run whose kept worktree to inspect"},
             "command": {"type": "string", "description": "the shell command to run in it"},
@@ -1616,6 +1620,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "setup_project before dispatching — unbound repos run on raw global defaults. "
         "A local path the user has not confirmed exists gets a list_repos/repo_state "
         "check first — dispatching at a missing directory is refused, not carded. "
+        "NOT for retrying a run whose worktree is kept (crashed/timed-out/"
+        "failed): resume_run continues it in place, diagnose_run inspects it "
+        "first — a fresh dispatch redoes the work cold; the result carries a "
+        "'hint' line when this applies. "
         "If the task needs network hosts, shell commands, or capabilities the "
         "effective policy denies, say so and propose the policy change first — "
         "never dispatch into a known gate. "
@@ -4255,6 +4263,14 @@ def _execute_mutation(
             seed_default_schedules=bool(args.get("seed_default_schedules", True)),
         )
     if name == "dispatch_run":
+        # v109-F6: computed BEFORE the submit so the hint names the PRIOR
+        # run, never the one this dispatch creates — a hint, not a block.
+        hint = actions.preserved_resumable_hint(
+            holder,
+            store,
+            repo=str(args["repo"]),
+            ref=None if args.get("ref") is None else str(args["ref"]),
+        )
         task_id = actions.submit_run(
             holder,
             runner,
@@ -4278,12 +4294,15 @@ def _execute_mutation(
         # v40-F2 (v35): repo + caste ride the result so both the live SSE tool
         # event and the stored transcript row can render a human summary —
         # additive only, same field set on both paths.
-        return {
+        result_view = {
             "task_id": task_id,
             "state": "dispatched",
             "repo": str(args["repo"]),
             "caste": str(args.get("caste") or "coding"),
         }
+        if hint is not None:
+            result_view["hint"] = hint
+        return result_view
     if name == "start_research":
         from ..templates import deep_research_template, instantiate
 

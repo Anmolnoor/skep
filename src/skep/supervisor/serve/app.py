@@ -50,6 +50,7 @@ from .actions import (
     patch_path,
     pending_approval_or_409,
     policy_block_views,
+    preserved_resumable_hint,
     project_context_detail_view,
     refresh_repo,
     repo_state_view,
@@ -411,6 +412,9 @@ def create_app(
 
     @app.post("/api/runs", status_code=202)
     def create_run(body: RunRequest) -> dict[str, str]:
+        # v109-F6: same helper, same line as the chat face — a resumable prior
+        # run's kept worktree rides the response; the dispatch proceeds as is.
+        hint = preserved_resumable_hint(holder, run_store, repo=body.repo, ref=body.ref)
         task_id = submit_run(
             holder,
             runner,
@@ -430,7 +434,10 @@ def create_app(
             protocol=body.protocol,
             engine=body.engine,
         )
-        return {"task_id": task_id, "state": "dispatched"}
+        response = {"task_id": task_id, "state": "dispatched"}
+        if hint is not None:
+            response["hint"] = hint
+        return response
 
     @app.get("/api/policy")
     def get_policy() -> dict[str, Any]:

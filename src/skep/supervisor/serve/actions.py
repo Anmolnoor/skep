@@ -2491,6 +2491,57 @@ def resume_crashed_run(
     return {"resumed_as": resumed_id, "resume_of": task_id, "worktree": fate}
 
 
+def _age_text(updated_at: str) -> str:
+    """'{n}s'/'{n}m'/'{n}h' since the run's last transition (store format only)."""
+    try:
+        then = datetime.strptime(updated_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return "some time"
+    seconds = max(0.0, (datetime.now(UTC) - then).total_seconds())
+    if seconds >= 3600:
+        return f"{int(seconds // 3600)}h"
+    if seconds >= 60:
+        return f"{int(seconds // 60)}m"
+    return f"{int(seconds)}s"
+
+
+def preserved_resumable_hint(
+    holder: ConfigHolder, store: RunStore, *, repo: str, ref: str | None = None
+) -> str | None:
+    """v109-F6: one line the dispatch surfaces carry when a prior run on this
+    repo is resumable in a kept worktree — a hint, never a block.
+
+    The field failure was a fix-chain becoming three fresh dispatches for one
+    task while the v107 kept-worktree machinery sat uninvoked: nothing at the
+    dispatch surface mentioned the preserved tree. Both faces (the chat tool
+    result and ``POST /api/runs``) attach this same line; the dispatch itself
+    proceeds/cards exactly as before. None when nothing applies — including
+    an unresolvable repo, which stays submit_run's error to raise."""
+    from ..dispatch import PRESERVED_WORKTREE_TTL_SECONDS
+
+    try:
+        resolved = resolve_repo_arg(repo, repos_root(holder), store)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    rows = store.preserved_resumable_runs(
+        repo=str(resolved),
+        states=sorted(_resumable_states()),
+        ref=ref,
+        max_age_seconds=PRESERVED_WORKTREE_TTL_SECONDS,
+    )
+    for task_id, state, workspace, updated_at in rows:
+        # The predicate answers from rows; the tree on disk is the value —
+        # a sweep or manual removal leaves the row behind (same check as
+        # diagnose_run's).
+        if not workspace or not Path(workspace).is_dir():
+            continue
+        return (
+            f"run {task_id[:12]} {state} {_age_text(updated_at)} ago, worktree kept — "
+            "resume_run continues it in place; diagnose_run inspects it first"
+        )
+    return None
+
+
 def remember_commands_for_session(store: RunStore, commands: list[list[str]]) -> list[list[str]]:
     """v86-F1: a plain approve holds for the serve session — persist the
     eligible approved commands into the session tier (cleared at serve
