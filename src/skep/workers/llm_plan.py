@@ -234,6 +234,8 @@ def _protocol(provider: ProviderProfile) -> LLMProtocol:
         return "openai-compat"
     if name == "anthropic":
         return "anthropic"
+    if name == "openai-responses":
+        return "openai-responses"
     raise LlmPlanError(f"unsupported worker provider {provider.name!r}")
 
 

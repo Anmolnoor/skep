@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from ..store import RunStore
 
-LLMProtocol = Literal["ollama", "openai-compat", "anthropic"]
+LLMProtocol = Literal["ollama", "openai-compat", "anthropic", "openai-responses"]
 _PROTOCOL_VALUES: tuple[str, ...] = get_args(LLMProtocol)
 # v108-F1: the ONE registry->serve protocol bridge. The registry spells
 # protocols with underscores (providers.PROVIDER_PROTOCOLS); the wire uses
@@ -40,6 +40,7 @@ REGISTRY_PROTOCOLS: dict[str, LLMProtocol] = {
     "ollama": "ollama",
     "openai_compat": "openai-compat",
     "anthropic": "anthropic",
+    "openai_responses": "openai-responses",
 }
 LLM_BASE_URL = "llm_base_url"
 LLM_DEFAULT_MODEL = "llm_default_model"
@@ -203,6 +204,7 @@ def detect_model_ctx(
     if protocol == "anthropic":
         return _ANTHROPIC_CTX_FLOOR
     if protocol != "ollama":
+        # openai-compat and openai-responses (v108-F5) have no such endpoint.
         return None
     try:
         response = httpx.post(
@@ -258,7 +260,8 @@ def list_models(
     protocol: LLMProtocol = DEFAULT_LLM_PROTOCOL,
     timeout: float = 10.0,
 ) -> list[str]:
-    if protocol == "openai-compat":
+    if protocol in ("openai-compat", "openai-responses"):
+        # v108-F5: the Responses API ships the same GET /v1/models listing.
         return _list_openai_models(base_url, api_key, timeout=timeout)
     if protocol == "anthropic":
         return _list_anthropic_models(base_url, api_key, timeout=timeout)
@@ -316,6 +319,15 @@ def chat_stream(
     if protocol == "anthropic":
         # anthropic sizes its own context too; num_ctx is ollama-only.
         yield from _anthropic_chat_stream(
+            base_url, api_key, model=model, messages=messages, tools=tools, timeout=timeout
+        )
+        return
+    if protocol == "openai-responses":
+        # v108-F5: the Responses API sizes its own context; num_ctx is
+        # ollama-only. Imported here — llm_responses imports this module.
+        from .llm_responses import responses_chat_stream
+
+        yield from responses_chat_stream(
             base_url, api_key, model=model, messages=messages, tools=tools, timeout=timeout
         )
         return

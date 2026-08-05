@@ -1579,7 +1579,8 @@ async function viewSetup(main, setup) {
   const protocol = el("select", {},
     el("option", { value: "ollama" }, "Ollama"),
     el("option", { value: "openai-compat" }, "OpenAI-compatible"),
-    el("option", { value: "anthropic" }, "Anthropic"));
+    el("option", { value: "anthropic" }, "Anthropic"),
+    el("option", { value: "openai-responses" }, "OpenAI Responses"));
   protocol.value = llm.protocol || "ollama";
   const baseUrl = el("input", {
     value: llm.base_url || "",
@@ -4972,7 +4973,8 @@ async function renderAssistantTab(panel) {
   const protocol = el("select", {},
     el("option", { value: "ollama" }, "Ollama"),
     el("option", { value: "openai-compat" }, "OpenAI-compatible"),
-    el("option", { value: "anthropic" }, "Anthropic"));
+    el("option", { value: "anthropic" }, "Anthropic"),
+    el("option", { value: "openai-responses" }, "OpenAI Responses"));
   protocol.value = llm.protocol || "ollama";
   const baseUrl = el("input", {
     value: llm.base_url || "",

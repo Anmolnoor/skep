@@ -8,8 +8,9 @@ config (``~/.skep/profile.json``, the sqlite ``llm_*`` settings, and the
 first use; the legacy readers remain only as a compatibility fallback until every
 caller reads the registry.
 
-Only Anthropic needs bespoke protocol code; OpenRouter and DeepSeek are
-OpenAI-compatible, so they are served through ``openai_compat`` profiles.
+Anthropic and the OpenAI Responses API (v108-F5) need bespoke protocol code;
+OpenRouter and DeepSeek are OpenAI-compatible, so they are served through
+``openai_compat`` profiles.
 (``gemini`` sat in this vocabulary until v108-F1 with no client, probe, or
 worker mapping behind it — a stored profile was a dead end. Google routes
 through its OpenAI-compatible endpoint as a preset instead.)
@@ -29,7 +30,9 @@ from skep.profile import _ENV_VAR_NAME_RE
 if TYPE_CHECKING:
     from .store import RunStore
 
-PROVIDER_PROTOCOLS: frozenset[str] = frozenset({"ollama", "openai_compat", "anthropic"})
+PROVIDER_PROTOCOLS: frozenset[str] = frozenset(
+    {"ollama", "openai_compat", "anthropic", "openai_responses"}
+)
 # local = on-box (Ollama); free = zero-cost remote; paid = metered remote.
 PROVIDER_COST_CLASSES: frozenset[str] = frozenset({"local", "free", "paid"})
 
@@ -38,6 +41,7 @@ _LEGACY_PROTOCOL_MAP = {
     "ollama": "ollama",
     "openai-compat": "openai_compat",
     "anthropic": "anthropic",
+    "openai-responses": "openai_responses",
 }
 
 

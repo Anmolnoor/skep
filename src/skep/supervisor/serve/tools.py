@@ -1816,7 +1816,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "scope 'chat' changes only THIS chat's model and nothing else; pass "
         "model 'default' with scope 'chat' to clear the override. Optional "
         "base_url/protocol switch providers in the same card (protocol: "
-        "'ollama', 'openai-compat', or 'anthropic' — scope 'default' only). "
+        "'ollama', 'openai-compat', 'anthropic', or 'openai-responses' — "
+        "scope 'default' only). "
         "Never carries an API key: secrets are set in Settings, never "
         "through chat.",
         {
