@@ -63,8 +63,11 @@ def test_gemini_profile_is_rejected_not_stored() -> None:
 def test_registry_api_key_env_rejects_pasted_key_values() -> None:
     ok = validate_provider_profile(_profile(api_key_env="OPENROUTER_API_KEY"))
     assert ok.api_key_env == "OPENROUTER_API_KEY"
+    # A dot/dash value can never be an env-var NAME — the pasted-key shape,
+    # without looking like a real credential (the release hygiene scan reads
+    # this file too).
     with pytest.raises(ProviderError) as err:
-        validate_provider_profile(_profile(api_key_env="sk-or-v1-abc123.def456"))
+        validate_provider_profile(_profile(api_key_env="pasted.key-value"))
     assert "pasted" in str(err.value)
 
 

@@ -78,7 +78,7 @@ def test_rest_add_activate_remove_round_trip(config: SupervisorConfig) -> None:
 
 def test_rest_rejects_pasted_keys_and_unknown_ids(config: SupervisorConfig) -> None:
     client = serve_client(config)
-    bad = client.post("/api/providers", json=_openrouter_body(api_key_env="sk-or-v1-abc123.def"))
+    bad = client.post("/api/providers", json=_openrouter_body(api_key_env="pasted.key-value"))
     assert bad.status_code == 400
     assert "pasted" in bad.json()["detail"]
     assert client.post("/api/providers/nope/activate").status_code == 404
