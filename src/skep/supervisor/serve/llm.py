@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from ..store import RunStore
 
-LLMProtocol = Literal["ollama", "openai-compat", "anthropic", "openai-responses"]
+LLMProtocol = Literal["ollama", "openai-compat", "anthropic", "openai-responses", "bedrock"]
 _PROTOCOL_VALUES: tuple[str, ...] = get_args(LLMProtocol)
 # v108-F1: the ONE registry->serve protocol bridge. The registry spells
 # protocols with underscores (providers.PROVIDER_PROTOCOLS); the wire uses
@@ -41,6 +41,7 @@ REGISTRY_PROTOCOLS: dict[str, LLMProtocol] = {
     "openai_compat": "openai-compat",
     "anthropic": "anthropic",
     "openai_responses": "openai-responses",
+    "bedrock": "bedrock",
 }
 LLM_BASE_URL = "llm_base_url"
 LLM_DEFAULT_MODEL = "llm_default_model"
@@ -198,8 +199,8 @@ def detect_model_ctx(
 
     ollama reports it via POST /api/show under an architecture-prefixed
     ``model_info`` key (``llama.context_length``, ``qwen3.context_length``, …);
-    the ``.context_length`` suffix is the stable part. openai-compat has no
-    standard endpoint.
+    the ``.context_length`` suffix is the stable part. openai-compat and
+    bedrock have no standard endpoint — they fall through to None.
     """
     if protocol == "anthropic":
         return _ANTHROPIC_CTX_FLOOR
@@ -265,6 +266,10 @@ def list_models(
         return _list_openai_models(base_url, api_key, timeout=timeout)
     if protocol == "anthropic":
         return _list_anthropic_models(base_url, api_key, timeout=timeout)
+    if protocol == "bedrock":
+        from .llm_bedrock import list_bedrock_models  # local import: llm_bedrock imports us
+
+        return list_bedrock_models(base_url, api_key, timeout=timeout)
     return _list_ollama_models(base_url, api_key, timeout=timeout)
 
 
@@ -328,6 +333,14 @@ def chat_stream(
         from .llm_responses import responses_chat_stream
 
         yield from responses_chat_stream(
+            base_url, api_key, model=model, messages=messages, tools=tools, timeout=timeout
+        )
+        return
+    if protocol == "bedrock":
+        # bedrock sizes its own context too; num_ctx is ollama-only.
+        from .llm_bedrock import bedrock_chat_stream  # local import: llm_bedrock imports us
+
+        yield from bedrock_chat_stream(
             base_url, api_key, model=model, messages=messages, tools=tools, timeout=timeout
         )
         return

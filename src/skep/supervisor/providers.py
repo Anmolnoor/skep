@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from .store import RunStore
 
 PROVIDER_PROTOCOLS: frozenset[str] = frozenset(
-    {"ollama", "openai_compat", "anthropic", "openai_responses"}
+    {"ollama", "openai_compat", "anthropic", "openai_responses", "bedrock"}
 )
 # local = on-box (Ollama); free = zero-cost remote; paid = metered remote.
 PROVIDER_COST_CLASSES: frozenset[str] = frozenset({"local", "free", "paid"})
@@ -42,6 +42,7 @@ _LEGACY_PROTOCOL_MAP = {
     "openai-compat": "openai_compat",
     "anthropic": "anthropic",
     "openai-responses": "openai_responses",
+    "bedrock": "bedrock",
 }
 
 

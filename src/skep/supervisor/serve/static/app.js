@@ -1580,7 +1580,8 @@ async function viewSetup(main, setup) {
     el("option", { value: "ollama" }, "Ollama"),
     el("option", { value: "openai-compat" }, "OpenAI-compatible"),
     el("option", { value: "anthropic" }, "Anthropic"),
-    el("option", { value: "openai-responses" }, "OpenAI Responses"));
+    el("option", { value: "openai-responses" }, "OpenAI Responses"),
+    el("option", { value: "bedrock" }, "AWS Bedrock"));
   protocol.value = llm.protocol || "ollama";
   const baseUrl = el("input", {
     value: llm.base_url || "",
@@ -4974,7 +4975,8 @@ async function renderAssistantTab(panel) {
     el("option", { value: "ollama" }, "Ollama"),
     el("option", { value: "openai-compat" }, "OpenAI-compatible"),
     el("option", { value: "anthropic" }, "Anthropic"),
-    el("option", { value: "openai-responses" }, "OpenAI Responses"));
+    el("option", { value: "openai-responses" }, "OpenAI Responses"),
+    el("option", { value: "bedrock" }, "AWS Bedrock"));
   protocol.value = llm.protocol || "ollama";
   const baseUrl = el("input", {
     value: llm.base_url || "",
