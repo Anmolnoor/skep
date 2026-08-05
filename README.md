@@ -6,6 +6,10 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://pypi.org/project/skep/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+```sh
+pipx install skep   # or inside a venv: pip install skep
+```
+
 ![skep — the supervisor for AI coding agents: sandbox, agent runs, verify, you approve, audit trail](docs/assets/skep-cover.png)
 
 skep is a local-first supervisor for AI coding agents — Claude Code, Codex,
