@@ -45,6 +45,7 @@ from .actions import (
     effective_policy_view,
     land_run,
     landing_reason,
+    ledger_remember_suggestions,
     list_policy_groups,
     merge_branch,
     open_pr_from_branch,
@@ -54,6 +55,8 @@ from .actions import (
     preserved_resumable_hint,
     project_context_detail_view,
     refresh_repo,
+    remember_ledger_entry,
+    remember_suggestion_for_review,
     repo_state_view,
     require_run,
     resume_past_gate,
@@ -206,6 +209,14 @@ class WorkonRequest(BaseModel):
     path: str
     pack: str = "trusted_local_dev"
     phase: str = "build"
+
+
+class RememberRequest(BaseModel):
+    """Body of ``POST /api/ledger/remember`` (v109-F8)."""
+
+    action: str
+    resource: str
+    repo: str
 
 
 def _sse(data: dict[str, Any], *, event: str | None = None) -> str:
@@ -581,7 +592,12 @@ def create_app(
             resumed_id = resume_past_gate(
                 run_store, holder.current, runner, run, review_id, body.actor
             )
-            return {"action": "resumed", "resumed_as": resumed_id}
+            resumed = {"action": "resumed", "resumed_as": resumed_id}
+            # v109-F8: the Nth identical approval says so (a hint, never a block).
+            suggestion = remember_suggestion_for_review(run_store, review_id)
+            if suggestion is not None:
+                resumed["suggestion"] = suggestion
+            return resumed
         branch = apply_patch(run_store, run, review_id, body.actor, body.note, branch=body.branch)
         applied = {"action": "applied", "branch": branch}
         # v20-F3: warn when landing a run the supervisor could not re-verify.
@@ -589,6 +605,18 @@ def create_app(
         if warning is not None:
             applied["warning"] = warning
         return applied
+
+    @app.get("/api/ledger/suggestions")
+    def ledger_suggestions(repo: str | None = None) -> dict[str, Any]:
+        """v109-F8: the keys the operator keeps approving, derived on read."""
+        return {"suggestions": ledger_remember_suggestions(run_store, repo)}
+
+    @app.post("/api/ledger/remember")
+    def ledger_remember(body: RememberRequest) -> dict[str, Any]:
+        """v109-F8: persist a suggested key as a standing project grant."""
+        return remember_ledger_entry(
+            run_store, holder, action=body.action, resource=body.resource, repo=body.repo
+        )
 
     @app.post("/api/approvals/{review_id}/allow-command")
     def allow_command(review_id: str, body: ResolveRequest) -> dict[str, str]:

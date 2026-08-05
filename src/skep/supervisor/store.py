@@ -1795,6 +1795,69 @@ class RunStore:
         return [self._row_to_ledger(row) for row in rows]
 
     @_locked
+    def ledger_entry_for_review(self, review_id: str) -> ApprovalLedgerRecord | None:
+        row = self._conn.execute(
+            "SELECT id, review_id, task_id, action, resource, reason, instructions_snippet,"
+            " repo_path, template_name, approved_at, approved_by, task_outcome, remembered"
+            " FROM approval_ledger WHERE review_id = ?",
+            (review_id,),
+        ).fetchone()
+        return None if row is None else self._row_to_ledger(row)
+
+    @_locked
+    def ledger_remember_candidates(self, *, min_count: int = 3) -> list[dict[str, Any]]:
+        """v109-F8: the (action, resource, repo) keys the operator keeps
+        approving with no standing grant. Deterministic and derived on read —
+        no suggestion state to desync: remembering removes a key from this
+        list by construction. Only actions with a remember path count; a
+        landing (apply_patch) is the trust ramp, never a suggestion
+        (ADR 0048). A later deny of the same resource resets the streak —
+        matchable for shell approvals, whose reason carries the command;
+        network deny reasons carry no host, so those streaks stand until
+        remembered or denied by the operator at the suggestion itself."""
+        rows = self._conn.execute(
+            "SELECT action, resource, repo_path, COUNT(*), MAX(approved_at)"
+            " FROM approval_ledger"
+            " WHERE remembered = 0"
+            "   AND action IN ('shell.run', 'network.fetch', 'network.read')"
+            "   AND resource != action"
+            " GROUP BY action, resource, repo_path HAVING COUNT(*) >= ?"
+            " ORDER BY COUNT(*) DESC, MAX(approved_at) DESC",
+            (min_count,),
+        ).fetchall()
+        candidates: list[dict[str, Any]] = []
+        for action, resource, repo_path, count, last_approved in rows:
+            denied = self._conn.execute(
+                "SELECT 1 FROM approvals WHERE status = 'denied'"
+                " AND reason LIKE ? AND resolved_at > ? LIMIT 1",
+                (f"%{resource}", last_approved),
+            ).fetchone()
+            if denied is not None:
+                continue
+            candidates.append(
+                {
+                    "action": str(action),
+                    "resource": str(resource),
+                    "repo": str(repo_path),
+                    "count": int(count),
+                    "last_approved": str(last_approved),
+                }
+            )
+        return candidates
+
+    @_locked
+    def mark_ledger_remembered(self, *, action: str, resource: str, repo_path: str) -> int:
+        """v109-F8: a standing grant now covers this key — every matching
+        ledger row says so (I13), whichever door persisted the grant."""
+        cursor = self._conn.execute(
+            "UPDATE approval_ledger SET remembered = 1"
+            " WHERE action = ? AND resource = ? AND repo_path = ? AND remembered = 0",
+            (action, resource, repo_path),
+        )
+        self._conn.commit()
+        return cursor.rowcount
+
+    @_locked
     def ledger_for_pattern(self, instructions_snippet: str) -> list[ApprovalLedgerRecord]:
         rows = self._conn.execute(
             "SELECT id, review_id, task_id, action, resource, reason, instructions_snippet,"

@@ -4046,7 +4046,13 @@ def _execute_mutation(
         run = actions.require_run(store, str(approval["task_id"]))
         if run["state"] == "pending_approval":
             resumed = actions.resume_past_gate(store, holder.current, runner, run, review_id, actor)
-            return {"action": "resumed", "resumed_as": resumed}
+            resumed_result: dict[str, Any] = {"action": "resumed", "resumed_as": resumed}
+            # v109-F8: the Nth identical approval says so — the model relays
+            # the nudge instead of silently re-approving forever.
+            suggestion = actions.remember_suggestion_for_review(store, review_id)
+            if suggestion is not None:
+                resumed_result["suggestion"] = suggestion
+            return resumed_result
         note = None if args.get("note") is None else str(args["note"])
         requested_branch = _queen_landing_branch(store, run, args.get("branch"))
         landed = actions.apply_patch(store, run, review_id, actor, note, branch=requested_branch)

@@ -2690,12 +2690,19 @@ def _persist_remembered_command(
                 pack_name=project.pack_name,
                 pack_version=project.pack_version,
             )
-        return
-    existing = list(policy_view(store, holder.current).get("allowed_shell_commands") or [])
-    if command not in existing:
-        existing.append(command)
-        store.set_setting(ALLOWED_SHELL_COMMANDS, existing)
-        holder.rebuild()
+    else:
+        existing_global = list(
+            policy_view(store, holder.current).get("allowed_shell_commands") or []
+        )
+        if command not in existing_global:
+            existing_global.append(command)
+            store.set_setting(ALLOWED_SHELL_COMMANDS, existing_global)
+            holder.rebuild()
+    # v109-F8: every historical approval of this exact command now has a
+    # standing grant — its ledger rows say so (I13).
+    store.mark_ledger_remembered(
+        action="shell.run", resource=shlex.join(command), repo_path=str(repo)
+    )
 
 
 def _persist_remembered_network_host(
@@ -2721,14 +2728,18 @@ def _persist_remembered_network_host(
                 pack_name=project.pack_name,
                 pack_version=project.pack_version,
             )
-        return
-    existing = [
-        str(entry) for entry in (policy_view(store, holder.current).get(DEFAULT_NETWORK) or [])
-    ]
-    if host not in existing:
-        existing.append(host)
-        store.set_setting(DEFAULT_NETWORK, existing)
-        holder.rebuild()
+    else:
+        existing = [
+            str(entry) for entry in (policy_view(store, holder.current).get(DEFAULT_NETWORK) or [])
+        ]
+        if host not in existing:
+            existing.append(host)
+            store.set_setting(DEFAULT_NETWORK, existing)
+            holder.rebuild()
+    # v109-F8: every historical approval of this host now has a standing
+    # grant — its ledger rows say so, whichever door persisted it (I13).
+    for network_action in ("network.fetch", "network.read"):
+        store.mark_ledger_remembered(action=network_action, resource=host, repo_path=str(repo))
 
 
 def allow_network_host_and_resume(
@@ -2787,6 +2798,89 @@ def allow_network_host_and_resume(
         actor,
         remembered=True,
     )
+
+
+def ledger_remember_suggestions(store: RunStore, repo: str | None = None) -> list[dict[str, Any]]:
+    """v109-F8: the keys the operator keeps approving, offered for remembering.
+
+    Derived from the ledger on read (deterministic — I6: only the operator's
+    confirm changes policy; this only notices the recurrence). Keys the floor
+    forbids are never suggested, however often they were approved."""
+    suggestions: list[dict[str, Any]] = []
+    for candidate in store.ledger_remember_candidates():
+        if repo is not None and candidate["repo"] != repo:
+            continue
+        if candidate["action"] == "shell.run":
+            try:
+                argv = normalize_remembered_command(shlex.split(str(candidate["resource"])))
+            except ValueError:
+                continue
+            if not argv or dangerous_prefix_reason(argv) is not None:
+                continue
+        suggestions.append(
+            {
+                **candidate,
+                "hint": (
+                    f"approved {candidate['count']}x on this repo with no standing "
+                    "grant — POST /api/ledger/remember persists it for the project"
+                ),
+            }
+        )
+    return suggestions
+
+
+def remember_suggestion_for_review(store: RunStore, review_id: str) -> str | None:
+    """The one-line nudge an approve response carries when its key just hit
+    the suggestion threshold (the F6 hint pattern: inform, never block)."""
+    entry = store.ledger_entry_for_review(review_id)
+    if entry is None or entry.remembered:
+        return None
+    for candidate in store.ledger_remember_candidates():
+        if (candidate["action"], candidate["resource"], candidate["repo"]) == (
+            entry.action,
+            entry.resource,
+            entry.repo_path,
+        ):
+            return (
+                f"this is approval #{candidate['count']} of exactly this on this repo — "
+                "'Allow & remember' (or POST /api/ledger/remember) would stop the asking"
+            )
+    return None
+
+
+def remember_ledger_entry(
+    store: RunStore, holder: ConfigHolder, *, action: str, resource: str, repo: str
+) -> dict[str, Any]:
+    """v109-F8: persist a suggested key as a standing project grant.
+
+    Routes through the SAME persist helpers the approval-time remember uses
+    (I5 — one path per scope), so the floor guards and the ledger marking
+    apply identically."""
+    repo_path = Path(repo)
+    if action == "shell.run":
+        try:
+            argv = normalize_remembered_command(shlex.split(resource))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=f"unparseable command: {exc}") from exc
+        if not argv:
+            raise HTTPException(status_code=409, detail="empty command cannot be remembered")
+        guard_reason = dangerous_prefix_reason(argv)
+        if guard_reason is not None:
+            raise HTTPException(status_code=409, detail=guard_reason)
+        _persist_remembered_command(store, holder, repo_path, argv)
+    elif action in ("network.fetch", "network.read"):
+        host = resource.strip()
+        if not host or host == "*" or "/" in host or ":" in host:
+            raise HTTPException(
+                status_code=409, detail=f"{host!r} is not a rememberable bare hostname"
+            )
+        _persist_remembered_network_host(store, holder, repo_path, host)
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail="only shell.run and network.fetch/network.read approvals can be remembered",
+        )
+    return {"remembered": True, "action": action, "resource": resource, "repo": repo}
 
 
 def allow_shell_command_and_resume(

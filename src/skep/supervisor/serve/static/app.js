@@ -4045,6 +4045,7 @@ async function viewApprovals(main) {
         const before = location.hash;
         try {
           const result = await api("POST", `/api/approvals/${approval.review_id}/${path}`, body);
+          if (result.suggestion) flash("ok", result.suggestion);
           if (result.resumed_as) { location.hash = `#/runs/${result.resumed_as}`; return; }
           if (result.url) flash("ok", `PR: ${result.url}`);
           if (location.hash === before) route();
