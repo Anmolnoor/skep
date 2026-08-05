@@ -16,7 +16,12 @@ from typing import Any, Literal
 # shape v101-F1 spent a whole fix removing from the caste roster. This one is
 # not going to be the sixth. (Workers already import from skep.supervisor:
 # netproxy, store, serve.llm.)
-from skep.supervisor.shell_prefixes import argv_segments, is_history_rewrite_command
+from skep.supervisor.shell_prefixes import (
+    argv_segments,
+    catastrophic_command_line_reason,
+    catastrophic_command_reason,
+    is_history_rewrite_command,
+)
 from skep.worker_contract import (
     RESUME_CHECKPOINT_ARTIFACT_NAME,
     RESUME_CHECKPOINT_STATE_KEY,
@@ -556,6 +561,17 @@ class ShellExecPlugin:
         # the git blocks fire there: a self-labeled purpose must not skip a
         # hard deny. A wrapper payload the gate cannot read fails closed; the
         # worker can always rewrite it as a direct command.
+        # v109-F10: string-level machine-wreckers (fork bombs, redirects into a
+        # raw device) are judged on the whole line BEFORE any parsing — the
+        # shapes exist precisely because an argv cannot represent them, and
+        # the joke names the sin better than an unparseable fallback (I9).
+        catastrophic_line = catastrophic_command_line_reason(command)
+        if catastrophic_line is not None:
+            return RuntimePolicyDecision(
+                verdict="deny",
+                reason="capability.deny.catastrophic_command",
+                detail=catastrophic_line,
+            )
         segments = argv_segments(argv)
         if segments is None:
             return RuntimePolicyDecision(
@@ -567,10 +583,23 @@ class ShellExecPlugin:
                     "or deep nesting); run it as a direct command instead"
                 ),
             )
+        # v109-F10: the catastrophic-command floor — machine-wreckers (rm -rf /,
+        # mkfs, dd onto a device, shutdown, fork bombs) are denied outright,
+        # before the verify fast-path and every grant, exactly like the git
+        # blocks, and judged per segment like them (v109-F1). The sandbox is
+        # the wall; this is the sign on it, and the detail teaches the
+        # acceptable shape (I9).
         for segment in segments:
             denied = _git_floor_decision(segment)
             if denied is not None:
                 return denied
+            catastrophic = catastrophic_command_reason(segment)
+            if catastrophic is not None:
+                return RuntimePolicyDecision(
+                    verdict="deny",
+                    reason="capability.deny.catastrophic_command",
+                    detail=catastrophic,
+                )
         # v20-F1: keep git mutations out of the verify fast-path. A
         # ``git add``/``git commit`` mislabeled ``purpose: "verify"`` must fall
         # through to the allowlist/grant/approval path — never bypass the
