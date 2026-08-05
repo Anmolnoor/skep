@@ -159,6 +159,21 @@ class ProviderSettings(BaseModel):
     api_key_env: str | None = None
 
 
+class ProviderCreateRequest(BaseModel):
+    """v108-F2: register a registry profile. ``api_key_env`` is an env-var
+    NAME — key values never ride this route (G2)."""
+
+    provider_id: str
+    protocol: str
+    base_url: str
+    model: str
+    api_key_env: str | None = None
+    cost_class: str = "paid"
+    fallback_order: int = 0
+    allowed_network_hosts: list[str] = Field(default_factory=list)
+    activate: bool = False
+
+
 class ChannelConfigRequest(BaseModel):
     """v26-F1: partial channel config update; secrets are write-only."""
 
@@ -1200,6 +1215,57 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
     @app.get("/api/providers/health")
     def provider_health() -> dict[str, Any]:
         return {"health": [asdict(h) for h in run_store.list_provider_health()]}
+
+    # v108-F2: the registry's write path — same actions.py verbs as the CLI
+    # and the carded chat tools (ADR 0050).
+
+    @app.post("/api/providers", status_code=201)
+    def add_provider_route(body: ProviderCreateRequest) -> dict[str, Any]:
+        # actions imports from this module, so the reverse import stays local.
+        from ..providers import ProviderError
+        from . import actions
+
+        try:
+            result = actions.add_provider(
+                run_store,
+                provider_id=body.provider_id,
+                protocol=body.protocol,
+                base_url=body.base_url,
+                model=body.model,
+                api_key_env=body.api_key_env,
+                cost_class=body.cost_class,
+                fallback_order=body.fallback_order,
+                allowed_network_hosts=tuple(body.allowed_network_hosts),
+            )
+            if body.activate:
+                result.update(
+                    actions.use_provider(
+                        run_store, holder.current.home, provider_id=body.provider_id
+                    )
+                )
+        except ProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return result
+
+    @app.post("/api/providers/{provider_id}/activate")
+    def activate_provider_route(provider_id: str) -> dict[str, Any]:
+        from ..providers import ProviderError
+        from . import actions
+
+        try:
+            return actions.use_provider(run_store, holder.current.home, provider_id=provider_id)
+        except ProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.delete("/api/providers/{provider_id}")
+    def remove_provider_route(provider_id: str) -> dict[str, Any]:
+        from ..providers import ProviderError
+        from . import actions
+
+        try:
+            return actions.remove_provider(run_store, provider_id=provider_id)
+        except ProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     # -- v15: ops node registry ----------------------------------------------
 

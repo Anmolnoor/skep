@@ -14,6 +14,7 @@ worker with `--worker-cmd` or `SKEP_WORKER_CMD`.
 | Custom contract worker | Supported | Any command that reads Skep task JSON and writes Skep result JSON. |
 | Codex | Supported | Thin `AdapterSpec` on the shared CLI adapter (v33): `python -m skep.workers.codex`. |
 | Aider | Supported | Thin `AdapterSpec` on the shared CLI adapter (v33): `python -m skep.workers.aider`. |
+| pi | Supported | Thin `AdapterSpec` on the shared CLI adapter: `python -m skep.workers.pi` (headless `-p`). |
 | Ollama coding worker | Supported | First-party planner over a local Ollama model (v33): `python -m skep.workers.ollama`. |
 
 ## Claude Code

@@ -444,6 +444,7 @@ CREATE TABLE IF NOT EXISTS provider_profiles (
     fallback_order INTEGER NOT NULL DEFAULT 0,
     api_key_env TEXT,
     active INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'manual',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -1013,6 +1014,15 @@ class RunStore:
             self._conn.execute(
                 "UPDATE chats SET source = 'terminal'"
                 " WHERE source = 'web' AND title LIKE 'terminal 20__-__-__ __:__'"
+            )
+        provider_columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(provider_profiles)")
+        }
+        if "source" not in provider_columns:
+            # v108-F2: which path created the profile — 'manual' or 'preset:<id>'
+            # (I8: provenance visible wherever the profile is shown).
+            self._conn.execute(
+                "ALTER TABLE provider_profiles ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'"
             )
         # v51-F1: a store that predates chat_fts has transcripts the triggers
         # never saw — rebuild the index once from chat_messages on first open.
@@ -2959,7 +2969,7 @@ class RunStore:
 
     _PROVIDER_COLS = (
         "provider_id, protocol, base_url, model, allowed_network_hosts_json, cost_class,"
-        " fallback_order, api_key_env, active"
+        " fallback_order, api_key_env, active, source"
     )
 
     @staticmethod
@@ -2974,6 +2984,7 @@ class RunStore:
             fallback_order=int(row[6]),
             api_key_env=None if row[7] is None else str(row[7]),
             active=bool(row[8]),
+            source=str(row[9] or "manual"),
         )
 
     @_locked
@@ -2985,13 +2996,13 @@ class RunStore:
         self._conn.execute(
             "INSERT INTO provider_profiles (provider_id, protocol, base_url, model,"
             " allowed_network_hosts_json, cost_class, fallback_order, api_key_env, active,"
-            " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(provider_id) DO UPDATE SET protocol = excluded.protocol,"
             " base_url = excluded.base_url, model = excluded.model,"
             " allowed_network_hosts_json = excluded.allowed_network_hosts_json,"
             " cost_class = excluded.cost_class, fallback_order = excluded.fallback_order,"
             " api_key_env = excluded.api_key_env, active = excluded.active,"
-            " updated_at = excluded.updated_at",
+            " source = excluded.source, updated_at = excluded.updated_at",
             (
                 normalized.provider_id,
                 normalized.protocol,
@@ -3002,6 +3013,7 @@ class RunStore:
                 normalized.fallback_order,
                 normalized.api_key_env,
                 1 if normalized.active else 0,
+                normalized.source,
                 now,
                 now,
             ),

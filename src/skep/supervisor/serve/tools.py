@@ -24,6 +24,7 @@ from ..castes import CASTES, caste_names
 from ..engines import engine_names
 from ..memory import MEMORY_CLASSES, MemoryError
 from ..projects import list_projects, project_to_dict
+from ..providers import PROVIDER_COST_CLASSES, PROVIDER_PROTOCOLS
 from ..store import ChatSearchHit, RunStore
 from . import actions
 from .jobs import Dispatcher
@@ -436,6 +437,12 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool("list_projects", "Registered trusted projects and their bound strategy/phase.", {}),
     _tool(
+        "list_providers",
+        "Registered LLM provider profiles. Shows id, protocol, endpoint, "
+        "model, cost class, active flag, provenance.",
+        {},
+    ),
+    _tool(
         "list_policy_groups",
         "Named policy groups (reusable convenience-grant bundles: network hosts, "
         "shell prefixes, env vars, budgets, engine) with the projects each is "
@@ -845,8 +852,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                             "type": "string",
                             "description": (
                                 "coding agent for THIS task (builtin, claude_code, "
-                                "codex, aider); a CLI engine needs the project to "
-                                "pin verify_command or the run fails closed"
+                                "codex, aider, pi); a CLI engine needs the project "
+                                "to pin verify_command or the run fails closed"
                             ),
                         },
                     },
@@ -1516,7 +1523,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "string",
                 "enum": engine_names(),
                 "description": "the project's coding agent — use this, not a "
-                "policy_overrides blob, to pick claude_code/codex/aider",
+                "policy_overrides blob, to pick claude_code/codex/aider/pi",
             },
             "groups": {
                 "type": "array",
@@ -1825,6 +1832,41 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "protocol": {"type": "string", "enum": list(get_args(LLMProtocol))},
         },
         ["model"],
+    ),
+    _tool(
+        "add_provider",
+        "PROPOSE registering an LLM provider profile (requires user "
+        "confirmation). Takes id, protocol, endpoint, model, cost class, "
+        "and optionally the NAME of the key's env var — never the key "
+        "value. activate=true also switches the assistant.",
+        {
+            "provider_id": {"type": "string", "description": "short id, e.g. 'openrouter'"},
+            "protocol": {"type": "string", "enum": sorted(PROVIDER_PROTOCOLS)},
+            "base_url": {"type": "string", "description": "provider endpoint URL"},
+            "model": {"type": "string", "description": "default model"},
+            "api_key_env": {
+                "type": "string",
+                "description": "env var NAME holding the key (never the value)",
+            },
+            "cost_class": {"type": "string", "enum": sorted(PROVIDER_COST_CLASSES)},
+            "activate": {"type": "boolean", "description": "also switch the assistant"},
+        },
+        ["provider_id", "protocol", "base_url", "model"],
+    ),
+    _tool(
+        "use_provider",
+        "PROPOSE switching the assistant to a registered provider profile "
+        "(requires user confirmation). Writes it through to the saved "
+        "assistant config.",
+        {"provider_id": {"type": "string"}},
+        ["provider_id"],
+    ),
+    _tool(
+        "remove_provider",
+        "PROPOSE deleting a provider profile (requires user confirmation). "
+        "The saved assistant config is untouched.",
+        {"provider_id": {"type": "string"}},
+        ["provider_id"],
     ),
     _tool(
         "set_tts_provider",
@@ -2140,6 +2182,10 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "processes": ("start_process", "stop_process", "list_processes", "read_process_log"),
     "assistant": (
         "set_assistant_model",
+        "list_providers",
+        "add_provider",
+        "use_provider",
+        "remove_provider",
         "set_personality",
         "set_persona",
         "set_tts_provider",
@@ -2975,6 +3021,8 @@ def execute_read_tool(
         return {"repos": known_repos(repos_root(holder), store)}
     if name == "list_projects":
         return {"projects": [project_to_dict(project) for project in list_projects(store)]}
+    if name == "list_providers":
+        return {"providers": [asdict(p) for p in store.list_provider_profiles()]}
     if name == "list_policy_groups":
         return actions.list_policy_groups(store)
     if name == "list_notes":
@@ -4479,6 +4527,29 @@ def _execute_mutation(
             "default_model": model,
             "note": "chats and default workers use this from their next turn",
         }
+    if name == "add_provider":
+        # v108-F2: same actions.py verb as `skep provider add` and
+        # POST /api/providers. api_key_env carries a NAME, never a value.
+        provider_id = str(args["provider_id"]).strip()
+        raw_key_env = args.get("api_key_env")
+        result = actions.add_provider(
+            store,
+            provider_id=provider_id,
+            protocol=str(args["protocol"]),
+            base_url=str(args["base_url"]),
+            model=str(args["model"]),
+            api_key_env=str(raw_key_env).strip() or None if raw_key_env else None,
+            cost_class=str(args.get("cost_class") or "paid"),
+        )
+        if bool(args.get("activate")):
+            result.update(actions.use_provider(store, holder.current.home, provider_id=provider_id))
+        return result
+    if name == "use_provider":
+        return actions.use_provider(
+            store, holder.current.home, provider_id=str(args["provider_id"]).strip()
+        )
+    if name == "remove_provider":
+        return actions.remove_provider(store, provider_id=str(args["provider_id"]).strip())
     if name == "set_tts_provider":
         # v53-F6 (ADR 0031): config-gated channel infrastructure; the result
         # names the egress truth so the transcript records what was chosen.

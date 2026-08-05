@@ -56,6 +56,8 @@ class ProviderProfile:
     fallback_order: int = 0
     api_key_env: str | None = None
     active: bool = False
+    # v108-F2: which path created the profile — 'manual' or 'preset:<id>' (I8).
+    source: str = "manual"
 
 
 @dataclass(frozen=True)
@@ -206,6 +208,7 @@ def validate_provider_profile(profile: ProviderProfile) -> ProviderProfile:
         fallback_order=profile.fallback_order,
         api_key_env=profile.api_key_env or None,
         active=profile.active,
+        source=profile.source.strip() or "manual",
     )
 
 

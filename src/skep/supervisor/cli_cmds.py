@@ -1604,6 +1604,80 @@ def cmd_provider_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provider_add(args: argparse.Namespace) -> int:
+    """v108-F2: the registry's CLI write face — same actions.py verb as
+    POST /api/providers and the carded chat tool (ADR 0050)."""
+    from .providers import ProviderError
+    from .serve.actions import add_provider, use_provider
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        try:
+            result = add_provider(
+                store,
+                provider_id=args.provider_id,
+                protocol=args.protocol,
+                base_url=args.base_url,
+                model=args.model,
+                api_key_env=args.api_key_env,
+                cost_class=args.cost_class,
+                fallback_order=args.order,
+                allowed_network_hosts=tuple(args.host or ()),
+            )
+            if args.activate:
+                result.update(use_provider(store, config.home, provider_id=args.provider_id))
+        except ProviderError as exc:
+            return _err(str(exc))
+    finally:
+        store.close()
+    provider = result["provider"]
+    print(f"registered {provider['provider_id']} ({provider['protocol']} @ {provider['base_url']})")
+    if args.activate:
+        print(f"active: the assistant speaks {provider['model']} from its next turn")
+    return 0
+
+
+def cmd_provider_use(args: argparse.Namespace) -> int:
+    from .providers import ProviderError
+    from .serve.actions import use_provider
+
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        return _err("no providers configured")
+    store = RunStore(config.db_path)
+    try:
+        try:
+            result = use_provider(store, config.home, provider_id=args.provider_id)
+        except ProviderError as exc:
+            return _err(str(exc))
+    finally:
+        store.close()
+    print(f"active: {result['active']} — {result['model']} over {result['protocol']}")
+    print(result["note"])
+    return 0
+
+
+def cmd_provider_remove(args: argparse.Namespace) -> int:
+    from .providers import ProviderError
+    from .serve.actions import remove_provider
+
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        return _err("no providers configured")
+    store = RunStore(config.db_path)
+    try:
+        try:
+            result = remove_provider(store, provider_id=args.provider_id)
+        except ProviderError as exc:
+            return _err(str(exc))
+    finally:
+        store.close()
+    note = " (was active; the saved assistant config is unchanged)" if result["was_active"] else ""
+    print(f"removed {result['removed']}{note}")
+    return 0
+
+
 def cmd_provider_health(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     if not config.db_path.is_file():
@@ -2468,13 +2542,48 @@ def register_supervisor_commands(
     sched_health = schedule_sub.add_parser("health", help="schedule health (v14)")
     sched_health.set_defaults(func=cmd_schedule_health)
 
-    # v14: provider registry + health views.
+    # v14: provider registry + health views; v108-F2: the write faces.
+    from .providers import PROVIDER_COST_CLASSES, PROVIDER_PROTOCOLS
+
     provider = subcommands.add_parser("provider", help="model provider registry (v14)")
     provider_sub = provider.add_subparsers(dest="provider_command")
     prov_list = provider_sub.add_parser("list", help="list registered providers")
     prov_list.set_defaults(func=cmd_provider_list)
     prov_health = provider_sub.add_parser("health", help="latest provider health")
     prov_health.set_defaults(func=cmd_provider_health)
+    prov_add = provider_sub.add_parser("add", help="register a provider profile (v108)")
+    prov_add.add_argument("provider_id")
+    prov_add.add_argument("--protocol", required=True, choices=sorted(PROVIDER_PROTOCOLS))
+    prov_add.add_argument("--base-url", required=True, dest="base_url")
+    prov_add.add_argument("--model", required=True)
+    prov_add.add_argument(
+        "--api-key-env",
+        dest="api_key_env",
+        default=None,
+        help="env var NAME holding the key (never the key value)",
+    )
+    prov_add.add_argument(
+        "--cost-class", dest="cost_class", default="paid", choices=sorted(PROVIDER_COST_CLASSES)
+    )
+    prov_add.add_argument("--order", type=int, default=0, help="fallback order (0 = primary)")
+    prov_add.add_argument(
+        "--host",
+        action="append",
+        default=None,
+        help="extra egress host this provider needs (repeatable)",
+    )
+    prov_add.add_argument(
+        "--activate", action="store_true", help="also make it the assistant's active config"
+    )
+    prov_add.set_defaults(func=cmd_provider_add)
+    prov_use = provider_sub.add_parser(
+        "use", help="activate a profile — the assistant speaks it next turn"
+    )
+    prov_use.add_argument("provider_id")
+    prov_use.set_defaults(func=cmd_provider_use)
+    prov_remove = provider_sub.add_parser("remove", help="delete a provider profile")
+    prov_remove.add_argument("provider_id")
+    prov_remove.set_defaults(func=cmd_provider_remove)
 
     tick = subcommands.add_parser("tick", help="dispatch all due schedules (call from cron)")
     tick.add_argument(

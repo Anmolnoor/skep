@@ -16,6 +16,7 @@ from skep.supervisor.contracts_io import DEFAULT_BUDGET, DEFAULT_PERMISSIONS, mi
 from skep.worker_contract import CodingWorkerResult, Permissions, TaskState, VerificationOutcome
 from skep.workers.aider import run_aider_task
 from skep.workers.codex import run_codex_task
+from skep.workers.pi import run_pi_task
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -52,6 +53,14 @@ _ADAPTERS = [
         "aider_made.py",
         run_aider_task,
         "aider-adapter-0.1.0",
+    ),
+    (
+        "pi",
+        # pi sees: -p <instructions> (its headless one-shot).
+        "if sys.argv[1] != '-p':\n    raise SystemExit(12)\n",
+        "pi_made.py",
+        run_pi_task,
+        "pi-adapter-0.1.0",
     ),
 ]
 
@@ -236,20 +245,23 @@ def test_failure_details_stay_bounded_for_a_chatty_agent(
     assert len(details) < 300
 
 
-def test_all_three_adapters_share_one_body() -> None:
+def test_all_cli_adapters_share_one_body() -> None:
     """v33: the shared cli_adapter is the single implementation; the specs only
     differ in the binary and argv."""
     from skep.workers.aider import AIDER_SPEC
     from skep.workers.claude_code.__main__ import CLAUDE_SPEC
     from skep.workers.codex import CODEX_SPEC
+    from skep.workers.pi import PI_SPEC
 
-    specs = [CLAUDE_SPEC, CODEX_SPEC, AIDER_SPEC]
+    specs = [CLAUDE_SPEC, CODEX_SPEC, AIDER_SPEC, PI_SPEC]
     assert {s.caste for s in specs} == {"coding"}
     # Each carries a distinct binary + env override.
-    assert {s.default_command for s in specs} == {("claude",), ("codex",), ("aider",)}
-    assert len({s.command_env for s in specs}) == 3
+    assert {s.default_command for s in specs} == {("claude",), ("codex",), ("aider",), ("pi",)}
+    assert len({s.command_env for s in specs}) == 4
     # Aider's argv must never auto-commit (patch-as-approval).
     assert "--no-auto-commit" in AIDER_SPEC.build_argv(["aider"], "do it")
+    # pi's headless one-shot is -p; anything else would sit interactive forever.
+    assert PI_SPEC.build_argv(["pi"], "do it") == ["pi", "-p", "do it"]
 
 
 def test_agent_command_heartbeats_while_it_runs(tmp_path: Path) -> None:
