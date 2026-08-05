@@ -3719,6 +3719,32 @@ class RunStore:
         return [self._row_to_action(row) for row in rows]
 
     @_locked
+    def supersede_chat_action(self, action_id: str, *, note: str) -> None:
+        """v109-F2: a newer proposal for the same subject replaces a pending
+        card. Recorded exactly like the resolution-side supersede (v63-F2) —
+        an honest terminal row plus a tool line in the transcript — never a
+        silent delete. A card that is no longer 'proposed' is left alone."""
+        row = self._conn.execute(
+            "SELECT chat_id, tool, status FROM chat_actions WHERE action_id = ?",
+            (action_id,),
+        ).fetchone()
+        if row is None or str(row[2]) != "proposed":
+            return
+        payload = {"ok": True, "superseded": True, "note": note}
+        self._conn.execute(
+            "UPDATE chat_actions SET status = 'superseded', result_json = ?,"
+            " resolved_at = ? WHERE action_id = ?",
+            (json.dumps(payload, ensure_ascii=True), _now(), action_id),
+        )
+        self.add_chat_message(
+            str(row[0]),
+            role="tool",
+            tool_name=str(row[1]),
+            content=json.dumps(payload, ensure_ascii=True),
+        )
+        self._conn.commit()
+
+    @_locked
     def pending_cards_older_than(self, seconds: int) -> list[ChatActionRecord]:
         """v54-F1: proposed cards across ALL chats stale past the cutoff —
         the ticker's auto-deny sweep. ISO-Z timestamps compare lexically.
