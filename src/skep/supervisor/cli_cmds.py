@@ -1604,6 +1604,25 @@ def cmd_provider_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provider_presets(args: argparse.Namespace) -> int:
+    """v108-F3: the catalog, one row per preset — including what each one
+    means for egress (I8)."""
+    from .provider_presets import PROVIDER_PRESETS, preset_view
+
+    print(f"{'preset':<20} {'protocol':<17} {'key env':<28} default model")
+    for preset in PROVIDER_PRESETS.values():
+        view = preset_view(preset)
+        print(
+            f"{preset.preset_id:<20} {preset.protocol:<17} "
+            f"{preset.api_key_env or '-':<28} {preset.default_model}"
+        )
+        print(f"{'':<20} {view['egress']}")
+        if preset.auth_note:
+            print(f"{'':<20} auth: {preset.auth_note}")
+    print("\nregister one: skep provider add <id> --preset <preset> [--model M] [--activate]")
+    return 0
+
+
 def cmd_provider_add(args: argparse.Namespace) -> int:
     """v108-F2: the registry's CLI write face — same actions.py verb as
     POST /api/providers and the carded chat tool (ADR 0050)."""
@@ -1624,15 +1643,18 @@ def cmd_provider_add(args: argparse.Namespace) -> int:
                 cost_class=args.cost_class,
                 fallback_order=args.order,
                 allowed_network_hosts=tuple(args.host or ()),
+                preset=args.preset,
             )
+            provider = result["provider"]
             if args.activate:
-                result.update(use_provider(store, config.home, provider_id=args.provider_id))
+                result.update(use_provider(store, config.home, provider_id=provider["provider_id"]))
         except ProviderError as exc:
             return _err(str(exc))
     finally:
         store.close()
-    provider = result["provider"]
     print(f"registered {provider['provider_id']} ({provider['protocol']} @ {provider['base_url']})")
+    if "egress" in result:
+        print(result["egress"])
     if args.activate:
         print(f"active: the assistant speaks {provider['model']} from its next turn")
     return 0
@@ -2551,11 +2573,14 @@ def register_supervisor_commands(
     prov_list.set_defaults(func=cmd_provider_list)
     prov_health = provider_sub.add_parser("health", help="latest provider health")
     prov_health.set_defaults(func=cmd_provider_health)
+    prov_presets = provider_sub.add_parser("presets", help="the preset catalog (v108)")
+    prov_presets.set_defaults(func=cmd_provider_presets)
     prov_add = provider_sub.add_parser("add", help="register a provider profile (v108)")
-    prov_add.add_argument("provider_id")
-    prov_add.add_argument("--protocol", required=True, choices=sorted(PROVIDER_PROTOCOLS))
-    prov_add.add_argument("--base-url", required=True, dest="base_url")
-    prov_add.add_argument("--model", required=True)
+    prov_add.add_argument("provider_id", nargs="?", default=None)
+    prov_add.add_argument("--preset", default=None, help="preset id from `skep provider presets`")
+    prov_add.add_argument("--protocol", default=None, choices=sorted(PROVIDER_PROTOCOLS))
+    prov_add.add_argument("--base-url", default=None, dest="base_url")
+    prov_add.add_argument("--model", default=None)
     prov_add.add_argument(
         "--api-key-env",
         dest="api_key_env",
@@ -2563,7 +2588,10 @@ def register_supervisor_commands(
         help="env var NAME holding the key (never the key value)",
     )
     prov_add.add_argument(
-        "--cost-class", dest="cost_class", default="paid", choices=sorted(PROVIDER_COST_CLASSES)
+        "--cost-class",
+        dest="cost_class",
+        default=None,  # None: the preset's class (or 'paid') wins
+        choices=sorted(PROVIDER_COST_CLASSES),
     )
     prov_add.add_argument("--order", type=int, default=0, help="fallback order (0 = primary)")
     prov_add.add_argument(

@@ -117,6 +117,7 @@ def test_cli_add_use_remove(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
             argparse.Namespace(
                 home=home,
                 provider_id="zai",
+                preset=None,
                 protocol="openai_compat",
                 base_url="https://api.z.ai/api/paas/v4",
                 model="glm-4.7",

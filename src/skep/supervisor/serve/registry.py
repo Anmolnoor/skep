@@ -161,16 +161,18 @@ class ProviderSettings(BaseModel):
 
 class ProviderCreateRequest(BaseModel):
     """v108-F2: register a registry profile. ``api_key_env`` is an env-var
-    NAME — key values never ride this route (G2)."""
+    NAME — key values never ride this route (G2). v108-F3: ``preset`` names
+    a catalog row that fills the other fields; explicit values override."""
 
-    provider_id: str
-    protocol: str
-    base_url: str
-    model: str
+    provider_id: str | None = None
+    protocol: str | None = None
+    base_url: str | None = None
+    model: str | None = None
     api_key_env: str | None = None
-    cost_class: str = "paid"
+    cost_class: str | None = None
     fallback_order: int = 0
     allowed_network_hosts: list[str] = Field(default_factory=list)
+    preset: str | None = None
     activate: bool = False
 
 
@@ -1219,6 +1221,12 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
     # v108-F2: the registry's write path — same actions.py verbs as the CLI
     # and the carded chat tools (ADR 0050).
 
+    @app.get("/api/provider-presets")
+    def provider_presets() -> dict[str, Any]:
+        from ..provider_presets import PROVIDER_PRESETS, preset_view
+
+        return {"presets": [preset_view(p) for p in PROVIDER_PRESETS.values()]}
+
     @app.post("/api/providers", status_code=201)
     def add_provider_route(body: ProviderCreateRequest) -> dict[str, Any]:
         # actions imports from this module, so the reverse import stays local.
@@ -1236,12 +1244,12 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                 cost_class=body.cost_class,
                 fallback_order=body.fallback_order,
                 allowed_network_hosts=tuple(body.allowed_network_hosts),
+                preset=body.preset,
             )
             if body.activate:
+                saved_id = str(result["provider"]["provider_id"])
                 result.update(
-                    actions.use_provider(
-                        run_store, holder.current.home, provider_id=body.provider_id
-                    )
+                    actions.use_provider(run_store, holder.current.home, provider_id=saved_id)
                 )
         except ProviderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

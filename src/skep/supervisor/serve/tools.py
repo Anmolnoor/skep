@@ -443,6 +443,13 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         {},
     ),
     _tool(
+        "list_provider_presets",
+        "Provider preset catalog. Each row names protocol, endpoint, key "
+        "env var, default model, and what leaves the machine; feed its "
+        "preset_id to add_provider.",
+        {},
+    ),
+    _tool(
         "list_policy_groups",
         "Named policy groups (reusable convenience-grant bundles: network hosts, "
         "shell prefixes, env vars, budgets, engine) with the projects each is "
@@ -1838,10 +1845,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "add_provider",
         "PROPOSE registering an LLM provider profile (requires user "
-        "confirmation). Takes id, protocol, endpoint, model, cost class, "
-        "and optionally the NAME of the key's env var — never the key "
-        "value. activate=true also switches the assistant.",
+        "confirmation). Pass preset (a list_provider_presets id) OR "
+        "protocol+base_url+model+provider_id. api_key_env is the NAME of "
+        "the key's env var — never the key value. activate=true also "
+        "switches the assistant.",
         {
+            "preset": {"type": "string", "description": "preset_id from the catalog"},
             "provider_id": {"type": "string", "description": "short id, e.g. 'openrouter'"},
             "protocol": {"type": "string", "enum": sorted(PROVIDER_PROTOCOLS)},
             "base_url": {"type": "string", "description": "provider endpoint URL"},
@@ -1853,7 +1862,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "cost_class": {"type": "string", "enum": sorted(PROVIDER_COST_CLASSES)},
             "activate": {"type": "boolean", "description": "also switch the assistant"},
         },
-        ["provider_id", "protocol", "base_url", "model"],
+        [],
     ),
     _tool(
         "use_provider",
@@ -2185,6 +2194,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "assistant": (
         "set_assistant_model",
         "list_providers",
+        "list_provider_presets",
         "add_provider",
         "use_provider",
         "remove_provider",
@@ -3025,6 +3035,10 @@ def execute_read_tool(
         return {"projects": [project_to_dict(project) for project in list_projects(store)]}
     if name == "list_providers":
         return {"providers": [asdict(p) for p in store.list_provider_profiles()]}
+    if name == "list_provider_presets":
+        from ..provider_presets import PROVIDER_PRESETS, preset_view
+
+        return {"presets": [preset_view(p) for p in PROVIDER_PRESETS.values()]}
     if name == "list_policy_groups":
         return actions.list_policy_groups(store)
     if name == "list_notes":
@@ -4532,19 +4546,24 @@ def _execute_mutation(
     if name == "add_provider":
         # v108-F2: same actions.py verb as `skep provider add` and
         # POST /api/providers. api_key_env carries a NAME, never a value.
-        provider_id = str(args["provider_id"]).strip()
-        raw_key_env = args.get("api_key_env")
+        # v108-F3: preset fills the row from the catalog.
+        def _opt(key: str) -> str | None:
+            raw = args.get(key)
+            return (str(raw).strip() or None) if raw else None
+
         result = actions.add_provider(
             store,
-            provider_id=provider_id,
-            protocol=str(args["protocol"]),
-            base_url=str(args["base_url"]),
-            model=str(args["model"]),
-            api_key_env=str(raw_key_env).strip() or None if raw_key_env else None,
-            cost_class=str(args.get("cost_class") or "paid"),
+            provider_id=_opt("provider_id"),
+            protocol=_opt("protocol"),
+            base_url=_opt("base_url"),
+            model=_opt("model"),
+            api_key_env=_opt("api_key_env"),
+            cost_class=_opt("cost_class"),
+            preset=_opt("preset"),
         )
         if bool(args.get("activate")):
-            result.update(actions.use_provider(store, holder.current.home, provider_id=provider_id))
+            saved_id = str(result["provider"]["provider_id"])
+            result.update(actions.use_provider(store, holder.current.home, provider_id=saved_id))
         return result
     if name == "use_provider":
         return actions.use_provider(
