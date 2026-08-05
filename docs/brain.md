@@ -5,13 +5,23 @@ small local-friendly model (glm-5.2 via ollama.com), and the recorded
 model-quality limits (v48 personality adherence, v50 re-asking, v70 loop
 lessons) are properties of that choice — turn the dial and they move.
 
-## The three protocols
+## The five protocols
 
 | protocol | endpoint shape | examples |
 |---|---|---|
 | `ollama` | native Ollama API | local daemon (`http://localhost:11434`), ollama.com |
 | `openai-compat` | `/v1/chat/completions` | OpenRouter, DeepSeek, any OpenAI-style server |
-| `anthropic` | `/v1/messages` (v72-F1) | `https://api.anthropic.com`, claude-sonnet-5 etc. |
+| `anthropic` | `/v1/messages` (v72-F1) | `https://api.anthropic.com`, MiniMax, Kimi For Coding |
+| `openai-responses` | `/v1/responses` (v108-F5) | OpenAI's Responses API, xAI |
+| `bedrock` | Converse + SigV4 (v108-F6) | `bedrock-runtime.<region>.amazonaws.com`, AWS env creds |
+
+Most named providers need no protocol thinking at all: `skep provider
+presets` lists the built-in catalog (v108 — OpenRouter, DeepSeek, GLM,
+Kimi, MiniMax, Copilot, Bedrock and ~25 more) and `skep provider add
+<id> --preset <preset> --activate` registers + switches in one step.
+Each profile can hold its own key (`skep provider set-key`, a 0600
+`llm-secret-<id>` file); the GitHub Copilot preset exchanges your own
+GitHub token for its short-lived bearer automatically (v108-F7).
 
 ## How to switch
 
