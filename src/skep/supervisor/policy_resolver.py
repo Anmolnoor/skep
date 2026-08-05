@@ -7,6 +7,8 @@ supervisor defaults -> hardcoded fallbacks inside ``policy_view``.
 
 from __future__ import annotations
 
+import hashlib
+import re
 import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -225,6 +227,33 @@ def run_policy_for_repo(
             roots.append(managed)
             effective["trusted_workspace_roots"] = roots
     return effective
+
+
+def project_cache_root(store: RunStore, config: SupervisorConfig, repo: Path) -> Path:
+    """v109-F4: the per-project dependency-cache home for runs on ``repo``.
+
+    Caches hold content-addressed toolchain artifacts (uv wheels, npm
+    tarballs) that outlive the disposable worktree — the workspace stays
+    disposable, and the patch diffs against the startup baseline, so nothing
+    living here can reach a landing. Keyed by the bound project's id so a
+    project's runs warm each other; an unbound repo gets a slug+path-hash key
+    of its own — two projects/repos never share a cache.
+    """
+    # Managed clones are slug-bound (registry name == directory name) — same
+    # candidates as the verify-pin safety net, so both resolve one project.
+    candidates = [("repo_slug", repo.name)] if repo.parent == managed_repos_root(config) else []
+    match = _match_project_for_repo(store, repo, binding_candidates=candidates)
+    if match is not None:
+        raw = match.project.project_id
+    else:
+        digest = hashlib.sha256(str(repo.resolve()).encode("utf-8")).hexdigest()[:8]
+        raw = f"{repo.name}-{digest}"
+    key = re.sub(r"[^A-Za-z0-9._-]", "-", raw)
+    if key != raw:
+        # An id is operator text; the key must stay one path segment, and the
+        # disambiguating hash keeps two mangled ids from sharing a cache.
+        key = f"{key}-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:8]}"
+    return config.home / "cache" / "projects" / key
 
 
 def per_domain_egress_enforceable() -> bool:

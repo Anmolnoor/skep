@@ -117,6 +117,7 @@ def reverify(
     env: dict[str, str],
     changed_files: tuple[str, ...] | None = None,
     timeout_seconds: float | None = None,
+    uv_cache_dir: Path | None = None,
 ) -> ReverifyOutcome:
     """Apply the patch to a clean worktree and re-run the verification command(s).
 
@@ -124,6 +125,10 @@ def reverify(
     real pinned suites (skep's own takes ~10min serially — the dogfood run
     019fc72c timed out at -1 while perfectly healthy). Callers with the run's
     budget in hand pass it so the re-run is afforded what the worker was.
+
+    ``uv_cache_dir`` (v109-F4) is the per-project cache dispatch already
+    uses; when set, priming resolves into it instead of a worktree-local
+    throwaway, so the work survives across runs. None keeps the throwaway.
     """
     if patch_path is None or not patch_path.is_file():
         # v65-F1: 58 of the first 94 reverifications were patch-less runs
@@ -166,21 +171,28 @@ def reverify(
         reverify_tmp = worktree / ".reverify-tmp"
         reverify_tmp.mkdir(parents=True, exist_ok=True)
         env["TMPDIR"] = str(reverify_tmp)
+        # v109-F4: a shared cache sits outside the worktree, so both profiles
+        # below need it as an explicit writable root (the offline verify still
+        # takes locks in the cache; content-addressed artifacts, never patch
+        # material). The worktree-local throwaway needed nothing.
+        cache_writable = [uv_cache_dir] if uv_cache_dir is not None else []
         primed = ""
         if _needs_uv_priming(worktree, commands):
             # v94-F7: prime the BASELINE env before the patch is applied — only
             # code the operator's repo already contains at HEAD runs with the
             # network; patch code stays offline under the deny-all profile
-            # below, and the shared host uv cache is never written (a
-            # workspace-local cache dies with the worktree).
-            cache_dir = worktree / ".uv-cache"
+            # below, and the operator's own ~/.cache/uv is never written.
+            # v109-F4: the cache is the per-project one dispatch primes too,
+            # when the caller resolved it — a workspace-local cache dies with
+            # the worktree, which made every re-verify resolve from zero.
+            cache_dir = uv_cache_dir if uv_cache_dir is not None else worktree / ".uv-cache"
             prime_profile: Path | None = None
             if profile_path is not None:
                 prime_profile = profile_path.with_suffix(".prime.sb")
                 sandbox.write_profile(
                     prime_profile,
                     workspace=worktree,
-                    extra_writable=git_metadata_writable_roots(worktree),
+                    extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
                     network=sandbox.ALLOW_ALL_NETWORK,
                 )
             prime_code = _run_command(
@@ -208,7 +220,7 @@ def reverify(
             sandbox.write_profile(
                 profile_path,
                 workspace=worktree,
-                extra_writable=git_metadata_writable_roots(worktree),
+                extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
                 network=sandbox.DENY_ALL_NETWORK,
             )
         applied = subprocess.run(
@@ -288,6 +300,14 @@ def reverify_run(
     if config.sandbox and sandbox.available():
         profile_path = config.audit_dir / task_id / "reverify.profile.sb"
 
+    # v109-F4: prime against the same per-project cache dispatch used, so the
+    # resolve work one run pays for, the next run keeps. (Runtime import: the
+    # resolver pulls in the serve tree — the same cycle dispatch dodges.)
+    from .policy_resolver import project_cache_root
+
+    uv_cache_dir = project_cache_root(store, config, repo) / "uv"
+    uv_cache_dir.mkdir(parents=True, exist_ok=True)
+
     outcome = reverify(
         repo=repo,
         ref=ref,
@@ -298,6 +318,7 @@ def reverify_run(
         env={name: os.environ[name] for name in ("PATH", "HOME") if name in os.environ},
         changed_files=changed_files,
         timeout_seconds=timeout_seconds,
+        uv_cache_dir=uv_cache_dir,
     )
     # I8: the record says WHAT it re-ran, not just how it went — "passed" means
     # something different when the worker chose the command than when the

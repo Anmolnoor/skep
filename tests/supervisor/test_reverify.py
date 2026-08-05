@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+import pytest
 
 from skep.supervisor import RunStore, SupervisorConfig, run_task
 from skep.supervisor.reverify import ReverifyOutcome, reverify
@@ -352,6 +355,57 @@ def test_slug_bound_pin_survives_the_run_task_fallback(
     assert reverify_record is not None
     assert reverify_record.commands == ['grep -q "value = 1" existing.py']
     assert "the project's pinned verify_command" in reverify_record.detail
+
+
+def test_reverify_run_primes_against_the_shared_project_cache(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v109-F4: priming resolves into the per-project cache dispatch already
+    uses — not a worktree-local throwaway that dies with the tree — and both
+    reverify profiles keep that root writable."""
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
+    git(repo, "add", "pyproject.toml")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "pyproject")
+    bin_dir = tmp_path / "uvbin"
+    bin_dir.mkdir()
+    stub = bin_dir / "uv"
+    # The stub logs INTO the cache dir itself: the log lands at the shared
+    # root only if UV_CACHE_DIR points there AND the profiles let uv write it.
+    stub.write_text(
+        '#!/bin/sh\necho "$1 cache=${UV_CACHE_DIR:-unset}" >> "$UV_CACHE_DIR/uv.log"\nexit 0\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    happy = run_task(repo, "Fix the bug. MODE:happy", config=config)
+    assert happy.record.state == "completed"
+    store = RunStore(config.db_path)
+    try:
+        from skep.supervisor.policy_resolver import project_cache_root
+        from skep.supervisor.reverify import reverify_run
+
+        outcome = reverify_run(
+            store=store,
+            task_id=happy.record.task_id,
+            worker_outcome="passed",
+            repo=repo,
+            ref=None,
+            config=config,
+            verify_command="uv run pytest",
+        )
+        shared = project_cache_root(store, config, repo) / "uv"
+    finally:
+        store.close()
+    assert outcome.outcome == "passed", outcome.detail
+    lines = (shared / "uv.log").read_text(encoding="utf-8").splitlines()
+    # The prime ran first against the shared cache; the pinned command ran
+    # second with the same cache. The throwaway never appears.
+    assert lines[0].startswith("sync")
+    assert lines[1].startswith("run")
+    assert f"cache={shared}" in lines[0]
+    assert f"cache={shared}" in lines[1]
+    assert ".uv-cache" not in "\n".join(lines)
 
 
 def test_reverify_timeout_is_the_budget_floored_at_the_default() -> None:

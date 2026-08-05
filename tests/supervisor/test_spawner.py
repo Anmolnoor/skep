@@ -201,10 +201,17 @@ def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
         out_path,
         log_path=log_path,
         sandbox_enabled=True,
+        # v109-F4: the per-run cache root dispatch passes joins the writable
+        # roots — one list, consumed by every backend.
+        extra_writable=(tmp_path / "cache" / "projects" / "proj-1",),
     )
 
     assert captured["workspace"] == workspace
-    assert captured["extra_writable"] == (out_path.parent, gitdir.resolve())
+    assert captured["extra_writable"] == (
+        out_path.parent,
+        gitdir.resolve(),
+        tmp_path / "cache" / "projects" / "proj-1",
+    )
 
 
 def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(
