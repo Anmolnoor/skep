@@ -15,7 +15,7 @@ import json
 import re
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from fastapi import HTTPException
 
@@ -27,6 +27,7 @@ from ..projects import list_projects, project_to_dict
 from ..store import ChatSearchHit, RunStore
 from . import actions
 from .jobs import Dispatcher
+from .llm import LLMProtocol
 from .registry import (
     known_repos,
     register_repo,
@@ -1821,7 +1822,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "string",
                 "description": "provider endpoint URL (scope 'default' only)",
             },
-            "protocol": {"type": "string", "enum": ["ollama", "openai-compat", "anthropic"]},
+            "protocol": {"type": "string", "enum": list(get_args(LLMProtocol))},
         },
         ["model"],
     ),
@@ -4463,8 +4464,9 @@ def _execute_mutation(
                 refresh_model_ctx(store, holder.current.home, override)
             return {"chat_model": override or "default"}
         protocol = args.get("protocol")
-        if protocol is not None and protocol not in ("ollama", "openai-compat", "anthropic"):
-            raise ValueError("protocol must be 'ollama', 'openai-compat', or 'anthropic'")
+        if protocol is not None and protocol not in get_args(LLMProtocol):
+            names = ", ".join(repr(value) for value in get_args(LLMProtocol))
+            raise ValueError(f"protocol must be one of {names}")
         store.set_setting(LLM_DEFAULT_MODEL, model)
         base_url = args.get("base_url")
         if base_url is not None:

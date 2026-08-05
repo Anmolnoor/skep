@@ -35,9 +35,13 @@ def configured_provider_hosts(store: RunStore, home: Path) -> list[str]:
     # task network allowlist through v19-F2, not a bespoke merge.
     active = store.active_provider_profile()
     if active is not None:
+        # v108-F1: the profile's WHOLE host list rides along, not only the
+        # endpoint host — auxiliary entries (token-exchange endpoints, control
+        # planes, extra regions) were validated and stored but read by nothing.
         active_host = _url_host(active.base_url)
-        if active_host is not None and active_host not in hosts:
-            hosts.append(active_host)
+        for host in (active_host, *active.allowed_network_hosts):
+            if host is not None and host not in hosts:
+                hosts.append(host)
     return hosts
 
 

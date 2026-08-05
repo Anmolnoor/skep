@@ -77,6 +77,25 @@ def test_active_provider_host_rides_the_v19f2_merge_path(store: RunStore) -> Non
     assert "provider.registry.example" in hosts
 
 
+def test_profile_auxiliary_hosts_ride_the_merge_too(store: RunStore) -> None:
+    """v108-F1: allowed_network_hosts was validated and stored but read by
+    nothing — auxiliary hosts (token exchange, control planes) now reach the
+    same v19-F2 merge as the endpoint host."""
+    profile = ProviderProfile(
+        provider_id="copilot",
+        protocol="openai_compat",
+        base_url="https://api.githubcopilot.com",
+        model="m",
+        cost_class="paid",
+        allowed_network_hosts=("api.github.com",),
+    )
+    store.upsert_provider_profile(profile)
+    store.set_active_provider("copilot")
+    hosts = configured_provider_hosts(store, Path("/nonexistent-home"))
+    assert "api.githubcopilot.com" in hosts
+    assert "api.github.com" in hosts
+
+
 def test_no_providers_is_explicit() -> None:
     decision = resolve_fallback_chain(providers=[], healthy_ids=set(), allow_remote=True)
     assert decision == FallbackDecision(None, None, False, (), "fallback.no_providers")

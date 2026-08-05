@@ -1,0 +1,31 @@
+{
+  "name": "v108-f1-needs-provider-castes-get-the-host",
+  "kind": "network_merge",
+  "execution_mode": "sandbox",
+  "cases": [
+    {
+      "caste": "reviewer",
+      "network": [],
+      "provider_hosts": ["provider.example"],
+      "network_out": ["provider.example"]
+    },
+    {
+      "caste": "document",
+      "network": [],
+      "provider_hosts": ["provider.example"],
+      "network_out": ["provider.example"]
+    },
+    {
+      "caste": "reviewer",
+      "network": ["*"],
+      "provider_hosts": ["provider.example"],
+      "network_out": ["*"]
+    },
+    {
+      "caste": "script",
+      "network": [],
+      "provider_hosts": ["provider.example"],
+      "network_out": []
+    }
+  ]
+}

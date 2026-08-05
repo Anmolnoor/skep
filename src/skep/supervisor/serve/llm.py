@@ -21,7 +21,7 @@ import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Literal, TypeGuard
+from typing import Any, Literal, TypeGuard, get_args
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -30,6 +30,17 @@ from pydantic import BaseModel
 from ..store import RunStore
 
 LLMProtocol = Literal["ollama", "openai-compat", "anthropic"]
+_PROTOCOL_VALUES: tuple[str, ...] = get_args(LLMProtocol)
+# v108-F1: the ONE registry->serve protocol bridge. The registry spells
+# protocols with underscores (providers.PROVIDER_PROTOCOLS); the wire uses
+# this Literal. This map lived in ticker.py with only two entries, so an
+# anthropic registry profile could never probe healthy and routing skipped
+# it forever. test_protocol_vocabulary pins every derived surface to it.
+REGISTRY_PROTOCOLS: dict[str, LLMProtocol] = {
+    "ollama": "ollama",
+    "openai_compat": "openai-compat",
+    "anthropic": "anthropic",
+}
 LLM_BASE_URL = "llm_base_url"
 LLM_DEFAULT_MODEL = "llm_default_model"
 LLM_PROTOCOL = "llm_protocol"
@@ -234,7 +245,10 @@ def _headers(api_key: str | None) -> dict[str, str]:
 
 
 def _protocol(value: Any | None) -> LLMProtocol:
-    return value if value in ("ollama", "openai-compat", "anthropic") else DEFAULT_LLM_PROTOCOL
+    # Unknown values fall back (never raise): legacy settings rows predate the
+    # vocabulary and must keep the daemon bootable. New-protocol additions grow
+    # the Literal, and this guard follows automatically.
+    return value if value in _PROTOCOL_VALUES else DEFAULT_LLM_PROTOCOL
 
 
 def list_models(

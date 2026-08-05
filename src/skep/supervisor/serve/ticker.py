@@ -16,12 +16,8 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from ..providers import ProviderProfile
-
-if TYPE_CHECKING:
-    from .llm import LLMProtocol
 from ..scheduler import run_due, run_provider_health_checks
 from ..store import RunStore
 from .settings import (
@@ -41,17 +37,17 @@ logger = logging.getLogger("skep.serve")
 PROVIDER_HEALTH_INTERVAL_SECONDS = "provider_health_interval_seconds"
 DEFAULT_PROVIDER_HEALTH_INTERVAL = 300
 
-# Registry protocol → serve list_models protocol; probes support these two.
-_PROBE_PROTOCOLS: dict[str, LLMProtocol] = {"ollama": "ollama", "openai_compat": "openai-compat"}
-
 
 def _probe_list_models(home: Path) -> Callable[[ProviderProfile], list[str]]:
     """Production ``list_models`` for health checks: the profile's endpoint,
     its env credential when named, the daemon's llm-secret otherwise."""
-    from .llm import list_models, resolve_api_key
+    # v108-F1: the bridge is the shared REGISTRY_PROTOCOLS map, not a local
+    # two-entry dict — the old one omitted anthropic, so an anthropic profile
+    # was recorded permanently unreachable and routing never picked it.
+    from .llm import REGISTRY_PROTOCOLS, list_models, resolve_api_key
 
     def _list(profile: ProviderProfile) -> list[str]:
-        protocol = _PROBE_PROTOCOLS.get(profile.protocol)
+        protocol = REGISTRY_PROTOCOLS.get(profile.protocol)
         if protocol is None:
             raise RuntimeError(f"health probe not supported for protocol {profile.protocol!r}")
         if profile.api_key_env:

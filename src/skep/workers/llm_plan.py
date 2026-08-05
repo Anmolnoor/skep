@@ -10,7 +10,7 @@ import urllib.parse
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from skep.profile import ProviderProfile, load_profile, profile_path
 from skep.supervisor.netproxy import domain_allowed
@@ -143,8 +143,8 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
         return None
     if not isinstance(model, str) or not model.strip():
         return None
-    known = ("ollama", "openai-compat", "anthropic")
-    name = protocol if protocol in known else DEFAULT_LLM_PROTOCOL
+    known = get_args(LLMProtocol)
+    name = str(protocol) if protocol in known else DEFAULT_LLM_PROTOCOL
     return WorkerProvider(
         profile=ProviderProfile(name=name, model=model, endpoint=base_url),
         api_key=resolve_api_key(supervisor_home),

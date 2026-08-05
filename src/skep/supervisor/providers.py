@@ -8,8 +8,11 @@ config (``~/.skep/profile.json``, the sqlite ``llm_*`` settings, and the
 first use; the legacy readers remain only as a compatibility fallback until every
 caller reads the registry.
 
-Only Anthropic and Gemini need bespoke protocol code; OpenRouter and DeepSeek are
+Only Anthropic needs bespoke protocol code; OpenRouter and DeepSeek are
 OpenAI-compatible, so they are served through ``openai_compat`` profiles.
+(``gemini`` sat in this vocabulary until v108-F1 with no client, probe, or
+worker mapping behind it — a stored profile was a dead end. Google routes
+through its OpenAI-compatible endpoint as a preset instead.)
 """
 
 from __future__ import annotations
@@ -21,10 +24,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from skep.profile import _ENV_VAR_NAME_RE
+
 if TYPE_CHECKING:
     from .store import RunStore
 
-PROVIDER_PROTOCOLS: frozenset[str] = frozenset({"ollama", "openai_compat", "anthropic", "gemini"})
+PROVIDER_PROTOCOLS: frozenset[str] = frozenset({"ollama", "openai_compat", "anthropic"})
 # local = on-box (Ollama); free = zero-cost remote; paid = metered remote.
 PROVIDER_COST_CLASSES: frozenset[str] = frozenset({"local", "free", "paid"})
 
@@ -178,6 +183,13 @@ def validate_provider_profile(profile: ProviderProfile) -> ProviderProfile:
         )
     if not profile.model.strip():
         raise ProviderError("model must be non-empty")
+    # v108-F1: the same v48-F2 guard the personal profile has — api_key_env is
+    # the NAME of an env var; a pasted key value silently breaks every auth.
+    if profile.api_key_env and not _ENV_VAR_NAME_RE.match(profile.api_key_env):
+        raise ProviderError(
+            f"api_key_env must be an environment variable NAME, got {profile.api_key_env!r} "
+            "(looks like a pasted key value)"
+        )
     host = provider_host(profile.base_url)
     if host is None:
         raise ProviderError(f"base_url must be a valid http(s) URL, got {profile.base_url!r}")
