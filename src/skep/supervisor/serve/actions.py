@@ -2698,6 +2698,97 @@ def _persist_remembered_command(
         holder.rebuild()
 
 
+def _persist_remembered_network_host(
+    store: RunStore, holder: ConfigHolder, repo: Path, host: str
+) -> None:
+    """v109-F7: the network twin of ``_persist_remembered_command``. Prefers
+    the repo's bound project policy (``default_network``) so remembering does
+    not silently widen every repo's egress; falls back to the global setting
+    when the repo is unbound."""
+    project = store.project_for_binding("repo_path", str(repo))
+    if project is not None:
+        existing = [str(entry) for entry in (project.policy.get("default_network") or [])]
+        if host not in existing:
+            existing.append(host)
+            updated = dict(project.policy)
+            updated["default_network"] = existing
+            store.add_project_policy(
+                project_id=project.project_id,
+                name=project.name,
+                strategy=project.strategy,
+                phase=project.phase,
+                policy=updated,
+                pack_name=project.pack_name,
+                pack_version=project.pack_version,
+            )
+        return
+    existing = [
+        str(entry) for entry in (policy_view(store, holder.current).get(DEFAULT_NETWORK) or [])
+    ]
+    if host not in existing:
+        existing.append(host)
+        store.set_setting(DEFAULT_NETWORK, existing)
+        holder.rebuild()
+
+
+def allow_network_host_and_resume(
+    store: RunStore,
+    holder: ConfigHolder,
+    runner: Dispatcher,
+    run: dict[str, Any],
+    approval: dict[str, Any],
+    review_id: str,
+    actor: str,
+) -> str:
+    """v109-F7: the network twin of ``allow_shell_command_and_resume``.
+
+    A network approval was approve-once or resume-grant only — nothing could
+    say "this host is fine for this project, stop asking" (the field ledger
+    holds the same install host approved twice in one workspace). The blocked
+    hostname rides the approval decision's detail (the same slot the resume
+    verdict grants from, v90-F3); it lands in the project's ``default_network``
+    and the gated run resumes with the grant.
+    """
+    if run["state"] != "pending_approval":
+        raise HTTPException(status_code=409, detail="allow-host only applies to pending runs")
+    action = str(approval.get("action") or "")
+    if action not in ("network.fetch", "network.read"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "allow-host applies to network.fetch/network.read approvals; "
+                "for a shell command use allow-command"
+            ),
+        )
+    decision = approval_decision_for_action(
+        action=action, events=current_events(store, str(run["task_id"]))
+    )
+    host = "" if decision is None or decision.detail is None else str(decision.detail).strip()
+    if not host:
+        raise HTTPException(
+            status_code=409,
+            detail="this approval carries no hostname to remember; approve it once instead",
+        )
+    if host == "*" or "/" in host or ":" in host:
+        # The wildcard is the trust ramp, not a host — it is never remembered
+        # from an approval; a URL or host:port is not a bare hostname either.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{host!r} is not a rememberable bare hostname; approve it once instead",
+        )
+    repo = Path(str(run["repo"]))
+    _persist_remembered_network_host(store, holder, repo, host)
+    return resume_past_gate(
+        store,
+        holder.current,
+        runner,
+        run,
+        review_id,
+        actor,
+        remembered=True,
+    )
+
+
 def allow_shell_command_and_resume(
     store: RunStore,
     holder: ConfigHolder,

@@ -29,6 +29,7 @@ from ..cli_cmds import STATE_EXIT_CODES
 from ..config import SupervisorConfig
 from ..store import RunStore
 from .actions import (
+    allow_network_host_and_resume,
     allow_shell_command_and_resume,
     applied_branch_for,
     apply_patch,
@@ -597,6 +598,17 @@ def create_app(
             run_store, holder, runner, run, approval, review_id, body.actor
         )
         return {"action": "allowed_command", "resumed_as": resumed_id}
+
+    @app.post("/api/approvals/{review_id}/allow-host")
+    def allow_host(review_id: str, body: ResolveRequest) -> dict[str, str]:
+        """v109-F7: the network twin of allow-command — remember the blocked
+        host for this repo's project and resume the gated run."""
+        approval = pending_approval_or_409(run_store, review_id)
+        run = _require_run(str(approval["task_id"]))
+        resumed_id = allow_network_host_and_resume(
+            run_store, holder, runner, run, approval, review_id, body.actor
+        )
+        return {"action": "allowed_host", "resumed_as": resumed_id}
 
     @app.post("/api/approvals/{review_id}/deny")
     def deny(review_id: str, body: ResolveRequest) -> dict[str, str]:

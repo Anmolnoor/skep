@@ -1346,8 +1346,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "allow_command_review",
-        "PROPOSE allowing a pending shell command review (requires user confirmation): "
-        "persist the command into allowed policy and resume the gated run.",
+        "PROPOSE allowing a pending review and remembering it (requires user "
+        "confirmation): a shell approval persists the command into allowed policy, "
+        "a network.fetch/network.read approval persists the blocked host into the "
+        "project's network allowlist; either way the gated run resumes.",
         {"review_id": {"type": "string"}},
         ["review_id"],
     ),
@@ -4135,6 +4137,13 @@ def _execute_mutation(
         review_id = str(args["review_id"])
         approval = actions.pending_approval_or_409(store, review_id)
         run = actions.require_run(store, str(approval["task_id"]))
+        # v109-F7: one chat tool, routed by what is actually blocked — a
+        # network approval remembers its host, everything else its command.
+        if str(approval.get("action") or "") in ("network.fetch", "network.read"):
+            resumed = actions.allow_network_host_and_resume(
+                store, holder, runner, run, approval, review_id, actor
+            )
+            return {"action": "allowed_host", "resumed_as": resumed}
         resumed = actions.allow_shell_command_and_resume(
             store, holder, runner, run, approval, review_id, actor
         )

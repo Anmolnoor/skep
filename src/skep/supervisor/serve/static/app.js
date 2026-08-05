@@ -4061,6 +4061,14 @@ async function viewApprovals(main) {
         verdict("Skip", "ghost", "deny", { note: "skipped from UI" }),
       );
     }
+    if (approval.action === "network.fetch" || approval.action === "network.read") {
+      // v109-F7: the network twin of "Allow command" — remember the blocked
+      // host for this repo's project and resume.
+      actions.append(
+        verdict("Allow host & remember", "ghost", "allow-host", {}),
+        verdict("Skip", "ghost", "deny", { note: "skipped from UI" }),
+      );
+    }
     if (run.state === "completed") actions.append(verdict("Open PR", "ghost", "pr", {}));
     card.append(actions);
     return card;
