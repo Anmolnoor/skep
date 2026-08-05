@@ -432,6 +432,26 @@ def test_sandbox_writable_roots_include_the_project_cache(
     assert str(config.home / "cache" / "projects") in profile
 
 
+def test_grandchildren_inherit_the_toolchain_env(repo: Path, config: SupervisorConfig) -> None:
+    """v109-F5: the worker's child shell commands rebuild their env from the
+    allowlist + passthrough — TMPDIR and UV_CACHE_DIR must cross that boundary
+    or the v107-F3 / v109-F4 redirects stop at the worker process."""
+    # The childenv worker's skep import outlasts the fixture's 3x0.1s
+    # silence window; widen it for this one mode.
+    config = replace(config, heartbeat_seconds=2.0)
+    outcome = run_task(repo, "Dump grandchild env. MODE:childenv", config=config)
+    assert outcome.record.state == "completed"
+
+    dump_path = config.results_dir / f"childenv-{outcome.record.task_id}.json"
+    grandchild_env = json.loads(dump_path.read_text())
+    tmpdir = grandchild_env.get("TMPDIR", "")
+    assert f"{os.sep}.toolchain{os.sep}tmp" in tmpdir
+    assert outcome.record.workspace in tmpdir
+    cache_prefix = str(config.home / "cache" / "projects")
+    assert grandchild_env.get("UV_CACHE_DIR", "").startswith(cache_prefix)
+    assert grandchild_env.get("npm_config_cache", "").startswith(cache_prefix)
+
+
 # ---------- v13 Step 8: curated-memory injection ----------
 
 

@@ -1,13 +1,17 @@
 """A tiny scripted worker for hermetic supervisor tests — no external worker, no LLM.
 
-Speaks the contract wire format (raw JSON, stdlib only) and takes its behavior
-from a ``MODE:<name>`` token in the task instructions:
+Speaks the contract wire format (raw JSON, stdlib only — childenv's one skep
+import excepted) and takes its behavior from a ``MODE:<name>`` token in the
+task instructions:
 
 - happy:    full event stream, real patch artifact, completed result, exit 0
 - pending:  approval.requested → terminal pending_approval, result, exit 4
 - crash:    task.start then dies without terminal event or result, exit 9
 - hang:     task.start + one heartbeat, then sleeps forever (monitor must kill)
 - envdump:  writes its environment to <workspace>/envdump.json, then happy-min
+- childenv: spawns a grandchild through the worker's REAL child-env boundary
+            (the one skep import this file makes — a copy of the passthrough
+            would prove nothing) and dumps the GRANDCHILD's env next to --out
 - netprobe: attempts an outbound socket, records errno next to --out, then happy-min
 - noresult: emits a completed terminal event but no result envelope
 - badresult: emits a completed terminal event but writes malformed result JSON
@@ -153,6 +157,31 @@ def main() -> int:
         # Written next to --out so the evidence survives worktree teardown.
         dump = args.out.parent / f"envdump-{task_id}.json"
         dump.write_text(json.dumps(dict(os.environ)))
+
+    if mode == "childenv":
+        # v109-F5: what a builtin worker's child shell command actually
+        # spawns — env rebuilt by the real capability boundary, so the test
+        # proves the passthrough tuple, not this script. The skep import is
+        # slow; the heartbeat keeps the monitor's silence window open.
+        stream.emit("heartbeat", {"phase": "executing"})
+        import subprocess
+
+        from skep.workers.capabilities import _child_process_env
+
+        permissions = task.get("permissions") or {}
+        assert isinstance(permissions, dict)
+        grandchild = subprocess.run(
+            [sys.executable, "-c", "import json, os; print(json.dumps(dict(os.environ)))"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=_child_process_env(
+                env_allowlist=[str(n) for n in permissions.get("env_allowlist") or []],
+                env_baseline=("PATH", "HOME"),
+                network_allowlist=(),
+            ),
+        )
+        (args.out.parent / f"childenv-{task_id}.json").write_text(grandchild.stdout)
 
     if mode == "netprobe":
         # Attempt an outbound connection; under the Seatbelt deny-all profile this
