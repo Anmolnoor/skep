@@ -114,6 +114,53 @@ def test_get_api_sync_is_read_only_status(config: SupervisorConfig) -> None:
     assert client.post("/api/sync").status_code == 405
 
 
+def test_sync_fleet_is_a_carded_publishing_mutation() -> None:
+    """v110-F2: carded like push_branch, and web-UI-only — absent from the
+    channel confirm allow-list and from the always-advertised core set."""
+    from skep.supervisor.serve.cards import risk
+    from skep.supervisor.serve.channels import CHANNEL_CONFIRMABLE_ACTIONS
+    from skep.supervisor.serve.tools import (
+        COMMAND_TOOL_NAMES,
+        CORE_TOOL_NAMES,
+        MUTATING_TOOL_NAMES,
+        tool_description,
+    )
+
+    assert "sync_fleet" in MUTATING_TOOL_NAMES
+    assert "sync_fleet" in COMMAND_TOOL_NAMES  # the deck's /sync may propose it
+    assert "sync_fleet" not in CHANNEL_CONFIRMABLE_ACTIONS
+    assert "sync_fleet" not in CORE_TOOL_NAMES
+    description = tool_description("sync_fleet")
+    assert "never choose or change the command" in description
+    assert "skep sync --set" in description
+    risk_text = risk("sync_fleet", {})
+    assert risk_text is not None
+    assert "publishes to the remote" in risk_text
+
+
+def test_model_args_can_never_steer_the_sync_command(
+    store: RunStore, config: SupervisorConfig
+) -> None:
+    """I4: the execute arm ignores every argument — a model-authored
+    {"command": ...} still runs the operator's pin, verbatim."""
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import execute_mutation
+
+    holder = ConfigHolder(config, store)
+    set_fleet_sync_command(store, "echo pinned-wins")
+    result = execute_mutation(
+        "sync_fleet",
+        {"command": "echo model-was-here"},
+        store=store,
+        holder=holder,
+        runner=None,  # type: ignore[arg-type]  # sync_fleet never dispatches
+        actor="test",
+    )
+    assert result["command"] == "echo pinned-wins"
+    assert "pinned-wins" in result["stdout"]
+    assert "model-was-here" not in result["stdout"]
+
+
 def test_cli_sync_pin_run_show(
     config: SupervisorConfig, capsys: pytest.CaptureFixture[str]
 ) -> None:
