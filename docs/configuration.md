@@ -205,6 +205,10 @@ default in-repo coding worker when no explicit worker profile exists.
 - base URL, protocol, and default model are stored in the supervisor database
 - API key is stored in `<home>/supervisor/llm-secret` with `0600` permissions
 - `SKEP_LLM_API_KEY` overrides the saved key when set
+- registry profiles (v108) each hold their own key in
+  `<home>/supervisor/llm-secret-<provider_id>` (`skep provider set-key`);
+  resolution is the profile's named env var, then its own file, then the
+  legacy `llm-secret`
 
 ## Useful Environment Variables
 

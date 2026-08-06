@@ -159,6 +159,29 @@ class ProviderSettings(BaseModel):
     api_key_env: str | None = None
 
 
+class ProviderCreateRequest(BaseModel):
+    """v108-F2: register a registry profile. ``api_key_env`` is an env-var
+    NAME — key values never ride this route (G2). v108-F3: ``preset`` names
+    a catalog row that fills the other fields; explicit values override."""
+
+    provider_id: str | None = None
+    protocol: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+    api_key_env: str | None = None
+    cost_class: str | None = None
+    fallback_order: int = 0
+    allowed_network_hosts: list[str] = Field(default_factory=list)
+    preset: str | None = None
+    activate: bool = False
+
+
+class ProviderKeyRequest(BaseModel):
+    """v108-F4: write-only key delivery; an empty value clears the file."""
+
+    api_key: str
+
+
 class ChannelConfigRequest(BaseModel):
     """v26-F1: partial channel config update; secrets are write-only."""
 
@@ -1195,11 +1218,100 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.get("/api/providers")
     def list_providers() -> dict[str, Any]:
-        return {"providers": [asdict(p) for p in run_store.list_provider_profiles()]}
+        import os
+
+        from .llm import provider_secret_path
+
+        def _view(profile: Any) -> dict[str, Any]:
+            view = asdict(profile)
+            # v108-F4: presence only, never the value — "does this profile
+            # hold ITS OWN credential" (named env var set, or its key file).
+            has_env = bool(profile.api_key_env and os.environ.get(profile.api_key_env))
+            has_file = provider_secret_path(holder.current.home, profile.provider_id).is_file()
+            view["api_key_set"] = has_env or has_file
+            return view
+
+        return {"providers": [_view(p) for p in run_store.list_provider_profiles()]}
 
     @app.get("/api/providers/health")
     def provider_health() -> dict[str, Any]:
         return {"health": [asdict(h) for h in run_store.list_provider_health()]}
+
+    # v108-F2: the registry's write path — same actions.py verbs as the CLI
+    # and the carded chat tools (ADR 0050).
+
+    @app.get("/api/provider-presets")
+    def provider_presets() -> dict[str, Any]:
+        from ..provider_presets import PROVIDER_PRESETS, preset_view
+
+        return {"presets": [preset_view(p) for p in PROVIDER_PRESETS.values()]}
+
+    @app.post("/api/providers", status_code=201)
+    def add_provider_route(body: ProviderCreateRequest) -> dict[str, Any]:
+        # actions imports from this module, so the reverse import stays local.
+        from ..providers import ProviderError
+        from . import actions
+
+        try:
+            result = actions.add_provider(
+                run_store,
+                provider_id=body.provider_id,
+                protocol=body.protocol,
+                base_url=body.base_url,
+                model=body.model,
+                api_key_env=body.api_key_env,
+                cost_class=body.cost_class,
+                fallback_order=body.fallback_order,
+                allowed_network_hosts=tuple(body.allowed_network_hosts),
+                preset=body.preset,
+            )
+            if body.activate:
+                saved_id = str(result["provider"]["provider_id"])
+                result.update(
+                    actions.use_provider(run_store, holder.current.home, provider_id=saved_id)
+                )
+        except ProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return result
+
+    @app.post("/api/providers/{provider_id}/activate")
+    def activate_provider_route(provider_id: str) -> dict[str, Any]:
+        from ..providers import ProviderError
+        from . import actions
+
+        try:
+            return actions.use_provider(run_store, holder.current.home, provider_id=provider_id)
+        except ProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.delete("/api/providers/{provider_id}")
+    def remove_provider_route(provider_id: str) -> dict[str, Any]:
+        from ..providers import ProviderError
+        from . import actions
+        from .llm import store_provider_api_key
+
+        try:
+            result = actions.remove_provider(run_store, provider_id=provider_id)
+        except ProviderError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # v108-F4: a removed profile leaves no orphaned credential behind.
+        store_provider_api_key(holder.current.home, provider_id, "")
+        return result
+
+    @app.put("/api/providers/{provider_id}/key")
+    def set_provider_key_route(provider_id: str, body: ProviderKeyRequest) -> dict[str, Any]:
+        # v108-F4: the ONE write-only route for a profile's key value (G2 /
+        # ADR 0019's exception, extended per profile by ADR 0051). Empty
+        # clears. The value never appears in sqlite or any GET.
+        from .llm import provider_secret_path, store_provider_api_key
+
+        if run_store.get_provider_profile(provider_id) is None:
+            raise HTTPException(status_code=404, detail=f"unknown provider {provider_id!r}")
+        store_provider_api_key(holder.current.home, provider_id, body.api_key.strip())
+        return {
+            "provider_id": provider_id,
+            "api_key_set": provider_secret_path(holder.current.home, provider_id).is_file(),
+        }
 
     # -- v15: ops node registry ----------------------------------------------
 

@@ -117,6 +117,20 @@ CODING_ENGINES: dict[str, CodingEngine] = {
             "Aider, pinned --no-auto-commit. Confined by the sandbox, not the capability layer."
         ),
     ),
+    "pi": CodingEngine(
+        name="pi",
+        argv=(sys.executable, "-m", "skep.workers.pi"),
+        binary="pi",
+        network_host=None,  # multi-provider; the operator's provider host rides v19-F2
+        # pi reads whichever provider key matches its configured model; unset
+        # names are inert allowlist entries (G2 — names, never secrets).
+        env_vars=("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"),
+        # pi writes config + session transcripts under ~/.pi/agent; the sandbox
+        # makes only the workspace writable (v106-F1), and the redirect doubles
+        # as evidence — the transcript survives with a kept worktree (v107-F1).
+        toolchain_env=(("PI_CODING_AGENT_DIR", "pi"),),
+        summary=("pi, headless (-p). Confined by the sandbox, not the capability layer."),
+    ),
 }
 
 

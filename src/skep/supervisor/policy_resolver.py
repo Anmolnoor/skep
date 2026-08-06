@@ -25,6 +25,7 @@ from skep.worker_contract import (
     ProjectContextPayload,
 )
 
+from .castes import CASTES
 from .config import SupervisorConfig
 from .policy_schema import (
     OPERATOR_POLICY_SETTINGS_KEY,
@@ -555,7 +556,11 @@ def resolve_run_policy(
     # path (not only when network was left unspecified). ``["*"]`` already allows
     # everything; leave it untouched. Deny-all ``[]`` becomes ``[<provider-host>]``.
     # v72-F2: the document caste drafts through the same provider — same rule.
-    if caste in ("coding", "document") and chosen_network != ["*"]:
+    # v108-F1: the gate reads the caste registry's needs_provider flag — the
+    # field always claimed to drive this merge (castes.py) while a hardcoded
+    # tuple here starved the reviewer caste, which hard-fails without its host.
+    caste_spec = CASTES.get(caste)
+    if caste_spec is not None and caste_spec.needs_provider and chosen_network != ["*"]:
         seen = set(chosen_network)
         for host in extra_network_hosts:
             if host not in seen:

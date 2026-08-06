@@ -10,7 +10,13 @@ import pytest
 
 from skep.status import build_status
 from skep.supervisor import SupervisorConfig
-from skep.supervisor.serve.llm import SECRET_ENV, SECRET_FILE, chat_stream
+from skep.supervisor.serve.llm import (
+    SECRET_ENV,
+    SECRET_FILE,
+    chat_stream,
+    list_models,
+    openai_style_prefix,
+)
 
 from .conftest import serve_client as _client
 from .fake_ollama import FakeOllama
@@ -147,6 +153,26 @@ def test_llm_test_probes_with_overrides_before_saving(
     ).json()
     assert bad["ok"] is False
     assert "401" in bad["detail"]
+
+
+def test_openai_style_prefix_root_gets_v1_and_a_path_is_the_prefix() -> None:
+    """v108-F11: a bare host gets the conventional /v1; a base that already
+    carries a path IS the prefix (the OpenAI-SDK convention). Before this
+    rule the client hardcoded /v1, so a path-carrying provider (Z.AI's
+    /api/paas/v4, Google's /v1beta/openai) was unreachable under either
+    spelling — and a pasted .../api/v1 base doubled to /api/v1/v1/."""
+    assert openai_style_prefix("https://api.openai.com") == "https://api.openai.com/v1"
+    assert openai_style_prefix("https://ollama.com/") == "https://ollama.com/v1"
+    assert openai_style_prefix("https://openrouter.ai/api/v1") == "https://openrouter.ai/api/v1"
+    assert openai_style_prefix("https://api.z.ai/api/paas/v4") == "https://api.z.ai/api/paas/v4"
+
+
+def test_openai_compat_path_base_never_doubles_the_v1(openai: FakeOpenAI) -> None:
+    # The fake serves /v1/models; a base already ending in /v1 must reach it
+    # verbatim, not as /v1/v1/models.
+    models = list_models(f"{openai.base_url}/v1", "sk-fake", protocol="openai-compat")
+    assert models
+    assert models == list_models(openai.base_url, "sk-fake", protocol="openai-compat")
 
 
 def test_openai_compat_test_probe_and_models_dispatch_by_protocol(

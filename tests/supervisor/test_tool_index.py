@@ -155,16 +155,24 @@ def test_the_fresh_chat_floor_is_measured_under_24kb(
     registry summaries were tightened first (64 chars, and both the Settings
     roster and the schema read them, so the win lands twice); that was not
     enough, so the pin moves 23KB → 24KB. It is still 3.5KB below where v99
-    found it."""
+    found it.
+
+    v108-F2 re-measured. The provider registry's first operator face — four
+    verbs (list/add/use/remove provider) — costs ~350 chars of index lines
+    and takes the floor over 24KB; the glosses were tightened to first-
+    sentence budgets before the move (I9 forbids gutting them further: the
+    small model reads nothing else). The pin moves 24KB → 24.5KB, sized to
+    also absorb the two protocol enum values v108-F5/F6 add. Still 3KB
+    below where v99 found it."""
     client = configured_client(config, ollama)
     chat_id = client.post("/api/chats", json={}).json()["chat_id"]
     ollama.script_reply("hello")
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
     body = ollama.chat_bodies()[0]
     floor = len(body["messages"][0]["content"]) + len(json.dumps(body["tools"]))
-    assert floor <= 24_000
+    assert floor <= 24_500
     context = client.get(f"/api/chats/{chat_id}").json()["context"]
-    assert context["floor_chars"] <= 24_000
+    assert context["floor_chars"] <= 24_500
 
 
 def test_describe_tools_activates_and_the_next_round_advertises(

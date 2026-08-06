@@ -6,6 +6,10 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://pypi.org/project/skep/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+```sh
+pipx install skep   # or inside a venv: pip install skep
+```
+
 ![skep — the supervisor for AI coding agents: sandbox, agent runs, verify, you approve, audit trail](docs/assets/skep-cover.png)
 
 skep is a local-first supervisor for AI coding agents — Claude Code, Codex,
@@ -147,10 +151,12 @@ same approval gate. The adapter surface for bringing your own worker is in
 
 The chat "Queen" that plans and dispatches work is deliberately tool-driven
 rather than cleverness-driven, so it ships tuned for a small local model via
-Ollama — and the model is a dial, not an identity. Three provider protocols
-are supported: native Ollama, OpenAI-compatible endpoints, and the Anthropic
-API ([`docs/brain.md`](docs/brain.md)). The entire core loop — plan,
-dispatch, sandbox, verify, approve, audit — works without a cloud account.
+Ollama — and the model is a dial, not an identity. Five provider protocols
+are supported — native Ollama, OpenAI-compatible, Anthropic, the OpenAI
+Responses API, and AWS Bedrock — with a preset catalog (`skep provider
+presets`) covering ~30 named providers ([`docs/brain.md`](docs/brain.md)).
+The entire core loop — plan, dispatch, sandbox, verify, approve, audit —
+works without a cloud account.
 
 ## Beyond the patch
 

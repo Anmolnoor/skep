@@ -2564,3 +2564,38 @@ re-run now gets the run's own wall-clock budget (the flat 300s cap timed
 out healthy 10-minute suites), and the plugin scratch copy learned to
 exclude bookkeeping dirs. Recorded seed: macOS seatbelt's bare
 (deny network*) blocks loopback binds — unverified from a Linux host.
+
+## v108 — the provider shelf (2026-08-05)
+
+Hermes parity as data: the operator's archived assistant reached ~28
+model providers; skep's registry (v14) reached four — and recon showed
+the registry itself was a facade (no surface could write a profile,
+allowed_network_hosts was stored but read by nothing, and every
+inference path collapsed onto the single llm-secret). F1 fixes the six
+truths the plumbing was lying about: the probe bridge gains anthropic
+(profiles could never probe healthy), phantom `gemini` leaves the
+vocabulary, the profile host list actually reaches the v19-F2 egress
+merge, the reviewer caste stops starving (the merge gate reads
+needs_provider), registry api_key_env gets the v48-F2 name guard, and
+the protocol vocabulary derives from ONE Literal
+(test_protocol_vocabulary pins every surface). F2 gives the registry
+its operator face — add/use/remove as one actions.py verb each with
+CLI, REST, and carded chat forms (ADR 0050); `use` writes through to
+the saved assistant config so activation is something the Queen
+actually speaks. F5/F6 add the two missing wire protocols: the OpenAI
+Responses API and AWS Bedrock Converse with a hand-rolled, test-vector-
+pinned SigV4 (no boto3) plus a binary eventstream decoder. F3 ships the
+preset catalog (~30 rows mined from the operator's own ~/.hermes:
+OpenRouter, DeepSeek, GLM, Kimi, MiniMax, Copilot, Bedrock, Google via
+its OpenAI-compatible endpoint, …) — every registration prints its
+egress truth, provenance lands as source=preset:<id>, azure demands its
+per-resource URL instead of guessing. F4 ends the one-secret era:
+per-profile 0600 key files (env NAME → own file → legacy) honored by
+chat, workers, probes, and /api/llm/models, with stdin-only CLI entry
+and a write-only key route. F7 automates the one subscription auth that
+needs no borrowed identity — the GitHub Copilot token exchange (your
+own GitHub token becomes a short-lived in-memory bearer). F8 adds
+`skep provider login`: RFC 8628 device flow with the OPERATOR'S client
+id — skep ships none, ever (ADR 0051). F9 is the face polish: a preset
+picker in both LLM forms, docs, and this entry. The chat floor pin
+moved 24KB → 24.5KB for the four registry verbs + two protocol enums.

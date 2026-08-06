@@ -8,12 +8,17 @@ config (``~/.skep/profile.json``, the sqlite ``llm_*`` settings, and the
 first use; the legacy readers remain only as a compatibility fallback until every
 caller reads the registry.
 
-Only Anthropic and Gemini need bespoke protocol code; OpenRouter and DeepSeek are
-OpenAI-compatible, so they are served through ``openai_compat`` profiles.
+Anthropic and the OpenAI Responses API (v108-F5) need bespoke protocol code;
+OpenRouter and DeepSeek are OpenAI-compatible, so they are served through
+``openai_compat`` profiles.
+(``gemini`` sat in this vocabulary until v108-F1 with no client, probe, or
+worker mapping behind it — a stored profile was a dead end. Google routes
+through its OpenAI-compatible endpoint as a preset instead.)
 """
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,10 +26,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from skep.profile import _ENV_VAR_NAME_RE
+
 if TYPE_CHECKING:
     from .store import RunStore
 
-PROVIDER_PROTOCOLS: frozenset[str] = frozenset({"ollama", "openai_compat", "anthropic", "gemini"})
+PROVIDER_PROTOCOLS: frozenset[str] = frozenset(
+    {"ollama", "openai_compat", "anthropic", "openai_responses", "bedrock"}
+)
 # local = on-box (Ollama); free = zero-cost remote; paid = metered remote.
 PROVIDER_COST_CLASSES: frozenset[str] = frozenset({"local", "free", "paid"})
 
@@ -33,6 +42,8 @@ _LEGACY_PROTOCOL_MAP = {
     "ollama": "ollama",
     "openai-compat": "openai_compat",
     "anthropic": "anthropic",
+    "openai-responses": "openai_responses",
+    "bedrock": "bedrock",
 }
 
 
@@ -51,6 +62,8 @@ class ProviderProfile:
     fallback_order: int = 0
     api_key_env: str | None = None
     active: bool = False
+    # v108-F2: which path created the profile — 'manual' or 'preset:<id>' (I8).
+    source: str = "manual"
 
 
 @dataclass(frozen=True)
@@ -161,12 +174,20 @@ def provider_host(base_url: str) -> str | None:
     return parsed.hostname
 
 
+# v108-F4: the id names a per-profile secret FILE (llm-secret-<id>), so it
+# must be a plain slug — no separators that could traverse out of home.
+_PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
 def validate_provider_profile(profile: ProviderProfile) -> ProviderProfile:
     """Validate and normalize a profile. Ensures the endpoint host is present in
     the network allowlist (explicit + reproducible), so a provider can never be
     reached through a host the operator did not list."""
-    if not profile.provider_id.strip():
-        raise ProviderError("provider_id must be non-empty")
+    if not _PROVIDER_ID_RE.match(profile.provider_id.strip()):
+        raise ProviderError(
+            f"provider_id must be a slug ([A-Za-z0-9._-], no leading dot), "
+            f"got {profile.provider_id!r}"
+        )
     if profile.protocol not in PROVIDER_PROTOCOLS:
         raise ProviderError(
             f"protocol must be one of {sorted(PROVIDER_PROTOCOLS)!r}, got {profile.protocol!r}"
@@ -178,6 +199,13 @@ def validate_provider_profile(profile: ProviderProfile) -> ProviderProfile:
         )
     if not profile.model.strip():
         raise ProviderError("model must be non-empty")
+    # v108-F1: the same v48-F2 guard the personal profile has — api_key_env is
+    # the NAME of an env var; a pasted key value silently breaks every auth.
+    if profile.api_key_env and not _ENV_VAR_NAME_RE.match(profile.api_key_env):
+        raise ProviderError(
+            f"api_key_env must be an environment variable NAME, got {profile.api_key_env!r} "
+            "(looks like a pasted key value)"
+        )
     host = provider_host(profile.base_url)
     if host is None:
         raise ProviderError(f"base_url must be a valid http(s) URL, got {profile.base_url!r}")
@@ -194,6 +222,7 @@ def validate_provider_profile(profile: ProviderProfile) -> ProviderProfile:
         fallback_order=profile.fallback_order,
         api_key_env=profile.api_key_env or None,
         active=profile.active,
+        source=profile.source.strip() or "manual",
     )
 
 
