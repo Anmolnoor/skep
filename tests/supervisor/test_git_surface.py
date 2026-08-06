@@ -618,11 +618,13 @@ def test_a_stored_merge_grant_is_swept_not_grandfathered() -> None:
     "command",
     [
         # The two store-observed bypasses (chat_actions 3160babe / a5f5a8d1),
-        # branch and sed tail representative of the originals.
-        "cd /Users/anmolnoor/.skep/repos/my-portfolio && "
+        # branch and sed tail representative of the originals; the operator
+        # home dir is anonymized for the public tree (release hygiene) —
+        # the command SHAPE is what the guard must read.
+        "cd /Users/operator/.skep/repos/my-portfolio && "
         "git checkout skep/019fc896-c90e-7fcc-9594-1013be153b24 && "
         "sed -i '' \"s/today/this week/\" src/content/blog/skep-is-live.mdx",
-        "cd /Users/anmolnoor/.skep/repos/my-portfolio && git stash && "
+        "cd /Users/operator/.skep/repos/my-portfolio && git stash && "
         "git checkout skep/019fc896-c90e-7fcc-9594-1013be153b24 && "
         'grep -n "^## " src/content/blog/skep-is-live.mdx',
         "true; git push",
