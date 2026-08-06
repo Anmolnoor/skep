@@ -2599,3 +2599,43 @@ own GitHub token becomes a short-lived in-memory bearer). F8 adds
 id — skep ships none, ever (ADR 0051). F9 is the face polish: a preset
 picker in both LLM forms, docs, and this entry. The chat floor pin
 moved 24KB → 24.5KB for the four registry verbs + two protocol enums.
+
+## v109 — one question asked once (2026-08-05)
+
+Seeded by the 2026-08-03 blog-post session read straight out of the
+store: two byte-equivalent land_run cards confirmed 67 s apart, three
+approval surfaces for one landing with no shared words, three fresh
+dispatches for one fix-chain while the v107 kept-tree machinery sat
+unused — and, found in the same rows, `cd <repo> && git checkout … &&
+sed -i …` executed from chat with exit 0. F1: guards judge SEGMENTS,
+not lines — command lines split at shell operators, `bash -c` payloads
+and `env` prefixes unwrap, and the deny fires on any segment, on both
+lanes (the same shape also closed the worker's wrapped-git and
+verify-fast-path holes); what cannot be statically read fails closed on
+the persist/worker lanes and cards on the queen lane. F2: proposal-time
+dedup — an identical pending proposal hands the model the pending card
+with the protocol spelled out; a changed proposal for the same subject
+supersedes honestly; gate mirrors and operator cards are never
+superseded by a model proposal. F3: landing approvals are titled
+`land "<brief>" → <branch>`, review cards headline the reason instead
+of a UUID, and land_run's result says done-means-done. F4/F5: a
+per-project uv/npm cache mounted through the sandbox wall (re-verify
+primes against the same cache; grandchild processes finally inherit
+TMPDIR/UV_CACHE_DIR). F6: dispatch surfaces hint at kept worktrees
+before a fresh dispatch redoes the work. F7/F8: approve-and-remember
+reaches network hosts (project `default_network`, allow-host faces),
+and the ledger closes its loop — the Nth identical approval carries a
+nudge, GET /api/ledger/suggestions derives the standing offers on read,
+remembering through any door marks every matching ledger row. F9: the
+Policies workspace shows every tier, learned/session rules become
+listable and revocable (carded from chat, with an honest narrowing risk
+line), and RSoP provenance answers "who decided each key" on project
+detail. F10: the catastrophic floor — rm on roots, mkfs, dd onto
+devices, shutdown, fork bombs — refused everywhere with one laugh and
+one honest line, never allowlistable, learnable, or grandfathered, on
+the same only-ever-grows footing as the git guards. The fresh-chat
+floor re-measured to 24.5KB (the round paid byte-for-byte first: F7
+folded its tool into allow_command_review, F6 trimmed). Also: the main
+branch arrived with a failing release-checklist pin from the README
+front-page rewrite — repaired first, per the no-pre-existing-failures
+rule.

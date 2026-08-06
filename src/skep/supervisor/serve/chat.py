@@ -38,7 +38,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..store import RunStore
+from ..store import ChatActionRecord, RunStore
 from . import actions
 from .cards import card_summary
 from .jobs import Dispatcher
@@ -237,6 +237,77 @@ def _text_shaped_tool_call(content: str) -> bool:
     if isinstance(parsed, list):
         return bool(parsed) and all(is_call(item) for item in parsed)
     return is_call(parsed)
+
+
+# v109-F2: the Aug 3 field test confirmed two byte-identical land_run cards
+# 67 s apart, and Jul 17 proposed identical open_pr cards up to four times in
+# a row. A proposal that matches a pending card is not a new question (I8):
+# identical args hand the pending card back to the model with the protocol
+# spelled out; changed args for the same subject supersede the stale card so
+# exactly one question stands. The landing family is keyed by its subject —
+# a land_run for a task is the same question whatever the note says.
+_PROPOSAL_SUBJECT_KEYS: dict[str, tuple[str, ...]] = {
+    "land_run": ("task_id",),
+    "approve_review": ("review_id",),
+    "deny_review": ("review_id",),
+    "open_pr": ("repo", "branch"),
+    "push_branch": ("repo", "name"),
+    "merge_pr": ("repo", "number"),
+    "close_pr": ("repo", "number"),
+}
+
+
+def _proposal_subject(tool: str, args: dict[str, Any]) -> str | None:
+    keys = _PROPOSAL_SUBJECT_KEYS.get(tool)
+    if not keys:
+        return None
+    values = [str(args.get(key) or "") for key in keys]
+    if not any(values):
+        return None
+    return json.dumps([tool, values], ensure_ascii=True)
+
+
+def _canonical_args(args: dict[str, Any]) -> str:
+    return json.dumps(args, sort_keys=True, ensure_ascii=True)
+
+
+def pending_duplicate_action(
+    store: RunStore, chat_id: str, tool: str, args: dict[str, Any]
+) -> tuple[ChatActionRecord, bool] | None:
+    """The pending card already asking this question, with whether its args
+    are byte-identical. Only 'proposed' rows count — a denied card is a
+    verdict, and re-proposing after one is a new question for the human."""
+    subject = _proposal_subject(tool, args)
+    args_key = _canonical_args(args)
+    for record in store.pending_chat_actions(chat_id):
+        if record.tool != tool:
+            continue
+        if _canonical_args(record.args) == args_key:
+            return record, True
+        if subject is not None and _proposal_subject(record.tool, record.args) == subject:
+            # A gate mirror is the standing question for a live review (its
+            # Deny denies the review, v87-F2) — it is never superseded by a
+            # proposal, so a subject match reports it as the card to wait on.
+            if record.source == "gate":
+                return record, True
+            return record, False
+    return None
+
+
+def duplicate_proposal_result(action_id: str) -> dict[str, Any]:
+    """The tool result a re-proposing model reads instead of a twin card."""
+    return {
+        "ok": False,
+        "pending_action_id": action_id,
+        "error": (
+            f"card {action_id} already asks exactly this — the operator "
+            "decides it next. Do not re-propose it; this is the protocol "
+            "working, not a failure."
+        ),
+    }
+
+
+_SUPERSEDED_BY_NEWER = "superseded by a newer proposal for the same subject"
 
 
 def chat_stream_with_retry(
@@ -1532,6 +1603,31 @@ class ChatEngine:
                             receipt["grant"] = grant
                         yield ("tool", receipt)
                         continue
+                    # v109-F2: a pending twin is not a new question. Identical
+                    # args → the model gets the pending card back and the turn
+                    # continues; changed args, same subject → the stale card is
+                    # superseded and the fresh one stands alone.
+                    duplicate = pending_duplicate_action(self.store, chat_id, name, args)
+                    if duplicate is not None and (
+                        duplicate[1]
+                        # I7: a model proposal never supersedes an operator's
+                        # standing card — the typed command is the decision.
+                        or duplicate[0].source != "assistant"
+                    ):
+                        payload = duplicate_proposal_result(duplicate[0].action_id)
+                        self.store.add_chat_message(
+                            chat_id,
+                            role="tool",
+                            tool_name=name,
+                            tool_call_id=call_id,
+                            content=json.dumps(payload, ensure_ascii=True),
+                        )
+                        yield ("tool", {"tool": name, "result": payload})
+                        continue
+                    if duplicate is not None:
+                        self.store.supersede_chat_action(
+                            duplicate[0].action_id, note=_SUPERSEDED_BY_NEWER
+                        )
                     action_id = self.store.add_chat_action(
                         chat_id,
                         tool=name,
@@ -2227,6 +2323,28 @@ def add_chat_routes(
             raise HTTPException(
                 status_code=400, detail=f"unknown command tool {body.tool!r}; known: {known}"
             )
+        # v109-F2: an operator command that matches a pending card takes it
+        # over instead of standing beside it as a twin (the B-pair: a typed
+        # /approve while the gate-mirror card is pending). Identical args
+        # return the pending card itself; changed args supersede it first.
+        duplicate = pending_duplicate_action(run_store, chat_id, body.tool, body.args)
+        if duplicate is not None:
+            pending, identical = duplicate
+            # An assistant card cannot be resolved through the command
+            # endpoints (409 below), so the typed command takes it over;
+            # operator/gate cards are handed back as the standing question.
+            if identical and pending.source in ("operator", "gate"):
+                return {
+                    "action_id": pending.action_id,
+                    "tool": pending.tool,
+                    "args": pending.args,
+                    "description": tool_description(pending.tool),
+                    "card": card_summary(
+                        pending.tool, pending.args, tool_description(pending.tool)
+                    ),
+                    "already_pending": True,
+                }
+            run_store.supersede_chat_action(pending.action_id, note=_SUPERSEDED_BY_NEWER)
         action_id = run_store.add_chat_action(
             chat_id, tool=body.tool, args=body.args, source="operator"
         )

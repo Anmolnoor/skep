@@ -607,3 +607,136 @@ def test_a_stored_merge_grant_is_swept_not_grandfathered() -> None:
     )
     assert kept == [["uv", "run", "pytest"], ["git", "status"]]
     assert removed == [["git", "merge", "origin/main"]]
+
+
+# v109-F1: the 2026-08-03 field test ran `cd <repo> && git checkout <branch>`
+# from chat with {"ok": true, "exit_code": 0} — argv[0] was `cd`, so the v83-F9
+# guard never saw the git. Guards judge segments now, on both lanes.
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The two store-observed bypasses (chat_actions 3160babe / a5f5a8d1),
+        # branch and sed tail representative of the originals; the operator
+        # home dir is anonymized for the public tree (release hygiene) —
+        # the command SHAPE is what the guard must read.
+        "cd /Users/operator/.skep/repos/my-portfolio && "
+        "git checkout skep/019fc896-c90e-7fcc-9594-1013be153b24 && "
+        "sed -i '' \"s/today/this week/\" src/content/blog/skep-is-live.mdx",
+        "cd /Users/operator/.skep/repos/my-portfolio && git stash && "
+        "git checkout skep/019fc896-c90e-7fcc-9594-1013be153b24 && "
+        'grep -n "^## " src/content/blog/skep-is-live.mdx',
+        "true; git push",
+        "echo hi | git fetch",
+        "sh -c 'git fetch origin'",
+        "env A=1 git switch main",
+        "cd /x&&git push",
+    ],
+)
+def test_the_queen_reads_compound_command_lines(command: str) -> None:
+    """v109-F1: no segment of a chat command line may be a denied git command —
+    `cd` in front of a checkout stops laundering it."""
+    from skep.supervisor.shell_prefixes import queen_command_line_refusal
+
+    assert queen_command_line_refusal(command) is not None
+
+
+def test_the_branch_switch_refusal_teaches_git_show() -> None:
+    """I9: the Queen switched branches to READ branch content; the refusal
+    names the read-only way to do that."""
+    from skep.supervisor.shell_prefixes import queen_command_line_refusal
+
+    refusal = queen_command_line_refusal("cd /x && git checkout feature")
+    assert refusal is not None
+    assert "git show" in refusal
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd /x && git status",
+        "git show main:README.md",
+        "echo use git push to publish",  # `push` as data after echo, one segment
+        "echo 'a && git push'",  # quoted operator is data, not a separator
+        "git checkout -- file.txt",
+        "grep -rn pattern src | head -5",
+    ],
+)
+def test_the_compound_guard_does_not_overreach(command: str) -> None:
+    from skep.supervisor.shell_prefixes import queen_command_line_refusal
+
+    assert queen_command_line_refusal(command) is None
+
+
+def test_a_malformed_line_falls_to_the_card() -> None:
+    """Unjudgeable from chat still cards — a human reads the raw string before
+    anything runs (the lane's long-standing malformed behavior, kept)."""
+    from skep.supervisor.shell_prefixes import queen_command_line_refusal
+
+    assert queen_command_line_refusal("echo 'unbalanced") is None
+
+
+def test_a_wrapped_git_command_is_denied_worker_side() -> None:
+    """v109-F1: `bash -c 'git push …'` dodged every worker deny (argv[0] was
+    `bash`) and the verify label would have fast-pathed it. Neither survives
+    segment judgment — before the fast-path, before any grant."""
+    from skep.workers.runtime_plugins import ShellExecPlugin
+
+    argv = ["bash", "-c", "git push origin main"]
+    decision = ShellExecPlugin().decision(
+        purpose="verify",
+        argv=argv,
+        command="bash -c 'git push origin main'",
+        approved_shell_commands=[argv],
+        shell_allowlist=[["bash"]],
+    )
+    assert decision.verdict == "deny"
+    assert decision.reason == "capability.deny.remote_git_managed_by_supervisor"
+
+
+def test_a_compound_argv_is_denied_worker_side() -> None:
+    from skep.workers.runtime_plugins import ShellExecPlugin
+
+    decision = ShellExecPlugin().decision(
+        purpose="edit",
+        argv=["cd", "/x", "&&", "git", "checkout", "main"],
+        command="cd /x && git checkout main",
+        approved_shell_commands=[],
+        shell_allowlist=[],
+    )
+    assert decision.verdict == "deny"
+    assert decision.reason == "capability.deny.git_branch_ops_managed_by_supervisor"
+
+
+def test_an_unreadable_wrapper_payload_fails_closed() -> None:
+    """A payload the gate cannot statically read is denied, not waved through —
+    and the deny says how to proceed (I9)."""
+    from skep.workers.runtime_plugins import ShellExecPlugin
+
+    decision = ShellExecPlugin().decision(
+        purpose="edit",
+        argv=["bash", "-c", "echo `git push`"],
+        command="bash -c 'echo `git push`'",
+        approved_shell_commands=[],
+        shell_allowlist=[],
+    )
+    assert decision.verdict == "deny"
+    assert decision.reason == "capability.deny.shell_wrapper_unparseable"
+    assert "direct command" in (decision.detail or "")
+
+
+def test_python_dash_c_keeps_the_verify_fast_path() -> None:
+    """A python -c payload is Python, not shell — never decomposed, so the
+    fast-path behavior for real verify commands is unchanged."""
+    from skep.workers.runtime_plugins import ShellExecPlugin
+
+    decision = ShellExecPlugin().decision(
+        purpose="verify",
+        argv=["python3", "-c", "print('git push')"],
+        command="python3 -c \"print('git push')\"",
+        approved_shell_commands=[],
+        shell_allowlist=[],
+    )
+    assert decision.verdict == "allow"
+    assert decision.reason == "capability.allow.shell_verify"

@@ -163,7 +163,15 @@ def test_the_fresh_chat_floor_is_measured_under_24kb(
     sentence budgets before the move (I9 forbids gutting them further: the
     small model reads nothing else). The pin moves 24KB → 24.5KB, sized to
     also absorb the two protocol enum values v108-F5/F6 add. Still 3KB
-    below where v99 found it."""
+    below where v99 found it.
+
+    v109 re-measured: the round paid byte-for-byte before asking — F7 FOLDED
+    its network-remember into allow_command_review instead of shipping a
+    second tool (a spec entry costs more than any description trim recovers),
+    and F6 trimmed its dispatch_run addition — but F9's revoke_policy_rule is
+    a genuinely new carded verb (the first way to SEE and NARROW standing
+    grants, I6's other half) and lands the floor at 24.02KB. The pin moves
+    24KB → 24.5KB, still 3KB below where v99 found it."""
     client = configured_client(config, ollama)
     chat_id = client.post("/api/chats", json={}).json()["chat_id"]
     ollama.script_reply("hello")

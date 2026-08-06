@@ -1805,6 +1805,69 @@ class RunStore:
         return [self._row_to_ledger(row) for row in rows]
 
     @_locked
+    def ledger_entry_for_review(self, review_id: str) -> ApprovalLedgerRecord | None:
+        row = self._conn.execute(
+            "SELECT id, review_id, task_id, action, resource, reason, instructions_snippet,"
+            " repo_path, template_name, approved_at, approved_by, task_outcome, remembered"
+            " FROM approval_ledger WHERE review_id = ?",
+            (review_id,),
+        ).fetchone()
+        return None if row is None else self._row_to_ledger(row)
+
+    @_locked
+    def ledger_remember_candidates(self, *, min_count: int = 3) -> list[dict[str, Any]]:
+        """v109-F8: the (action, resource, repo) keys the operator keeps
+        approving with no standing grant. Deterministic and derived on read —
+        no suggestion state to desync: remembering removes a key from this
+        list by construction. Only actions with a remember path count; a
+        landing (apply_patch) is the trust ramp, never a suggestion
+        (ADR 0048). A later deny of the same resource resets the streak —
+        matchable for shell approvals, whose reason carries the command;
+        network deny reasons carry no host, so those streaks stand until
+        remembered or denied by the operator at the suggestion itself."""
+        rows = self._conn.execute(
+            "SELECT action, resource, repo_path, COUNT(*), MAX(approved_at)"
+            " FROM approval_ledger"
+            " WHERE remembered = 0"
+            "   AND action IN ('shell.run', 'network.fetch', 'network.read')"
+            "   AND resource != action"
+            " GROUP BY action, resource, repo_path HAVING COUNT(*) >= ?"
+            " ORDER BY COUNT(*) DESC, MAX(approved_at) DESC",
+            (min_count,),
+        ).fetchall()
+        candidates: list[dict[str, Any]] = []
+        for action, resource, repo_path, count, last_approved in rows:
+            denied = self._conn.execute(
+                "SELECT 1 FROM approvals WHERE status = 'denied'"
+                " AND reason LIKE ? AND resolved_at > ? LIMIT 1",
+                (f"%{resource}", last_approved),
+            ).fetchone()
+            if denied is not None:
+                continue
+            candidates.append(
+                {
+                    "action": str(action),
+                    "resource": str(resource),
+                    "repo": str(repo_path),
+                    "count": int(count),
+                    "last_approved": str(last_approved),
+                }
+            )
+        return candidates
+
+    @_locked
+    def mark_ledger_remembered(self, *, action: str, resource: str, repo_path: str) -> int:
+        """v109-F8: a standing grant now covers this key — every matching
+        ledger row says so (I13), whichever door persisted the grant."""
+        cursor = self._conn.execute(
+            "UPDATE approval_ledger SET remembered = 1"
+            " WHERE action = ? AND resource = ? AND repo_path = ? AND remembered = 0",
+            (action, resource, repo_path),
+        )
+        self._conn.commit()
+        return cursor.rowcount
+
+    @_locked
     def ledger_for_pattern(self, instructions_snippet: str) -> list[ApprovalLedgerRecord]:
         rows = self._conn.execute(
             "SELECT id, review_id, task_id, action, resource, reason, instructions_snippet,"
@@ -3334,6 +3397,41 @@ class RunStore:
         return [(str(row[0]), str(row[1])) for row in rows]
 
     @_locked
+    def preserved_resumable_runs(
+        self,
+        *,
+        repo: str,
+        states: Sequence[str],
+        ref: str | None = None,
+        max_age_seconds: float | None = None,
+    ) -> list[tuple[str, str, str, str]]:
+        """v109-F6: (task_id, state, workspace, updated_at) rows for this
+        repo's preserved runs in the given resumable states, newest first —
+        the dispatch surface's "a warm tree already exists" lookup. Same
+        predicate as the sweep views (one source of truth); the state filter
+        drops the completed-unconfirmed half, which diagnose_run serves but
+        resume never will. The caller checks the tree still exists on disk."""
+        placeholders = ", ".join("?" for _ in states)
+        sql = (
+            "SELECT r.task_id, r.state, r.workspace, r.updated_at"
+            + self._PRESERVED_PREDICATE
+            + f" AND r.repo = ? AND r.state IN ({placeholders})"
+        )
+        params: list[Any] = [repo, *states]
+        if ref is not None:
+            sql += " AND r.ref = ?"
+            params.append(ref)
+        if max_age_seconds is not None:
+            cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            sql += " AND r.updated_at >= ?"
+            params.append(cutoff)
+        sql += " ORDER BY r.updated_at DESC"
+        rows = self._conn.execute(sql, params).fetchall()
+        return [(str(row[0]), str(row[1]), str(row[2]), str(row[3])) for row in rows]
+
+    @_locked
     def latest_channel_chat(self) -> str | None:
         """v72-F3: the newest messenger-bound chat that still exists — the
         delivery target for system alarms that belong to no particular chat
@@ -3729,6 +3827,32 @@ class RunStore:
             (chat_id,),
         ).fetchall()
         return [self._row_to_action(row) for row in rows]
+
+    @_locked
+    def supersede_chat_action(self, action_id: str, *, note: str) -> None:
+        """v109-F2: a newer proposal for the same subject replaces a pending
+        card. Recorded exactly like the resolution-side supersede (v63-F2) —
+        an honest terminal row plus a tool line in the transcript — never a
+        silent delete. A card that is no longer 'proposed' is left alone."""
+        row = self._conn.execute(
+            "SELECT chat_id, tool, status FROM chat_actions WHERE action_id = ?",
+            (action_id,),
+        ).fetchone()
+        if row is None or str(row[2]) != "proposed":
+            return
+        payload = {"ok": True, "superseded": True, "note": note}
+        self._conn.execute(
+            "UPDATE chat_actions SET status = 'superseded', result_json = ?,"
+            " resolved_at = ? WHERE action_id = ?",
+            (json.dumps(payload, ensure_ascii=True), _now(), action_id),
+        )
+        self.add_chat_message(
+            str(row[0]),
+            role="tool",
+            tool_name=str(row[1]),
+            content=json.dumps(payload, ensure_ascii=True),
+        )
+        self._conn.commit()
 
     @_locked
     def pending_cards_older_than(self, seconds: int) -> list[ChatActionRecord]:

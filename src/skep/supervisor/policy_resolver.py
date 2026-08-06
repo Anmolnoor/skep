@@ -7,6 +7,8 @@ supervisor defaults -> hardcoded fallbacks inside ``policy_view``.
 
 from __future__ import annotations
 
+import hashlib
+import re
 import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -98,6 +100,10 @@ class ResolvedRunPolicy:
     # v90-F1 (ADR 0047): the coding agent this run uses, from the project
     # policy overlay key `coding_engine`. "builtin" is skep's own worker.
     coding_engine: str = "builtin"
+    # v109-F9 (RSoP): which layer decided each final policy key — labels
+    # "global", "phase:<phase>", "project", "group:<name>", "trusted-roots".
+    # Pure provenance: recording it never changes the resolution result.
+    provenance: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -173,18 +179,35 @@ def run_policy_for_repo(
     *,
     binding_candidates: Sequence[tuple[str, str]] = (),
 ) -> dict[str, Any]:
-    """Return the effective project-aware run policy for ``repo``."""
+    """Return the effective project-aware run policy for ``repo``.
+
+    v109-F9 (RSoP): the returned dict carries a ``_provenance`` breadcrumb —
+    key → the layer that decided its final value ("global", "phase:<phase>",
+    "project", "group:<name>", "trusted-roots"). A label moves only when a
+    layer actually CHANGES the value, so an overlay restating the global
+    default never claims a key it did not decide. ``resolve_run_policy`` pops
+    the breadcrumb (the ``_missing_policy_groups`` idiom); recording it never
+    changes the resolution result.
+    """
     policy = dict(policy_view(store, config))
+    provenance: dict[str, str] = dict.fromkeys(policy, "global")
     match = _match_project_for_repo(store, repo, binding_candidates=binding_candidates)
-    if match is None:
-        effective = dict(policy)
-    else:
+    effective = dict(policy)
+
+    def _layer_set(key: str, value: Any, label: str) -> None:
+        if key not in effective or effective[key] != value:
+            provenance[key] = label
+        effective[key] = value
+
+    if match is not None:
         project = match.project
-        effective = dict(policy)
-        effective.update(phase_default_policy(strategy=project.strategy, phase=project.phase))
+        for key, value in phase_default_policy(
+            strategy=project.strategy, phase=project.phase
+        ).items():
+            _layer_set(key, value, f"phase:{project.phase}")
         for key in _PROJECT_RUN_POLICY_FIELDS:
             if key in project.policy:
-                effective[key] = project.policy[key]
+                _layer_set(key, project.policy[key], "project")
 
         # v97-F2 (ADR 0048): attached policy groups, live-composed. List keys
         # union (like trusted roots below); group scalars fill only where the
@@ -200,9 +223,13 @@ def run_policy_for_repo(
                 for key, value in groups.get(name, {}).items():
                     if key in GROUP_LIST_KEYS:
                         base = list(effective.get(key) or [])
-                        effective[key] = base + [item for item in value if item not in base]
+                        _layer_set(
+                            key,
+                            base + [item for item in value if item not in base],
+                            f"group:{name}",
+                        )
                     elif key not in project.policy:
-                        effective[key] = value
+                        _layer_set(key, value, f"group:{name}")
             missing = [name for name in group_names if name not in groups]
             if missing:
                 effective["_missing_policy_groups"] = missing
@@ -216,7 +243,7 @@ def run_policy_for_repo(
         repo_root = str(repo)
         if repo_root not in trusted_roots:
             trusted_roots.append(repo_root)
-        effective["trusted_workspace_roots"] = trusted_roots
+        _layer_set("trusted_workspace_roots", trusted_roots, "trusted-roots")
 
     # v23-F1: skep-managed clones are trusted by construction.
     managed = str(managed_repos_root(config))
@@ -224,8 +251,36 @@ def run_policy_for_repo(
         roots = [str(root) for root in effective.get("trusted_workspace_roots") or []]
         if managed not in roots:
             roots.append(managed)
-            effective["trusted_workspace_roots"] = roots
+            _layer_set("trusted_workspace_roots", roots, "trusted-roots")
+    effective["_provenance"] = provenance
     return effective
+
+
+def project_cache_root(store: RunStore, config: SupervisorConfig, repo: Path) -> Path:
+    """v109-F4: the per-project dependency-cache home for runs on ``repo``.
+
+    Caches hold content-addressed toolchain artifacts (uv wheels, npm
+    tarballs) that outlive the disposable worktree — the workspace stays
+    disposable, and the patch diffs against the startup baseline, so nothing
+    living here can reach a landing. Keyed by the bound project's id so a
+    project's runs warm each other; an unbound repo gets a slug+path-hash key
+    of its own — two projects/repos never share a cache.
+    """
+    # Managed clones are slug-bound (registry name == directory name) — same
+    # candidates as the verify-pin safety net, so both resolve one project.
+    candidates = [("repo_slug", repo.name)] if repo.parent == managed_repos_root(config) else []
+    match = _match_project_for_repo(store, repo, binding_candidates=candidates)
+    if match is not None:
+        raw = match.project.project_id
+    else:
+        digest = hashlib.sha256(str(repo.resolve()).encode("utf-8")).hexdigest()[:8]
+        raw = f"{repo.name}-{digest}"
+    key = re.sub(r"[^A-Za-z0-9._-]", "-", raw)
+    if key != raw:
+        # An id is operator text; the key must stay one path segment, and the
+        # disambiguating hash keeps two mangled ids from sharing a cache.
+        key = f"{key}-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:8]}"
+    return config.home / "cache" / "projects" / key
 
 
 def per_domain_egress_enforceable() -> bool:
@@ -481,6 +536,10 @@ def resolve_run_policy(
     engine still requires the pinned ``verify_command`` and is still forced
     into the sandbox — same single validation point (I5)."""
     policy = run_policy_for_repo(store, config, repo, binding_candidates=binding_candidates)
+    # v109-F9: lift the RSoP breadcrumb off the policy dict so the stored/
+    # serialized run policy stays exactly what it was; the map rides the
+    # ResolvedRunPolicy for the effective-policy view.
+    provenance = dict(policy.pop("_provenance", None) or {})
     # v97-F2 (ADR 0048): a dangling group attach fails the dispatch closed —
     # silently running without the grants the project thinks it has would be
     # a policy the record cannot explain (I8), so the refusal teaches (I9).
@@ -658,6 +717,7 @@ def resolve_run_policy(
         worker_protocol=worker_protocol,
         verify_command=verify_command,
         coding_engine=chosen_engine.name,
+        provenance=provenance,
     )
 
 

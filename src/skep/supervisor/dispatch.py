@@ -220,20 +220,29 @@ def _resume_workspace(
     return workspace
 
 
-def _toolchain_env(workspace: Path, engine: CodingEngine) -> dict[str, str]:
+def _toolchain_env(workspace: Path, engine: CodingEngine, cache_root: Path) -> dict[str, str]:
     """v106-F1: a writable home for per-run toolchain state, inside the wall.
 
     The sandbox confines writes to the workspace (I12) — correct, but nothing
     gave runtime toolchain state a home *inside* it, so npm died on a read-only
     ``~/.npm`` and Claude Code's Bash tool died on a read-only ``~/.claude``
-    ("completed but produced no patch", six field runs). Everything lands under
-    ``<workspace>/.toolchain/``: npm's cache for every worker (npm derives its
-    logs dir from the cache, so one variable covers both failures), plus
-    whatever the engine registry declares (``CLAUDE_CONFIG_DIR``). Excluded
-    from the patch with the other bookkeeping dirs; swept with the worktree.
+    ("completed but produced no patch", six field runs). Run-scoped state lands
+    under ``<workspace>/.toolchain/``: TMPDIR plus whatever the engine registry
+    declares (``CLAUDE_CONFIG_DIR``). Excluded from the patch with the other
+    bookkeeping dirs; swept with the worktree.
+
+    v109-F4: the uv/npm dependency caches live under ``cache_root`` instead —
+    the per-project dir mounted through the sandbox wall — so resolve work
+    survives the disposable worktree (before, every dispatch re-resolved from
+    zero). Content-addressed artifacts only; the patch diffs against the
+    baseline, so nothing cached can reach a landing. (npm derives its logs
+    dir from the cache, so one variable still covers both v106 failures.)
     """
     scratch = workspace / TOOLCHAIN_DIR
-    env = {"npm_config_cache": str(scratch / "npm-cache")}
+    env = {
+        "npm_config_cache": str(cache_root / "npm"),
+        "UV_CACHE_DIR": str(cache_root / "uv"),
+    }
     # v107-F3: TMPDIR lives inside the wall too. Unset, Python and every
     # tool fall back to /tmp — which any NESTED bwrap the run spawns (skep's
     # own test suite does) re-mounts as a fresh tmpfs, masking the outer
@@ -615,7 +624,10 @@ def run_task(
             }
         # v106-F1: same non-secret supervisor-injected class as the routed
         # provider env above.
-        routed_env.update(_toolchain_env(workspace, engine))
+        from .policy_resolver import project_cache_root
+
+        cache_root = project_cache_root(run_store, config, repo)
+        routed_env.update(_toolchain_env(workspace, engine, cache_root))
         run_store.transition(task.task_id, "dispatched", dispatched_detail)
         log_path = audit_task_dir / "worker.log"
         try:
@@ -630,6 +642,9 @@ def run_task(
                 sandbox_enabled=None if execution_mode == "sandbox" else False,
                 extra_env=routed_env or None,
                 worker_argv=worker_argv,
+                # v109-F4: the cache is OUTSIDE the workspace by design (it
+                # must outlive the worktree), so the wall needs a door for it.
+                extra_writable=(cache_root,),
             )
         except OSError as exc:
             return finish_before_worker(

@@ -263,6 +263,17 @@ def test_shell_command_policy_rejects_git_push(config: SupervisorConfig) -> None
     assert "remote git commands cannot be allowlisted" in response.json()["detail"]
 
 
+def test_shell_command_policy_rejects_catastrophic_commands(config: SupervisorConfig) -> None:
+    """v109-F10: a machine-wrecker can never be allowlisted, and the refusal
+    is the joke+teach line, not a bare no."""
+    client = _client(config)
+
+    response = client.put("/api/policy", json={"allowed_shell_commands": [["rm", "-rf", "/"]]})
+
+    assert response.status_code == 400
+    assert "does not fit in a worktree" in response.json()["detail"]
+
+
 def test_policy_view_filters_poisoned_git_push_entry(config: SupervisorConfig) -> None:
     """v19-F3: a stored git push entry is filtered from policy_view output."""
     store = RunStore(config.db_path)
@@ -361,6 +372,25 @@ def test_startup_sweep_removes_poisoned_git_push_entry(config: SupervisorConfig)
     store = RunStore(config.db_path)
     try:
         store.set_setting("allowed_shell_commands", [["git", "push"], ["git", "status"]])
+    finally:
+        store.close()
+
+    # Building the app runs the startup sweep.
+    _client(config)
+
+    store = RunStore(config.db_path)
+    try:
+        assert store.get_setting("allowed_shell_commands") == [["git", "status"]]
+    finally:
+        store.close()
+
+
+def test_startup_sweep_removes_preseeded_catastrophic_entry(config: SupervisorConfig) -> None:
+    """v109-F10: a store already holding `rm -rf /` stops granting it durably —
+    swept at startup, not grandfathered (the v19-F3 sweep, wider)."""
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting("allowed_shell_commands", [["rm", "-rf", "/"], ["git", "status"]])
     finally:
         store.close()
 

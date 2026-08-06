@@ -117,6 +117,16 @@ def test_learned_shell_rule_cannot_cross_the_immutable_floor() -> None:
     assert excinfo.value.deny_rule_id.startswith("floor/")
 
 
+def test_learned_catastrophic_rule_cannot_cross_the_floor_either() -> None:
+    """v109-F10: the catastrophic-command floor rides the same remember-guard —
+    no document can teach skep that `rm -rf /` is fine."""
+    learned = LearnedRule(rule_id="nuke", action="run", pattern="rm -rf /", scope="shell")
+    with pytest.raises(LearnedRuleRejected) as excinfo:
+        resolve(PolicyDocument(), learned=(learned,))
+    assert excinfo.value.deny_rule_id.startswith("floor/")
+    assert "does not fit in a worktree" in excinfo.value.deny_rule_id
+
+
 def test_learned_lift_auto_allows_after_resolution() -> None:
     base = PolicyDocument.model_validate(
         {

@@ -800,6 +800,24 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         ["domain"],
     ),
     _tool(
+        "revoke_policy_rule",
+        "PROPOSE revoking ONE learned policy rule by id (requires user "
+        "confirmation). Removes the standing grant — allow-always or "
+        "session — so the next matching action cards again instead of "
+        "auto-running; this NARROWS policy, it can never widen it. Rule ids "
+        "are deterministic and returned by the grant that made them (e.g. "
+        "'network:fetch:docs.python.org', 'shell:run:uv run pytest'); a "
+        "wrong id refuses listing the known rules. Offer it when the user "
+        "asks why something ran without asking, or wants a grant undone.",
+        {
+            "rule_id": {
+                "type": "string",
+                "description": "the learned rule's id, e.g. 'network:fetch:docs.python.org'",
+            }
+        },
+        ["rule_id"],
+    ),
+    _tool(
         "resume_run",
         "PROPOSE resuming a crashed, timed-out, or FAILED run (requires user "
         "confirmation). Crashed/timed-out runs continue IN PLACE from their "
@@ -808,6 +826,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "caches and installed deps intact, so the retry skips the cold "
         "setup. When the worktree is gone (preserved trees expire after 24h) "
         "the resume honestly replays from step 0 in a fresh worktree. "
+        "Prefer this over a fresh dispatch_run of the same task — that redoes "
+        "the work cold; diagnose_run inspects the kept tree first. "
         "Landing rules unchanged: the resumed run still lands through its "
         "own approval.",
         {"task_id": {"type": "string", "description": "the run's task id"}},
@@ -823,7 +843,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "worktree) and its output returns here, capped at 10k chars. Only "
         "failed/unconfirmed runs keep their worktree, and only for 24h; when "
         "the tree is gone, read the audit trail via get_run instead. This "
-        "cannot land, push, or modify anything outside the kept worktree.",
+        "cannot land, push, or modify anything outside the kept worktree. "
+        "After diagnosis, resume_run continues the work in that same tree — "
+        "no fresh dispatch_run needed.",
         {
             "task_id": {"type": "string", "description": "the run whose kept worktree to inspect"},
             "command": {"type": "string", "description": "the shell command to run in it"},
@@ -1271,7 +1293,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "create branches or commit, so never dispatch a run to 'commit' finished work "
         "and never suggest auto_approve — use this. Only a COMPLETED run with a "
         "patch can land: a failed run is never landable, and a run that changed "
-        "nothing has no patch — do not propose landing either.",
+        "nothing has no patch — do not propose landing either. Propose it ONCE "
+        "per task: the result says when the patch landed, and a landed task "
+        "never needs a second land_run.",
         {
             "task_id": {"type": "string"},
             "note": {"type": "string"},
@@ -1355,8 +1379,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "allow_command_review",
-        "PROPOSE allowing a pending shell command review (requires user confirmation): "
-        "persist the command into allowed policy and resume the gated run.",
+        "PROPOSE allowing a pending review and remembering it (requires user "
+        "confirmation): a shell approval persists the command into allowed policy, "
+        "a network.fetch/network.read approval persists the blocked host into the "
+        "project's network allowlist; either way the gated run resumes.",
         {"review_id": {"type": "string"}},
         ["review_id"],
     ),
@@ -1629,6 +1655,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "setup_project before dispatching — unbound repos run on raw global defaults. "
         "A local path the user has not confirmed exists gets a list_repos/repo_state "
         "check first — dispatching at a missing directory is refused, not carded. "
+        "NOT for retrying a run whose worktree is kept (crashed/timed-out/"
+        "failed): resume_run continues it in place, diagnose_run inspects it "
+        "first — a fresh dispatch redoes the work cold; the result carries a "
+        "'hint' line when this applies. "
         "If the task needs network hosts, shell commands, or capabilities the "
         "effective policy denies, say so and propose the policy change first — "
         "never dispatch into a known gate. "
@@ -2131,6 +2161,8 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "delete_policy_group",
         "attach_policy_group",
         "detach_policy_group",
+        # v109-F9: the narrowing half of the learned-grant verbs.
+        "revoke_policy_rule",
     ),
     "chats & memory": (
         "search_chats",
@@ -2462,19 +2494,16 @@ def queen_shell_decision(
     ``run_background`` action instead — a daemon is a different promise
     than a 60s one-off, so a 'run' grant never covers it (review item 3);
     repo cwds refuse flat (daemons do not belong in checkouts)."""
-    import shlex
-
     from ..policy_resolver import resolve_operator_policy
     from ..policy_schema import DEFAULT_DENY_RULE_ID
-    from ..shell_prefixes import queen_shell_refusal
+    from ..shell_prefixes import queen_command_line_refusal
 
-    try:
-        argv = shlex.split(command)
-    except ValueError:
-        return None  # malformed → card; the honest error surfaces on confirm
-    if not argv:
+    if not command.strip():
         return None
-    reason = queen_shell_refusal(argv)
+    # v109-F1: judged per segment — `cd <repo> && git checkout <branch>` ran
+    # from chat because argv[0] was `cd`. Malformed lines still fall to the
+    # card so the honest error surfaces on confirm.
+    reason = queen_command_line_refusal(command)
     if reason is not None:
         return AutonomyDecision(
             verdict="deny",
@@ -4073,6 +4102,11 @@ def _execute_mutation(
             "rule_id": rule_id or f"{rule_scope}:{server_id}:{tool_name}",
             "scope": rule_scope,
         }
+    if name == "revoke_policy_rule":
+        # v109-F9: the narrowing half of allow_fetch_domain / allow_mcp_tool /
+        # the session grants — one shared verb; the REST DELETE is the
+        # operator-direct face of the same function (I5).
+        return actions.revoke_policy_rule(store, rule_id=str(args["rule_id"]))
     if name == "set_policy":
         return actions.update_policy(store, holder, args)
     if name == "apply_policy_preset":
@@ -4102,7 +4136,13 @@ def _execute_mutation(
         run = actions.require_run(store, str(approval["task_id"]))
         if run["state"] == "pending_approval":
             resumed = actions.resume_past_gate(store, holder.current, runner, run, review_id, actor)
-            return {"action": "resumed", "resumed_as": resumed}
+            resumed_result: dict[str, Any] = {"action": "resumed", "resumed_as": resumed}
+            # v109-F8: the Nth identical approval says so — the model relays
+            # the nudge instead of silently re-approving forever.
+            suggestion = actions.remember_suggestion_for_review(store, review_id)
+            if suggestion is not None:
+                resumed_result["suggestion"] = suggestion
+            return resumed_result
         note = None if args.get("note") is None else str(args["note"])
         requested_branch = _queen_landing_branch(store, run, args.get("branch"))
         landed = actions.apply_patch(store, run, review_id, actor, note, branch=requested_branch)
@@ -4193,6 +4233,13 @@ def _execute_mutation(
         review_id = str(args["review_id"])
         approval = actions.pending_approval_or_409(store, review_id)
         run = actions.require_run(store, str(approval["task_id"]))
+        # v109-F7: one chat tool, routed by what is actually blocked — a
+        # network approval remembers its host, everything else its command.
+        if str(approval.get("action") or "") in ("network.fetch", "network.read"):
+            resumed = actions.allow_network_host_and_resume(
+                store, holder, runner, run, approval, review_id, actor
+            )
+            return {"action": "allowed_host", "resumed_as": resumed}
         resumed = actions.allow_shell_command_and_resume(
             store, holder, runner, run, approval, review_id, actor
         )
@@ -4321,6 +4368,14 @@ def _execute_mutation(
             seed_default_schedules=bool(args.get("seed_default_schedules", True)),
         )
     if name == "dispatch_run":
+        # v109-F6: computed BEFORE the submit so the hint names the PRIOR
+        # run, never the one this dispatch creates — a hint, not a block.
+        hint = actions.preserved_resumable_hint(
+            holder,
+            store,
+            repo=str(args["repo"]),
+            ref=None if args.get("ref") is None else str(args["ref"]),
+        )
         task_id = actions.submit_run(
             holder,
             runner,
@@ -4344,12 +4399,15 @@ def _execute_mutation(
         # v40-F2 (v35): repo + caste ride the result so both the live SSE tool
         # event and the stored transcript row can render a human summary —
         # additive only, same field set on both paths.
-        return {
+        result_view = {
             "task_id": task_id,
             "state": "dispatched",
             "repo": str(args["repo"]),
             "caste": str(args.get("caste") or "coding"),
         }
+        if hint is not None:
+            result_view["hint"] = hint
+        return result_view
     if name == "start_research":
         from ..templates import deep_research_template, instantiate
 

@@ -29,6 +29,7 @@ from typing import Any
 from ..shell_prefixes import (
     is_ops_mutating_command,
     is_outbound_content_prefix,
+    queen_command_line_refusal,
     queen_shell_refusal,
 )
 
@@ -48,6 +49,7 @@ _SUBJECT_KEYS: tuple[str, ...] = (
     "repo",
     "task_id",
     "review_id",
+    "rule_id",  # v109-F9: revoke_policy_rule — the card names WHICH grant goes
     "name",
     "project_id",
     "query",
@@ -129,6 +131,16 @@ def headline(tool: str, args: dict[str, Any]) -> str:
     repo, pr = args.get("repo"), args.get("pr")
     if repo not in (None, "") and pr not in (None, ""):
         return f"{tool} — {_render_value(repo).strip()}#{_render_value(pr).strip()}"
+    # v109-F3: a review card's subject is the approval's reason, not its UUID.
+    # The gate mirror carries the reason in args (run_status.py), and since the
+    # landing reason now names the task ('land "…" → branch'), the operator
+    # reads WHAT is waiting instead of `approve_review — <36 hex chars>`.
+    if tool in {"approve_review", "deny_review"}:
+        reason = str(args.get("reason") or "").strip().replace("\n", " ")
+        if reason:
+            if len(reason) > 160:
+                reason = f"{reason[:157]}…"
+            return f"{tool} — {reason}"
     for key in _SUBJECT_KEYS:
         value = args.get(key)
         if value in (None, "", [], {}):
@@ -196,7 +208,12 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
             return "privilege escalation — it would launder every command guard beneath it"
         if is_ops_mutating_command(argv):
             return "changes machine state (service, files, or backups) — approve-once only"
-        refusal = queen_shell_refusal(argv)
+        command_line = args.get("command") or args.get("shell_command")
+        refusal = (
+            queen_command_line_refusal(command_line)
+            if isinstance(command_line, str) and command_line.strip()
+            else queen_shell_refusal(argv)
+        )
         if refusal is not None:
             # Should never reach a card (the verb refuses it outright), but if a
             # path ever proposes one, say the engine's own reason, not a guess.
@@ -224,6 +241,13 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
         return "publishes to the remote — visible outside this machine, and not undone by a revert"
     if tool in _LANDING_TOOLS:
         return "applies a patch to a real branch — landing IS the commit"
+    if tool == "revoke_policy_rule":
+        # v109-F9: the one policy verb that NARROWS — the _POLICY_TOOLS line
+        # ("widens…") would be a lie on this card.
+        return (
+            "removes a standing grant — the next matching action cards again "
+            "instead of auto-running"
+        )
     if tool in _POLICY_TOOLS:
         return "widens what future runs may do without asking you again"
     if tool in _DESTRUCTIVE_TOOLS:

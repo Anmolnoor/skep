@@ -1312,6 +1312,12 @@ pre.log, pre.diff {
 .policy-group-row .row { align-items: center; gap: 10px; flex-wrap: wrap; }
 .project-group-edit { padding: 2px 10px; min-height: 26px; font-size: 12px; margin-right: 6px; }
 .field-help { color: var(--muted-2); font-size: 12px; margin: 0; line-height: 1.4; }
+/* v109-F9: learned-rule rows (Policies) + the RSoP decided-by table
+   (project detail). Long patterns and list values wrap, never overflow. */
+.learned-rule-row .row { align-items: center; gap: 10px; flex-wrap: wrap; }
+.learned-rule-row .mono { word-break: break-all; }
+.learned-rule-row button { margin-left: auto; }
+.rsop-table td { word-break: break-word; vertical-align: top; }
 .shell-cmd-list { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; }
 .shell-cmd-row { display: flex; gap: 6px; align-items: center; }
 .shell-cmd-row input { flex: 1; min-width: 0; }

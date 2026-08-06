@@ -48,7 +48,15 @@ class _EmitStream:
 # v106-F1: ``npm_config_cache`` is supervisor-injected per-run config (a
 # workspace-local path, never a secret) — child commands need it or npm falls
 # back to a read-only ``~/.npm`` inside the sandbox and dies on rofs.
-_CHILD_ENV_PASSTHROUGH: tuple[str, ...] = ("SKEP_HOME", "npm_config_cache")
+# v109-F5: ``TMPDIR`` and ``UV_CACHE_DIR`` are the same supervisor-injected
+# class — dropped here, a grandchild fell back to /tmp (which a nested bwrap
+# tmpfs-masks, v107-F3) and to the read-only ``~/.cache/uv``.
+_CHILD_ENV_PASSTHROUGH: tuple[str, ...] = (
+    "SKEP_HOME",
+    "npm_config_cache",
+    "TMPDIR",
+    "UV_CACHE_DIR",
+)
 
 _PROXY_ENV_PASSTHROUGH: tuple[str, ...] = (
     "HTTP_PROXY",

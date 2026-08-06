@@ -29,6 +29,7 @@ from ..cli_cmds import STATE_EXIT_CODES
 from ..config import SupervisorConfig
 from ..store import RunStore
 from .actions import (
+    allow_network_host_and_resume,
     allow_shell_command_and_resume,
     applied_branch_for,
     apply_patch,
@@ -43,19 +44,26 @@ from .actions import (
     diagnose_run,
     effective_policy_view,
     land_run,
+    landing_reason,
+    ledger_remember_suggestions,
     list_policy_groups,
+    list_policy_rules,
     merge_branch,
     open_pr_from_branch,
     patch_path,
     pending_approval_or_409,
     policy_block_views,
+    preserved_resumable_hint,
     project_context_detail_view,
     refresh_repo,
+    remember_ledger_entry,
+    remember_suggestion_for_review,
     repo_state_view,
     require_run,
     resume_past_gate,
     reverification_event_view_for_task,
     reverification_warning,
+    revoke_policy_rule,
     run_summary_view,
     set_policy_group,
     submit_run,
@@ -203,6 +211,14 @@ class WorkonRequest(BaseModel):
     path: str
     pack: str = "trusted_local_dev"
     phase: str = "build"
+
+
+class RememberRequest(BaseModel):
+    """Body of ``POST /api/ledger/remember`` (v109-F8)."""
+
+    action: str
+    resource: str
+    repo: str
 
 
 def _sse(data: dict[str, Any], *, event: str | None = None) -> str:
@@ -410,6 +426,9 @@ def create_app(
 
     @app.post("/api/runs", status_code=202)
     def create_run(body: RunRequest) -> dict[str, str]:
+        # v109-F6: same helper, same line as the chat face — a resumable prior
+        # run's kept worktree rides the response; the dispatch proceeds as is.
+        hint = preserved_resumable_hint(holder, run_store, repo=body.repo, ref=body.ref)
         task_id = submit_run(
             holder,
             runner,
@@ -429,7 +448,10 @@ def create_app(
             protocol=body.protocol,
             engine=body.engine,
         )
-        return {"task_id": task_id, "state": "dispatched"}
+        response = {"task_id": task_id, "state": "dispatched"}
+        if hint is not None:
+            response["hint"] = hint
+        return response
 
     @app.get("/api/policy")
     def get_policy() -> dict[str, Any]:
@@ -490,6 +512,21 @@ def create_app(
     @app.put("/api/policy")
     def put_policy(body: PolicyUpdate) -> dict[str, Any]:
         return update_policy(run_store, holder, body.model_dump())
+
+    # -- learned policy rules (v109-F9): the standing grants that auto-run
+    # things. The GET is the operator's first surface over them; the DELETE is
+    # the operator-direct face of the carded revoke_policy_rule chat verb —
+    # both land on the same shared verbs (I5).
+
+    @app.get("/api/policy/rules")
+    def get_policy_rules() -> dict[str, Any]:
+        return list_policy_rules(run_store)
+
+    # {rule_id:path} — shell rule ids embed the command (`shell:run:scripts/x`),
+    # so the id may carry slashes the default converter would reject (v48-F4).
+    @app.delete("/api/policy/rules/{rule_id:path}")
+    def delete_policy_rule(rule_id: str) -> dict[str, Any]:
+        return revoke_policy_rule(run_store, rule_id=rule_id)
 
     # -- policy groups (v97-F5, ADR 0048): operator-direct UI routes. The
     # authenticated UI is the human, same standing as the /api/policy PUTs;
@@ -558,7 +595,9 @@ def create_app(
                 status_code=409, detail="nothing to approve: no pending gate and no patch"
             )
         review_id = run_store.enqueue_approval(
-            task_id, action="apply_patch", reason="patch application review"
+            task_id,
+            action="apply_patch",
+            reason=landing_reason(str(run.get("instructions") or ""), None),
         )
         return {"review_id": review_id}
 
@@ -570,7 +609,12 @@ def create_app(
             resumed_id = resume_past_gate(
                 run_store, holder.current, runner, run, review_id, body.actor
             )
-            return {"action": "resumed", "resumed_as": resumed_id}
+            resumed = {"action": "resumed", "resumed_as": resumed_id}
+            # v109-F8: the Nth identical approval says so (a hint, never a block).
+            suggestion = remember_suggestion_for_review(run_store, review_id)
+            if suggestion is not None:
+                resumed["suggestion"] = suggestion
+            return resumed
         branch = apply_patch(run_store, run, review_id, body.actor, body.note, branch=body.branch)
         applied = {"action": "applied", "branch": branch}
         # v20-F3: warn when landing a run the supervisor could not re-verify.
@@ -578,6 +622,18 @@ def create_app(
         if warning is not None:
             applied["warning"] = warning
         return applied
+
+    @app.get("/api/ledger/suggestions")
+    def ledger_suggestions(repo: str | None = None) -> dict[str, Any]:
+        """v109-F8: the keys the operator keeps approving, derived on read."""
+        return {"suggestions": ledger_remember_suggestions(run_store, repo)}
+
+    @app.post("/api/ledger/remember")
+    def ledger_remember(body: RememberRequest) -> dict[str, Any]:
+        """v109-F8: persist a suggested key as a standing project grant."""
+        return remember_ledger_entry(
+            run_store, holder, action=body.action, resource=body.resource, repo=body.repo
+        )
 
     @app.post("/api/approvals/{review_id}/allow-command")
     def allow_command(review_id: str, body: ResolveRequest) -> dict[str, str]:
@@ -587,6 +643,17 @@ def create_app(
             run_store, holder, runner, run, approval, review_id, body.actor
         )
         return {"action": "allowed_command", "resumed_as": resumed_id}
+
+    @app.post("/api/approvals/{review_id}/allow-host")
+    def allow_host(review_id: str, body: ResolveRequest) -> dict[str, str]:
+        """v109-F7: the network twin of allow-command — remember the blocked
+        host for this repo's project and resume the gated run."""
+        approval = pending_approval_or_409(run_store, review_id)
+        run = _require_run(str(approval["task_id"]))
+        resumed_id = allow_network_host_and_resume(
+            run_store, holder, runner, run, approval, review_id, body.actor
+        )
+        return {"action": "allowed_host", "resumed_as": resumed_id}
 
     @app.post("/api/approvals/{review_id}/deny")
     def deny(review_id: str, body: ResolveRequest) -> dict[str, str]:

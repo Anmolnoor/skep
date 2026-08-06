@@ -4048,6 +4048,7 @@ async function viewApprovals(main) {
         const before = location.hash;
         try {
           const result = await api("POST", `/api/approvals/${approval.review_id}/${path}`, body);
+          if (result.suggestion) flash("ok", result.suggestion);
           if (result.resumed_as) { location.hash = `#/runs/${result.resumed_as}`; return; }
           if (result.url) flash("ok", `PR: ${result.url}`);
           if (location.hash === before) route();
@@ -4061,6 +4062,14 @@ async function viewApprovals(main) {
     if (approval.action === "shell.run") {
       actions.append(
         verdict(isBatch ? "Allow all & remember" : "Allow command", "ghost", "allow-command", {}),
+        verdict("Skip", "ghost", "deny", { note: "skipped from UI" }),
+      );
+    }
+    if (approval.action === "network.fetch" || approval.action === "network.read") {
+      // v109-F7: the network twin of "Allow command" — remember the blocked
+      // host for this repo's project and resume.
+      actions.append(
+        verdict("Allow host & remember", "ghost", "allow-host", {}),
         verdict("Skip", "ghost", "deny", { note: "skipped from UI" }),
       );
     }
@@ -4501,10 +4510,37 @@ async function viewProjectDetail(main, projectId) {
         },
       }, `${name} ✎`))));
   }
+  // v109-F9 (RSoP): the resolved policy as key → value → decided-by. It
+  // renders HERE, not on the Policies page, because "why is this the
+  // effective policy" is a per-repo question — the answer depends on this
+  // project's binding, phase, and attached groups, and the Policies page has
+  // no repo in hand. The raw overlay stays one disclosure deeper.
+  const rsopBinding = (project.bindings || [])
+    .find(b => b.kind === "repo_path" || b.kind === "repo_slug");
+  const effective = rsopBinding
+    ? await api("GET",
+      `/api/repos/${encodeURIComponent(rsopBinding.value)}/effective-policy`)
+      .catch(exc => ({ error: String(exc) }))
+    : null;
+  const provenance = effective?.policy_provenance;
+  const rsop = provenance
+    ? el("table", { class: "rsop-table" },
+      el("thead", {}, el("tr", {},
+        ["key", "value", "decided by"].map(h => el("th", {}, h)))),
+      el("tbody", {}, Object.entries(provenance).map(([key, entry]) => el("tr", {},
+        el("td", { class: "mono" }, key),
+        el("td", { class: "mono" }, JSON.stringify(entry.value)),
+        el("td", {}, el("span", { class: "chip tone-info" }, entry.decided_by))))))
+    : el("p", { class: "note" }, effective?.error
+      ? `policy did not resolve: ${effective.error}`
+      : "no repo binding — the resolved per-key view needs one");
   main.append(el("div", { class: "card" }, meta,
     el("details", {},
-      el("summary", {}, "effective policy"),
-      el("pre", { class: "mono" }, JSON.stringify(project.policy || {}, null, 2)))));
+      el("summary", {}, "effective policy — who decided each key"),
+      rsop,
+      el("details", {},
+        el("summary", {}, "project overlay (raw)"),
+        el("pre", { class: "mono" }, JSON.stringify(project.policy || {}, null, 2))))));
 
   const bound = schedules.filter(s => s.project_context?.project_id === projectId);
   main.append(el("h3", {}, `schedules (${bound.length})`));
@@ -4744,7 +4780,20 @@ async function viewPolicies(main) {
   header(main, "Policies",
     "Policy and scopes: autonomy and defaults. Every change rebuilds the config for the next "
     + "run; templates (skep setup --template) set these in one move.");
-  const policy = await api("GET", "/api/policy");
+  // v109-F9: every policy tier on one page — Global knobs, the Queen's
+  // Operator rules, Groups, and the Learned grants that auto-run things —
+  // behind the shared filter-bar pattern (Runs/Approvals).
+  const [policy, { groups }, ruleData] = await Promise.all([
+    api("GET", "/api/policy"),
+    api("GET", "/api/policy-groups"),
+    api("GET", "/api/policy/rules"),
+  ]);
+  const tiers = {
+    global: el("div", { class: "policy-tier" }),
+    operator: el("div", { class: "policy-tier" }),
+    groups: el("div", { class: "policy-tier" }),
+    learned: el("div", { class: "policy-tier" }),
+  };
   const auto = el("input", { type: "checkbox" });
   auto.checked = policy.auto_approve;
   const workerCmd = el("input", { value: policy.worker_cmd, class: "mono" });
@@ -4797,7 +4846,7 @@ async function viewPolicies(main) {
     el("summary", { class: "policy-section-header" }, title),
     el("div", { class: "policy-section-body" }, body));
 
-  main.append(
+  tiers.global.append(
     section("Execution defaults", true,
       el("div", { class: "row" },
         field("default execution", mode,
@@ -4844,7 +4893,6 @@ async function viewPolicies(main) {
   // v97-F5 (ADR 0048): policy groups — named convenience-grant bundles,
   // live-composed into every attached project's run policy. Edit once, all
   // follow; "Save as new group" is the copy-on-write escape hatch.
-  const { groups } = await api("GET", "/api/policy-groups");
   let groupEditHandoff = null;
   try {
     const raw = sessionStorage.getItem("skep-group-edit");
@@ -4937,7 +4985,28 @@ async function viewPolicies(main) {
     } catch (e) { flash("bad", e.message); }
   });
 
-  main.append(
+  // v109-F9: within Groups, filter by attached project — the same chip
+  // pattern, one level down.
+  const attachedProjects = [...new Set(groups.flatMap(g => g.attached_projects))].sort();
+  const groupList = el("div", {});
+  const renderGroupRows = (projectKey) => {
+    groupList.replaceChildren(...groups
+      .filter(g => projectKey === "all" || g.attached_projects.includes(projectKey))
+      .map(groupRow));
+  };
+  const projectBar = attachedProjects.length
+    ? buildFilterBar(
+      [{ key: "all", label: "All projects" },
+        ...attachedProjects.map(p => ({ key: p, label: p }))],
+      Object.fromEntries([
+        ["all", groups.length],
+        ...attachedProjects.map(p =>
+          [p, groups.filter(g => g.attached_projects.includes(p)).length]),
+      ]),
+      renderGroupRows)
+    : null;
+  renderGroupRows("all");
+  tiers.groups.append(
     el("details", { class: "policy-section", open: groupEditHandoff ? "" : null },
       el("summary", { class: "policy-section-header" }, "Policy groups"),
       el("div", { class: "policy-section-body" },
@@ -4946,8 +5015,88 @@ async function viewPolicies(main) {
           + "budgets, engine) attached to projects and composed live — the "
           + "project's own policy always wins scalars; trust-ramp keys can "
           + "never ride a group."),
-        ...groups.map(groupRow),
+        projectBar,
+        groupList,
         el("div", { class: "row" }, newGroupName, newGroupBtn))));
+
+  // v109-F9: the Queen's standing operator document — visible, read-only
+  // (its edits stay the carded set_operator_policy chat verb).
+  const operatorRules = ruleData.operator_rules || [];
+  tiers.operator.append(
+    section("Operator rules (the Queen's standing policy)", true,
+      el("p", { class: "field-help" },
+        "The Queen's own standing document (the set_operator_policy chat "
+        + "verb) — it governs Queen-side reads and fetches only, never "
+        + "workers. Read-only here."),
+      operatorRules.length
+        ? el("table", {},
+          el("thead", {}, el("tr", {},
+            ["scope", "action", "pattern", "verdict"].map(h => el("th", {}, h)))),
+          el("tbody", {}, operatorRules.map(r => el("tr", {},
+            el("td", {}, r.scope),
+            el("td", {}, r.action),
+            el("td", { class: "mono" }, r.pattern),
+            el("td", {}, r.verdict)))))
+        : el("p", { class: "empty-state" }, "No operator rules stored.")));
+
+  // v109-F9: learned rules — the standing grants that auto-run things. Until
+  // this section the operator could grant them but never see or revoke them.
+  const learnedRules = ruleData.rules || [];
+  const ruleRow = (rule) => {
+    const revoke = el("button", { class: "danger" }, "Revoke");
+    revoke.addEventListener("click", async () => {
+      if (!window.confirm(
+        `Revoke ${rule.rule_id}? The next matching action cards again.`)) return;
+      try {
+        await api("DELETE", `/api/policy/rules/${encodeURIComponent(rule.rule_id)}`);
+        flash("ok", `revoked ${rule.rule_id} — the next matching action cards again`);
+        route();
+      } catch (e) { flash("bad", e.message); }
+    });
+    return el("div", { class: "item-card learned-rule-row" },
+      el("div", { class: "row" },
+        el("span", { class: "mono" }, rule.rule_id),
+        el("span", { class: "note" },
+          `${rule.scope}/${rule.action} · `
+          + (rule.tier === "session" ? "session (ends on restart)" : "always")
+          + ` · ${rule.provenance}`
+          + (rule.created_at ? ` · granted ${rule.created_at}` : "")),
+        revoke));
+  };
+  tiers.learned.append(
+    section("Learned rules (standing grants)", true,
+      el("p", { class: "field-help" },
+        "Written by allow-always confirmations and approved cards — each rule "
+        + "lets its exact subject auto-run without a card. Session rules end "
+        + "when serve restarts; Revoke ends any rule now."),
+      learnedRules.length
+        ? el("div", { class: "stack" }, learnedRules.map(ruleRow))
+        : el("p", { class: "empty-state" },
+          "No learned rules — nothing auto-runs beyond stored policy.")));
+
+  // The tier filter shows one tier (or all); counts follow the tier contents.
+  const TIER_FILTERS = [
+    { key: "all", label: "All" },
+    { key: "global", label: "Global" },
+    { key: "operator", label: "Operator" },
+    { key: "groups", label: "Groups" },
+    { key: "learned", label: "Learned" },
+  ];
+  const globalSections = 4; // Execution defaults / Security / Advanced / Auto-approval
+  const tierCounts = {
+    all: globalSections + operatorRules.length + groups.length + learnedRules.length,
+    global: globalSections,
+    operator: operatorRules.length,
+    groups: groups.length,
+    learned: learnedRules.length,
+  };
+  main.append(
+    buildFilterBar(TIER_FILTERS, tierCounts, (key) => {
+      for (const [tier, wrap] of Object.entries(tiers)) {
+        wrap.classList.toggle("hidden", key !== "all" && key !== tier);
+      }
+    }),
+    tiers.global, tiers.operator, tiers.groups, tiers.learned);
 }
 
 // ---------- Settings (v75-F3: five tabs — one section's DOM at a time) ----------

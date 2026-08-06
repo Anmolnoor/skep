@@ -1382,6 +1382,20 @@ def merge_branch(
     }
 
 
+def landing_reason(instructions: str | None, branch: str | None) -> str:
+    """v109-F3: a landing approval's reason names WHAT lands and, when known,
+    WHERE. The Aug 3 field test rendered three same-day landings as identical
+    'apply_patch: patch application review' rows — a title carrying zero task
+    identity on every surface that shows approvals. The branch joins only when
+    the caller pinned one; guessing the default here could put a wrong branch
+    on the record (I8)."""
+    snippet = " ".join((instructions or "").split())
+    if len(snippet) > 80:
+        snippet = f"{snippet[:77]}…"
+    label = f'land "{snippet}"' if snippet else "land this run's patch"
+    return f"{label} → {branch}" if branch else label
+
+
 def land_run(
     store: RunStore,
     run: dict[str, Any],
@@ -1413,10 +1427,15 @@ def land_run(
                 status_code=409, detail="nothing to land: this run produced no patch"
             )
         review_id = store.enqueue_approval(
-            task_id, action="apply_patch", reason="patch application review"
+            task_id,
+            action="apply_patch",
+            reason=landing_reason(str(run.get("instructions") or ""), branch),
         )
     landed = apply_patch(store, run, review_id, actor, note, branch=branch)
     result: dict[str, Any] = {"action": "applied", "branch": landed}
+    # v109-F3: the Aug 3 model re-proposed land_run a minute after this very
+    # result — say the terminal state in words a small model acts on (I9).
+    result["next"] = f"landed on {landed} — this task is done; do not propose land_run for it again"
     warning = reverification_warning(store.reverification_for(task_id))
     if warning is not None:
         result["warning"] = warning
@@ -1663,6 +1682,14 @@ def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> d
             "verify_command": resolved.verify_command or "(worker-nominated fallback)",
         }
     )
+    # v109-F9 (RSoP): every effective policy key with its value and the layer
+    # that decided it — "why is this the effective policy" answered per key
+    # (I8). Keys the layering never touched read "global".
+    view["policy_provenance"] = {
+        key: {"value": value, "decided_by": resolved.provenance.get(key, "global")}
+        for key, value in sorted(resolved.policy.items())
+        if not key.startswith("_")
+    }
     # v97-F5 (ADR 0048): attached groups WITH what each contributes, so
     # "why is this host allowed" has an answer (I8) — the composed lists
     # above stay the truth; this is their provenance.
@@ -2601,6 +2628,57 @@ def resume_crashed_run(
     return {"resumed_as": resumed_id, "resume_of": task_id, "worktree": fate}
 
 
+def _age_text(updated_at: str) -> str:
+    """'{n}s'/'{n}m'/'{n}h' since the run's last transition (store format only)."""
+    try:
+        then = datetime.strptime(updated_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return "some time"
+    seconds = max(0.0, (datetime.now(UTC) - then).total_seconds())
+    if seconds >= 3600:
+        return f"{int(seconds // 3600)}h"
+    if seconds >= 60:
+        return f"{int(seconds // 60)}m"
+    return f"{int(seconds)}s"
+
+
+def preserved_resumable_hint(
+    holder: ConfigHolder, store: RunStore, *, repo: str, ref: str | None = None
+) -> str | None:
+    """v109-F6: one line the dispatch surfaces carry when a prior run on this
+    repo is resumable in a kept worktree — a hint, never a block.
+
+    The field failure was a fix-chain becoming three fresh dispatches for one
+    task while the v107 kept-worktree machinery sat uninvoked: nothing at the
+    dispatch surface mentioned the preserved tree. Both faces (the chat tool
+    result and ``POST /api/runs``) attach this same line; the dispatch itself
+    proceeds/cards exactly as before. None when nothing applies — including
+    an unresolvable repo, which stays submit_run's error to raise."""
+    from ..dispatch import PRESERVED_WORKTREE_TTL_SECONDS
+
+    try:
+        resolved = resolve_repo_arg(repo, repos_root(holder), store)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    rows = store.preserved_resumable_runs(
+        repo=str(resolved),
+        states=sorted(_resumable_states()),
+        ref=ref,
+        max_age_seconds=PRESERVED_WORKTREE_TTL_SECONDS,
+    )
+    for task_id, state, workspace, updated_at in rows:
+        # The predicate answers from rows; the tree on disk is the value —
+        # a sweep or manual removal leaves the row behind (same check as
+        # diagnose_run's).
+        if not workspace or not Path(workspace).is_dir():
+            continue
+        return (
+            f"run {task_id[:12]} {state} {_age_text(updated_at)} ago, worktree kept — "
+            "resume_run continues it in place; diagnose_run inspects it first"
+        )
+    return None
+
+
 def remember_commands_for_session(store: RunStore, commands: list[list[str]]) -> list[list[str]]:
     """v86-F1: a plain approve holds for the serve session — persist the
     eligible approved commands into the session tier (cleared at serve
@@ -2749,12 +2827,197 @@ def _persist_remembered_command(
                 pack_name=project.pack_name,
                 pack_version=project.pack_version,
             )
-        return
-    existing = list(policy_view(store, holder.current).get("allowed_shell_commands") or [])
-    if command not in existing:
-        existing.append(command)
-        store.set_setting(ALLOWED_SHELL_COMMANDS, existing)
-        holder.rebuild()
+    else:
+        existing_global = list(
+            policy_view(store, holder.current).get("allowed_shell_commands") or []
+        )
+        if command not in existing_global:
+            existing_global.append(command)
+            store.set_setting(ALLOWED_SHELL_COMMANDS, existing_global)
+            holder.rebuild()
+    # v109-F8: every historical approval of this exact command now has a
+    # standing grant — its ledger rows say so (I13).
+    store.mark_ledger_remembered(
+        action="shell.run", resource=shlex.join(command), repo_path=str(repo)
+    )
+
+
+def _persist_remembered_network_host(
+    store: RunStore, holder: ConfigHolder, repo: Path, host: str
+) -> None:
+    """v109-F7: the network twin of ``_persist_remembered_command``. Prefers
+    the repo's bound project policy (``default_network``) so remembering does
+    not silently widen every repo's egress; falls back to the global setting
+    when the repo is unbound."""
+    project = store.project_for_binding("repo_path", str(repo))
+    if project is not None:
+        existing = [str(entry) for entry in (project.policy.get("default_network") or [])]
+        if host not in existing:
+            existing.append(host)
+            updated = dict(project.policy)
+            updated["default_network"] = existing
+            store.add_project_policy(
+                project_id=project.project_id,
+                name=project.name,
+                strategy=project.strategy,
+                phase=project.phase,
+                policy=updated,
+                pack_name=project.pack_name,
+                pack_version=project.pack_version,
+            )
+    else:
+        existing = [
+            str(entry) for entry in (policy_view(store, holder.current).get(DEFAULT_NETWORK) or [])
+        ]
+        if host not in existing:
+            existing.append(host)
+            store.set_setting(DEFAULT_NETWORK, existing)
+            holder.rebuild()
+    # v109-F8: every historical approval of this host now has a standing
+    # grant — its ledger rows say so, whichever door persisted it (I13).
+    for network_action in ("network.fetch", "network.read"):
+        store.mark_ledger_remembered(action=network_action, resource=host, repo_path=str(repo))
+
+
+def allow_network_host_and_resume(
+    store: RunStore,
+    holder: ConfigHolder,
+    runner: Dispatcher,
+    run: dict[str, Any],
+    approval: dict[str, Any],
+    review_id: str,
+    actor: str,
+) -> str:
+    """v109-F7: the network twin of ``allow_shell_command_and_resume``.
+
+    A network approval was approve-once or resume-grant only — nothing could
+    say "this host is fine for this project, stop asking" (the field ledger
+    holds the same install host approved twice in one workspace). The blocked
+    hostname rides the approval decision's detail (the same slot the resume
+    verdict grants from, v90-F3); it lands in the project's ``default_network``
+    and the gated run resumes with the grant.
+    """
+    if run["state"] != "pending_approval":
+        raise HTTPException(status_code=409, detail="allow-host only applies to pending runs")
+    action = str(approval.get("action") or "")
+    if action not in ("network.fetch", "network.read"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "allow-host applies to network.fetch/network.read approvals; "
+                "for a shell command use allow-command"
+            ),
+        )
+    decision = approval_decision_for_action(
+        action=action, events=current_events(store, str(run["task_id"]))
+    )
+    host = "" if decision is None or decision.detail is None else str(decision.detail).strip()
+    if not host:
+        raise HTTPException(
+            status_code=409,
+            detail="this approval carries no hostname to remember; approve it once instead",
+        )
+    if host == "*" or "/" in host or ":" in host:
+        # The wildcard is the trust ramp, not a host — it is never remembered
+        # from an approval; a URL or host:port is not a bare hostname either.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{host!r} is not a rememberable bare hostname; approve it once instead",
+        )
+    repo = Path(str(run["repo"]))
+    _persist_remembered_network_host(store, holder, repo, host)
+    return resume_past_gate(
+        store,
+        holder.current,
+        runner,
+        run,
+        review_id,
+        actor,
+        remembered=True,
+    )
+
+
+def ledger_remember_suggestions(store: RunStore, repo: str | None = None) -> list[dict[str, Any]]:
+    """v109-F8: the keys the operator keeps approving, offered for remembering.
+
+    Derived from the ledger on read (deterministic — I6: only the operator's
+    confirm changes policy; this only notices the recurrence). Keys the floor
+    forbids are never suggested, however often they were approved."""
+    suggestions: list[dict[str, Any]] = []
+    for candidate in store.ledger_remember_candidates():
+        if repo is not None and candidate["repo"] != repo:
+            continue
+        if candidate["action"] == "shell.run":
+            try:
+                argv = normalize_remembered_command(shlex.split(str(candidate["resource"])))
+            except ValueError:
+                continue
+            if not argv or dangerous_prefix_reason(argv) is not None:
+                continue
+        suggestions.append(
+            {
+                **candidate,
+                "hint": (
+                    f"approved {candidate['count']}x on this repo with no standing "
+                    "grant — POST /api/ledger/remember persists it for the project"
+                ),
+            }
+        )
+    return suggestions
+
+
+def remember_suggestion_for_review(store: RunStore, review_id: str) -> str | None:
+    """The one-line nudge an approve response carries when its key just hit
+    the suggestion threshold (the F6 hint pattern: inform, never block)."""
+    entry = store.ledger_entry_for_review(review_id)
+    if entry is None or entry.remembered:
+        return None
+    for candidate in store.ledger_remember_candidates():
+        if (candidate["action"], candidate["resource"], candidate["repo"]) == (
+            entry.action,
+            entry.resource,
+            entry.repo_path,
+        ):
+            return (
+                f"this is approval #{candidate['count']} of exactly this on this repo — "
+                "'Allow & remember' (or POST /api/ledger/remember) would stop the asking"
+            )
+    return None
+
+
+def remember_ledger_entry(
+    store: RunStore, holder: ConfigHolder, *, action: str, resource: str, repo: str
+) -> dict[str, Any]:
+    """v109-F8: persist a suggested key as a standing project grant.
+
+    Routes through the SAME persist helpers the approval-time remember uses
+    (I5 — one path per scope), so the floor guards and the ledger marking
+    apply identically."""
+    repo_path = Path(repo)
+    if action == "shell.run":
+        try:
+            argv = normalize_remembered_command(shlex.split(resource))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=f"unparseable command: {exc}") from exc
+        if not argv:
+            raise HTTPException(status_code=409, detail="empty command cannot be remembered")
+        guard_reason = dangerous_prefix_reason(argv)
+        if guard_reason is not None:
+            raise HTTPException(status_code=409, detail=guard_reason)
+        _persist_remembered_command(store, holder, repo_path, argv)
+    elif action in ("network.fetch", "network.read"):
+        host = resource.strip()
+        if not host or host == "*" or "/" in host or ":" in host:
+            raise HTTPException(
+                status_code=409, detail=f"{host!r} is not a rememberable bare hostname"
+            )
+        _persist_remembered_network_host(store, holder, repo_path, host)
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail="only shell.run and network.fetch/network.read approvals can be remembered",
+        )
+    return {"remembered": True, "action": action, "resource": resource, "repo": repo}
 
 
 def allow_shell_command_and_resume(
@@ -3393,6 +3656,101 @@ def remember_action_for_session(
             return None
         return {"scope": "shell", "pattern": pattern, "tier": "session"}
     return None
+
+
+def list_policy_rules(store: RunStore) -> dict[str, Any]:
+    """v109-F9: every learned rule (durable AND session) plus the Queen's
+    standing operator rules — the read behind ``GET /api/policy/rules``.
+
+    The rules auto-run things the operator once approved; until this list they
+    had no surface at all — the operator could grant standing allowances
+    (allow_fetch_domain, allow_mcp_tool, a confirmed card's session grant) but
+    never see or revoke what auto-runs (I8).
+    """
+    from ..policy_schema import (
+        OPERATOR_POLICY_SETTINGS_KEY,
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        PolicyDocument,
+        document_from_settings,
+        is_session_rule,
+        operator_document_from_settings,
+    )
+
+    document = (
+        document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
+    )
+    operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
+    return {
+        "rules": [
+            {
+                "rule_id": rule.rule_id,
+                "scope": rule.scope,
+                "action": rule.action,
+                "pattern": rule.pattern,
+                # A learned rule always resolves as allow (policy_schema.resolve).
+                "verdict": "allow",
+                "provenance": rule.provenance,
+                "tier": "session" if is_session_rule(rule) else "always",
+                "created_at": rule.created_at,
+            }
+            for rule in document.learned
+        ],
+        # Read-only context for the Policies page's Operator tier: the Queen's
+        # standing document (set_operator_policy). Not revocable here — it is
+        # authored rules, not learned grants.
+        "operator_rules": [
+            {
+                "rule_id": rule.rule_id,
+                "scope": scope_policy.scope,
+                "action": rule.action,
+                "pattern": rule.pattern,
+                "verdict": verdict,
+            }
+            for scope_policy in operator.scopes
+            for verdict, group in (("allow", scope_policy.allow), ("deny", scope_policy.deny))
+            for rule in group
+        ],
+    }
+
+
+def revoke_policy_rule(store: RunStore, *, rule_id: str) -> dict[str, Any]:
+    """v109-F9: remove ONE learned rule (durable or session) by id.
+
+    The narrowing half of ``learn_policy_rule`` — after the revoke, the next
+    matching action cards again instead of auto-running. An unknown id refuses
+    naming the known set (I9). Shared verb: the chat ``revoke_policy_rule``
+    card and ``DELETE /api/policy/rules/{rule_id}`` both land here (I5).
+    """
+    from ..policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        PolicyDocument,
+        document_from_settings,
+        is_session_rule,
+    )
+
+    document = (
+        document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
+    )
+    revoked = next((rule for rule in document.learned if rule.rule_id == rule_id), None)
+    if revoked is None:
+        known = ", ".join(rule.rule_id for rule in document.learned) or "(none)"
+        raise HTTPException(
+            status_code=404, detail=f"no learned rule {rule_id!r}; known rules: {known}"
+        )
+    kept = [rule for rule in document.learned if rule.rule_id != rule_id]
+    updated = document.model_copy(update={"learned": kept})
+    store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
+    return {
+        "revoked": {
+            "rule_id": revoked.rule_id,
+            "scope": revoked.scope,
+            "action": revoked.action,
+            "pattern": revoked.pattern,
+            "provenance": revoked.provenance,
+            "tier": "session" if is_session_rule(revoked) else "always",
+        },
+        "remaining_rules": len(kept),
+    }
 
 
 def clear_session_policy_rules(store: RunStore) -> int:

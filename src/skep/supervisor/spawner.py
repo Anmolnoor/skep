@@ -138,6 +138,7 @@ def spawn_worker(
     sandbox_enabled: bool | None = None,
     extra_env: dict[str, str] | None = None,
     worker_argv: tuple[str, ...] | None = None,
+    extra_writable: Iterable[Path] = (),
 ) -> subprocess.Popen[bytes]:
     """Start the headless worker in its own session (so the whole tree is killable).
 
@@ -172,15 +173,19 @@ def spawn_worker(
     backend = resolve_sandbox_backend(config, network) if use_sandbox else None
     if use_sandbox and sandbox.availability(backend).usable:
         workspace = Path(task.workspace)
-        extra_writable = [
+        # v109-F4: ``extra_writable`` is per-run (the project dependency-cache
+        # root); every backend consumes this one list (Seatbelt subpaths,
+        # bwrap/podman binds), so the door opens on all of them.
+        writable = [
             out_path.parent,
             *git_metadata_writable_roots(workspace),
             *config.sandbox_writable_extra,
+            *extra_writable,
         ]
         profile_path = sandbox.write_profile(
             log_path.parent / "sandbox.profile.sb",
             workspace=workspace,
-            extra_writable=extra_writable,
+            extra_writable=writable,
             network=network,
             proxy_port=proxy_port,
             unix_socket_path=network_proxy_unix_path if proxy_port is not None else None,

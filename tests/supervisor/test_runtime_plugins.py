@@ -100,6 +100,51 @@ def test_shell_exec_denies_worker_commit(argv: list[str]) -> None:
         assert "landing approval is the commit" in decision.detail  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["rm", "-rf", "/"],
+        ["rm", "--no-preserve-root", "-r", "/anything"],
+        ["mkfs.ext4", "/dev/sda1"],
+        ["diskutil", "eraseDisk", "APFS", "Blank", "disk2"],
+        ["dd", "if=/dev/zero", "of=/dev/sda"],
+        ["shutdown", "-h", "now"],
+        ["init", "0"],
+        ["chmod", "-R", "777", "/etc"],
+    ],
+)
+def test_shell_exec_denies_catastrophic_commands(argv: list[str]) -> None:
+    """v109-F10: machine-wreckers are denied outright — before the verify
+    fast-path and every grant (the `_decide` helper passes argv into BOTH
+    grant sets), with the joke+teach detail."""
+    for purpose in ("run", "verify"):
+        decision = _decide(argv, purpose=purpose)
+        assert decision.verdict == "deny"  # type: ignore[attr-defined]
+        assert decision.reason == "capability.deny.catastrophic_command"  # type: ignore[attr-defined]
+        assert decision.detail  # type: ignore[attr-defined]
+
+
+def test_shell_exec_denies_string_level_catastrophes() -> None:
+    """v109-F10: shapes an argv cannot represent (fork bomb, device redirect)
+    are caught on the command string, still before the verify fast-path."""
+    for command in ("bash -c ':(){ :|:& };:'", "sh -c 'cat image.img > /dev/sda'"):
+        decision = SHELL_EXEC_PLUGIN.decision(
+            purpose="verify",
+            argv=command.split(),
+            command=command,
+            approved_shell_commands=[],
+            shell_allowlist=[],
+        )
+        assert decision.verdict == "deny"
+        assert decision.reason == "capability.deny.catastrophic_command"
+
+
+def test_shell_exec_keeps_workspace_rm_legal() -> None:
+    """The near-miss stays normal life: `rm -rf ./build` rides its allowlist."""
+    decision = _decide(["rm", "-rf", "./build"])
+    assert decision.verdict == "allow_with_constraints"  # type: ignore[attr-defined]
+
+
 def test_shell_exec_git_mutation_labeled_verify_does_not_fast_path() -> None:
     """v20-F1: a git mutation mislabeled purpose="verify" must not bypass approval
     (mutations not on the v22-F2 deny list still fall through to approval)."""
