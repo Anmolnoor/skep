@@ -1081,6 +1081,135 @@ def list_policy_groups(store: RunStore) -> dict[str, Any]:
     }
 
 
+# -- provider registry (v108-F2) ---------------------------------------------
+# The registry's first write path. One implementation, three faces (ADR 0050):
+# ``skep provider add|use|remove``, POST/DELETE /api/providers, and the carded
+# chat verbs all call THESE. Key VALUES never pass through here — api_key_env
+# is an env-var NAME (G2); validation rejects pasted keys (v48-F2 shape).
+
+
+def add_provider(
+    store: RunStore,
+    *,
+    provider_id: str | None = None,
+    protocol: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+    api_key_env: str | None = None,
+    cost_class: str | None = None,
+    fallback_order: int = 0,
+    allowed_network_hosts: tuple[str, ...] = (),
+    source: str = "manual",
+    preset: str | None = None,
+) -> dict[str, Any]:
+    """Register (or update) a provider profile. Raises ``ProviderError``.
+
+    v108-F3: ``preset`` names a catalog row (provider_presets.py) that fills
+    protocol/base_url/model/key-env; explicit arguments override it."""
+    from ..providers import ProviderError, ProviderProfile
+
+    if preset:
+        from ..provider_presets import profile_from_preset
+
+        profile = profile_from_preset(
+            preset,
+            provider_id=provider_id,
+            model=model,
+            base_url=base_url,
+            cost_class=cost_class,
+            fallback_order=fallback_order,
+        )
+        if api_key_env:
+            profile = replace(profile, api_key_env=api_key_env)
+        if allowed_network_hosts:
+            merged = dict.fromkeys((*profile.allowed_network_hosts, *allowed_network_hosts))
+            profile = replace(profile, allowed_network_hosts=tuple(merged))
+    else:
+        missing = [
+            name
+            for name, value in (
+                ("provider_id", provider_id),
+                ("protocol", protocol),
+                ("base_url", base_url),
+                ("model", model),
+            )
+            if not value
+        ]
+        if missing:
+            raise ProviderError(
+                f"{', '.join(missing)} required (or pass a preset from the catalog)"
+            )
+        assert provider_id and protocol and base_url and model  # narrowed above
+        profile = ProviderProfile(
+            provider_id=provider_id,
+            protocol=protocol,
+            base_url=base_url,
+            model=model,
+            allowed_network_hosts=tuple(allowed_network_hosts),
+            cost_class=cost_class or "paid",
+            fallback_order=fallback_order,
+            api_key_env=api_key_env,
+            source=source,
+        )
+    saved = store.upsert_provider_profile(profile)
+    result: dict[str, Any] = {"provider": asdict(saved)}
+    if preset:
+        from ..provider_presets import PROVIDER_PRESETS, preset_egress_note
+
+        # I8: the record says what selecting this preset means for egress.
+        result["egress"] = preset_egress_note(PROVIDER_PRESETS[preset], saved.base_url)
+    return result
+
+
+def remove_provider(store: RunStore, *, provider_id: str) -> dict[str, Any]:
+    """Delete a profile. Removing the ACTIVE profile does not touch the saved
+    assistant llm_* settings — the Queen keeps speaking its current config
+    until another profile is activated."""
+    from ..providers import ProviderError
+
+    profile = store.get_provider_profile(provider_id)
+    if profile is None:
+        raise ProviderError(f"unknown provider {provider_id!r}")
+    store.delete_provider_profile(provider_id)
+    return {"removed": provider_id, "was_active": profile.active}
+
+
+def use_provider(store: RunStore, home: Path, *, provider_id: str) -> dict[str, Any]:
+    """Activate a profile AND write it through to the assistant llm_* settings
+    (the v19-F9 contract) — an activation the Queen does not actually speak
+    would be a lie (I8). ``home`` is the supervisor home."""
+    from ..providers import ProviderError
+    from .llm import (
+        LLM_BASE_URL,
+        LLM_DEFAULT_MODEL,
+        LLM_PROTOCOL,
+        REGISTRY_PROTOCOLS,
+        _write_through_profile,
+        refresh_model_ctx,
+    )
+
+    profile = store.get_provider_profile(provider_id)
+    if profile is None:
+        raise ProviderError(f"unknown provider {provider_id!r}")
+    serve_protocol = REGISTRY_PROTOCOLS.get(profile.protocol)
+    if serve_protocol is None:
+        # The v42 lesson: an unroutable protocol refuses loudly, never falls
+        # back to a different wire format.
+        raise ProviderError(f"protocol {profile.protocol!r} has no wire client")
+    store.set_active_provider(provider_id)
+    store.set_setting(LLM_BASE_URL, profile.base_url)
+    store.set_setting(LLM_DEFAULT_MODEL, profile.model)
+    store.set_setting(LLM_PROTOCOL, serve_protocol)
+    refresh_model_ctx(store, home, profile.model)
+    _write_through_profile(store, home.parent)
+    return {
+        "active": provider_id,
+        "model": profile.model,
+        "protocol": serve_protocol,
+        "note": "chats and default workers use this from their next turn",
+    }
+
+
 def refresh_repo(
     holder: ConfigHolder, repo: str, *, store: RunStore | None = None
 ) -> dict[str, Any]:

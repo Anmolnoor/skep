@@ -132,6 +132,8 @@ def test_chat_detail_carries_server_computed_context(
     # v101-F12: dispatch_run's per-caste guidance is generated from the caste
     # registry (875 chars) so five of eight castes stop being unreachable from
     # chat; pin 23KB -> 24KB, the explicit decision recorded in test_tool_index.
+    # v108-F2 moved the tool-index pin 24KB -> 24.5KB (see test_tool_index).
+    assert 15000 < context["floor_chars"] <= 24500
     assert 15000 < context["floor_chars"] <= 24500
     assert context["history_chars"] == 0
     assert context["compacted"] is False

@@ -157,6 +157,14 @@ def test_the_fresh_chat_floor_is_measured_under_24kb(
     enough, so the pin moves 23KB → 24KB. It is still 3.5KB below where v99
     found it.
 
+    v108-F2 re-measured. The provider registry's first operator face — four
+    verbs (list/add/use/remove provider) — costs ~350 chars of index lines
+    and takes the floor over 24KB; the glosses were tightened to first-
+    sentence budgets before the move (I9 forbids gutting them further: the
+    small model reads nothing else). The pin moves 24KB → 24.5KB, sized to
+    also absorb the two protocol enum values v108-F5/F6 add. Still 3KB
+    below where v99 found it.
+
     v109 re-measured: the round paid byte-for-byte before asking — F7 FOLDED
     its network-remember into allow_command_review instead of shipping a
     second tool (a spec entry costs more than any description trim recovers),

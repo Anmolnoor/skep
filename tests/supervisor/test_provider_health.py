@@ -32,6 +32,32 @@ def _profile(**kw: object) -> ProviderProfile:
     return ProviderProfile(**base)  # type: ignore[arg-type]
 
 
+def test_anthropic_registry_profile_probes_healthy(tmp_path: Path) -> None:
+    """v108-F1: the probe bridge is the shared REGISTRY_PROTOCOLS map — the
+    old two-entry dict omitted anthropic, so an anthropic profile was recorded
+    permanently unreachable and routing never picked it."""
+    from skep.supervisor.serve.ticker import _probe_list_models
+
+    from .fake_anthropic import FakeAnthropic
+
+    fake = FakeAnthropic(models=["claude-sonnet-5"])
+    fake.start()
+    try:
+        profile = _profile(
+            provider_id="claude",
+            protocol="anthropic",
+            base_url=fake.base_url,
+            model="claude-sonnet-5",
+            cost_class="paid",
+        )
+        health = check_provider_health(profile, list_models=_probe_list_models(tmp_path), now=_NOW)
+    finally:
+        fake.stop()
+    assert health.reachable is True
+    assert health.model_found is True
+    assert health.error is None
+
+
 def test_healthy_provider_reports_model_found_and_latency() -> None:
     health = check_provider_health(
         _profile(), list_models=lambda _p: ["qwen3", "llama3.2"], now=_NOW

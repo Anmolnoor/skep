@@ -88,7 +88,9 @@ def test_reach_block_sizes_are_measured(config: SupervisorConfig) -> None:
     try:
         _seed_registries(store)
         block = reach_block(store)
-        assert 0 < len(block) < 9_000  # v99-F3: re-encoded index, ratcheted
+        # v99-F3 re-encoded and ratcheted; v108-F2 spends 500 of it on the
+        # provider registry's four operator verbs (+ F5/F6 protocol enums).
+        assert 0 < len(block) < 9_500
         # Skills + MCP sections alone (headers + entries) — the fold-in cost.
         skills_and_mcp = block[block.index("Approved skills") :]
         assert len(skills_and_mcp) < 1_000  # v99-F2: names, not descriptions

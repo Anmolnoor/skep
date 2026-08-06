@@ -121,9 +121,9 @@ def _check_shell_guard(fixture: dict[str, Any]) -> None:
 
 
 def _check_network_merge(fixture: dict[str, Any], tmp_path: Path) -> None:
-    """v19-F2/F11: the configured provider host is merged into a coding run's
-    network allowlist on every creation path (and only for the coding caste),
-    driven by the real ``resolve_run_policy``."""
+    """v19-F2/F11: the configured provider host is merged into a run's network
+    allowlist on every creation path (for the castes that declare
+    ``needs_provider`` — v108-F1), driven by the real ``resolve_run_policy``."""
     config = SupervisorConfig(home=tmp_path / "home", worker_command=("false",))
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)

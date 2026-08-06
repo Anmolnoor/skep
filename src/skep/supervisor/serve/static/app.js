@@ -1579,7 +1579,9 @@ async function viewSetup(main, setup) {
   const protocol = el("select", {},
     el("option", { value: "ollama" }, "Ollama"),
     el("option", { value: "openai-compat" }, "OpenAI-compatible"),
-    el("option", { value: "anthropic" }, "Anthropic"));
+    el("option", { value: "anthropic" }, "Anthropic"),
+    el("option", { value: "openai-responses" }, "OpenAI Responses"),
+    el("option", { value: "bedrock" }, "AWS Bedrock"));
   protocol.value = llm.protocol || "ollama";
   const baseUrl = el("input", {
     value: llm.base_url || "",
@@ -1642,6 +1644,7 @@ async function viewSetup(main, setup) {
   main.append(el("div", { class: "card" },
     el("h3", {}, "LLM"),
     el("div", { class: "row" },
+      el("div", { class: "field" }, el("label", {}, "preset"), buildPresetPicker(protocol, baseUrl)),
       el("div", { class: "field" }, el("label", {}, "protocol"), protocol),
       el("div", { class: "field grow" }, el("label", {}, "base URL"), baseUrl),
       el("div", { class: "field grow" }, el("label", {}, "API key"), apiKey),
@@ -5115,13 +5118,38 @@ async function viewSettings(main) {
   main.append(tabs.bar, tabs.content);
 }
 
+// v108-F9: the preset picker — one catalog row (GET /api/provider-presets)
+// fills protocol + base URL; registry spelling maps to the wire spelling by
+// swapping underscores. The key still goes in by hand: values never ride
+// the catalog, and azure (no fixed URL) stays type-it-yourself.
+function buildPresetPicker(protocol, baseUrl) {
+  const presets = {};
+  const picker = el("select", {}, el("option", { value: "" }, "preset\u2026"));
+  api("GET", "/api/provider-presets").then((cat) => {
+    for (const p of cat.presets) {
+      if (!p.base_url) continue;
+      presets[p.preset_id] = p;
+      picker.append(el("option", { value: p.preset_id }, p.label));
+    }
+  }).catch(() => {});
+  picker.addEventListener("change", () => {
+    const p = presets[picker.value];
+    if (!p) return;
+    protocol.value = p.protocol.replace(/_/g, "-");
+    baseUrl.value = p.base_url;
+  });
+  return picker;
+}
+
 // -- assistant (v6): URL + key -> test -> pick a default model --------------
 async function renderAssistantTab(panel) {
   const llm = await api("GET", "/api/llm/config");
   const protocol = el("select", {},
     el("option", { value: "ollama" }, "Ollama"),
     el("option", { value: "openai-compat" }, "OpenAI-compatible"),
-    el("option", { value: "anthropic" }, "Anthropic"));
+    el("option", { value: "anthropic" }, "Anthropic"),
+    el("option", { value: "openai-responses" }, "OpenAI Responses"),
+    el("option", { value: "bedrock" }, "AWS Bedrock"));
   protocol.value = llm.protocol || "ollama";
   const baseUrl = el("input", {
     value: llm.base_url || "",
@@ -5145,6 +5173,7 @@ async function renderAssistantTab(panel) {
   });
   const llmCard = el("div", { class: "card" },
     el("div", { class: "row" },
+      el("div", { class: "field" }, el("label", {}, "preset"), buildPresetPicker(protocol, baseUrl)),
       el("div", { class: "field" }, el("label", {}, "assistant protocol"), protocol),
       el("div", { class: "field grow" }, el("label", {}, "assistant base URL"), baseUrl),
       el("div", { class: "field grow" },

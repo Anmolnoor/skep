@@ -21,7 +21,8 @@ import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Literal, TypeGuard
+from typing import TYPE_CHECKING, Any, Literal, TypeGuard, get_args
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -29,7 +30,23 @@ from pydantic import BaseModel
 
 from ..store import RunStore
 
-LLMProtocol = Literal["ollama", "openai-compat", "anthropic"]
+if TYPE_CHECKING:
+    from ..providers import ProviderProfile
+
+LLMProtocol = Literal["ollama", "openai-compat", "anthropic", "openai-responses", "bedrock"]
+_PROTOCOL_VALUES: tuple[str, ...] = get_args(LLMProtocol)
+# v108-F1: the ONE registry->serve protocol bridge. The registry spells
+# protocols with underscores (providers.PROVIDER_PROTOCOLS); the wire uses
+# this Literal. This map lived in ticker.py with only two entries, so an
+# anthropic registry profile could never probe healthy and routing skipped
+# it forever. test_protocol_vocabulary pins every derived surface to it.
+REGISTRY_PROTOCOLS: dict[str, LLMProtocol] = {
+    "ollama": "ollama",
+    "openai_compat": "openai-compat",
+    "anthropic": "anthropic",
+    "openai_responses": "openai-responses",
+    "bedrock": "bedrock",
+}
 LLM_BASE_URL = "llm_base_url"
 LLM_DEFAULT_MODEL = "llm_default_model"
 LLM_PROTOCOL = "llm_protocol"
@@ -96,6 +113,76 @@ def store_api_key(home: Path, value: str) -> None:
     home.mkdir(parents=True, exist_ok=True)
     path.write_text(value + "\n", encoding="utf-8")
     path.chmod(0o600)
+
+
+# v108-F4: per-profile keys. One llm-secret could not serve a multi-provider
+# registry — chat, workers, and probes all collapsed onto it, so a second
+# provider's credential had nowhere to live. Each profile gets its own 0600
+# file beside llm-secret (the ADR 0019 exception extended per profile,
+# ADR 0051). Resolution order everywhere: the profile's NAMED env var → its
+# own file → the legacy llm-secret (v19-F9 compatibility).
+_PROVIDER_SECRET_PREFIX = "llm-secret-"
+
+
+def provider_secret_path(home: Path, provider_id: str) -> Path:
+    # provider_id is slug-validated at the registry write path, so it cannot
+    # traverse out of home.
+    return home / f"{_PROVIDER_SECRET_PREFIX}{provider_id}"
+
+
+def store_provider_api_key(home: Path, provider_id: str, value: str) -> None:
+    """Persist (or, for an empty value, remove) one profile's key — 0600."""
+    path = provider_secret_path(home, provider_id)
+    if not value:
+        path.unlink(missing_ok=True)
+        return
+    home.mkdir(parents=True, exist_ok=True)
+    path.write_text(value + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def resolve_provider_api_key(home: Path, profile: ProviderProfile) -> str | None:
+    key = _raw_provider_api_key(home, profile)
+    if key is None:
+        return None
+    from ..providers import provider_host
+
+    if provider_host(profile.base_url) == "api.githubcopilot.com":
+        # v108-F7: a Copilot endpoint takes a short-lived bearer, not the
+        # GitHub token itself — exchange (and cache) it transparently.
+        from .llm_copilot import resolve_copilot_bearer
+
+        return resolve_copilot_bearer(key)
+    return key
+
+
+def _raw_provider_api_key(home: Path, profile: ProviderProfile) -> str | None:
+    if profile.api_key_env:
+        env = os.environ.get(profile.api_key_env, "").strip()
+        if env:
+            return env
+    path = provider_secret_path(home, profile.provider_id)
+    if path.is_file():
+        value = path.read_text(encoding="utf-8").strip()
+        if value:
+            return value
+    return resolve_api_key(home)
+
+
+def resolve_active_api_key(
+    store: RunStore, home: Path, *, base_url: str | None = None
+) -> str | None:
+    """The key for the ACTIVE registry profile — what chat and the model
+    listing authenticate with. ``base_url`` guards divergence: when the
+    saved llm_* settings no longer match the active profile (a manual PUT
+    /api/llm/config), the profile's credential must not leak onto a
+    different endpoint, so the legacy single secret applies instead."""
+    active = store.active_provider_profile()
+    if active is None:
+        return resolve_api_key(home)
+    if base_url is not None and active.base_url.rstrip("/") != base_url.strip().rstrip("/"):
+        return resolve_api_key(home)
+    return resolve_provider_api_key(home, active)
 
 
 def llm_config_view(store: RunStore, home: Path) -> dict[str, Any]:
@@ -186,12 +273,13 @@ def detect_model_ctx(
 
     ollama reports it via POST /api/show under an architecture-prefixed
     ``model_info`` key (``llama.context_length``, ``qwen3.context_length``, …);
-    the ``.context_length`` suffix is the stable part. openai-compat has no
-    standard endpoint.
+    the ``.context_length`` suffix is the stable part. openai-compat and
+    bedrock have no standard endpoint — they fall through to None.
     """
     if protocol == "anthropic":
         return _ANTHROPIC_CTX_FLOOR
     if protocol != "ollama":
+        # openai-compat and openai-responses (v108-F5) have no such endpoint.
         return None
     try:
         response = httpx.post(
@@ -233,8 +321,25 @@ def _headers(api_key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
+def openai_style_prefix(base_url: str) -> str:
+    """v108-F11: where an OpenAI-style API's path root lives. A bare host
+    gets the conventional ``/v1`` appended (``api.openai.com`` →
+    ``api.openai.com/v1``); a base that already carries a path IS the prefix,
+    verbatim (``openrouter.ai/api/v1``, ``api.z.ai/api/paas/v4``) — the
+    OpenAI-SDK convention operators know. Before this rule the client
+    hardcoded ``/v1``, so a path-carrying provider was unreachable under
+    either spelling."""
+    trimmed = base_url.rstrip("/")
+    if urlparse(trimmed).path in ("", "/"):
+        return trimmed + "/v1"
+    return trimmed
+
+
 def _protocol(value: Any | None) -> LLMProtocol:
-    return value if value in ("ollama", "openai-compat", "anthropic") else DEFAULT_LLM_PROTOCOL
+    # Unknown values fall back (never raise): legacy settings rows predate the
+    # vocabulary and must keep the daemon bootable. New-protocol additions grow
+    # the Literal, and this guard follows automatically.
+    return value if value in _PROTOCOL_VALUES else DEFAULT_LLM_PROTOCOL
 
 
 def list_models(
@@ -244,10 +349,15 @@ def list_models(
     protocol: LLMProtocol = DEFAULT_LLM_PROTOCOL,
     timeout: float = 10.0,
 ) -> list[str]:
-    if protocol == "openai-compat":
+    if protocol in ("openai-compat", "openai-responses"):
+        # v108-F5: the Responses API ships the same GET /v1/models listing.
         return _list_openai_models(base_url, api_key, timeout=timeout)
     if protocol == "anthropic":
         return _list_anthropic_models(base_url, api_key, timeout=timeout)
+    if protocol == "bedrock":
+        from .llm_bedrock import list_bedrock_models  # local import: llm_bedrock imports us
+
+        return list_bedrock_models(base_url, api_key, timeout=timeout)
     return _list_ollama_models(base_url, api_key, timeout=timeout)
 
 
@@ -269,7 +379,7 @@ def _list_ollama_models(base_url: str, api_key: str | None, *, timeout: float) -
 def _list_openai_models(base_url: str, api_key: str | None, *, timeout: float) -> list[str]:
     try:
         response = httpx.get(
-            f"{base_url.rstrip('/')}/v1/models", headers=_headers(api_key), timeout=timeout
+            f"{openai_style_prefix(base_url)}/models", headers=_headers(api_key), timeout=timeout
         )
         response.raise_for_status()
         payload = response.json()
@@ -302,6 +412,23 @@ def chat_stream(
     if protocol == "anthropic":
         # anthropic sizes its own context too; num_ctx is ollama-only.
         yield from _anthropic_chat_stream(
+            base_url, api_key, model=model, messages=messages, tools=tools, timeout=timeout
+        )
+        return
+    if protocol == "openai-responses":
+        # v108-F5: the Responses API sizes its own context; num_ctx is
+        # ollama-only. Imported here — llm_responses imports this module.
+        from .llm_responses import responses_chat_stream
+
+        yield from responses_chat_stream(
+            base_url, api_key, model=model, messages=messages, tools=tools, timeout=timeout
+        )
+        return
+    if protocol == "bedrock":
+        # bedrock sizes its own context too; num_ctx is ollama-only.
+        from .llm_bedrock import bedrock_chat_stream  # local import: llm_bedrock imports us
+
+        yield from bedrock_chat_stream(
             base_url, api_key, model=model, messages=messages, tools=tools, timeout=timeout
         )
         return
@@ -450,7 +577,7 @@ def _openai_chat_stream(
     pending_calls: dict[int, dict[str, str]] = {}
     try:
         for line in _open_stream_lines(
-            f"{base_url.rstrip('/')}/v1/chat/completions",
+            f"{openai_style_prefix(base_url)}/chat/completions",
             base_url,
             headers=_headers(api_key),
             body=body,
@@ -865,7 +992,9 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
         if not base_url:
             raise HTTPException(status_code=409, detail="configure the LLM base URL first")
         protocol = _protocol(run_store.get_setting(LLM_PROTOCOL))
+        # v108-F4: the active profile's own credential, when settings match it.
+        api_key = resolve_active_api_key(run_store, home, base_url=str(base_url))
         try:
-            return {"models": list_models(str(base_url), resolve_api_key(home), protocol=protocol)}
+            return {"models": list_models(str(base_url), api_key, protocol=protocol)}
         except OllamaError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc

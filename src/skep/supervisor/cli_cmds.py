@@ -1607,6 +1607,184 @@ def cmd_provider_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provider_presets(args: argparse.Namespace) -> int:
+    """v108-F3: the catalog, one row per preset — including what each one
+    means for egress (I8)."""
+    from .provider_presets import PROVIDER_PRESETS, preset_view
+
+    print(f"{'preset':<20} {'protocol':<17} {'key env':<28} default model")
+    for preset in PROVIDER_PRESETS.values():
+        view = preset_view(preset)
+        print(
+            f"{preset.preset_id:<20} {preset.protocol:<17} "
+            f"{preset.api_key_env or '-':<28} {preset.default_model}"
+        )
+        print(f"{'':<20} {view['egress']}")
+        if preset.auth_note:
+            print(f"{'':<20} auth: {preset.auth_note}")
+    print("\nregister one: skep provider add <id> --preset <preset> [--model M] [--activate]")
+    return 0
+
+
+def cmd_provider_add(args: argparse.Namespace) -> int:
+    """v108-F2: the registry's CLI write face — same actions.py verb as
+    POST /api/providers and the carded chat tool (ADR 0050)."""
+    from .providers import ProviderError
+    from .serve.actions import add_provider, use_provider
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        try:
+            result = add_provider(
+                store,
+                provider_id=args.provider_id,
+                protocol=args.protocol,
+                base_url=args.base_url,
+                model=args.model,
+                api_key_env=args.api_key_env,
+                cost_class=args.cost_class,
+                fallback_order=args.order,
+                allowed_network_hosts=tuple(args.host or ()),
+                preset=args.preset,
+            )
+            provider = result["provider"]
+            if args.activate:
+                result.update(use_provider(store, config.home, provider_id=provider["provider_id"]))
+        except ProviderError as exc:
+            return _err(str(exc))
+    finally:
+        store.close()
+    print(f"registered {provider['provider_id']} ({provider['protocol']} @ {provider['base_url']})")
+    if "egress" in result:
+        print(result["egress"])
+    if args.activate:
+        print(f"active: the assistant speaks {provider['model']} from its next turn")
+    return 0
+
+
+def cmd_provider_use(args: argparse.Namespace) -> int:
+    from .providers import ProviderError
+    from .serve.actions import use_provider
+
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        return _err("no providers configured")
+    store = RunStore(config.db_path)
+    try:
+        try:
+            result = use_provider(store, config.home, provider_id=args.provider_id)
+        except ProviderError as exc:
+            return _err(str(exc))
+    finally:
+        store.close()
+    print(f"active: {result['active']} — {result['model']} over {result['protocol']}")
+    print(result["note"])
+    return 0
+
+
+def cmd_provider_remove(args: argparse.Namespace) -> int:
+    from .providers import ProviderError
+    from .serve.actions import remove_provider
+
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        return _err("no providers configured")
+    store = RunStore(config.db_path)
+    try:
+        try:
+            result = remove_provider(store, provider_id=args.provider_id)
+        except ProviderError as exc:
+            return _err(str(exc))
+    finally:
+        store.close()
+    note = " (was active; the saved assistant config is unchanged)" if result["was_active"] else ""
+    print(f"removed {result['removed']}{note}")
+    return 0
+
+
+def cmd_provider_set_key(args: argparse.Namespace) -> int:
+    """v108-F4: store one profile's key in its own 0600 file. The value is
+    read from stdin (tty: hidden prompt) — never from argv, which would leak
+    into shell history and the process table."""
+    from .serve.llm import provider_secret_path, store_provider_api_key
+
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        return _err("no providers configured")
+    store = RunStore(config.db_path)
+    try:
+        profile = store.get_provider_profile(args.provider_id)
+    finally:
+        store.close()
+    if profile is None:
+        return _err(f"unknown provider {args.provider_id!r}")
+    if args.clear:
+        store_provider_api_key(config.home, args.provider_id, "")
+        print(f"cleared key for {args.provider_id}")
+        return 0
+    if sys.stdin.isatty():
+        import getpass
+
+        value = getpass.getpass(f"API key for {args.provider_id}: ")
+    else:
+        value = sys.stdin.readline()
+    value = value.strip()
+    if not value:
+        return _err("empty key (pass --clear to remove a stored one)")
+    store_provider_api_key(config.home, args.provider_id, value)
+    path = provider_secret_path(config.home, args.provider_id)
+    print(f"stored key for {args.provider_id} ({path.name}, 0600 — never sqlite, never a GET)")
+    if profile.api_key_env:
+        print(f"note: env var {profile.api_key_env} still wins over the file when set")
+    return 0
+
+
+def cmd_provider_login(args: argparse.Namespace) -> int:
+    """v108-F8: the RFC 8628 device flow, ending in the same 0600 file
+    ``set-key`` writes. ``--client-id`` is required and has no default: skep
+    ships no OAuth client id for any provider (ADR 0051), so the app being
+    authorized is always one the operator registered or was handed."""
+    from .provider_login import KNOWN_LOGIN_ENDPOINTS, DeviceEndpoints, ProviderLoginError
+    from .provider_login import device_login as run_device_login
+    from .serve.llm import provider_secret_path, store_provider_api_key
+
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        return _err("no providers configured")
+    store = RunStore(config.db_path)
+    try:
+        profile = store.get_provider_profile(args.provider_id)
+    finally:
+        store.close()
+    if profile is None:
+        return _err(
+            f"unknown provider {args.provider_id!r}",
+            next_command=f"skep provider add {args.provider_id} --preset <preset>",
+        )
+    known = KNOWN_LOGIN_ENDPOINTS.get(args.provider_id)
+    device_url = args.device_url or (known.device_url if known else None)
+    token_url = args.token_url or (known.token_url if known else None)
+    if not device_url or not token_url:
+        return _err(
+            f"no device-flow endpoints known for {args.provider_id!r}",
+            evidence=f"known: {', '.join(sorted(KNOWN_LOGIN_ENDPOINTS)) or 'none'}",
+            next_command="skep provider login ID --client-id CID --device-url U --token-url U",
+        )
+    scope = args.scope if args.scope is not None else (known.scope if known else "")
+    endpoints = DeviceEndpoints(device_url=device_url, token_url=token_url, scope=scope)
+    try:
+        token = run_device_login(endpoints, args.client_id, printer=print, sleeper=time.sleep)
+    except ProviderLoginError as exc:
+        return _err(str(exc))
+    store_provider_api_key(config.home, args.provider_id, token)
+    path = provider_secret_path(config.home, args.provider_id)
+    print(f"stored key for {args.provider_id} ({path.name}, 0600 — never sqlite, never a GET)")
+    if profile.api_key_env:
+        print(f"note: env var {profile.api_key_env} still wins over the file when set")
+    return 0
+
+
 def cmd_provider_health(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     if not config.db_path.is_file():
@@ -2471,13 +2649,78 @@ def register_supervisor_commands(
     sched_health = schedule_sub.add_parser("health", help="schedule health (v14)")
     sched_health.set_defaults(func=cmd_schedule_health)
 
-    # v14: provider registry + health views.
+    # v14: provider registry + health views; v108-F2: the write faces.
+    from .providers import PROVIDER_COST_CLASSES, PROVIDER_PROTOCOLS
+
     provider = subcommands.add_parser("provider", help="model provider registry (v14)")
     provider_sub = provider.add_subparsers(dest="provider_command")
     prov_list = provider_sub.add_parser("list", help="list registered providers")
     prov_list.set_defaults(func=cmd_provider_list)
     prov_health = provider_sub.add_parser("health", help="latest provider health")
     prov_health.set_defaults(func=cmd_provider_health)
+    prov_presets = provider_sub.add_parser("presets", help="the preset catalog (v108)")
+    prov_presets.set_defaults(func=cmd_provider_presets)
+    prov_add = provider_sub.add_parser("add", help="register a provider profile (v108)")
+    prov_add.add_argument("provider_id", nargs="?", default=None)
+    prov_add.add_argument("--preset", default=None, help="preset id from `skep provider presets`")
+    prov_add.add_argument("--protocol", default=None, choices=sorted(PROVIDER_PROTOCOLS))
+    prov_add.add_argument("--base-url", default=None, dest="base_url")
+    prov_add.add_argument("--model", default=None)
+    prov_add.add_argument(
+        "--api-key-env",
+        dest="api_key_env",
+        default=None,
+        help="env var NAME holding the key (never the key value)",
+    )
+    prov_add.add_argument(
+        "--cost-class",
+        dest="cost_class",
+        default=None,  # None: the preset's class (or 'paid') wins
+        choices=sorted(PROVIDER_COST_CLASSES),
+    )
+    prov_add.add_argument("--order", type=int, default=0, help="fallback order (0 = primary)")
+    prov_add.add_argument(
+        "--host",
+        action="append",
+        default=None,
+        help="extra egress host this provider needs (repeatable)",
+    )
+    prov_add.add_argument(
+        "--activate", action="store_true", help="also make it the assistant's active config"
+    )
+    prov_add.set_defaults(func=cmd_provider_add)
+    prov_use = provider_sub.add_parser(
+        "use", help="activate a profile — the assistant speaks it next turn"
+    )
+    prov_use.add_argument("provider_id")
+    prov_use.set_defaults(func=cmd_provider_use)
+    prov_key = provider_sub.add_parser(
+        "set-key", help="store a profile's API key (stdin, 0600 file — v108)"
+    )
+    prov_key.add_argument("provider_id")
+    prov_key.add_argument("--clear", action="store_true", help="remove the stored key")
+    prov_key.set_defaults(func=cmd_provider_set_key)
+    prov_login = provider_sub.add_parser(
+        "login", help="OAuth device-code login, storing the token as the key (v108)"
+    )
+    prov_login.add_argument("provider_id")
+    prov_login.add_argument(
+        "--client-id",
+        dest="client_id",
+        required=True,
+        help="YOUR OAuth client id — skep ships none for any provider (ADR 0051)",
+    )
+    prov_login.add_argument(
+        "--device-url", dest="device_url", default=None, help="device authorization endpoint"
+    )
+    prov_login.add_argument(
+        "--token-url", dest="token_url", default=None, help="token endpoint polled for the grant"
+    )
+    prov_login.add_argument("--scope", default=None, help="OAuth scope requested")
+    prov_login.set_defaults(func=cmd_provider_login)
+    prov_remove = provider_sub.add_parser("remove", help="delete a provider profile")
+    prov_remove.add_argument("provider_id")
+    prov_remove.set_defaults(func=cmd_provider_remove)
 
     tick = subcommands.add_parser("tick", help="dispatch all due schedules (call from cron)")
     tick.add_argument(

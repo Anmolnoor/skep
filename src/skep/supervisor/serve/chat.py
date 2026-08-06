@@ -49,7 +49,7 @@ from .llm import (
     chat_num_ctx,
     chat_stream,
     llm_config_view,
-    resolve_api_key,
+    resolve_active_api_key,
     resolved_num_ctx,
     tool_delivery,
 )
@@ -913,7 +913,10 @@ class ChatEngine:
                 status_code=409,
                 detail="configure the assistant first: base URL and a default model (Settings)",
             )
-        return str(config["base_url"]), resolve_api_key(self.home), str(model), config["protocol"]
+        # v108-F4: the active profile's own credential (per-profile secret /
+        # named env var), falling back to the legacy llm-secret.
+        api_key = resolve_active_api_key(self.store, self.home, base_url=str(config["base_url"]))
+        return str(config["base_url"]), api_key, str(model), config["protocol"]
 
     def _system_prompt(self, chat_id: str) -> str:
         """The operative prompt assembled in the pinned v53 order:

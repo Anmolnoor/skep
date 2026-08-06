@@ -15,7 +15,7 @@ import json
 import re
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from fastapi import HTTPException
 
@@ -24,9 +24,11 @@ from ..castes import CASTES, caste_names
 from ..engines import engine_names
 from ..memory import MEMORY_CLASSES, MemoryError
 from ..projects import list_projects, project_to_dict
+from ..providers import PROVIDER_COST_CLASSES, PROVIDER_PROTOCOLS
 from ..store import ChatSearchHit, RunStore
 from . import actions
 from .jobs import Dispatcher
+from .llm import LLMProtocol
 from .registry import (
     known_repos,
     register_repo,
@@ -434,6 +436,19 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         ["repo"],
     ),
     _tool("list_projects", "Registered trusted projects and their bound strategy/phase.", {}),
+    _tool(
+        "list_providers",
+        "Registered LLM provider profiles. Shows id, protocol, endpoint, "
+        "model, cost class, active flag, provenance.",
+        {},
+    ),
+    _tool(
+        "list_provider_presets",
+        "Provider preset catalog. Each row names protocol, endpoint, key "
+        "env var, default model, and what leaves the machine; feed its "
+        "preset_id to add_provider.",
+        {},
+    ),
     _tool(
         "list_policy_groups",
         "Named policy groups (reusable convenience-grant bundles: network hosts, "
@@ -866,8 +881,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                             "type": "string",
                             "description": (
                                 "coding agent for THIS task (builtin, claude_code, "
-                                "codex, aider); a CLI engine needs the project to "
-                                "pin verify_command or the run fails closed"
+                                "codex, aider, pi); a CLI engine needs the project "
+                                "to pin verify_command or the run fails closed"
                             ),
                         },
                     },
@@ -1541,7 +1556,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "string",
                 "enum": engine_names(),
                 "description": "the project's coding agent — use this, not a "
-                "policy_overrides blob, to pick claude_code/codex/aider",
+                "policy_overrides blob, to pick claude_code/codex/aider/pi",
             },
             "groups": {
                 "type": "array",
@@ -1838,7 +1853,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "scope 'chat' changes only THIS chat's model and nothing else; pass "
         "model 'default' with scope 'chat' to clear the override. Optional "
         "base_url/protocol switch providers in the same card (protocol: "
-        "'ollama', 'openai-compat', or 'anthropic' — scope 'default' only). "
+        "'ollama', 'openai-compat', 'anthropic', 'openai-responses', or "
+        "'bedrock' (AWS, keys from the daemon environment) — scope 'default' "
+        "only). "
         "Never carries an API key: secrets are set in Settings, never "
         "through chat.",
         {
@@ -1851,9 +1868,46 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "string",
                 "description": "provider endpoint URL (scope 'default' only)",
             },
-            "protocol": {"type": "string", "enum": ["ollama", "openai-compat", "anthropic"]},
+            "protocol": {"type": "string", "enum": list(get_args(LLMProtocol))},
         },
         ["model"],
+    ),
+    _tool(
+        "add_provider",
+        "PROPOSE registering an LLM provider profile (requires user "
+        "confirmation). Pass preset (a list_provider_presets id) OR "
+        "protocol+base_url+model+provider_id. api_key_env is the NAME of "
+        "the key's env var — never the key value. activate=true also "
+        "switches the assistant.",
+        {
+            "preset": {"type": "string", "description": "preset_id from the catalog"},
+            "provider_id": {"type": "string", "description": "short id, e.g. 'openrouter'"},
+            "protocol": {"type": "string", "enum": sorted(PROVIDER_PROTOCOLS)},
+            "base_url": {"type": "string", "description": "provider endpoint URL"},
+            "model": {"type": "string", "description": "default model"},
+            "api_key_env": {
+                "type": "string",
+                "description": "env var NAME holding the key (never the value)",
+            },
+            "cost_class": {"type": "string", "enum": sorted(PROVIDER_COST_CLASSES)},
+            "activate": {"type": "boolean", "description": "also switch the assistant"},
+        },
+        [],
+    ),
+    _tool(
+        "use_provider",
+        "PROPOSE switching the assistant to a registered provider profile "
+        "(requires user confirmation). Writes it through to the saved "
+        "assistant config.",
+        {"provider_id": {"type": "string"}},
+        ["provider_id"],
+    ),
+    _tool(
+        "remove_provider",
+        "PROPOSE deleting a provider profile (requires user confirmation). "
+        "The saved assistant config is untouched.",
+        {"provider_id": {"type": "string"}},
+        ["provider_id"],
     ),
     _tool(
         "set_tts_provider",
@@ -2171,6 +2225,11 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "processes": ("start_process", "stop_process", "list_processes", "read_process_log"),
     "assistant": (
         "set_assistant_model",
+        "list_providers",
+        "list_provider_presets",
+        "add_provider",
+        "use_provider",
+        "remove_provider",
         "set_personality",
         "set_persona",
         "set_tts_provider",
@@ -3003,6 +3062,12 @@ def execute_read_tool(
         return {"repos": known_repos(repos_root(holder), store)}
     if name == "list_projects":
         return {"projects": [project_to_dict(project) for project in list_projects(store)]}
+    if name == "list_providers":
+        return {"providers": [asdict(p) for p in store.list_provider_profiles()]}
+    if name == "list_provider_presets":
+        from ..provider_presets import PROVIDER_PRESETS, preset_view
+
+        return {"presets": [preset_view(p) for p in PROVIDER_PRESETS.values()]}
     if name == "list_policy_groups":
         return actions.list_policy_groups(store)
     if name == "list_notes":
@@ -4521,8 +4586,9 @@ def _execute_mutation(
                 refresh_model_ctx(store, holder.current.home, override)
             return {"chat_model": override or "default"}
         protocol = args.get("protocol")
-        if protocol is not None and protocol not in ("ollama", "openai-compat", "anthropic"):
-            raise ValueError("protocol must be 'ollama', 'openai-compat', or 'anthropic'")
+        if protocol is not None and protocol not in get_args(LLMProtocol):
+            names = ", ".join(repr(value) for value in get_args(LLMProtocol))
+            raise ValueError(f"protocol must be one of {names}")
         store.set_setting(LLM_DEFAULT_MODEL, model)
         base_url = args.get("base_url")
         if base_url is not None:
@@ -4535,6 +4601,34 @@ def _execute_mutation(
             "default_model": model,
             "note": "chats and default workers use this from their next turn",
         }
+    if name == "add_provider":
+        # v108-F2: same actions.py verb as `skep provider add` and
+        # POST /api/providers. api_key_env carries a NAME, never a value.
+        # v108-F3: preset fills the row from the catalog.
+        def _opt(key: str) -> str | None:
+            raw = args.get(key)
+            return (str(raw).strip() or None) if raw else None
+
+        result = actions.add_provider(
+            store,
+            provider_id=_opt("provider_id"),
+            protocol=_opt("protocol"),
+            base_url=_opt("base_url"),
+            model=_opt("model"),
+            api_key_env=_opt("api_key_env"),
+            cost_class=_opt("cost_class"),
+            preset=_opt("preset"),
+        )
+        if bool(args.get("activate")):
+            saved_id = str(result["provider"]["provider_id"])
+            result.update(actions.use_provider(store, holder.current.home, provider_id=saved_id))
+        return result
+    if name == "use_provider":
+        return actions.use_provider(
+            store, holder.current.home, provider_id=str(args["provider_id"]).strip()
+        )
+    if name == "remove_provider":
+        return actions.remove_provider(store, provider_id=str(args["provider_id"]).strip())
     if name == "set_tts_provider":
         # v53-F6 (ADR 0031): config-gated channel infrastructure; the result
         # names the egress truth so the transcript records what was chosen.
