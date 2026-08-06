@@ -2519,6 +2519,114 @@ def diagnose_run(
     }
 
 
+# v110-F1: the fleet sync verb — the operator's machine-sync script gains a
+# skep face. The command is PINNED by the operator's own hands (`skep sync
+# --set`), never chosen or varied by the model (I4): execution reads the pin
+# from the settings table, and the chat arm passes no argument through.
+FLEET_SYNC_COMMAND_KEY = "fleet_sync_command"
+FLEET_SYNC_STATE_KEY = "fleet_sync_state"
+FLEET_SYNC_DEFAULT_TIMEOUT_SECONDS = 300.0
+FLEET_SYNC_MAX_TIMEOUT_SECONDS = 900.0
+FLEET_SYNC_OUTPUT_CAP = 10_000
+# Git credential helpers need HOME + USER/LOGNAME (the v94-F3 keychain
+# lesson); SSH remotes need the agent socket. Nothing else crosses.
+_FLEET_SYNC_ENV_KEYS = ("PATH", "HOME", "USER", "LOGNAME", "SSH_AUTH_SOCK")
+
+
+def sync_fleet(store: RunStore, *, timeout_seconds: float | None = None) -> dict[str, Any]:
+    """v110-F1: run the operator-pinned fleet sync command, supervisor-side.
+
+    The one lane where skep touches git transport for the operator's own
+    config/vault repos, and it stays the operator's lane: the pin is typed in
+    the terminal, the chat face can only propose running it verbatim behind a
+    card (I6), and the state + result record exactly what ran (I8). NOT
+    sandboxed — publishing the operator's repos is the point; the pin is the
+    wall (I4/I5), not the sandbox.
+    """
+    command = store.get_setting(FLEET_SYNC_COMMAND_KEY)
+    if not isinstance(command, str) or not command.strip():
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "no fleet sync command pinned — pin the operator's sync script "
+                "first: skep sync --set '~/Developer/apiary/sync.sh'. The pin "
+                "is set only from the terminal; chat can propose running it, "
+                "never choose it."
+            ),
+        )
+    timeout = min(
+        float(timeout_seconds or FLEET_SYNC_DEFAULT_TIMEOUT_SECONDS),
+        FLEET_SYNC_MAX_TIMEOUT_SECONDS,
+    )
+    env = {name: os.environ[name] for name in _FLEET_SYNC_ENV_KEYS if name in os.environ}
+    started = datetime.now(UTC).isoformat()
+    try:
+        proc = subprocess.run(
+            ["/bin/sh", "-c", command],
+            cwd=Path.home(),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+        exit_code = proc.returncode
+        stdout, stderr = proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as exc:
+        exit_code = -1
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = f"command timed out after {int(timeout)}s"
+
+    def _cap(text: str) -> str:
+        if len(text) <= FLEET_SYNC_OUTPUT_CAP:
+            return text
+        return text[-FLEET_SYNC_OUTPUT_CAP:] + "\n… (truncated)"
+
+    ok = exit_code == 0
+    store.set_setting(
+        FLEET_SYNC_STATE_KEY,
+        {"at": started, "command": command, "exit_code": exit_code, "ok": ok},
+    )
+    return {
+        "command": command,
+        "exit_code": exit_code,
+        "ok": ok,
+        "stdout": _cap(stdout),
+        "stderr": _cap(stderr),
+    }
+
+
+def set_fleet_sync_command(store: RunStore, command: str | None) -> dict[str, Any]:
+    """v110-F1: pin (or clear, with None) the fleet sync command — CLI-only."""
+    if command is None:
+        store.set_setting(FLEET_SYNC_COMMAND_KEY, None)
+        return {"command": None, "note": "fleet sync pin cleared"}
+    if not command.strip():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "an empty pin means nothing to run — name the script, e.g. "
+                "skep sync --set '~/Developer/apiary/sync.sh'"
+            ),
+        )
+    pinned = command.strip()
+    store.set_setting(FLEET_SYNC_COMMAND_KEY, pinned)
+    return {
+        "command": pinned,
+        "note": "pinned — skep sync and the /sync card now run exactly this",
+    }
+
+
+def fleet_sync_status(store: RunStore) -> dict[str, Any]:
+    """v110-F1: the pin and the last run — CLI --show, GET /api/sync, deck notes."""
+    command = store.get_setting(FLEET_SYNC_COMMAND_KEY)
+    last = store.get_setting(FLEET_SYNC_STATE_KEY)
+    return {
+        "command": command if isinstance(command, str) and command.strip() else None,
+        "last": last if isinstance(last, dict) else None,
+    }
+
+
 def _resumable_states() -> frozenset[str]:
     # v107-F1: one source of truth — dispatch owns the list (crash states plus
     # "failed", whose preserved tree is the resume value even with no
