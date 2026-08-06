@@ -160,7 +160,7 @@ _PRESETS: tuple[ProviderPreset, ...] = (
         "NOUS_API_KEY",
         auth_note=_PASTE_TOKEN + " (or a portal API key)",
     ),
-    _p("ollama-cloud", "Ollama Cloud", "https://ollama.com/v1", "glm-5.2", "OLLAMA_API_KEY"),
+    _p("ollama-cloud", "Ollama Cloud", "https://ollama.com", "glm-5.2", "OLLAMA_API_KEY"),
     _p(
         "google-gemini",
         "Google Gemini (OpenAI-compatible)",

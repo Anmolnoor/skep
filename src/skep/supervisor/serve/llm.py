@@ -22,6 +22,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeGuard, get_args
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -320,6 +321,20 @@ def _headers(api_key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
+def openai_style_prefix(base_url: str) -> str:
+    """v108-F11: where an OpenAI-style API's path root lives. A bare host
+    gets the conventional ``/v1`` appended (``api.openai.com`` →
+    ``api.openai.com/v1``); a base that already carries a path IS the prefix,
+    verbatim (``openrouter.ai/api/v1``, ``api.z.ai/api/paas/v4``) — the
+    OpenAI-SDK convention operators know. Before this rule the client
+    hardcoded ``/v1``, so a path-carrying provider was unreachable under
+    either spelling."""
+    trimmed = base_url.rstrip("/")
+    if urlparse(trimmed).path in ("", "/"):
+        return trimmed + "/v1"
+    return trimmed
+
+
 def _protocol(value: Any | None) -> LLMProtocol:
     # Unknown values fall back (never raise): legacy settings rows predate the
     # vocabulary and must keep the daemon bootable. New-protocol additions grow
@@ -364,7 +379,7 @@ def _list_ollama_models(base_url: str, api_key: str | None, *, timeout: float) -
 def _list_openai_models(base_url: str, api_key: str | None, *, timeout: float) -> list[str]:
     try:
         response = httpx.get(
-            f"{base_url.rstrip('/')}/v1/models", headers=_headers(api_key), timeout=timeout
+            f"{openai_style_prefix(base_url)}/models", headers=_headers(api_key), timeout=timeout
         )
         response.raise_for_status()
         payload = response.json()
@@ -562,7 +577,7 @@ def _openai_chat_stream(
     pending_calls: dict[int, dict[str, str]] = {}
     try:
         for line in _open_stream_lines(
-            f"{base_url.rstrip('/')}/v1/chat/completions",
+            f"{openai_style_prefix(base_url)}/chat/completions",
             base_url,
             headers=_headers(api_key),
             body=body,

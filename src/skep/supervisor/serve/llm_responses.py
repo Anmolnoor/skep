@@ -38,6 +38,7 @@ from .llm import (
     _final_openai_tool_calls,
     _headers,
     _open_stream_lines,
+    openai_style_prefix,
 )
 
 
@@ -200,7 +201,7 @@ def responses_chat_stream(
     pending_calls: dict[int, dict[str, str]] = {}
     try:
         for line in _open_stream_lines(
-            f"{base_url.rstrip('/')}/v1/responses",
+            f"{openai_style_prefix(base_url)}/responses",
             base_url,
             headers=_headers(api_key),
             body=body,
