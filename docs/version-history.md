@@ -2639,3 +2639,29 @@ folded its tool into allow_command_review, F6 trimmed). Also: the main
 branch arrived with a failing release-checklist pin from the README
 front-page rewrite — repaired first, per the no-pre-existing-failures
 rule.
+
+## v110 — the fleet sync verb (2026-08-05)
+
+A requested-capability round, not a field failure: the operator's
+machines converge through an apiary-style sync script (publish +
+converge — commit, rebase, push, then pull and re-run installers), and
+the apiary README's growth path had already named the missing face,
+"a `skep sync` verb wrapping what bootstrap.sh does, once the shape
+settles." The shape that respects the invariants: the command is PINNED
+from the terminal only (`skep sync --set`, the settings table), and the
+model can propose running it, never choose it — a chat tool that
+accepted a command argument would have been a shadow run_shell without
+the Queen's git guard, the exact lane I4 forbids. F1: `sync_fleet` in
+serve/actions.py runs the pin supervisor-side on diagnose_run's bounded
+shape (/bin/sh -c, PATH/HOME/USER/LOGNAME/SSH_AUTH_SOCK env, tail-capped
+capture, timeout as exit_code=-1), records `fleet_sync_state` (I8),
+refuses unpinned naming the fix (I9); faces: `skep sync`
+(--set/--show/--clear/--timeout, docs/cli-reference.md) and read-only
+GET /api/sync — deliberately no POST, running goes through the carded
+path or the operator's own argv. F2: the chat face — a zero-argument
+proposal carded as a publishing risk beside push_branch, deck-proposable,
+web-UI-only (absent from CHANNEL_CONFIRMABLE_ACTIONS), /sync in both
+decks in lockstep with card notes stating the exact pinned command and
+the last outcome; an args-cannot-steer test pins that a model-authored
+{"command": …} still runs the pin verbatim. Floor cost: one 58-char
+index line; the ≤24500 pin holds.
