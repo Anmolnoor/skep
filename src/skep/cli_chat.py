@@ -267,6 +267,11 @@ COMMANDS: dict[str, dict[str, str]] = {
         "usage": "/browser",
         "desc": "register the built-in Playwright browser under the browse scope (confirm card)",
     },
+    "sync": {
+        "usage": "/sync",
+        "desc": "run the operator-pinned fleet sync command — "
+        "pin it with `skep sync --set` (confirm card)",
+    },
     "status": {
         "usage": "/status",
         "desc": "re-print the startup banner: assistant readiness, approvals/cards waiting",
@@ -872,6 +877,20 @@ class ChatRepl:
         if name == "browser":
             # v83-F11: one card registers the Playwright MCP server.
             self._propose_command("setup_browser", {})
+            return
+        if name == "sync":
+            # v110-F2: the pin is terminal-set (skep sync --set); the card
+            # only ever runs it verbatim, and the notes say exactly what (I8).
+            status = self.client.get("/api/sync")
+            if not status.get("command"):
+                print("no fleet sync command pinned — pin one: skep sync --set '<cmd>'")
+                return
+            notes = [f"runs: {status['command']}"]
+            last = status.get("last")
+            if last:
+                verdict = "ok" if last.get("ok") else f"failed (exit {last.get('exit_code')})"
+                notes.append(f"last: {verdict} at {last.get('at')}")
+            self._propose_command("sync_fleet", {}, notes)
             return
         if name == "status":
             # v77-F3: re-print the banner on demand — "what needs me?" mid-session.

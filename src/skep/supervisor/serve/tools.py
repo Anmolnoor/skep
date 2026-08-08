@@ -214,6 +214,9 @@ COMMAND_TOOL_NAMES = (
             "delete_policy_group",
             "attach_policy_group",
             "detach_policy_group",
+            # v110-F2: the deck's /sync — proposes running the operator's
+            # pinned fleet sync command; web-UI-only like push_branch.
+            "sync_fleet",
         }
     )
     | COMMAND_ONLY_TOOLS
@@ -1490,6 +1493,18 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         ["repo"],
     ),
     _tool(
+        "sync_fleet",
+        "PROPOSE running the operator-pinned fleet sync command (requires "
+        "user confirmation) — the machine-sync script pinned in the terminal "
+        "via skep sync --set, typically commit+push+pull of the operator's "
+        "own config/vault repos. Runs the pin VERBATIM: this tool can never "
+        "choose or change the command, and it refuses while nothing is "
+        "pinned. Publishes to remotes on operator credentials, like "
+        "push_branch. Not a coding lane — repo tasks go through dispatch_run.",
+        {},
+        [],
+    ),
+    _tool(
         "unregister_repo",
         "PROPOSE removing a registered repo's managed clone (requires user "
         "confirmation). Deletes SKEP_HOME/repos/<slug> only — never the remote, "
@@ -2131,6 +2146,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "merge_branch",
         "push_branch",
         "push_baseline",
+        "sync_fleet",
         "land_run",
         "open_pr",
         "merge_pr",
@@ -4284,6 +4300,10 @@ def _execute_mutation(
         )
     if name == "push_branch":
         return actions.push_branch(holder, str(args["repo"]), name=str(args["name"]), store=store)
+    if name == "sync_fleet":
+        # v110-F2: args are IGNORED by construction — the verb runs only the
+        # operator's terminal-set pin (I4); a model argument can never steer it.
+        return actions.sync_fleet(store)
     if name == "push_baseline":
         return actions.push_baseline(
             holder,
