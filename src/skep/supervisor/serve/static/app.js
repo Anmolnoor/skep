@@ -2927,8 +2927,22 @@ async function viewChat(main, chatId) {
   // visible without a reload no matter where it was born.
   const renderPendingCards = () => {
     for (const action of actions) {
-      if (action.status !== "proposed") continue;
-      if (log.querySelector(`.confirm-card[data-action-id="${action.action_id}"]`)) continue;
+      const drawn = log.querySelector(`.confirm-card[data-action-id="${action.action_id}"]`);
+      if (action.status !== "proposed") {
+        // v110-F2: a drawn card whose action died server-side — superseded by
+        // a newer proposal, or answered from another surface — must drop its
+        // buttons: a live Approve on a dead action can only 409, which reads
+        // as "approval is broken" (the Aug 9 five-close_pr field test).
+        if (drawn && !drawn.classList.contains("resolved")) {
+          const label = action.status === "confirmed" ? "✓ Approved"
+            : action.status === "superseded"
+              ? `✗ Superseded — ${(action.result && action.result.note) || "replaced by a newer card"}`
+              : "✗ Denied";
+          resolveCardUI(drawn, label, action.status === "confirmed" ? "confirm" : "deny");
+        }
+        continue;
+      }
+      if (drawn) continue;
       // v25-F1: operator /commands resolve on the commands endpoints; only
       // model proposals resume the model after the verdict. v87-F2: gate
       // mirrors ride the commands endpoints too, without locking anything.

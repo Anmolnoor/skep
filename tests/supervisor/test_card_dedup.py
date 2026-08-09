@@ -70,9 +70,7 @@ def test_different_prs_are_different_questions(config: SupervisorConfig) -> None
             args={"repo": "authwapi", "pr": "14", "delete_branch": "true"},
         )
         assert (
-            pending_duplicate_action(
-                store, chat_id, "close_pr", {"repo": "authwapi", "pr": "15"}
-            )
+            pending_duplicate_action(store, chat_id, "close_pr", {"repo": "authwapi", "pr": "15"})
             is None
         )
         record, identical = pending_duplicate_action(

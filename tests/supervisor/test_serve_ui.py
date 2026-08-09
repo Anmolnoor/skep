@@ -1517,6 +1517,22 @@ def test_pending_cards_reconcile_without_a_reload() -> None:
     assert "!chatStreamActive && hash.match" in source
 
 
+def test_dead_cards_drop_their_buttons() -> None:
+    """v110-F2 (field test 2026-08-09): five close_pr cards streamed live;
+    four were superseded server-side in the same second, but the DOM kept
+    their Approve buttons and every click 409'd forever. The reconciler now
+    resolves drawn cards whose action is no longer proposed, with the honest
+    verdict — including the store's supersede note."""
+    source = (STATIC_DIR / "app.js").read_text()
+    reconciler = source[
+        source.index("const renderPendingCards") : source.index("const proposeCommand")
+    ]
+    assert 'action.status !== "proposed"' in reconciler
+    assert '!drawn.classList.contains("resolved")' in reconciler
+    assert "✗ Superseded" in reconciler
+    assert "resolveCardUI(drawn," in reconciler
+
+
 def test_worker_loader_ticks_from_dispatch_and_announces_terminals_once() -> None:
     """v92-F1 (field test 2026-07-26): the run status is a per-run loader row
     — phase plus a browser-side timer counting from dispatch — not a single
