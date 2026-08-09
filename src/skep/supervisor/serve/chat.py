@@ -252,8 +252,11 @@ _PROPOSAL_SUBJECT_KEYS: dict[str, tuple[str, ...]] = {
     "deny_review": ("review_id",),
     "open_pr": ("repo", "branch"),
     "push_branch": ("repo", "name"),
-    "merge_pr": ("repo", "number"),
-    "close_pr": ("repo", "number"),
+    # v110-F1: the tools take `pr`, not `number` — the wrong key computed the
+    # same partial subject for every PR in a repo, so five close_pr cards for
+    # five different PRs superseded each other down to one (Aug 9 field test).
+    "merge_pr": ("repo", "pr"),
+    "close_pr": ("repo", "pr"),
 }
 
 
@@ -261,8 +264,12 @@ def _proposal_subject(tool: str, args: dict[str, Any]) -> str | None:
     keys = _PROPOSAL_SUBJECT_KEYS.get(tool)
     if not keys:
         return None
+    # v110-F1: a subject with ANY key missing is no subject at all. A partial
+    # match ("repo" present, the PR key absent) collapsed five distinct
+    # questions into one; key-name drift between this table and the tool
+    # schema must degrade to byte-identical dedup, never eat sibling cards.
     values = [str(args.get(key) or "") for key in keys]
-    if not any(values):
+    if not all(values):
         return None
     return json.dumps([tool, values], ensure_ascii=True)
 

@@ -55,6 +55,53 @@ def test_the_landing_family_matches_on_subject_not_bytes(config: SupervisorConfi
         store.close()
 
 
+def test_different_prs_are_different_questions(config: SupervisorConfig) -> None:
+    """v110-F1 (Aug 9 field test): close_pr/merge_pr take `pr`, but the
+    subject table said ("repo", "number") — every card in a repo computed the
+    same partial subject, and five close_pr cards for five different PRs
+    superseded each other down to one. Different PRs stand side by side; the
+    same PR with changed args still supersedes."""
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="dedup", model=None).chat_id
+        first = store.add_chat_action(
+            chat_id,
+            tool="close_pr",
+            args={"repo": "authwapi", "pr": "14", "delete_branch": "true"},
+        )
+        assert (
+            pending_duplicate_action(
+                store, chat_id, "close_pr", {"repo": "authwapi", "pr": "15"}
+            )
+            is None
+        )
+        record, identical = pending_duplicate_action(
+            store, chat_id, "close_pr", {"repo": "authwapi", "pr": "14"}
+        ) or (None, None)
+        assert record is not None and record.action_id == first
+        assert identical is False  # same PR, changed args → supersede path
+    finally:
+        store.close()
+
+
+def test_a_partial_subject_never_collapses_questions(config: SupervisorConfig) -> None:
+    """v110-F1: a subject with any key missing is no subject at all — key-name
+    drift between the table and the tool schema must degrade to byte-identical
+    dedup, never eat sibling cards."""
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="dedup", model=None).chat_id
+        store.add_chat_action(chat_id, tool="merge_pr", args={"repo": "authwapi"})
+        assert (
+            pending_duplicate_action(
+                store, chat_id, "merge_pr", {"repo": "authwapi", "number": "7"}
+            )
+            is None
+        )
+    finally:
+        store.close()
+
+
 def test_supersede_chat_action_records_an_honest_terminal_row(
     config: SupervisorConfig,
 ) -> None:
