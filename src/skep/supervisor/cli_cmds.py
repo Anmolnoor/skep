@@ -2064,6 +2064,9 @@ def _project_policy_overrides(args: argparse.Namespace) -> dict[str, Any]:
     groups = getattr(args, "groups", None)
     if groups:
         overrides["policy_groups"] = groups
+    unlocked = getattr(args, "unlocked", None)
+    if unlocked is not None:
+        overrides["unlocked"] = bool(unlocked)
     return overrides
 
 
@@ -2881,6 +2884,16 @@ def register_supervisor_commands(
         dest="groups",
         help="attach a policy group at setup (repeatable, v97-F4); "
         "`skep policy` groups or list_policy_groups names the known set",
+    )
+    project_setup.add_argument(
+        "--unlocked",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="zero-ask mode for this project (ADR 0052): escalations, cards, "
+        "and verified-patch landing auto-approve as recorded auto:unlocked "
+        "verdicts; runs are sandbox-forced. Requires a pinned verify_command "
+        "and a usable sandbox. Outbound content and policy changes still "
+        "card; --no-unlocked turns it back off",
     )
     project_setup.set_defaults(func=cmd_project_setup)
 

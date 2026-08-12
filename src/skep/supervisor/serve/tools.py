@@ -1566,6 +1566,15 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "groups matching the repo's toolchain — suggestions never "
                 "attach silently, pass them here to attach)",
             },
+            "unlocked": {
+                "type": "boolean",
+                "description": "zero-ask mode (ADR 0052): the project's "
+                "escalations, cards, and verified-patch landings auto-approve "
+                "as recorded auto:unlocked verdicts and every run is "
+                "sandbox-forced. Refused without a pinned verify_command and "
+                "a usable sandbox. Set it ONLY when the user explicitly asks "
+                "to unlock the project; false turns it back off",
+            },
             "policy_overrides": {"type": "object"},
             "seed_default_schedules": {"type": "boolean"},
         },
@@ -4348,6 +4357,11 @@ def _execute_mutation(
             if not isinstance(args["groups"], list):
                 raise ValueError("groups must be a list of policy group names")
             overrides.setdefault("policy_groups", [str(group) for group in args["groups"]])
+        if args.get("unlocked") is not None:
+            # unlocked-F1: sugar like engine=; preconditions (pinned verify,
+            # usable sandbox) are vetted in _persist_project (I5) so every
+            # face gets the same refusal.
+            overrides.setdefault("unlocked", bool(args["unlocked"]))
         return setup_project_record(
             run_store=store,
             root=repos_root(holder),

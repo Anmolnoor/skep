@@ -34,6 +34,7 @@ from ..projects import (
     project_to_dict,
     validate_project_definition,
 )
+from ..sandbox import availability as sandbox_availability
 from ..scheduler import make_schedule, make_template_schedule, parse_interval, validate_chain
 from ..skill_cmds import SkillError, approve, propose, reject, run_candidate_test
 from ..store import RunStore
@@ -488,7 +489,34 @@ def _validate_project_binding(*, root: Path, run_store: RunStore, kind: str, val
         raise HTTPException(status_code=400, detail=f"unknown template {value!r}")
 
 
+def unlocked_block_reason(policy: dict[str, Any]) -> str | None:
+    """unlocked-F1 (ADR 0052): the zero-ask mode's two preconditions, checked
+    at every project write. The dispatch-side resolver re-checks fail-closed —
+    this copy exists so the refusal arrives when the operator flips the knob,
+    not at the first dispatch after."""
+    if policy.get("unlocked") is not True:
+        return None
+    if not str(policy.get("verify_command") or "").strip():
+        return (
+            "unlocked=true requires a pinned verify_command — the only lane "
+            "that lands work without a human refuses worker-nominated verifies "
+            "(I2). Pin one with --verify-command / policy_overrides."
+        )
+    probe = sandbox_availability()
+    if not probe.usable:
+        return (
+            "unlocked=true requires a usable sandbox (unlocked runs are "
+            "sandbox-forced) and this host has none: "
+            f"{probe.reason or 'unavailable'} — {probe.detail or 'no detail'}. "
+            "Fix the sandbox backend (see `skep doctor`) or drop unlocked."
+        )
+    return None
+
+
 def _persist_project(run_store: RunStore, project: Any) -> dict[str, Any]:
+    block = unlocked_block_reason(project.policy)
+    if block is not None:
+        raise HTTPException(status_code=400, detail=block)
     run_store.add_project_policy(
         project_id=project.project_id,
         name=project.name,
@@ -536,6 +564,8 @@ def _dangerous_grant_warnings(policy: dict[str, Any]) -> list[str]:
         warnings.append("auto_dispatch_allowed")
     if policy.get("auto_apply_verified_patch") is True:
         warnings.append("auto_apply_verified_patch")
+    if policy.get("unlocked") is True:
+        warnings.append("unlocked")
     return warnings
 
 

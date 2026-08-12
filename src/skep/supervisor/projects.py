@@ -50,6 +50,14 @@ PROJECT_POLICY_KEYS = frozenset(
         # Shape-validated here; known-name checks live at attach time and,
         # fail-closed, at resolve time.
         "policy_groups",
+        # unlocked-F1 (ADR 0052): the top rung of the per-project trust ramp
+        # (I6) — worker escalations, Queen cards, and verified-patch landing
+        # all auto-approve, each as a recorded auto:unlocked verdict. Requires
+        # a usable sandbox and a pinned verify_command (enforced at write time
+        # in _persist_project and fail-closed at dispatch); forces sandbox
+        # execution. Outbound content, policy mutations, and the hard git
+        # denies are NOT covered — those never stop asking/denying.
+        "unlocked",
     }
 )
 
@@ -223,7 +231,12 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
             normalized["allowed_plugin_risks"],
             field="allowed_plugin_risks",
         )
-    for field in ("allow_git_mutation", "auto_apply_verified_patch", "auto_dispatch_allowed"):
+    for field in (
+        "allow_git_mutation",
+        "auto_apply_verified_patch",
+        "auto_dispatch_allowed",
+        "unlocked",
+    ):
         if field in normalized:
             normalized[field] = _require_bool(normalized[field], field=field)
     if normalized.get("auto_apply_branch") is not None:
@@ -259,9 +272,9 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
 # Named, reusable bundles of CONVENIENCE grants, live-composed into run policy
 # for every project that attaches them (edit once, every attached project
 # follows on its next dispatch). The trust-ramp keys (auto_apply_*,
-# allow_git_mutation, auto_dispatch_allowed, trusted_workspace_roots) are
-# deliberately ungroupable: the trust ramp is climbed per project (I6), never
-# bundled. Group contents pass the same validators as project policy (I5).
+# allow_git_mutation, auto_dispatch_allowed, trusted_workspace_roots,
+# unlocked) are deliberately ungroupable: the trust ramp is climbed per
+# project (I6), never bundled. Group contents pass the same validators as project policy (I5).
 
 POLICY_GROUPS_SETTING = "policy_groups"
 POLICY_GROUP_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
