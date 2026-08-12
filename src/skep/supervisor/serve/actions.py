@@ -2937,6 +2937,50 @@ def allow_network_host_and_resume(
     )
 
 
+def covering_policy_group(store: RunStore, *, action: str, resource: str, repo: str) -> str | None:
+    """v112-F2: the unattached group that already bundles this key, if any.
+
+    ADR 0048 built reusable grant bundles and v97 shipped builtins
+    (python-bootstrap, node-dev) — and six weeks of field use attached zero,
+    because no decision-time surface ever OFFERED one: the operator was always
+    shown the raw crumb ("allow pypi.org"), never the bundle. This is the
+    recognition half: a bare name (attach still goes through the existing
+    carded ``attach_policy_group`` with all its validation, I5). Only
+    project-bound repos qualify — groups attach to projects — and a group
+    already attached offers nothing (its keys are already composed in).
+    """
+    from ..projects import stored_policy_groups
+
+    project = store.project_for_binding("repo_path", repo)
+    if project is None:
+        return None
+    attached = {str(n) for n in project.policy.get("policy_groups") or []}
+    if action in ("network.fetch", "network.read"):
+
+        def covers(policy: dict[str, Any]) -> bool:
+            return resource in [str(h) for h in policy.get("default_network") or []]
+    elif action == "shell.run":
+        try:
+            argv = normalize_remembered_command(shlex.split(resource))
+        except ValueError:
+            return None
+
+        def covers(policy: dict[str, Any]) -> bool:
+            prefixes = policy.get("allowed_shell_commands") or []
+            return any(
+                [str(part) for part in prefix] == list(argv[: len(prefix)])
+                for prefix in prefixes
+                if prefix
+            )
+    else:
+        return None
+    groups = stored_policy_groups(store)
+    for name in sorted(groups):
+        if name not in attached and covers(groups[name]):
+            return name
+    return None
+
+
 def ledger_remember_suggestions(store: RunStore, repo: str | None = None) -> list[dict[str, Any]]:
     """v109-F8: the keys the operator keeps approving, offered for remembering.
 
@@ -2954,15 +2998,28 @@ def ledger_remember_suggestions(store: RunStore, repo: str | None = None) -> lis
                 continue
             if not argv or dangerous_prefix_reason(argv) is not None:
                 continue
-        suggestions.append(
-            {
-                **candidate,
-                "hint": (
-                    f"approved {candidate['count']}x on this repo with no standing "
-                    "grant — POST /api/ledger/remember persists it for the project"
-                ),
-            }
+        # v112-F2: when an unattached group already bundles this key, offer
+        # the bundle — one attach replaces this card and its future siblings.
+        group = covering_policy_group(
+            store,
+            action=str(candidate["action"]),
+            resource=str(candidate["resource"]),
+            repo=str(candidate["repo"]),
         )
+        entry = {
+            **candidate,
+            "hint": (
+                f"approved {candidate['count']}x on this repo with no standing "
+                "grant — POST /api/ledger/remember persists it for the project"
+            ),
+        }
+        if group is not None:
+            entry["covering_group"] = group
+            entry["hint"] += (
+                f"; policy group {group!r} already bundles it — attach_group={group!r} "
+                "attaches the bundle instead"
+            )
+        suggestions.append(entry)
     return suggestions
 
 
@@ -2978,22 +3035,73 @@ def remember_suggestion_for_review(store: RunStore, review_id: str) -> str | Non
             entry.resource,
             entry.repo_path,
         ):
-            return (
+            hint = (
                 f"this is approval #{candidate['count']} of exactly this on this repo — "
                 "'Allow & remember' (or POST /api/ledger/remember) would stop the asking"
             )
+            group = covering_policy_group(
+                store,
+                action=entry.action,
+                resource=entry.resource,
+                repo=entry.repo_path,
+            )
+            if group is not None:
+                hint += f"; policy group {group!r} bundles it and its siblings"
+            return hint
     return None
 
 
 def remember_ledger_entry(
-    store: RunStore, holder: ConfigHolder, *, action: str, resource: str, repo: str
+    store: RunStore,
+    holder: ConfigHolder,
+    *,
+    action: str,
+    resource: str,
+    repo: str,
+    attach_group: str | None = None,
 ) -> dict[str, Any]:
     """v109-F8: persist a suggested key as a standing project grant.
 
     Routes through the SAME persist helpers the approval-time remember uses
     (I5 — one path per scope), so the floor guards and the ledger marking
-    apply identically."""
+    apply identically.
+
+    v112-F2: ``attach_group`` attaches the named bundle INSTEAD of persisting
+    the raw key — only when the group genuinely covers the resource (a
+    mismatched name is refused naming the check, I9) and the repo is
+    project-bound. The attach itself is the existing ``attach_policy_group``
+    write with all its validation (I5)."""
     repo_path = Path(repo)
+    if attach_group is not None:
+        covering = covering_policy_group(store, action=action, resource=resource, repo=repo)
+        if covering != attach_group:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"group {attach_group!r} does not cover {resource!r} for this repo "
+                    + (
+                        f"(the covering group is {covering!r})"
+                        if covering
+                        else "(no unattached group covers it — remember the raw key instead)"
+                    )
+                ),
+            )
+        project = store.project_for_binding("repo_path", repo)
+        assert project is not None  # covering_policy_group requires the binding
+        result = attach_policy_group(store, project_id=project.project_id, name=attach_group)
+        for ledger_action in (
+            ("network.fetch", "network.read") if action.startswith("network.") else (action,)
+        ):
+            store.mark_ledger_remembered(action=ledger_action, resource=resource, repo_path=repo)
+        return {
+            "remembered": True,
+            "attached_group": attach_group,
+            "project_id": project.project_id,
+            "policy_groups": result.get("policy_groups"),
+            "action": action,
+            "resource": resource,
+            "repo": repo,
+        }
     if action == "shell.run":
         try:
             argv = normalize_remembered_command(shlex.split(resource))

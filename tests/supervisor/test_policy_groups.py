@@ -571,3 +571,131 @@ def test_delete_refusals_teach(config: SupervisorConfig) -> None:
         assert "temp" not in (store.get_setting(POLICY_GROUPS_SETTING) or {})
     finally:
         store.close()
+
+
+# ---- v112-F2: the bundle is offered at decision time --------------------------
+
+
+def test_covering_policy_group_names_the_unattached_bundle(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """pypi.org is python-bootstrap's key; a bound project without the group
+    gets the offer, and shell prefixes match by argv prefix."""
+    from skep.supervisor.serve.actions import covering_policy_group
+
+    store = RunStore(config.db_path)
+    try:
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        _project_with_groups(store, repo, groups=[])
+
+        assert (
+            covering_policy_group(
+                store, action="network.fetch", resource="pypi.org", repo=str(repo)
+            )
+            == "python-bootstrap"
+        )
+        assert (
+            covering_policy_group(
+                store,
+                action="shell.run",
+                resource="uv pip install requests",
+                repo=str(repo),
+            )
+            == "python-bootstrap"
+        )
+        # A key no group bundles, and an unbound repo: nothing to offer.
+        assert (
+            covering_policy_group(
+                store, action="network.fetch", resource="example.com", repo=str(repo)
+            )
+            is None
+        )
+        assert (
+            covering_policy_group(
+                store, action="network.fetch", resource="pypi.org", repo=str(tmp_path / "unbound")
+            )
+            is None
+        )
+    finally:
+        store.close()
+
+
+def test_an_attached_group_offers_nothing(config: SupervisorConfig, tmp_path: Path) -> None:
+    from skep.supervisor.serve.actions import covering_policy_group
+
+    store = RunStore(config.db_path)
+    try:
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        _project_with_groups(store, repo, groups=["python-bootstrap"])
+        assert (
+            covering_policy_group(
+                store, action="network.fetch", resource="pypi.org", repo=str(repo)
+            )
+            is None
+        )
+    finally:
+        store.close()
+
+
+def test_remember_with_attach_group_attaches_the_bundle_not_the_crumb(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v112-F2: attach_group routes through the existing attach (I5) and the
+    raw key is NOT written into the project overlay — the group carries it."""
+    from skep.supervisor.serve.actions import remember_ledger_entry
+
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    try:
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        _project_with_groups(store, repo, groups=[])
+
+        result = remember_ledger_entry(
+            store,
+            holder,
+            action="network.fetch",
+            resource="pypi.org",
+            repo=str(repo),
+            attach_group="python-bootstrap",
+        )
+        assert result["attached_group"] == "python-bootstrap"
+
+        record = store.get_project_policy("grouped")
+        assert record is not None
+        assert record.policy.get("policy_groups") == ["python-bootstrap"]
+        # The crumb stays out of the overlay; composition carries it instead.
+        assert "pypi.org" not in (record.policy.get("default_network") or [])
+        composed = run_policy_for_repo(store, config, repo)
+        assert "pypi.org" in composed["default_network"]
+    finally:
+        store.close()
+
+
+def test_remember_refuses_a_group_that_does_not_cover(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    from fastapi import HTTPException
+
+    from skep.supervisor.serve.actions import remember_ledger_entry
+
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    try:
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        _project_with_groups(store, repo, groups=[])
+        with pytest.raises(HTTPException) as excinfo:
+            remember_ledger_entry(
+                store,
+                holder,
+                action="network.fetch",
+                resource="example.com",
+                repo=str(repo),
+                attach_group="python-bootstrap",
+            )
+        assert "does not cover" in str(excinfo.value.detail)
+    finally:
+        store.close()

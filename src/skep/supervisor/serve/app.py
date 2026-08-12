@@ -214,11 +214,15 @@ class WorkonRequest(BaseModel):
 
 
 class RememberRequest(BaseModel):
-    """Body of ``POST /api/ledger/remember`` (v109-F8)."""
+    """Body of ``POST /api/ledger/remember`` (v109-F8).
+
+    v112-F2: ``attach_group`` attaches the named covering bundle instead of
+    persisting the raw key (refused with 409 when it does not cover)."""
 
     action: str
     resource: str
     repo: str
+    attach_group: str | None = None
 
 
 def _sse(data: dict[str, Any], *, event: str | None = None) -> str:
@@ -632,7 +636,12 @@ def create_app(
     def ledger_remember(body: RememberRequest) -> dict[str, Any]:
         """v109-F8: persist a suggested key as a standing project grant."""
         return remember_ledger_entry(
-            run_store, holder, action=body.action, resource=body.resource, repo=body.repo
+            run_store,
+            holder,
+            action=body.action,
+            resource=body.resource,
+            repo=body.repo,
+            attach_group=body.attach_group,
         )
 
     @app.post("/api/approvals/{review_id}/allow-command")
