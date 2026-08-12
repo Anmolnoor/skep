@@ -66,3 +66,41 @@ def test_boot_banner_lands_in_the_log_and_never_the_token(tmp_path: Path) -> Non
     assert lines == [banner, banner]
     # The token is stdout-only — the log file is not a second credential store.
     assert "access token" not in log_path.read_text(encoding="utf-8")
+
+
+def test_serve_env_loads_names_without_overriding_the_process(tmp_path: Path) -> None:
+    """v111-F1: the operator's serve.env finally has a reader.
+
+    The Aug 11 2026 restart shed CLAUDE_CODE_OAUTH_TOKEN because only the
+    restart ritual carried it; the daemon now loads the file itself. An
+    explicit export outranks the file, comments and blanks are ignored, and
+    the loader reports names (for stdout) — never values.
+    """
+    from skep.supervisor.serve.serve_cmds import load_serve_env
+
+    env_file = tmp_path / "serve.env"
+    env_file.write_text(
+        "# engine auth\n"
+        "\n"
+        "CLAUDE_CODE_OAUTH_TOKEN=sk-live-secret\n"
+        'export OPENAI_API_KEY="quoted-secret"\n'
+        "ALREADY_SET=from-file\n"
+        "not a key value line\n",
+        encoding="utf-8",
+    )
+    environ: dict[str, str] = {"ALREADY_SET": "from-process"}
+
+    loaded = load_serve_env(env_file, environ)
+
+    assert loaded == ["CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"]
+    assert environ["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-live-secret"
+    assert environ["OPENAI_API_KEY"] == "quoted-secret"  # quotes stripped
+    assert environ["ALREADY_SET"] == "from-process"  # export outranks the file
+
+
+def test_serve_env_missing_file_is_a_noop(tmp_path: Path) -> None:
+    from skep.supervisor.serve.serve_cmds import load_serve_env
+
+    environ: dict[str, str] = {}
+    assert load_serve_env(tmp_path / "serve.env", environ) == []
+    assert environ == {}
