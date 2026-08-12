@@ -193,6 +193,29 @@ class Ticker(threading.Thread):
         else:  # no messenger has ever bound a chat — the durable note is the record
             self._store.create_note(text, actor="provider-health")
 
+    def _auto_resume_unlocked_gates(self) -> None:
+        """unlocked-F2 (ADR 0052): catch-all sweep for gates the done-callback
+        path did not see (scheduler-dispatched and startup-recovered runs).
+        The interactive path resolves its gate before the notify; this sweep
+        only mops up, one tick later at worst."""
+        if self._runner is None:
+            return
+        from .actions import auto_resume_unlocked_gate
+        from .jobs import Dispatcher
+
+        runner = self._runner
+        assert isinstance(runner, Dispatcher)
+        for gate in self._store.pending_approvals():
+            try:
+                resumed = auto_resume_unlocked_gate(self._store, self._holder, runner, gate.task_id)
+            except Exception:
+                logger.exception("unlocked auto-resume failed for %s", gate.task_id)
+                continue
+            if resumed is not None:
+                logger.info(
+                    "unlocked: gate %s auto-approved, resumed as %s", gate.review_id, resumed
+                )
+
     def _prompt_turn(self) -> Callable[..., tuple[str, bool]] | None:
         """v83-F5: the run_due hook for 'prompt' schedules — a read-only Queen
         turn in the bound chat. Lazy import keeps the core scheduler
@@ -232,6 +255,12 @@ class Ticker(threading.Thread):
                 self._probe_provider_health()
             except Exception:
                 logger.exception("provider health sweep failed")
+            try:
+                # unlocked-F2: gates on unlocked projects answer themselves
+                # (guarded per-gate inside; a broken sweep never breaks ticking).
+                self._auto_resume_unlocked_gates()
+            except Exception:
+                logger.exception("unlocked gate sweep failed")
             try:
                 # v71-F5: observations expire on the tick — the fluid memory
                 # lane earns its no-proposal write by never outliving its TTL.

@@ -2717,12 +2717,17 @@ def resume_past_gate(
     shell_allowlist: list[list[str]] | None = None,
     *,
     remembered: bool = False,
+    session: bool = True,
 ) -> str:
     """Q8: approving a suspended task resumes it past the gate (fresh worker
     run carrying the granted verdict), dispatched on the background pool.
 
     ``shell_allowlist`` overrides the original permissions' allowlist so a
     just-persisted policy change applies to this resume, not only future runs.
+    ``session=False`` (the unlocked-F2 auto path) grants ONCE: an automatic
+    verdict must never widen the session tier — that key is global, so a
+    session write here would leak an unlocked project's grants onto every
+    other project's runs (ADR 0046: no silent promotion).
     """
     task_id = str(run["task_id"])
     audit_task = config.audit_dir / task_id / "task.json"
@@ -2755,7 +2760,7 @@ def resume_past_gate(
     # v86-F1: a plain approve also holds for the serve session (the operator's
     # explicit ask); "remember" already wrote the durable tier before this call.
     session_kept: list[list[str]] = []
-    if not remembered and approval_commands:
+    if session and not remembered and approval_commands:
         session_kept = remember_commands_for_session(
             store, [list(command) for command in approval_commands]
         )
@@ -2800,6 +2805,44 @@ def resume_past_gate(
     # before the predecessor drops out of pending_gate_workspaces.
     store.transition(task_id, TaskState.SUPERSEDED.value, f"resumed as {resumed_id}")
     return resumed_id
+
+
+def unlocked_for_repo(store: RunStore, config: SupervisorConfig, repo: Path) -> bool:
+    """unlocked-F2 (ADR 0052): is this repo bound to a project in zero-ask
+    mode? Fail closed — an unresolvable policy asks like any other run."""
+    try:
+        return run_policy_for_repo(store, config, repo).get("unlocked") is True
+    except Exception:
+        return False
+
+
+def auto_resume_unlocked_gate(
+    store: RunStore, holder: ConfigHolder, runner: Dispatcher, task_id: str
+) -> str | None:
+    """unlocked-F2 (ADR 0052): on an unlocked project, a worker escalation
+    answers itself — the exact resume_past_gate path a human click takes,
+    recorded as actor ``auto:unlocked``, granted once (never the session or
+    durable tiers). Nothing deny-classed can arrive here: the capability
+    floor rejects the hard denies before anything becomes approvable (I4).
+    Returns the resumed task id, or None when this gate is not ours to answer.
+    """
+    run = store.get_run(task_id)
+    if run is None or run.state != "pending_approval":
+        return None
+    if not unlocked_for_repo(store, holder.current, Path(run.repo)):
+        return None
+    gate = next((a for a in store.pending_approvals() if a.task_id == task_id), None)
+    if gate is None:
+        return None
+    return resume_past_gate(
+        store,
+        holder.current,
+        runner,
+        require_run(store, task_id),
+        gate.review_id,
+        "auto:unlocked",
+        session=False,
+    )
 
 
 def _persist_remembered_command(
