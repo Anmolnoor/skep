@@ -62,3 +62,4 @@ touches.
 | [0049](0049-caste-registry.md) | The caste roster is a registry, not five dict literals (v101) |
 | [0050](0050-one-verb-three-faces.md) | One verb, three faces: the operator's surface is never the narrow half (v104) |
 | [0051](0051-provider-shelf.md) | The provider shelf: presets, per-profile keys, no borrowed identity (v108) |
+| [0052](0052-unlocked-mode.md) | unlocked: the per-project zero-ask rung of the trust ramp (branch unlocked) |

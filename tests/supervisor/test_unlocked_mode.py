@@ -357,3 +357,43 @@ def test_unlocked_dispatch_family_auto_allows_but_overrides_and_policy_tools_car
             assert mutation_execution_decision(tool, args, store=store, holder=holder) is None
     finally:
         store.close()
+
+
+# ---- F6: the mode is visible everywhere it matters --------------------------
+
+
+def test_doctor_names_unlocked_projects(repo: Path, tmp_path: Path) -> None:
+    from skep.status import _unlocked_advisories
+    from skep.supervisor.cli_cmds import build_config
+
+    home = tmp_path / "home"
+    config = build_config(home, None)
+    assert _unlocked_advisories(home) == []  # store not created yet — quiet
+
+    _bind_unlocked_project(config, repo)
+    advisories = _unlocked_advisories(home)
+    assert len(advisories) == 1
+    assert "UNLOCKED" in advisories[0]
+    assert "unlockable" in advisories[0]
+    assert "--no-unlocked" in advisories[0]  # the way out rides the advisory (I9)
+
+
+def test_effective_policy_view_says_unlocked_with_provenance(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.serve.actions import effective_policy_view
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    _bind_unlocked_project(config, repo)
+    store = RunStore(config.db_path)
+    try:
+        view = effective_policy_view(ConfigHolder(config, store), store, repo=str(repo))
+    finally:
+        store.close()
+    assert view["unlocked"] is True
+    assert view["execution_mode"] == "sandbox"  # F3 coercion shows on the view
+    # RSoP (v109-F9): the implied landing flag names the layer that decided it.
+    assert view["policy_provenance"]["auto_apply_verified_patch"] == {
+        "value": True,
+        "decided_by": "unlocked",
+    }

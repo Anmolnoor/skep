@@ -50,6 +50,7 @@ def build_status(
             + _verify_pin_advisories(home)
             + _repo_registry_advisories(home)
             + _stale_store_advisories(home)
+            + _unlocked_advisories(home)
         )
         payload["stale_pending"] = stale_pending
         return payload
@@ -78,6 +79,7 @@ def build_status(
         + _verify_pin_advisories(home)
         + _repo_registry_advisories(home)
         + _stale_store_advisories(home)
+        + _unlocked_advisories(home)
     )
     payload["stale_pending"] = stale_pending
     return payload
@@ -311,6 +313,38 @@ def _verify_pin_advisories(home: Path) -> list[str]:
             '`skep project setup <repo> --verify-command "<runnable command>"`.'
         )
     return advisories
+
+
+def _unlocked_advisories(home: Path) -> list[str]:
+    """unlocked-F6 (ADR 0052, I8): a zero-ask project is a standing mode the
+    operator must be able to see at a glance — 'nothing asked' has to read as
+    the mode they enabled, never as 'nothing happened'."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.projects import list_projects
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        unlocked = [
+            f"{project.project_id} (verify: "
+            f"{str(project.policy.get('verify_command') or '').strip() or 'UNPINNED'})"
+            for project in list_projects(store)
+            if project.policy.get("unlocked") is True
+        ]
+    finally:
+        store.close()
+    if not unlocked:
+        return []
+    return [
+        f"{len(unlocked)} project(s) are UNLOCKED (zero-ask, ADR 0052): worker "
+        "escalations, dispatch cards, and G10-confirmed patch landings auto-approve "
+        "as recorded auto verdicts, and every run is sandbox-forced: "
+        f"{'; '.join(sorted(unlocked))}. Outbound content, policy changes, and the "
+        "hard git denies still gate. Turn off with "
+        "`skep project setup <repo> --no-unlocked`."
+    ]
 
 
 def _repo_registry_advisories(home: Path) -> list[str]:

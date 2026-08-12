@@ -1680,6 +1680,10 @@ def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> d
             # v96-F1 (I2): which command G10 re-runs. The unpinned fallback is
             # the weaker guarantee — say so instead of rendering blank.
             "verify_command": resolved.verify_command or "(worker-nominated fallback)",
+            # unlocked-F6 (ADR 0052, I8): a standing zero-ask mode must be
+            # visible wherever the policy is — "nothing asked" has to read as
+            # a mode, never as "nothing happened".
+            "unlocked": resolved.policy.get("unlocked") is True,
         }
     )
     # v109-F9 (RSoP): every effective policy key with its value and the layer

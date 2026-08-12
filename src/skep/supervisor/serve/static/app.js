@@ -2416,9 +2416,15 @@ async function viewChat(main, chatId) {
       enginePill.hidden = true;
       return;
     }
-    policyPill.text.textContent = policy.execution_mode;
+    // unlocked-F6 (ADR 0052, I8): zero-ask is a standing MODE — the strip
+    // must say so, or "nothing asked" reads as "nothing happened".
+    policyPill.text.textContent = (policy.unlocked ? "UNLOCKED · " : "") + policy.execution_mode;
     policyPill.popover.replaceChildren(...pop(
       `${policy.execution_mode} · ${policy.landing}`,
+      policy.unlocked
+        ? "UNLOCKED (zero-ask): escalations, dispatch cards, and verified-patch "
+          + "landings auto-approve as recorded auto verdicts; runs are sandbox-forced"
+        : null,
       policy.policy_groups?.length
         ? `groups: ${policy.policy_groups.map(g => g.name).join(", ")}` : null,
       `network: ${policy.network?.length ? policy.network.join(", ") : "(none)"}`,
