@@ -2788,17 +2788,31 @@ async function viewChat(main, chatId) {
     ];
   };
 
+  // v112-F1: the tools whose approve can persist a grant (v90-F3's set) —
+  // only these cards earn a keep selector; everything else approves once.
+  const REMEMBERABLE_TOOLS = new Set(["read_url", "run_shell", "start_process"]);
+
   // A proposed mutation: the model never holds the trigger — you do.
   const actionCard = (d) => {
     const approve = el("button", { class: "primary" }, "Approve");
     const refuse = el("button", { class: "danger" }, "Deny");
+    // v112-F1: the keep choice rides the confirm — session stays the default.
+    const keep = REMEMBERABLE_TOOLS.has(d.tool)
+      ? el("select", { class: "card-keep", title: "How long this approval holds" },
+          el("option", { value: "once" }, "once"),
+          el("option", { value: "session", selected: "" }, "this session"),
+          el("option", { value: "always" }, "always"))
+      : null;
     // v81-F13: the id on the DOM lets reconcilers see which cards are drawn.
     const card = el("div", { class: "confirm-card", "data-action-id": d.action_id },
       ...cardBody(d),
-      el("div", { class: "actions" }, approve, refuse));
+      el("div", { class: "actions" }, approve, refuse, keep));
     const verdict = (verb) => async () => {
       approve.disabled = refuse.disabled = true; // double-click guard
-      try { await runStream(`/api/chats/${activeChatId}/actions/${d.action_id}/${verb}`); }
+      try {
+        await runStream(`/api/chats/${activeChatId}/actions/${d.action_id}/${verb}`,
+          verb === "confirm" && keep ? { keep: keep.value } : {});
+      }
       catch (e) {
         // v54-F2: a failed call leaves the card PENDING — buttons come back.
         flash("bad", e.message);

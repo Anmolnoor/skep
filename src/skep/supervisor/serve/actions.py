@@ -3588,6 +3588,7 @@ def remember_action_for_session(
     tool: str,
     args: dict[str, Any],
     actor: str,
+    tier: str = "session",
 ) -> dict[str, str] | None:
     """v90-F3: a confirmed card grants its exact subject for this serve session.
 
@@ -3597,6 +3598,12 @@ def remember_action_for_session(
     session-provenance learned rule, so the SAME decision functions
     (``fetch_grant_decision``, ``queen_shell_decision``) auto-resolve the
     repeat. Returns the grant for the receipt, or None when nothing was granted.
+
+    v112-F1: ``tier`` is the operator's keep choice riding the confirm —
+    "session" (the v90-F3 default, dropped at serve startup) or "always"
+    (the same durable ``allow-always:`` provenance ``allow_fetch_domain``
+    writes, visible and revocable on the Policies page). The guards below
+    apply identically to both tiers; only the provenance prefix differs.
 
     Deliberately narrow:
     - only the verbs whose repeats the operator actually sees (fetch, shell);
@@ -3615,7 +3622,9 @@ def remember_action_for_session(
         normalize_remembered_command,
     )
 
-    provenance = f"session:{actor}"
+    if tier not in ("session", "always"):
+        raise ValueError(f"grant tier must be 'session' or 'always', got {tier!r}")
+    provenance = f"session:{actor}" if tier == "session" else f"allow-always:{actor}"
     if tool == "read_url":
         host = urllib.parse.urlparse(str(args.get("url") or "")).hostname or ""
         if not host:
@@ -3628,7 +3637,7 @@ def remember_action_for_session(
             scope="network",
             provenance=provenance,
         )
-        return None if rule_id is None else {"scope": "network", "pattern": host, "tier": "session"}
+        return None if rule_id is None else {"scope": "network", "pattern": host, "tier": tier}
     if tool in ("run_shell", "start_process"):
         raw = str(args.get("command") or "").strip()
         if not raw:
@@ -3654,7 +3663,7 @@ def remember_action_for_session(
         )
         if rule_id is None:
             return None
-        return {"scope": "shell", "pattern": pattern, "tier": "session"}
+        return {"scope": "shell", "pattern": pattern, "tier": tier}
     return None
 
 

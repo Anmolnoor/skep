@@ -136,3 +136,46 @@ def test_the_receipt_knows_the_grant_tier_and_time(tmp_path: Path) -> None:
         assert learned_rule_grant_view(store, None) is None
     finally:
         store.close()
+
+
+def test_the_always_tier_writes_a_durable_grant(config: SupervisorConfig) -> None:
+    """v112-F1: the keep choice on a card confirm — tier='always' writes the
+    same allow-always provenance ``allow_fetch_domain`` uses, so the grant
+    shows on the Policies page as tier 'always' and survives the serve-startup
+    session sweep. The v90-F3 guards (deny vetting, never-grantable classes)
+    apply identically; only the provenance prefix differs."""
+    store = RunStore(config.db_path)
+    try:
+        grant = actions.remember_action_for_session(
+            store,
+            tool="read_url",
+            args={"url": "https://kept.example.com/x"},
+            actor="me",
+            tier="always",
+        )
+        assert grant == {"scope": "network", "pattern": "kept.example.com", "tier": "always"}
+        learned = _doc(store).learned
+        assert learned[0].provenance == "allow-always:me"
+
+        # The session sweep at serve startup must NOT drop it.
+        assert actions.clear_session_policy_rules(store) == 0
+        assert [r.pattern for r in _doc(store).learned] == ["kept.example.com"]
+    finally:
+        store.close()
+
+
+def test_an_unknown_grant_tier_is_refused(config: SupervisorConfig) -> None:
+    import pytest
+
+    store = RunStore(config.db_path)
+    try:
+        with pytest.raises(ValueError, match=r"session.*always"):
+            actions.remember_action_for_session(
+                store,
+                tool="read_url",
+                args={"url": "https://x.example.com/"},
+                actor="me",
+                tier="forever",
+            )
+    finally:
+        store.close()

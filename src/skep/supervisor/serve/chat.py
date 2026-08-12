@@ -880,6 +880,13 @@ class CommandRequest(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
 
 
+class ActionConfirm(BaseModel):
+    """v112-F1: the operator's keep choice riding a card confirm. Absent body
+    (every pre-v112 caller) keeps the v90-F3 behavior: a session grant."""
+
+    keep: str = "session"
+
+
 class ChatEngine:
     """The Queen's turn loop, faceless (v26-F2).
 
@@ -1896,6 +1903,7 @@ class ChatEngine:
         *,
         confirm: bool,
         actor: str = CHAT_ACTOR,
+        keep: str = "session",
     ) -> Iterator[ChatEvent]:
         """Resolve one card, append its tool result, stream the continuation.
 
@@ -1908,6 +1916,12 @@ class ChatEngine:
         action = self.store.get_chat_action(action_id)
         if action is None or action.chat_id != chat_id:
             raise HTTPException(status_code=404, detail=f"no action {action_id!r} in this chat")
+        # v112-F1: the keep choice rides the confirm — "once" grants nothing,
+        # "session" is the v90-F3 default, "always" writes the durable tier.
+        if keep not in ("once", "session", "always"):
+            raise HTTPException(
+                status_code=422, detail="keep must be one of 'once', 'session', 'always'"
+            )
         if action.source == "operator":
             # v25-F1: operator commands resolve on the commands endpoints — this
             # path appends tool results to the transcript and resumes the model,
@@ -1939,11 +1953,15 @@ class ChatEngine:
                 # always-tier writes to, so resolve() composes it unchanged and
                 # LearnedRuleRejected still bars denied space (I5, I6 — the
                 # operator's own verdict creates it, never the model's).
-                session_grant = actions.remember_action_for_session(
-                    self.store, tool=action.tool, args=action.args, actor=actor
+                grant = (
+                    None
+                    if keep == "once"
+                    else actions.remember_action_for_session(
+                        self.store, tool=action.tool, args=action.args, actor=actor, tier=keep
+                    )
                 )
-                if session_grant is not None:
-                    payload["session_grant"] = session_grant
+                if grant is not None:
+                    payload["grant"] = grant
             except HTTPException as exc:
                 payload = {"ok": False, "error": str(exc.detail)}
             except (KeyError, ValueError, TypeError) as exc:
@@ -2430,10 +2448,13 @@ def add_chat_routes(
         return _resolve_command(chat_id, action_id, confirm=False)
 
     @app.post("/api/chats/{chat_id}/actions/{action_id}/confirm")
-    def confirm_action(chat_id: str, action_id: str) -> StreamingResponse:
+    def confirm_action(
+        chat_id: str, action_id: str, body: ActionConfirm | None = None
+    ) -> StreamingResponse:
         chat = _require_chat(chat_id)
+        keep = body.keep if body is not None else "session"
         return StreamingResponse(
-            _as_sse(engine.verdict_events(chat_id, chat, action_id, confirm=True)),
+            _as_sse(engine.verdict_events(chat_id, chat, action_id, confirm=True, keep=keep)),
             media_type="text/event-stream",
         )
 
