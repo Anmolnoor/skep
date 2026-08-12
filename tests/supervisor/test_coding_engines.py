@@ -172,6 +172,24 @@ def test_a_cli_engine_gets_the_env_it_declares(repo: Path, config: SupervisorCon
     assert "ANTHROPIC_API_KEY" in resolved.permissions.env_allowlist
 
 
+def test_codex_declares_its_env_auth_and_state_home(repo: Path, config: SupervisorConfig) -> None:
+    """v111-F4: the codex entry predated the v94-F3/v106-F1 hardening — no
+    env, no CODEX_HOME redirect — and zero codex runs ever completed: the
+    read-only mount killed its sqlite state under ~/.codex before auth was
+    even tested, and file-based ChatGPT login could never reach the sandbox
+    anyway. Same treatment as claude_code: state under .toolchain/, auth
+    rides the environment (names only, G2)."""
+    from skep.supervisor.engines import CODING_ENGINES
+
+    _bind(config, repo, {"coding_engine": "codex", "verify_command": "pytest -q"})
+    resolved = _resolve(config, repo)
+    assert "OPENAI_API_KEY" in resolved.permissions.env_allowlist
+    assert "USER" in resolved.permissions.env_allowlist
+    codex = CODING_ENGINES["codex"]
+    assert ("CODEX_HOME", "codex") in codex.toolchain_env
+    assert codex.auth_env == ("OPENAI_API_KEY",)
+
+
 def test_the_builtin_engine_adds_no_env(repo: Path, config: SupervisorConfig) -> None:
     """The merge is engine-declared, not a global widening: skep's own worker
     keeps the bare G2 allowlist."""

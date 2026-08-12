@@ -115,6 +115,16 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         argv=(sys.executable, "-m", "skep.workers.codex"),
         binary="codex",
         network_host="api.openai.com",
+        # v111-F4: the entry predated the v94-F3/v106-F1 hardening and never
+        # got it — zero codex runs ever completed. ~/.codex/auth.json (the
+        # ChatGPT login) is file-based and can never reach the sandbox once
+        # CODEX_HOME is redirected per-run; auth rides OPENAI_API_KEY or not
+        # at all — the same story as claude_code's /login. The redirect also
+        # gives codex's own sqlite state a writable home: under the read-only
+        # / mount it dies opening ~/.codex before auth is even tested (I12).
+        env_vars=("USER", "LOGNAME", "OPENAI_API_KEY"),
+        auth_env=("OPENAI_API_KEY",),
+        toolchain_env=(("CODEX_HOME", "codex"),),
         summary=("Codex CLI, headless. Confined by the sandbox, not the capability layer."),
     ),
     "aider": CodingEngine(
