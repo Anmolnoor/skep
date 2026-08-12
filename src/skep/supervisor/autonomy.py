@@ -114,6 +114,24 @@ def project_policy_dispatch_decision(
             verdict="require_approval",
             reason="dispatch.require_approval.explicit_run_overrides",
         )
+    # unlocked-F4 (ADR 0052): a zero-ask project's dispatch family
+    # (dispatch_run / run_code / quick_edit / batch members) runs in-turn —
+    # the run itself is sandbox-forced (F3) and lands only through the
+    # verified-patch lane, so the card would gate the one path that is
+    # already walled. Explicit run overrides above still card (I6/I7: an
+    # explicit model choice gets eyes), and a resolution error still asks.
+    if policy.get("unlocked") is True:
+        if policy_resolution_error is not None:
+            return AutonomyDecision(
+                verdict="require_approval",
+                reason="dispatch.require_approval.policy_resolution_failed",
+                detail=str(policy_resolution_error),
+            )
+        return AutonomyDecision(
+            verdict="allow",
+            reason="dispatch.auto_allowed.unlocked",
+            detail="zero-ask project (ADR 0052); the run is sandbox-forced",
+        )
     if policy.get("auto_dispatch_allowed") is not True:
         return AutonomyDecision(
             verdict="require_approval",

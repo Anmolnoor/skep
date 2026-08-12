@@ -294,3 +294,43 @@ def test_spawner_refuses_a_required_sandbox_it_cannot_build(
             log_path=tmp_path / "worker.log",
             sandbox_enabled=True,
         )
+
+
+# ---- F4: the dispatch family runs in-turn; everything else still cards ------
+
+
+def test_unlocked_dispatch_family_auto_allows_but_overrides_and_policy_tools_card(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.serve.actions import dispatch_run_decision
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import mutation_execution_decision
+
+    _bind_unlocked_project(config, repo)
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+
+        decision = dispatch_run_decision(holder, store, repo=str(repo))
+        assert decision.verdict == "allow"
+        assert decision.reason == "dispatch.auto_allowed.unlocked"
+
+        # An explicit per-dispatch engine stays a carded choice (v95-F3, I6/I7).
+        gated = dispatch_run_decision(holder, store, repo=str(repo), engine="claude_code")
+        assert gated.verdict == "require_approval"
+
+        # run_code rides the same decision (v51-F3).
+        run_code = mutation_execution_decision(
+            "run_code", {"repo": str(repo), "code": "print(1)"}, store=store, holder=holder
+        )
+        assert run_code is not None and run_code.verdict == "allow"
+
+        # Self-widening and outbound verbs gain NO auto path from unlocked:
+        # no decision means the card machinery asks, exactly as before.
+        for tool, args in (
+            ("setup_project", {"project_id": "unlockable", "name": "n", "strategy": "x"}),
+            ("open_pr", {"repo": str(repo), "task_id": "t"}),
+        ):
+            assert mutation_execution_decision(tool, args, store=store, holder=holder) is None
+    finally:
+        store.close()
