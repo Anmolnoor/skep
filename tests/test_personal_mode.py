@@ -139,6 +139,31 @@ class PersonalModeTests(unittest.TestCase):
             self.assertIn("supervisor daemon has an LLM provider", report)
             self.assertIn("provider.example", report)
 
+    def test_doctor_memory_check_reads_the_live_store_not_the_retired_path(self) -> None:
+        """v111-F2: the one path that drifted. A leftover store at the retired
+        ``<home>/supervisor.sqlite3`` layout exists and opens, so the memory
+        check spent weeks vouching for a frozen file while serve wrote to
+        ``<home>/supervisor/supervisor.sqlite3``."""
+        from skep.supervisor.store import RunStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / "supervisor").mkdir(parents=True)
+            # The decoy at the retired layout: exists, opens, holds nothing.
+            RunStore(home / "supervisor.sqlite3").close()
+            live = RunStore(home / "supervisor" / "supervisor.sqlite3")
+            try:
+                live.add_memory_item(
+                    memory_class="project_fact", content="the live store", actor="test"
+                )
+            finally:
+                live.close()
+
+            memory = build_status(home)["memory"]
+
+            self.assertEqual(memory["path"], str(home / "supervisor" / "supervisor.sqlite3"))
+            self.assertEqual(memory["items"], 1)
+
     def test_doctor_names_projects_that_pin_no_verify_command(self) -> None:
         """v91-F1 (I2/I8): setup pins one for new projects but never rewrites a
         stored policy, so the ones still on the worker-nominated fallback are

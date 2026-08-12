@@ -460,8 +460,14 @@ def _coding_engine_checks() -> dict[str, dict[str, Any]]:
 def _memory_status(home: Path, has_profile: bool) -> dict[str, Any]:
     """v13: the single durable memory system is the sqlite store (curated
     memory_items with FTS search), not the inert ``~/.skep/memory`` directory.
-    Report readiness and the durable item count from the store."""
-    db = home / "supervisor.sqlite3"
+    Report readiness and the durable item count from the store.
+
+    v111-F2: the path is the one serve actually uses
+    (``<home>/supervisor/supervisor.sqlite3``, like every other check here) —
+    this line alone had drifted to ``<home>/supervisor.sqlite3``, a retired
+    layout whose leftover file exists and opens, so doctor spent weeks
+    vouching for a store frozen on 2026-08-03 while the live one grew."""
+    db = home / "supervisor" / "supervisor.sqlite3"
     if not db.is_file():
         return {
             "status": "ready" if has_profile else "blocked",
