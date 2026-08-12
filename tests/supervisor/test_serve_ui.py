@@ -1844,3 +1844,18 @@ def test_diagnose_run_rest_face(repo: Path, config: SupervisorConfig, tmp_path: 
     assert ok.status_code == 200, ok.text
     assert ok.json()["exit_code"] == 0
     assert "hi" in ok.json()["stdout"]
+
+
+def test_the_ledger_nudge_has_a_face_on_the_approvals_view() -> None:
+    """v112-F3: /api/ledger/suggestions existed since v109-F8 with zero UI
+    consumers — an invisible nudge nudges nobody. The Approvals view renders
+    the keys that keep asking, with the remember action and (v112-F2) the
+    covering-group attach."""
+    source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "/api/ledger/suggestions" in source
+    assert "renderRememberSuggestions" in source
+    assert "covering_group" in source
+    assert "attach_group" in source
+    # The keep selector (v112-F1) rides only rememberable cards.
+    assert 'REMEMBERABLE_TOOLS = new Set(["read_url", "run_shell", "start_process"])' in source
+    assert "card-keep" in source

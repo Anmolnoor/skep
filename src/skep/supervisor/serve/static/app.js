@@ -3991,10 +3991,54 @@ async function viewRunDetail(main, taskId) {
 
 // ---------- Approvals ----------
 
+// v112-F3: the v109-F8 ledger nudge finally has a face — the keys the
+// operator keeps approving with no standing grant, with the remember /
+// attach-bundle actions inline (the attach is F2's covering-group offer).
+function renderRememberSuggestions(main, suggestions) {
+  if (!suggestions.length) return;
+  const section = el("div", { class: "card remember-suggestions" },
+    el("p", {}, el("strong", {}, "Keeps asking"),
+      " — approved repeatedly with no standing grant:"));
+  for (const s of suggestions) {
+    const row = el("p", { class: "note" },
+      el("code", {}, s.resource), ` (${s.action}, ${s.count}× on ${s.repo}) `);
+    const act = (label, cls, body, doneNote) => {
+      const button = el("button", cls ? { class: cls } : {}, label);
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          await api("POST", "/api/ledger/remember", body);
+          flash("ok", doneNote);
+          row.remove();
+        } catch (e) {
+          flash("bad", e.message);
+          button.disabled = false;
+        }
+      });
+      return button;
+    };
+    row.append(act("Remember for project", "",
+      { action: s.action, resource: s.resource, repo: s.repo },
+      `remembered ${s.resource}`));
+    if (s.covering_group) {
+      row.append(" ", act(`Attach ${s.covering_group}`, "primary",
+        { action: s.action, resource: s.resource, repo: s.repo,
+          attach_group: s.covering_group },
+        `attached ${s.covering_group} — its whole bundle is granted now`));
+    }
+    section.append(row);
+  }
+  main.append(section);
+}
+
 async function viewApprovals(main) {
   header(main, "Approvals",
     "The gate queue: risky work waits here for a human verdict — nothing lands on its own.");
-  const { approvals } = await api("GET", "/api/approvals");
+  const [{ approvals }, ledger] = await Promise.all([
+    api("GET", "/api/approvals"),
+    api("GET", "/api/ledger/suggestions").catch(() => ({ suggestions: [] })),
+  ]);
+  renderRememberSuggestions(main, ledger.suggestions || []);
   if (!approvals.length) {
     // v76-F5: the empty state teaches the next step (I9).
     main.append(el("div", { class: "empty-state" },
