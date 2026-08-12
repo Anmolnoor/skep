@@ -70,6 +70,14 @@ class CodingEngine:
     # ``~/.claude``, so without this its Bash tool dies on a read-only mount
     # and every shell-needing task ends "completed but produced no patch".
     toolchain_env: tuple[tuple[str, str], ...] = ()
+    # v111-F3: headless auth — at least ONE of these env vars must be set in
+    # the supervisor's OWN process env for the engine to authenticate at all:
+    # file-based logins (~/.claude/.credentials.json, ~/.codex/auth.json)
+    # never reach the sandbox once the config dir is redirected per-run
+    # (v106-F1), so the environment is the only carrier. Names only, never
+    # values (G2); ``skep doctor`` compares them against the process env —
+    # the 2026-08-11 restart shed the token and doctor still said "ok".
+    auth_env: tuple[str, ...] = ()
     # True when the agent's own commands do NOT pass skep's capability layer.
     external: bool = True
     summary: str = ""
@@ -96,6 +104,7 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         # environment instead: `claude setup-token` mints the long-lived
         # token. Names only (G2); unset vars are inert allowlist entries.
         env_vars=("USER", "LOGNAME", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
+        auth_env=("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
         toolchain_env=(("CLAUDE_CONFIG_DIR", "claude"),),
         summary=(
             "Claude Code, headless (--print). Confined by the sandbox, not the capability layer."

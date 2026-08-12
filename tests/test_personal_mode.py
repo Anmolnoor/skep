@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -138,6 +139,45 @@ class PersonalModeTests(unittest.TestCase):
             self.assertTrue(status["advisories"])
             self.assertIn("supervisor daemon has an LLM provider", report)
             self.assertIn("provider.example", report)
+
+    def test_doctor_flags_a_present_engine_with_no_auth_env(self) -> None:
+        """v111-F3: a present binary is not a runnable engine. The 2026-08-11
+        restart shed CLAUDE_CODE_OAUTH_TOKEN and doctor kept saying
+        'engine claude_code: ok' while every dispatch died on 'Not logged in'.
+        The declared auth names (G2: names, never values) are compared against
+        the supervisor's own process env."""
+        from skep.status import _coding_engine_checks, format_doctor_report
+
+        scrubbed = {"CLAUDE_CODE_OAUTH_TOKEN": "", "ANTHROPIC_API_KEY": ""}
+        with mock.patch.dict(os.environ, scrubbed):
+            checks = _coding_engine_checks()
+        self.assertFalse(checks["claude_code"]["auth_ok"])
+        self.assertEqual(
+            checks["claude_code"]["auth_env"],
+            ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+        )
+        # The builtin worker declares no auth env and stays clean.
+        self.assertTrue(checks["builtin"]["auth_ok"])
+
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}):
+            self.assertTrue(_coding_engine_checks()["claude_code"]["auth_ok"])
+
+        report = format_doctor_report(
+            {
+                "overall": "ready",
+                "required": {},
+                "coding_engines": {
+                    "claude_code": {
+                        "present": True,
+                        "detail": "/usr/bin/claude",
+                        "external": True,
+                        "auth_ok": False,
+                        "auth_env": ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+                    }
+                },
+            }
+        )
+        self.assertIn("NO AUTH ENV — set one of CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY", report)
 
     def test_doctor_memory_check_reads_the_live_store_not_the_retired_path(self) -> None:
         """v111-F2: the one path that drifted. A leftover store at the retired

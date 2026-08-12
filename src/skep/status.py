@@ -398,6 +398,9 @@ def format_doctor_report(status: Mapping[str, Any]) -> str:
     engines = status.get("coding_engines", {})
     for name, engine in engines.items():
         mark = "ok" if engine.get("present") else "MISSING"
+        if engine.get("present") and not engine.get("auth_ok", True):
+            # v111-F3: binary present but no way to authenticate headlessly.
+            mark = f"NO AUTH ENV — set one of {'/'.join(engine.get('auth_env', []))}"
         walls = "" if not engine.get("external") else " (sandbox-confined; needs verify_command)"
         lines.append(f"- engine {name}: {mark} — {engine.get('detail')}{walls}")
 
@@ -448,11 +451,17 @@ def _coding_engine_checks() -> dict[str, dict[str, Any]]:
     checks: dict[str, dict[str, Any]] = {}
     for name, engine in sorted(CODING_ENGINES.items()):
         present, detail = engine_available(engine)
+        # v111-F3: a present binary is not a runnable engine — headless auth
+        # rides the supervisor's process env (declared names only, G2), and
+        # the 2026-08-11 restart shed the token while doctor kept saying ok.
+        auth_ok = not engine.auth_env or any(os.environ.get(var) for var in engine.auth_env)
         checks[name] = {
             "present": present,
             "detail": detail,
             "external": engine.external,
             "summary": engine.summary,
+            "auth_ok": auth_ok,
+            "auth_env": list(engine.auth_env),
         }
     return checks
 
