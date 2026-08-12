@@ -49,6 +49,7 @@ def build_status(
             + _browse_advisories(home)
             + _verify_pin_advisories(home)
             + _repo_registry_advisories(home)
+            + _stale_store_advisories(home)
         )
         payload["stale_pending"] = stale_pending
         return payload
@@ -76,6 +77,7 @@ def build_status(
         + _browse_advisories(home)
         + _verify_pin_advisories(home)
         + _repo_registry_advisories(home)
+        + _stale_store_advisories(home)
     )
     payload["stale_pending"] = stale_pending
     return payload
@@ -193,6 +195,32 @@ def _auto_approve_advisories(home: Path) -> list[str]:
     finally:
         store.close()
     return [_AUTO_APPROVE_DEPRECATION] if enabled else []
+
+
+# v111-F5: store files from retired layouts. Each migration left its sqlite
+# behind silently; two independent investigations (doctor's own memory check
+# pre-F2, and the 2026-08-12 forensics session) opened a dead store first.
+_RETIRED_STORE_FILES = (
+    "runs.db",
+    "skep.db",
+    "store.sqlite3",
+    "supervisor.sqlite3",
+    "supervisor/runs.db",
+)
+
+
+def _stale_store_advisories(home: Path) -> list[str]:
+    """v111-F5: name the retired store files no current code reads (I8)."""
+    stale = [rel for rel in _RETIRED_STORE_FILES if (home / rel).is_file()]
+    if not stale:
+        return []
+    listed = ", ".join(str(home / rel) for rel in stale)
+    return [
+        f"{len(stale)} store file(s) from retired layouts linger and read as the "
+        f"live store to anyone (or any tool) inspecting {home}: {listed}. The "
+        f"only live store is {home / 'supervisor' / 'supervisor.sqlite3'}; "
+        "archive or delete the rest."
+    ]
 
 
 def _browse_advisories(home: Path) -> list[str]:

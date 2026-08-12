@@ -179,6 +179,34 @@ class PersonalModeTests(unittest.TestCase):
         )
         self.assertIn("NO AUTH ENV — set one of CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY", report)
 
+    def test_doctor_names_store_files_from_retired_layouts(self) -> None:
+        """v111-F5: every layout migration left its sqlite behind silently;
+        doctor's own memory check (pre-F2) and a forensics session both opened
+        a dead store first. The litter is named, with the live path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            (home / "supervisor").mkdir(parents=True)
+            (home / "supervisor.sqlite3").write_bytes(b"")
+            (home / "store.sqlite3").write_bytes(b"")
+            (home / "supervisor" / "runs.db").write_bytes(b"")
+
+            advisories = build_status(home)["advisories"]
+
+            stale = [a for a in advisories if "retired layouts" in a]
+            self.assertEqual(len(stale), 1)
+            self.assertIn(str(home / "supervisor.sqlite3"), stale[0])
+            self.assertIn(str(home / "store.sqlite3"), stale[0])
+            self.assertIn(str(home / "supervisor" / "runs.db"), stale[0])
+            self.assertIn(str(home / "supervisor" / "supervisor.sqlite3"), stale[0])
+
+            # A clean home is silent.
+            clean = Path(tmp) / "clean"
+            (clean / "supervisor").mkdir(parents=True)
+            self.assertEqual(
+                [a for a in build_status(clean)["advisories"] if "retired layouts" in a],
+                [],
+            )
+
     def test_doctor_memory_check_reads_the_live_store_not_the_retired_path(self) -> None:
         """v111-F2: the one path that drifted. A leftover store at the retired
         ``<home>/supervisor.sqlite3`` layout exists and opens, so the memory
