@@ -6,6 +6,9 @@ and a usable sandbox (I12).
 F2: a worker escalation on an unlocked project answers itself through the
 same resume_past_gate path a human click takes — recorded auto:unlocked,
 granted once, never the session tier.
+F3: unlocked runs are sandbox-forced (I12) — the resolver coerces the mode,
+run_task refuses mismatches, and a REQUIRED sandbox that cannot be built is
+a refusal, never a silent naked-host run.
 """
 
 from __future__ import annotations
@@ -186,3 +189,108 @@ def test_unlocked_gate_answers_itself_with_a_recorded_auto_verdict(
         assert not store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS)
     finally:
         store.close()
+
+
+# ---- F3: the sandbox is forced, and its absence refuses ---------------------
+
+
+def _bind_unlocked_project(config: SupervisorConfig, repo: Path) -> None:
+    """Write an unlocked project straight into the store — the shape of a
+    policy that was valid when saved, whatever the host looks like now."""
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="unlockable",
+            name="Unlockable",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={
+                "unlocked": True,
+                "verify_command": "pytest -q",
+                "default_execution_mode": "workspace",
+                "auto_dispatch_allowed": True,
+            },
+        )
+        store.add_project_binding(
+            project_id="unlockable", binding_kind="repo_path", binding_value=str(repo)
+        )
+    finally:
+        store.close()
+
+
+def test_unlocked_resolution_coerces_the_mode_to_sandbox(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.policy_resolver import resolve_run_policy
+
+    _bind_unlocked_project(config, repo)
+    store = RunStore(config.db_path)
+    try:
+        resolved = resolve_run_policy(
+            store=store,
+            config=config,
+            repo=repo,
+            caste="coding",
+            network=None,
+            env_allowlist=None,
+            wall_clock_seconds=None,
+            max_iterations=None,
+            max_actions=None,
+            max_provider_calls=None,
+            execution_mode="workspace",
+        )
+    finally:
+        store.close()
+    assert resolved.execution_mode == "sandbox"
+
+
+def test_unlocked_run_task_refuses_a_non_sandbox_mode(repo: Path, tmp_path: Path) -> None:
+    from skep.supervisor.cli_cmds import build_config
+
+    config = build_config(tmp_path / "home", None)
+    _bind_unlocked_project(config, repo)
+
+    import skep.supervisor.dispatch as dispatch_module
+
+    with pytest.raises(ValueError, match="unlocked"):
+        dispatch_module.run_task(repo, "do a thing", config=config, execution_mode="workspace")
+
+
+def test_unlocked_run_task_refuses_an_unusable_sandbox(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.cli_cmds import build_config
+
+    config = build_config(tmp_path / "home", None)
+    _bind_unlocked_project(config, repo)
+
+    import skep.supervisor.dispatch as dispatch_module
+
+    monkeypatch.setattr(dispatch_module, "sandbox_availability", _sandbox_probe(False))
+    with pytest.raises(ValueError, match="sandbox"):
+        dispatch_module.run_task(repo, "do a thing", config=config, execution_mode="sandbox")
+
+
+def test_spawner_refuses_a_required_sandbox_it_cannot_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sandbox_enabled=True means REQUIRED: no silent naked-host fallback."""
+    from skep.supervisor import sandbox as supervisor_sandbox
+    from skep.supervisor import spawner as supervisor_spawner
+    from skep.supervisor.contracts_io import mint_task
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task = mint_task(workspace=workspace, instructions="do a thing")
+    config = SupervisorConfig(home=tmp_path / "home", worker_command=("fake-worker",))
+    monkeypatch.setattr(supervisor_sandbox, "availability", _sandbox_probe(False))
+
+    with pytest.raises(supervisor_sandbox.SandboxUnavailableError, match="forced off by test"):
+        supervisor_spawner.spawn_worker(
+            config,
+            task,
+            tmp_path / "task.json",
+            tmp_path / "result.json",
+            log_path=tmp_path / "worker.log",
+            sandbox_enabled=True,
+        )

@@ -60,6 +60,7 @@ from .netproxy import FilteringProxy
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
 from .providers import ProviderProfile
 from .reverify import reverify_run
+from .sandbox import SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
 from .spawner import effective_network_domains, spawn_worker
 from .store import RunStore
@@ -392,22 +393,36 @@ def run_task(
                 "agent on the host; fix the sandbox backend (`skep doctor`) or "
                 "switch the project to the builtin engine"
             )
-    if not verify_command:
-        from .policy_resolver import run_policy_for_repo
+    from .policy_resolver import run_policy_for_repo
 
-        # Managed clones are slug-bound (registry name == directory name), so
-        # the safety-net lookup must offer the slug too — path-only matching
-        # dropped the pin for every slug-bound project that reached run_task
-        # without an explicit verify_command (the authwapi acceptance hole).
-        candidates = (
-            [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
-        )
-        pinned = run_policy_for_repo(run_store, config, repo, binding_candidates=candidates).get(
-            "verify_command"
-        )
+    # Managed clones are slug-bound (registry name == directory name), so
+    # the safety-net lookup must offer the slug too — path-only matching
+    # dropped the pin for every slug-bound project that reached run_task
+    # without an explicit verify_command (the authwapi acceptance hole).
+    candidates = [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+    repo_policy = run_policy_for_repo(run_store, config, repo, binding_candidates=candidates)
+    if not verify_command:
+        pinned = repo_policy.get("verify_command")
         # A non-string overlay value is treated as unset; resolve_run_policy is
         # the surface that rejects it loudly on the dispatch path (I9).
         verify_command = pinned if isinstance(pinned, str) else ""
+    # unlocked-F3 (ADR 0052): a zero-ask project's confinement story IS the
+    # sandbox, so run_task refuses the mismatches the resolver cannot see
+    # (resume with a pre-unlock mode, explicit flags) — the v94-F4 shape.
+    unlocked_run = repo_policy.get("unlocked") is True
+    if unlocked_run:
+        if execution_mode != "sandbox":
+            raise ValueError(
+                f"this repo's project is unlocked (zero-ask, ADR 0052) and never "
+                f"runs in {execution_mode!r} mode — dispatch it with execution "
+                "mode 'sandbox', or turn unlocked off in the project policy"
+            )
+        if not sandbox_availability().usable:
+            raise ValueError(
+                "this repo's project is unlocked (zero-ask, ADR 0052), which "
+                "requires a usable sandbox, and this host has none — fix the "
+                "sandbox backend (`skep doctor`) or turn unlocked off"
+            )
     try:
         landing_decision = auto_apply_decision(
             config.auto_approval_rules, auto_apply_verified_patch
@@ -639,7 +654,14 @@ def run_task(
                 log_path=log_path,
                 network_proxy_port=proxy.port if proxy is not None else None,
                 network_proxy_unix_path=proxy_unix_path,
-                sandbox_enabled=None if execution_mode == "sandbox" else False,
+                # True = REQUIRED (unlocked project or external engine): the
+                # spawner refuses the naked-host fallback instead of degrading
+                # silently. None = best-effort per config; False = off.
+                sandbox_enabled=(
+                    True
+                    if (unlocked_run or worker_argv is not None)
+                    else (None if execution_mode == "sandbox" else False)
+                ),
                 extra_env=routed_env or None,
                 worker_argv=worker_argv,
                 # v109-F4: the cache is OUTSIDE the workspace by design (it
@@ -650,6 +672,13 @@ def run_task(
             return finish_before_worker(
                 reason="spawn_failed",
                 summary=f"Worker process could not be started: {exc}",
+            )
+        except SandboxUnavailableError as exc:
+            # unlocked-F3: a REQUIRED sandbox that cannot be built at spawn
+            # time fails the run honestly — never a naked-host fallback (I12).
+            return finish_before_worker(
+                reason="sandbox_required_unavailable",
+                summary=f"a required sandbox could not be built: {exc}",
             )
         run_store.transition(task.task_id, "running", f"pid {process.pid}")
 

@@ -171,7 +171,19 @@ def spawn_worker(
     else:
         network = sandbox.NetworkPolicy(allow=domains)
     backend = resolve_sandbox_backend(config, network) if use_sandbox else None
-    if use_sandbox and sandbox.availability(backend).usable:
+    sandbox_usable = use_sandbox and sandbox.availability(backend).usable
+    if sandbox_enabled is True and not sandbox_usable:
+        # unlocked-F3 / v94-F4 (I12): True means REQUIRED — this run's whole
+        # confinement story is the sandbox (unlocked project, external
+        # engine). The unwrapped fallthrough below is for best-effort runs
+        # (None) only; a required wall that cannot be built is a refusal,
+        # never a naked-host run.
+        probe = sandbox.availability(backend)
+        raise sandbox.SandboxUnavailableError(
+            f"sandbox required but unusable ({probe.reason or 'unavailable'}: "
+            f"{probe.detail or 'no detail'})"
+        )
+    if sandbox_usable:
         workspace = Path(task.workspace)
         # v109-F4: ``extra_writable`` is per-run (the project dependency-cache
         # root); every backend consumes this one list (Seatbelt subpaths,

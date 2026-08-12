@@ -608,6 +608,13 @@ def resolve_run_policy(
     # every surface shows (I8); dispatch backs this with a hard refusal.
     if chosen_engine.external:
         resolved_execution_mode = "sandbox"
+    # unlocked-F3 (ADR 0052): zero-ask is JUSTIFIED by the wall, so the wall
+    # is not optional — an unlocked project's runs are sandbox-forced whatever
+    # the default or request said. Same shape as the v94-F4 coercion above:
+    # the coerced mode is the mode every surface shows (I8); dispatch backs
+    # it with a hard refusal.
+    if policy.get("unlocked") is True:
+        resolved_execution_mode = "sandbox"
     default_network = list(policy["default_network"])
     chosen_network = list(default_network if network is None else network)
     # v19-F2: a coding worker that cannot reach its LLM provider cannot work at

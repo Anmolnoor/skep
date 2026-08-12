@@ -2787,7 +2787,14 @@ def resume_past_gate(
             ref=None if run["ref"] is None else str(run["ref"]),
             resume_of=task_id,
             approval_verdict=verdict,
-            execution_mode=str(run.get("execution_mode") or "sandbox"),
+            # unlocked-F3: a resume is a NEW run resolved under CURRENT policy —
+            # a pre-unlock workspace run comes back sandboxed, or run_task's
+            # unlocked refusal would 500 the very click meant to resume it.
+            execution_mode=(
+                "sandbox"
+                if unlocked_for_repo(store, config, Path(str(run["repo"])))
+                else str(run.get("execution_mode") or "sandbox")
+            ),
         )
     except DispatchError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
