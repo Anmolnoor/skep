@@ -472,9 +472,17 @@ def status_json(status: Mapping[str, Any]) -> str:
     return json.dumps(status, indent=2, sort_keys=True) + "\n"
 
 
-def _coding_engine_checks() -> dict[str, dict[str, Any]]:
+def _coding_engine_checks(home: Path) -> dict[str, dict[str, Any]]:
     """Presence of each registered coding engine's binary (v90-F1)."""
     from skep.supervisor.engines import CODING_ENGINES, engine_available
+    from skep.supervisor.serve.serve_cmds import SERVE_ENV_FILE, load_serve_env
+
+    # v111-F6: doctor is its own process — the token usually lives in
+    # <home>/serve.env, which the daemon loads at startup (F1). Counting only
+    # doctor's env would cry NO AUTH ENV on every healthy setup. Loaded into a
+    # scratch dict: names checked, doctor's own env never mutated.
+    serve_env: dict[str, str] = {}
+    load_serve_env(home / SERVE_ENV_FILE, serve_env)
 
     checks: dict[str, dict[str, Any]] = {}
     for name, engine in sorted(CODING_ENGINES.items()):
@@ -482,7 +490,9 @@ def _coding_engine_checks() -> dict[str, dict[str, Any]]:
         # v111-F3: a present binary is not a runnable engine — headless auth
         # rides the supervisor's process env (declared names only, G2), and
         # the 2026-08-11 restart shed the token while doctor kept saying ok.
-        auth_ok = not engine.auth_env or any(os.environ.get(var) for var in engine.auth_env)
+        auth_ok = not engine.auth_env or any(
+            os.environ.get(var) or serve_env.get(var) for var in engine.auth_env
+        )
         checks[name] = {
             "present": present,
             "detail": detail,
@@ -554,7 +564,7 @@ def _status_payload(
         # v90-F1 (ADR 0047): which coding engines this host can actually run.
         # Reported BEFORE dispatch — the v87-F6 lesson, where a binary that was
         # not on the host burned three runs before anything said so.
-        "coding_engines": _coding_engine_checks(),
+        "coding_engines": _coding_engine_checks(home),
         "approvals": {"status": "ready", "pending": 0},
         "memory": _memory_status(home, profile is not None),
         "sandbox": sandbox or {},

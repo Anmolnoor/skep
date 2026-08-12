@@ -149,18 +149,27 @@ class PersonalModeTests(unittest.TestCase):
         from skep.status import _coding_engine_checks, format_doctor_report
 
         scrubbed = {"CLAUDE_CODE_OAUTH_TOKEN": "", "ANTHROPIC_API_KEY": ""}
-        with mock.patch.dict(os.environ, scrubbed):
-            checks = _coding_engine_checks()
-        self.assertFalse(checks["claude_code"]["auth_ok"])
-        self.assertEqual(
-            checks["claude_code"]["auth_env"],
-            ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
-        )
-        # The builtin worker declares no auth env and stays clean.
-        self.assertTrue(checks["builtin"]["auth_ok"])
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            home.mkdir()
+            with mock.patch.dict(os.environ, scrubbed):
+                checks = _coding_engine_checks(home)
+            self.assertFalse(checks["claude_code"]["auth_ok"])
+            self.assertEqual(
+                checks["claude_code"]["auth_env"],
+                ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            )
+            # The builtin worker declares no auth env and stays clean.
+            self.assertTrue(checks["builtin"]["auth_ok"])
 
-        with mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}):
-            self.assertTrue(_coding_engine_checks()["claude_code"]["auth_ok"])
+            with mock.patch.dict(os.environ, {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}):
+                self.assertTrue(_coding_engine_checks(home)["claude_code"]["auth_ok"])
+
+            # v111-F6: doctor is its own process — a token that lives only in
+            # <home>/serve.env (which serve loads at startup, F1) still counts.
+            (home / "serve.env").write_text("CLAUDE_CODE_OAUTH_TOKEN=sk-live\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, scrubbed):
+                self.assertTrue(_coding_engine_checks(home)["claude_code"]["auth_ok"])
 
         report = format_doctor_report(
             {
