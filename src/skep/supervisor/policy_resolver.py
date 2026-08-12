@@ -252,6 +252,15 @@ def run_policy_for_repo(
         if managed not in roots:
             roots.append(managed)
             _layer_set("trusted_workspace_roots", roots, "trusted-roots")
+    # unlocked-F5 (ADR 0052): zero-ask implies the verified-patch landing lane.
+    # This must OVERRIDE the layered flag, not fill it — every build-phase
+    # project carries auto_apply_verified_patch=False from its phase defaults,
+    # so a fill-only rule would never land. The lane itself stays exactly
+    # v90-F4: G10-confirmed with the project's PINNED verify_command, onto a
+    # skep/* branch only (I1, I2) — a human click remains the path for
+    # anything the rule blocks.
+    if effective.get("unlocked") is True:
+        _layer_set("auto_apply_verified_patch", True, "unlocked")
     effective["_provenance"] = provenance
     return effective
 

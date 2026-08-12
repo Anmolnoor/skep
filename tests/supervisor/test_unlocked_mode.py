@@ -187,8 +187,31 @@ def test_unlocked_gate_answers_itself_with_a_recorded_auto_verdict(
 
         # Once means once: the auto verdict left no standing session grant.
         assert not store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS)
+
+        # F5: the finished patch lands through the v90-F4 verified-patch lane
+        # with zero clicks — G10-confirmed against the PINNED verify command,
+        # onto a skep/* branch, with the rule on the ledger (I1, I2, I13).
+        # The landing row is written moments AFTER the completed transition
+        # (re-verify → auto-apply on the same dispatch thread), so poll.
+        deadline = time.monotonic() + 30.0
+        landing = store.approvals_for(resumed_id)
+        while time.monotonic() < deadline and not landing:
+            time.sleep(0.05)
+            landing = store.approvals_for(resumed_id)
+        assert len(landing) == 1
+        assert landing[0].action == "apply_patch"
+        assert landing[0].status == "approved"
+        assert landing[0].resolved_by == "auto:verified-patch"
+        assert landing[0].landing_branch == f"skep/{resumed_id}"
     finally:
         store.close()
+
+    # main never advances on its own (I1): the landing lives on skep/*.
+    from .conftest import git
+
+    assert git(repo, "branch", "--show-current").stdout.strip() == "main"
+    branches = git(repo, "branch", "--list", f"skep/{resumed_id}").stdout
+    assert f"skep/{resumed_id}" in branches
 
 
 # ---- F3: the sandbox is forced, and its absence refuses ---------------------
