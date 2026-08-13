@@ -2492,6 +2492,55 @@ def cmd_project_set_phase(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sync(args: argparse.Namespace) -> int:
+    """v110-F1: the fleet sync verb's terminal face — pin, show, clear, run.
+
+    The pin is the authority: the /sync chat card can only propose running it
+    verbatim (I4), so choosing the command lives here, in the operator's own
+    argv — the same way a project pins verify_command.
+    """
+    from fastapi import HTTPException
+
+    from .serve.actions import fleet_sync_status, set_fleet_sync_command, sync_fleet
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        try:
+            if args.set is not None:
+                result = set_fleet_sync_command(store, args.set)
+                print(f"pinned: {result['command']}")
+                return 0
+            if args.clear:
+                set_fleet_sync_command(store, None)
+                print("fleet sync pin cleared")
+                return 0
+            if args.show:
+                status = fleet_sync_status(store)
+                print(f"command: {status['command'] or '- (pin one with skep sync --set)'}")
+                last = status["last"]
+                if last:
+                    verdict = "ok" if last.get("ok") else f"failed (exit {last.get('exit_code')})"
+                    print(f"last:    {verdict} at {last.get('at')}")
+                else:
+                    print("last:    never run")
+                return 0
+            result = sync_fleet(store, timeout_seconds=args.timeout)
+        except HTTPException as exc:
+            return _err(_http_error_detail(exc))
+    finally:
+        store.close()
+    if result["stdout"]:
+        print(result["stdout"], end="" if result["stdout"].endswith("\n") else "\n")
+    if result["stderr"]:
+        stderr_end = "" if result["stderr"].endswith("\n") else "\n"
+        print(result["stderr"], file=sys.stderr, end=stderr_end)
+    if result["ok"]:
+        print("sync: ok (exit 0)")
+        return 0
+    return _err(f"sync exited {result['exit_code']}", evidence=result["command"])
+
+
 def register_supervisor_commands(
     subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
@@ -2996,6 +3045,32 @@ def register_supervisor_commands(
         "--base", default=None, help="branch to create (default: the repo's default branch)"
     )
     repo_baseline.set_defaults(func=cmd_repo_push_baseline)
+
+    # v110-F1: the fleet sync verb — the operator's machine-sync script
+    # (publish + converge, e.g. apiary's sync.sh) gains its skep face. The
+    # pinned command is the ONLY thing skep will ever run here; the /sync
+    # chat card proposes exactly it and can never choose or vary it (I4).
+    sync = subcommands.add_parser(
+        "sync",
+        help="run the operator-pinned fleet sync command (pin it with --set)",
+    )
+    sync.add_argument(
+        "--set",
+        default=None,
+        metavar="CMD",
+        help="pin the command to run (e.g. '~/Developer/apiary/sync.sh') — "
+        "terminal-only; chat can propose a run, never change the pin",
+    )
+    sync.add_argument("--clear", action="store_true", help="remove the pin")
+    sync.add_argument("--show", action="store_true", help="print the pin and the last run")
+    sync.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="cap this run (default 300, max 900)",
+    )
+    sync.set_defaults(func=cmd_sync)
 
     # v4: the learned-skill lifecycle. Imported here (not at module top) so the skill
     # commands can reuse build_config/_err/_parse_params from this module without a

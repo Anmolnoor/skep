@@ -2095,6 +2095,10 @@ const COMMANDS = {
     usage: "/browser",
     desc: "register the built-in Playwright browser under the browse scope (confirm card)",
   },
+  sync: {
+    usage: "/sync",
+    desc: "run the operator-pinned fleet sync command — pin it with `skep sync --set` (confirm card)",
+  },
 };
 
 function parseSlashCommand(text) {
@@ -3101,6 +3105,23 @@ async function viewChat(main, chatId) {
         const text = args.join(" ").trim();
         if (!text) { commandHelp(`usage: ${spec.usage}`); return; }
         await proposeCommand("set_persona", { text });
+        return;
+      }
+      if (name === "sync") {
+        // v110-F2: the pin is terminal-set; the card only ever runs it
+        // verbatim, and says exactly what that is (I8).
+        const status = await api("GET", "/api/sync");
+        if (!status.command) {
+          commandHelp("no fleet sync command pinned — in the terminal: skep sync --set '<cmd>'");
+          return;
+        }
+        const notes = [`runs: ${status.command}`];
+        if (status.last) {
+          notes.push(status.last.ok
+            ? `last: ok at ${status.last.at}`
+            : `last: failed (exit ${status.last.exit_code}) at ${status.last.at}`);
+        }
+        await proposeCommand("sync_fleet", {}, notes);
         return;
       }
       if (name === "workon") {

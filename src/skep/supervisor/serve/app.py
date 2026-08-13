@@ -43,6 +43,7 @@ from .actions import (
     delete_policy_group,
     diagnose_run,
     effective_policy_view,
+    fleet_sync_status,
     land_run,
     landing_reason,
     ledger_remember_suggestions,
@@ -466,6 +467,13 @@ def create_app(
         """v101-F9: the roster — every caste and every coding engine, with
         presence probed rather than assumed. Read-only; nothing is written."""
         return workers_view()
+
+    @app.get("/api/sync")
+    def get_sync_status() -> dict[str, Any]:
+        """v110-F1: the fleet-sync pin and last run — read-only. Running it
+        goes through the carded command path or the operator's own CLI; there
+        is deliberately no POST here."""
+        return fleet_sync_status(run_store)
 
     # v48-F4: {name:path} — the ASGI server decodes %2F in the URL path, so a
     # /workon path-bound repo (/tmp/project) never matched the default

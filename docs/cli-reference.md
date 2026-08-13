@@ -164,6 +164,24 @@ move a branch, and neither can the Queen's shell.
 A typed command is your decision and acts immediately — confirmation cards
 exist because a *model* proposed the action, not a human.
 
+## Fleet Sync
+
+```sh
+skep sync                       # run the pinned command now
+skep sync --set CMD             # pin what "sync" means (e.g. '~/Developer/apiary/sync.sh')
+skep sync --show                # the pin and the last run
+skep sync --clear               # remove the pin
+skep sync --timeout SECONDS     # cap this run (default 300, max 900)
+```
+
+`sync` runs the operator's own machine-sync script — the one that commits,
+pushes, and pulls your config/vault repos — supervisor-side on your
+credentials, like the branch/PR verbs above. The pin is the authority: it is
+set only here in the terminal, and the `/sync` chat command can only propose
+a card that runs it verbatim. Unpinned, everything refuses and names this
+command. The result and a `fleet_sync_state` record say exactly what ran and
+how it exited.
+
 ## Serve
 
 ```sh
