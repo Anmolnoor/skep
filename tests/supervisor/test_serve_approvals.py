@@ -1112,3 +1112,88 @@ def test_cli_allow_command_writes_the_project_overlay_like_the_rest_face(
         assert ["uv", "tree"] not in (store.get_setting("allowed_shell_commands") or [])
     finally:
         store.close()
+
+
+def test_resume_after_approval_skips_a_denied_step_and_runs_the_approved_one(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v114-F5 (field test, runs 01a15e64 → 01a15e67): the plan parked on a
+    shell approval; after the operator approved it, the resume executed the
+    EARLIER network.fetch step, got the host denied, and the whole run failed
+    — the approved command never ran and the approval was spent. On a fixed
+    plan a denied non-verify step is recorded and skipped; the verify step
+    still decides, and the record says what was skipped (I7, I8)."""
+    config = build_config(tmp_path / "home", None)
+    client = _client(config)
+    server = FakeOpenAI(api_key="sk-fake").start()
+    monkeypatch.setenv("SKEP_TEST_LLM_KEY", "sk-fake")
+    write_argv = [
+        sys.executable,
+        "-c",
+        "from pathlib import Path; Path('generated.py').write_text(\"print('from shell')\\n\")",
+    ]
+    worker_plan = json.dumps(
+        {
+            "summary": "fetch a page, then write generated.py after shell approval",
+            "required_tools": ["network.fetch", "shell.run"],
+            "steps": [
+                {"tool": "network.fetch", "args": {"url": "https://example.com/"}},
+                {"tool": "shell.run", "args": {"argv": write_argv}},
+                {
+                    "tool": "shell.run",
+                    "args": {"argv": [sys.executable, "generated.py"], "purpose": "verify"},
+                },
+            ],
+            "verify": {"expected_stdout": "from shell\n"},
+        }
+    )
+    try:
+        run_personal_setup(
+            config.home.parent,
+            provider="openai-compat",
+            model="gpt-oss",
+            endpoint=server.base_url,
+            api_key_env="SKEP_TEST_LLM_KEY",
+        )
+        client.put(
+            "/api/policy",
+            json={
+                "trusted_workspace_roots": [str(tmp_path)],
+                "default_execution_mode": "workspace",
+            },
+        )
+        server.script_reply(worker_plan)
+        task_id = client.post(
+            "/api/runs",
+            json={
+                "repo": str(repo),
+                "instructions": "Fetch a page, then use a shell command that needs approval.",
+                "network": ["127.0.0.1"],
+                "env_allowlist": ["SKEP_TEST_LLM_KEY"],
+            },
+        ).json()["task_id"]
+        assert _wait_terminal(client, task_id)["state"] == "pending_approval"
+        review_id = client.get("/api/approvals").json()["approvals"][0]["review_id"]
+        response = client.post(f"/api/approvals/{review_id}/approve", json={"actor": "tester"})
+        assert response.status_code == 200, response.text
+        resumed_id = response.json()["resumed_as"]
+        resumed = _wait_terminal(client, resumed_id)
+    finally:
+        server.stop()
+    assert resumed["state"] == "completed", resumed["summary"]
+    commands = client.get(f"/api/runs/{resumed_id}").json()["commands"]
+    assert [command["command"] for command in commands] == [
+        shlex.join(write_argv),
+        shlex.join([sys.executable, "generated.py"]),
+    ]
+    events = client.get(f"/api/runs/{resumed_id}/events").json()["events"]
+    fetch_starts = [
+        event
+        for event in events
+        if event["type"] == "command.start"
+        and event["payload"].get("capability_id") == "network.fetch"
+    ]
+    assert fetch_starts and fetch_starts[0]["payload"]["decision"]["verdict"] == "deny"
+    result = json.loads((config.audit_dir / resumed_id / "result.json").read_text())
+    assert "denied_step" in result["risk_flags"]
+    assert "example.com" in resumed["summary"] and "skipped" in resumed["summary"]

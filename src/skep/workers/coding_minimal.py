@@ -52,6 +52,7 @@ from .llm_plan import (
     LlmEditPlan,
     LlmPlanError,
     LlmToolPlan,
+    PlannedToolStep,
     ProviderUsageTally,
     ReactDone,
     WorkerProvider,
@@ -358,6 +359,61 @@ def _approved_network_hosts(
     ):
         hosts.append(approval_verdict.decision.detail)
     return tuple(hosts)
+
+
+_INTENT_MAX = 160
+
+
+def _plan_intent(summary: str) -> str:
+    """v114-F4: the plan's stated intent as ONE line. Field run 01a15e64 put a
+    step-by-step narrative with predicted outcomes into ``summary``; the
+    worker emitted it verbatim as the plan and as the run's terminal summary,
+    so the Runs card showed refusals that never happened and results never
+    measured. The full text still rides ``plan.created`` as ``intent``."""
+    stripped = summary.strip()
+    first = stripped.splitlines()[0].strip() if stripped else stripped
+    # The first sentence of the first line: a narrative's opener ("Task-step
+    # report.") is its honest headline; a one-sentence summary is unchanged.
+    for mark in (". ", ".\t"):
+        cut = first.find(mark)
+        if cut != -1:
+            first = first[: cut + 1]
+            break
+    if len(first) > _INTENT_MAX:
+        first = first[: _INTENT_MAX - 1].rstrip() + "…"
+    return first
+
+
+def _executed_summary(
+    *,
+    intent: str,
+    capped: bool,
+    ran: int,
+    total: int,
+    verify_word: str,
+    verification_command: str,
+    changed: int,
+    skipped: list[tuple[str, str]],
+) -> str:
+    """v114-F4/F5: a run's summary is what ran. The digest leads whenever the
+    plan's prose had to be capped or a step was skipped; otherwise the
+    one-line intent stands, as every run before this had it.
+    ponytail: a short summary IS a fine one-liner — only narratives and
+    skips earn the digest; make it unconditional if the field shows short
+    summaries lying too."""
+    verify = f"verify {verify_word}"
+    if verification_command:
+        verify = f"{verify} ({verification_command})"
+    digest = f"ran {ran} of {total} step(s); {verify}; changed {changed} file(s)"
+    if skipped:
+        digest = f"{digest}; skipped {len(skipped)} step(s) denied by policy: {skipped[0][1][:120]}"
+    if not capped and not skipped:
+        return intent
+    return f"{digest} — intent: {intent}"
+
+
+def _is_verify_step(step: PlannedToolStep) -> bool:
+    return step.tool == "shell.run" and _shell_purpose_from_args(step.args) == "verify"
 
 
 def _plan_failure_summary(reason: str) -> str:
@@ -1077,6 +1133,8 @@ def _apply_llm_plan(
     cursor: ResumeCursor | None = None,
     allow_recovery: bool = False,
 ) -> int:
+    intent = _plan_intent(plan.summary)
+    capped = intent != plan.summary.strip()
     if isinstance(plan, LlmToolPlan):
         return _apply_llm_tool_plan(
             task,
@@ -1110,10 +1168,13 @@ def _apply_llm_plan(
     artifacts: list[Artifact] = [
         Artifact(kind="event_log", path=str(stream.path.relative_to(workspace)), sha256="")
     ]
-    steps = [plan.summary]
+    steps = [intent]
     steps.extend(f"write {file.path}" for file in plan.files)
     steps.append(f"verify: {shlex.join(plan.verification.argv)}")
-    stream.emit(EventType.PLAN_CREATED, {"steps": steps, "provider_calls": provider_calls})
+    plan_payload: dict[str, object] = {"steps": steps, "provider_calls": provider_calls}
+    if capped:
+        plan_payload["intent"] = plan.summary
+    stream.emit(EventType.PLAN_CREATED, plan_payload)
     try:
         for index, file in enumerate(plan.files):
             if index < start_files:
@@ -1134,7 +1195,7 @@ def _apply_llm_plan(
             workspace=workspace,
             stream=stream,
             out_path=out_path,
-            summary=f"{plan.summary}; stopped before {exc.capability_id} for approval.",
+            summary=f"{intent}; stopped before {exc.capability_id} for approval.",
             reason=exc.reason,
             action=exc.capability_id,
             decision=exc.decision,
@@ -1207,9 +1268,17 @@ def _apply_llm_plan(
         )
 
     status = TaskState.COMPLETED if outcome is VerificationOutcome.PASSED else TaskState.FAILED
-    summary = (
-        plan.summary if status is TaskState.COMPLETED else f"{plan.summary}; verification failed."
-    )
+    if status is TaskState.COMPLETED:
+        summary = (
+            intent
+            if not capped
+            else (
+                f"wrote {len(plan.files)} file(s); verify passed ({verify_command})"
+                f" — intent: {intent}"
+            )
+        )
+    else:
+        summary = f"{intent}; verification failed."
     pending_checkpoint_artifact: Artifact | None = None
     do_commit = status is TaskState.COMPLETED and _wants_git_commit(task)
     if do_commit and not changed_files:
@@ -1223,18 +1292,18 @@ def _apply_llm_plan(
                 task, "git.stage"
             ):
                 stage_result = capabilities.invoke("git.stage", {"paths": changed_files})
-            commit_result = capabilities.invoke("git.commit", {"message": plan.summary})
+            commit_result = capabilities.invoke("git.commit", {"message": intent})
             if (
                 stage_result is not None and stage_result.exit_code != 0
             ) or commit_result.exit_code != 0:
                 status = TaskState.FAILED
-                summary = f"{plan.summary}; git commit failed."
+                summary = f"{intent}; git commit failed."
         except CapabilityDenied as exc:
             status = TaskState.FAILED
-            summary = _commit_tail_denied_summary(capabilities, plan.summary, exc)
+            summary = _commit_tail_denied_summary(capabilities, intent, exc)
         except CapabilityApprovalRequired as exc:
             status = TaskState.PENDING_APPROVAL
-            summary = f"{plan.summary}; stopped before git commit for approval."
+            summary = f"{intent}; stopped before git commit for approval."
             pending_checkpoint_artifact = _resume_checkpoint_artifact(
                 workspace,
                 plan,
@@ -1772,6 +1841,8 @@ def _apply_llm_tool_plan(
     cursor: ResumeCursor | None = None,
     allow_recovery: bool = False,
 ) -> int:
+    intent = _plan_intent(plan.summary)
+    capped = intent != plan.summary.strip()
     requested_tools = set(plan.required_tools)
     requested_tools.update(step.tool for step in plan.steps)
     missing_tools = sorted(tool for tool in requested_tools if not capabilities.has_tool(tool))
@@ -1831,9 +1902,14 @@ def _apply_llm_tool_plan(
     artifacts: list[Artifact] = [
         Artifact(kind="event_log", path=str(stream.path.relative_to(workspace)), sha256="")
     ]
-    steps = [plan.summary]
+    steps = [intent]
     steps.extend(f"{step.tool}: {sorted(step.args)}" for step in plan.steps)
-    stream.emit(EventType.PLAN_CREATED, {"steps": steps, "provider_calls": provider_calls})
+    plan_payload: dict[str, object] = {"steps": steps, "provider_calls": provider_calls}
+    if capped:
+        plan_payload["intent"] = plan.summary
+    stream.emit(EventType.PLAN_CREATED, plan_payload)
+    skipped: list[tuple[str, str]] = []
+    risk_flags: list[str] = []
 
     verification_result: CapabilityResult | _ReplayedVerification | None = None
     verification_command = ""
@@ -1864,7 +1940,7 @@ def _apply_llm_tool_plan(
             workspace=workspace,
             stream=stream,
             out_path=out_path,
-            summary=f"{plan.summary}; stopped for approval of "
+            summary=f"{intent}; stopped for approval of "
             f"{len(blocked_shell_steps)} shell command(s).",
             reason=reason,
             action="shell.run",
@@ -1899,7 +1975,21 @@ def _apply_llm_tool_plan(
             if index < start_step:
                 continue
             completed_steps = index
-            tool_result = capabilities.invoke(step.tool, step.args)
+            try:
+                tool_result = capabilities.invoke(step.tool, step.args)
+            except CapabilityDenied as exc:
+                if allow_recovery or _is_verify_step(step):
+                    raise
+                # v114-F5: on a fixed plan (a resume, or recovery already spent)
+                # a denied non-verify step is recorded and skipped — the deny
+                # already sits in the event log — and the verify step still
+                # decides. Field run 01a15e67 died here with its operator's
+                # approval unspent (I7, I8).
+                skipped.append((step.tool, str(exc)))
+                if "denied_step" not in risk_flags:
+                    risk_flags.append("denied_step")
+                completed_steps = index + 1
+                continue
             changed_files.extend(tool_result.changed_files)
             if step.tool == "shell.run":
                 command = _command_from_shell_args(step.args)
@@ -1944,7 +2034,7 @@ def _apply_llm_tool_plan(
             workspace=workspace,
             stream=stream,
             out_path=out_path,
-            summary=f"{plan.summary}; stopped before {exc.capability_id} for approval.",
+            summary=f"{intent}; stopped before {exc.capability_id} for approval.",
             reason=exc.reason,
             action=exc.capability_id,
             decision=exc.decision,
@@ -2000,6 +2090,18 @@ def _apply_llm_tool_plan(
             usage=_tallied_usage(tokens, provider_calls),
         )
 
+    if skipped and not changed_files and all(record.purpose == "verify" for record in commands):
+        # v114-F5: every step that could do work was denied — a vacuous verify
+        # must not turn that into "completed" (the v43-F3 empty-deliverable rule).
+        return _failure_result(
+            task=task,
+            workspace=workspace,
+            stream=stream,
+            out_path=out_path,
+            summary=f"LLM coding plan was denied by worker policy: {skipped[0][1]}",
+            details=skipped[0][1],
+            usage=_tallied_usage(tokens, provider_calls),
+        )
     outcome, details = _verification_verdict(
         workspace=workspace,
         changed_files=changed_files,
@@ -2027,12 +2129,26 @@ def _apply_llm_tool_plan(
         )
 
     status = TaskState.COMPLETED if outcome is VerificationOutcome.PASSED else TaskState.FAILED
-    if status is TaskState.COMPLETED:
-        summary = plan.summary
-    elif failed_command_details is not None:
-        summary = f"{plan.summary}; command failed."
-    else:
-        summary = f"{plan.summary}; verification failed."
+    verify_word = {
+        VerificationOutcome.PASSED: "passed",
+        VerificationOutcome.FAILED: "failed",
+    }.get(outcome, "not attempted")
+    summary = _executed_summary(
+        intent=intent,
+        capped=capped,
+        ran=len(plan.steps) - len(skipped),
+        total=len(plan.steps),
+        verify_word=verify_word,
+        verification_command=verification_command,
+        changed=len(changed_files),
+        skipped=skipped,
+    )
+    if status is not TaskState.COMPLETED:
+        summary = (
+            f"{summary}; command failed."
+            if failed_command_details is not None
+            else f"{summary}; verification failed."
+        )
     pending_checkpoint_artifact: Artifact | None = None
     do_commit = status is TaskState.COMPLETED and _wants_git_commit(task)
     if do_commit and not changed_files:
@@ -2046,18 +2162,18 @@ def _apply_llm_tool_plan(
                 task, "git.stage"
             ):
                 stage_result = capabilities.invoke("git.stage", {"paths": changed_files})
-            commit_result = capabilities.invoke("git.commit", {"message": plan.summary})
+            commit_result = capabilities.invoke("git.commit", {"message": intent})
             if (
                 stage_result is not None and stage_result.exit_code != 0
             ) or commit_result.exit_code != 0:
                 status = TaskState.FAILED
-                summary = f"{plan.summary}; git commit failed."
+                summary = f"{intent}; git commit failed."
         except CapabilityDenied as exc:
             status = TaskState.FAILED
-            summary = _commit_tail_denied_summary(capabilities, plan.summary, exc)
+            summary = _commit_tail_denied_summary(capabilities, intent, exc)
         except CapabilityApprovalRequired as exc:
             status = TaskState.PENDING_APPROVAL
-            summary = f"{plan.summary}; stopped before git commit for approval."
+            summary = f"{intent}; stopped before git commit for approval."
             pending_checkpoint_artifact = _resume_checkpoint_artifact(
                 workspace,
                 plan,
@@ -2101,7 +2217,7 @@ def _apply_llm_tool_plan(
         verification=Verification(outcome=outcome, details=details),
         artifacts=artifacts,
         usage=_tallied_usage(tokens, provider_calls),
-        risk_flags=[],
+        risk_flags=risk_flags,
     )
     _write_result(out_path, worker_result)
     if status is TaskState.COMPLETED:
