@@ -3227,10 +3227,23 @@ def test_default_coding_worker_denies_git_checkout_branch_switch(
     finally:
         server.stop()
 
-    assert outcome.record.state == "failed"
+    # v114-F5: the denied switch is recorded and skipped; the run completes on
+    # the file it wrote, and the record — not a git error — teaches why.
+    assert outcome.record.state == "completed"
     summary = outcome.record.summary or ""
-    assert "managed by the skep supervisor" in summary
+    assert "skipped 1 step(s) denied by policy" in summary
     assert "is already used by worktree" not in summary
+    store = RunStore(config.db_path)
+    try:
+        events = store.events_for(outcome.record.task_id)
+    finally:
+        store.close()
+    denied_tails = [
+        str((event.payload or {}).get("stderr_tail", ""))
+        for event in events
+        if event.type.value == "command.result"
+    ]
+    assert any("managed by the skep supervisor" in tail for tail in denied_tails)
 
 
 def test_default_coding_worker_stops_plan_at_first_failed_run_command(
@@ -4904,7 +4917,9 @@ def test_default_coding_worker_denies_plan_level_git_commit(
 ) -> None:
     """v22-F2: a plan-level ``git add``/``git commit`` step is denied outright —
     even under a broad ``git`` allowlist prefix — because the landing approval
-    is the commit. The worktree HEAD must never move."""
+    is the commit. The worktree HEAD must never move. (v114-F5: the denied
+    steps are recorded and skipped; the written file still reaches the patch
+    and the record carries the ``denied_step`` flag.)"""
     head_before = git(repo, "rev-parse", "HEAD").stdout.strip()
     task = mint_task(
         workspace=repo,
@@ -4952,8 +4967,10 @@ def test_default_coding_worker_denies_plan_level_git_commit(
         for line in (repo / ".events" / f"{task.task_id}.ndjson").read_text().splitlines()
     ]
 
-    assert code != EXIT_COMPLETED
-    assert result.status.value == "failed"
+    assert code == EXIT_COMPLETED
+    assert result.status.value == "completed"
+    assert "denied_step" in result.risk_flags
+    assert "skipped 2 step(s) denied by policy" in result.summary
     denied = [
         event
         for event in events
@@ -5381,3 +5398,92 @@ def test_prompt_states_the_python_toolchain(monkeypatch: pytest.MonkeyPatch) -> 
     assert "python3 at /usr/bin/python3" in line
     assert "uv available" in line
     assert "never `pip ...`" in line
+
+
+NARRATIVE_SUMMARY = (
+    "Task-step report. This response is the executable plan itself, so the two "
+    "policy-blocked steps are answered as refusals and the runnable steps carry "
+    "expected outcomes; no command output is invented.\n\n"
+    "Step 1 (git push origin main): REFUSED, not run. Workspace rules deny push "
+    "outright; a task instruction is not a grant that overrides them.\n\n"
+    "Step 2 (write 'hello' to /tmp/outside.txt): REFUSED, not run. The sandbox "
+    "permits writes only inside the workspace.\n\n"
+    "Verification: the final step is the task-mandated verify; the expected result "
+    "is 2 passed."
+)
+
+
+def test_tool_plan_narrative_summary_becomes_an_intent_line(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v114-F4 (field test, run 01a15e64): the model put a step-by-step
+    narrative with predicted outcomes into ``summary``; the worker emitted it
+    verbatim as the plan AND as the run's terminal summary, so the Runs card
+    and the deck showed refusals that never happened and results that were
+    never measured. The summary of a run is what ran; the plan's prose is
+    kept in the record as its intent, capped to one line where it leads (I2, I8)."""
+    config = build_config(tmp_path / "home", None)
+    server = FakeOpenAI(api_key="sk-fake").start()
+    monkeypatch.setenv("SKEP_TEST_LLM_KEY", "sk-fake")
+    try:
+        run_personal_setup(
+            config.home.parent,
+            provider="openai-compat",
+            model="gpt-oss",
+            endpoint=server.base_url,
+            api_key_env="SKEP_TEST_LLM_KEY",
+        )
+        server.script_reply(
+            json.dumps(
+                {
+                    "summary": NARRATIVE_SUMMARY,
+                    "required_tools": ["filesystem.write", "shell.run"],
+                    "steps": [
+                        {
+                            "tool": "filesystem.write",
+                            "args": {
+                                "path": "generated.py",
+                                "content": "print('from tool plan')\n",
+                                "overwrite": True,
+                            },
+                        },
+                        {
+                            "tool": "shell.run",
+                            "args": {
+                                "argv": [sys.executable, "generated.py"],
+                                "purpose": "verify",
+                            },
+                        },
+                    ],
+                    "verify": {"expected_stdout": "from tool plan\n"},
+                }
+            )
+        )
+        permissions = Permissions(
+            read=["workspace"],
+            write=["workspace"],
+            network=["*"],
+            env_allowlist=["SKEP_TEST_LLM_KEY"],
+        )
+        outcome = run_task(
+            repo,
+            "Use the available tools to create and verify generated.py.",
+            config=config,
+            permissions=permissions,
+        )
+    finally:
+        server.stop()
+    assert outcome.record.state == "completed"
+    summary = outcome.record.summary or ""
+    assert "REFUSED" not in summary and "expected" not in summary
+    assert summary.startswith("ran 2 of 2 step(s); verify passed")
+    assert "intent: Task-step report." in summary
+    store = RunStore(config.db_path)
+    try:
+        events = store.events_for(outcome.record.task_id)
+    finally:
+        store.close()
+    plan_created = next(event for event in events if event.type.value == "plan.created")
+    assert plan_created.payload["intent"] == NARRATIVE_SUMMARY
+    assert len(plan_created.payload["steps"][0]) <= 170
+    _no_leftovers(repo, config.worktrees_root)

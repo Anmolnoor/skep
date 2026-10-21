@@ -1246,12 +1246,23 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "(land_run) is the only commit path. rm/sudo and other dangerous "
         "prefixes are also always rejected. GRANTING MEANS: this command can "
         "read and modify files in its working directory without a patch card "
-        "— the user grants with eyes open.",
+        "— the user grants with eyes open. TIERS: with `repo` (or a chat bound "
+        "to a project) the grant lands in that project's own allowlist; without "
+        "either it lands in the GLOBAL list, which a project's own list SHADOWS — "
+        "so for project work always pass repo, or the gate stays shut. The "
+        "result's `tier` says which list was written.",
         {
             "command": {
                 "type": "string",
                 "description": "the command prefix to allow, e.g. 'npm install'",
-            }
+            },
+            "repo": {
+                "type": "string",
+                "description": (
+                    "registered repo name or path whose project overlay takes the "
+                    "grant; omit only for a repo with no project"
+                ),
+            },
         },
         ["command"],
     ),
@@ -2476,6 +2487,49 @@ def _cwd_registered_repo(store: RunStore, holder: ConfigHolder, cwd: str | None)
     return None
 
 
+_PATH_TOKEN_RE = re.compile(r"~?/[^\s'\"`()<>|&;]+")
+
+
+def _command_registered_repo(
+    store: RunStore, holder: ConfigHolder, command: str, cwd: str | None
+) -> str | None:
+    """v114-F1: the registered repo a command line REACHES, judged on its
+    text rather than its cwd — a path operand under a repo root (absolute
+    or ``~``), a path embedded in a wrapper payload (``sh -c``,
+    ``python3 -c``), a ``cd`` into one (relative to cwd), ``git -C <root>``.
+    The cwd check alone taught the model to hop to ``cwd=/tmp`` the moment
+    ``repo_cwd`` refused; the pen is the repo, not the directory the shell
+    starts in."""
+    from pathlib import Path
+
+    from ..shell_prefixes import command_line_segments
+    from .registry import known_repos
+
+    roots = [
+        (str(item["name"]), Path(str(item["path"])).resolve())
+        for item in known_repos(repos_root(holder), store)
+    ]
+    if not roots:
+        return None
+    base = (Path(cwd).expanduser() if cwd else Path.cwd()).resolve()
+    segments = command_line_segments(command)
+    tokens = [token for segment in segments for token in segment] if segments else [command]
+    candidates: list[Path] = []
+    for token in tokens:
+        candidates.extend(Path(match).expanduser() for match in _PATH_TOKEN_RE.findall(token))
+        if segments and token and not token.startswith("-"):
+            candidates.append(base / token)  # a relative operand: `cd myrepo`
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        for name, root in roots:
+            if resolved == root or root in resolved.parents:
+                return name
+    return None
+
+
 def queen_shell_decision(
     store: RunStore,
     holder: ConfigHolder,
@@ -2513,15 +2567,28 @@ def queen_shell_decision(
         )
     policy = resolve_operator_policy(store)
     repo = _cwd_registered_repo(store, holder, cwd)
-    if repo is not None:
+    reached = None if repo is not None else _command_registered_repo(store, holder, command, cwd)
+    target = repo if repo is not None else reached
+    if target is not None:
+        # v114-F1: a command that REACHES a registered repo (a path operand, a
+        # `cd`, `git -C`, a wrapper payload) is the same pen as a repo cwd.
+        via_cwd = repo is not None
+        how = (
+            f"the working directory is inside registered repo {target!r}"
+            if via_cwd
+            else f"the command reaches into registered repo {target!r} (a path, cd, or git -C)"
+        )
         if background:
             return AutonomyDecision(
                 verdict="deny",
-                reason="shell.deny.repo_cwd_background",
+                reason=(
+                    "shell.deny.repo_cwd_background"
+                    if via_cwd
+                    else "shell.deny.repo_target_background"
+                ),
                 detail=(
-                    f"the working directory is inside registered repo {repo!r} — "
-                    "daemons do not run in checkouts (a background process there "
-                    "could modify files with no patch card, forever). Run it from "
+                    f"{how} — daemons do not run in checkouts (a background process "
+                    "there could modify files with no patch card, forever). Run it from "
                     "a non-repo directory, or use dispatch_run for repo work."
                 ),
                 decided_by="queen-shell-guard",
@@ -2536,11 +2603,10 @@ def queen_shell_decision(
             )
         return AutonomyDecision(
             verdict="deny",
-            reason="shell.deny.repo_cwd",
+            reason="shell.deny.repo_cwd" if via_cwd else "shell.deny.repo_target",
             detail=(
-                f"the working directory is inside registered repo {repo!r} — a "
-                "shell command there can modify files with no patch card, so it "
-                "refuses by default. For a governed one-file change use "
+                f"{how} — a shell command there can modify files with no patch card, "
+                "so it refuses by default. For a governed one-file change use "
                 "quick_edit (or dispatch_run for more); to open repo shells "
                 "deliberately, set_operator_policy scope='shell' "
                 "action='run_repo' with the command prefix."
@@ -3231,6 +3297,21 @@ def execute_read_tool(
 _PROJECT_BINDING_TOOLS = frozenset(
     {"dispatch_run", "run_code", "batch_dispatch", "workon", "setup_project"}
 )
+
+
+def _chat_bound_repo(store: RunStore, chat_id: str) -> Path | None:
+    """v114-F2: the repo_path binding of the project this chat is bound to."""
+    chat = store.get_chat(chat_id)
+    project_id = getattr(chat, "project_id", None)
+    if not project_id:
+        return None
+    for project in list_projects(store):
+        if project.project_id != project_id:
+            continue
+        for binding in project.bindings:
+            if binding.kind == "repo_path":
+                return Path(str(binding.value))
+    return None
 
 
 def _bind_chat_project(
@@ -4118,8 +4199,15 @@ def _execute_mutation(
             "allowed_shell_commands": actions.allow_env_bootstrap(store, holder),
         }
     if name == "allow_shell_command":
-        allowed = actions.allow_shell_command(store, holder, str(args["command"]))
-        return {"action": "shell_command_allowed", "allowed_shell_commands": allowed}
+        # v114-F2: `repo` (or the chat's bound project) scopes the grant; the
+        # action answers with the tier it wrote.
+        repo_arg = args.get("repo")
+        grant_repo: Path | None = None
+        if repo_arg:
+            grant_repo = resolve_repo_arg(str(repo_arg), repos_root(holder), store)
+        elif chat_id is not None:
+            grant_repo = _chat_bound_repo(store, chat_id)
+        return actions.allow_shell_command_scoped(store, holder, str(args["command"]), grant_repo)
     if name == "set_operator_policy":
         # v52-F4: the Queen's standing policy, edited behind the card the
         # operator just confirmed; run/worker policy documents are untouched.

@@ -2802,16 +2802,21 @@ def resume_past_gate(
     return resumed_id
 
 
-def _persist_remembered_command(
+def persist_remembered_command(
     store: RunStore, holder: ConfigHolder, repo: Path, command: list[str]
-) -> None:
-    """Persist an exact remembered command (v19-F4).
+) -> str:
+    """Persist an exact remembered command (v19-F4); returns the tier written.
 
     Prefers the repo's bound project policy so remembering does not silently
     widen every repo's global allowlist; falls back to the global setting when
-    the repo is not bound to a project.
+    the repo is not bound to a project. v114-F2: this is the ONE writer every
+    face shares (CLI, REST, chat — ADR 0050), and the tier it wrote
+    (``project:<id>`` or ``global``) is part of its answer: a project's own
+    ``allowed_shell_commands`` shadows the global list, so a global write for
+    project work clears no gate — the field test's "the gate is cleared" lie.
     """
     project = store.project_for_binding("repo_path", str(repo))
+    tier = "global" if project is None else f"project:{project.project_id}"
     if project is not None:
         existing = [list(entry) for entry in (project.policy.get("allowed_shell_commands") or [])]
         if command not in existing:
@@ -2840,12 +2845,13 @@ def _persist_remembered_command(
     store.mark_ledger_remembered(
         action="shell.run", resource=shlex.join(command), repo_path=str(repo)
     )
+    return tier
 
 
 def _persist_remembered_network_host(
     store: RunStore, holder: ConfigHolder, repo: Path, host: str
 ) -> None:
-    """v109-F7: the network twin of ``_persist_remembered_command``. Prefers
+    """v109-F7: the network twin of ``persist_remembered_command``. Prefers
     the repo's bound project policy (``default_network``) so remembering does
     not silently widen every repo's egress; falls back to the global setting
     when the repo is unbound."""
@@ -3112,7 +3118,7 @@ def remember_ledger_entry(
         guard_reason = dangerous_prefix_reason(argv)
         if guard_reason is not None:
             raise HTTPException(status_code=409, detail=guard_reason)
-        _persist_remembered_command(store, holder, repo_path, argv)
+        persist_remembered_command(store, holder, repo_path, argv)
     elif action in ("network.fetch", "network.read"):
         host = resource.strip()
         if not host or host == "*" or "/" in host or ":" in host:
@@ -3164,7 +3170,7 @@ def allow_shell_command_and_resume(
     repo = Path(str(run["repo"]))
     # v19-F4: prefer the repo's bound project policy; fall back to global.
     for command in normalized_commands:
-        _persist_remembered_command(store, holder, repo, command)
+        persist_remembered_command(store, holder, repo, command)
     # Re-resolve the allowlist so the just-persisted command reaches the
     # immediate resume, not only future runs.
     execution_mode = str(run.get("execution_mode") or "sandbox")
@@ -3299,19 +3305,65 @@ def set_operator_policy_rule(
     }
 
 
-def allow_shell_command(store: RunStore, holder: ConfigHolder, command: str) -> list[list[str]]:
+def allow_shell_command(
+    store: RunStore, holder: ConfigHolder, command: str, repo: Path | None = None
+) -> list[list[str]]:
     """v49-F2: union ONE operator-confirmed command prefix into the allowlist.
 
     The chat's answer to "allow pytest" — same guard, same setting, same
     union semantics as the presets, so a card can never wipe the list the
-    way a PUT-shaped set_policy field could."""
+    way a PUT-shaped set_policy field could.
+
+    v114-F2: with ``repo`` the grant goes through ``persist_remembered_command``
+    — the bound project's overlay, global only when unbound — and the list
+    returned is that tier's. Without ``repo`` it is the global list, as before."""
     try:
         argv = shlex.split(command)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"command could not be parsed: {exc}") from exc
     if not argv:
         raise HTTPException(status_code=400, detail="command must be a non-empty shell command")
-    return _union_shell_allowlist(store, holder, [argv])
+    if repo is None:
+        return _union_shell_allowlist(store, holder, [argv])
+    guard_reason = dangerous_prefix_reason(argv)
+    if guard_reason is not None:
+        raise HTTPException(status_code=409, detail=guard_reason)
+    normalized = normalize_remembered_command(argv)
+    tier = persist_remembered_command(store, holder, repo, normalized)
+    if tier == "global":
+        return [
+            list(entry)
+            for entry in policy_view(store, holder.current).get("allowed_shell_commands") or []
+        ]
+    project = store.project_for_binding("repo_path", str(repo))
+    assert project is not None  # tier said so
+    return [list(entry) for entry in (project.policy.get("allowed_shell_commands") or [])]
+
+
+def allow_shell_command_scoped(
+    store: RunStore, holder: ConfigHolder, command: str, repo: Path | None
+) -> dict[str, Any]:
+    """v114-F2: ``allow_shell_command`` plus the tier it wrote — the chat
+    tool's whole answer. A project's own ``allowed_shell_commands`` shadows
+    the global list, so a global write for project work clears no gate; the
+    result says which list changed so the Queen cannot report a gate as
+    cleared when it is not (I8)."""
+    allowed = allow_shell_command(store, holder, command, repo=repo)
+    bound = store.project_for_binding("repo_path", str(repo)) if repo is not None else None
+    result: dict[str, Any] = {
+        "action": "shell_command_allowed",
+        "tier": "global" if bound is None else f"project:{bound.project_id}",
+        "allowed_shell_commands": allowed,
+    }
+    if repo is not None:
+        result["repo"] = str(repo)
+    if bound is None:
+        result["note"] = (
+            "written to the GLOBAL allowlist (repos with no project overlay); a "
+            "project's own allowed_shell_commands shadows it, so for project work "
+            "pass repo=<name> to scope the grant to that project"
+        )
+    return result
 
 
 def allow_env_bootstrap(store: RunStore, holder: ConfigHolder) -> list[list[str]]:
