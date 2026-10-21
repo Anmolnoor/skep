@@ -2,7 +2,18 @@ name: CI
 
 on:
   push:
+    branches: [main]
+    tags: ["v*"]
   pull_request:
+
+# v114: one run per change. `push:` with no filter plus `pull_request:` ran
+# the whole matrix twice at once on every PR push; the twin macOS jobs raced
+# on the runner and the slower one timed out its workers (12 `worker_timeout`
+# failures in one 8-minute job on 2026-10-21, zero in the 5-minute twin).
+# A superseded run of the same PR is cancelled rather than finished.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   checks:
