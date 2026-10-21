@@ -411,10 +411,18 @@ class CapabilityRegistry:
         approved_capability_ids: Sequence[str] = (),
         approved_network_hosts: Sequence[str] = (),
         approved_plugin_risks: Mapping[str, str] | None = None,
+        command_timeout_seconds: float | None = None,
     ) -> None:
         self._workspace = workspace.resolve()
         self._emit = emit
         self._instructions = instructions
+        # v115-F6: the per-command cap follows the task's wall-clock budget. A
+        # fixed 120 s killed skep's own verify (`uv run pytest -q`, ~10 min)
+        # on the first self-maintenance run — and the TimeoutExpired escaped,
+        # so the worker died without a terminal event.
+        self._command_timeout_seconds = (
+            float(command_timeout_seconds) if command_timeout_seconds else 120.0
+        )
         self._child_env = _child_process_env(
             env_allowlist=tuple(str(name) for name in env_allowlist),
             env_baseline=tuple(str(name) for name in env_baseline),
@@ -1272,9 +1280,11 @@ class CapabilityRegistry:
                 error,
                 decision=decision,
             )
-        timeout = arguments.get("timeout_seconds", 120)
+        timeout = arguments.get("timeout_seconds", self._command_timeout_seconds)
         if not isinstance(timeout, int | float) or timeout <= 0:
             raise CapabilityDenied("timeout_seconds must be positive")
+        # A step may ask for less than the budget, never more (v115-F6).
+        timeout = min(float(timeout), self._command_timeout_seconds)
 
         self._emit_command_start(
             capability_id="shell.run",
@@ -1301,6 +1311,30 @@ class CapabilityRegistry:
                     check=False,
                     env=self._child_env,
                 )
+        except subprocess.TimeoutExpired:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            error = (
+                f"timed out after {timeout:.0f}s — the task's per-command cap, taken from "
+                "its wall-clock budget; raise the budget or split the command"
+            )
+            self._emit_command_result(
+                capability_id="shell.run",
+                command=command,
+                exit_code=124,
+                duration_ms=duration_ms,
+                stdout_tail="",
+                stderr_tail=error[-200:],
+                stdout="",
+                stderr=error,
+                decision=decision,
+            )
+            return CapabilityResult(
+                capability_id="shell.run",
+                status="allowed",
+                exit_code=124,
+                output="",
+                error=error,
+            )
         except OSError as exc:
             duration_ms = int((time.monotonic() - started) * 1000)
             error = str(exc)
@@ -1341,6 +1375,11 @@ class CapabilityRegistry:
             output=proc.stdout,
             error=proc.stderr,
         )
+
+    @property
+    def command_timeout_seconds(self) -> float:
+        """The cap one shell command may run to (v115-F6): the task budget."""
+        return self._command_timeout_seconds
 
     def _resolve_diff_baseline(self) -> str | None:
         """Record the worktree's HEAD at worker startup (v20-F2).

@@ -2005,3 +2005,40 @@ def test_plugin_tool_requires_approval_when_mutating_risk_not_allowed(tmp_path: 
             },
         ),
     ]
+
+
+def test_shell_run_timeout_is_an_honest_failed_command_not_a_crash(tmp_path: Path) -> None:
+    """v115-F6 (field run 01a1608c, skep maintaining skep): the worker's own
+    verify, `uv run pytest -q`, ran past the 120 s default; the
+    ``subprocess.TimeoutExpired`` escaped ``_shell_run`` (only ``OSError`` was
+    caught) and the worker died "without a terminal event". A timeout is a
+    failed command — exit 124, a line naming the cap — and the default cap
+    follows the task's wall clock, not a constant (I8, I9)."""
+    events: list[tuple[object, dict[str, object]]] = []
+    registry = CapabilityRegistry(
+        tmp_path,
+        emit=lambda event_type, payload: events.append((event_type, payload)),
+        shell_allowlist=[[sys.executable]],
+        command_timeout_seconds=1,
+    )
+    assert registry.command_timeout_seconds == 1.0
+    result = registry.invoke(
+        "shell.run", {"argv": [sys.executable, "-c", "import time; time.sleep(5)"]}
+    )
+    assert result.exit_code == 124
+    assert "timed out" in (result.error or "") and "1" in (result.error or "")
+    results = [payload for kind, payload in events if kind == EventType.COMMAND_RESULT]
+    assert results and results[-1]["exit_code"] == 124
+    # An explicit timeout_seconds above the budget is capped to the budget.
+    capped = registry.invoke(
+        "shell.run",
+        {"argv": [sys.executable, "-c", "import time; time.sleep(5)"], "timeout_seconds": 600},
+    )
+    assert capped.exit_code == 124
+    roomy = CapabilityRegistry(
+        tmp_path,
+        emit=lambda _type, _payload: None,
+        shell_allowlist=[[sys.executable]],
+        command_timeout_seconds=30,
+    )
+    assert roomy.invoke("shell.run", {"argv": [sys.executable, "-c", "print('ok')"]}).exit_code == 0
