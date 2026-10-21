@@ -2476,6 +2476,49 @@ def _cwd_registered_repo(store: RunStore, holder: ConfigHolder, cwd: str | None)
     return None
 
 
+_PATH_TOKEN_RE = re.compile(r"~?/[^\s'\"`()<>|&;]+")
+
+
+def _command_registered_repo(
+    store: RunStore, holder: ConfigHolder, command: str, cwd: str | None
+) -> str | None:
+    """v114-F1: the registered repo a command line REACHES, judged on its
+    text rather than its cwd — a path operand under a repo root (absolute
+    or ``~``), a path embedded in a wrapper payload (``sh -c``,
+    ``python3 -c``), a ``cd`` into one (relative to cwd), ``git -C <root>``.
+    The cwd check alone taught the model to hop to ``cwd=/tmp`` the moment
+    ``repo_cwd`` refused; the pen is the repo, not the directory the shell
+    starts in."""
+    from pathlib import Path
+
+    from ..shell_prefixes import command_line_segments
+    from .registry import known_repos
+
+    roots = [
+        (str(item["name"]), Path(str(item["path"])).resolve())
+        for item in known_repos(repos_root(holder), store)
+    ]
+    if not roots:
+        return None
+    base = (Path(cwd).expanduser() if cwd else Path.cwd()).resolve()
+    segments = command_line_segments(command)
+    tokens = [token for segment in segments for token in segment] if segments else [command]
+    candidates: list[Path] = []
+    for token in tokens:
+        candidates.extend(Path(match).expanduser() for match in _PATH_TOKEN_RE.findall(token))
+        if segments and token and not token.startswith("-"):
+            candidates.append(base / token)  # a relative operand: `cd myrepo`
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        for name, root in roots:
+            if resolved == root or root in resolved.parents:
+                return name
+    return None
+
+
 def queen_shell_decision(
     store: RunStore,
     holder: ConfigHolder,
@@ -2513,15 +2556,28 @@ def queen_shell_decision(
         )
     policy = resolve_operator_policy(store)
     repo = _cwd_registered_repo(store, holder, cwd)
-    if repo is not None:
+    reached = None if repo is not None else _command_registered_repo(store, holder, command, cwd)
+    target = repo if repo is not None else reached
+    if target is not None:
+        # v114-F1: a command that REACHES a registered repo (a path operand, a
+        # `cd`, `git -C`, a wrapper payload) is the same pen as a repo cwd.
+        via_cwd = repo is not None
+        how = (
+            f"the working directory is inside registered repo {target!r}"
+            if via_cwd
+            else f"the command reaches into registered repo {target!r} (a path, cd, or git -C)"
+        )
         if background:
             return AutonomyDecision(
                 verdict="deny",
-                reason="shell.deny.repo_cwd_background",
+                reason=(
+                    "shell.deny.repo_cwd_background"
+                    if via_cwd
+                    else "shell.deny.repo_target_background"
+                ),
                 detail=(
-                    f"the working directory is inside registered repo {repo!r} — "
-                    "daemons do not run in checkouts (a background process there "
-                    "could modify files with no patch card, forever). Run it from "
+                    f"{how} — daemons do not run in checkouts (a background process "
+                    "there could modify files with no patch card, forever). Run it from "
                     "a non-repo directory, or use dispatch_run for repo work."
                 ),
                 decided_by="queen-shell-guard",
@@ -2536,11 +2592,10 @@ def queen_shell_decision(
             )
         return AutonomyDecision(
             verdict="deny",
-            reason="shell.deny.repo_cwd",
+            reason="shell.deny.repo_cwd" if via_cwd else "shell.deny.repo_target",
             detail=(
-                f"the working directory is inside registered repo {repo!r} — a "
-                "shell command there can modify files with no patch card, so it "
-                "refuses by default. For a governed one-file change use "
+                f"{how} — a shell command there can modify files with no patch card, "
+                "so it refuses by default. For a governed one-file change use "
                 "quick_edit (or dispatch_run for more); to open repo shells "
                 "deliberately, set_operator_policy scope='shell' "
                 "action='run_repo' with the command prefix."

@@ -227,3 +227,48 @@ def test_quick_edit_is_a_scoped_dispatch_not_a_pen(
         _ = tools  # imported for the namespace parity with other tests
     finally:
         store.close()
+
+
+def test_repo_targets_refuse_from_any_cwd(config: SupervisorConfig, tmp_path: Path) -> None:
+    """v114-F1: the guard judges the command's TARGETS, not only its cwd.
+    ``cd <repo> && …``, ``git -C <repo>``, an absolute repo path as an operand
+    or a redirect target, and a wrapper payload (``sh -c``) that reaches into a
+    registered repo are the same file-write pen as a repo cwd — the field
+    test saw the model hop to ``cwd=/tmp`` the moment ``repo_cwd`` refused."""
+    from skep.supervisor.serve.registry import repos_root
+
+    store, holder = _parts(config)
+    repo = repos_root(holder) / "myrepo"
+    (repo / ".git").mkdir(parents=True)
+    neutral = tmp_path / "neutral"
+    neutral.mkdir()
+    try:
+        _allow(store, "run", "sh")  # a wrapper grant must NOT open the repo through its payload
+        probes = [
+            f"cd {repo} && touch pwned.txt",
+            f"sh -c 'cd {repo} && rm calc.py'",
+            f"git -C {repo} status",
+            f"python3 -c \"open('{repo}/pwned.py', 'w').write('x')\"",
+            f"echo x > {repo}/pwned.txt",
+            f"cp /etc/hosts {repo}/",
+            f"sed -i '' 's/add/sub/' {repo}/calc.py",
+            f"cat {repo}/README.md",
+            "cd myrepo && ls",  # relative, resolved against cwd (the repos root)
+        ]
+        for command in probes:
+            cwd = str(repo.parent) if command.startswith("cd myrepo") else str(neutral)
+            decision = queen_shell_decision(store, holder, command=command, cwd=cwd)
+            assert decision is not None and decision.verdict == "deny", command
+            assert decision.reason == "shell.deny.repo_target", command
+            assert "myrepo" in (decision.detail or "") and "quick_edit" in (decision.detail or "")
+        # A command that names no repo, from a neutral cwd, is still the ordinary card.
+        assert queen_shell_decision(store, holder, command="uname -a", cwd=str(neutral)) is None
+        # A run_repo grant opens a repo target exactly as it opens a repo cwd.
+        _allow(store, "run_repo", "git")
+        opened = queen_shell_decision(
+            store, holder, command=f"git -C {repo} status", cwd=str(neutral)
+        )
+        assert opened is not None and opened.verdict == "allow"
+        assert opened.reason == "shell.allow.run_repo_rule"
+    finally:
+        store.close()
