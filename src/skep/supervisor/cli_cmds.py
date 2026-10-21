@@ -987,16 +987,24 @@ def _shell_command_from_approval_reason(reason: object) -> list[str] | None:
     return argv or None
 
 
-def _remember_shell_command(store: RunStore, reason: object) -> list[str] | None:
-    command = _shell_command_from_approval_reason(reason)
-    if command is None:
-        return None
-    existing = store.get_setting(ALLOWED_SHELL_COMMANDS)
-    allowed = list(existing) if isinstance(existing, list) else []
-    if command not in allowed:
-        allowed.append(command)
-        store.set_setting(ALLOWED_SHELL_COMMANDS, allowed)
-    return command
+def _remember_for_repo(
+    store: RunStore, config: SupervisorConfig, repo: Path, argv: list[str]
+) -> str:
+    """v114-F2: the ONE writer every face shares (ADR 0050) — the bound
+    project's overlay first, global only when unbound — returning the tier it
+    wrote. The CLI used to append to the global setting on its own, so a
+    `--allow-command` on a project-bound run widened every repo and cleared
+    nothing for the project whose list shadows the global one."""
+    from .serve.actions import persist_remembered_command
+    from .serve.settings import ConfigHolder
+    from .shell_prefixes import dangerous_prefix_reason, normalize_remembered_command
+
+    guard_reason = dangerous_prefix_reason(argv)
+    if guard_reason is not None:
+        raise ValueError(guard_reason)
+    return persist_remembered_command(
+        store, ConfigHolder(config, store), repo, normalize_remembered_command(argv)
+    )
 
 
 def cmd_review(args: argparse.Namespace) -> int:
@@ -1135,13 +1143,24 @@ def cmd_review(args: argparse.Namespace) -> int:
                     evidence=str(audit_dir),
                     next_command=f"skep review {record.task_id}  # inspect the evidence",
                 )
-            if _remember_shell_command(store, pending_approval.reason) is None:
+            argv = _shell_command_from_approval_reason(pending_approval.reason)
+            if argv is None:
                 return _err(
                     "approval does not contain a shell command.",
                     state=record.state,
                     evidence=str(audit_dir),
                     next_command=f"skep review {record.task_id}  # inspect the evidence",
                 )
+            try:
+                tier = _remember_for_repo(store, config, Path(record.repo), argv)
+            except ValueError as exc:
+                return _err(
+                    f"this command cannot be remembered: {exc}",
+                    state=record.state,
+                    evidence=str(audit_dir),
+                    next_command=f"skep review {record.task_id} --approve  # approve it once",
+                )
+            print(f"  remembered: {shlex.join(argv)} → {tier}")
             return _resume_pending_approval(config, store, record, actor, remembered=True)
 
         # Q8 true resume: approving a suspended task continues it past the gate
@@ -1278,13 +1297,19 @@ def _prompt_inline_approval(
                 print("approval cannot be remembered")
                 print("approval left pending")
                 return None
-            if (
-                pending.action == "shell.run"
-                and _remember_shell_command(run_store, pending.reason) is None
-            ):
-                print("approval cannot be remembered")
-                print("approval left pending")
-                return None
+            if pending.action == "shell.run":
+                argv = _shell_command_from_approval_reason(pending.reason)
+                if argv is None:
+                    print("approval cannot be remembered")
+                    print("approval left pending")
+                    return None
+                try:
+                    tier = _remember_for_repo(run_store, config, Path(record.repo), argv)
+                except ValueError as exc:
+                    print(f"approval cannot be remembered: {exc}")
+                    print("approval left pending")
+                    return None
+                print(f"  remembered: {shlex.join(argv)} → {tier}")
             return _resume_pending_approval(config, run_store, record, actor, remembered=True)
         if choice in {"d", "deny", "n", "no"}:
             run_store.resolve_approval(pending.review_id, approved=False, actor=actor)

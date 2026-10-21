@@ -1246,12 +1246,23 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "(land_run) is the only commit path. rm/sudo and other dangerous "
         "prefixes are also always rejected. GRANTING MEANS: this command can "
         "read and modify files in its working directory without a patch card "
-        "— the user grants with eyes open.",
+        "— the user grants with eyes open. TIERS: with `repo` (or a chat bound "
+        "to a project) the grant lands in that project's own allowlist; without "
+        "either it lands in the GLOBAL list, which a project's own list SHADOWS — "
+        "so for project work always pass repo, or the gate stays shut. The "
+        "result's `tier` says which list was written.",
         {
             "command": {
                 "type": "string",
                 "description": "the command prefix to allow, e.g. 'npm install'",
-            }
+            },
+            "repo": {
+                "type": "string",
+                "description": (
+                    "registered repo name or path whose project overlay takes the "
+                    "grant; omit only for a repo with no project"
+                ),
+            },
         },
         ["command"],
     ),
@@ -3288,6 +3299,21 @@ _PROJECT_BINDING_TOOLS = frozenset(
 )
 
 
+def _chat_bound_repo(store: RunStore, chat_id: str) -> Path | None:
+    """v114-F2: the repo_path binding of the project this chat is bound to."""
+    chat = store.get_chat(chat_id)
+    project_id = getattr(chat, "project_id", None)
+    if not project_id:
+        return None
+    for project in list_projects(store):
+        if project.project_id != project_id:
+            continue
+        for binding in project.bindings:
+            if binding.kind == "repo_path":
+                return Path(str(binding.value))
+    return None
+
+
 def _bind_chat_project(
     store: RunStore,
     holder: ConfigHolder | None,
@@ -4173,8 +4199,15 @@ def _execute_mutation(
             "allowed_shell_commands": actions.allow_env_bootstrap(store, holder),
         }
     if name == "allow_shell_command":
-        allowed = actions.allow_shell_command(store, holder, str(args["command"]))
-        return {"action": "shell_command_allowed", "allowed_shell_commands": allowed}
+        # v114-F2: `repo` (or the chat's bound project) scopes the grant; the
+        # action answers with the tier it wrote.
+        repo_arg = args.get("repo")
+        grant_repo: Path | None = None
+        if repo_arg:
+            grant_repo = resolve_repo_arg(str(repo_arg), repos_root(holder), store)
+        elif chat_id is not None:
+            grant_repo = _chat_bound_repo(store, chat_id)
+        return actions.allow_shell_command_scoped(store, holder, str(args["command"]), grant_repo)
     if name == "set_operator_policy":
         # v52-F4: the Queen's standing policy, edited behind the card the
         # operator just confirmed; run/worker policy documents are untouched.

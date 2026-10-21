@@ -23,8 +23,8 @@ from skep.supervisor.apply import validate_landing_branch
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.github import PullRequestResult
 from skep.supervisor.serve.actions import (
-    _persist_remembered_command,
     allow_shell_command_and_resume,
+    persist_remembered_command,
     reverification_summary,
     reverification_warning,
     run_summary_view,
@@ -376,20 +376,20 @@ def test_allow_command_refuses_to_remember_remote_git(repo: Path, config: Superv
         store.close()
 
 
-def test_persist_remembered_command_falls_back_to_global(
+def testpersist_remembered_command_falls_back_to_global(
     repo: Path, config: SupervisorConfig
 ) -> None:
     """v19-F4: with no bound project, the command lands in the global setting."""
     store = RunStore(config.db_path)
     try:
         holder = ConfigHolder(config, store)
-        _persist_remembered_command(store, holder, repo, ["git", "commit", "-m", "hi"])
+        persist_remembered_command(store, holder, repo, ["git", "commit", "-m", "hi"])
         assert store.get_setting("allowed_shell_commands") == [["git", "commit", "-m", "hi"]]
     finally:
         store.close()
 
 
-def test_persist_remembered_command_prefers_bound_project(
+def testpersist_remembered_command_prefers_bound_project(
     repo: Path, config: SupervisorConfig
 ) -> None:
     """v19-F4: a repo bound to a project scopes the remember there, not globally."""
@@ -406,7 +406,7 @@ def test_persist_remembered_command_prefers_bound_project(
             project_id="p1", binding_kind="repo_path", binding_value=str(repo)
         )
         holder = ConfigHolder(config, store)
-        _persist_remembered_command(store, holder, repo, ["pytest", "-q"])
+        persist_remembered_command(store, holder, repo, ["pytest", "-q"])
         # Global setting untouched; the command lands in the project policy.
         assert store.get_setting("allowed_shell_commands") is None
         project = store.get_project_policy("p1")
@@ -1052,3 +1052,63 @@ def test_approve_review_with_task_id_teaches_land_run(repo: Path, config: Superv
         store.close()
     assert "task id, not a review id" in str(excinfo.value.detail)
     assert "land_run" in str(excinfo.value.detail)
+
+
+def test_cli_allow_command_writes_the_project_overlay_like_the_rest_face(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v114-F2 (ADR 0050): one verb, one writer. The field test saw
+    ``skep review --allow-command`` widen the GLOBAL allowlist for a run bound
+    to a project, while ``POST /api/approvals/{id}/allow-command`` wrote the
+    project overlay — and the project's own list then shadowed the global
+    write, so the gate the operator thought cleared was not."""
+    import argparse
+
+    from skep.supervisor import cli_cmds
+    from skep.supervisor.contracts_io import mint_task
+
+    config = build_config(tmp_path / "home", None)
+    config.home.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="sample",
+            name="sample",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"allowed_shell_commands": [["uv", "run", "pytest"]]},
+        )
+        store.add_project_binding(
+            project_id="sample", binding_kind="repo_path", binding_value=str(repo)
+        )
+        task = mint_task(workspace=repo, instructions="Run uv tree.")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "pending_approval")
+        store.enqueue_approval(
+            task.task_id,
+            action="shell.run",
+            reason="shell.run requires approval for command: uv tree",
+            commands=[["uv", "tree"]],
+        )
+        # The resume itself is the worker's business; this test is about the writer.
+        monkeypatch.setattr(cli_cmds, "_resume_pending_approval", lambda *a, **k: 0)
+        args = argparse.Namespace(
+            home=tmp_path / "home",  # build_config appends /supervisor itself
+            task_id=task.task_id,
+            approve=False,
+            deny=False,
+            allow_command=True,
+            actor="tester",
+            note=None,
+            branch=None,
+            pr=False,
+            pr_base=None,
+            worker_cmd=None,
+        )
+        assert cli_cmds.cmd_review(args) == 0
+        project = store.project_for_binding("repo_path", str(repo))
+        assert project is not None
+        assert ["uv", "tree"] in project.policy["allowed_shell_commands"]
+        assert ["uv", "tree"] not in (store.get_setting("allowed_shell_commands") or [])
+    finally:
+        store.close()
