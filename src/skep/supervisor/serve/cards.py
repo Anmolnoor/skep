@@ -273,4 +273,8 @@ def card_summary(tool: str, args: Any, description: str = "") -> dict[str, Any]:
     danger = risk(tool, safe_args)
     if danger is not None:
         summary["risk"] = danger
+    if tool in _POLICY_TOOLS:
+        # v114-F3: a standing change, not a one-off — clients that pre-confirm
+        # (`skep chat --yes`) must leave it for a named confirm.
+        summary["policy"] = True
     return summary

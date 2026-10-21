@@ -136,8 +136,9 @@ def _parser() -> argparse.ArgumentParser:
     chat.add_argument(
         "--yes",
         action="store_true",
-        help="with --oneshot: pre-confirm every card this turn proposes "
-        "(explicit consent for THIS invocation; default stays skip-and-report)",
+        help="with --oneshot: pre-confirm every card this turn proposes, once — "
+        "never a policy card (allowlist/grant changes stay pending, named for "
+        "/approve); explicit consent for THIS invocation, default stays skip-and-report",
     )
     chat.set_defaults(func=_chat)
 

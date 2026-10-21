@@ -855,17 +855,22 @@ def test_oneshot_yes_confirms_cards_without_a_tty(
     ollama: FakeOllama,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """v81-F12: --yes is the explicit opt-out of skip-and-report — the card
-    confirms and the continuation streams, with no one at the keyboard."""
-    ollama.script_tool_call("set_policy", {"auto_approve": True})
-    ollama.script_reply("auto-approve is on")
+    confirms and the continuation streams, with no one at the keyboard.
+    (v114-F3: the example card is a one-off shell run — a policy card such
+    as set_policy is exactly what --yes no longer covers.)"""
+    neutral = tmp_path / "neutral"
+    neutral.mkdir()
+    ollama.script_tool_call("run_shell", {"command": "echo hi", "cwd": str(neutral)})
+    ollama.script_reply("it said hi")
     script_input(monkeypatch, [])  # EOF: cron/pipe, nobody answering
     code = run_chat(
         home=config.home,
         url="http://unused",
         client=client,
-        oneshot="enable auto approve",
+        oneshot="run echo hi",
         yes=True,
     )
     assert code == 0
@@ -873,8 +878,7 @@ def test_oneshot_yes_confirms_cards_without_a_tty(
     assert action["status"] == "confirmed"
     out = capsys.readouterr().out
     assert "--yes: confirming card" in out
-    assert "auto-approve is on" in out
-    assert client.get("/api/policy").json()["auto_approve"] is True
+    assert "it said hi" in out
 
 
 def test_oneshot_intercepts_slash_commands_before_the_model(
@@ -1231,3 +1235,51 @@ def test_serve_client_raises_with_detail(config: SupervisorConfig) -> None:
         serve.get("/api/chats/no-such-chat")
     assert excinfo.value.status == 404
     assert "no chat" in excinfo.value.detail
+
+
+def test_oneshot_yes_leaves_zero_standing_rules(
+    config: SupervisorConfig,
+    client: TestClient,
+    ollama: FakeOllama,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """v114-F3: ``--yes`` is consent for THIS invocation. The field test saw
+    a ``--yes`` run_shell leave a session-tier rule behind, and the next
+    identical command ran in-turn with nobody asked (I6/I7)."""
+    neutral = tmp_path / "neutral"
+    neutral.mkdir()
+    ollama.script_tool_call("run_shell", {"command": "echo hi", "cwd": str(neutral)})
+    ollama.script_reply("ran it")
+    script_input(monkeypatch, [])
+    code = run_chat(
+        home=config.home, url="http://unused", client=client, oneshot="run echo hi", yes=True
+    )
+    assert code == 0
+    (action,) = _chat_actions(client)
+    assert action["status"] == "confirmed"
+    assert client.get("/api/policy/rules").json()["rules"] == []
+
+
+def test_oneshot_yes_never_preconfirms_a_policy_card(
+    config: SupervisorConfig,
+    client: TestClient,
+    ollama: FakeOllama,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """v114-F3: a policy-tier card the model volunteers (the field test's
+    ``allow_shell_command uv tree`` before a dispatch) is a standing change —
+    ``--yes`` leaves it pending and says so; only a named confirm takes it."""
+    ollama.script_tool_call("allow_shell_command", {"command": "uv tree"})
+    script_input(monkeypatch, [])
+    code = run_chat(
+        home=config.home, url="http://unused", client=client, oneshot="allow uv tree", yes=True
+    )
+    assert code == 0
+    (action,) = _chat_actions(client)
+    assert action["tool"] == "allow_shell_command"
+    assert action["status"] == "proposed"
+    out = capsys.readouterr().out
+    assert "policy card" in out and "/approve" in out
+    assert ["uv", "tree"] not in client.get("/api/policy").json()["allowed_shell_commands"]

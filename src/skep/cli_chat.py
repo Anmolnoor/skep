@@ -605,6 +605,17 @@ class ChatRepl:
         action_id = str(action.get("action_id"))
         _render_card(action)
         if self.auto_confirm:
+            if (action.get("card") or {}).get("policy"):
+                # v114-F3: a policy card is a standing change the operator did
+                # not type; one flag never covers it (I6/I7).
+                print(
+                    _c(
+                        DIM,
+                        f"--yes does not cover a policy card ({action.get('tool', '?')}) — "
+                        f"left pending ({action_id}): /approve {action_id} confirms it by name",
+                    )
+                )
+                return
             # v81-F12: the operator consented up front (--yes); no prompt.
             print(_c(DIM, f"--yes: confirming card {action_id}"))
             self._apply_card_verb(action, "confirm")
@@ -639,8 +650,12 @@ class ChatRepl:
             if result.get("ok"):
                 self._maybe_tail(result.get("result"))
             return
+        # v114-F3: a terminal confirm is consent for THIS card (keep=once) —
+        # the server's absent-body default is a session grant, which left a
+        # standing rule behind every `--yes` in the field test.
+        body = {"keep": "once"} if verb == "confirm" else None
         with self.client.stream(
-            "POST", f"/api/chats/{chat_id}/actions/{action_id}/{verb}"
+            "POST", f"/api/chats/{chat_id}/actions/{action_id}/{verb}", body
         ) as response:
             _state, more = render_turn(
                 iter_sse(response), show_thinking=self.show_thinking, url=self.url
