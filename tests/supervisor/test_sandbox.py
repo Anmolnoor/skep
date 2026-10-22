@@ -76,6 +76,27 @@ def test_outbound_network_is_physically_denied(tmp_path: Path) -> None:
     assert "Operation not permitted" in proc.stderr or "PermissionError" in proc.stderr
 
 
+def test_loopback_round_trip_works_under_the_sandbox(tmp_path: Path) -> None:
+    """v115-F9: a server on 127.0.0.1 and a client to it, both inside the wall
+    — the shape of every FakeOllama/FakeOpenAI test; egress stays denied
+    (test_outbound_network_is_physically_denied)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    profile = _tight_profile(tmp_path, workspace, sandbox.DENY_ALL_NETWORK)
+    code = (
+        "import socket, threading\n"
+        "srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen(1)\n"
+        "def serve():\n"
+        "    conn, _ = srv.accept(); conn.sendall(conn.recv(16)); conn.close()\n"
+        "threading.Thread(target=serve, daemon=True).start()\n"
+        "c = socket.create_connection(('127.0.0.1', srv.getsockname()[1]), timeout=5)\n"
+        "c.sendall(b'ping'); print(c.recv(16).decode())\n"
+    )
+    proc = _run_sandboxed(profile, code)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "ping"
+
+
 def test_compute_still_works_under_the_sandbox(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -89,6 +110,9 @@ def test_deny_all_profile_denies_network_text() -> None:
     text = sandbox.build_profile(writable_roots=[Path("/tmp/ws")], network=sandbox.DENY_ALL_NETWORK)
     assert "(deny network*)" in text
     assert '(allow file-write* (subpath "/tmp/ws"))' in text
+    # v115-F9: loopback is not egress — a test suite's own servers stay reachable.
+    assert '(allow network-bind (local ip "localhost:*"))' in text
+    assert '(allow network-outbound (remote ip "localhost:*"))' in text
 
 
 def test_allow_all_profile_omits_network_deny() -> None:
@@ -116,6 +140,7 @@ def test_domain_allowlist_pins_egress_to_the_proxy_port() -> None:
     )
     assert "(deny network*)" in text
     assert '(allow network-outbound (remote ip "localhost:54321"))' in text
+    assert '(allow network-inbound (local ip "localhost:*"))' in text
 
 
 class _OriginHandler(BaseHTTPRequestHandler):
@@ -148,11 +173,12 @@ _CHILD = """
 import os, socket
 proxy_port = int(os.environ["PROXY_PORT"])
 origin_port = int(os.environ["ORIGIN_PORT"])
-try:
+
+def via_proxy(host, port):
     s = socket.create_connection(("127.0.0.1", proxy_port), timeout=5)
     s.sendall(
-        f"GET http://localhost:{origin_port}/ HTTP/1.1\\r\\n"
-        f"Host: localhost:{origin_port}\\r\\nConnection: close\\r\\n\\r\\n".encode()
+        f"GET http://{host}:{port}/ HTTP/1.1\\r\\n"
+        f"Host: {host}:{port}\\r\\nConnection: close\\r\\n\\r\\n".encode()
     )
     resp = b""
     while True:
@@ -161,12 +187,21 @@ try:
             break
         resp += d
     s.close()
+    return resp
+
+try:
+    resp = via_proxy("localhost", origin_port)
     print("PROXY_STATUS", resp.split(b"\\r\\n", 1)[0].decode("latin-1"))
     print("HAS_ORIGIN", b"ORIGIN-OK" in resp)
 except OSError as e:
     print("PROXY_ERR", type(e).__name__)
 try:
-    s = socket.create_connection(("127.0.0.1", origin_port), timeout=3)
+    resp = via_proxy("denied.invalid", 80)
+    print("DENIED_STATUS", resp.split(b"\\r\\n", 1)[0].decode("latin-1"))
+except OSError as e:
+    print("DENIED_ERR", type(e).__name__)
+try:
+    s = socket.create_connection(("192.0.2.1", 9), timeout=3)  # TEST-NET-1: never routable
     s.close()
     print("DIRECT_OK")
 except OSError as e:
@@ -185,14 +220,17 @@ def _run_worker(profile: Path, child: Path, *, proxy_port: int, origin_port: int
 
 def test_network_allowlist_enforced_end_to_end(tmp_path: Path, origin_port: int) -> None:
     """The headline D1 proof: the sandboxed worker's ONLY egress is the proxy, the
-    proxy enforces the domain allowlist, and a direct bypass is physically denied."""
+    proxy enforces the domain allowlist, and a direct bypass is physically denied.
+    v115-F9: loopback is open by design, so the proof's "internet" is a name the
+    proxy refuses (denied.invalid) and an address Seatbelt refuses (TEST-NET-1)."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     child = tmp_path / "child.py"
     child.write_text(_CHILD)
-
-    # 1) "localhost" allowed → the proxied request reaches the origin; a direct
-    #    connection to the origin (bypassing the proxy) is denied by Seatbelt.
+    # 1) with "localhost" allowlisted: the proxied request reaches the loopback
+    #    origin; a non-allowlisted name is 403'd by the proxy; a direct
+    #    non-loopback connection is denied by Seatbelt (PermissionError, not a
+    #    timeout — the wall, not the network, said no).
     allow_proxy = FilteringProxy(("localhost",)).start()
     try:
         profile = sandbox.write_profile(
@@ -202,14 +240,15 @@ def test_network_allowlist_enforced_end_to_end(tmp_path: Path, origin_port: int)
             proxy_port=allow_proxy.port,
         )
         out = _run_worker(profile, child, proxy_port=allow_proxy.port, origin_port=origin_port)
-        assert "PROXY_STATUS" in out and "200 OK" in out, out  # origin reply passed through
+        assert "PROXY_STATUS" in out and "200 OK" in out, out
         assert "HAS_ORIGIN True" in out, out
-        assert "DIRECT_BLOCKED" in out, out  # cannot bypass the proxy
-        assert allow_proxy.allowed_count >= 1
+        assert "DENIED_STATUS" in out and "403" in out, out
+        assert "DIRECT_BLOCKED PermissionError" in out, out
+        assert allow_proxy.allowed_count >= 1 and allow_proxy.denied_count >= 1
     finally:
         allow_proxy.stop()
-
-    # 2) "localhost" NOT allowed → the proxy 403s the request; the origin is never reached.
+    # 2) with NOTHING loopback allowlisted: the loopback origin is still reachable
+    #    through the proxy (loopback is not egress); the denied name still 403s.
     deny_proxy = FilteringProxy(("pypi.org",)).start()
     try:
         profile = sandbox.write_profile(
@@ -219,8 +258,9 @@ def test_network_allowlist_enforced_end_to_end(tmp_path: Path, origin_port: int)
             proxy_port=deny_proxy.port,
         )
         out = _run_worker(profile, child, proxy_port=deny_proxy.port, origin_port=origin_port)
-        assert "PROXY_STATUS" in out and "403" in out, out
-        assert "HAS_ORIGIN False" in out, out
+        assert "HAS_ORIGIN True" in out, out
+        assert "DENIED_STATUS" in out and "403" in out, out
+        assert "DIRECT_BLOCKED PermissionError" in out, out
         assert deny_proxy.denied_count >= 1
     finally:
         deny_proxy.stop()

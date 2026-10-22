@@ -37,6 +37,19 @@ _CONNECT_TIMEOUT = 10.0
 _TUNNEL_POLL = 5.0
 
 
+def is_loopback_host(host: str) -> bool:
+    """``localhost``, ``*.localhost`` (RFC 6761), ``127.0.0.0/8`` and ``::1``."""
+    import ipaddress
+
+    bare = host.strip().lower().rstrip(".").strip("[]")
+    if bare == "localhost" or bare.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(bare).is_loopback
+    except ValueError:
+        return False
+
+
 def domain_allowed(host: str, allowlist: tuple[str, ...]) -> bool:
     """True if ``host`` is permitted by ``allowlist``.
 
@@ -131,7 +144,11 @@ class _ProxyHandler(StreamRequestHandler):
 
     def _do_connect(self, target: str) -> None:
         host, _, port_s = target.partition(":")
-        if not domain_allowed(host, self.server.allowlist):
+        # v115-F9: loopback is not egress — a project's own test servers on
+        # 127.0.0.1 stay reachable through the proxied client (the first
+        # skep-maintains-skep run lost 210 tests to this 403). The wall governs
+        # what leaves the machine; the serve API still needs its token (G2).
+        if not (is_loopback_host(host) or domain_allowed(host, self.server.allowlist)):
             self.server.note(allowed=False)
             self._reply(403, f"Forbidden: {host!r} is not in the task network allowlist")
             return
@@ -151,7 +168,11 @@ class _ProxyHandler(StreamRequestHandler):
     def _do_http(self, method: str, target: str, headers: list[bytes]) -> None:
         split = urlsplit(target)
         host = split.hostname or ""
-        if not domain_allowed(host, self.server.allowlist):
+        # v115-F9: loopback is not egress — a project's own test servers on
+        # 127.0.0.1 stay reachable through the proxied client (the first
+        # skep-maintains-skep run lost 210 tests to this 403). The wall governs
+        # what leaves the machine; the serve API still needs its token (G2).
+        if not (is_loopback_host(host) or domain_allowed(host, self.server.allowlist)):
             self.server.note(allowed=False)
             self._reply(403, f"Forbidden: {host!r} is not in the task network allowlist")
             return

@@ -287,9 +287,26 @@ def default_writable_roots() -> tuple[Path, ...]:
     return tuple(seen.values())
 
 
+# v115-F9: loopback is not egress. The project's own tests start servers on
+# 127.0.0.1 and talk to them; with loopback denied, skep's own suite lost 210
+# tests inside the wall on its first self-maintenance run. The wall still
+# governs what leaves the machine — and it is STATED (I12): a sandboxed worker
+# can reach services listening on the host's loopback; those must carry their
+# own auth (the serve API does, G2).
+# Seatbelt accepts only "*" or "localhost" in a network address filter (an IP
+# literal is a profile syntax error), and "localhost" matches every address
+# this host owns. So the wall, stated exactly: a sandboxed worker can reach
+# listeners on THIS host; it cannot reach any other machine.
+_LOOPBACK_RULES = (
+    '(allow network-bind (local ip "localhost:*"))',
+    '(allow network-inbound (local ip "localhost:*"))',
+    '(allow network-outbound (remote ip "localhost:*"))',
+)
+
+
 def _network_rules(network: NetworkPolicy, proxy_port: int | None) -> list[str]:
     if network.is_deny_all:
-        return ["(deny network*)"]
+        return ["(deny network*)", *_LOOPBACK_RULES]
     if network.is_allow_all:
         # allow-default already permits network; an explicit comment keeps the
         # generated profile self-documenting.
@@ -307,6 +324,7 @@ def _network_rules(network: NetworkPolicy, proxy_port: int | None) -> list[str]:
         )
     return [
         "(deny network*)",
+        *_LOOPBACK_RULES,
         f'(allow network-outbound (remote ip "localhost:{proxy_port}"))',
     ]
 

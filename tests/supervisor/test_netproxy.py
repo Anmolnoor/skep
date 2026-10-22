@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from skep.supervisor import netproxy
-from skep.supervisor.netproxy import FilteringProxy, domain_allowed
+from skep.supervisor.netproxy import FilteringProxy, domain_allowed, is_loopback_host
 
 
 @pytest.mark.parametrize(
@@ -87,10 +87,10 @@ def test_http_forward_allowed_host_reaches_origin(origin: int) -> None:
 
 
 def test_http_forward_denied_host_gets_403(origin: int) -> None:
-    proxy = FilteringProxy(("pypi.org",)).start()  # localhost is NOT allowed
+    proxy = FilteringProxy(("pypi.org",)).start()  # denied.invalid is NOT allowed
     try:
         with pytest.raises(urllib.error.HTTPError) as excinfo:
-            _fetch_via(proxy.port, f"http://localhost:{origin}/")
+            _fetch_via(proxy.port, f"http://denied.invalid:{origin}/")
         assert excinfo.value.code == 403
         assert proxy.denied_count == 1
         assert proxy.allowed_count == 0
@@ -147,9 +147,9 @@ def test_connect_allowed_host_tunnels() -> None:
 
 def test_connect_denied_host_gets_403() -> None:
     echo_port, srv = _echo_listener()
-    proxy = FilteringProxy(("pypi.org",)).start()  # localhost not allowed
+    proxy = FilteringProxy(("pypi.org",)).start()  # denied.invalid not allowed
     try:
-        status, sock = _connect_via_proxy(proxy.port, "localhost", echo_port)
+        status, sock = _connect_via_proxy(proxy.port, "denied.invalid", echo_port)
         assert "403" in status
         sock.close()
         assert proxy.denied_count == 1
@@ -311,3 +311,42 @@ def test_unix_socket_door_filters_like_the_tcp_one() -> None:
         srv.close()
     assert not Path(sock_path).exists()  # stop() unlinks the socket
     shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("127.0.0.1", True),
+        ("127.0.0.53", True),
+        ("localhost", True),
+        ("LOCALHOST.", True),
+        ("api.localhost", True),
+        ("::1", True),
+        ("[::1]", True),
+        ("127.0.0.1.evil.example", False),
+        ("localhost.example.com", False),
+        ("10.0.0.5", False),
+    ],
+)
+def test_loopback_is_not_egress(host: str, expected: bool) -> None:
+    """v115-F9 (the first skep-maintains-skep run, 01a160f4): the worker's
+    verify lost 210 tests to "Forbidden: '127.0.0.1' is not in the task
+    network allowlist" — every test that starts a server on loopback and
+    talks to it through the proxied httpx. The wall governs what leaves the
+    machine; a loopback connection never does. `domain_allowed` itself keeps
+    pure allowlist semantics so a loopback allow is never misattributed."""
+    assert is_loopback_host(host) is expected
+    assert domain_allowed(host, ()) is False
+
+
+def test_loopback_passes_through_the_proxy_with_an_empty_allowlist(origin: int) -> None:
+    """v115-F9, end to end: the field shape — an httpx client inside a worker,
+    HTTP_PROXY pointed at the filtering proxy, talking to a test server the
+    suite started on 127.0.0.1. Nothing is allowlisted; loopback still works."""
+    proxy = FilteringProxy(()).start()
+    try:
+        status, body = _fetch_via(proxy.port, f"http://127.0.0.1:{origin}/")
+        assert status == 200 and body
+        assert proxy.allowed_count == 1 and proxy.denied_count == 0
+    finally:
+        proxy.stop()
