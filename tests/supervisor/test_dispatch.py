@@ -532,3 +532,113 @@ def test_injected_memory_reaches_the_worker_prompt_as_context() -> None:
     assert "Prefer uv over pip" in block
     assert "NOT authority" in block  # worker sees memory as context, not authority
     assert _memory_block([]) == ""
+
+
+def test_watch_worker_allows_a_slow_start_before_the_first_event(tmp_path: Path) -> None:
+    """v115-F8: ``last_activity`` began at launch, so a worker that took longer
+    than 3x the heartbeat to write its FIRST byte was killed as heartbeat_lost
+    — on 2026-10-21 that was every `worker_timeout == completed` CI flake
+    (a cold `uv run` plus the skep import on a loaded macOS runner), five
+    reruns in one afternoon. Before the first event a worker gets a startup
+    allowance; after it, silence longer than 3x the heartbeat is still death."""
+    from skep.supervisor import monitor as monitor_mod
+    from skep.supervisor.monitor import watch_worker
+    from skep.worker_contract import CONTRACT_VERSION, Event, EventType
+
+    events_path = tmp_path / "events.ndjson"
+    now = {"t": 0.0}
+
+    def event(seq: int, kind: EventType, payload: dict[str, object]) -> str:
+        return Event(
+            contract_version=CONTRACT_VERSION,
+            event_id=f"e{seq}",
+            seq=seq,
+            task_id="t",
+            trace_id="tr",
+            ts="2026-10-21T00:00:00Z",
+            type=kind,
+            payload=payload,
+        ).model_dump_json()
+
+    class SlowStart:
+        """Silent for 45 s (3x10 s would have killed it), then a full run."""
+
+        pid = 4242
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            if now["t"] >= 45 and not events_path.exists():
+                events_path.write_text(
+                    event(
+                        1,
+                        EventType.TASK_START,
+                        {"worker_version": "fake", "manifest_fingerprint": "f" * 64},
+                    )
+                    + "\n"
+                    + event(2, EventType.TASK_TERMINAL, {"status": "completed", "summary": "ok"})
+                    + "\n"
+                )
+            if now["t"] >= 50:
+                self.returncode = 0
+                return 0
+            return None
+
+    verdict = watch_worker(
+        SlowStart(),  # type: ignore[arg-type]
+        events_path,
+        task_id="t",
+        trace_id="tr",
+        wall_clock_seconds=600,
+        grace_seconds=30,
+        heartbeat_seconds=10,
+        startup_seconds=120,
+        clock=lambda: now["t"],
+        sleep=lambda _s: now.__setitem__("t", now["t"] + 1.0),
+    )
+    assert verdict.kind == "worker_reported"
+
+    # After the first byte the old rule holds: silence > 3x heartbeat is death.
+    killed: list[int] = []
+    monkey_events = tmp_path / "events2.ndjson"
+    now["t"] = 0.0
+
+    class StartsThenStalls:
+        pid = 4343
+        returncode: int | None = None
+
+        def poll(self) -> int | None:
+            if now["t"] >= 5 and not monkey_events.exists():
+                monkey_events.write_text(
+                    event(
+                        1,
+                        EventType.TASK_START,
+                        {"worker_version": "fake", "manifest_fingerprint": "f" * 64},
+                    )
+                    + "\n"
+                )
+            return self.returncode
+
+    original_kill = monitor_mod.kill_process_tree
+
+    def fake_kill(process: object) -> None:
+        killed.append(getattr(process, "pid", 0))
+        process.returncode = -9  # type: ignore[attr-defined]
+
+    monitor_mod.kill_process_tree = fake_kill
+    try:
+        stalled = watch_worker(
+            StartsThenStalls(),  # type: ignore[arg-type]
+            monkey_events,
+            task_id="t",
+            trace_id="tr",
+            wall_clock_seconds=600,
+            grace_seconds=30,
+            heartbeat_seconds=10,
+            startup_seconds=120,
+            clock=lambda: now["t"],
+            sleep=lambda _s: now.__setitem__("t", now["t"] + 1.0),
+        )
+    finally:
+        monitor_mod.kill_process_tree = original_kill
+    assert stalled.kind == "heartbeat_lost" and killed == [4343]
+    assert now["t"] < 60  # killed ~36 s after its first byte, not after the startup allowance

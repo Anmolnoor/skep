@@ -35,6 +35,10 @@ class SupervisorConfig:
     caste_worker_commands: dict[str, tuple[str, ...]] = field(default_factory=dict)
     grace_seconds: float = 30.0
     heartbeat_seconds: float = 10.0
+    # v115-F8: a worker may take this long to write its FIRST event (a cold
+    # `uv run` plus the skep import); after that, 3x heartbeat_seconds of
+    # silence is death. Before this, the 3x rule ran from launch.
+    startup_seconds: float = 120.0
     poll_seconds: float = 0.05
     env_baseline: tuple[str, ...] = ("PATH", "HOME")
     contract_range: str = SUPPORTED_CONTRACT_RANGE

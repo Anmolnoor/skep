@@ -757,6 +757,7 @@ def _execute(
         allow_git_mutation=task.permissions.allow_git_mutation,
         approved_capability_ids=tuple(approved_capability_ids),
         approved_plugin_risks=approved_plugin_risks,
+        command_timeout_seconds=task.budget.wall_clock_seconds,
     )
 
     try:

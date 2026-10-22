@@ -662,6 +662,7 @@ def run_task(
             grace_seconds=config.grace_seconds,
             heartbeat_seconds=config.heartbeat_seconds,
             poll_seconds=config.poll_seconds,
+            startup_seconds=config.startup_seconds,
         )
 
         result = None

@@ -1197,3 +1197,49 @@ def test_resume_after_approval_skips_a_denied_step_and_runs_the_approved_one(
     result = json.loads((config.audit_dir / resumed_id / "result.json").read_text())
     assert "denied_step" in result["risk_flags"]
     assert "example.com" in resumed["summary"] and "skipped" in resumed["summary"]
+
+
+def test_cli_resume_keeps_the_original_execution_mode(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v115-F7 (field runs 01a16089 → 01a1608c): the dispatch ran in
+    ``workspace`` (the project default); the CLI resume called ``run_task``
+    with no execution mode and the worker ran in ``sandbox`` — a different
+    wall, picked by a default, recorded nowhere as a change. The REST face
+    (``resume_past_gate``) already carries the run's mode; the CLI face must
+    too (ADR 0050, I8)."""
+    from skep.supervisor import cli_cmds
+    from skep.supervisor.contracts_io import mint_task
+
+    config = build_config(tmp_path / "home", None)
+    config.home.mkdir(parents=True, exist_ok=True)
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=repo, instructions="Run the suite.")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "pending_approval")
+        store.enqueue_approval(
+            task.task_id,
+            action="shell.run",
+            reason="shell.run requires approval for command: uv lock",
+            commands=[["uv", "lock"]],
+        )
+        audit = config.audit_dir / task.task_id
+        audit.mkdir(parents=True, exist_ok=True)
+        (audit / "task.json").write_text(task.model_dump_json(), encoding="utf-8")
+        captured: dict[str, object] = {}
+
+        def fake_run_task(repo_path: Path, instructions: str, **kwargs: object) -> object:
+            captured.update(kwargs)
+            store.transition(task.task_id, "failed")
+            record = cli_cmds._find_run(store, task.task_id)
+            assert record is not None
+            return type("Outcome", (), {"record": record})()
+
+        monkeypatch.setattr(cli_cmds, "run_task", fake_run_task)
+        record = cli_cmds._find_run(store, task.task_id)
+        assert record is not None
+        cli_cmds._resume_pending_approval(config, store, record, "tester")
+        assert captured.get("execution_mode") == "workspace"
+    finally:
+        store.close()

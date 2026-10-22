@@ -1393,6 +1393,10 @@ def _resume_pending_approval(
         ref=record.ref,
         resume_of=record.task_id,
         approval_verdict=verdict,
+        # v115-F7: the resume keeps the run's wall; run_task's default is
+        # sandbox and silently moved a workspace run (ADR 0050 parity with
+        # resume_past_gate, which already carries it).
+        execution_mode=record.execution_mode,
         store=store,
     )
     # Resolve the original's approval, linking it to the resume it produced.
