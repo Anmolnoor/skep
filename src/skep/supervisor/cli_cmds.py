@@ -34,6 +34,7 @@ from .castes import caste_worker_commands
 from .config import SupervisorConfig
 from .contracts_io import DEFAULT_BUDGET
 from .dispatch import run_task
+from .engines import engine_names
 from .github import default_pr_body, default_pr_title, open_pull_request
 from .policy import SAFE_DEPENDENCY_RULE
 from .policy_resolver import PolicyResolutionError, ResolvedRunPolicy, resolve_run_policy
@@ -655,6 +656,7 @@ def _has_explicit_run_overrides(args: argparse.Namespace) -> bool:
     return any(
         value is not None
         for value in (
+            getattr(args, "engine", None),  # v116-F1: an explicit engine deviates too
             args.network,
             args.env_allow,
             args.budget_wall_clock,
@@ -756,6 +758,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     execution_mode=execution_mode,
                     extra_network_hosts=configured_provider_hosts(store, config.home.parent),
                     binding_candidates=[("template_name", args.template)],
+                    engine=args.engine,
                 )
                 permissions = resolved_policy.permissions
                 budget = resolved_policy.budget
@@ -820,6 +823,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                         max_provider_calls=args.budget_max_provider_calls,
                         execution_mode=execution_mode,
                         extra_network_hosts=configured_provider_hosts(store, config.home.parent),
+                        engine=args.engine,
                     )
                     permissions = resolved_policy.permissions
                     budget = resolved_policy.budget
@@ -836,6 +840,23 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
     finally:
         store.close()
+
+    if (
+        args.worker_cmd
+        and args.engine is None
+        and resolved_policy is not None
+        and resolved_policy.coding_engine != "builtin"
+    ):
+        # v116-F1: the project's engine pin replaced an explicit --worker-cmd
+        # without a word (dispatch.py takes the engine argv for any external
+        # engine) — the field burned three runs on an agent the operator had
+        # not asked for. Name both and the two ways out (I9).
+        return _err(
+            f"project pins coding_engine {resolved_policy.coding_engine!r}, which replaces "
+            "--worker-cmd; pass --engine builtin to run your worker command under this "
+            "project, or drop --worker-cmd to run the pinned engine",
+            next_command=f'skep run {repo} "<instructions>" --engine builtin --worker-cmd ...',
+        )
 
     default_dispatch_decision = run_request_resolved_decision()
     dispatch_decision = (
@@ -886,8 +907,16 @@ def cmd_run(args: argparse.Namespace) -> int:
             execution_mode=execution_mode,
             planning_protocol=planning_protocol,
             # v90-F1 (ADR 0047): the project's chosen coding agent.
-            coding_engine=(resolved_policy.coding_engine if resolved_policy is not None else ""),
+            coding_engine=(
+                resolved_policy.coding_engine
+                if resolved_policy is not None
+                else (args.engine or "")
+            ),
         )
+    except ValueError as exc:
+        # v116-F1: a dispatch refusal (engine absent, no auth env, no usable
+        # sandbox) is an answer, not a traceback; nothing was recorded.
+        return _err(str(exc), next_command="skep doctor  # engines, auth env, sandbox")
     finally:
         if tail is not None:
             tail.stop()
@@ -2590,7 +2619,15 @@ def register_supervisor_commands(
     run.add_argument(
         "--worker-cmd",
         default=None,
-        help="worker argv prefix (default: $SKEP_WORKER_CMD or skep's minimal coding worker)",
+        help="worker argv prefix (default: $SKEP_WORKER_CMD or skep's minimal coding worker); "
+        "a project pinned to an external engine refuses it unless --engine builtin is passed",
+    )
+    run.add_argument(
+        "--engine",
+        default=None,
+        choices=engine_names(),
+        help="coding engine for this run, over the project's coding_engine pin "
+        "(v116-F1: the chat's dispatch_run engine=, recorded as an operator override)",
     )
     run.add_argument(
         "--env-allow",
