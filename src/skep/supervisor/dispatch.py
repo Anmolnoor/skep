@@ -738,7 +738,6 @@ def run_task(
                     task_id=task.task_id,
                     verification_outcome=outcome.record.verification_outcome,
                     risk_flags=tuple(result.risk_flags),
-                    changed_files=tuple(result.changed_files),
                     branch=auto_apply_branch,
                     # v90-F4: the auto-landing lane only fires when the project
                     # said what verification means (v88-F4).

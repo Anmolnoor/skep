@@ -139,6 +139,46 @@ def test_matching_rule_auto_applies_the_patch(repo: Path, config: SupervisorConf
     assert "Approved-by: auto:autofix" in log
 
 
+def test_the_lane_judges_the_patch_not_the_workers_claim(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """v115-F15: skep's own starlette lock bump was made by ``uv lock``, so the
+    worker's changed_files said [] while a confirmed uv.lock patch sat in the
+    audit dir — and the lane refused it as "no changed files to apply". The
+    patch is the supervisor's evidence; the claim is not an input."""
+    cfg = dataclasses.replace(
+        config, auto_approval_rules=(AutoApprovalRule("autofix", diff_scope=("*.py",)),)
+    )
+    outcome = run_task(repo, "Fix the bug. MODE:unclaimed", config=cfg)
+    assert outcome.record.state == "completed"
+    assert _branch_exists(repo, outcome.record.task_id), (
+        "a confirmed patch was blocked on the worker's empty changed_files claim"
+    )
+
+
+def test_patch_paths_reads_every_patch_shape(tmp_path: Path) -> None:
+    """v115-F15: the lane's change list comes from git's reading of the patch —
+    header-less unified diffs (what a minimal worker writes), quoted paths,
+    deletions — and an unreadable patch is no paths, never a guess."""
+    from skep.supervisor.apply import patch_paths
+
+    plain = tmp_path / "plain.patch"
+    plain.write_text("--- a/existing.py\n+++ b/existing.py\n@@ -1 +1 @@\n-value = 0\n+value = 1\n")
+    assert patch_paths(tmp_path, plain) == ("existing.py",)
+    git_style = tmp_path / "git.patch"
+    git_style.write_text(
+        "diff --git a/uv.lock b/uv.lock\n--- a/uv.lock\n+++ b/uv.lock\n@@ -1 +1 @@\n-a\n+b\n"
+        'diff --git a/src/x y.py b/src/x y.py\n--- "a/src/x y.py"\n+++ "b/src/x y.py"\n'
+        "@@ -1 +1 @@\n-a\n+b\n"
+        "diff --git a/gone.py b/gone.py\ndeleted file mode 100644\n--- a/gone.py\n"
+        "+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+    )
+    assert patch_paths(tmp_path, git_style) == ("uv.lock", "src/x y.py", "gone.py")
+    garbage = tmp_path / "garbage.patch"
+    garbage.write_text("not a patch\n")
+    assert patch_paths(tmp_path, garbage) == ()
+
+
 def test_no_rules_is_dormant(repo: Path, config: SupervisorConfig) -> None:
     outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)  # default: no rules
     assert outcome.record.state == "completed"
@@ -268,6 +308,9 @@ def test_a_blocked_auto_apply_writes_its_reason_to_the_audit_trail(
             exit_codes=[0],
             detail="re-ran clean",
         )
+        patch = tmp_path / "a.patch"
+        patch.write_text("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n")
+        store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
 
         approved = maybe_auto_approve(
             store=store,
@@ -276,7 +319,6 @@ def test_a_blocked_auto_apply_writes_its_reason_to_the_audit_trail(
             task_id=task.task_id,
             verification_outcome="passed",
             risk_flags=(),
-            changed_files=("a.py",),
             verify_pinned=False,  # the field shape: unpinned project, maintain lane
         )
         assert approved is None
