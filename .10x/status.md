@@ -21,8 +21,8 @@
 | 1 Strategy | CTO + PM | **done** — `decisions/cto/policy-engine-rewrite.md`; PM file folded into CTO file (solo operator is the only user) |
 | 2 Design | Architect + Staff | **done** 2026-10-22 — `adrs/0052-*.md` (P0), `adrs/0053-*.md` (P1), drafts until accepted into `docs/adr/` |
 | 3 Planning | EM + Senior | **done** 2026-10-22 — executor plan (local, gitignored) `plans/policy-engine-rewrite/README.md`: P0-1 registry, P0-2 golden harness, P0-3 RSoP + why; one branch per phase |
-| 4 Implementation | SDE | **in progress** — P0 on `p0-policy-registry-harness`, one commit per step, gates after each |
-| 5 Verification | QA + Security | pending — golden-parity gate is the QA instrument |
+| 4 Implementation | SDE | **P0 done** 2026-10-22 on `p0-policy-registry-harness` — P0-1 registry (`policy_registry.py`), P0-2 harness (`policy_golden.py`, `scripts/policy_golden.py`, 7 real projects frozen under `tests/fixtures/policy_golden/`), P0-3 RSoP + why (`serve/actions.py`) with chat/REST/CLI faces; each commit gated green |
+| 5 Verification | QA + Security | P0: golden-parity suite green on the committed seed; no behavior change (every pre-existing test untouched). P1's per-scope gate from here on |
 | 6 Delivery | DevOps + SRE | pending — per-scope kill switch is the rollback plan |
 
 ## Risks flagged
