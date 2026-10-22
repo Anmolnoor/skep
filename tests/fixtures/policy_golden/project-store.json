@@ -58,7 +58,7 @@
           "benchmark/requirements.txt"
         ],
         [
-          "/Users/anmolnoor/Developer/skep/.venv/bin/python3",
+          "<home>/Developer/skep/.venv/bin/python3",
           "-m",
           "pip",
           "install",
@@ -135,7 +135,7 @@
         "benchmark/requirements.txt"
       ],
       [
-        "/Users/anmolnoor/Developer/skep/.venv/bin/python3",
+        "<home>/Developer/skep/.venv/bin/python3",
         "-m",
         "pip",
         "install",
@@ -242,8 +242,8 @@
       },
       {
         "action": "run",
-        "pattern": "/Users/anmolnoor/Developer/skep/.venv/bin/python3 -m pip install -r benchmark/requirements.txt",
-        "rule_id": "shell:/Users/anmolnoor/Developer/skep/.venv/bin/python3 -m pip install -r benchmark/requirements.txt",
+        "pattern": "<home>/Developer/skep/.venv/bin/python3 -m pip install -r benchmark/requirements.txt",
+        "rule_id": "shell:<home>/Developer/skep/.venv/bin/python3 -m pip install -r benchmark/requirements.txt",
         "verdict": "allow"
       },
       {

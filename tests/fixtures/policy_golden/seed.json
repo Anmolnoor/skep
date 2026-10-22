@@ -228,7 +228,7 @@
         "benchmark/requirements.txt"
       ],
       [
-        "/Users/anmolnoor/Developer/skep/.venv/bin/python3",
+        "<home>/Developer/skep/.venv/bin/python3",
         "-m",
         "pip",
         "install",

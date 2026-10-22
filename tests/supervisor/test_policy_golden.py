@@ -80,7 +80,11 @@ def test_a_seeded_home_freezes_with_its_provenance_and_no_host_paths(tmp_path: P
 
 def test_snapshot_never_carries_secrets_or_host_paths(tmp_path: Path) -> None:
     """The seed is policy only: no llm_* setting, no provider row, no token;
-    bindings and trusted roots ride under the placeholder."""
+    bindings and trusted roots ride under the placeholder, and so does any
+    other path under the operator's home (PR #33's CI found a venv python
+    inside allowed_shell_commands — the release-hygiene scan refuses those)."""
+    from unittest import mock
+
     from skep.supervisor import RunStore, SupervisorConfig
 
     home = tmp_path / "home"
@@ -92,6 +96,9 @@ def test_snapshot_never_carries_secrets_or_host_paths(tmp_path: Path) -> None:
         store.set_setting("llm_default_model", "glm-5.3")
         store.set_setting("default_network", ["pypi.org"])
         store.set_setting("trusted_workspace_roots", [str(tmp_path / "work")])
+        store.set_setting(
+            "allowed_shell_commands", [[str(tmp_path / ".venv" / "bin" / "python3"), "-m", "pip"]]
+        )
         store.add_project_policy(
             project_id="p", name="p", strategy="trusted_local_dev", phase="build", policy={}
         )
@@ -100,10 +107,14 @@ def test_snapshot_never_carries_secrets_or_host_paths(tmp_path: Path) -> None:
         )
     finally:
         store.close()
-    seed = snapshot(home)
+    with mock.patch.object(Path, "home", return_value=tmp_path):
+        seed = snapshot(home)
     text = json.dumps(seed)
     assert "llm_" not in text and "ollama" not in text
     assert str(tmp_path) not in text
+    assert seed["settings"]["allowed_shell_commands"] == [
+        [f"{HOME_PLACEHOLDER}/.venv/bin/python3", "-m", "pip"]
+    ]
     assert seed["settings"]["trusted_workspace_roots"] == [f"{HOME_PLACEHOLDER}/bound/work"]
     assert seed["projects"][0]["bindings"] == [
         {"kind": "repo_path", "value": f"{HOME_PLACEHOLDER}/bound/p"}

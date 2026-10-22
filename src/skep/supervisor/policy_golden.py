@@ -115,7 +115,7 @@ def snapshot(home: Path) -> dict[str, Any]:
             or template.shell_allowlist
             or template.allow_git_mutation
         ]
-        return {
+        seed = {
             "version": SEED_VERSION,
             "settings": globals_,
             "policy_document": store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY),
@@ -126,6 +126,10 @@ def snapshot(home: Path) -> dict[str, Any]:
         }
     finally:
         store.close()
+    # Anything else under the operator's own home (a venv python in
+    # allowed_shell_commands, say) is still a personal machine path: the
+    # release-hygiene scan refuses it, so it rides under the placeholder too.
+    return dict(_replace(seed, str(Path.home()), HOME_PLACEHOLDER))
 
 
 def _placeholder_policy(policy: dict[str, Any]) -> dict[str, Any]:
@@ -136,15 +140,20 @@ def _placeholder_policy(policy: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _replace(value: Any, old: str, new: str) -> Any:
+    """``str.replace`` over every string in a JSON-able value, recursively."""
+    if isinstance(value, str):
+        return value.replace(old, new)
+    if isinstance(value, list):
+        return [_replace(item, old, new) for item in value]
+    if isinstance(value, dict):
+        return {key: _replace(item, old, new) for key, item in value.items()}
+    return value
+
+
 def _materialize(value: Any, home: Path) -> Any:
     """Replace the placeholder with the temp home, recursively."""
-    if isinstance(value, str):
-        return value.replace(HOME_PLACEHOLDER, str(home))
-    if isinstance(value, list):
-        return [_materialize(item, home) for item in value]
-    if isinstance(value, dict):
-        return {key: _materialize(item, home) for key, item in value.items()}
-    return value
+    return _replace(value, HOME_PLACEHOLDER, str(home))
 
 
 def build_home(seed: dict[str, Any], home: Path) -> SupervisorConfig:
