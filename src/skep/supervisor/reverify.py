@@ -148,6 +148,7 @@ def reverify(
     changed_files: tuple[str, ...] | None = None,
     timeout_seconds: float | None = None,
     uv_cache_dir: Path | None = None,
+    evidence_dir: Path | None = None,
 ) -> ReverifyOutcome:
     """Apply the patch to a clean worktree and re-run the verification command(s).
 
@@ -318,8 +319,9 @@ def reverify(
         # v115-F12: the failed re-run's own words ride the record; the full
         # output lands beside the profile in the audit dir when there is one.
         evidence = ""
-        if profile_path is not None:
-            output_path = profile_path.with_name("reverify.output.txt")
+        if evidence_dir is not None:
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            output_path = evidence_dir / "reverify.output.txt"
             output_path.write_text(
                 "\n\n".join(
                     f"$ {command}\n(exit {code})\n{tail}"
@@ -386,6 +388,7 @@ def reverify_run(
         commands=commands,
         config=config,
         profile_path=profile_path,
+        evidence_dir=config.audit_dir / task_id,
         env={name: os.environ[name] for name in ("PATH", "HOME") if name in os.environ},
         changed_files=changed_files,
         timeout_seconds=timeout_seconds,
