@@ -16,6 +16,26 @@ from skep.supervisor.sandbox import SandboxAvailability
 
 
 class _ProviderHandler(BaseHTTPRequestHandler):
+    chat_status = 200  # v115-F5: what one authenticated completion gets
+
+    def do_POST(self) -> None:
+        if self.path != "/api/chat":
+            self.send_response(404)
+            self.end_headers()
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        body = (
+            b'{"message":{"role":"assistant","content":"pong"},"done":true}\n'
+            if self.chat_status == 200
+            else b'{"error":"unauthorized"}'
+        )
+        self.send_response(self.chat_status)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
         if self.path == "/api/tags":
             body = b'{"models":[]}'
@@ -33,13 +53,20 @@ class _ProviderHandler(BaseHTTPRequestHandler):
         return
 
 
+class _DeadKeyHandler(_ProviderHandler):
+    """The field shape: the model list is public, the completion is not."""
+
+    chat_status = 401
+
+
 class ProviderServer:
-    def __init__(self) -> None:
+    def __init__(self, handler: type[_ProviderHandler] = _ProviderHandler) -> None:
         self.server: HTTPServer | None = None
         self.thread: threading.Thread | None = None
+        self._handler = handler
 
     def __enter__(self) -> str:
-        self.server = HTTPServer(("127.0.0.1", 0), _ProviderHandler)
+        self.server = HTTPServer(("127.0.0.1", 0), self._handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         host, port = cast(tuple[str, int], self.server.server_address)
@@ -432,6 +459,60 @@ class PersonalModeTests(unittest.TestCase):
             self.assertEqual(worker["status"], "ready")
             self.assertIn("qwen3", worker["label"])
             self.assertIn(endpoint, worker["detail"])
+
+    def test_worker_check_blocks_when_the_key_lists_models_but_cannot_complete(self) -> None:
+        """v115-F5 (v113-A0): the key that 401'd every chat turn passed the
+        public model list, and doctor said "provider ready". One
+        authenticated completion is the probe a dead key cannot pass."""
+        from skep.supervisor.serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL
+        from skep.supervisor.store import RunStore
+
+        with tempfile.TemporaryDirectory() as tmp, ProviderServer(_DeadKeyHandler) as endpoint:
+            home = Path(tmp)
+            run_personal_setup(home, provider="mock", model="local-ready")
+            (home / "supervisor").mkdir(exist_ok=True)
+            store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+            try:
+                store.set_setting(LLM_BASE_URL, endpoint)
+                store.set_setting(LLM_DEFAULT_MODEL, "qwen3")
+            finally:
+                store.close()
+            worker = build_status(home)["workers"]["coding_worker"]
+            self.assertEqual(worker["status"], "blocked")
+            self.assertIn("refused a completion", worker["label"])
+            self.assertIn("401", worker["detail"])
+
+    def test_doctor_flags_a_registry_model_behind_the_daemon_settings(self) -> None:
+        """v115-F5: `skep provider health` called the model missing and routing
+        refused every provider while chat ran fine — the registry's active
+        profile was seeded once and never followed the settings."""
+        from skep.supervisor.providers import ProviderProfile
+        from skep.supervisor.serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL
+        from skep.supervisor.store import RunStore
+
+        with tempfile.TemporaryDirectory() as tmp, ProviderServer() as endpoint:
+            home = Path(tmp)
+            run_personal_setup(home, provider="mock", model="local-ready")
+            (home / "supervisor").mkdir(exist_ok=True)
+            store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+            try:
+                store.set_setting(LLM_BASE_URL, endpoint)
+                store.set_setting(LLM_DEFAULT_MODEL, "glm-5.3")
+                store.upsert_provider_profile(
+                    ProviderProfile(
+                        provider_id="default",
+                        protocol="ollama",
+                        base_url=endpoint,
+                        model="deepseek-v4-pro",
+                        active=True,
+                    )
+                )
+            finally:
+                store.close()
+            report = format_doctor_report(build_status(home))
+            self.assertIn("they disagree", report)
+            self.assertIn("'glm-5.3'", report)
+            self.assertIn("'deepseek-v4-pro'", report)
 
     def test_dashboard_renders_the_same_status_categories_as_doctor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

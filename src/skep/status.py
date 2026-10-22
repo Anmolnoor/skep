@@ -50,6 +50,7 @@ def build_status(
             + _verify_pin_advisories(home)
             + _repo_registry_advisories(home)
             + _stale_store_advisories(home)
+            + _model_truth_advisories(home)
         )
         payload["stale_pending"] = stale_pending
         return payload
@@ -78,6 +79,7 @@ def build_status(
         + _verify_pin_advisories(home)
         + _repo_registry_advisories(home)
         + _stale_store_advisories(home)
+        + _model_truth_advisories(home)
     )
     payload["stale_pending"] = stale_pending
     return payload
@@ -115,6 +117,21 @@ def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
         return {
             "status": "blocked",
             "label": f"blocked: provider probe failed ({exc})",
+            "detail": f"{target}: {exc}",
+        }
+    # v115-F5: a model list is public on ollama.com — the key that 401'd
+    # every chat turn passed it, and doctor said "provider ready" (I8). One
+    # authenticated completion is the probe a dead key cannot pass.
+    from .supervisor.serve.llm import probe_completion
+
+    try:
+        probe_completion(
+            endpoint, api_key, model=model, protocol=protocol, timeout=max(timeout, 15.0)
+        )
+    except OllamaError as exc:
+        return {
+            "status": "blocked",
+            "label": f"blocked: the provider lists models but refused a completion ({exc})",
             "detail": f"{target}: {exc}",
         }
     if models and model not in models:
@@ -207,6 +224,37 @@ _RETIRED_STORE_FILES = (
     "supervisor.sqlite3",
     "supervisor/runs.db",
 )
+
+
+def _model_truth_advisories(home: Path) -> list[str]:
+    """v115-F5: the daemon's ``llm_default_model`` setting and the registry's
+    active profile both say which model runs. The field had the registry a
+    model behind (seeded once, never updated): `skep provider health` called
+    the model missing and routing refused every provider while chat ran
+    fine. Name the disagreement; profile.json already mirrors the settings
+    (v19-F9), so these two are the pair that can drift."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.serve.llm import LLM_DEFAULT_MODEL
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        setting = store.get_setting(LLM_DEFAULT_MODEL)
+        active = store.active_provider_profile()
+    finally:
+        store.close()
+    if active is None or not (isinstance(setting, str) and setting.strip()):
+        return []
+    if active.model == setting.strip():
+        return []
+    return [
+        f"the model is written in two places and they disagree: daemon settings say "
+        f"{setting.strip()!r}, registry profile {active.provider_id!r} says {active.model!r} — "
+        "chats use the settings, routed runs the registry; save the model once in "
+        "Settings (or `skep provider use <id>`) so both agree"
+    ]
 
 
 def _stale_store_advisories(home: Path) -> list[str]:

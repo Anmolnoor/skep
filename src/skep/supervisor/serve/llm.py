@@ -16,6 +16,7 @@ adapter at this boundary so the rest of chat sees the same message/tool shape.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import time
@@ -389,6 +390,39 @@ def _list_openai_models(base_url: str, api_key: str | None, *, timeout: float) -
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
     names = [entry.get("id") or entry.get("name") for entry in payload.get("data", [])]
     return [str(name) for name in names if name]
+
+
+def probe_completion(
+    base_url: str,
+    api_key: str | None,
+    *,
+    model: str,
+    protocol: LLMProtocol = DEFAULT_LLM_PROTOCOL,
+    timeout: float = 20.0,
+) -> None:
+    """v115-F5: one authenticated completion — the probe a dead key cannot pass.
+
+    A model list is public on ollama.com: the key that 401'd every chat turn
+    passed ``list_models`` and doctor said "provider ready". This reads the
+    first streamed chunk of a one-word prompt and closes the stream (a
+    token's worth), raising OllamaError with the provider's words on refusal.
+    """
+    stream = chat_stream(
+        base_url,
+        api_key,
+        model=model,
+        messages=[{"role": "user", "content": "ping"}],
+        protocol=protocol,
+        timeout=timeout,
+    )
+    try:
+        next(stream, None)
+    finally:
+        # chat_stream is a generator function (typed as its Iterator face):
+        # closing it aborts the HTTP stream after the first chunk.
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
 
 
 def chat_stream(
@@ -914,6 +948,23 @@ def _write_through_profile(store: RunStore, personal_home: Path) -> None:
         endpoint=base_url.strip(),
         api_key_env=None,
     )
+    # v115-F5: the registry's ACTIVE profile is the third copy of this truth
+    # — routing and `skep provider health` read it. It was seeded once
+    # (migrate_legacy_provider) and never followed the settings: the field
+    # registry said deepseek-v4-pro while chat ran glm-5.3, so routing
+    # logged no_healthy_provider for every run. One writer, mirrored here.
+    active = store.active_provider_profile()
+    if active is not None:
+        serve_protocol = _protocol(protocol)
+        registry_protocol = next(
+            (key for key, value in REGISTRY_PROTOCOLS.items() if value == serve_protocol),
+            active.protocol,
+        )
+        mirrored = dataclasses.replace(
+            active, base_url=base_url.strip(), model=model.strip(), protocol=registry_protocol
+        )
+        if mirrored != active:
+            store.upsert_provider_profile(mirrored)
 
 
 def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
