@@ -60,6 +60,11 @@ def test_lying_worker_is_caught_by_reverification(repo: Path, config: Supervisor
     assert reverify.outcome == "failed"
     assert reverify.confirmed is False
     assert reverify.exit_codes and reverify.exit_codes[0] != 0
+    # v115-F12: and the record says what the re-run SAID, not only its exit code.
+    assert "--- re-run output (tail) ---" in reverify.detail
+    assert "full output: " in reverify.detail
+    output_path = Path(reverify.detail.split("full output: ", 1)[1].split("\n", 1)[0])
+    assert output_path.is_file() and "(exit " in output_path.read_text(encoding="utf-8")
     _kept_as_evidence(repo, config, outcome.record.task_id)
 
 

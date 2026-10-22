@@ -87,7 +87,7 @@ def _run_command(
     env: dict[str, str],
     profile_path: Path | None,
     timeout: float = _REVERIFY_TIMEOUT_SECONDS,
-) -> int:
+) -> tuple[int, str]:
     argv: list[str] = ["/bin/sh", "-c", command]
     if profile_path is not None:
         argv = sandbox.wrap_command(argv, profile_path)
@@ -102,8 +102,24 @@ def _run_command(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return -1
-    return proc.returncode
+        return -1, f"timed out after {timeout:.0f}s"
+    return proc.returncode, _output_tail(proc.stdout, proc.stderr)
+
+
+_OUTPUT_TAIL_CHARS = 2000
+
+
+def _output_tail(stdout: str, stderr: str) -> str:
+    """v115-F12: what a failed re-run SAID. The first skep-maintains-skep run
+    to reach G10 failed re-verification and the record held only "exit 1" —
+    the pytest output had been captured and discarded (I8, I9). pytest's own
+    short summary is the most useful slice; otherwise the last 2000 chars."""
+    combined = (stdout or "") + (("\n" + stderr) if stderr else "")
+    marker = combined.rfind("short test summary info")
+    if marker != -1:
+        line_start = combined.rfind("\n", 0, marker) + 1
+        return combined[line_start:].strip()[-_OUTPUT_TAIL_CHARS:]
+    return combined.strip()[-_OUTPUT_TAIL_CHARS:]
 
 
 def reverify(
@@ -195,7 +211,7 @@ def reverify(
                     extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
                     network=sandbox.ALLOW_ALL_NETWORK,
                 )
-            prime_code = _run_command(
+            prime_code, _prime_tail = _run_command(
                 "uv sync",
                 cwd=worktree,
                 env={**env, "UV_CACHE_DIR": str(cache_dir)},
@@ -238,9 +254,10 @@ def reverify(
                 f"{applied.stderr.strip()}",
             )
         exit_codes: list[int] = []
+        tails: list[str] = []
         command_timeout = command_timeout_seconds(timeout_seconds)
         for command in commands:
-            code = _run_command(
+            code, tail = _run_command(
                 command,
                 cwd=worktree,
                 env=env,
@@ -248,6 +265,7 @@ def reverify(
                 timeout=command_timeout,
             )
             exit_codes.append(code)
+            tails.append(tail)
         if any(code == _COMMAND_NOT_FOUND for code in exit_codes):
             return ReverifyOutcome(
                 "unavailable",
@@ -259,11 +277,26 @@ def reverify(
             return ReverifyOutcome(
                 "passed", commands, exit_codes, f"re-ran clean: all exit 0{primed}"
             )
+        # v115-F12: the failed re-run's own words ride the record; the full
+        # output lands beside the profile in the audit dir when there is one.
+        evidence = ""
+        if profile_path is not None:
+            output_path = profile_path.with_name("reverify.output.txt")
+            output_path.write_text(
+                "\n\n".join(
+                    f"$ {command}\n(exit {code})\n{tail}"
+                    for command, code, tail in zip(commands, exit_codes, tails, strict=True)
+                ),
+                encoding="utf-8",
+            )
+            evidence = f"; full output: {output_path}"
+        failed_tail = next((t for c, t in zip(exit_codes, tails, strict=True) if c != 0), "")
         return ReverifyOutcome(
             "failed",
             commands,
             exit_codes,
-            f"re-run exit codes {exit_codes} (expected all 0){primed}",
+            f"re-run exit codes {exit_codes} (expected all 0){primed}{evidence}\n"
+            f"--- re-run output (tail) ---\n{failed_tail or '(no output)'}",
         )
     finally:
         remove_worktree(repo, worktree)
