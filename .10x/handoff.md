@@ -44,3 +44,30 @@ confirming `decide()` will have a stable external face.
 - 2026-10-22 — CTO -> Architect + Staff: ADR drafts 0052 (P0) and 0053 (P1) written in `adrs/`; Planning folded into the local executor plan; Implementation of P0 started on `p0-policy-registry-harness`.
 
 - 2026-10-22 — Discovery -> CTO: existing codebase analysed; four policy systems identified; operator confirmed goal (personal daily driver, three months) and chose engine rewrite over registry-only path; sequence P0->P1->P2->P3 agreed.
+
+## 2026-10-22 — SDE handoff: P0–P3 built, awaiting operator review (PR #33)
+
+Built one by one, separate commits per phase, every commit gated green:
+
+- **P0** registry (`policy_registry.py`), golden harness (`policy_golden.py`,
+  `tests/fixtures/policy_golden/`), RSoP + why on three faces.
+- **P1** engine v2 (`policy_engine.py`: one stack, set/extend/clear,
+  enforced, floor outside), reader (`policy_layers.py`, nothing rewritten),
+  kill switch `policy_engine_v2_scopes` + flip ledger, golden parity with
+  all seven scopes flipped, validator reads the registry. ADR 0053 draft
+  carries the P1 refinements (union is a statement mode — the golden proved
+  a project list replaces today).
+- **P2** the "Resolve & edit" tier on the Policies page (registry-driven,
+  RSoP per knob, inherit/set, writes via the project upsert + PUT /api/policy,
+  why box, engine switch). Explicit "cleared" has no stored form yet.
+- **P3** `policy_decide` + `POST /api/policy/decide` + `skep policy
+  decide|hook` (Claude Code PreToolUse), ledger `<audit>/policy/decisions.jsonl`,
+  `docs/policy-hook.md`.
+
+Operator's next moves: review and merge PR #33; flip `shell` on the live
+daemon (Policies → Resolve & edit → engine switch, or `PUT /api/policy`);
+install the hook in `~/.claude/settings.json`; start the 30-day ledger.
+Open after that: a stored form for "cleared" and "enforced" (D3/D4), the
+remaining `resolve(document)` preview in `policy_templates`, and deleting
+the v1 resolvers only after the ledger shows no flips. ADR drafts 0052/0053
+move to `docs/adr/` on acceptance.
