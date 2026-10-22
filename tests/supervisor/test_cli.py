@@ -1436,7 +1436,9 @@ def test_run_inherits_bound_project_auto_apply_policy(
     assert code == 0, out
 
     task_id = _only_task_id(home)
-    assert git(repo, "rev-parse", "--verify", f"refs/heads/skep/{task_id}")
+    # v115-F16: a maintain project lands on ITS branch, whichever face dispatched.
+    assert git(repo, "rev-parse", "--verify", "refs/heads/skep/maintain")
+    assert not git(repo, "branch", "--list", f"skep/{task_id}").stdout.strip()
     task = json.loads((config.audit_dir / task_id / "task.json").read_text())
     assert task["auto_apply_verified_patch"] is True
 
@@ -1480,7 +1482,9 @@ def test_run_inherits_bound_project_phase_auto_apply_default(
     assert code == 0, out
 
     task_id = _only_task_id(home)
-    assert git(repo, "rev-parse", "--verify", f"refs/heads/skep/{task_id}")
+    # v115-F16: a maintain project lands on ITS branch, whichever face dispatched.
+    assert git(repo, "rev-parse", "--verify", "refs/heads/skep/maintain")
+    assert not git(repo, "branch", "--list", f"skep/{task_id}").stdout.strip()
     task = json.loads((config.audit_dir / task_id / "task.json").read_text())
     assert task["auto_apply_verified_patch"] is True
     assert task["project_context"] == {

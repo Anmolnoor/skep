@@ -239,8 +239,10 @@ def test_scenario_4_phase_aware_landing(tmp_path: Path) -> None:
         build_id = ran["build-audit"].task_id
         assert maintain_id is not None and build_id is not None
 
-        # maintain: auto_apply_verified_patch defaults True -> auto-lands on a branch.
-        assert _branch_exists(maintain_repo, f"skep/{maintain_id}")
+        # maintain: auto_apply_verified_patch defaults True -> auto-lands on the
+        # phase's integration branch (v30), whichever face dispatched (v115-F16).
+        assert _branch_exists(maintain_repo, "skep/maintain")
+        assert not _branch_exists(maintain_repo, f"skep/{maintain_id}")
         # build: auto_apply defaults False -> filed for review, nothing landed.
         assert not any(
             (a.resolved_by or "").startswith("auto:") for a in store.approvals_for(build_id)
