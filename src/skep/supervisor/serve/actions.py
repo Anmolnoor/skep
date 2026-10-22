@@ -56,6 +56,7 @@ from ..policy_registry import registry_keys
 from ..policy_resolver import (
     PolicyResolutionError,
     ResolvedRunPolicy,
+    engine_v2_scopes,
     resolve_operator_policy,
     resolve_run_policy,
     resolved_shell_allowlist,
@@ -65,6 +66,7 @@ from ..policy_schema import (
     OPERATOR_POLICY_SETTINGS_KEY,
     POLICY_DOCUMENT_SETTINGS_KEY,
     SCOPE_ACTIONS,
+    SCOPES,
     PolicyDocument,
     decide,
     document_from_settings,
@@ -110,6 +112,7 @@ from .settings import (
     DEFAULT_NETWORK,
     DEFAULT_WALL_CLOCK_SECONDS,
     EXECUTION_MODES,
+    POLICY_ENGINE_V2_SCOPES,
     SANDBOX_BACKEND,
     SANDBOX_BACKENDS,
     SANDBOX_REQUIRED_FOR,
@@ -119,6 +122,7 @@ from .settings import (
     TRUSTED_WORKSPACE_ROOTS,
     WORKER_CMD,
     ConfigHolder,
+    engine_v2_scopes_from,
     policy_view,
 )
 
@@ -140,6 +144,7 @@ POLICY_FIELDS = {
     "allowed_shell_commands": ALLOWED_SHELL_COMMANDS,
     "allowed_plugin_risks": ALLOWED_PLUGIN_RISKS,
     "sandbox_backend": SANDBOX_BACKEND,
+    "policy_engine_v2_scopes": POLICY_ENGINE_V2_SCOPES,
 }
 
 _POSITIVE_POLICY_FIELDS = {
@@ -1804,6 +1809,9 @@ def rsop_view(holder: ConfigHolder, store: RunStore, repo: str) -> dict[str, Any
         for scope, scope_policy in sorted(operator.resolved_scopes.items())
     }
     view["floor"] = [key.name for key in registry_keys(system="floor")]
+    # P1 (ADR 0053 D6): which engine answered — the operator must see the
+    # cutover state where they read the policy (I8).
+    view["engine"] = resolved.policy_engine
     return view
 
 
@@ -3512,7 +3520,7 @@ def set_operator_policy_rule(
             # Dry-run the composition: a deny that would strand an existing
             # learned rule fails HERE, naming the conflict, not on every
             # later Queen decision.
-            resolve(base, overlays=(document,))
+            resolve(base, overlays=(document,), v2_scopes=engine_v2_scopes(store))
         except LearnedRuleRejected as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         store.set_setting(OPERATOR_POLICY_SETTINGS_KEY, document.model_dump_json())
@@ -3930,7 +3938,7 @@ def learn_policy_rule(
             return None
     updated = document.model_copy(update={"learned": [*document.learned, rule]})
     try:
-        resolve(updated)  # vets the learned rule against every deny
+        resolve(updated, v2_scopes=engine_v2_scopes(store))  # vets against every deny
     except LearnedRuleRejected as exc:
         raise ValueError(str(exc)) from exc
     store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
@@ -4165,6 +4173,24 @@ def clear_session_policy_rules(store: RunStore) -> int:
     return dropped
 
 
+def _record_engine_flip(audit_dir: Path, before: list[str], after: list[str]) -> None:
+    """P1 (ADR 0053 D6/D7): every kill-switch flip is a line in the audit
+    trail — the 30-day ledger that decides when the old resolvers may go."""
+    path = audit_dir / "policy" / "engine-flips.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "from": before,
+                    "to": after,
+                }
+            )
+            + "\n"
+        )
+
+
 def update_policy(store: RunStore, holder: ConfigHolder, updates: dict[str, Any]) -> dict[str, Any]:
     """Write the provided policy fields and return the rebuilt effective view."""
     unknown = set(updates) - set(POLICY_FIELDS)
@@ -4182,6 +4208,20 @@ def update_policy(store: RunStore, holder: ConfigHolder, updates: dict[str, Any]
             status_code=400,
             detail=f"sandbox_backend must be one of {list(SANDBOX_BACKENDS)}",
         )
+    # P1 (ADR 0053 D6): the kill switch takes known scopes only, and the
+    # refusal names the set (I9).
+    if updates.get("policy_engine_v2_scopes") is not None:
+        switch_scopes = _require_string_list(
+            updates["policy_engine_v2_scopes"], field="policy_engine_v2_scopes"
+        )
+        unknown_scopes = sorted(set(switch_scopes) - set(SCOPES))
+        if unknown_scopes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"policy_engine_v2_scopes: unknown scope(s) {unknown_scopes!r}; "
+                f"known: {', '.join(SCOPES)}",
+            )
+        updates["policy_engine_v2_scopes"] = sorted(set(switch_scopes))
     # v100-F7: `default_network` and `default_env_allowlist` used to fall through
     # to set_setting unvalidated, so a stringified array (the v95-F1 family the
     # Queen still produces) persisted verbatim and read back as its characters.
@@ -4211,9 +4251,13 @@ def update_policy(store: RunStore, holder: ConfigHolder, updates: dict[str, Any]
     for field in _NONNEGATIVE_POLICY_FIELDS:
         if updates.get(field) is not None:
             updates[field] = _require_int(updates[field], field=field, minimum=0)
+    flips_before = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
     for field, key in POLICY_FIELDS.items():
         if updates.get(field) is not None:
             store.set_setting(key, updates[field])
+    flips_after = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
+    if flips_before != flips_after:
+        _record_engine_flip(holder.current.audit_dir, flips_before, flips_after)
     view = dict(policy_view(store, holder.rebuild()))
     # v23-F6 → v81-F14: the global toggle is INERT now — the write persists
     # for display but installs no rule; say so on every write.

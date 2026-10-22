@@ -24,6 +24,7 @@ denied space raises ``LearnedRuleRejected`` naming the deny's rule_id, so
 from __future__ import annotations
 
 import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import Any, Literal, get_args
@@ -235,6 +236,8 @@ def resolve(
     base: PolicyDocument,
     overlays: tuple[PolicyDocument, ...] = (),
     learned: tuple[LearnedRule, ...] = (),
+    *,
+    v2_scopes: Sequence[str] = (),
 ) -> dict[str, ResolvedScopePolicy]:
     """Compose base → overlays → learned into per-scope rule sets.
 
@@ -242,6 +245,10 @@ def resolve(
     lift require_approval → allow; one that intersects any deny rule raises
     LearnedRuleRejected at resolution too — defense in depth beneath the
     write-time check.
+
+    ``v2_scopes`` (P1, ADR 0053 D6): the scopes the ``policy_engine_v2_scopes``
+    setting routes through the v2 stack answer from it; every other scope
+    keeps this path. Same signature, same callers — the strangler seam.
     """
     rules: dict[str, list[ResolvedRule]] = {scope: [] for scope in SCOPES}
     for document in (base, *overlays):
@@ -271,10 +278,18 @@ def resolve(
                 verdict="allow", rule_id=rule.rule_id, action=rule.action, pattern=rule.pattern
             )
         )
-    return {
+    result = {
         scope: ResolvedScopePolicy(scope=scope, rules=tuple(bucket))
         for scope, bucket in rules.items()
     }
+    if v2_scopes:
+        from .policy_engine import document_layers, resolve_stack
+
+        v2 = resolve_stack(document_layers(base, overlays, learned)).scopes()
+        for scope in v2_scopes:
+            if scope in result:
+                result[scope] = v2[scope]
+    return result
 
 
 def vet_learned_rule(rule: LearnedRule, existing: list[ResolvedRule]) -> None:

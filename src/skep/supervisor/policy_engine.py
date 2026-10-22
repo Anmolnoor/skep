@@ -41,6 +41,7 @@ from .policy_schema import (
     SCOPES,
     LearnedRule,
     LearnedRuleRejected,
+    PolicyDocument,
     ResolvedRule,
     ResolvedScopePolicy,
     Verdict,
@@ -96,6 +97,8 @@ class Statement:
     outcome: Outcome
     enforced: bool = False
     reason: str | None = None
+    # The knob's value right after this statement (what v1's chain recorded).
+    result: Any = None
 
 
 @dataclass(frozen=True)
@@ -231,6 +234,7 @@ class _KnobState:
                 setting.value,
                 "applied" if changed else "unchanged",
                 setting.enforced,
+                result=value,
             )
         for pos in extends:
             label, setting = self.statements[pos]
@@ -252,7 +256,7 @@ class _KnobState:
                 source = label
             cleared_at = None
             chain[pos] = Statement(
-                label, "extend", setting.value, "applied" if changed else "unchanged"
+                label, "extend", setting.value, "applied" if changed else "unchanged", result=value
             )
         return ResolvedKnob(
             key=self.key,
@@ -324,3 +328,62 @@ def resolve_stack(layers: Sequence[Layer]) -> ResolvedStack:
         rules={scope: tuple(bucket) for scope, bucket in rules.items()},
         refusals=tuple(refusals),
     )
+
+
+def _document_rules(document: PolicyDocument) -> tuple[LayerRule, ...]:
+    rules: list[LayerRule] = []
+    for scope_policy in document.scopes:
+        for verdict, group in (
+            ("allow", scope_policy.allow),
+            ("require_approval", scope_policy.require_approval),
+            ("deny", scope_policy.deny),
+        ):
+            for rule in group:
+                rules.append(
+                    LayerRule(
+                        scope=scope_policy.scope,
+                        verdict=verdict,  # type: ignore[arg-type]
+                        rule_id=rule.rule_id,
+                        action=rule.action,
+                        pattern=rule.pattern,
+                    )
+                )
+    return tuple(rules)
+
+
+def _learned_rules(rules: Sequence[LearnedRule]) -> tuple[LayerRule, ...]:
+    return tuple(
+        LayerRule(
+            scope=rule.scope,
+            verdict="allow",
+            rule_id=rule.rule_id,
+            action=rule.action,
+            pattern=rule.pattern,
+            learned=True,
+            origin=rule,
+        )
+        for rule in rules
+    )
+
+
+def document_layers(
+    base: PolicyDocument,
+    overlays: Sequence[PolicyDocument] = (),
+    learned: Sequence[LearnedRule] = (),
+    *,
+    labels: Sequence[str] = (),
+) -> list[Layer]:
+    """The rule stack ``resolve()`` composes: base, overlays, then every
+    learned rule (the documents' own and the extra ones) as the session
+    layer — v1's order, each rule now carrying its source label."""
+    names = list(labels) or ["global", *(f"overlay:{index}" for index in range(len(overlays)))]
+    layers = [Layer("global", names[0], rules=_document_rules(base))]
+    for index, overlay in enumerate(overlays):
+        label = names[index + 1] if index + 1 < len(names) else f"overlay:{index}"
+        layers.append(Layer("global", label, rules=_document_rules(overlay)))
+    all_learned = [rule for document in (base, *overlays) for rule in document.learned] + list(
+        learned
+    )
+    if all_learned:
+        layers.append(Layer("session", "learned", rules=_learned_rules(all_learned)))
+    return layers

@@ -1,5 +1,9 @@
 """The reader: today's stored policy as v2 layers, nothing rewritten (P1-2, ADR 0053 D7).
 
+``document_layers`` (the rule stack) lives in ``policy_engine`` so
+``resolve()`` can reach it without importing a store-aware module; this
+module adds the store-reading half.
+
 Every layer here is derived from the stores v1 reads — ``policy_view``
 globals, phase defaults, the project overlay, the stored policy groups,
 the trusted-roots merge, and the two rule documents. Tri-state is derived
@@ -18,12 +22,11 @@ from pathlib import Path
 from typing import Any
 
 from .config import SupervisorConfig
-from .policy_engine import Layer, LayerRule, Setting
+from .policy_engine import Layer, Setting, document_layers
 from .policy_resolver import _match_project_for_repo, _under_root, managed_repos_root
 from .policy_schema import (
     OPERATOR_POLICY_SETTINGS_KEY,
     POLICY_DOCUMENT_SETTINGS_KEY,
-    LearnedRule,
     PolicyDocument,
     document_from_settings,
     operator_document_from_settings,
@@ -112,65 +115,6 @@ def layers_for_repo(
     return layers, missing
 
 
-def _document_rules(document: PolicyDocument) -> tuple[LayerRule, ...]:
-    rules: list[LayerRule] = []
-    for scope_policy in document.scopes:
-        for verdict, group in (
-            ("allow", scope_policy.allow),
-            ("require_approval", scope_policy.require_approval),
-            ("deny", scope_policy.deny),
-        ):
-            for rule in group:
-                rules.append(
-                    LayerRule(
-                        scope=scope_policy.scope,
-                        verdict=verdict,  # type: ignore[arg-type]
-                        rule_id=rule.rule_id,
-                        action=rule.action,
-                        pattern=rule.pattern,
-                    )
-                )
-    return tuple(rules)
-
-
-def _learned_rules(rules: Sequence[LearnedRule]) -> tuple[LayerRule, ...]:
-    return tuple(
-        LayerRule(
-            scope=rule.scope,
-            verdict="allow",
-            rule_id=rule.rule_id,
-            action=rule.action,
-            pattern=rule.pattern,
-            learned=True,
-            origin=rule,
-        )
-        for rule in rules
-    )
-
-
-def document_layers(
-    base: PolicyDocument,
-    overlays: Sequence[PolicyDocument] = (),
-    learned: Sequence[LearnedRule] = (),
-    *,
-    labels: Sequence[str] = (),
-) -> list[Layer]:
-    """The rule stack ``resolve()`` composes: base, overlays, then every
-    learned rule (the documents' own and the extra ones) as the session
-    layer — v1's order, each rule now carrying its source label."""
-    names = list(labels) or ["global", *(f"overlay:{index}" for index in range(len(overlays)))]
-    layers = [Layer("global", names[0], rules=_document_rules(base))]
-    for index, overlay in enumerate(overlays):
-        label = names[index + 1] if index + 1 < len(names) else f"overlay:{index}"
-        layers.append(Layer("global", label, rules=_document_rules(overlay)))
-    all_learned = [rule for document in (base, *overlays) for rule in document.learned] + list(
-        learned
-    )
-    if all_learned:
-        layers.append(Layer("session", "learned", rules=_learned_rules(all_learned)))
-    return layers
-
-
 def operator_layers(store: RunStore) -> list[Layer]:
     """The Queen's standing policy as layers: the global document, then the
     operator overlay (v52-F2), labelled by document."""
@@ -188,3 +132,6 @@ def flatten(values: dict[str, Any], sources: dict[str, str]) -> dict[str, Any]:
     out = dict(values)
     out["_provenance"] = dict(sources)
     return out
+
+
+__all__ = ["document_layers", "flatten", "layers_for_repo", "operator_layers"]

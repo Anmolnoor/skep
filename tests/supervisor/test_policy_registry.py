@@ -95,3 +95,25 @@ def test_registry_view_is_plain_json(tmp_path: Path) -> None:
     assert json.loads(text) == view
     assert view["layers"] == list(LAYERS)
     assert any(entry["name"] == "verify_command" for entry in view["keys"])
+
+
+def test_every_run_policy_knob_declares_its_scope_or_is_a_daemon_knob_on_purpose() -> None:
+    """P1 (ADR 0053 D6): the per-scope kill switch routes a knob by its
+    declared scope; a knob with none is daemon machinery no run scope owns,
+    listed here so a new knob cannot silently escape every switch."""
+    from skep.supervisor.policy_schema import SCOPES
+
+    daemon_only = {
+        "auto_approve",
+        "ticker_interval_seconds",
+        "card_timeout_seconds",
+        "policy_engine_v2_scopes",
+    }
+    for key in registry_keys(system="run_policy"):
+        if key.scope is None:
+            assert key.name in daemon_only, key.name
+        else:
+            assert key.scope in SCOPES, (key.name, key.scope)
+    assert {key.name for key in registry_keys(system="run_policy") if key.scope is None} == (
+        daemon_only
+    )

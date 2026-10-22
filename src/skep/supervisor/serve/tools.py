@@ -2478,7 +2478,10 @@ def fetch_grant_decision(store: RunStore, host: str) -> AutonomyDecision | None:
 
     raw = store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)
     document = document_from_settings(raw) or PolicyDocument()
-    decision = decide(resolve(document), "network", "fetch", host, template=document.template)
+    from ..policy_resolver import engine_v2_scopes
+
+    resolved = resolve(document, v2_scopes=engine_v2_scopes(store))
+    decision = decide(resolved, "network", "fetch", host, template=document.template)
     if decision.rule_id == DEFAULT_DENY_RULE_ID:
         return None
     if decision.verdict == "allow":

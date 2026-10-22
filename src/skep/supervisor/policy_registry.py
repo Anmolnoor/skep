@@ -67,6 +67,9 @@ class PolicyKey:
     invariant: str
     doc: str
     enforced_at: str | None = None
+    # P1 (ADR 0053 D6): which scope's kill switch routes this knob through
+    # engine v2. None = a daemon knob no run scope owns (never routed).
+    scope: str | None = None
 
 
 def _knob(
@@ -78,6 +81,7 @@ def _knob(
     invariant: str,
     doc: str,
     enforced_at: str | None = None,
+    scope: str | None = None,
 ) -> PolicyKey:
     return PolicyKey(
         name=name,
@@ -89,6 +93,7 @@ def _knob(
         invariant=invariant,
         doc=doc,
         enforced_at=enforced_at,
+        scope=scope,
     )
 
 
@@ -99,6 +104,7 @@ _RAMP_LAYERS = ("global", "phase", "project")
 _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     _knob(
         "default_network",
+        scope="network",
         type="list[str]",
         default=[],
         layers=_PROJECT_LAYERS,
@@ -108,6 +114,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "default_env_allowlist",
+        scope="coding",
         type="list[str]",
         default=[],
         layers=_PROJECT_LAYERS,
@@ -116,6 +123,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "default_execution_mode",
+        scope="coding",
         type="enum[ask|workspace|sandbox]",
         default="ask",
         layers=("global", "phase", "project", "dispatch"),
@@ -124,6 +132,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "default_wall_clock_seconds",
+        scope="coding",
         type="int",
         default=600,
         layers=_PROJECT_LAYERS,
@@ -132,6 +141,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "default_max_iterations",
+        scope="coding",
         type="int",
         default=16,
         layers=_PROJECT_LAYERS,
@@ -140,6 +150,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "default_max_actions",
+        scope="coding",
         type="int",
         default=100,
         layers=_PROJECT_LAYERS,
@@ -148,6 +159,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "default_max_provider_calls",
+        scope="coding",
         type="int",
         default=64,
         layers=_PROJECT_LAYERS,
@@ -156,6 +168,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "allowed_shell_commands",
+        scope="shell",
         type="list[argv]",
         default=[],
         layers=("global", "group", "project"),
@@ -165,6 +178,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "allowed_plugin_risks",
+        scope="coding",
         type="list[str]",
         default=[],
         layers=("global", "project"),
@@ -173,6 +187,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "allow_git_mutation",
+        scope="coding",
         type="bool",
         default=False,
         layers=_RAMP_LAYERS,
@@ -182,6 +197,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "auto_apply_verified_patch",
+        scope="coding",
         type="bool",
         default=False,
         layers=_RAMP_LAYERS,
@@ -191,6 +207,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "auto_apply_branch",
+        scope="coding",
         type="str",
         default=None,
         layers=_RAMP_LAYERS,
@@ -201,6 +218,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "auto_dispatch_allowed",
+        scope="coding",
         type="bool",
         default=False,
         layers=_RAMP_LAYERS,
@@ -210,6 +228,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "trusted_workspace_roots",
+        scope="filesystem",
         type="list[str]",
         default=[],
         layers=("global", "project"),
@@ -220,6 +239,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "worker_protocol",
+        scope="coding",
         type="enum[plan|react]",
         default="plan",
         layers=("global", "project", "dispatch"),
@@ -228,6 +248,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "verify_command",
+        scope="coding",
         type="str",
         default="",
         layers=("project",),
@@ -237,6 +258,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "coding_engine",
+        scope="coding",
         type="enum[builtin|claude_code|codex|aider|pi]",
         default="builtin",
         layers=("global", "group", "project", "dispatch"),
@@ -246,6 +268,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "policy_groups",
+        scope="coding",
         type="list[str]",
         default=[],
         layers=("project",),
@@ -253,6 +276,16 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         doc="names of attached policy groups, live-composed between phase and project (ADR 0048)",
     ),
     # --- global-only knobs (policy_view keys a project cannot set) -----------
+    _knob(
+        "policy_engine_v2_scopes",
+        type="list[str]",
+        default=[],
+        layers=("global",),
+        invariant="I5",
+        doc="P1 kill switch (ADR 0053 D6): the scopes whose knobs and rules answer from "
+        "policy engine v2; every other scope keeps the v1 path. Flips are recorded in "
+        "<audit>/policy/engine-flips.jsonl; cut over shell first, after golden parity",
+    ),
     _knob(
         "auto_approve",
         type="bool",
@@ -264,6 +297,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "worker_cmd",
+        scope="coding",
         type="str",
         default="",
         layers=("global", "dispatch"),
@@ -272,6 +306,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "sandbox_required_for",
+        scope="coding",
         type="list[str]",
         default=["email", "browser", "secrets", "unknown_repo"],
         layers=("global",),
@@ -296,6 +331,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "sandbox_backend",
+        scope="coding",
         type="enum[auto|podman]",
         default="auto",
         layers=("global",),
@@ -304,6 +340,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     ),
     _knob(
         "session_allowed_shell_commands",
+        scope="shell",
         type="list[argv]",
         default=[],
         layers=("session",),

@@ -119,3 +119,35 @@ def test_snapshot_never_carries_secrets_or_host_paths(tmp_path: Path) -> None:
     assert seed["projects"][0]["bindings"] == [
         {"kind": "repo_path", "value": f"{HOME_PLACEHOLDER}/bound/p"}
     ]
+
+
+def test_the_golden_holds_with_every_scope_routed_through_engine_v2(tmp_path: Path) -> None:
+    """P1 (ADR 0053 D6): the cutover gate. The same seed with the kill switch
+    set to all seven scopes freezes byte-equal to the committed golden (the
+    switch key itself aside) — the v2 stack answers exactly as v1 for every
+    real project, so any scope may be flipped on the live daemon."""
+    from skep.supervisor.policy_schema import SCOPES
+
+    seed_path = FIXTURES / "seed.json"
+    if not seed_path.is_file():
+        pytest.skip("no seed committed yet — run scripts/policy_golden.py snapshot")
+    seed = json.loads(seed_path.read_text())
+    seed["settings"] = {**seed["settings"], "policy_engine_v2_scopes": list(SCOPES)}
+    rebuilt = freeze(seed, tmp_path / "home")
+    committed = read_golden(FIXTURES)
+
+    def _without_switch(golden: dict[str, object]) -> dict[str, object]:
+        run_policy = golden.get("run_policy")
+        if not isinstance(run_policy, dict):
+            return golden
+        run_policy = {k: v for k, v in run_policy.items() if k != "policy_engine_v2_scopes"}
+        provenance = run_policy.get("_provenance")
+        if isinstance(provenance, dict):
+            run_policy["_provenance"] = {
+                k: v for k, v in provenance.items() if k != "policy_engine_v2_scopes"
+            }
+        return {**golden, "run_policy": run_policy}
+
+    assert set(rebuilt) == set(committed)
+    for name in sorted(rebuilt):
+        assert _without_switch(rebuilt[name]) == _without_switch(committed[name]), name
