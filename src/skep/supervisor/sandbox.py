@@ -301,6 +301,14 @@ _LOOPBACK_RULES = (
     '(allow network-bind (local ip "localhost:*"))',
     '(allow network-inbound (local ip "localhost:*"))',
     '(allow network-outbound (remote ip "localhost:*"))',
+    # v115-F14: Unix-domain sockets are files, and "(deny network*)" covers
+    # them too — skep's own netshim/netproxy tests bind one and died with
+    # EPERM inside the re-verify wall. Creating one still needs a writable
+    # root (file-write says where); connecting reaches any socket on THIS
+    # host the worker can read — the same stated wall as "localhost" above.
+    "(allow network-bind (local unix-socket))",
+    "(allow network-inbound (local unix-socket))",
+    "(allow network-outbound (remote unix-socket))",
 )
 
 
