@@ -37,6 +37,19 @@ _CONNECT_TIMEOUT = 10.0
 _TUNNEL_POLL = 5.0
 
 
+def is_loopback_host(host: str) -> bool:
+    """``localhost``, ``*.localhost`` (RFC 6761), ``127.0.0.0/8`` and ``::1``."""
+    import ipaddress
+
+    bare = host.strip().lower().rstrip(".").strip("[]")
+    if bare == "localhost" or bare.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(bare).is_loopback
+    except ValueError:
+        return False
+
+
 def domain_allowed(host: str, allowlist: tuple[str, ...]) -> bool:
     """True if ``host`` is permitted by ``allowlist``.
 
@@ -45,6 +58,13 @@ def domain_allowed(host: str, allowlist: tuple[str, ...]) -> bool:
     and any subdomain. Matching is case-insensitive and ignores a trailing dot.
     """
     host = host.strip().lower().rstrip(".")
+    if is_loopback_host(host):
+        # v115-F9: loopback is not egress. A project's own tests start servers
+        # on 127.0.0.1 and talk to them through the proxied client; the first
+        # skep-maintains-skep run lost 210 tests to the 403 below. The wall
+        # governs what leaves the machine; the serve API behind its port still
+        # needs its bearer token (G2).
+        return True
     for raw in allowlist:
         entry = raw.strip().lower()
         if entry == "*":
