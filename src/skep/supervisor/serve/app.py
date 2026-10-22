@@ -796,6 +796,9 @@ def create_app(
                     break
         return {
             "run": run,
+            # v115-F1: the forward pointer of the resume chain (v79-F2 kept it
+            # for chat only; the run page had to rediscover the successor).
+            "resumed_as": run_store.resumed_as_for(task_id),
             "project_context": project_context,
             "dispatch_decision": dispatch_decision,
             "landing_decision": landing_decision,

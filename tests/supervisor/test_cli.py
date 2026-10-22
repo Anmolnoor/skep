@@ -468,7 +468,10 @@ def test_run_can_approve_pending_gate_inline(
         resumed = next(run for run in runs if run.resume_of is not None)
         original = next(run for run in runs if run.task_id == resumed.resume_of)
         approvals = store.approvals_for(original.task_id)
-        assert original.state == "pending_approval"
+        # v115-F1: the CLI resume supersedes the parent like the REST one
+        # (v19-F8) — it is not "waiting on you" once its successor ran.
+        assert original.state == "superseded"
+        assert store.resumed_as_for(original.task_id) == resumed.task_id
         assert resumed.state == "completed"
         assert [approval.status for approval in approvals] == ["approved"]
     finally:

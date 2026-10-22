@@ -430,8 +430,11 @@ def test_resume_marks_the_old_run_superseded(repo: Path, config: SupervisorConfi
     resumed = _wait_terminal(client, resumed_id)
     assert resumed["state"] == "completed", "successor completes (worktree intact)"
 
-    old = client.get(f"/api/runs/{task_id}").json()["run"]
+    detail = client.get(f"/api/runs/{task_id}").json()
+    old = detail["run"]
     assert old["state"] == "superseded"
+    # v115-F1: the run page carries the forward pointer of the chain.
+    assert detail["resumed_as"] == resumed_id
 
     store = RunStore(config.db_path)
     try:

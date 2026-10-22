@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from skep.worker_contract import ApprovalVerdict, Budget, CodingWorkerTask, Permissions
+from skep.worker_contract import ApprovalVerdict, Budget, CodingWorkerTask, Permissions, TaskState
 
 from .apply import apply_patch_on_branch, validate_landing_branch
 from .autonomy import (
@@ -1406,6 +1406,14 @@ def _resume_pending_approval(
         actor=actor,
         note=f"resumed as {outcome.record.task_id} ({outcome.record.state})",
         remembered=remembered,
+    )
+    # v115-F1: the parent is superseded by its successor, as resume_past_gate
+    # has said since v19-F8 — the CLI face left it "pending_approval" forever
+    # ("Waiting on you: 1" for a run whose resume had already finished). After
+    # resolve_approval, as there; before the ledger line so the ledger keeps
+    # the successor's outcome, not the word "superseded".
+    store.transition(
+        record.task_id, TaskState.SUPERSEDED.value, f"resumed as {outcome.record.task_id}"
     )
     store.update_ledger_outcome(record.task_id, outcome.record.state)
     new = outcome.record
