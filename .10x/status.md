@@ -3,7 +3,7 @@
 **Project:** skep
 **Discovered:** 2026-10-22 at `bc6f4cf` (PR #30, v115-F16). Existing codebase; `.10x/` created by discovery, not by scaffold.
 **Current feature:** `policy-engine-rewrite`
-**Phase:** Strategy complete (CTO). Next: Design (Architect + Staff Engineer) — P0 and P1 ADR drafts.
+**Phase:** Implementation (P0) on branch `p0-policy-registry-harness`. Design and Planning done 2026-10-22: ADR drafts `adrs/0052-policy-registry-harness.md`, `adrs/0053-policy-engine-v2.md`; executor plan local at `plans/policy-engine-rewrite/README.md`.
 
 ## Discovery summary `[DISCOVERED]`
 
@@ -19,9 +19,9 @@
 |---|---|---|
 | 0 Brainstorm | all | done in chat 2026-10-22 (verdict + four complaints confirmed + sequence agreed) |
 | 1 Strategy | CTO + PM | **done** — `decisions/cto/policy-engine-rewrite.md`; PM file folded into CTO file (solo operator is the only user) |
-| 2 Design | Architect + Staff | pending — P0 + P1 ADR drafts (house numbers 0052, 0053) |
-| 3 Planning | EM + Senior | pending |
-| 4 Implementation | SDE | pending — P0 first |
+| 2 Design | Architect + Staff | **done** 2026-10-22 — `adrs/0052-*.md` (P0), `adrs/0053-*.md` (P1), drafts until accepted into `docs/adr/` |
+| 3 Planning | EM + Senior | **done** 2026-10-22 — executor plan (local, gitignored) `plans/policy-engine-rewrite/README.md`: P0-1 registry, P0-2 golden harness, P0-3 RSoP + why; one branch per phase |
+| 4 Implementation | SDE | **in progress** — P0 on `p0-policy-registry-harness`, one commit per step, gates after each |
 | 5 Verification | QA + Security | pending — golden-parity gate is the QA instrument |
 | 6 Delivery | DevOps + SRE | pending — per-scope kill switch is the rollback plan |
 

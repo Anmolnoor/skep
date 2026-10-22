@@ -41,4 +41,6 @@ confirming `decide()` will have a stable external face.
 
 ## Handoff history
 
+- 2026-10-22 — CTO -> Architect + Staff: ADR drafts 0052 (P0) and 0053 (P1) written in `adrs/`; Planning folded into the local executor plan; Implementation of P0 started on `p0-policy-registry-harness`.
+
 - 2026-10-22 — Discovery -> CTO: existing codebase analysed; four policy systems identified; operator confirmed goal (personal daily driver, three months) and chose engine rewrite over registry-only path; sequence P0->P1->P2->P3 agreed.
