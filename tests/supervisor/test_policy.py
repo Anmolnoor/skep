@@ -162,6 +162,11 @@ def test_patch_paths_reads_every_patch_shape(tmp_path: Path) -> None:
     deletions — and an unreadable patch is no paths, never a guess."""
     from skep.supervisor.apply import patch_paths
 
+    # The lane runs git at the project's repo root; from a subdirectory of a
+    # repo, `git apply --numstat` ignores paths outside it — and inside a
+    # worker, pytest's tmp_path IS such a subdirectory (TMPDIR lives under
+    # the worktree). A repo root here mirrors the production call.
+    git(tmp_path, "init", "-q")
     plain = tmp_path / "plain.patch"
     plain.write_text("--- a/existing.py\n+++ b/existing.py\n@@ -1 +1 @@\n-value = 0\n+value = 1\n")
     assert patch_paths(tmp_path, plain) == ("existing.py",)
@@ -294,6 +299,7 @@ def test_a_blocked_auto_apply_writes_its_reason_to_the_audit_trail(
     from skep.supervisor import mint_task
     from skep.supervisor.policy import VERIFIED_PATCH_RULE, maybe_auto_approve
 
+    git(tmp_path, "init", "-q")  # v115-F15: repo root for patch_paths (see that test)
     store = RunStore(tmp_path / "s.sqlite3")
     try:
         task = mint_task(workspace=tmp_path / "ws", instructions="maintain tick")
