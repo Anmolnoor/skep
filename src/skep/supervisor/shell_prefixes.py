@@ -138,14 +138,32 @@ def is_outbound_content_prefix(argv: Sequence[str]) -> bool:
     return False
 
 
+_WORKTREES_MARK = ".skep/worktrees/"
+
+
 def references_dead_worktree(argv: Sequence[str]) -> bool:
-    """True if any token points under ``.skep/worktrees/`` (v20-F6).
+    """True if any token points under a ``.skep/worktrees/<id>`` that is gone (v20-F6).
 
     A skep worktree path is dead the moment the worktree is pruned, so an
     allowlist entry that names one (e.g. ``git -C /.../.skep/worktrees/<id>
     checkout main``) can never match a future command again.
+
+    v115-F10: dead means the directory is gone, not merely that the path is
+    under ``.skep/worktrees/``. When skep verifies itself, the worker's
+    ``sys.executable`` IS ``<its worktree>/.venv/bin/python``; the old test
+    swept every remembered command naming it while the worktree was alive.
     """
-    return any(".skep/worktrees/" in token for token in argv)
+    from pathlib import Path
+
+    for token in argv:
+        start = token.find(_WORKTREES_MARK)
+        if start == -1:
+            continue
+        root_end = token.find("/", start + len(_WORKTREES_MARK))
+        root = token[:root_end] if root_end != -1 else token
+        if not Path(root).is_dir():
+            return True
+    return False
 
 
 def is_ops_mutating_command(argv: Sequence[str]) -> bool:
