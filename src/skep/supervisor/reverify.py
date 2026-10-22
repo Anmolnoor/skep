@@ -63,6 +63,20 @@ def verification_commands_from_events(events: list[Event]) -> list[str]:
     return []
 
 
+_LOCKFILES = frozenset({"uv.lock", "pyproject.toml"})
+
+
+def _patch_touches_lockfile(worktree: Path) -> bool:
+    """v115-F13: did the applied patch change what `uv sync` would install?"""
+    changed = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--name-only"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return any(line.strip() in _LOCKFILES for line in changed.stdout.splitlines())
+
+
 def _needs_uv_priming(worktree: Path, commands: list[str]) -> bool:
     """v94-F7: does this re-verify invoke uv in a repo that defines a Python
     project? Then the venv must be primed first — under the deny-all profile
@@ -193,6 +207,7 @@ def reverify(
         # material). The worktree-local throwaway needed nothing.
         cache_writable = [uv_cache_dir] if uv_cache_dir is not None else []
         primed = ""
+        prime_profile: Path | None = None
         if _needs_uv_priming(worktree, commands):
             # v94-F7: prime the BASELINE env before the patch is applied — only
             # code the operator's repo already contains at HEAD runs with the
@@ -202,7 +217,6 @@ def reverify(
             # when the caller resolved it — a workspace-local cache dies with
             # the worktree, which made every re-verify resolve from zero.
             cache_dir = uv_cache_dir if uv_cache_dir is not None else worktree / ".uv-cache"
-            prime_profile: Path | None = None
             if profile_path is not None:
                 prime_profile = profile_path.with_suffix(".prime.sb")
                 sandbox.write_profile(
@@ -253,6 +267,30 @@ def reverify(
                 f"patch did not apply to a clean worktree at {ref or 'HEAD'}: "
                 f"{applied.stderr.strip()}",
             )
+        if primed and _patch_touches_lockfile(worktree):
+            # v115-F13 (I2): the baseline prime installed the OLD dependencies;
+            # a patch that changes the lockfile must be verified against the
+            # NEW ones. Run 01a16157 bumped starlette 1.3.0 → 1.9.0 in uv.lock
+            # and re-verification ran the suite on 1.3.0 — a breaking bump would
+            # have passed. Prime again, after the patch, from the same cache
+            # (network allowed, as for the baseline prime); the pinned command
+            # still runs offline afterwards.
+            resync_env = {key: value for key, value in env.items() if key != "UV_NO_SYNC"}
+            resync_code, resync_tail = _run_command(
+                "uv sync", cwd=worktree, env=resync_env, profile_path=prime_profile
+            )
+            if resync_code != 0:
+                return ReverifyOutcome(
+                    "unavailable",
+                    commands,
+                    [resync_code],
+                    "the patch changes the lockfile and its packages could not be "
+                    f"primed (uv sync exited {resync_code}); the verification command "
+                    "was not run — a dependency change is never confirmed against the "
+                    "old dependencies\n--- uv sync output (tail) ---\n"
+                    f"{resync_tail or '(no output)'}",
+                )
+            primed = f"{primed}; re-primed against the patched lockfile"
         exit_codes: list[int] = []
         tails: list[str] = []
         command_timeout = command_timeout_seconds(timeout_seconds)

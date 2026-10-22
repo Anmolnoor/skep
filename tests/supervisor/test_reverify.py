@@ -448,3 +448,98 @@ def test_reverify_env_carries_a_worktree_local_tmpdir(repo: Path, config: Superv
         store.close()
     assert record is not None
     assert record.exit_codes == [0], record.detail
+
+
+def _lock_bump_patch(tmp_path: Path) -> Path:
+    patch = tmp_path / "lock.patch"
+    patch.write_text(
+        "diff --git a/uv.lock b/uv.lock\n"
+        "--- a/uv.lock\n"
+        "+++ b/uv.lock\n"
+        "@@ -1,4 +1,4 @@\n"
+        " version = 1\n"
+        " [[package]]\n"
+        ' name = "dep"\n'
+        '-version = "1.0"\n'
+        '+version = "2.0"\n'
+        "diff --git a/patched_marker.txt b/patched_marker.txt\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/patched_marker.txt\n"
+        "@@ -0,0 +1 @@\n"
+        "+patched\n",
+        encoding="utf-8",
+    )
+    return patch
+
+
+def _uv_project(repo: Path) -> None:
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
+    (repo / "uv.lock").write_text(
+        'version = 1\n[[package]]\nname = "dep"\nversion = "1.0"\n', encoding="utf-8"
+    )
+    git(repo, "add", "pyproject.toml", "uv.lock")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "uv project")
+
+
+def test_a_lockfile_patch_is_primed_again_after_it_applies(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v115-F13 (I2, run 01a16157): the baseline prime installed the OLD
+    dependencies and the pinned command then ran offline against them — a
+    uv.lock bump of starlette 1.3.0 → 1.9.0 was "re-verified" on 1.3.0. A
+    patch that changes the lockfile is primed a second time, after it lands,
+    before the offline verify."""
+    _uv_project(repo)
+    bin_dir, log = _uv_stub(tmp_path)
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_lock_bump_patch(tmp_path),
+        commands=["uv run pytest"],
+        config=config,
+        profile_path=None,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    assert "re-primed against the patched lockfile" in outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("sync nosync=unset") and "patched=no" in lines[0]
+    assert lines[1].startswith("sync nosync=unset") and "patched=yes" in lines[1]
+    assert lines[2].startswith("run nosync=1") and "patched=yes" in lines[2]
+
+
+def test_a_lockfile_patch_that_cannot_be_primed_is_unavailable_not_passed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """The second prime fails (the new package is not in the cache and there is
+    no network): the verify never runs and the verdict is unavailable — stale
+    dependencies are never a confirmation."""
+    _uv_project(repo)
+    bin_dir, log = _uv_stub(tmp_path)
+    stub = bin_dir / "uv"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'patched="no"\n'
+        '[ -e patched_marker.txt ] && patched="yes"\n'
+        'echo "$1 nosync=${UV_NO_SYNC:-unset} patched=$patched" >> "$UV_LOG"\n'
+        'if [ "$1" = sync ] && [ "$patched" = yes ]; then'
+        ' echo "no wheel for dep 2.0" >&2; exit 7; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_lock_bump_patch(tmp_path),
+        commands=["uv run pytest"],
+        config=config,
+        profile_path=None,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
+    )
+    assert outcome.outcome == "unavailable"
+    assert outcome.exit_codes == [7]
+    assert "never confirmed against the old dependencies" in outcome.detail
+    assert "no wheel for dep 2.0" in outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert [line.split()[0] for line in lines] == ["sync", "sync"]  # the verify never ran
