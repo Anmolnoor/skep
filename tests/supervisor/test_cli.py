@@ -2142,6 +2142,58 @@ def test_phase_tail_renders_a_patchless_reverify_as_benign(
     assert "re-ran" not in out
 
 
+def test_phase_tail_scoped_to_this_dispatch_prints_no_other_history(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v115-F2: `skep run` opened with twenty runs of other people's approvals
+    and the heartbeats of kept worktrees before its own worker started. A
+    tail given `since` skips runs created before it and takes every event
+    file already on disk up from its end."""
+    import json
+
+    from skep.supervisor.cli_cmds import _PhaseTail, build_config
+
+    config = build_config(tmp_path / "home", None)
+    config.worktrees_root.mkdir(parents=True, exist_ok=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    old_events = config.worktrees_root / "old-task" / ".events"
+    old_events.mkdir(parents=True)
+    old_file = old_events / "old-task.ndjson"
+    old_file.write_text(
+        json.dumps({"type": "task.start", "payload": {"worker_version": "0.1.0"}}) + "\n"
+    )
+    old = mint_task(workspace=config.worktrees_root / "old-task", instructions="Old history.")
+    store = RunStore(config.db_path)
+    try:
+        store.create_run(old, repo=repo, ref=None, execution_mode="workspace")
+        store._conn.execute(
+            "UPDATE runs SET created_at = ? WHERE task_id = ?",
+            ("2020-01-01T00:00:00Z", old.task_id),
+        )
+        store._conn.commit()
+        review = store.enqueue_approval(old.task_id, action="apply_patch", reason="old review")
+        store.resolve_approval(review, approved=False, actor="someone-else", note="old denial")
+
+        tail = _PhaseTail(config, since="2026-01-01T00:00:00Z")
+
+        new = mint_task(workspace=config.worktrees_root / "new-task", instructions="This run.")
+        store.create_run(new, repo=repo, ref=None, execution_mode="workspace")
+        review = store.enqueue_approval(new.task_id, action="shell.run", reason="this gate")
+        store.resolve_approval(review, approved=True, actor="tester", note="this approval")
+    finally:
+        store.close()
+    with old_file.open("a") as handle:
+        handle.write(json.dumps({"type": "verify.result", "payload": {"outcome": "passed"}}) + "\n")
+
+    tail._drain()
+    out = capsys.readouterr().out
+    assert "old denial" not in out and "someone-else" not in out, out
+    assert "worker started" not in out, "replayed a kept worktree's history"
+    assert "this approval" in out
+    assert "verification: passed" in out, "lines appended after the tail started must print"
+
+
 # ---------- v14 Step 8: schedule + provider health CLI views ----------
 
 
