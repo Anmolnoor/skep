@@ -192,6 +192,9 @@ def _shell_tokens(text: str) -> list[str]:
         return text.split()
 
 
+shell_tokens = _shell_tokens  # P1: the v2 engine vets every layer's shell rules with it
+
+
 def pattern_matches(scope: str, pattern: str, value: str) -> bool:
     """Does ``pattern`` cover ``value`` under this scope's matcher?"""
     if pattern == "*":

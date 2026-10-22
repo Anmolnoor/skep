@@ -88,3 +88,26 @@ dogfood ledger shows no kill-switch flips (the CTO file's non-negotiable).
   reading must be reviewed against the golden files before each flip.
 - Fallback (CTO file): if `shell` is not cut over by end of week 6, P1
   stops and the quarter ships P0 + P3 only.
+
+## P1 refinements (2026-10-22, from the P0 golden)
+
+- **D2 refined — union is a statement mode, not a type property.** The
+  committed golden has two real projects (`skep`, `skep-sample`) whose
+  overlay pins `allowed_shell_commands` while the global layer also sets
+  it; today the project list REPLACES the global one, and a group or the
+  trusted-roots merge EXTENDS it. The v2 engine therefore carries the
+  merge mode on each statement — `set` replaces, `extend` adds, `clear`
+  stops inheritance — and the reader derives today's modes from where a
+  statement came from, so parity holds. Whether a project list should
+  extend rather than replace is a policy change for after the cutover,
+  decided on a golden diff.
+- **`source` keeps the v109-F9 contract**: the last statement that changed
+  the value, so RSoP labels are identical across engines.
+- **D5 at resolve time records, it does not hide**: a stored allow that
+  reaches the floor is kept out of the resolved rules AND listed as a
+  refusal on the stack (I8); a learned rule into denied space still
+  raises, as v1 does.
+- **Delivery shape (operator decision):** P1, P2 and P3 land in sequence
+  on one stacked branch and one review (PR #33); "one branch per phase"
+  was a collision mitigation for parallel sessions and only one session
+  works the tree.
