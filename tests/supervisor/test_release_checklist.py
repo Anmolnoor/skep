@@ -74,7 +74,13 @@ def test_release_checklist_covers_social_account_day_of_checks() -> None:
 
 def test_public_doc_relative_links_exist() -> None:
     missing: list[str] = []
-    docs = sorted(ROOT.rglob("*.md")) + sorted((ROOT / "docs").rglob("*.html"))
+    # Public docs only: skip dot-directories — skep's own bookkeeping
+    # (.toolchain/tmp holds pytest fixtures when skep verifies skep), .venv, .git.
+    docs = sorted(
+        path
+        for path in list(ROOT.rglob("*.md")) + list((ROOT / "docs").rglob("*.html"))
+        if not any(part.startswith(".") for part in path.relative_to(ROOT).parts)
+    )
     for path in docs:
         if any(part in {".git", ".venv", ".uv-cache"} for part in path.parts):
             continue

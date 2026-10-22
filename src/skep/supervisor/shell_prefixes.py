@@ -157,12 +157,15 @@ def references_dead_worktree(argv: Sequence[str]) -> bool:
 
     for token in argv:
         start = token.find(_WORKTREES_MARK)
-        if start == -1:
-            continue
-        root_end = token.find("/", start + len(_WORKTREES_MARK))
-        root = token[:root_end] if root_end != -1 else token
-        if not Path(root).is_dir():
-            return True
+        while start != -1:
+            # Every occurrence: a path can sit under a worktree INSIDE another
+            # worktree (a test's TMPDIR when skep verifies skep), and one
+            # pruned root anywhere in it makes the token dead.
+            root_end = token.find("/", start + len(_WORKTREES_MARK))
+            root = token[:root_end] if root_end != -1 else token
+            if not Path(root).is_dir():
+                return True
+            start = token.find(_WORKTREES_MARK, start + len(_WORKTREES_MARK))
     return False
 
 
