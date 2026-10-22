@@ -1890,10 +1890,18 @@ def test_run_turns_a_dispatch_refusal_into_an_answer(
 ) -> None:
     """v116-F1: an engine refusal from the dispatch chokepoint is an error line
     with the next command, not a traceback."""
+    import skep.supervisor.dispatch as dispatch_module
     import skep.supervisor.engines as engines_module
 
     home = tmp_path / "home"
     _pin_engine(home, repo, "claude_code")
+    # The sandbox checks come first in run_task; a runner with no usable
+    # backend (CI's ubuntu) would refuse on that line, not on the engine.
+    monkeypatch.setattr(
+        dispatch_module,
+        "sandbox_availability",
+        lambda backend=None: type("A", (), {"usable": True, "backend": "seatbelt"})(),
+    )
     monkeypatch.setattr(
         engines_module, "engine_available", lambda e: (False, "'claude' not on PATH")
     )
