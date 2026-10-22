@@ -63,6 +63,20 @@ def verification_commands_from_events(events: list[Event]) -> list[str]:
     return []
 
 
+_LOCKFILES = frozenset({"uv.lock", "pyproject.toml"})
+
+
+def _patch_touches_lockfile(worktree: Path) -> bool:
+    """v115-F13: did the applied patch change what `uv sync` would install?"""
+    changed = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--name-only"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return any(line.strip() in _LOCKFILES for line in changed.stdout.splitlines())
+
+
 def _needs_uv_priming(worktree: Path, commands: list[str]) -> bool:
     """v94-F7: does this re-verify invoke uv in a repo that defines a Python
     project? Then the venv must be primed first — under the deny-all profile
@@ -87,7 +101,7 @@ def _run_command(
     env: dict[str, str],
     profile_path: Path | None,
     timeout: float = _REVERIFY_TIMEOUT_SECONDS,
-) -> int:
+) -> tuple[int, str]:
     argv: list[str] = ["/bin/sh", "-c", command]
     if profile_path is not None:
         argv = sandbox.wrap_command(argv, profile_path)
@@ -102,8 +116,24 @@ def _run_command(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return -1
-    return proc.returncode
+        return -1, f"timed out after {timeout:.0f}s"
+    return proc.returncode, _output_tail(proc.stdout, proc.stderr)
+
+
+_OUTPUT_TAIL_CHARS = 2000
+
+
+def _output_tail(stdout: str, stderr: str) -> str:
+    """v115-F12: what a failed re-run SAID. The first skep-maintains-skep run
+    to reach G10 failed re-verification and the record held only "exit 1" —
+    the pytest output had been captured and discarded (I8, I9). pytest's own
+    short summary is the most useful slice; otherwise the last 2000 chars."""
+    combined = (stdout or "") + (("\n" + stderr) if stderr else "")
+    marker = combined.rfind("short test summary info")
+    if marker != -1:
+        line_start = combined.rfind("\n", 0, marker) + 1
+        return combined[line_start:].strip()[-_OUTPUT_TAIL_CHARS:]
+    return combined.strip()[-_OUTPUT_TAIL_CHARS:]
 
 
 def reverify(
@@ -118,6 +148,7 @@ def reverify(
     changed_files: tuple[str, ...] | None = None,
     timeout_seconds: float | None = None,
     uv_cache_dir: Path | None = None,
+    evidence_dir: Path | None = None,
 ) -> ReverifyOutcome:
     """Apply the patch to a clean worktree and re-run the verification command(s).
 
@@ -177,6 +208,7 @@ def reverify(
         # material). The worktree-local throwaway needed nothing.
         cache_writable = [uv_cache_dir] if uv_cache_dir is not None else []
         primed = ""
+        prime_profile: Path | None = None
         if _needs_uv_priming(worktree, commands):
             # v94-F7: prime the BASELINE env before the patch is applied — only
             # code the operator's repo already contains at HEAD runs with the
@@ -186,7 +218,6 @@ def reverify(
             # when the caller resolved it — a workspace-local cache dies with
             # the worktree, which made every re-verify resolve from zero.
             cache_dir = uv_cache_dir if uv_cache_dir is not None else worktree / ".uv-cache"
-            prime_profile: Path | None = None
             if profile_path is not None:
                 prime_profile = profile_path.with_suffix(".prime.sb")
                 sandbox.write_profile(
@@ -195,7 +226,7 @@ def reverify(
                     extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
                     network=sandbox.ALLOW_ALL_NETWORK,
                 )
-            prime_code = _run_command(
+            prime_code, _prime_tail = _run_command(
                 "uv sync",
                 cwd=worktree,
                 env={**env, "UV_CACHE_DIR": str(cache_dir)},
@@ -237,10 +268,35 @@ def reverify(
                 f"patch did not apply to a clean worktree at {ref or 'HEAD'}: "
                 f"{applied.stderr.strip()}",
             )
+        if primed and _patch_touches_lockfile(worktree):
+            # v115-F13 (I2): the baseline prime installed the OLD dependencies;
+            # a patch that changes the lockfile must be verified against the
+            # NEW ones. Run 01a16157 bumped starlette 1.3.0 → 1.9.0 in uv.lock
+            # and re-verification ran the suite on 1.3.0 — a breaking bump would
+            # have passed. Prime again, after the patch, from the same cache
+            # (network allowed, as for the baseline prime); the pinned command
+            # still runs offline afterwards.
+            resync_env = {key: value for key, value in env.items() if key != "UV_NO_SYNC"}
+            resync_code, resync_tail = _run_command(
+                "uv sync", cwd=worktree, env=resync_env, profile_path=prime_profile
+            )
+            if resync_code != 0:
+                return ReverifyOutcome(
+                    "unavailable",
+                    commands,
+                    [resync_code],
+                    "the patch changes the lockfile and its packages could not be "
+                    f"primed (uv sync exited {resync_code}); the verification command "
+                    "was not run — a dependency change is never confirmed against the "
+                    "old dependencies\n--- uv sync output (tail) ---\n"
+                    f"{resync_tail or '(no output)'}",
+                )
+            primed = f"{primed}; re-primed against the patched lockfile"
         exit_codes: list[int] = []
+        tails: list[str] = []
         command_timeout = command_timeout_seconds(timeout_seconds)
         for command in commands:
-            code = _run_command(
+            code, tail = _run_command(
                 command,
                 cwd=worktree,
                 env=env,
@@ -248,6 +304,7 @@ def reverify(
                 timeout=command_timeout,
             )
             exit_codes.append(code)
+            tails.append(tail)
         if any(code == _COMMAND_NOT_FOUND for code in exit_codes):
             return ReverifyOutcome(
                 "unavailable",
@@ -259,11 +316,27 @@ def reverify(
             return ReverifyOutcome(
                 "passed", commands, exit_codes, f"re-ran clean: all exit 0{primed}"
             )
+        # v115-F12: the failed re-run's own words ride the record; the full
+        # output lands beside the profile in the audit dir when there is one.
+        evidence = ""
+        if evidence_dir is not None:
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            output_path = evidence_dir / "reverify.output.txt"
+            output_path.write_text(
+                "\n\n".join(
+                    f"$ {command}\n(exit {code})\n{tail}"
+                    for command, code, tail in zip(commands, exit_codes, tails, strict=True)
+                ),
+                encoding="utf-8",
+            )
+            evidence = f"; full output: {output_path}"
+        failed_tail = next((t for c, t in zip(exit_codes, tails, strict=True) if c != 0), "")
         return ReverifyOutcome(
             "failed",
             commands,
             exit_codes,
-            f"re-run exit codes {exit_codes} (expected all 0){primed}",
+            f"re-run exit codes {exit_codes} (expected all 0){primed}{evidence}\n"
+            f"--- re-run output (tail) ---\n{failed_tail or '(no output)'}",
         )
     finally:
         remove_worktree(repo, worktree)
@@ -315,6 +388,7 @@ def reverify_run(
         commands=commands,
         config=config,
         profile_path=profile_path,
+        evidence_dir=config.audit_dir / task_id,
         env={name: os.environ[name] for name in ("PATH", "HOME") if name in os.environ},
         changed_files=changed_files,
         timeout_seconds=timeout_seconds,
