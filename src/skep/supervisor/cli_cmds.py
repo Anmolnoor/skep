@@ -1216,7 +1216,13 @@ def cmd_review(args: argparse.Namespace) -> int:
                 next_command=f"skep review {record.task_id}  # re-inspect",
             )
         review_id = _pending_or_new(store, record, reason=landing_reason(record.instructions, None))
-        store.resolve_approval(review_id, approved=True, actor=actor, note=args.note)
+        # v115-F4: the approval row is where the landing branch lives (v30);
+        # without it `applied_branch` fell back to skep/<task_id> for a
+        # --branch landing — the run page and the PR verbs named a branch
+        # that never existed (I8, I13).
+        store.resolve_approval(
+            review_id, approved=True, actor=actor, note=args.note, landing_branch=branch
+        )
         print(f"approved: task {record.task_id} (by {actor})")
         print(f"  patch applied on branch {branch} in {record.repo}")
         # v20-F3: make an unconfirmed re-verification impossible to miss at landing.

@@ -289,6 +289,17 @@ def test_review_approve_lands_on_named_branch(
     assert git(repo, "show", "sci-cal:existing.py").stdout == "value = 1\n"
     # The default skep/<task_id> branch was NOT created.
     assert git(repo, "branch", "--list", f"skep/{task_id}").stdout.strip() == ""
+    # v115-F4: the approval row records where the patch landed, so every
+    # face that reads applied_branch names sci-cal, not skep/<task_id>.
+    from skep.supervisor.serve.actions import applied_branch_for
+
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    try:
+        (approval,) = store.approvals_for(task_id)
+        assert approval.landing_branch == "sci-cal"
+        assert applied_branch_for(store, task_id) == "sci-cal"
+    finally:
+        store.close()
 
     # An invalid branch name is refused before anything is applied.
     code = _run_cli(
