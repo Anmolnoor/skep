@@ -26,6 +26,8 @@ that), so if you can't find it below, it doesn't exist yet.
 ## Reference
 
 - [`cli-reference.md`](cli-reference.md) — every command
+- [`policy-hook.md`](policy-hook.md) — the policy enforcement hook: `decide()`
+  for outside agents (Claude Code PreToolUse), every verdict recorded
 - [`configuration.md`](configuration.md) — home, worker, policy, and model
   settings
 - [`brain.md`](brain.md) — choosing the assistant model (the v72 dial:

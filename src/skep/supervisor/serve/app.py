@@ -53,6 +53,7 @@ from .actions import (
     patch_path,
     pending_approval_or_409,
     policy_block_views,
+    policy_decide,
     policy_why,
     preserved_resumable_hint,
     project_context_detail_view,
@@ -203,6 +204,17 @@ class PolicyUpdate(BaseModel):
     sandbox_backend: Literal["auto", "podman"] | None = None
     # P1 (ADR 0053 D6): scopes routed through policy engine v2.
     policy_engine_v2_scopes: list[str] | None = None
+
+
+class PolicyDecideRequest(BaseModel):
+    """Body of ``POST /api/policy/decide`` (P3, ADR 0053): one scoped action
+    an outside agent is about to take. ``repo`` = the checkout it acts in."""
+
+    scope: str
+    action: str
+    value: str
+    repo: str | None = None
+    actor: str = "api"
 
 
 class DefaultWorkspaceRequest(BaseModel):
@@ -496,6 +508,23 @@ def create_app(
         """P0-3 (ADR 0052): would <scope>.<action> <value> be allowed in <repo>?"""
         try:
             return policy_why(holder, run_store, repo, scope, action, value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/policy/decide")
+    def post_policy_decide(body: PolicyDecideRequest) -> dict[str, Any]:
+        """P3 (ADR 0053): decide() for an outside agent — the why-query,
+        recorded in <audit>/policy/decisions.jsonl."""
+        try:
+            return policy_decide(
+                holder,
+                run_store,
+                scope=body.scope,
+                action=body.action,
+                value=body.value,
+                repo=body.repo,
+                actor=body.actor,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

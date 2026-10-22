@@ -1815,13 +1815,7 @@ def rsop_view(holder: ConfigHolder, store: RunStore, repo: str) -> dict[str, Any
     return view
 
 
-def policy_why(
-    holder: ConfigHolder, store: RunStore, repo: str, scope: str, action: str, value: str
-) -> dict[str, Any]:
-    """P0-3 (ADR 0052 D4): would <scope>.<action> <value> in <repo> be allowed?
-    The same resolve_run_policy a dispatch runs, then decide() on the compiled
-    run document, plus the Queen's operator document — no dispatch, no record.
-    Unknown scope or action refuses naming the known set (I9)."""
+def _check_scope_action(scope: str, action: str) -> None:
     if scope not in SCOPE_ACTIONS:
         raise ValueError(
             f"unknown scope {scope!r}; known scopes: {', '.join(sorted(SCOPE_ACTIONS))}"
@@ -1829,6 +1823,80 @@ def policy_why(
     if action not in SCOPE_ACTIONS[scope]:
         known = ", ".join(sorted(SCOPE_ACTIONS[scope]))
         raise ValueError(f"scope {scope!r} has no action {action!r}; known: {known}")
+
+
+# The Queen-side lanes by definition (policy_schema.SCOPE_ACTIONS): search is
+# the Queen's keyless discovery, fetch the read_url granted-domain lane. An
+# outside agent asking about them is asking what the operator document says.
+_OPERATOR_LANES: frozenset[tuple[str, str]] = frozenset(
+    {("network", "search"), ("network", "fetch")}
+)
+
+
+def policy_decide(
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    scope: str,
+    action: str,
+    value: str,
+    repo: str | None = None,
+    actor: str = "api",
+) -> dict[str, Any]:
+    """P3 (ADR 0053; the CTO record's enforcement hook): ``decide()`` reachable
+    from outside, and RECORDED. With a repo, the run policy decides — the
+    engine a dispatch there would run under (the why-query, P0-3); without
+    one, for the Queen-side lanes, or when the repo is unknown or will not
+    resolve, the operator document decides and the record says which (I8).
+    Every call appends a line to ``<audit>/policy/decisions.jsonl`` — the
+    CTO success criterion "Claude Code runs produce decide() verdicts in the
+    audit trail". No second decision path (I5): it is the why-query, kept."""
+    _check_scope_action(scope, action)
+    record: dict[str, Any] = {
+        "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "actor": actor,
+        "repo": repo,
+        "scope": scope,
+        "action": action,
+        "value": value,
+    }
+    decision: dict[str, Any] | None = None
+    if repo and (scope, action) not in _OPERATOR_LANES:
+        try:
+            why = policy_why(holder, store, repo, scope, action, value)
+        except HTTPException as exc:
+            record["note"] = f"repo not resolvable: {exc.detail}"
+        else:
+            run = why["run"]
+            if "verdict" in run:
+                decision = {key: run[key] for key in ("verdict", "rule_id", "decided_by")}
+                record["project"] = why["project"]
+                record["source"] = "run"
+                if why["project"] is None:
+                    record["note"] = "repo is not bound to a project — the global run policy"
+            else:
+                record["note"] = f"run policy did not resolve: {run['error']}"
+    if decision is None:
+        operator = resolve_operator_policy(store).decision(scope, action, value)
+        decision = {
+            "verdict": operator.verdict,
+            "rule_id": operator.rule_id,
+            "decided_by": operator.decided_by,
+        }
+        record["source"] = "operator"
+    record.update(decision)
+    _append_policy_ledger(holder.current.audit_dir, "decisions", record)
+    return record
+
+
+def policy_why(
+    holder: ConfigHolder, store: RunStore, repo: str, scope: str, action: str, value: str
+) -> dict[str, Any]:
+    """P0-3 (ADR 0052 D4): would <scope>.<action> <value> in <repo> be allowed?
+    The same resolve_run_policy a dispatch runs, then decide() on the compiled
+    run document, plus the Queen's operator document — no dispatch, no record.
+    Unknown scope or action refuses naming the known set (I9)."""
+    _check_scope_action(scope, action)
     resolved_repo, binding_candidates, project = _repo_project_for_view(holder, store, repo)
     view: dict[str, Any] = {
         "repo": str(resolved_repo),
@@ -4173,22 +4241,23 @@ def clear_session_policy_rules(store: RunStore) -> int:
     return dropped
 
 
+def _append_policy_ledger(audit_dir: Path, name: str, payload: dict[str, Any]) -> None:
+    """One JSON line under ``<audit>/policy/<name>.jsonl`` — the policy
+    engine's own record (I8): engine flips (P1) and outside decisions (P3)."""
+    path = audit_dir / "policy" / f"{name}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+
 def _record_engine_flip(audit_dir: Path, before: list[str], after: list[str]) -> None:
     """P1 (ADR 0053 D6/D7): every kill-switch flip is a line in the audit
     trail — the 30-day ledger that decides when the old resolvers may go."""
-    path = audit_dir / "policy" / "engine-flips.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(
-                {
-                    "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "from": before,
-                    "to": after,
-                }
-            )
-            + "\n"
-        )
+    _append_policy_ledger(
+        audit_dir,
+        "engine-flips",
+        {"at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "from": before, "to": after},
+    )
 
 
 def update_policy(store: RunStore, holder: ConfigHolder, updates: dict[str, Any]) -> dict[str, Any]:
