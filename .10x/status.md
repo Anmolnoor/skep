@@ -3,7 +3,7 @@
 **Project:** skep
 **Discovered:** 2026-10-22 at `bc6f4cf` (PR #30, v115-F16). Existing codebase; `.10x/` created by discovery, not by scaffold.
 **Current feature:** `policy-engine-rewrite`
-**Phase:** Implementation (P0) on branch `p0-policy-registry-harness`. Design and Planning done 2026-10-22: ADR drafts `adrs/0052-policy-registry-harness.md`, `adrs/0053-policy-engine-v2.md`; executor plan local at `plans/policy-engine-rewrite/README.md`.
+**Phase:** Implementation — P0 and P1 built; P2 (editor) next, then P3 (hook). Operator decision 2026-10-22: all phases land on PR #33 (one review), separate commits per phase, built one by one with gates between. Design and Planning done 2026-10-22: ADR drafts `adrs/0052-policy-registry-harness.md`, `adrs/0053-policy-engine-v2.md`; executor plan local at `plans/policy-engine-rewrite/README.md`.
 
 ## Discovery summary `[DISCOVERED]`
 
@@ -21,7 +21,7 @@
 | 1 Strategy | CTO + PM | **done** — `decisions/cto/policy-engine-rewrite.md`; PM file folded into CTO file (solo operator is the only user) |
 | 2 Design | Architect + Staff | **done** 2026-10-22 — `adrs/0052-*.md` (P0), `adrs/0053-*.md` (P1), drafts until accepted into `docs/adr/` |
 | 3 Planning | EM + Senior | **done** 2026-10-22 — executor plan (local, gitignored) `plans/policy-engine-rewrite/README.md`: P0-1 registry, P0-2 golden harness, P0-3 RSoP + why; one branch per phase |
-| 4 Implementation | SDE | **P0 done** 2026-10-22 on `p0-policy-registry-harness` — P0-1 registry (`policy_registry.py`), P0-2 harness (`policy_golden.py`, `scripts/policy_golden.py`, 7 real projects frozen under `tests/fixtures/policy_golden/`), P0-3 RSoP + why (`serve/actions.py`) with chat/REST/CLI faces; each commit gated green |
+| 4 Implementation | SDE | **P0 done**, **P1 done** 2026-10-22 (P1-1 engine `policy_engine.py`, P1-2 reader `policy_layers.py`, P1-3 kill switch `policy_engine_v2_scopes` + flip ledger + golden parity with all seven scopes flipped, P1-4 validator reads the registry; switch ships OFF — operator flips `shell` first). P0 was on `p0-policy-registry-harness` — P0-1 registry (`policy_registry.py`), P0-2 harness (`policy_golden.py`, `scripts/policy_golden.py`, 7 real projects frozen under `tests/fixtures/policy_golden/`), P0-3 RSoP + why (`serve/actions.py`) with chat/REST/CLI faces; each commit gated green |
 | 5 Verification | QA + Security | P0: golden-parity suite green on the committed seed; no behavior change (every pre-existing test untouched). P1's per-scope gate from here on |
 | 6 Delivery | DevOps + SRE | pending — per-scope kill switch is the rollback plan |
 
