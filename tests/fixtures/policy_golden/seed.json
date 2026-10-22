@@ -1,0 +1,248 @@
+{
+  "operator_policy_document": null,
+  "policy_document": "{\"template\":null,\"pack\":null,\"scopes\":[],\"learned\":[{\"rule_id\":\"shell:run:yt-dlp --write-auto-sub --skip-download --sub-format vtt --output /tmp/yt_transcript 'https://www.youtube.com/watch?v=sCfbcoQgeWo' '&&' yt-dlp --print title --print duration_string 'https://www.youtube.com/watch?v=sCfbcoQgeWo'\",\"action\":\"run\",\"pattern\":\"yt-dlp --write-auto-sub --skip-download --sub-format vtt --output /tmp/yt_transcript 'https://www.youtube.com/watch?v=sCfbcoQgeWo' '&&' yt-dlp --print title --print duration_string 'https://www.youtube.com/watch?v=sCfbcoQgeWo'\",\"scope\":\"shell\",\"provenance\":\"session:chat-user\",\"created_at\":\"2026-10-22T09:14:20Z\"},{\"rule_id\":\"shell:run:sleep 20 '&&' '(yt-dlp' --write-subs --write-auto-sub --skip-download --sub-format vtt --output /tmp/yt_transcript 'https://www.youtube.com/watch?v=sCfbcoQgeWo;' yt-dlp --no-update --print title --print duration_string --print channel 'https://www.youtube.com/watch?v=sCfbcoQgeWo)'\",\"action\":\"run\",\"pattern\":\"sleep 20 '&&' '(yt-dlp' --write-subs --write-auto-sub --skip-download --sub-format vtt --output /tmp/yt_transcript 'https://www.youtube.com/watch?v=sCfbcoQgeWo;' yt-dlp --no-update --print title --print duration_string --print channel 'https://www.youtube.com/watch?v=sCfbcoQgeWo)'\",\"scope\":\"shell\",\"provenance\":\"session:chat-user\",\"created_at\":\"2026-10-22T09:14:50Z\"},{\"rule_id\":\"shell:run:sleep 60 '&&' yt-dlp --no-update --skip-download --dump-json 'https://www.youtube.com/watch?v=sCfbcoQgeWo' '|' python3 -c 'import json,sys\\nd=json.load(sys.stdin)\\nsubs={}\\nfor k in ('\\\"'\\\"'subtitles'\\\"'\\\"','\\\"'\\\"'automatic_captions'\\\"'\\\"'):\\n    v=d.get(k) or {}\\n    for lang,tracks in v.items():\\n        if lang=='\\\"'\\\"'en'\\\"'\\\"' or lang.startswith('\\\"'\\\"'en.'\\\"'\\\"'):\\n            for t in tracks:\\n                if t.get('\\\"'\\\"'ext'\\\"'\\\"')=='\\\"'\\\"'vtt'\\\"'\\\"':\\n                    subs[k+'\\\"'\\\"':'\\\"'\\\"'+lang]=t['\\\"'\\\"'url'\\\"'\\\"']\\nprint(json.dumps(subs,indent=1)[:3000])'\",\"action\":\"run\",\"pattern\":\"sleep 60 '&&' yt-dlp --no-update --skip-download --dump-json 'https://www.youtube.com/watch?v=sCfbcoQgeWo' '|' python3 -c 'import json,sys\\nd=json.load(sys.stdin)\\nsubs={}\\nfor k in ('\\\"'\\\"'subtitles'\\\"'\\\"','\\\"'\\\"'automatic_captions'\\\"'\\\"'):\\n    v=d.get(k) or {}\\n    for lang,tracks in v.items():\\n        if lang=='\\\"'\\\"'en'\\\"'\\\"' or lang.startswith('\\\"'\\\"'en.'\\\"'\\\"'):\\n            for t in tracks:\\n                if t.get('\\\"'\\\"'ext'\\\"'\\\"')=='\\\"'\\\"'vtt'\\\"'\\\"':\\n                    subs[k+'\\\"'\\\"':'\\\"'\\\"'+lang]=t['\\\"'\\\"'url'\\\"'\\\"']\\nprint(json.dumps(subs,indent=1)[:3000])'\",\"scope\":\"shell\",\"provenance\":\"session:chat-user\",\"created_at\":\"2026-10-22T09:15:56Z\"},{\"rule_id\":\"shell:run:yt-dlp --no-update --skip-download --dump-json 'https://www.youtube.com/watch?v=sCfbcoQgeWo' '|' python3 -c 'import json,sys\\nd=json.load(sys.stdin)\\nsubs={}\\nfor k in ('\\\"'\\\"'subtitles'\\\"'\\\"','\\\"'\\\"'automatic_captions'\\\"'\\\"'):\\n    v=d.get(k) or {}\\n    for lang,tracks in v.items():\\n        if lang=='\\\"'\\\"'en'\\\"'\\\"' or lang.startswith('\\\"'\\\"'en.'\\\"'\\\"'):\\n            for t in tracks:\\n                if t.get('\\\"'\\\"'ext'\\\"'\\\"')=='\\\"'\\\"'vtt'\\\"'\\\"':\\n                    subs[k+'\\\"'\\\"':'\\\"'\\\"'+lang]=t['\\\"'\\\"'url'\\\"'\\\"']\\nprint(json.dumps(subs,indent=1)[:3000])'\",\"action\":\"run\",\"pattern\":\"yt-dlp --no-update --skip-download --dump-json 'https://www.youtube.com/watch?v=sCfbcoQgeWo' '|' python3 -c 'import json,sys\\nd=json.load(sys.stdin)\\nsubs={}\\nfor k in ('\\\"'\\\"'subtitles'\\\"'\\\"','\\\"'\\\"'automatic_captions'\\\"'\\\"'):\\n    v=d.get(k) or {}\\n    for lang,tracks in v.items():\\n        if lang=='\\\"'\\\"'en'\\\"'\\\"' or lang.startswith('\\\"'\\\"'en.'\\\"'\\\"'):\\n            for t in tracks:\\n                if t.get('\\\"'\\\"'ext'\\\"'\\\"')=='\\\"'\\\"'vtt'\\\"'\\\"':\\n                    subs[k+'\\\"'\\\"':'\\\"'\\\"'+lang]=t['\\\"'\\\"'url'\\\"'\\\"']\\nprint(json.dumps(subs,indent=1)[:3000])'\",\"scope\":\"shell\",\"provenance\":\"session:chat-user\",\"created_at\":\"2026-10-22T09:17:23Z\"},{\"rule_id\":\"shell:run:curl -s -o /tmp/yt_transcript.en.vtt 'https://www.youtube.com/api/timedtext?v=sCfbcoQgeWo&ei=otTZaraaB675sfIPmbr7oAk&caps=asr&opi=112496729&xoaf=5&xowf=1&xospf=1&hl=en&ip=0.0.0.0&ipbits=0&expire=1792685842&sparams=ip%2Cipbits%2Cexpire%2Cv%2Cei%2Ccaps%2Copi%2Cxoaf&signature=4D58D6ADF5AB7A983ED545EF62386849B288593B.DF9AECB1A16BF2B141B9E1B76C6D1B0903F11A69&key=yt8&kind=asr&lang=uk&variant=timing-optimized&fmt=vtt&tlang=en' '&&' wc -c /tmp/yt_transcript.en.vtt '&&' head -30 /tmp/yt_transcript.en.vtt\",\"action\":\"run\",\"pattern\":\"curl -s -o /tmp/yt_transcript.en.vtt 'https://www.youtube.com/api/timedtext?v=sCfbcoQgeWo&ei=otTZaraaB675sfIPmbr7oAk&caps=asr&opi=112496729&xoaf=5&xowf=1&xospf=1&hl=en&ip=0.0.0.0&ipbits=0&expire=1792685842&sparams=ip%2Cipbits%2Cexpire%2Cv%2Cei%2Ccaps%2Copi%2Cxoaf&signature=4D58D6ADF5AB7A983ED545EF62386849B288593B.DF9AECB1A16BF2B141B9E1B76C6D1B0903F11A69&key=yt8&kind=asr&lang=uk&variant=timing-optimized&fmt=vtt&tlang=en' '&&' wc -c /tmp/yt_transcript.en.vtt '&&' head -30 /tmp/yt_transcript.en.vtt\",\"scope\":\"shell\",\"provenance\":\"session:chat-user\",\"created_at\":\"2026-10-22T09:22:08Z\"},{\"rule_id\":\"shell:run:curl -s -o /tmp/yt_transcript.en.vtt -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' -H 'Accept-Language: en-US,en;q=0.9' -H 'Referer: https://www.youtube.com/watch?v=sCfbcoQgeWo' 'https://www.youtube.com/api/timedtext?v=sCfbcoQgeWo&ei=otTZaraaB675sfIPmbr7oAk&caps=asr&opi=112496729&xoaf=5&xowf=1&xospf=1&hl=en&ip=0.0.0.0&ipbits=0&expire=1792685842&sparams=ip%2Cipbits%2Cexpire%2Cv%2Cei%2Ccaps%2Copi%2Cxoaf&signature=4D58D6ADF5AB7A983ED545EF62386849B288593B.DF9AECB1A16BF2B141B9E1B76C6D1B0903F11A69&key=yt8&kind=asr&lang=uk&variant=timing-optimized&fmt=vtt&tlang=en' '&&' wc -c /tmp/yt_transcript.en.vtt '&&' head -c 500 /tmp/yt_transcript.en.vtt\",\"action\":\"run\",\"pattern\":\"curl -s -o /tmp/yt_transcript.en.vtt -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' -H 'Accept-Language: en-US,en;q=0.9' -H 'Referer: https://www.youtube.com/watch?v=sCfbcoQgeWo' 'https://www.youtube.com/api/timedtext?v=sCfbcoQgeWo&ei=otTZaraaB675sfIPmbr7oAk&caps=asr&opi=112496729&xoaf=5&xowf=1&xospf=1&hl=en&ip=0.0.0.0&ipbits=0&expire=1792685842&sparams=ip%2Cipbits%2Cexpire%2Cv%2Cei%2Ccaps%2Copi%2Cxoaf&signature=4D58D6ADF5AB7A983ED545EF62386849B288593B.DF9AECB1A16BF2B141B9E1B76C6D1B0903F11A69&key=yt8&kind=asr&lang=uk&variant=timing-optimized&fmt=vtt&tlang=en' '&&' wc -c /tmp/yt_transcript.en.vtt '&&' head -c 500 /tmp/yt_transcript.en.vtt\",\"scope\":\"shell\",\"provenance\":\"session:chat-user\",\"created_at\":\"2026-10-22T09:22:21Z\"},{\"rule_id\":\"shell:run:yt-dlp --no-update --skip-download --dump-json 'https://www.youtube.com/watch?v=sCfbcoQgeWo' '>' /tmp/yt_meta.json '&&' python3 -c 'import json\\nd=json.load(open('\\\"'\\\"'/tmp/yt_meta.json'\\\"'\\\"'))\\nprint('\\\"'\\\"'TITLE:'\\\"'\\\"', d.get('\\\"'\\\"'title'\\\"'\\\"'))\\nprint('\\\"'\\\"'CHANNEL:'\\\"'\\\"', d.get('\\\"'\\\"'channel'\\\"'\\\"'))\\nprint('\\\"'\\\"'UPLOADED:'\\\"'\\\"', d.get('\\\"'\\\"'upload_date'\\\"'\\\"'), '\\\"'\\\"'VIEWS:'\\\"'\\\"', d.get('\\\"'\\\"'view_count'\\\"'\\\"'))\\nprint('\\\"'\\\"'DESCRIPTION:'\\\"'\\\"'); print(d.get('\\\"'\\\"'description'\\\"'\\\"'))\\nprint('\\\"'\\\"'CHAPTERS:'\\\"'\\\"', json.dumps(d.get('\\\"'\\\"'chapters'\\\"'\\\"'), indent=1))\\nprint('\\\"'\\\"'TAGS:'\\\"'\\\"', d.get('\\\"'\\\"'tags'\\\"'\\\"'))'\",\"action\":\"run\",\"pattern\":\"yt-dlp --no-update --skip-download --dump-json 'https://www.youtube.com/watch?v=sCfbcoQgeWo' '>' /tmp/yt_meta.json '&&' python3 -c 'import json\\nd=json.load(open('\\\"'\\\"'/tmp/yt_meta.json'\\\"'\\\"'))\\nprint('\\\"'\\\"'TITLE:'\\\"'\\\"', d.get('\\\"'\\\"'title'\\\"'\\\"'))\\nprint('\\\"'\\\"'CHANNEL:'\\\"'\\\"', d.get('\\\"'\\\"'channel'\\\"'\\\"'))\\nprint('\\\"'\\\"'UPLOADED:'\\\"'\\\"', d.get('\\\"'\\\"'upload_date'\\\"'\\\"'), '\\\"'\\\"'VIEWS:'\\\"'\\\"', d.get('\\\"'\\\"'view_count'\\\"'\\\"'))\\nprint('\\\"'\\\"'DESCRIPTION:'\\\"'\\\"'); print(d.get('\\\"'\\\"'description'\\\"'\\\"'))\\nprint('\\\"'\\\"'CHAPTERS:'\\\"'\\\"', json.dumps(d.get('\\\"'\\\"'chapters'\\\"'\\\"'), indent=1))\\nprint('\\\"'\\\"'TAGS:'\\\"'\\\"', d.get('\\\"'\\\"'tags'\\\"'\\\"'))'\",\"scope\":\"shell\",\"provenance\":\"session:chat-user\",\"created_at\":\"2026-10-22T09:22:53Z\"},{\"rule_id\":\"shell:run:sleep '60;' echo waited\",\"action\":\"run\",\"pattern\":\"sleep '60;' echo waited\",\"scope\":\"shell\",\"provenance\":\"session:chat-user\",\"created_at\":\"2026-10-22T09:27:01Z\"}]}",
+  "policy_groups": {},
+  "projects": [
+    {
+      "bindings": [
+        {
+          "kind": "repo_path",
+          "value": "<home>/bound/forge"
+        }
+      ],
+      "name": "forge",
+      "pack_name": "trusted_local_dev",
+      "pack_version": "1",
+      "phase": "build",
+      "policy": {
+        "auto_apply_verified_patch": false,
+        "auto_dispatch_allowed": true,
+        "default_execution_mode": "workspace"
+      },
+      "project_id": "forge",
+      "strategy": "trusted_local_dev"
+    },
+    {
+      "bindings": [
+        {
+          "kind": "repo_path",
+          "value": "<home>/bound/skep"
+        }
+      ],
+      "name": "skep",
+      "pack_name": null,
+      "pack_version": null,
+      "phase": "maintain",
+      "policy": {
+        "allowed_shell_commands": [
+          [
+            "uv",
+            "run",
+            "pytest"
+          ],
+          [
+            "pytest"
+          ],
+          [
+            "make",
+            "all"
+          ],
+          [
+            "make",
+            "lint"
+          ],
+          [
+            "make",
+            "format"
+          ],
+          [
+            "make",
+            "type"
+          ],
+          [
+            "make",
+            "unit"
+          ],
+          [
+            "make",
+            "smoke"
+          ],
+          [
+            "make",
+            "u1"
+          ],
+          [
+            "make",
+            "templates"
+          ],
+          [
+            "make",
+            "skills"
+          ],
+          [
+            "make",
+            "public-free"
+          ],
+          [
+            "make",
+            "whole-app-external"
+          ],
+          [
+            "make",
+            "serve"
+          ],
+          [
+            "uv",
+            "lock",
+            "--upgrade-package",
+            "starlette"
+          ]
+        ],
+        "auto_apply_branch": "skep/maintain",
+        "auto_apply_verified_patch": true,
+        "auto_dispatch_allowed": true,
+        "coding_engine": "builtin",
+        "default_execution_mode": "workspace",
+        "verify_command": "uv run pytest -q"
+      },
+      "project_id": "skep",
+      "strategy": "trusted_local_dev"
+    },
+    {
+      "bindings": [
+        {
+          "kind": "repo_slug",
+          "value": "skep-benchmarks"
+        }
+      ],
+      "name": "skep-benchmarks-build",
+      "pack_name": null,
+      "pack_version": null,
+      "phase": "maintain",
+      "policy": {
+        "auto_apply_branch": "skep/maintain",
+        "auto_apply_verified_patch": true,
+        "auto_dispatch_allowed": true,
+        "default_execution_mode": "workspace"
+      },
+      "project_id": "skep-benchmarks-build",
+      "strategy": "trusted_local_dev"
+    },
+    {
+      "bindings": [
+        {
+          "kind": "repo_path",
+          "value": "<home>/bound/skep-sample"
+        }
+      ],
+      "name": "skep-sample",
+      "pack_name": "trusted_local_dev",
+      "pack_version": "1",
+      "phase": "build",
+      "policy": {
+        "allowed_shell_commands": [
+          [
+            "uv",
+            "run",
+            "pytest"
+          ],
+          [
+            "pytest"
+          ]
+        ],
+        "auto_apply_verified_patch": false,
+        "auto_dispatch_allowed": true,
+        "coding_engine": "builtin",
+        "default_execution_mode": "workspace",
+        "verify_command": "uv run pytest"
+      },
+      "project_id": "skep-sample",
+      "strategy": "trusted_local_dev"
+    },
+    {
+      "bindings": [
+        {
+          "kind": "repo_slug",
+          "value": "skep-testing"
+        }
+      ],
+      "name": "skep-testing-build",
+      "pack_name": null,
+      "pack_version": null,
+      "phase": "build",
+      "policy": {
+        "auto_apply_verified_patch": false,
+        "auto_dispatch_allowed": true,
+        "default_execution_mode": "workspace"
+      },
+      "project_id": "skep-testing-build",
+      "strategy": "trusted_local_dev"
+    },
+    {
+      "bindings": [
+        {
+          "kind": "repo_path",
+          "value": "<home>/bound/store"
+        }
+      ],
+      "name": "store",
+      "pack_name": null,
+      "pack_version": null,
+      "phase": "maintain",
+      "policy": {
+        "auto_apply_branch": "skep/maintain",
+        "auto_apply_verified_patch": true,
+        "auto_dispatch_allowed": true,
+        "default_execution_mode": "workspace",
+        "verify_command": "git diff --check"
+      },
+      "project_id": "store",
+      "strategy": "trusted_local_dev"
+    },
+    {
+      "bindings": [
+        {
+          "kind": "repo_path",
+          "value": "<home>/bound/workspace"
+        }
+      ],
+      "name": "Workspace",
+      "pack_name": "trusted_local_dev",
+      "pack_version": "1",
+      "phase": "build",
+      "policy": {
+        "auto_apply_verified_patch": false,
+        "auto_dispatch_allowed": true,
+        "default_execution_mode": "workspace"
+      },
+      "project_id": "workspace",
+      "strategy": "trusted_local_dev"
+    }
+  ],
+  "settings": {
+    "allowed_shell_commands": [
+      [
+        "pip",
+        "install",
+        "-r",
+        "benchmark/requirements.txt"
+      ],
+      [
+        "/Users/anmolnoor/Developer/skep/.venv/bin/python3",
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        "benchmark/requirements.txt"
+      ],
+      [
+        "pip",
+        "install",
+        "youtube-transcript-api"
+      ]
+    ],
+    "session_allowed_shell_commands": []
+  },
+  "templates": [],
+  "version": 1
+}

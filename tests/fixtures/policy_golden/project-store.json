@@ -1,0 +1,257 @@
+{
+  "project": {
+    "bindings": [
+      {
+        "kind": "repo_path",
+        "value": "<home>/bound/store"
+      }
+    ],
+    "name": "store",
+    "pack_name": null,
+    "pack_version": null,
+    "phase": "maintain",
+    "policy": {
+      "auto_apply_branch": "skep/maintain",
+      "auto_apply_verified_patch": true,
+      "auto_dispatch_allowed": true,
+      "default_execution_mode": "workspace",
+      "verify_command": "git diff --check"
+    },
+    "project_id": "store",
+    "strategy": "trusted_local_dev"
+  },
+  "repo": "<home>/bound/store",
+  "resolved": {
+    "budget": {
+      "max_actions": 100,
+      "max_iterations": 16,
+      "max_provider_calls": 64,
+      "wall_clock_seconds": 900
+    },
+    "coding_engine": "builtin",
+    "execution_mode": "workspace",
+    "network_resolved": [
+      "files.pythonhosted.org",
+      "proxy.golang.org",
+      "pypi.org",
+      "registry.npmjs.org"
+    ],
+    "permissions": {
+      "allow_git_mutation": false,
+      "allowed_plugin_risks": [],
+      "allowed_tools": null,
+      "env_allowlist": [],
+      "network": [
+        "files.pythonhosted.org",
+        "proxy.golang.org",
+        "pypi.org",
+        "registry.npmjs.org"
+      ],
+      "read": [
+        "workspace"
+      ],
+      "shell_allowlist": [
+        [
+          "pip",
+          "install",
+          "-r",
+          "benchmark/requirements.txt"
+        ],
+        [
+          "/Users/anmolnoor/Developer/skep/.venv/bin/python3",
+          "-m",
+          "pip",
+          "install",
+          "-r",
+          "benchmark/requirements.txt"
+        ],
+        [
+          "pip",
+          "install",
+          "youtube-transcript-api"
+        ]
+      ],
+      "write": [
+        "workspace"
+      ]
+    },
+    "provenance": {
+      "allowed_plugin_risks": "global",
+      "allowed_shell_commands": "global",
+      "auto_apply_branch": "phase:maintain",
+      "auto_apply_verified_patch": "phase:maintain",
+      "auto_approve": "global",
+      "auto_dispatch_allowed": "project",
+      "card_timeout_seconds": "global",
+      "default_env_allowlist": "global",
+      "default_execution_mode": "project",
+      "default_max_actions": "global",
+      "default_max_iterations": "global",
+      "default_max_provider_calls": "global",
+      "default_network": "global",
+      "default_wall_clock_seconds": "global",
+      "sandbox_backend": "global",
+      "sandbox_required_for": "global",
+      "session_allowed_shell_commands": "global",
+      "ticker_interval_seconds": "global",
+      "trusted_workspace_roots": "trusted-roots",
+      "verify_command": "project",
+      "worker_cmd": "global"
+    },
+    "trust_root": "<home>/bound/store",
+    "verify_command": "git diff --check",
+    "worker_protocol": "plan"
+  },
+  "run_policy": {
+    "_provenance": {
+      "allowed_plugin_risks": "global",
+      "allowed_shell_commands": "global",
+      "auto_apply_branch": "phase:maintain",
+      "auto_apply_verified_patch": "phase:maintain",
+      "auto_approve": "global",
+      "auto_dispatch_allowed": "project",
+      "card_timeout_seconds": "global",
+      "default_env_allowlist": "global",
+      "default_execution_mode": "project",
+      "default_max_actions": "global",
+      "default_max_iterations": "global",
+      "default_max_provider_calls": "global",
+      "default_network": "global",
+      "default_wall_clock_seconds": "global",
+      "sandbox_backend": "global",
+      "sandbox_required_for": "global",
+      "session_allowed_shell_commands": "global",
+      "ticker_interval_seconds": "global",
+      "trusted_workspace_roots": "trusted-roots",
+      "verify_command": "project",
+      "worker_cmd": "global"
+    },
+    "allowed_plugin_risks": [],
+    "allowed_shell_commands": [
+      [
+        "pip",
+        "install",
+        "-r",
+        "benchmark/requirements.txt"
+      ],
+      [
+        "/Users/anmolnoor/Developer/skep/.venv/bin/python3",
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        "benchmark/requirements.txt"
+      ],
+      [
+        "pip",
+        "install",
+        "youtube-transcript-api"
+      ]
+    ],
+    "auto_apply_branch": "skep/maintain",
+    "auto_apply_verified_patch": true,
+    "auto_approve": false,
+    "auto_dispatch_allowed": true,
+    "card_timeout_seconds": 300,
+    "default_env_allowlist": [],
+    "default_execution_mode": "workspace",
+    "default_max_actions": 100,
+    "default_max_iterations": 16,
+    "default_max_provider_calls": 64,
+    "default_network": [],
+    "default_wall_clock_seconds": 900,
+    "sandbox_backend": "auto",
+    "sandbox_required_for": [
+      "email",
+      "browser",
+      "secrets",
+      "unknown_repo"
+    ],
+    "session_allowed_shell_commands": [],
+    "ticker_interval_seconds": 30,
+    "trusted_workspace_roots": [
+      "<home>/bound/store"
+    ],
+    "verify_command": "git diff --check",
+    "worker_cmd": "skep-worker"
+  },
+  "scopes": {
+    "browse": [],
+    "coding": [
+      {
+        "action": "edit",
+        "pattern": "workspace",
+        "rule_id": "coding:workspace-edit",
+        "verdict": "allow"
+      },
+      {
+        "action": "verify",
+        "pattern": "workspace",
+        "rule_id": "coding:workspace-verify",
+        "verdict": "allow"
+      }
+    ],
+    "email": [],
+    "filesystem": [
+      {
+        "action": "write",
+        "pattern": "workspace",
+        "rule_id": "fs:workspace",
+        "verdict": "allow"
+      },
+      {
+        "action": "write",
+        "pattern": "<home>/bound/store/*",
+        "rule_id": "fs:root:<home>/bound/store",
+        "verdict": "allow"
+      }
+    ],
+    "mcp": [],
+    "network": [
+      {
+        "action": "connect",
+        "pattern": "files.pythonhosted.org",
+        "rule_id": "net:files.pythonhosted.org",
+        "verdict": "allow"
+      },
+      {
+        "action": "connect",
+        "pattern": "proxy.golang.org",
+        "rule_id": "net:proxy.golang.org",
+        "verdict": "allow"
+      },
+      {
+        "action": "connect",
+        "pattern": "pypi.org",
+        "rule_id": "net:pypi.org",
+        "verdict": "allow"
+      },
+      {
+        "action": "connect",
+        "pattern": "registry.npmjs.org",
+        "rule_id": "net:registry.npmjs.org",
+        "verdict": "allow"
+      }
+    ],
+    "shell": [
+      {
+        "action": "run",
+        "pattern": "pip install -r benchmark/requirements.txt",
+        "rule_id": "shell:pip install -r benchmark/requirements.txt",
+        "verdict": "allow"
+      },
+      {
+        "action": "run",
+        "pattern": "/Users/anmolnoor/Developer/skep/.venv/bin/python3 -m pip install -r benchmark/requirements.txt",
+        "rule_id": "shell:/Users/anmolnoor/Developer/skep/.venv/bin/python3 -m pip install -r benchmark/requirements.txt",
+        "verdict": "allow"
+      },
+      {
+        "action": "run",
+        "pattern": "pip install youtube-transcript-api",
+        "rule_id": "shell:pip install youtube-transcript-api",
+        "verdict": "allow"
+      }
+    ]
+  }
+}
