@@ -4848,6 +4848,37 @@ function buildShellCommandEditor(commands) {
   };
 }
 
+// P2 (ADR 0053): one typed control per registry knob. The registry's `type`
+// string decides the widget; `value()` returns the JSON the routes expect.
+function knobInput(knob, current) {
+  const type = knob.type || "str";
+  if (type === "bool") {
+    const box = el("input", { type: "checkbox" });
+    box.checked = current === true;
+    return { node: box, value: () => box.checked };
+  }
+  if (type === "int") {
+    const input = el("input", { type: "number", class: "mono", value: String(current ?? knob.default ?? 0) });
+    return { node: input, value: () => Number(input.value) };
+  }
+  if (type.startsWith("enum[")) {
+    const options = type.slice(5, -1).split("|");
+    const select = el("select", {}, ...options.map(o => el("option", { value: o }, o)));
+    select.value = options.includes(current) ? current : options[0];
+    return { node: select, value: () => select.value };
+  }
+  if (type === "list[argv]") {
+    const editor = buildShellCommandEditor((Array.isArray(current) ? current : []).map(c => [...c]));
+    return { node: editor.node, value: () => editor.value() };
+  }
+  if (type === "list[str]") {
+    const input = el("input", { class: "mono", value: (Array.isArray(current) ? current : []).join(", ") });
+    return { node: input, value: () => input.value.split(",").map(s => s.trim()).filter(Boolean) };
+  }
+  const input = el("input", { class: "mono", value: current == null ? "" : String(current) });
+  return { node: input, value: () => input.value.trim() };
+}
+
 async function viewPolicies(main) {
   header(main, "Policies",
     "Policy and scopes: autonomy and defaults. Every change rebuilds the config for the next "
@@ -4855,13 +4886,16 @@ async function viewPolicies(main) {
   // v109-F9: every policy tier on one page — Global knobs, the Queen's
   // Operator rules, Groups, and the Learned grants that auto-run things —
   // behind the shared filter-bar pattern (Runs/Approvals).
-  const [policy, { groups }, ruleData] = await Promise.all([
+  const [policy, { groups }, ruleData, registry, { projects }] = await Promise.all([
     api("GET", "/api/policy"),
     api("GET", "/api/policy-groups"),
     api("GET", "/api/policy/rules"),
+    api("GET", "/api/policy/registry"),
+    api("GET", "/api/projects"),
   ]);
   const tiers = {
     global: el("div", { class: "policy-tier" }),
+    resolve: el("div", { class: "policy-tier" }),
     operator: el("div", { class: "policy-tier" }),
     groups: el("div", { class: "policy-tier" }),
     learned: el("div", { class: "policy-tier" }),
@@ -5146,18 +5180,205 @@ async function viewPolicies(main) {
         : el("p", { class: "empty-state" },
           "No learned rules — nothing auto-runs beyond stored policy.")));
 
+  // P2 (ADR 0053): the registry-driven editor. Every knob the registry
+  // names renders with the layer that decided it (RSoP), everything it
+  // overrode, the layers that may set it, and a tri-state control at the
+  // layer being edited — inherit (absent from the overlay) or set. Writes
+  // go through the routes that already exist (I5): a project overlay is the
+  // definition re-POSTed (the upsert), global knobs are PUT /api/policy.
+  // Explicit "cleared" has no stored form yet (D3/D7); the hint says so.
+  const knobs = (registry.keys || []).filter(k =>
+    k.kind === "knob" && k.system === "run_policy" && k.name !== "policy_engine_v2_scopes");
+  const scopeNames = [...new Set((registry.keys || [])
+    .filter(k => k.kind === "rule" && k.system === "scope_document")
+    .map(k => k.name.split(".")[0]))];
+  const picker = el("select", {},
+    el("option", { value: "" }, "global knobs (no project)"),
+    ...projects.map(p => el("option", { value: p.project_id }, `${p.name} (${p.project_id})`)));
+  const editorBody = el("div", { class: "stack" });
+  const chipFor = (layer, name) => el("span", { class: "chip tone-info" },
+    name ? `${layer}:${name}` : layer);
+  const renderEditor = async () => {
+    editorBody.replaceChildren(el("p", { class: "note" }, "resolving…"));
+    const projectId = picker.value;
+    let project = null;
+    let rsop = null;
+    try {
+      project = projectId
+        ? await api("GET", `/api/projects/${encodeURIComponent(projectId)}`) : null;
+      const binding = (project?.bindings || [])
+        .find(b => b.kind === "repo_path" || b.kind === "repo_slug");
+      rsop = binding
+        ? await api("GET", `/api/repos/${encodeURIComponent(binding.value)}/rsop`)
+          .catch(exc => ({ error: String(exc) }))
+        : null;
+    } catch (e) { editorBody.replaceChildren(el("p", { class: "note" }, e.message)); return; }
+    const byKey = new Map((rsop?.keys || []).map(k => [k.key, k]));
+    const editLayer = project ? "project" : "global";
+    const overlay = project ? { ...(project.policy || {}) } : null;
+    const rows = [];
+    const table = el("table", { class: "rsop-table rsop-editor" },
+      el("thead", {}, el("tr", {},
+        ["key", "effective value", "decided by", "overrode", "may be set at", `edit at ${editLayer}`]
+          .map(h => el("th", {}, h)))),
+      el("tbody", {}, knobs.map(knob => {
+        const entry = byKey.get(knob.name);
+        const effective = project ? entry?.value : policy[knob.name];
+        const decided = project
+          ? (entry && entry.source_layer ? chipFor(entry.source_layer, entry.source_name)
+            : el("span", { class: "chip tone-muted" }, "unresolved"))
+          : el("span", { class: "chip tone-info" }, "global");
+        const overrode = el("div", { class: "row" },
+          (entry?.overridden || []).map(o => el("span", { class: "chip tone-muted", title: JSON.stringify(o.value) },
+            o.name ? `${o.layer}:${o.name}` : o.layer)));
+        const mayBeSet = el("span", { class: "note" }, (knob.layers || []).join(" · "));
+        const canEdit = (knob.layers || []).includes(editLayer)
+          && (project || Object.hasOwn(policy, knob.name));
+        const control = el("div", { class: "editor-ctl" });
+        if (canEdit) {
+          const inOverlay = project ? Object.hasOwn(overlay, knob.name) : true;
+          const state = el("select", {},
+            el("option", { value: "inherit" }, "inherit"),
+            el("option", { value: "set" }, "set"));
+          state.value = inOverlay ? "set" : "inherit";
+          const input = knobInput(knob, inOverlay ? (project ? overlay[knob.name] : policy[knob.name])
+            : (entry?.value ?? knob.default));
+          input.node.classList.toggle("hidden", !inOverlay);
+          state.addEventListener("change", () => {
+            input.node.classList.toggle("hidden", state.value !== "set");
+          });
+          if (project) control.append(state);
+          control.append(input.node);
+          rows.push({ key: knob.name, state: () => (project ? state.value : "set"), value: input.value });
+        } else {
+          control.append(el("span", { class: "note" }, project ? "not settable here" : "read-only"));
+        }
+        return el("tr", {},
+          el("td", { class: "mono", title: `${knob.doc} (${knob.invariant})` }, knob.name),
+          el("td", { class: "mono" }, effective === undefined ? "—" : JSON.stringify(effective)),
+          el("td", {}, decided),
+          el("td", {}, overrode),
+          el("td", {}, mayBeSet),
+          el("td", {}, control));
+      })));
+    const save = el("button", { class: "primary" },
+      project ? `Save ${project.name} overlay` : "Save global knobs");
+    save.addEventListener("click", async () => {
+      try {
+        if (project) {
+          const nextPolicy = { ...overlay };
+          for (const row of rows) {
+            if (row.state() === "set") nextPolicy[row.key] = row.value();
+            else delete nextPolicy[row.key];
+          }
+          await api("POST", "/api/projects", { ...project, policy: nextPolicy });
+          flash("ok", `${project.name}: overlay saved — the next dispatch resolves it`);
+          await renderEditor();  // stay on this project; the RSoP re-resolves
+          return;
+        } else {
+          const body = {};
+          for (const row of rows) {
+            const next = row.value();
+            if (JSON.stringify(next) !== JSON.stringify(policy[row.key])) body[row.key] = next;
+          }
+          if (!Object.keys(body).length) { flash("ok", "nothing changed"); return; }
+          await api("PUT", "/api/policy", body);
+          flash("ok", "global policy saved — applies to the next run");
+        }
+        route();
+      } catch (e) { flash("bad", e.message); }
+    });
+    const engineNote = rsop?.engine
+      ? el("p", { class: "field-help" },
+        `engine: v2 on [${(rsop.engine.v2_scopes || []).join(", ") || "none"}]`
+        + (rsop.engine.routed_keys ? ` · routed ${rsop.engine.routed_keys.length} knob(s)` : "")
+        + (rsop.engine.rule_refusals?.length ? ` · ${rsop.engine.rule_refusals.length} rule refusal(s)` : ""))
+      : null;
+    editorBody.replaceChildren(
+      rsop?.error ? el("p", { class: "note" }, `policy did not resolve: ${rsop.error}`) : table,
+      engineNote,
+      el("p", { class: "field-help" },
+        "inherit = the key is absent from this layer (the layer below decides); set = this "
+        + "layer decides. An explicit \"cleared\" state has no stored form yet — remove the "
+        + "key here and edit the layer below."),
+      el("div", { class: "actions" }, save));
+  };
+  picker.addEventListener("change", renderEditor);
+
+  // The why box: one question, both answers (run + Queen), the rule named.
+  const whyScope = el("select", {}, ...scopeNames.map(s => el("option", { value: s }, s)));
+  const whyAction = el("input", { class: "mono", placeholder: "run" });
+  const whyValue = el("input", { class: "mono", placeholder: "uv sync" });
+  const whyOut = el("pre", { class: "mono" });
+  const ask = el("button", {}, "why?");
+  ask.addEventListener("click", async () => {
+    const project = projects.find(p => p.project_id === picker.value);
+    const binding = (project?.bindings || [])
+      .find(b => b.kind === "repo_path" || b.kind === "repo_slug");
+    if (!binding) { flash("bad", "pick a project with a repo binding first"); return; }
+    try {
+      const out = await api("GET", `/api/policy/why?repo=${encodeURIComponent(binding.value)}`
+        + `&scope=${encodeURIComponent(whyScope.value)}`
+        + `&action=${encodeURIComponent(whyAction.value.trim())}`
+        + `&value=${encodeURIComponent(whyValue.value.trim())}`);
+      whyOut.textContent = `run: ${out.run.verdict} — ${out.run.decided_by}\n`
+        + `operator: ${out.operator.verdict} — ${out.operator.decided_by}`;
+    } catch (e) { whyOut.textContent = e.message; }
+  });
+
+  // The engine switch (P1, ADR 0053 D6) lives where the operator stands when
+  // cutting over; every flip is a line in <audit>/policy/engine-flips.jsonl.
+  const switchBoxes = scopeNames.map(s => {
+    const box = el("input", { type: "checkbox" });
+    box.checked = (policy.policy_engine_v2_scopes || []).includes(s);
+    return [s, box];
+  });
+  const switchSave = el("button", {}, "Apply engine switch");
+  switchSave.addEventListener("click", async () => {
+    const scopes = switchBoxes.filter(([, box]) => box.checked).map(([s]) => s);
+    if (!window.confirm(`Route ${scopes.length ? scopes.join(", ") : "no scope"} through policy `
+      + "engine v2? The flip is recorded in the audit trail.")) return;
+    try {
+      await api("PUT", "/api/policy", { policy_engine_v2_scopes: scopes });
+      flash("ok", "engine switch saved — recorded in the audit trail");
+      route();
+    } catch (e) { flash("bad", e.message); }
+  });
+  tiers.resolve.append(
+    section("Resolve & edit (registry-driven)", true,
+      el("p", { class: "field-help" },
+        "Every policy knob skep has, from the registry: what decides it for the picked "
+        + "project, what lost, and where it may be set. Edits write the project overlay "
+        + "(or the global knobs) through the same routes the CLI and chat use."),
+      field("project", picker, "Pick a project to resolve against its repo; none = global knobs."),
+      editorBody,
+      el("div", { class: "row" },
+        field("scope", whyScope, null), field("action", whyAction, null),
+        field("value", whyValue, null, true), el("div", { class: "field" }, el("label", {}, "\u00a0"), ask)),
+      whyOut,
+      el("div", { class: "field" },
+        el("label", {}, "policy engine v2 — scopes routed through the new engine"),
+        el("p", { class: "field-help" },
+          "Cut over one scope at a time, shell first, after the golden parity suite is green. "
+          + "Flip back is one save; both are recorded."),
+        el("div", { class: "row" }, switchBoxes.map(([s, box]) => el("label", { class: "note" }, box, " ", s))),
+        el("div", { class: "actions" }, switchSave))));
+  renderEditor();
+
   // The tier filter shows one tier (or all); counts follow the tier contents.
   const TIER_FILTERS = [
     { key: "all", label: "All" },
     { key: "global", label: "Global" },
+    { key: "resolve", label: "Resolve & edit" },
     { key: "operator", label: "Operator" },
     { key: "groups", label: "Groups" },
     { key: "learned", label: "Learned" },
   ];
   const globalSections = 4; // Execution defaults / Security / Advanced / Auto-approval
   const tierCounts = {
-    all: globalSections + operatorRules.length + groups.length + learnedRules.length,
+    all: globalSections + knobs.length + operatorRules.length + groups.length + learnedRules.length,
     global: globalSections,
+    resolve: knobs.length,
     operator: operatorRules.length,
     groups: groups.length,
     learned: learnedRules.length,
@@ -5168,7 +5389,7 @@ async function viewPolicies(main) {
         wrap.classList.toggle("hidden", key !== "all" && key !== tier);
       }
     }),
-    tiers.global, tiers.operator, tiers.groups, tiers.learned);
+    tiers.global, tiers.resolve, tiers.operator, tiers.groups, tiers.learned);
 }
 
 // ---------- Settings (v75-F3: five tabs — one section's DOM at a time) ----------

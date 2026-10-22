@@ -110,6 +110,10 @@ class ProjectRequest(BaseModel):
     phase: str
     policy: dict[str, Any] = Field(default_factory=dict)
     bindings: list[ProjectBindingRequest] = Field(default_factory=list)
+    # P2 (ADR 0053): the editor re-POSTs the definition it GOT to edit the
+    # overlay; the pack a setup pinned must survive that round trip.
+    pack_name: str | None = None
+    pack_version: str | None = None
 
 
 class ProjectSetupRequest(BaseModel):
@@ -1598,6 +1602,8 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     ProjectBinding(kind=binding.kind, value=binding.value)
                     for binding in body.bindings
                 ],
+                pack_name=body.pack_name,
+                pack_version=body.pack_version,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
