@@ -82,6 +82,9 @@ def build_worker_env(
     return env
 
 
+_LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
+
+
 def _proxy_env(port: int) -> dict[str, str]:
     """Env that routes the worker's HTTP(S) tooling through the D1 filtering proxy.
 
@@ -97,8 +100,12 @@ def _proxy_env(port: int) -> dict[str, str]:
         "http_proxy": url,
         "https_proxy": url,
         "all_proxy": url,
-        "NO_PROXY": "",
-        "no_proxy": "",
+        # v115-F9: loopback is not egress — a worker's own test servers on
+        # 127.0.0.1 are reached directly (Seatbelt now permits it), not through
+        # the proxy, which answered a dead loopback port with "502 Bad Gateway"
+        # where a test expected a connection error.
+        "NO_PROXY": _LOOPBACK_NO_PROXY,
+        "no_proxy": _LOOPBACK_NO_PROXY,
     }
 
 

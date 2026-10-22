@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from skep.supervisor.shell_prefixes import (
@@ -445,3 +447,21 @@ def test_a_wrapped_machine_wrecker_cannot_be_allowlisted() -> None:
     assert compound is not None
     queen = queen_command_line_refusal("cd / && rm -rf /*")
     assert queen is not None and "Bold." in queen
+
+
+def test_a_live_worktree_is_not_a_dead_reference(tmp_path: Path) -> None:
+    """v115-F10 (skep maintaining skep, run 01a16113): the worker's own
+    interpreter lives under its worktree; a remembered command naming it was
+    swept as a dead-worktree reference while the worktree was alive, so the
+    allowlist view came back empty. Dead means gone."""
+    from skep.supervisor.shell_prefixes import references_dead_worktree
+
+    live = tmp_path / ".skep" / "worktrees" / "01a16113-live"
+    (live / ".venv" / "bin").mkdir(parents=True)
+    python = str(live / ".venv" / "bin" / "python")
+    assert references_dead_worktree([python, "-c", "print(1)"]) is False
+    gone = str(tmp_path / ".skep" / "worktrees" / "01a1608c-gone" / ".venv" / "bin" / "python")
+    assert references_dead_worktree([gone, "-c", "print(1)"]) is True
+    assert (
+        references_dead_worktree(["git", "-C", f"{tmp_path}/.skep/worktrees/x/", "status"]) is True
+    )
