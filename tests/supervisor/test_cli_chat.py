@@ -344,6 +344,9 @@ def test_pending_card_409_resolves_then_retries_the_message(
     assert "card left pending" in out  # the skip
     assert "flipped it on" in out  # the 409 replay confirmed the card
     assert "and here is your answer" in out  # then the message landed
+    # v115-F3: the re-ask is one line, not the card body rendered as if new.
+    assert "already asked: card" in out
+    assert out.count("confirm: set_policy") == 1
     (action,) = _chat_actions(client)
     assert action["status"] == "confirmed"
     assert client.get("/api/policy").json()["auto_approve"] is True
@@ -543,6 +546,56 @@ def test_deck_deny_accepts_the_pending_card_id(
     assert client.get("/api/policy").json()["auto_approve"] is False
     (resolved,) = _chat_actions(client)
     assert resolved["status"] == "denied"
+    # v115-F3: a second /deny on the resolved card says so — the field test
+    # saw "confirm: deny_review …" then "error: no approval '<id>'" over a
+    # denial the store already held.
+    capsys.readouterr()
+    script_input(monkeypatch, [f"/deny {action['action_id']}"])
+    assert run_chat(home=config.home, url="http://unused", client=client, continue_latest=True) == 0
+    out = capsys.readouterr().out
+    assert f"card {action['action_id']} already denied" in out
+    assert "error" not in out and "deny_review" not in out
+    (still,) = _chat_actions(client)  # no second card minted
+    assert still["status"] == "denied"
+
+
+def test_tool_receipts_name_the_lane(capsys: pytest.CaptureFixture[str]) -> None:
+    """v115-F3: every in-turn refusal read "ran without asking — covered by
+    <deny reason>"; a read tool read "covered by /path". The verb follows
+    the verdict, the grant is named by its rule id."""
+    from skep.cli_chat import _TurnPrinter
+
+    printer = _TurnPrinter(show_thinking=False)
+    printer.feed("tool", {"tool": "read_file", "kind": "read", "result": {"ok": True}})
+    printer.feed(
+        "tool",
+        {
+            "tool": "run_shell",
+            "decision": {
+                "verdict": "deny",
+                "reason": "shell.deny.repo_target",
+                "detail": "git -C /repo status",
+            },
+            "result": {"ok": False, "error": "denied by policy: shell.deny.repo_target"},
+        },
+    )
+    printer.feed(
+        "tool",
+        {
+            "tool": "run_shell",
+            "decision": {
+                "verdict": "allow",
+                "reason": "capability.allow.learned_rule",
+                "detail": "uv sync",
+            },
+            "result": {"ok": True, "result": {"exit_code": 0}},
+        },
+    )
+    out = capsys.readouterr().out
+    assert "ran in-turn — read tool" in out
+    assert "denied — shell.deny.repo_target (git -C /repo status)" in out
+    assert "ran without asking — covered by capability.allow.learned_rule (uv sync)" in out
+    assert "covered by shell.deny" not in out
 
 
 def test_web_deck_approve_resolves_card_ids_too(config: SupervisorConfig) -> None:
