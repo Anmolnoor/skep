@@ -8,6 +8,7 @@ from typing import Any
 
 from skep.worker_contract import KNOWN_PLUGIN_RISKS
 
+from .policy_registry import registry_keys
 from .shell_prefixes import dangerous_prefix_reason
 from .store import RunStore
 
@@ -266,17 +267,11 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
 POLICY_GROUPS_SETTING = "policy_groups"
 POLICY_GROUP_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 
+# P1-4 (ADR 0053 D4): read from the registry — a knob is groupable iff the
+# registry says the `group` layer may set it; the trust ramp is declared
+# enforced-at-project there, which is what this list encoded by omission.
 GROUPABLE_POLICY_KEYS = frozenset(
-    {
-        "default_network",
-        "allowed_shell_commands",
-        "default_env_allowlist",
-        "coding_engine",
-        "default_wall_clock_seconds",
-        "default_max_iterations",
-        "default_max_actions",
-        "default_max_provider_calls",
-    }
+    key.name for key in registry_keys(system="run_policy") if "group" in key.layers
 )
 
 # List keys union across layers (like trusted roots); scalars follow

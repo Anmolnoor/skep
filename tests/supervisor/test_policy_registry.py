@@ -46,11 +46,22 @@ def test_every_entry_is_documented_and_cites_an_invariant() -> None:
         assert key.kind in ("knob", "rule"), key.name
 
 
-def test_group_eligibility_matches_the_code() -> None:
-    """ADR 0048: GROUPABLE_POLICY_KEYS is the set of knobs a group may carry;
-    the registry says the same thing through `layers`."""
+def test_group_eligibility_is_read_from_the_registry() -> None:
+    """ADR 0048 → ADR 0053 D4: GROUPABLE_POLICY_KEYS is derived from the
+    registry's `group` layer, so the literal set is pinned HERE — the one
+    place a change to what a group may carry must be made on purpose."""
     groupable = {key.name for key in registry_keys(system="run_policy") if "group" in key.layers}
     assert groupable == set(GROUPABLE_POLICY_KEYS)
+    assert groupable == {
+        "default_network",
+        "allowed_shell_commands",
+        "default_env_allowlist",
+        "coding_engine",
+        "default_wall_clock_seconds",
+        "default_max_iterations",
+        "default_max_actions",
+        "default_max_provider_calls",
+    }
 
 
 def test_the_trust_ramp_is_enforced_at_project_and_never_groupable() -> None:
