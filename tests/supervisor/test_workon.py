@@ -105,6 +105,25 @@ def test_workon_refuses_the_store_missing_paths_and_too_broad_targets(
     assert "too broad" in refused("~")
 
 
+def test_workon_refuses_a_name_a_registered_clone_uses(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v116-F2: the field had a July clone ~/.skep/repos/skep AND the
+    registered project ~/Developer/skep; every bare-name face picked the
+    clone. The on-ramp refuses the duplicate, naming the clone and the fix."""
+    clone = config.home.parent / "repos" / "api"
+    (clone / ".git").mkdir(parents=True)
+    workdir = tmp_path / "api"
+    workdir.mkdir()
+
+    client = serve_client(config)
+    refused = client.post("/api/workon/preview", json={"path": str(workdir)})
+    assert refused.status_code == 409
+    assert str(clone) in refused.json()["detail"]
+    assert "unregister_repo api" in refused.json()["detail"]
+    assert client.post("/api/workon", json={"path": str(workdir)}).status_code == 409
+
+
 def test_workon_project_id_collision_is_a_conflict(
     config: SupervisorConfig, tmp_path: Path
 ) -> None:

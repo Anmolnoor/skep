@@ -211,7 +211,10 @@ def register_ops_commands(
     node_list = node_sub.add_parser("list", help="list registered nodes")
     node_list.set_defaults(func=cmd_node_list)
 
+    from .cli_cmds import _group_usage  # local: cli_cmds registers this module
+
     ops = subcommands.add_parser("ops", help="governed local ops (v15)")
+    ops.set_defaults(func=_group_usage(ops))  # v116-F4
     ops_sub = ops.add_subparsers(dest="ops_command")
     ops_run = ops_sub.add_parser(
         "run", help="resolve (and, with --approve, execute) an ops check against a node"

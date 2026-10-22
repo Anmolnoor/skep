@@ -1801,6 +1801,149 @@ def test_project_setup_engine_flag_saves_and_validates(
     assert "builtin" in err  # the refusal names the valid choices
 
 
+def _pin_engine(home: Path, repo: Path, engine: str) -> None:
+    code = _run_cli(
+        home,
+        "project",
+        "setup",
+        str(repo),
+        "--strategy",
+        "trusted_local_dev",
+        "--project-id",
+        "pinned",
+        "--engine",
+        engine,
+        "--verify-command",
+        "true",  # an external engine needs the pin (v90); the probe is what is under test
+    )
+    assert code == 0
+
+
+def test_run_refuses_worker_cmd_under_a_pinned_external_engine(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v116-F1: the project's engine pin replaced an explicit --worker-cmd
+    without a word — the field burned three claude_code runs on an agent the
+    operator had not asked for. Now a refusal that names both and the way out."""
+    home = tmp_path / "home"
+    _pin_engine(home, repo, "claude_code")
+    capsys.readouterr()
+    code = _run_cli(
+        home, "run", str(repo), "Fix the bug. MODE:happy", "--worker-cmd", _worker_cmd()
+    )
+    err = capsys.readouterr().err
+    assert code == 2, err
+    assert "pins coding_engine 'claude_code'" in err
+    assert "--engine builtin" in err
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    try:
+        assert store.recent_runs(5) == [], "nothing may be dispatched behind a refusal"
+    finally:
+        store.close()
+
+
+def test_run_engine_flag_overrides_the_pin_and_is_recorded_as_an_override(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v116-F1: `skep run --engine` is the CLI face of the chat's
+    dispatch_run engine= (ADR 0050): the explicit choice reaches the resolver
+    over the project's pin, and — like every explicit override (v95-F3) —
+    it never counts as a project-policy auto-dispatch match."""
+    import json
+
+    home = tmp_path / "home"
+    _pin_engine(home, repo, "claude_code")
+    capsys.readouterr()
+    code = _run_cli(
+        home,
+        "run",
+        str(repo),
+        "Fix the bug. MODE:happy",
+        "--engine",
+        "builtin",
+        "--execution-mode",
+        "workspace",
+        "--worker-cmd",
+        _worker_cmd(),
+        "--quiet",
+    )
+    out = capsys.readouterr().out
+    assert code == 0, out
+    task_id = _only_task_id(home)
+    config = build_config(home, None)
+    task = json.loads((config.audit_dir / task_id / "task.json").read_text())
+    assert task["dispatch_decision"]["reason"] != "dispatch.auto_allowed.project_policy_match"
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    try:
+        run = store.get_run(task_id)
+        assert run is not None and run.coding_engine == "builtin"
+    finally:
+        store.close()
+    # A typo in the engine name is refused by the flag itself, naming the choices.
+    with pytest.raises(SystemExit):
+        _run_cli(home, "run", str(repo), "x", "--engine", "clawed_code")
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_run_turns_a_dispatch_refusal_into_an_answer(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v116-F1: an engine refusal from the dispatch chokepoint is an error line
+    with the next command, not a traceback."""
+    import skep.supervisor.dispatch as dispatch_module
+    import skep.supervisor.engines as engines_module
+
+    home = tmp_path / "home"
+    _pin_engine(home, repo, "claude_code")
+    # The sandbox checks come first in run_task; a runner with no usable
+    # backend (CI's ubuntu) would refuse on that line, not on the engine.
+    monkeypatch.setattr(
+        dispatch_module,
+        "sandbox_availability",
+        lambda backend=None: type("A", (), {"usable": True, "backend": "seatbelt"})(),
+    )
+    monkeypatch.setattr(
+        engines_module, "engine_available", lambda e: (False, "'claude' not on PATH")
+    )
+    capsys.readouterr()
+    code = _run_cli(home, "run", str(repo), "Fix the bug. MODE:happy", "--quiet")
+    err = capsys.readouterr().err
+    assert code == 2, err
+    assert "not installed here" in err and "skep doctor" in err
+
+
+def test_repo_list_shows_clones_and_workon_dirs_and_the_group_prints_its_usage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v116-F4: the list_repos read had a chat face and a deck; the CLI had
+    only refresh and push-baseline. And `skep repo` alone printed the whole
+    command tree instead of its own usage."""
+    home = tmp_path / "home"
+    (home / "repos" / "clone-a" / ".git").mkdir(parents=True)
+    bound = tmp_path / "elsewhere" / "ws-b"
+    bound.mkdir(parents=True)
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="ws-b", name="ws-b", strategy="trusted_local_dev", phase="build", policy={}
+        )
+        store.add_project_binding(
+            project_id="ws-b", binding_kind="repo_path", binding_value=str(bound)
+        )
+    finally:
+        store.close()
+    assert _run_cli(home, "repo", "list") == 0
+    out = capsys.readouterr().out
+    assert "clone-a" in out and "clone" in out
+    assert "ws-b" in out and str(bound) in out
+
+    assert _run_cli(home, "repo") == 2
+    usage = capsys.readouterr().out
+    assert "list" in usage and "refresh" in usage and "push-baseline" in usage
+    assert "serve" not in usage, "the group prints its own usage, not the whole tree"
+
+
 def test_project_setup_verify_command_flag_pins_the_gate(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

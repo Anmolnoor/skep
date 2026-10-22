@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 from skep.cli import main
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.dispatch import run_task
@@ -49,6 +51,14 @@ def _cli(home: Path, *args: str) -> int:
 
 def _registry(home: Path) -> RunStore:
     return RunStore(home / "supervisor" / "supervisor.sqlite3")
+
+
+def test_skill_shelf_list_is_a_face(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """v116-F4: `skep skill shelf list` was an argparse error; bare `shelf`
+    listed. Both list now."""
+    home = tmp_path / "home"
+    assert main(["--home", str(home), "skill", "shelf", "list"]) == 0
+    assert "no external shelves" in capsys.readouterr().out
 
 
 def test_skill_cli_full_lifecycle(tmp_path: Path) -> None:

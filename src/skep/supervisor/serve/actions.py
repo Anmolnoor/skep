@@ -1479,6 +1479,17 @@ def _workon_path_or_400(config: SupervisorConfig, raw: str) -> Path:
             status_code=400,
             detail="the skep store is never a workspace; registered repos are dispatched by slug",
         )
+    clone = store_root / "repos" / resolved.name
+    if (clone / ".git").exists():
+        # v116-F2: a bare name must mean one repo. The field had `skep` →
+        # ~/.skep/repos/skep (a July clone) AND ~/Developer/skep (this
+        # project); every bare-name face picked the clone.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{resolved.name!r} is already the name of the registered clone at {clone} "
+            f"— `unregister_repo {resolved.name}` to drop it, or bind this directory "
+            "with setup_project under an explicit project_id",
+        )
     return resolved
 
 

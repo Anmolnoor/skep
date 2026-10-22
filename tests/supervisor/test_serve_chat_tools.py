@@ -512,6 +512,15 @@ def test_read_only_turn_never_cards_and_answers_the_mutation_attempt(
     assert offered and not (offered & MUTATING_TOOL_NAMES)
 
 
+def test_complete_task_says_it_records_rather_than_does() -> None:
+    """v116-F4: "Mark a task done" sent the Queen off to DO the task."""
+    from skep.supervisor.serve.tools import tool_description
+
+    text = tool_description("complete_task")
+    assert "does not do the work" in text
+    assert "dispatch_run" in text
+
+
 def test_btw_runs_beside_a_pending_card(config: SupervisorConfig, ollama: FakeOllama) -> None:
     """The composer 409 stands for normal messages while a card waits, but a
     read-only side question passes — safe because it can need no confirmation."""

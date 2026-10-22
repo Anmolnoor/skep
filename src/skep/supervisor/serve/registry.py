@@ -240,18 +240,38 @@ def resolve_repo_arg(value: str, root: Path, store: RunStore | None = None) -> P
     keep the documented dev-only host-path route.
     """
     if _SLUG_RE.match(value):
-        if (root / value / ".git").exists():
-            return (root / value).resolve()
-        if store is not None:
-            for bound_project in list_projects(store):
-                for binding in bound_project.bindings:
-                    if binding.kind != "repo_path":
-                        continue
-                    path = Path(binding.value)
-                    if path.name == value and path.is_dir():
-                        return path.resolve()
+        clone = (root / value).resolve() if (root / value / ".git").exists() else None
+        bound = _bound_dir_named(store, value) if store is not None else None
+        if clone is not None and bound is not None:
+            # v116-F2: one name, two repos. The clone used to win silently —
+            # `skep pr merge skep …`, `/state skep`, effective_policy(repo=
+            # 'skep') all landed on a stale clone while the registered
+            # project sat unconsulted. A refusal that prints both (I9).
+            raise HTTPException(
+                status_code=409,
+                detail=f"{value!r} names two repos: the registered clone at {clone} and the "
+                f"project directory at {bound} — pass the path you mean, "
+                f"`unregister_repo {value}` to drop the clone, or re-register it "
+                "under another --name",
+            )
+        if clone is not None:
+            return clone
+        if bound is not None:
+            return bound
         return (root / value).resolve()
     return Path(value).expanduser().resolve()
+
+
+def _bound_dir_named(store: RunStore, name: str) -> Path | None:
+    """The workon-bound directory whose basename is ``name``, if any."""
+    for bound_project in list_projects(store):
+        for binding in bound_project.bindings:
+            if binding.kind != "repo_path":
+                continue
+            path = Path(binding.value)
+            if path.name == name and path.is_dir():
+                return path.resolve()
+    return None
 
 
 def existing_dir_error(resolved: Path) -> str | None:
@@ -368,13 +388,24 @@ def ensure_repo_baseline(repo: Path) -> bool:
     return _initialize_empty_repo(repo)
 
 
-def register_repo(root: Path, *, url: str, name: str | None = None) -> dict[str, Any]:
+def register_repo(
+    root: Path, *, url: str, name: str | None = None, store: RunStore | None = None
+) -> dict[str, Any]:
     slug = name or url.rstrip("/").split("/")[-1].removesuffix(".git")
     if not _SLUG_RE.match(slug):
         raise HTTPException(status_code=400, detail=f"cannot derive a repo name from {slug!r}")
     dest = root / slug
     if dest.exists():
         raise HTTPException(status_code=409, detail=f"repo {slug!r} already registered")
+    bound = _bound_dir_named(store, slug) if store is not None else None
+    if bound is not None:
+        # v116-F2: the other kind of repo already answers to this name.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{slug!r} is already the name of the project directory at {bound}; "
+            f"a clone at {dest} would make every bare {slug!r} ambiguous — register it "
+            "under another --name",
+        )
     root.mkdir(parents=True, exist_ok=True)
     clone = subprocess.run(["git", "clone", url, str(dest)], capture_output=True, text=True)
     if clone.returncode != 0:
@@ -1690,7 +1721,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.post("/api/repos", status_code=201)
     def add_repo(body: RepoRequest) -> dict[str, Any]:
-        return register_repo(root, url=body.url, name=body.name)
+        return register_repo(root, url=body.url, name=body.name, store=run_store)
 
     @app.delete("/api/repos/{name}")
     def delete_repo(name: str) -> dict[str, bool]:

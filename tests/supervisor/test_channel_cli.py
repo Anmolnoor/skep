@@ -16,6 +16,15 @@ def _run(home: Path, *args: str) -> int:
     return main(["--home", str(home), *args])
 
 
+def test_channel_with_no_subcommand_prints_its_usage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v116-F4: `skep channel` alone fell through to the top-level help."""
+    assert _run(tmp_path / "home", "channel") == 2
+    out = capsys.readouterr().out
+    assert "status" in out and "serve" not in out
+
+
 def test_channel_status_states_the_actual_condition(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

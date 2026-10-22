@@ -482,7 +482,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "complete_task",
-        "Mark a task done immediately.",
+        # v116-F4: the Queen went searching repos to DO the task (I9).
+        "Mark an existing todo task as done by task_id — records that it is "
+        "finished; it does not do the work (dispatch_run or quick_edit do).",
         {"task_id": {"type": "string"}},
         ["task_id"],
     ),
@@ -2604,12 +2606,19 @@ def queen_shell_decision(
         return AutonomyDecision(
             verdict="deny",
             reason="shell.deny.repo_cwd" if via_cwd else "shell.deny.repo_target",
+            # v116-F3: the read lanes come first. The old line led with
+            # quick_edit/dispatch_run and ended on set_operator_policy, and the
+            # model answered `ls -la` by proposing a standing allow rule — a
+            # policy write for a look (I9). Reads need no card; writes have
+            # their lanes; the standing rule is named last and called one.
             detail=(
                 f"{how} — a shell command there can modify files with no patch card, "
-                "so it refuses by default. For a governed one-file change use "
-                "quick_edit (or dispatch_run for more); to open repo shells "
-                "deliberately, set_operator_policy scope='shell' "
-                "action='run_repo' with the command prefix."
+                "so it refuses by default. To look: repo_state, search_files, "
+                "read_file, git_log, git_diff run in-turn with no card. To change "
+                "something: quick_edit for one file, dispatch_run for more. Only to "
+                "open repo shells deliberately: set_operator_policy scope='shell' "
+                "action='run_repo' with the command prefix — a standing rule, not "
+                "a one-off."
             ),
             decided_by="queen-shell-guard",
         )
@@ -4343,6 +4352,7 @@ def _execute_mutation(
             repos_root(holder),
             url=str(args["url"]),
             name=None if args.get("name") is None else str(args["name"]),
+            store=store,
         )
     if name == "refresh_repo":
         return actions.refresh_repo(holder, str(args["repo"]), store=store)

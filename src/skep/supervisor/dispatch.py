@@ -366,7 +366,7 @@ def run_task(
     # v90-F1 (ADR 0047): the coding engine for this run. Castes with their own
     # workers (audit, researcher, …) are unaffected — an engine replaces the
     # CODING implementation only.
-    from .engines import resolve_engine
+    from .engines import engine_available, resolve_engine
 
     engine = resolve_engine(coding_engine or None)
     # Only an EXTERNAL engine replaces the worker argv. "builtin" defers to
@@ -391,6 +391,26 @@ def run_task(
                 "host has none — running it unsandboxed would put an unconfined "
                 "agent on the host; fix the sandbox backend (`skep doctor`) or "
                 "switch the project to the builtin engine"
+            )
+        # v116-F1: a present binary with a way to log in, BEFORE any run
+        # record exists. Three claude_code runs died in 1.2 s ("Not logged
+        # in") while doctor had said NO AUTH ENV all along — nothing on the
+        # dispatch path ever asked (I9). The worker inherits THIS process's
+        # environment (the daemon loads <home>/serve.env at startup; `skep
+        # run` uses the shell it was typed in), so that is what is checked.
+        present, detail = engine_available(engine)
+        if not present:
+            raise ValueError(
+                f"coding_engine {engine.name!r} is not installed here ({detail}) — "
+                "`skep doctor` lists each engine; install it, or switch the project "
+                "to another engine (`skep project setup --engine builtin`)"
+            )
+        if engine.auth_env and not any(os.environ.get(var) for var in engine.auth_env):
+            raise ValueError(
+                f"coding_engine {engine.name!r}: NO AUTH ENV — set one of "
+                f"{'/'.join(engine.auth_env)} in the environment the worker inherits "
+                "(the daemon reads <home>/serve.env at startup; `skep run` uses your "
+                "shell) — the line `skep doctor` prints for this engine"
             )
     if not verify_command or auto_apply_branch is None:
         from .policy_resolver import run_policy_for_repo

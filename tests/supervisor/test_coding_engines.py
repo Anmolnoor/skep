@@ -296,6 +296,83 @@ def test_dispatch_refuses_an_external_engine_without_a_usable_sandbox(
     assert "sandbox" in str(excinfo.value)
 
 
+def _usable_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    import skep.supervisor.dispatch as dispatch_module
+
+    monkeypatch.setattr(
+        dispatch_module,
+        "sandbox_availability",
+        lambda backend=None: type("A", (), {"usable": True, "backend": "seatbelt"})(),
+    )
+
+
+def test_dispatch_refuses_an_external_engine_that_is_not_installed(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v116-F1: the operator allowlisted a binary the host did not have and
+    burned runs before anything said so (v87-F6 gave doctor the probe); the
+    dispatch path now asks the same question, before any run record."""
+    import skep.supervisor.engines as engines_module
+    from skep.supervisor.dispatch import run_task
+    from skep.supervisor.store import RunStore
+
+    _usable_sandbox(monkeypatch)
+    monkeypatch.setattr(
+        engines_module, "engine_available", lambda e: (False, "'claude' not on PATH")
+    )
+    with pytest.raises(ValueError) as excinfo:
+        run_task(
+            repo,
+            "do a thing",
+            config=config,
+            execution_mode="sandbox",
+            coding_engine="claude_code",
+            verify_command="pytest -q",
+        )
+    message = str(excinfo.value)
+    assert "not installed here" in message and "'claude' not on PATH" in message
+    assert "skep doctor" in message
+    store = RunStore(config.db_path)
+    try:
+        assert store.recent_runs(5) == [], "a refused dispatch must leave no run record"
+    finally:
+        store.close()
+
+
+def test_dispatch_refuses_an_external_engine_with_no_auth_env(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v116-F1: three claude_code runs died in 1.2 s ("Not logged in") while
+    doctor had said NO AUTH ENV all along — dispatch now prints that line."""
+    import skep.supervisor.engines as engines_module
+    from skep.supervisor.dispatch import run_task
+    from skep.supervisor.store import RunStore
+
+    _usable_sandbox(monkeypatch)
+    monkeypatch.setattr(
+        engines_module, "engine_available", lambda e: (True, "/usr/local/bin/claude")
+    )
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(ValueError) as excinfo:
+        run_task(
+            repo,
+            "do a thing",
+            config=config,
+            execution_mode="sandbox",
+            coding_engine="claude_code",
+            verify_command="pytest -q",
+        )
+    message = str(excinfo.value)
+    assert "NO AUTH ENV" in message
+    assert "CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY" in message
+    store = RunStore(config.db_path)
+    try:
+        assert store.recent_runs(5) == []
+    finally:
+        store.close()
+
+
 def test_an_invalid_verify_command_is_rejected_at_resolve_time(
     repo: Path, config: SupervisorConfig
 ) -> None:
