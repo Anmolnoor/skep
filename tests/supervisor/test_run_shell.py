@@ -89,8 +89,14 @@ def test_repo_cwd_refuses_with_the_quick_edit_teaching(
         _allow(store, "run", "echo")  # a plain-run grant must NOT open the repo
         denied = queen_shell_decision(store, holder, command="echo hi", cwd=str(repo / "src"))
         assert denied is not None and denied.verdict == "deny"
-        assert "quick_edit" in (denied.detail or "")
-        assert "run_repo" in (denied.detail or "")
+        detail = denied.detail or ""
+        assert "quick_edit" in detail
+        assert "run_repo" in detail
+        # v116-F3: read lanes first, write lanes second, the standing rule
+        # last and named as one — the model proposed a policy write for `ls`.
+        for lane in ("repo_state", "search_files", "read_file", "git_log", "git_diff"):
+            assert detail.index(lane) < detail.index("quick_edit") < detail.index("run_repo")
+        assert "standing rule" in detail
         # The refusal holds on a confirmed card too (denied space stays
         # unreachable by confirmation).
         with pytest.raises(ValueError, match="quick_edit"):
