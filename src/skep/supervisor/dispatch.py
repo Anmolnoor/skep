@@ -392,7 +392,7 @@ def run_task(
                 "agent on the host; fix the sandbox backend (`skep doctor`) or "
                 "switch the project to the builtin engine"
             )
-    if not verify_command:
+    if not verify_command or auto_apply_branch is None:
         from .policy_resolver import run_policy_for_repo
 
         # Managed clones are slug-bound (registry name == directory name), so
@@ -402,12 +402,21 @@ def run_task(
         candidates = (
             [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
         )
-        pinned = run_policy_for_repo(run_store, config, repo, binding_candidates=candidates).get(
-            "verify_command"
-        )
-        # A non-string overlay value is treated as unset; resolve_run_policy is
-        # the surface that rejects it loudly on the dispatch path (I9).
-        verify_command = pinned if isinstance(pinned, str) else ""
+        project_policy = run_policy_for_repo(run_store, config, repo, binding_candidates=candidates)
+        if not verify_command:
+            pinned = project_policy.get("verify_command")
+            # A non-string overlay value is treated as unset; resolve_run_policy is
+            # the surface that rejects it loudly on the dispatch path (I9).
+            verify_command = pinned if isinstance(pinned, str) else ""
+        if auto_apply_branch is None:
+            # v115-F16: the maintain lane's integration branch (v30) is the
+            # project's, not the caller's. Only the chat/REST dispatch passed
+            # it; `skep run`, every resume and the scheduler fell to the
+            # per-task branch — skep's first self-landing went to
+            # skep/<task_id> under a policy that said skep/maintain. Resolved
+            # here, beside the verify pin, so every face lands the same way.
+            raw_branch = project_policy.get("auto_apply_branch")
+            auto_apply_branch = raw_branch if isinstance(raw_branch, str) else None
     try:
         landing_decision = auto_apply_decision(
             config.auto_approval_rules, auto_apply_verified_patch

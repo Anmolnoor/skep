@@ -184,6 +184,52 @@ def test_patch_paths_reads_every_patch_shape(tmp_path: Path) -> None:
     assert patch_paths(tmp_path, garbage) == ()
 
 
+def test_every_face_lands_a_maintain_patch_on_the_projects_branch(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """v115-F16: the integration branch (v30) is the project's, not the
+    caller's. Only the chat/REST dispatch passed ``auto_apply_branch``; the
+    CLI, every resume and the scheduler did not, so skep's first self-landing
+    went to skep/<task_id> under a policy that said skep/maintain. run_task
+    now resolves it from the project policy when the caller passes none —
+    this call is shaped exactly like `skep run`."""
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="selfhost",
+            name="selfhost",
+            strategy="trusted_local_dev",
+            phase="maintain",
+            policy={
+                "default_execution_mode": "workspace",
+                "auto_apply_verified_patch": True,
+                "auto_apply_branch": "skep/maintain",
+                "verify_command": 'grep -q "value = 1" existing.py',
+            },
+        )
+        store.add_project_binding(
+            project_id="selfhost", binding_kind="repo_path", binding_value=str(repo)
+        )
+    finally:
+        store.close()
+
+    outcome = run_task(
+        repo, "Fix the bug. MODE:happy", config=config, auto_apply_verified_patch=True
+    )
+    assert outcome.record.state == "completed"
+    assert git(repo, "branch", "--list", "skep/maintain").stdout.strip(), (
+        "the verified patch did not land on the project's auto_apply_branch"
+    )
+    assert not _branch_exists(repo, outcome.record.task_id), "landed on the per-task branch"
+    store = RunStore(config.db_path)
+    try:
+        (approval,) = store.approvals_for(outcome.record.task_id)
+    finally:
+        store.close()
+    assert approval.status == "approved"
+    assert approval.landing_branch == "skep/maintain"
+
+
 def test_no_rules_is_dormant(repo: Path, config: SupervisorConfig) -> None:
     outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)  # default: no rules
     assert outcome.record.state == "completed"

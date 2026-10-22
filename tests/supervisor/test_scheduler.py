@@ -653,7 +653,9 @@ def test_tick_inherits_project_auto_apply_policy(repo: Path, config: SupervisorC
         assert run is not None
         task = json.loads((config.audit_dir / results[0].task_id / "task.json").read_text())
         assert task["auto_apply_verified_patch"] is True
-        assert git(repo, "rev-parse", "--verify", f"refs/heads/skep/{results[0].task_id}")
+        # v115-F16: a maintain project lands on ITS branch, whichever face dispatched.
+        assert git(repo, "rev-parse", "--verify", "refs/heads/skep/maintain")
+        assert not git(repo, "branch", "--list", f"skep/{results[0].task_id}").stdout.strip()
     finally:
         store.close()
 
@@ -735,7 +737,9 @@ def test_tick_inherits_project_phase_auto_apply_default(
                 "decided_by": None,  # v40-F8 additive field
             },
         }
-        assert git(repo, "rev-parse", "--verify", f"refs/heads/skep/{results[0].task_id}")
+        # v115-F16: a maintain project lands on ITS branch, whichever face dispatched.
+        assert git(repo, "rev-parse", "--verify", "refs/heads/skep/maintain")
+        assert not git(repo, "branch", "--list", f"skep/{results[0].task_id}").stdout.strip()
     finally:
         store.close()
 
