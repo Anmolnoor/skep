@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from skep.supervisor import netproxy
-from skep.supervisor.netproxy import FilteringProxy, domain_allowed
+from skep.supervisor.netproxy import FilteringProxy, domain_allowed, is_loopback_host
 
 
 @pytest.mark.parametrize(
@@ -333,8 +333,10 @@ def test_loopback_is_not_egress(host: str, expected: bool) -> None:
     verify lost 210 tests to "Forbidden: '127.0.0.1' is not in the task
     network allowlist" — every test that starts a server on loopback and
     talks to it through the proxied httpx. The wall governs what leaves the
-    machine; a loopback connection never does. The allowlist stays empty."""
-    assert domain_allowed(host, ()) is expected
+    machine; a loopback connection never does. `domain_allowed` itself keeps
+    pure allowlist semantics so a loopback allow is never misattributed."""
+    assert is_loopback_host(host) is expected
+    assert domain_allowed(host, ()) is False
 
 
 def test_loopback_passes_through_the_proxy_with_an_empty_allowlist(origin: int) -> None:

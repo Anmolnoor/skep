@@ -19,7 +19,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
-from skep.supervisor.netproxy import domain_allowed
+from skep.supervisor.netproxy import domain_allowed, is_loopback_host
 from skep.supervisor.spawner import build_worker_env
 from skep.worker_contract import BOOKKEEPING_DIRS, PATCH_EXCLUDE_PATHSPECS, EventType
 from skep.workers.html_text import html_to_text
@@ -792,21 +792,29 @@ class CapabilityRegistry:
                 reason="capability.allow.resume_approved.network_host",
                 detail=hostname,
             )
+        if self._network_allowlist and domain_allowed(hostname, self._network_allowlist):
+            return CapabilityDecision(
+                verdict="allow_with_constraints",
+                reason="capability.allow.network_allowlist_match",
+                detail=hostname,
+            )
+        if is_loopback_host(hostname):
+            # v115-F9: loopback is not egress; the record says so in its own
+            # words rather than borrowing a grant or an allowlist match (I8).
+            return CapabilityDecision(
+                verdict="allow_with_constraints",
+                reason="capability.allow.network_loopback",
+                detail=hostname,
+            )
         if not self._network_allowlist:
             return CapabilityDecision(
                 verdict="require_approval",
                 reason="capability.require_approval.network_allowlist_missing",
                 detail=hostname,
             )
-        if not domain_allowed(hostname, self._network_allowlist):
-            return CapabilityDecision(
-                verdict="deny",
-                reason="capability.deny.network_host_not_allowed",
-                detail=hostname,
-            )
         return CapabilityDecision(
-            verdict="allow_with_constraints",
-            reason="capability.allow.network_allowlist_match",
+            verdict="deny",
+            reason="capability.deny.network_host_not_allowed",
             detail=hostname,
         )
 

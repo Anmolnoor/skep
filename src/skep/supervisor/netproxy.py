@@ -58,13 +58,6 @@ def domain_allowed(host: str, allowlist: tuple[str, ...]) -> bool:
     and any subdomain. Matching is case-insensitive and ignores a trailing dot.
     """
     host = host.strip().lower().rstrip(".")
-    if is_loopback_host(host):
-        # v115-F9: loopback is not egress. A project's own tests start servers
-        # on 127.0.0.1 and talk to them through the proxied client; the first
-        # skep-maintains-skep run lost 210 tests to the 403 below. The wall
-        # governs what leaves the machine; the serve API behind its port still
-        # needs its bearer token (G2).
-        return True
     for raw in allowlist:
         entry = raw.strip().lower()
         if entry == "*":
@@ -151,7 +144,11 @@ class _ProxyHandler(StreamRequestHandler):
 
     def _do_connect(self, target: str) -> None:
         host, _, port_s = target.partition(":")
-        if not domain_allowed(host, self.server.allowlist):
+        # v115-F9: loopback is not egress — a project's own test servers on
+        # 127.0.0.1 stay reachable through the proxied client (the first
+        # skep-maintains-skep run lost 210 tests to this 403). The wall governs
+        # what leaves the machine; the serve API still needs its token (G2).
+        if not (is_loopback_host(host) or domain_allowed(host, self.server.allowlist)):
             self.server.note(allowed=False)
             self._reply(403, f"Forbidden: {host!r} is not in the task network allowlist")
             return
@@ -171,7 +168,11 @@ class _ProxyHandler(StreamRequestHandler):
     def _do_http(self, method: str, target: str, headers: list[bytes]) -> None:
         split = urlsplit(target)
         host = split.hostname or ""
-        if not domain_allowed(host, self.server.allowlist):
+        # v115-F9: loopback is not egress — a project's own test servers on
+        # 127.0.0.1 stay reachable through the proxied client (the first
+        # skep-maintains-skep run lost 210 tests to this 403). The wall governs
+        # what leaves the machine; the serve API still needs its token (G2).
+        if not (is_loopback_host(host) or domain_allowed(host, self.server.allowlist)):
             self.server.note(allowed=False)
             self._reply(403, f"Forbidden: {host!r} is not in the task network allowlist")
             return

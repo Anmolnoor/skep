@@ -2042,3 +2042,19 @@ def test_shell_run_timeout_is_an_honest_failed_command_not_a_crash(tmp_path: Pat
         command_timeout_seconds=30,
     )
     assert roomy.invoke("shell.run", {"argv": [sys.executable, "-c", "print('ok')"]}).exit_code == 0
+
+
+def test_network_fetch_loopback_is_allowed_in_its_own_words(
+    tmp_path: Path, origin_url: str
+) -> None:
+    """v115-F9: with NO allowlist at all a loopback fetch is allowed — and the
+    record names the reason as loopback, not a grant or an allowlist match."""
+    events: list[tuple[EventType, dict[str, object]]] = []
+    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
+    result = registry.invoke("network.fetch", {"url": origin_url})
+    assert result.status == "allowed" and result.output == "ORIGIN-OK"
+    assert events[0][1]["decision"] == {
+        "verdict": "allow_with_constraints",
+        "reason": "capability.allow.network_loopback",
+        "detail": "localhost" if "localhost" in origin_url else "127.0.0.1",
+    }
