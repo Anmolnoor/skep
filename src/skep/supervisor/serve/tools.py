@@ -4343,6 +4343,7 @@ def _execute_mutation(
             repos_root(holder),
             url=str(args["url"]),
             name=None if args.get("name") is None else str(args["name"]),
+            store=store,
         )
     if name == "refresh_repo":
         return actions.refresh_repo(holder, str(args["repo"]), store=store)

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 
 from skep.supervisor import RunStore, SupervisorConfig, mint_task
 from skep.supervisor.scheduler import make_schedule
@@ -1069,6 +1070,34 @@ def test_register_repo_leaves_seeded_origin_alone(tmp_path: Path) -> None:
     assert git(origin, "rev-parse", "HEAD").stdout.strip() == before
 
 
+def test_register_repo_refuses_a_name_a_workon_binding_uses(
+    tmp_path: Path, config: SupervisorConfig
+) -> None:
+    """v116-F2: registration refuses the other kind's name before cloning,
+    naming both paths and the fix."""
+    from skep.supervisor.serve.registry import register_repo
+
+    root = tmp_path / "clones"
+    bound = tmp_path / "elsewhere" / "api"
+    bound.mkdir(parents=True)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="api", name="api", strategy="trusted_local_dev", phase="build", policy={}
+        )
+        store.add_project_binding(
+            project_id="api", binding_kind="repo_path", binding_value=str(bound)
+        )
+        with pytest.raises(HTTPException) as refused:
+            register_repo(root, url="file:///nowhere/api.git", name="api", store=store)
+    finally:
+        store.close()
+    assert refused.value.status_code == 409
+    assert str(bound.resolve()) in refused.value.detail
+    assert "--name" in refused.value.detail
+    assert not (root / "api").exists(), "refused before any clone"
+
+
 def test_resolve_repo_arg_never_resolves_against_daemon_cwd(
     tmp_path: Path, monkeypatch: Any, config: SupervisorConfig
 ) -> None:
@@ -1102,9 +1131,16 @@ def test_resolve_repo_arg_never_resolves_against_daemon_cwd(
         )
         assert resolve_repo_arg("my-workspace", root, store) == bound.resolve()
 
-        # A registered clone slug still wins over a binding of the same name.
+        # v116-F2: a clone AND a binding of the same name is a refusal that
+        # prints both paths — the clone used to win silently (the field's
+        # stale ~/.skep/repos/skep shadowed the registered project).
         (root / "my-workspace" / ".git").mkdir(parents=True)
-        assert resolve_repo_arg("my-workspace", root, store) == (root / "my-workspace").resolve()
+        with pytest.raises(HTTPException) as refused:
+            resolve_repo_arg("my-workspace", root, store)
+        assert refused.value.status_code == 409
+        assert str((root / "my-workspace").resolve()) in refused.value.detail
+        assert str(bound.resolve()) in refused.value.detail
+        assert "unregister_repo my-workspace" in refused.value.detail
 
         # Explicit paths keep the documented host-path route.
         assert resolve_repo_arg(str(bound), root, store) == bound.resolve()
