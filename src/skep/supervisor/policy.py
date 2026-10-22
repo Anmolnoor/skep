@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
-from .apply import apply_patch_on_branch
+from .apply import apply_patch_on_branch, patch_paths
 from .store import RunStore
 
 
@@ -151,7 +151,6 @@ def maybe_auto_approve(
     task_id: str,
     verification_outcome: str | None,
     risk_flags: tuple[str, ...],
-    changed_files: tuple[str, ...],
     branch: str | None = None,
     verify_pinned: bool = False,
 ) -> AutoApproval | None:
@@ -170,6 +169,14 @@ def maybe_auto_approve(
     if not rules:
         return None
     reverify = store.reverification_for(task_id)
+    artifacts = {kind: Path(path) for kind, path, _ in store.artifacts_for(task_id)}
+    patch_path = artifacts.get("patch")
+    # v115-F15: the lane judges the patch it would apply (scope, size, and
+    # whether there is anything at all) — the worker's changed_files claim is
+    # not an input to a landing decision (I2, I5).
+    changed_files = (
+        patch_paths(repo, patch_path) if patch_path is not None and patch_path.is_file() else ()
+    )
     ctx = AutoApprovalContext(
         verification_outcome=verification_outcome,
         reverify_confirmed=reverify is not None and reverify.confirmed,
@@ -194,9 +201,6 @@ def maybe_auto_approve(
         )
         return None
     rule, note = matched
-
-    artifacts = {kind: Path(path) for kind, path, _ in store.artifacts_for(task_id)}
-    patch_path = artifacts.get("patch")
     if patch_path is None or not patch_path.is_file():
         return None
 

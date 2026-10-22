@@ -15,6 +15,8 @@ task instructions:
 - netprobe: attempts an outbound socket, records errno next to --out, then happy-min
 - noresult: emits a completed terminal event but no result envelope
 - badresult: emits a completed terminal event but writes malformed result JSON
+- unclaimed: happy, but the result's changed_files says [] — the shape of a
+            file changed by a shell command the worker never counted (v115-F15)
 - liar:     claims completed+passed, but the patch contradicts the recorded
             verification command (G10 re-verification must catch the lie)
 - vacuous:  patches like liar, but nominates ``true`` as its own verification
@@ -311,7 +313,7 @@ def main() -> int:
         summary="fixed and verified",
         outcome="passed",
         details="claimed passed (exit 0)",
-        changed_files=[file_name],
+        changed_files=[] if mode == "unclaimed" else [file_name],
         commands=[{"command": verify_command, "exit_code": 0, "purpose": "verify"}],
         usage={"provider_calls": 2, "input_tokens": 120, "output_tokens": 40},
         artifacts=[

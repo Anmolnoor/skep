@@ -178,6 +178,24 @@ def git_identity(repo: Path) -> tuple[str, str]:
     return name, email
 
 
+def patch_paths(repo: Path, patch_path: Path) -> tuple[str, ...]:
+    """Every path the patch touches, as ``git apply --numstat`` reads it.
+
+    v115-F15: the supervisor's own list of what a run changed, read from the
+    artifact it is about to apply — never the worker's ``changed_files``
+    claim, which counts only its own writes (a ``uv lock`` bump reported 0
+    and the confirmed patch was blocked as "no changed files to apply").
+    git parses the patch exactly as the landing will: header-less unified
+    diffs, quoted paths, deletions. An unreadable patch is no paths.
+    """
+    proc = _git(repo, "apply", "--numstat", str(patch_path))
+    if proc.returncode != 0:
+        return ()
+    return tuple(
+        line.split("\t", 2)[2] for line in proc.stdout.splitlines() if line.count("\t") >= 2
+    )
+
+
 def apply_patch_on_branch(
     repo: Path, branch: str, patch_path: Path, *, task_id: str, actor: str
 ) -> str | None:
