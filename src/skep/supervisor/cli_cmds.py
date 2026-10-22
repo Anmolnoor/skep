@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from skep.worker_contract import ApprovalVerdict, Budget, CodingWorkerTask, Permissions
+from skep.worker_contract import ApprovalVerdict, Budget, CodingWorkerTask, Permissions, TaskState
 
 from .apply import apply_patch_on_branch, validate_landing_branch
 from .autonomy import (
@@ -205,7 +205,7 @@ def _parse_shell_allow(commands: list[str]) -> tuple[tuple[str, ...], ...]:
 class _PhaseTail(threading.Thread):
     """Live-print coarse phases by tailing the active worktree's event stream."""
 
-    def __init__(self, config: SupervisorConfig) -> None:
+    def __init__(self, config: SupervisorConfig, *, since: str | None = None) -> None:
         super().__init__(name="phase-tail", daemon=True)
         self._config = config
         # Named _stop_event because threading.Thread itself owns a private
@@ -214,6 +214,19 @@ class _PhaseTail(threading.Thread):
         self._offsets: dict[Path, int] = {}
         self._supervisor_event_ids: set[str] = set()
         self._last_line = ""
+        # v115-F2: the tail follows THIS dispatch. `since` (the store's own
+        # timestamp shape) skips runs created before it, and every event file
+        # already on disk is taken up from its end — the field run opened with
+        # twenty runs of other people's approvals and the heartbeats of kept
+        # worktrees before its own worker had started. None keeps the
+        # unscoped tail (tests drive it over seeded history).
+        self._since = since
+        if since is not None and config.worktrees_root.is_dir():
+            for events_file in config.worktrees_root.glob("*/.events/*.ndjson"):
+                try:
+                    self._offsets[events_file] = events_file.stat().st_size
+                except OSError:
+                    continue
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -256,6 +269,8 @@ class _PhaseTail(threading.Thread):
         store = RunStore(self._config.db_path)
         try:
             for record in store.recent_runs(20):
+                if self._since is not None and record.created_at < self._since:
+                    continue
                 views: list[dict[str, Any]] = []
                 reverify = reverification_event_view_for_task(store, record.task_id)
                 if reverify is not None:
@@ -847,7 +862,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
     if not args.quiet:
         print(f"dispatching task against {repo}{source}")
-        tail = _PhaseTail(config)
+        tail = _PhaseTail(config, since=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
         tail.start()
     started = time.monotonic()
     # v70-F3: the explicit flag wins; otherwise the project policy knob
@@ -1201,7 +1216,13 @@ def cmd_review(args: argparse.Namespace) -> int:
                 next_command=f"skep review {record.task_id}  # re-inspect",
             )
         review_id = _pending_or_new(store, record, reason=landing_reason(record.instructions, None))
-        store.resolve_approval(review_id, approved=True, actor=actor, note=args.note)
+        # v115-F4: the approval row is where the landing branch lives (v30);
+        # without it `applied_branch` fell back to skep/<task_id> for a
+        # --branch landing — the run page and the PR verbs named a branch
+        # that never existed (I8, I13).
+        store.resolve_approval(
+            review_id, approved=True, actor=actor, note=args.note, landing_branch=branch
+        )
         print(f"approved: task {record.task_id} (by {actor})")
         print(f"  patch applied on branch {branch} in {record.repo}")
         # v20-F3: make an unconfirmed re-verification impossible to miss at landing.
@@ -1406,6 +1427,14 @@ def _resume_pending_approval(
         actor=actor,
         note=f"resumed as {outcome.record.task_id} ({outcome.record.state})",
         remembered=remembered,
+    )
+    # v115-F1: the parent is superseded by its successor, as resume_past_gate
+    # has said since v19-F8 — the CLI face left it "pending_approval" forever
+    # ("Waiting on you: 1" for a run whose resume had already finished). After
+    # resolve_approval, as there; before the ledger line so the ledger keeps
+    # the successor's outcome, not the word "superseded".
+    store.transition(
+        record.task_id, TaskState.SUPERSEDED.value, f"resumed as {outcome.record.task_id}"
     )
     store.update_ledger_outcome(record.task_id, outcome.record.state)
     new = outcome.record

@@ -1500,7 +1500,8 @@ class ChatEngine:
                         tool_call_id=call_id,
                         content=json.dumps(result, ensure_ascii=True),
                     )
-                    yield ("tool", {"tool": name, "result": result})
+                    # v115-F3: the terminal receipt names the lane (I8).
+                    yield ("tool", {"tool": name, "kind": "read", "result": result})
                     continue
                 if name in MUTATING_TOOL_NAMES:
                     if read_only:

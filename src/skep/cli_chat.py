@@ -457,16 +457,23 @@ class _TurnPrinter:
             # the receipt exists to end (I8).
             decision = data.get("decision") or {}
             if decision:
-                covered = decision.get("detail") or decision.get("reason") or ""
-                note = (
-                    f"ran without asking — covered by {covered}"
-                    if covered
-                    else ("ran without asking — a standing grant covers it")
-                )
+                # v115-F3: `decision` rides a denial too (v40-F10), and the
+                # field test read "ran without asking — covered by <deny
+                # reason>" on every refusal. The verb follows the verdict;
+                # the grant is named by its rule id, the specifics after it.
+                reason = str(decision.get("reason") or "")
+                detail = decision.get("detail")
+                where = f" ({detail})" if detail else ""
+                if decision.get("verdict") == "allow":
+                    note = f"ran without asking — covered by {reason or 'a standing grant'}{where}"
+                else:
+                    note = f"denied — {reason or 'policy'}{where}"
                 self._write("    " + _c(DIM, note) + "\n")
                 risk = (data.get("card") or {}).get("risk")
                 if risk:
                     self._write("    " + _c(DIM, f"risk: {risk}") + "\n")
+            elif data.get("kind") == "read":
+                self._write("    " + _c(DIM, "ran in-turn — read tool") + "\n")
         elif event == "turn_status":
             # v87-F7: the wait names itself. The terminal shows a dim one-line
             # marker only for tool waits (await_runs can block for minutes);
@@ -581,7 +588,9 @@ class ChatRepl:
             if exc.status != 409 or "confirmation card" not in exc.detail:
                 raise
             detail = self.client.get(f"/api/chats/{self.chat_id}")
-            self.resolve_cards([a for a in detail["actions"] if a.get("status") == "proposed"])
+            for action in detail["actions"]:
+                if action.get("status") == "proposed":
+                    self._resolve_card(action, brief=True)
             actions = self._post_message(text)
         self.resolve_cards(actions)
         self._prompt_cache = None  # a model turn moved the context meter
@@ -599,11 +608,26 @@ class ChatRepl:
         for action in actions:
             self._resolve_card(action)
 
-    def _resolve_card(self, action: dict[str, Any]) -> None:
+    def _resolve_found_card(self, card: dict[str, Any], verb: str) -> None:
+        """v115-F3: a card id names a decision once. Pending → the verb; already
+        resolved → say so and stop (never a second card, never a review-id
+        error over a resolution the store already holds)."""
+        status = str(card.get("status") or "?")
+        if status == "proposed":
+            self._apply_card_verb(card, verb)
+            return
+        print(_c(DIM, f"card {card.get('action_id')} already {status} — nothing to {verb}"))
+
+    def _resolve_card(self, action: dict[str, Any], *, brief: bool = False) -> None:
         """One card, the house prompt: confirm and stream the continuation,
-        deny likewise, anything else leaves it pending (the web UI still can)."""
+        deny likewise, anything else leaves it pending (the web UI still can).
+        ``brief`` (v115-F3): the card was shown before — the composer's 409
+        re-ask prints one line, not the body again as if it were new."""
         action_id = str(action.get("action_id"))
-        _render_card(action)
+        if brief:
+            print(_c(DIM, f"already asked: card {action_id} (pending) — /approve or /deny it"))
+        else:
+            _render_card(action)
         if self.auto_confirm:
             if (action.get("card") or {}).get("policy"):
                 # v114-F3: a policy card is a standing change the operator did
@@ -664,34 +688,33 @@ class ChatRepl:
             self._tail_after_action(action_id, chat_id=chat_id)
         self.resolve_cards(more)
 
-    def _pending_card(self, action_id: str) -> dict[str, Any] | None:
-        """The proposed action row matching ``action_id``, tagged with its chat.
-
-        v51-F0: the pending-card hint (v50-F3) prints an action id no deck
-        command accepted — /approve and /deny take it now. v63-F1: current
-        chat first, then every other chat — flagless ``--oneshot`` mints a
-        fresh chat per invocation, so the id the hint printed always lives in
-        ANOTHER chat there; an exact id is unambiguous wherever it sits.
-        """
-        row = self._pending_card_in(self.chat_id, action_id)
+    def _find_card(self, action_id: str, *, pending_only: bool = False) -> dict[str, Any] | None:
+        """v115-F3: the card row for ``action_id`` in whichever chat holds it,
+        whatever its status — `/deny <card>` on an already-resolved card fell
+        through to the review-id path and printed "error: no approval" over a
+        denial the store had already recorded."""
+        row = self._card_in(self.chat_id, action_id, pending_only=pending_only)
         if row is not None:
             return row
         for chat in self.client.get("/api/chats")["chats"]:
             other_id = str(chat["chat_id"])
             if other_id == self.chat_id:
                 continue
-            row = self._pending_card_in(other_id, action_id)
+            row = self._card_in(other_id, action_id, pending_only=pending_only)
             if row is not None:
                 return row
         return None
 
-    def _pending_card_in(self, chat_id: str, action_id: str) -> dict[str, Any] | None:
+    def _card_in(
+        self, chat_id: str, action_id: str, *, pending_only: bool
+    ) -> dict[str, Any] | None:
         detail = self.client.get(f"/api/chats/{chat_id}")
         row = next(
             (
                 dict(a)
                 for a in detail["actions"]
-                if str(a.get("action_id")) == action_id and a.get("status") == "proposed"
+                if str(a.get("action_id")) == action_id
+                and (not pending_only or a.get("status") == "proposed")
             ),
             None,
         )
@@ -946,9 +969,9 @@ class ChatRepl:
                 return
             # v51-F0: a pending card id resolves directly — the command IS the
             # operator's decision, no second prompt. Review ids fall through.
-            card = self._pending_card(args[0])
+            card = self._find_card(args[0])
             if card is not None:
-                self._apply_card_verb(card, "confirm")
+                self._resolve_found_card(card, "confirm")
                 return
             body = {"review_id": args[0]}
             if len(args) > 1:
@@ -959,9 +982,9 @@ class ChatRepl:
             if not args:
                 print(usage)
                 return
-            card = self._pending_card(args[0])
+            card = self._find_card(args[0])
             if card is not None:
-                self._apply_card_verb(card, "deny")
+                self._resolve_found_card(card, "deny")
                 return
             self._propose_command("deny_review", {"review_id": args[0]}, auto_confirm=True)
             return
