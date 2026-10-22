@@ -9,8 +9,10 @@ macOS-only (G3); skipped where Seatbelt is unavailable.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -97,6 +99,31 @@ def test_loopback_round_trip_works_under_the_sandbox(tmp_path: Path) -> None:
     assert proc.stdout.strip() == "ping"
 
 
+def test_unix_socket_round_trip_works_under_the_sandbox() -> None:
+    """v115-F14: a Unix-domain socket server and its client inside the wall —
+    the shape of the netshim/netproxy tests, which died with EPERM on skep's
+    first self-re-verification. The socket lives in a short /tmp dir (AF_UNIX
+    path limit) that is also the profile's only writable root."""
+    sock_dir = Path(tempfile.mkdtemp(prefix="skep-ux-", dir="/tmp")).resolve()
+    try:
+        profile = _tight_profile(sock_dir, sock_dir, sandbox.DENY_ALL_NETWORK)
+        path = str(sock_dir / "s.sock")
+        code = (
+            "import socket, threading\n"
+            f"srv = socket.socket(socket.AF_UNIX); srv.bind({path!r}); srv.listen(1)\n"
+            "def serve():\n"
+            "    conn, _ = srv.accept(); conn.sendall(conn.recv(16)); conn.close()\n"
+            "threading.Thread(target=serve, daemon=True).start()\n"
+            f"c = socket.socket(socket.AF_UNIX); c.connect({path!r})\n"
+            "c.sendall(b'ping'); print(c.recv(16).decode())\n"
+        )
+        proc = _run_sandboxed(profile, code)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == "ping"
+    finally:
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
 def test_compute_still_works_under_the_sandbox(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -113,6 +140,9 @@ def test_deny_all_profile_denies_network_text() -> None:
     # v115-F9: loopback is not egress — a test suite's own servers stay reachable.
     assert '(allow network-bind (local ip "localhost:*"))' in text
     assert '(allow network-outbound (remote ip "localhost:*"))' in text
+    # v115-F14: Unix-domain sockets are files on this host, not egress.
+    assert "(allow network-bind (local unix-socket))" in text
+    assert "(allow network-outbound (remote unix-socket))" in text
 
 
 def test_allow_all_profile_omits_network_deny() -> None:
