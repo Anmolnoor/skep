@@ -231,11 +231,20 @@ skep project setup   REPO [--engine ENGINE] [--verify-command CMD] [--group NAME
 skep project list
 skep project show    PROJECT_ID
 skep project set-phase PROJECT_ID PHASE
+skep policy registry
+skep policy rsop REPO
+skep policy why  REPO SCOPE ACTION VALUE
 ```
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
 from the repo's own entry point (v91); an explicit `--verify-command` always
 wins. `set-phase` moves the trust-ramp defaults (build → maintain).
+`policy registry` lists every policy setting skep has (type, default, the
+layers that may set it); `policy rsop` is the resultant policy for a repo —
+each key with the layer that decided it and the layers it overrode, the
+compiled scope rules with their source, the operator rules, the floor;
+`policy why` answers whether one `SCOPE ACTION VALUE` would be allowed and
+names the rule that decided it (ADR 0052, read-only).
 
 ## Memory
 

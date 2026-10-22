@@ -53,6 +53,7 @@ from .actions import (
     patch_path,
     pending_approval_or_409,
     policy_block_views,
+    policy_why,
     preserved_resumable_hint,
     project_context_detail_view,
     refresh_repo,
@@ -64,6 +65,7 @@ from .actions import (
     reverification_event_view_for_task,
     reverification_warning,
     revoke_policy_rule,
+    rsop_view,
     run_summary_view,
     set_policy_group,
     submit_run,
@@ -474,6 +476,26 @@ def create_app(
     def get_effective_policy(name: str) -> dict[str, Any]:
         """v23-F2: what a run against this repo will ACTUALLY get."""
         return effective_policy_view(holder, run_store, name)
+
+    @app.get("/api/repos/{name:path}/rsop")
+    def get_rsop(name: str) -> dict[str, Any]:
+        """P0-3 (ADR 0052): resultant policy with the override chain."""
+        return rsop_view(holder, run_store, name)
+
+    @app.get("/api/policy/registry")
+    def get_policy_registry() -> dict[str, Any]:
+        """P0-1 (ADR 0052): every policy setting, as metadata."""
+        from ..policy_registry import registry_view
+
+        return registry_view()
+
+    @app.get("/api/policy/why")
+    def get_policy_why(repo: str, scope: str, action: str, value: str) -> dict[str, Any]:
+        """P0-3 (ADR 0052): would <scope>.<action> <value> be allowed in <repo>?"""
+        try:
+            return policy_why(holder, run_store, repo, scope, action, value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/repos/{name:path}/state")
     def get_repo_state(name: str) -> dict[str, Any]:

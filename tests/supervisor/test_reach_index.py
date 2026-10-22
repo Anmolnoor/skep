@@ -90,7 +90,10 @@ def test_reach_block_sizes_are_measured(config: SupervisorConfig) -> None:
         block = reach_block(store)
         # v99-F3 re-encoded and ratcheted; v108-F2 spends 500 of it on the
         # provider registry's four operator verbs (+ F5/F6 protocol enums).
-        assert 0 < len(block) < 9_500
+        # P0-3 (ADR 0052) spends 190 on the three policy read verbs
+        # (registry, rsop, why), measured at 9.56KB after their glosses were
+        # cut to the first-sentence budget.
+        assert 0 < len(block) < 9_750
         # Skills + MCP sections alone (headers + entries) — the fold-in cost.
         skills_and_mcp = block[block.index("Approved skills") :]
         assert len(skills_and_mcp) < 1_000  # v99-F2: names, not descriptions

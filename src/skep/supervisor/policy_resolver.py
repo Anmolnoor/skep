@@ -104,6 +104,8 @@ class ResolvedRunPolicy:
     # "global", "phase:<phase>", "project", "group:<name>", "trusted-roots".
     # Pure provenance: recording it never changes the resolution result.
     provenance: dict[str, str] = field(default_factory=dict)
+    # P0-3: key → [(layer label, value), …] in application order.
+    provenance_chain: dict[str, list[tuple[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -191,10 +193,19 @@ def run_policy_for_repo(
     """
     policy = dict(policy_view(store, config))
     provenance: dict[str, str] = dict.fromkeys(policy, "global")
+    # P0-3 (ADR 0052 D3): beside the one label, the whole chain — every layer
+    # that set the key, in application order, with the value it set. RSoP
+    # renders the losers as "overridden". Recorded only; the resolution
+    # result is untouched (the v109-F9 contract), and resolve_run_policy pops
+    # it like the label.
+    chain: dict[str, list[tuple[str, Any]]] = {
+        key: [("global", value)] for key, value in policy.items()
+    }
     match = _match_project_for_repo(store, repo, binding_candidates=binding_candidates)
     effective = dict(policy)
 
     def _layer_set(key: str, value: Any, label: str) -> None:
+        chain.setdefault(key, []).append((label, value))
         if key not in effective or effective[key] != value:
             provenance[key] = label
         effective[key] = value
@@ -253,6 +264,7 @@ def run_policy_for_repo(
             roots.append(managed)
             _layer_set("trusted_workspace_roots", roots, "trusted-roots")
     effective["_provenance"] = provenance
+    effective["_provenance_chain"] = chain
     return effective
 
 
@@ -540,6 +552,7 @@ def resolve_run_policy(
     # serialized run policy stays exactly what it was; the map rides the
     # ResolvedRunPolicy for the effective-policy view.
     provenance = dict(policy.pop("_provenance", None) or {})
+    provenance_chain = dict(policy.pop("_provenance_chain", None) or {})
     # v97-F2 (ADR 0048): a dangling group attach fails the dispatch closed —
     # silently running without the grants the project thinks it has would be
     # a policy the record cannot explain (I8), so the refusal teaches (I9).
@@ -718,6 +731,7 @@ def resolve_run_policy(
         verify_command=verify_command,
         coding_engine=chosen_engine.name,
         provenance=provenance,
+        provenance_chain=provenance_chain,
     )
 
 

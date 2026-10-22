@@ -337,6 +337,33 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         {"repo": {"type": "string", "description": "repo slug or path"}},
         ["repo"],
     ),
+    _tool(
+        "policy_registry",
+        "Every policy setting skep has. Name, type, default, which layers may set "
+        "it, the invariant it serves. Metadata only (P0).",
+        {},
+    ),
+    _tool(
+        "policy_rsop",
+        "Effective policy per key, and its source. Every key with the layer that "
+        "decided it and the layers it overrode, the compiled scope rules with their "
+        "source, the operator rules, and the floor. Read this to explain a gate.",
+        {"repo": {"type": "string", "description": "repo slug or path"}},
+        ["repo"],
+    ),
+    _tool(
+        "policy_why",
+        "Verdict and deciding rule for one action. Would <scope>.<action> <value> "
+        "be allowed in this repo? Answered for the run and for the Queen; "
+        "no dispatch.",
+        {
+            "repo": {"type": "string", "description": "repo slug or path"},
+            "scope": {"type": "string", "description": "shell, network, filesystem, …"},
+            "action": {"type": "string", "description": "e.g. run, connect, write"},
+            "value": {"type": "string", "description": "the command, host or path"},
+        },
+        ["repo", "scope", "action", "value"],
+    ),
     _tool("list_templates", "Saved workflow templates (hand-authored and learned).", {}),
     _tool("list_skills", "Learned-skill candidates and skill-pack ladder states.", {}),
     _tool(
@@ -2160,6 +2187,9 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "policy & projects": (
         "get_policy",
         "effective_policy",
+        "policy_registry",
+        "policy_rsop",
+        "policy_why",
         "set_policy",
         "apply_policy_preset",
         "set_operator_policy",
@@ -3012,6 +3042,21 @@ def execute_read_tool(
         )
     if name == "effective_policy":
         return actions.effective_policy_view(holder, store, str(args["repo"]))
+    if name == "policy_registry":
+        from ..policy_registry import registry_view
+
+        return registry_view()
+    if name == "policy_rsop":
+        return actions.rsop_view(holder, store, str(args["repo"]))
+    if name == "policy_why":
+        return actions.policy_why(
+            holder,
+            store,
+            str(args["repo"]),
+            str(args["scope"]),
+            str(args["action"]),
+            str(args["value"]),
+        )
     if name == "list_approvals":
         approvals = []
         for approval in store.pending_approvals():

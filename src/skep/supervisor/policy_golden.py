@@ -225,7 +225,9 @@ def _project_golden(
         golden["note"] = "no repo binding — run policy is only resolvable with a repo"
         return golden
     golden["repo"] = str(repo)
-    golden["run_policy"] = run_policy_for_repo(store, config, repo, binding_candidates=candidates)
+    run_policy = run_policy_for_repo(store, config, repo, binding_candidates=candidates)
+    # The chain is metadata RSoP renders; the golden freezes decisions.
+    golden["run_policy"] = {k: v for k, v in run_policy.items() if k != "_provenance_chain"}
     try:
         resolved = resolve_run_policy(
             store=store,

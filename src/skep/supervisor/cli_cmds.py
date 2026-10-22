@@ -2576,6 +2576,56 @@ def cmd_project_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy_registry(args: argparse.Namespace) -> int:
+    """P0-1 (ADR 0052): every policy setting, as metadata."""
+    from .policy_registry import registry_view
+
+    print(json.dumps(registry_view(), indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_policy_rsop(args: argparse.Namespace) -> int:
+    """P0-3 (ADR 0052): resultant policy for a repo with the override chain."""
+    from fastapi import HTTPException
+
+    from .serve.actions import rsop_view
+    from .serve.settings import ConfigHolder
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        view = rsop_view(ConfigHolder(config, store), store, args.repo)
+    except HTTPException as exc:
+        return _err(_http_error_detail(exc))
+    finally:
+        store.close()
+    print(json.dumps(view, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_policy_why(args: argparse.Namespace) -> int:
+    """P0-3 (ADR 0052): would <scope>.<action> <value> be allowed in <repo>?"""
+    from fastapi import HTTPException
+
+    from .serve.actions import policy_why
+    from .serve.settings import ConfigHolder
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        view = policy_why(
+            ConfigHolder(config, store), store, args.repo, args.scope, args.action, args.value
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    except HTTPException as exc:
+        return _err(_http_error_detail(exc))
+    finally:
+        store.close()
+    print(json.dumps(view, indent=2, sort_keys=True))
+    return 0
+
+
 def _cmd_project_show_effective(config: SupervisorConfig, repo: str) -> int:
     """v23-F2: print what a run against ``repo`` will actually get."""
     from .serve.actions import effective_policy_view
@@ -3109,6 +3159,25 @@ def register_supervisor_commands(
     # v104-F4: the CLI had no `repo` group at all — registration and refresh
     # lived only in REST and chat. Only `refresh` is added here: the verb an
     # operator actually needs to type before reasoning about staleness.
+    policy_group = subcommands.add_parser("policy", help="the policy engine, read-only (P0)")
+    policy_group.set_defaults(func=_group_usage(policy_group))
+    policy_sub = policy_group.add_subparsers(dest="policy_command")
+    policy_registry = policy_sub.add_parser("registry", help="every policy setting, as metadata")
+    policy_registry.set_defaults(func=cmd_policy_registry)
+    policy_rsop = policy_sub.add_parser(
+        "rsop", help="resultant policy for a repo: each key, its deciding layer, what it overrode"
+    )
+    policy_rsop.add_argument("repo", help="repo slug or path")
+    policy_rsop.set_defaults(func=cmd_policy_rsop)
+    policy_why = policy_sub.add_parser(
+        "why", help="would <scope>.<action> <value> be allowed in <repo>? (no dispatch)"
+    )
+    policy_why.add_argument("repo", help="repo slug or path")
+    policy_why.add_argument("scope")
+    policy_why.add_argument("action")
+    policy_why.add_argument("value")
+    policy_why.set_defaults(func=cmd_policy_why)
+
     repo_group = subcommands.add_parser("repo", help="registered repositories (v104)")
     repo_group.set_defaults(func=_group_usage(repo_group))
     repo_sub = repo_group.add_subparsers(dest="repo_command")
