@@ -76,6 +76,9 @@ def config(tmp_path: Path) -> SupervisorConfig:
         home=tmp_path / "skep-home",
         worker_command=(sys.executable, str(FAKE_WORKER)),
         grace_seconds=0.5,
-        heartbeat_seconds=0.1,
+        # v115-F8: 0.1 s made any 0.3 s pause between two events a kill — the
+        # CI flake class of 2026-10-21. 2 s keeps hang tests fast (6 s) and
+        # survives a loaded runner; startup has its own allowance now.
+        heartbeat_seconds=2.0,
         poll_seconds=0.01,
     )

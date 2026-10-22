@@ -101,6 +101,7 @@ def watch_worker(
     grace_seconds: float,
     heartbeat_seconds: float,
     poll_seconds: float = 0.05,
+    startup_seconds: float = 120.0,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> MonitorVerdict:
@@ -109,6 +110,8 @@ def watch_worker(
     Breach conditions (Q3):
     - wall clock: ``budget.wall_clock_seconds + grace`` elapsed → kill tree
     - heartbeat loss: no new event activity for 3xN with a live process → kill tree
+      (v115-F8: before the FIRST event the allowance is ``startup_seconds`` —
+      a cold start is not a lost heartbeat)
     Either way the tree is killed, and a ``task.terminal`` is synthesized if the
     worker did not write one. Process exit without a terminal event → crash.
     """
@@ -135,7 +138,8 @@ def watch_worker(
             kill_process_tree(process)
             exit_code = process.returncode
             break
-        if now - last_activity > 3 * heartbeat_seconds:
+        quiet_limit = startup_seconds if seen_bytes == 0 else 3 * heartbeat_seconds
+        if now - last_activity > quiet_limit:
             breach = "heartbeat_lost"
             kill_process_tree(process)
             exit_code = process.returncode
@@ -155,8 +159,12 @@ def watch_worker(
             summary=(
                 "Wall-clock budget breached; worker killed and torn down."
                 if breach == "wall_clock"
-                else f"No heartbeat for 3x{heartbeat_seconds}s with a live process; "
-                "worker killed and torn down."
+                else (
+                    f"No first event within {startup_seconds:g}s of launch; "
+                    if seen_bytes == 0
+                    else f"No heartbeat for 3x{heartbeat_seconds}s with a live process; "
+                )
+                + "worker killed and torn down."
             ),
             reason="wall_clock_exceeded" if breach == "wall_clock" else "heartbeat_lost",
             exit_code=exit_code,
