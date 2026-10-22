@@ -8,6 +8,7 @@ composition that makes the proxy unbypassable is proven in test_sandbox.py.
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -70,8 +71,14 @@ def _fetch_via(proxy_port: int, url: str) -> tuple[int, bytes]:
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({"http": f"http://127.0.0.1:{proxy_port}"})
     )
-    resp = opener.open(url, timeout=5)
-    return resp.status, resp.read()
+    # The proxy under test is the point: an ambient NO_PROXY (a skep worker
+    # sets one for loopback, v115-F9) must not let urllib bypass it.
+    saved = {key: os.environ.pop(key) for key in ("NO_PROXY", "no_proxy") if key in os.environ}
+    try:
+        resp = opener.open(url, timeout=5)
+        return resp.status, resp.read()
+    finally:
+        os.environ.update(saved)
 
 
 def test_http_forward_allowed_host_reaches_origin(origin: int) -> None:

@@ -55,6 +55,19 @@ def git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolated_skep_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Tests never touch the operator's ``~/.skep`` (CLAUDE.md) — reading it
+    included. v115-F11: a skep worker hands ``SKEP_HOME`` to its children, so
+    when skep verifies skep the suite ran with the operator's home in the
+    environment and every in-process worker picked up the operator's
+    provider and plugin shelf instead of the test's bare bootstrap path
+    ("real LLM provider calls require a task network allowlist")."""
+    monkeypatch.setenv("SKEP_HOME", str(tmp_path_factory.mktemp("skep-home")))
+
+
 @pytest.fixture()
 def repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
