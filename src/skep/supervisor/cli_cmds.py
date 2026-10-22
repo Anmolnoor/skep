@@ -17,6 +17,7 @@ import shutil
 import sys
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,18 @@ def _err(
     if next_command is not None:
         print(f"  next:     {next_command}", file=sys.stderr)
     return 2
+
+
+def _group_usage(parser: argparse.ArgumentParser) -> Callable[[argparse.Namespace], int]:
+    """v116-F4: a command group typed with no subcommand prints ITS usage, not
+    the top-level help (`skep channel`, `skep ops`, `skep repo` all fell
+    through to the whole command tree)."""
+
+    def _print(_args: argparse.Namespace) -> int:
+        parser.print_help()
+        return 2
+
+    return _print
 
 
 def _stdin_is_interactive() -> bool:
@@ -2436,6 +2449,27 @@ def cmd_pr_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_repo_list(args: argparse.Namespace) -> int:
+    """v116-F4: every repo skep can reach — the list_repos chat read and the
+    /repos deck had it; the CLI had only refresh and push-baseline."""
+    from .serve.registry import known_repos, repos_root
+    from .serve.settings import ConfigHolder
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        repos = known_repos(repos_root(ConfigHolder(config, store)), store)
+    finally:
+        store.close()
+    if not repos:
+        print("no repos registered.\n  add one: skep chat → register_repo <url>, or /workon <path>")
+        return 0
+    width = max(len(str(item["name"])) for item in repos)
+    for item in repos:
+        print(f"  {item['name']!s:<{width}}  {item['source']!s:<7}  {item['path']}")
+    return 0
+
+
 def cmd_repo_refresh(args: argparse.Namespace) -> int:
     """v104-F4: fetch origin and fast-forward the default branch.
 
@@ -3076,7 +3110,12 @@ def register_supervisor_commands(
     # lived only in REST and chat. Only `refresh` is added here: the verb an
     # operator actually needs to type before reasoning about staleness.
     repo_group = subcommands.add_parser("repo", help="registered repositories (v104)")
+    repo_group.set_defaults(func=_group_usage(repo_group))
     repo_sub = repo_group.add_subparsers(dest="repo_command")
+    repo_list = repo_sub.add_parser(
+        "list", help="every repo skep can reach: clones and workon dirs"
+    )
+    repo_list.set_defaults(func=cmd_repo_list)
     repo_refresh = repo_sub.add_parser(
         "refresh", help="fetch origin and fast-forward the default branch"
     )

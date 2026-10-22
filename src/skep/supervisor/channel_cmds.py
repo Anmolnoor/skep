@@ -69,7 +69,10 @@ def register_channel_commands(
     subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
     """``skep channel status``."""
+    from .cli_cmds import _group_usage  # local: cli_cmds registers this module
+
     channel = subcommands.add_parser("channel", help="messenger channel health (v87)")
+    channel.set_defaults(func=_group_usage(channel))  # v116-F4
     channel_sub = channel.add_subparsers(dest="channel_command")
 
     status_p = channel_sub.add_parser(

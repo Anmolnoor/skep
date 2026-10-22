@@ -806,7 +806,7 @@ def cmd_skill_shelf(args: argparse.Namespace) -> int:
     store = RunStore(config.db_path)
     try:
         action = args.shelf_action
-        if action is None:
+        if action is None or action == "list":  # v116-F4: `shelf list` is a face too
             shelves = skill_shelves(store)
             if not shelves:
                 print(
@@ -942,7 +942,10 @@ def register_skill_commands(
         "at serve start); no args lists them",
     )
     shelf_p.add_argument(
-        "shelf_action", nargs="?", choices=("add", "remove"), help="add or remove a shelf"
+        "shelf_action",
+        nargs="?",
+        choices=("list", "add", "remove"),
+        help="list (the default), add or remove a shelf",
     )
     shelf_p.add_argument("path", nargs="?", help="shelf directory, e.g. ~/.claude/skills")
     shelf_p.set_defaults(func=cmd_skill_shelf)

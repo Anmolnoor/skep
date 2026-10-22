@@ -13,6 +13,15 @@ def _run(home: Path, *args: str) -> int:
     return main(["--home", str(home), *args])
 
 
+def test_ops_with_no_subcommand_prints_its_usage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v116-F4: `skep ops` alone fell through to the top-level help."""
+    assert _run(tmp_path / "home", "ops") == 2
+    out = capsys.readouterr().out
+    assert "run" in out and "serve" not in out
+
+
 def test_node_add_and_list(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     home = tmp_path / "home"
     rc = _run(

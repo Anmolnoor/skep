@@ -482,7 +482,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "complete_task",
-        "Mark a task done immediately.",
+        # v116-F4: the Queen went searching repos to DO the task (I9).
+        "Mark an existing todo task as done by task_id — records that it is "
+        "finished; it does not do the work (dispatch_run or quick_edit do).",
         {"task_id": {"type": "string"}},
         ["task_id"],
     ),

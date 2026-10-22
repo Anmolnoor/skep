@@ -1904,6 +1904,38 @@ def test_run_turns_a_dispatch_refusal_into_an_answer(
     assert "not installed here" in err and "skep doctor" in err
 
 
+def test_repo_list_shows_clones_and_workon_dirs_and_the_group_prints_its_usage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v116-F4: the list_repos read had a chat face and a deck; the CLI had
+    only refresh and push-baseline. And `skep repo` alone printed the whole
+    command tree instead of its own usage."""
+    home = tmp_path / "home"
+    (home / "repos" / "clone-a" / ".git").mkdir(parents=True)
+    bound = tmp_path / "elsewhere" / "ws-b"
+    bound.mkdir(parents=True)
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="ws-b", name="ws-b", strategy="trusted_local_dev", phase="build", policy={}
+        )
+        store.add_project_binding(
+            project_id="ws-b", binding_kind="repo_path", binding_value=str(bound)
+        )
+    finally:
+        store.close()
+    assert _run_cli(home, "repo", "list") == 0
+    out = capsys.readouterr().out
+    assert "clone-a" in out and "clone" in out
+    assert "ws-b" in out and str(bound) in out
+
+    assert _run_cli(home, "repo") == 2
+    usage = capsys.readouterr().out
+    assert "list" in usage and "refresh" in usage and "push-baseline" in usage
+    assert "serve" not in usage, "the group prints its own usage, not the whole tree"
+
+
 def test_project_setup_verify_command_flag_pins_the_gate(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
