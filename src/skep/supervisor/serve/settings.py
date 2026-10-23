@@ -46,8 +46,20 @@ ALLOWED_SHELL_COMMANDS = "allowed_shell_commands"
 SESSION_ALLOWED_SHELL_COMMANDS = "session_allowed_shell_commands"
 ALLOWED_PLUGIN_RISKS = "allowed_plugin_risks"
 SANDBOX_BACKEND = "sandbox_backend"  # v44-F7: "auto" (native) | "podman"
+# P1 (ADR 0053 D6): the per-scope kill switch — scopes routed through engine v2.
+POLICY_ENGINE_V2_SCOPES = "policy_engine_v2_scopes"
 
 SANDBOX_BACKENDS = ("auto", "podman")
+
+
+def engine_v2_scopes_from(raw: object) -> list[str]:
+    """The stored switch, read fail-closed: known scopes only, sorted, deduped."""
+    from ..policy_schema import SCOPES
+
+    if not isinstance(raw, list):
+        return []
+    return sorted({item for item in raw if isinstance(item, str) and item in SCOPES})
+
 
 DEFAULT_TICKER_INTERVAL = 30
 DEFAULT_CARD_TIMEOUT = 300  # v54-F1: 5 minutes, then a pending card auto-DENIES
@@ -210,6 +222,7 @@ def policy_view(store: RunStore, config: SupervisorConfig) -> dict[str, Any]:
             allowed_plugin_risks if isinstance(allowed_plugin_risks, list) else []
         ),
         "sandbox_backend": config.sandbox_backend,
+        "policy_engine_v2_scopes": engine_v2_scopes_from(settings.get(POLICY_ENGINE_V2_SCOPES)),
     }
 
 

@@ -52,11 +52,26 @@ from ..castes import resolve_caste
 from ..config import SupervisorConfig
 from ..contracts_io import read_event_log
 from ..memory import MemoryError, MemoryProposal, MemorySource
+from ..policy_registry import registry_keys
 from ..policy_resolver import (
     PolicyResolutionError,
+    ResolvedRunPolicy,
+    engine_v2_scopes,
+    resolve_operator_policy,
     resolve_run_policy,
     resolved_shell_allowlist,
     run_policy_for_repo,
+)
+from ..policy_schema import (
+    OPERATOR_POLICY_SETTINGS_KEY,
+    POLICY_DOCUMENT_SETTINGS_KEY,
+    SCOPE_ACTIONS,
+    SCOPES,
+    PolicyDocument,
+    decide,
+    document_from_settings,
+    operator_document_from_settings,
+    pattern_matches,
 )
 from ..projects import (
     PROJECT_PHASES,
@@ -67,9 +82,14 @@ from ..projects import (
 )
 from ..provider_hosts import configured_provider_hosts
 from ..shell_prefixes import (
+    command_line_segments,
     dangerous_prefix_reason,
+    is_branch_switch_command,
+    is_history_rewrite_command,
     is_remote_git_command,
+    is_worker_commit_command,
     normalize_remembered_command,
+    queen_command_line_refusal,
 )
 from ..store import RunStore
 from .jobs import Dispatcher, DispatchError
@@ -97,6 +117,7 @@ from .settings import (
     DEFAULT_NETWORK,
     DEFAULT_WALL_CLOCK_SECONDS,
     EXECUTION_MODES,
+    POLICY_ENGINE_V2_SCOPES,
     SANDBOX_BACKEND,
     SANDBOX_BACKENDS,
     SANDBOX_REQUIRED_FOR,
@@ -106,6 +127,7 @@ from .settings import (
     TRUSTED_WORKSPACE_ROOTS,
     WORKER_CMD,
     ConfigHolder,
+    engine_v2_scopes_from,
     policy_view,
 )
 
@@ -127,6 +149,7 @@ POLICY_FIELDS = {
     "allowed_shell_commands": ALLOWED_SHELL_COMMANDS,
     "allowed_plugin_risks": ALLOWED_PLUGIN_RISKS,
     "sandbox_backend": SANDBOX_BACKEND,
+    "policy_engine_v2_scopes": POLICY_ENGINE_V2_SCOPES,
 }
 
 _POSITIVE_POLICY_FIELDS = {
@@ -1618,13 +1641,11 @@ def workon(
     }
 
 
-def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> dict[str, Any]:
-    """What a run against ``repo`` will ACTUALLY get (v23-F2).
-
-    Runs the same ``resolve_run_policy`` path a dispatch would — no side
-    effects — so the silent gaps (allowlist emptied by trust-root logic, repo
-    not bound to any project) become visible instead of debugging ghosts.
-    """
+def _repo_project_for_view(
+    holder: ConfigHolder, store: RunStore, repo: str
+) -> tuple[Path, list[tuple[str, str]], Any]:
+    """The resolved repo path, the binding candidates a dispatch would offer,
+    and the project they bind to (None when unbound)."""
     resolved_repo = resolve_repo_arg(repo, repos_root(holder), store)
     binding_candidates: list[tuple[str, str]] = []
     if (repos_root(holder) / repo / ".git").exists():
@@ -1634,16 +1655,337 @@ def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> d
         project = store.project_for_binding(kind, value)
         if project is not None:
             break
+    return resolved_repo, binding_candidates, project
+
+
+def _project_summary(project: Any) -> dict[str, Any] | None:
+    if project is None:
+        return None
+    return {
+        "project_id": project.project_id,
+        "name": project.name,
+        "strategy": project.strategy,
+        "phase": project.phase,
+    }
+
+
+def _resolve_for_view(
+    holder: ConfigHolder,
+    store: RunStore,
+    resolved_repo: Path,
+    binding_candidates: list[tuple[str, str]],
+) -> ResolvedRunPolicy:
+    """The same resolve_run_policy a dispatch runs — no side effects."""
+    return resolve_run_policy(
+        store=store,
+        config=holder.current,
+        repo=resolved_repo,
+        caste="coding",
+        network=None,
+        env_allowlist=None,
+        wall_clock_seconds=None,
+        max_iterations=None,
+        max_actions=None,
+        max_provider_calls=None,
+        execution_mode=None,
+        extra_network_hosts=_configured_provider_hosts(store, holder.current.home.parent),
+        binding_candidates=binding_candidates,
+    )
+
+
+def _split_layer(label: str, project: Any) -> tuple[str, str | None]:
+    """'group:npm-api' → ('group', 'npm-api'); 'project' → ('project', <id>)."""
+    if ":" in label:
+        layer, _, name = label.partition(":")
+        return layer, name
+    if label == "project" and project is not None:
+        return "project", str(project.project_id)
+    return label, None
+
+
+_RULE_KNOBS = (("net:", "default_network"), ("fs:root:", "trusted_workspace_roots"))
+
+
+def _compiled_rule_source(rule: Any, resolved: ResolvedRunPolicy) -> str:
+    """Which knob a compiled run-document rule came from, with its layer."""
+    rule_id = str(rule.rule_id)
+    if rule_id.startswith("shell:"):
+        argv = rule.pattern.split()
+        if argv in [list(a) for a in resolved.policy.get("allowed_shell_commands") or []]:
+            label = resolved.provenance.get("allowed_shell_commands", "global")
+            return f"allowed_shell_commands@{label}"
+        if argv in [list(a) for a in resolved.policy.get("session_allowed_shell_commands") or []]:
+            return "session_allowed_shell_commands@session"
+        return "compiled"
+    for prefix, knob in _RULE_KNOBS:
+        if rule_id.startswith(prefix):
+            return f"{knob}@{resolved.provenance.get(knob, 'global')}"
+    return "compiled"
+
+
+def _operator_rule_sources(store: RunStore) -> dict[str, str]:
+    base = (
+        document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
+    )
+    operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
+    sources: dict[str, str] = {}
+    for document, label in ((base, "policy_document"), (operator, "operator_policy_document")):
+        for scope_policy in document.scopes:
+            for group in (scope_policy.allow, scope_policy.require_approval, scope_policy.deny):
+                for rule in group:
+                    sources.setdefault(rule.rule_id, label)
+        for learned in document.learned:
+            sources.setdefault(learned.rule_id, f"learned:{learned.provenance}")
+    return sources
+
+
+def rsop_view(holder: ConfigHolder, store: RunStore, repo: str) -> dict[str, Any]:
+    """P0-3 (ADR 0052 D3): every effective key with the layer that decided it,
+    the layers it overrode, the compiled scope rules with their knob and
+    layer, the Queen's operator rules with their document, and the floor —
+    a read of the one engine (I5). Unresolved renders as unresolved (I8)."""
+    resolved_repo, binding_candidates, project = _repo_project_for_view(holder, store, repo)
+    view: dict[str, Any] = {"repo": str(resolved_repo), "project": _project_summary(project)}
+    try:
+        resolved = _resolve_for_view(holder, store, resolved_repo, binding_candidates)
+    except PolicyResolutionError as exc:
+        view["error"] = str(exc)
+        return view
+    settings = store.all_settings()
+    keys: list[dict[str, Any]] = []
+    names = sorted(
+        {key.name for key in registry_keys(system="run_policy")}
+        | {key for key in resolved.policy if not key.startswith("_")}
+    )
+    for key in names:
+        if key not in resolved.policy:
+            keys.append(
+                {
+                    "key": key,
+                    "value": None,
+                    "source_layer": None,
+                    "source_name": None,
+                    "overridden": [],
+                    "note": "not configured at any layer — the resolver's fallback",
+                }
+            )
+            continue
+        value = resolved.policy[key]
+        label = resolved.provenance.get(key, "global")
+        source_layer, source_name = _split_layer(label, project)
+        entry: dict[str, Any] = {
+            "key": key,
+            "value": value,
+            "source_layer": source_layer,
+            "source_name": source_name,
+            "overridden": [
+                {
+                    "layer": _split_layer(layer, project)[0],
+                    "name": _split_layer(layer, project)[1],
+                    "value": set_value,
+                }
+                for layer, set_value in resolved.provenance_chain.get(key, [])
+                if layer != label and set_value != value
+            ],
+        }
+        if label == "global" and key not in settings and key != "worker_cmd":
+            entry["source_layer"] = None
+            entry["source_name"] = None
+            entry["note"] = "not configured at any layer — the resolver's fallback"
+        keys.append(entry)
+    view["keys"] = keys
+    view["scopes"] = {
+        scope: [
+            {**asdict(rule), "source": _compiled_rule_source(rule, resolved)}
+            for rule in scope_policy.rules
+        ]
+        for scope, scope_policy in sorted(resolved.resolved_scopes.items())
+    }
+    operator = resolve_operator_policy(store)
+    operator_sources = _operator_rule_sources(store)
+    view["operator"] = {
+        scope: [
+            {
+                **asdict(rule),
+                "source": operator_sources.get(rule.rule_id, "operator_policy_document"),
+            }
+            for rule in scope_policy.rules
+        ]
+        for scope, scope_policy in sorted(operator.resolved_scopes.items())
+    }
+    view["floor"] = [key.name for key in registry_keys(system="floor")]
+    # P1 (ADR 0053 D6): which engine answered — the operator must see the
+    # cutover state where they read the policy (I8).
+    view["engine"] = resolved.policy_engine
+    return view
+
+
+def _check_scope_action(scope: str, action: str) -> None:
+    if scope not in SCOPE_ACTIONS:
+        raise ValueError(
+            f"unknown scope {scope!r}; known scopes: {', '.join(sorted(SCOPE_ACTIONS))}"
+        )
+    if action not in SCOPE_ACTIONS[scope]:
+        known = ", ".join(sorted(SCOPE_ACTIONS[scope]))
+        raise ValueError(f"scope {scope!r} has no action {action!r}; known: {known}")
+
+
+def _floor_verdict(scope: str, value: str) -> dict[str, Any] | None:
+    """I4: the floor sits ABOVE every document, so it is consulted before
+    ``decide()`` ever runs (F1 of the P3 review: the hook answered `ask` for
+    `git push`, the one command it exists to refuse). For a shell value the
+    floor is the Queen's own refusal set (v83-F9: the worker git guards
+    applied to the Queen's hands, privilege escalation, the catastrophic
+    commands) over every segment of the raw command line, and the verdict
+    names the registry's floor key — so RSoP, the why-query and the hook all
+    say the same thing. Not a rule: nothing in any layer can lift it."""
+    if scope != "shell":
+        return None
+    reason = queen_command_line_refusal(value)
+    if reason is None:
+        return None
+    git_floor = any(
+        is_remote_git_command(argv)
+        or is_worker_commit_command(argv)
+        or is_branch_switch_command(argv)
+        or is_history_rewrite_command(argv)
+        for argv in command_line_segments(value) or []
+    )
+    key = "floor.worker-git-hard-denies" if git_floor else "floor.never-grantable-prefixes"
+    return {"verdict": "deny", "rule_id": key, "decided_by": f"floor/{key}", "reason": reason}
+
+
+# The Queen-side lanes by definition (policy_schema.SCOPE_ACTIONS): search is
+# the Queen's keyless discovery, fetch the read_url granted-domain lane. An
+# outside agent asking about them is asking what the operator document says.
+_OPERATOR_LANES: frozenset[tuple[str, str]] = frozenset(
+    {("network", "search"), ("network", "fetch")}
+)
+
+
+def policy_decide(
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    scope: str,
+    action: str,
+    value: str,
+    repo: str | None = None,
+    actor: str = "api",
+) -> dict[str, Any]:
+    """P3 (ADR 0053; the CTO record's enforcement hook): ``decide()`` reachable
+    from outside, and RECORDED. With a repo, the run policy decides — the
+    engine a dispatch there would run under (the why-query, P0-3); without
+    one, for the Queen-side lanes, or when the repo is unknown or will not
+    resolve, the operator document decides and the record says which (I8).
+    Every call appends a line to ``<audit>/policy/decisions.jsonl`` — the
+    CTO success criterion "Claude Code runs produce decide() verdicts in the
+    audit trail". No second decision path (I5): it is the why-query, kept."""
+    _check_scope_action(scope, action)
+    record: dict[str, Any] = {
+        "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "actor": actor,
+        "repo": repo,
+        "scope": scope,
+        "action": action,
+        "value": value,
+    }
+    decision: dict[str, Any] | None = None
+    floor = _floor_verdict(scope, value)
+    if floor is not None:
+        decision = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
+        record["source"] = "floor"
+        record["note"] = floor["reason"]
+    elif repo and (scope, action) not in _OPERATOR_LANES:
+        try:
+            why = policy_why(holder, store, repo, scope, action, value)
+        except HTTPException as exc:
+            record["note"] = f"repo not resolvable: {exc.detail}"
+        else:
+            run = why["run"]
+            if "verdict" in run:
+                decision = {key: run[key] for key in ("verdict", "rule_id", "decided_by")}
+                record["project"] = why["project"]
+                record["source"] = "run"
+                if why["project"] is None:
+                    record["note"] = "repo is not bound to a project — the global run policy"
+            else:
+                record["note"] = f"run policy did not resolve: {run['error']}"
+    if decision is None:
+        operator = resolve_operator_policy(store).decision(scope, action, value)
+        decision = {
+            "verdict": operator.verdict,
+            "rule_id": operator.rule_id,
+            "decided_by": operator.decided_by,
+        }
+        record["source"] = "operator"
+    record.update(decision)
+    _append_policy_ledger(holder.current.audit_dir, "decisions", record)
+    return record
+
+
+def policy_why(
+    holder: ConfigHolder, store: RunStore, repo: str, scope: str, action: str, value: str
+) -> dict[str, Any]:
+    """P0-3 (ADR 0052 D4): would <scope>.<action> <value> in <repo> be allowed?
+    The same resolve_run_policy a dispatch runs, then decide() on the compiled
+    run document, plus the Queen's operator document — no dispatch, no record.
+    Unknown scope or action refuses naming the known set (I9)."""
+    _check_scope_action(scope, action)
+    resolved_repo, binding_candidates, project = _repo_project_for_view(holder, store, repo)
     view: dict[str, Any] = {
         "repo": str(resolved_repo),
-        "project": None
-        if project is None
-        else {
-            "project_id": project.project_id,
-            "name": project.name,
-            "strategy": project.strategy,
-            "phase": project.phase,
-        },
+        "project": _project_summary(project),
+        "scope": scope,
+        "action": action,
+        "value": value,
+    }
+    floor = _floor_verdict(scope, value)
+    if floor is not None:
+        # The floor binds workers AND the Queen (v83-F9): one answer, twice.
+        verdict = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
+        view["run"] = {**verdict, "considered": []}
+        view["operator"] = dict(verdict)
+        view["floor"] = floor["reason"]
+        return view
+    try:
+        resolved = _resolve_for_view(holder, store, resolved_repo, binding_candidates)
+    except PolicyResolutionError as exc:
+        view["run"] = {"error": str(exc)}
+    else:
+        template = resolved.document.template if resolved.document is not None else None
+        decision = decide(resolved.resolved_scopes, scope, action, value, template=template)
+        scope_policy = resolved.resolved_scopes.get(scope)
+        view["run"] = {
+            "verdict": decision.verdict,
+            "rule_id": decision.rule_id,
+            "decided_by": decision.decided_by,
+            "considered": [
+                asdict(rule)
+                for rule in (scope_policy.rules if scope_policy else ())
+                if rule.action == action and pattern_matches(scope, rule.pattern, value)
+            ],
+        }
+    operator = resolve_operator_policy(store).decision(scope, action, value)
+    view["operator"] = {
+        "verdict": operator.verdict,
+        "rule_id": operator.rule_id,
+        "decided_by": operator.decided_by,
+    }
+    return view
+
+
+def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> dict[str, Any]:
+    """What a run against ``repo`` will ACTUALLY get (v23-F2).
+
+    Runs the same ``resolve_run_policy`` path a dispatch would — no side
+    effects — so the silent gaps (allowlist emptied by trust-root logic, repo
+    not bound to any project) become visible instead of debugging ghosts.
+    """
+    resolved_repo, binding_candidates, project = _repo_project_for_view(holder, store, repo)
+    view: dict[str, Any] = {
+        "repo": str(resolved_repo),
+        "project": _project_summary(project),
     }
     if project is None:
         view["project_note"] = (
@@ -1651,21 +1993,7 @@ def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> d
             "`skep project setup` (or the setup_project action) applies a trust profile"
         )
     try:
-        resolved = resolve_run_policy(
-            store=store,
-            config=holder.current,
-            repo=resolved_repo,
-            caste="coding",
-            network=None,
-            env_allowlist=None,
-            wall_clock_seconds=None,
-            max_iterations=None,
-            max_actions=None,
-            max_provider_calls=None,
-            execution_mode=None,
-            extra_network_hosts=_configured_provider_hosts(store, holder.current.home.parent),
-            binding_candidates=binding_candidates,
-        )
+        resolved = _resolve_for_view(holder, store, resolved_repo, binding_candidates)
     except PolicyResolutionError as exc:
         view["error"] = str(exc)
         return view
@@ -3303,7 +3631,7 @@ def set_operator_policy_rule(
             # Dry-run the composition: a deny that would strand an existing
             # learned rule fails HERE, naming the conflict, not on every
             # later Queen decision.
-            resolve(base, overlays=(document,))
+            resolve(base, overlays=(document,), v2_scopes=engine_v2_scopes(store))
         except LearnedRuleRejected as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         store.set_setting(OPERATOR_POLICY_SETTINGS_KEY, document.model_dump_json())
@@ -3721,7 +4049,7 @@ def learn_policy_rule(
             return None
     updated = document.model_copy(update={"learned": [*document.learned, rule]})
     try:
-        resolve(updated)  # vets the learned rule against every deny
+        resolve(updated, v2_scopes=engine_v2_scopes(store))  # vets against every deny
     except LearnedRuleRejected as exc:
         raise ValueError(str(exc)) from exc
     store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
@@ -3956,6 +4284,25 @@ def clear_session_policy_rules(store: RunStore) -> int:
     return dropped
 
 
+def _append_policy_ledger(audit_dir: Path, name: str, payload: dict[str, Any]) -> None:
+    """One JSON line under ``<audit>/policy/<name>.jsonl`` — the policy
+    engine's own record (I8): engine flips (P1) and outside decisions (P3)."""
+    path = audit_dir / "policy" / f"{name}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+
+def _record_engine_flip(audit_dir: Path, before: list[str], after: list[str]) -> None:
+    """P1 (ADR 0053 D6/D7): every kill-switch flip is a line in the audit
+    trail — the 30-day ledger that decides when the old resolvers may go."""
+    _append_policy_ledger(
+        audit_dir,
+        "engine-flips",
+        {"at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"), "from": before, "to": after},
+    )
+
+
 def update_policy(store: RunStore, holder: ConfigHolder, updates: dict[str, Any]) -> dict[str, Any]:
     """Write the provided policy fields and return the rebuilt effective view."""
     unknown = set(updates) - set(POLICY_FIELDS)
@@ -3973,6 +4320,20 @@ def update_policy(store: RunStore, holder: ConfigHolder, updates: dict[str, Any]
             status_code=400,
             detail=f"sandbox_backend must be one of {list(SANDBOX_BACKENDS)}",
         )
+    # P1 (ADR 0053 D6): the kill switch takes known scopes only, and the
+    # refusal names the set (I9).
+    if updates.get("policy_engine_v2_scopes") is not None:
+        switch_scopes = _require_string_list(
+            updates["policy_engine_v2_scopes"], field="policy_engine_v2_scopes"
+        )
+        unknown_scopes = sorted(set(switch_scopes) - set(SCOPES))
+        if unknown_scopes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"policy_engine_v2_scopes: unknown scope(s) {unknown_scopes!r}; "
+                f"known: {', '.join(SCOPES)}",
+            )
+        updates["policy_engine_v2_scopes"] = sorted(set(switch_scopes))
     # v100-F7: `default_network` and `default_env_allowlist` used to fall through
     # to set_setting unvalidated, so a stringified array (the v95-F1 family the
     # Queen still produces) persisted verbatim and read back as its characters.
@@ -4002,9 +4363,13 @@ def update_policy(store: RunStore, holder: ConfigHolder, updates: dict[str, Any]
     for field in _NONNEGATIVE_POLICY_FIELDS:
         if updates.get(field) is not None:
             updates[field] = _require_int(updates[field], field=field, minimum=0)
+    flips_before = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
     for field, key in POLICY_FIELDS.items():
         if updates.get(field) is not None:
             store.set_setting(key, updates[field])
+    flips_after = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
+    if flips_before != flips_after:
+        _record_engine_flip(holder.current.audit_dir, flips_before, flips_after)
     view = dict(policy_view(store, holder.rebuild()))
     # v23-F6 → v81-F14: the global toggle is INERT now — the write persists
     # for display but installs no rule; say so on every write.

@@ -29,6 +29,7 @@ from skep.worker_contract import (
 
 from .castes import CASTES
 from .config import SupervisorConfig
+from .policy_registry import registry_keys
 from .policy_schema import (
     OPERATOR_POLICY_SETTINGS_KEY,
     POLICY_DOCUMENT_SETTINGS_KEY,
@@ -48,7 +49,12 @@ from .projects import (
     phase_default_policy,
     stored_policy_groups,
 )
-from .serve.settings import RUN_EXECUTION_MODES, policy_view
+from .serve.settings import (
+    POLICY_ENGINE_V2_SCOPES,
+    RUN_EXECUTION_MODES,
+    engine_v2_scopes_from,
+    policy_view,
+)
 from .store import ProjectPolicyRecord, RunStore
 
 _PROJECT_RUN_POLICY_FIELDS = PROJECT_POLICY_KEYS
@@ -104,6 +110,11 @@ class ResolvedRunPolicy:
     # "global", "phase:<phase>", "project", "group:<name>", "trusted-roots".
     # Pure provenance: recording it never changes the resolution result.
     provenance: dict[str, str] = field(default_factory=dict)
+    # P0-3: key → [(layer label, value), …] in application order.
+    provenance_chain: dict[str, list[tuple[str, Any]]] = field(default_factory=dict)
+    # P1 (ADR 0053 D6): which scopes answered from policy engine v2, which
+    # knobs that routed, and the rule refusals the v2 stack recorded (D5).
+    policy_engine: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -191,10 +202,19 @@ def run_policy_for_repo(
     """
     policy = dict(policy_view(store, config))
     provenance: dict[str, str] = dict.fromkeys(policy, "global")
+    # P0-3 (ADR 0052 D3): beside the one label, the whole chain — every layer
+    # that set the key, in application order, with the value it set. RSoP
+    # renders the losers as "overridden". Recorded only; the resolution
+    # result is untouched (the v109-F9 contract), and resolve_run_policy pops
+    # it like the label.
+    chain: dict[str, list[tuple[str, Any]]] = {
+        key: [("global", value)] for key, value in policy.items()
+    }
     match = _match_project_for_repo(store, repo, binding_candidates=binding_candidates)
     effective = dict(policy)
 
     def _layer_set(key: str, value: Any, label: str) -> None:
+        chain.setdefault(key, []).append((label, value))
         if key not in effective or effective[key] != value:
             provenance[key] = label
         effective[key] = value
@@ -252,8 +272,53 @@ def run_policy_for_repo(
         if managed not in roots:
             roots.append(managed)
             _layer_set("trusted_workspace_roots", roots, "trusted-roots")
+    # P1 (ADR 0053 D6): the strangler seam. For every knob whose scope the
+    # kill switch routes through v2, the stack's answer replaces v1's —
+    # value, label and chain alike — so a flipped scope is really answered by
+    # the new engine and the golden diff (not a comment) proves parity.
+    flipped = engine_v2_scopes_from(policy.get(POLICY_ENGINE_V2_SCOPES))
+    engine: dict[str, Any] = {"v2_scopes": flipped}
+    if flipped:
+        from dataclasses import asdict
+
+        from .policy_engine import resolve_stack
+        from .policy_layers import layers_for_repo
+
+        layers, _missing = layers_for_repo(
+            store, config, repo, binding_candidates=binding_candidates
+        )
+        stack = resolve_stack(layers)
+        routed: list[str] = []
+        for registered in registry_keys(system="run_policy"):
+            if registered.scope not in flipped:
+                continue
+            knob = stack.knobs.get(registered.name)
+            if knob is None:
+                continue
+            routed.append(registered.name)
+            if knob.resolved:
+                effective[registered.name] = knob.value
+                provenance[registered.name] = knob.source or "global"
+                chain[registered.name] = [
+                    (entry.layer, entry.result)
+                    for entry in knob.chain
+                    if entry.outcome != "refused"
+                ]
+            else:
+                effective.pop(registered.name, None)
+                provenance.pop(registered.name, None)
+                chain.pop(registered.name, None)
+        engine["routed_keys"] = routed
+        engine["rule_refusals"] = [asdict(refusal) for refusal in stack.refusals]
     effective["_provenance"] = provenance
+    effective["_provenance_chain"] = chain
+    effective["_engine"] = engine
     return effective
+
+
+def engine_v2_scopes(store: RunStore) -> tuple[str, ...]:
+    """The scopes the kill switch routes through engine v2 (P1, D6)."""
+    return tuple(engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES)))
 
 
 def project_cache_root(store: RunStore, config: SupervisorConfig, repo: Path) -> Path:
@@ -540,6 +605,8 @@ def resolve_run_policy(
     # serialized run policy stays exactly what it was; the map rides the
     # ResolvedRunPolicy for the effective-policy view.
     provenance = dict(policy.pop("_provenance", None) or {})
+    provenance_chain = dict(policy.pop("_provenance_chain", None) or {})
+    policy_engine = dict(policy.pop("_engine", None) or {})
     # v97-F2 (ADR 0048): a dangling group attach fails the dispatch closed —
     # silently running without the grants the project thinks it has would be
     # a policy the record cannot explain (I8), so the refusal teaches (I9).
@@ -669,7 +736,7 @@ def resolve_run_policy(
         shell_allowlist=_shell_allowlist_for(policy, repo, resolved_execution_mode),
         trusted_roots=trusted_roots,
     )
-    resolved_scopes = resolve(document)
+    resolved_scopes = resolve(document, v2_scopes=tuple(policy_engine.get("v2_scopes") or ()))
     chosen_env = list(policy["default_env_allowlist"] if env_allowlist is None else env_allowlist)
     # v94-F3: ADR 0047 §3 applied to env — whatever an engine cannot function
     # without is merged on every creation path, like its API host. Claude
@@ -718,6 +785,8 @@ def resolve_run_policy(
         verify_command=verify_command,
         coding_engine=chosen_engine.name,
         provenance=provenance,
+        provenance_chain=provenance_chain,
+        policy_engine=policy_engine,
     )
 
 
@@ -816,5 +885,5 @@ def resolve_operator_policy(store: RunStore) -> ResolvedOperatorPolicy:
     operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
     return ResolvedOperatorPolicy(
         template=base.template or operator.template,
-        resolved_scopes=resolve(base, overlays=(operator,)),
+        resolved_scopes=resolve(base, overlays=(operator,), v2_scopes=engine_v2_scopes(store)),
     )

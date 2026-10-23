@@ -19,6 +19,9 @@ jobs:
   checks:
     name: checks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The suite takes ~7 min; a runner whose apt mirror is unreachable once
+    # sat in `apt-get update` for the full 6-hour default (PR #33, d21014b).
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -31,6 +34,10 @@ jobs:
       - name: Install Linux sandbox backend
         if: runner.os == 'Linux'
         run: |
+          # Retries + a short HTTP timeout, so an unreachable mirror fails in
+          # minutes (PR #33: apt sat 6 hours). Config file, not flags: the
+          # install line below is pinned by test_ci_workflow.
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/99ci-timeouts
           sudo apt-get update
           sudo apt-get install -y bubblewrap ripgrep
       - name: Install ripgrep (macOS)
@@ -69,6 +76,7 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write

@@ -77,6 +77,10 @@ def repo(tmp_path: Path) -> Path:
     git(repo, "init", "-q", "-b", "main")
     git(repo, "config", "user.email", "test@example.com")
     git(repo, "config", "user.name", "Test")
+    # No background git maintenance beside a test: a commit may detach
+    # `gc --auto`, whose transient .git/objects/maintenance.lock raced a
+    # copytree of this repo on the macOS runner (PR #33 CI).
+    git(repo, "config", "gc.auto", "0")
     (repo / "existing.py").write_text("value = 0\n")
     git(repo, "add", "existing.py")
     git(repo, "commit", "-qm", "seed")

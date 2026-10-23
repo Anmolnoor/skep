@@ -110,6 +110,10 @@ class ProjectRequest(BaseModel):
     phase: str
     policy: dict[str, Any] = Field(default_factory=dict)
     bindings: list[ProjectBindingRequest] = Field(default_factory=list)
+    # P2 (ADR 0053): the editor re-POSTs the definition it GOT to edit the
+    # overlay; the pack a setup pinned must survive that round trip.
+    pack_name: str | None = None
+    pack_version: str | None = None
 
 
 class ProjectSetupRequest(BaseModel):
@@ -470,12 +474,23 @@ def remove_registered_repo(store: RunStore, root: Path, name: str) -> dict[str, 
 
 
 def _remove_repo_tree(path: Path) -> None:
+    """Remove the clone, riding out a run's own teardown underneath it.
+
+    A just-finished run prunes its worktree bookkeeping (.git/worktrees/
+    <task_id>) a beat after it is terminal; rmtree walking the clone at the
+    same moment sees either a directory that is not empty YET (ENOTEMPTY) or
+    an entry that vanished between listing and rmdir (ENOENT — the PR #33 CI
+    failure on ubuntu). Both are the same race, and the outcome we want is
+    the tree gone: retry briefly, and stop as soon as it is.
+    """
     for attempt in range(5):
         try:
             shutil.rmtree(path)
             return
         except OSError as exc:
-            if exc.errno != errno.ENOTEMPTY or attempt == 4:
+            if not path.exists():
+                return
+            if exc.errno not in (errno.ENOTEMPTY, errno.ENOENT) or attempt == 4:
                 raise
             time.sleep(0.05)
 
@@ -1598,6 +1613,8 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     ProjectBinding(kind=binding.kind, value=binding.value)
                     for binding in body.bindings
                 ],
+                pack_name=body.pack_name,
+                pack_version=body.pack_version,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

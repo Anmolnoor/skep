@@ -53,6 +53,8 @@ from .actions import (
     patch_path,
     pending_approval_or_409,
     policy_block_views,
+    policy_decide,
+    policy_why,
     preserved_resumable_hint,
     project_context_detail_view,
     refresh_repo,
@@ -64,6 +66,7 @@ from .actions import (
     reverification_event_view_for_task,
     reverification_warning,
     revoke_policy_rule,
+    rsop_view,
     run_summary_view,
     set_policy_group,
     submit_run,
@@ -199,6 +202,19 @@ class PolicyUpdate(BaseModel):
     allowed_plugin_risks: list[str] | None = None
     # v44-F7: worker sandbox backend — "auto" (native Seatbelt/bwrap) | "podman".
     sandbox_backend: Literal["auto", "podman"] | None = None
+    # P1 (ADR 0053 D6): scopes routed through policy engine v2.
+    policy_engine_v2_scopes: list[str] | None = None
+
+
+class PolicyDecideRequest(BaseModel):
+    """Body of ``POST /api/policy/decide`` (P3, ADR 0053): one scoped action
+    an outside agent is about to take. ``repo`` = the checkout it acts in."""
+
+    scope: str
+    action: str
+    value: str
+    repo: str | None = None
+    actor: str = "api"
 
 
 class DefaultWorkspaceRequest(BaseModel):
@@ -474,6 +490,43 @@ def create_app(
     def get_effective_policy(name: str) -> dict[str, Any]:
         """v23-F2: what a run against this repo will ACTUALLY get."""
         return effective_policy_view(holder, run_store, name)
+
+    @app.get("/api/repos/{name:path}/rsop")
+    def get_rsop(name: str) -> dict[str, Any]:
+        """P0-3 (ADR 0052): resultant policy with the override chain."""
+        return rsop_view(holder, run_store, name)
+
+    @app.get("/api/policy/registry")
+    def get_policy_registry() -> dict[str, Any]:
+        """P0-1 (ADR 0052): every policy setting, as metadata."""
+        from ..policy_registry import registry_view
+
+        return registry_view()
+
+    @app.get("/api/policy/why")
+    def get_policy_why(repo: str, scope: str, action: str, value: str) -> dict[str, Any]:
+        """P0-3 (ADR 0052): would <scope>.<action> <value> be allowed in <repo>?"""
+        try:
+            return policy_why(holder, run_store, repo, scope, action, value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/policy/decide")
+    def post_policy_decide(body: PolicyDecideRequest) -> dict[str, Any]:
+        """P3 (ADR 0053): decide() for an outside agent — the why-query,
+        recorded in <audit>/policy/decisions.jsonl."""
+        try:
+            return policy_decide(
+                holder,
+                run_store,
+                scope=body.scope,
+                action=body.action,
+                value=body.value,
+                repo=body.repo,
+                actor=body.actor,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/repos/{name:path}/state")
     def get_repo_state(name: str) -> dict[str, Any]:

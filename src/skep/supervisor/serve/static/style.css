@@ -1318,6 +1318,10 @@ pre.log, pre.diff {
 .learned-rule-row .mono { word-break: break-all; }
 .learned-rule-row button { margin-left: auto; }
 .rsop-table td { word-break: break-word; vertical-align: top; }
+/* P2 (ADR 0053): the registry-driven editor — one control column per knob. */
+.rsop-editor td:first-child, .rsop-editor td:nth-child(5) { white-space: nowrap; }
+.rsop-editor .editor-ctl { display: flex; flex-direction: column; gap: var(--space-1); min-width: 160px; }
+.rsop-editor .row { flex-wrap: wrap; gap: var(--space-1); }
 .shell-cmd-list { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; }
 .shell-cmd-row { display: flex; gap: 6px; align-items: center; }
 .shell-cmd-row input { flex: 1; min-width: 0; }

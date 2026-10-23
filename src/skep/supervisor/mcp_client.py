@@ -489,7 +489,9 @@ def mcp_scope_decision(store: RunStore, tool: MCPTool) -> AutonomyDecision:
 
     raw = store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)
     document = document_from_settings(raw) or PolicyDocument()
-    resolved = resolve(document)
+    from .policy_resolver import engine_v2_scopes
+
+    resolved = resolve(document, v2_scopes=engine_v2_scopes(store))
     scope, action = mcp_tool_scope_action(store, tool)
     value = f"{tool.server_id}:{tool.name}"
     decision = decide(resolved, scope, action, value, template=document.template)
