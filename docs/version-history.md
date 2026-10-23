@@ -2639,3 +2639,115 @@ folded its tool into allow_command_review, F6 trimmed). Also: the main
 branch arrived with a failing release-checklist pin from the README
 front-page rewrite — repaired first, per the no-pre-existing-failures
 rule.
+
+## v110 — the subject table lied (2026-08-09, F1–F2)
+
+Two chat-card fixes from the first days on the public tree. F1: the card
+subject table keyed `merge_pr`/`close_pr` on the wrong argument, so a card
+could headline one PR and act on another — it now keys on the real `pr`
+arg. F2: a card that dies server-side drops its buttons instead of
+offering a confirm that can no longer land. (A separate "fleet sync"
+branch also wore the v110 number; it was closed unmerged and never
+shipped.)
+
+## v111 — doctor sees what serve sees (2026-08-12, F1–F6)
+
+F1: `skep serve` loads `~/.skep/serve.env` at startup, so engine auth env
+can live beside the store instead of the shell that happened to start the
+daemon. F2–F6: `skep doctor` reads the live memory store rather than a
+retired path, probes each engine's auth env (not just its binary — and it
+counts `serve.env`), gives the codex entry the v94-F3/v106-F1 treatment it
+never had, and names the store files retired layouts left behind.
+
+## v112 — the keep choice on the card (2026-08-12, F1–F3)
+
+F1: the keep choice (once, session, always) rides the card confirm itself,
+so one click records both the decision and how long it stands. F2: the
+evidence bundle is offered at decision time, not only built afterwards.
+F3: the ledger's remember nudge gets a face on the Approvals view.
+
+## v113 — the restart: skep maintains skep (2026-10-21)
+
+After two months unreleased, the operator restarted by registering skep
+as its own `maintain` project and landing the open Dependabot alerts
+through skep's own cards — A0 found the provider key dead for inference
+while `doctor` said ready (fixed as v115-F5); A4, the starlette bump, was
+the first real self-maintenance run and took eight attempts, each one a
+v115 fix (PR #29 is the patch skep landed on itself). The ACP adapter
+(Part B) stays open on the Restart Plan; A7/A8 hygiene and record
+catch-up land with this release.
+
+## v114 — the policy engine under a hostile operator (2026-10-21, F1–F5)
+
+A field test that tried to make the Queen misbehave. F1: the Queen shell
+guard judges the command's targets, not only its cwd (`shell.deny.repo_
+target`; a nine-probe table test). F2: `persist_remembered_command` is the
+one writer of a remembered command, and CLI, REST and chat all name the
+tier. F3: `--yes` is one consent, never a standing grant and never a
+policy write; terminal confirms carry `keep=once`; policy cards are marked
+and left pending. F4: a plan step must be a step, and the run summary is
+built from what ran. F5: a denied non-verify step no longer kills a plan
+run, and a resume resumes. F6–F14 were cut into v115 and v116.
+
+## v115 — the record tells the truth (2026-10-21/22, F1–F16)
+
+Sixteen fixes, eleven of them found by skep's own self-maintenance
+attempts on the starlette bump. F1: a resumed parent is superseded on
+every face and the run page names its successor. F2: `skep run` tails
+only its own dispatch's events. F3: terminal-chat receipts say what the
+verdict was and why; `/approve` and `/deny` find a card across chats. F4:
+CLI approve persists the landing branch. F5: `doctor` probes a real
+completion and reconciles the two model truths. F6: the worker's
+per-command cap follows the task budget, and a timeout is a failed
+command. F7: a CLI resume keeps the run's execution mode. F8: a worker
+gets a startup allowance before its first event (the CI flake class,
+root-caused). F9: loopback is not egress. F10: a live worktree's own paths
+are not dead-worktree references. F11: the suite survives the environment
+a skep worker gives it. F12: a failed re-verification keeps what the
+re-run said (`reverify.output.txt` in the audit dir). F13: a lockfile
+patch is re-verified against its own dependencies. F14: Unix-domain
+sockets are files, not egress — the seatbelt profile says so. F15: the
+landing lane judges the patch (`git apply --numstat`), never the worker's
+claim. F16: `skep run` lands maintain patches on the project's integration
+branch, with `auto_apply_branch` read from project policy. PRs #21–#31.
+
+## v116 — every refusal teaches, every verb has one face (2026-10-22, F1–F4)
+
+F1: an engine pin never wins silently — `--worker-cmd` under an external
+pin refuses naming both, `skep run --engine` is the explicit override, and
+dispatch pre-checks the engine's auth env and asks doctor's question.
+F2: one name, two repos — a bare name that matches both a clone and a
+bound dir is a 409, and neither path may claim the other's name. F3: the
+repo-cwd denial leads with the read lanes, then the write lanes, then the
+standing rule. F4: `skep repo list`, group usage for the channel/ops/repo
+groups, `skill shelf list`, and `complete_task` says it records rather
+than does. PR #32.
+
+## policy-engine-rewrite P0–P3 — one policy engine (2026-10-22)
+
+The operator's decision (`.10x/decisions/cto/policy-engine-rewrite.md`,
+ADR drafts 0052/0053): the four policy systems become one, by strangler.
+P0: a registry of every policy key, a characterization harness that
+freezes the real home's seven projects as golden files, and a resultant-
+policy view with the override chain plus a `why` query on chat, REST and
+CLI. P1: engine v2 — one layer stack where each statement sets, extends
+or clears (the golden proved a project list REPLACES the global one while
+groups extend it, so union is a statement mode), `enforced` refuses lower
+layers by name, the floor stays outside; the reader derives layers from
+today's stores without rewriting them; a per-scope kill switch
+(`policy_engine_v2_scopes`, default off) routes flipped scopes through v2
+with every flip in `<audit>/policy/engine-flips.jsonl`; parity is proven
+with all seven scopes flipped. P2: the Policies page gains a registry-
+driven "Resolve & edit" tier. P3: `decide()` reachable from outside —
+`POST /api/policy/decide`, `skep policy decide|hook` (the Claude Code
+PreToolUse hook) — every verdict recorded, and the floor consulted before
+any document so `git push` is denied, never asked. PR #33.
+
+## v1.1.0 — the policy engine (2026-10-22)
+
+The first release since 1.0.2 (2026-08-03): v107–v116 and the policy-
+engine rewrite P0–P3 above. Operator note: the engine switch ships OFF —
+flip `shell` first, after the golden parity suite is green; install the
+Claude Code hook from `docs/policy-hook.md`. Linux/macOS CI gates stay
+the same, with job timeouts so an unreachable apt mirror fails in minutes.
+

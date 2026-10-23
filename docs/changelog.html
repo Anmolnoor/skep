@@ -50,17 +50,17 @@
   <section class="wrap" style="padding-bottom: clamp(32px, 4vw, 48px);">
     <div style="padding: clamp(22px, 3vw, 32px); border: 1px solid rgba(123,224,140,0.3); border-radius: 14px; background: var(--bg-card);">
       <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 14px;">
-        <span class="mono" style="font-size: 22px; font-weight: 600; color: var(--text-bright);">v1.0.2</span>
+        <span class="mono" style="font-size: 22px; font-weight: 600; color: var(--text-bright);">v1.1.0</span>
         <span class="pill" style="background: rgba(123,224,140,0.13); color: var(--green);">Latest</span>
-        <span class="mono" style="font-size: 12.5px; color: var(--text-ghost);">2026-08-03 · PyPI + GitHub release</span>
+        <span class="mono" style="font-size: 12.5px; color: var(--text-ghost);">2026-10-22 · PyPI + GitHub release</span>
       </div>
-      <p style="margin: 0 0 16px; max-width: 74ch; font-size: 15px; line-height: 1.65; color: var(--text-mid);">The v106 audit round. External coding engines get a writable <span class="mono" style="font-size: 13.5px; color: var(--orange-soft);">.toolchain/</span> home inside the sandboxed workspace — Claude Code's own tooling and <span class="mono" style="font-size: 13.5px;">npm install</span> now survive a run; the worker heartbeats through long commands instead of reading as dead. Re-verification stops saying "could not re-verify" when it ran and failed — the unconfirmed verdict is on the approval card <em>before</em> you say yes. Tool results pair by call id, Discord approval buttons ack inside the 3-second deadline, card timeouts measure operator absence, and <span class="mono" style="font-size: 13.5px;">skep doctor</span> names poisoned and dead repo registrations.</p>
+      <p style="margin: 0 0 16px; max-width: 74ch; font-size: 15px; line-height: 1.65; color: var(--text-mid);">The policy engine, one layer. Every policy key skep has is enumerable from a registry; a resultant-policy view says which layer decided each key and what lost, and <span class="mono" style="font-size: 13.5px;">skep policy why</span> answers "would this be allowed?" for the run and the Queen. Engine v2 composes rules and knobs in one stack behind a per-scope kill switch, proven byte-equal against the real home's frozen golden files. The Policies page edits any knob at any layer, and <span class="mono" style="font-size: 13.5px;">skep policy hook</span> puts the same engine in front of Claude Code's own tool calls — the floor consulted first, every verdict in the audit trail. Plus two months of field fixes (v107–v116): skep maintaining skep, honest records on every face, and refusals that teach.</p>
       <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-        <span class="pill" style="background: rgba(123,224,140,0.1); color: var(--green);">Engine toolchains</span>
-        <span class="pill" style="background: rgba(103,211,232,0.1); color: #67D3E8;">Honest re-verify</span>
-        <span class="pill" style="background: rgba(255,107,31,0.1); color: var(--orange-soft);">Discord ack</span>
-        <span class="pill" style="background: rgba(167,139,250,0.12); color: #A78BFA;">Doctor</span>
-        <span class="pill" style="background: rgba(242,179,94,0.12); color: var(--yellow);">Parallel CI</span>
+        <span class="pill" style="background: rgba(123,224,140,0.1); color: var(--green);">Policy registry + RSoP</span>
+        <span class="pill" style="background: rgba(103,211,232,0.1); color: #67D3E8;">Engine v2, per-scope switch</span>
+        <span class="pill" style="background: rgba(255,107,31,0.1); color: var(--orange-soft);">Policy editor</span>
+        <span class="pill" style="background: rgba(167,139,250,0.12); color: #A78BFA;">Claude Code hook</span>
+        <span class="pill" style="background: rgba(242,179,94,0.12); color: var(--yellow);">skep maintains skep</span>
       </div>
       <div style="display: flex; flex-wrap: wrap; gap: 18px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line-inner); font-size: 13.5px; color: var(--text-dim);">
         <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="package" style="width: 15px; height: 15px; color: var(--green);"></i><span class="mono" style="font-size: 12.5px;">pipx install skep</span></span>
@@ -77,6 +77,11 @@
       <p style="margin: 0 0 34px; max-width: 62ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Milestones from the internal version history — each one field-tested, fixed, and landed with its own evidence before the next began.</p>
 
       <div class="timeline">
+        <div class="t-item major">
+          <div class="when">2026-10-22 · v1.1.0</div>
+          <h3>One policy engine</h3>
+          <p>The four policy systems become one by strangler: a registry of every key, golden files frozen from the real home, resultant policy with the override chain and a why-query on three faces, engine v2 behind a per-scope kill switch with parity proven for all seven scopes, a registry-driven editor, and a Claude Code PreToolUse hook that consults the floor first and records every verdict. Before it, v107–v116: skep registered as its own maintain project and landed its first self-made patch after eight attempts, each one a fix.</p>
+        </div>
         <div class="t-item">
           <div class="when">2026-08-03 · v1.0.2</div>
           <h3>The v106 audit round goes public</h3>
