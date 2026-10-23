@@ -1222,3 +1222,47 @@ def test_rest_branch_routes_create_and_merge_refusing_default(
     default = client.post("/api/repos/fixture/branches/main/merge", json={"source": "feature-x"})
     assert default.status_code in (400, 409), default.text
     assert "default" in default.json()["detail"]
+
+
+def test_remove_repo_tree_rides_out_a_worktree_pruned_mid_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #33 CI (ubuntu): a run's teardown pruned .git/worktrees/<task_id>
+    while rmtree was walking the clone — ENOENT on the rmdir, not ENOTEMPTY.
+    The helper retries both and stops as soon as the tree is gone."""
+    import errno as errno_module
+    import shutil as shutil_module
+
+    from skep.supervisor.serve import registry as registry_module
+
+    clone = tmp_path / "repos" / "fixture"
+    bookkeeping = clone / ".git" / "worktrees" / "01a16693-task"
+    bookkeeping.mkdir(parents=True)
+    (bookkeeping / "gitdir").write_text("x")
+    real_rmtree = shutil_module.rmtree
+    calls: list[int] = []
+
+    def racing_rmtree(path: Path) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            # The worker's prune wins the race for the bookkeeping dir, and
+            # the walk's rmdir then finds it gone.
+            real_rmtree(bookkeeping)
+            raise FileNotFoundError(errno_module.ENOENT, "No such file or directory", "01a16693")
+        real_rmtree(path)
+
+    # The helper reads shutil.rmtree at call time; patch it on the module.
+    monkeypatch.setattr(shutil_module, "rmtree", racing_rmtree)
+    registry_module._remove_repo_tree(clone)
+    assert not clone.exists() and len(calls) == 2
+
+    # Already gone entirely: nothing to do, no error.
+    calls.clear()
+
+    def vanished(path: Path) -> None:
+        calls.append(1)
+        raise FileNotFoundError(errno_module.ENOENT, "No such file or directory", str(path))
+
+    monkeypatch.setattr(shutil_module, "rmtree", vanished)
+    registry_module._remove_repo_tree(tmp_path / "repos" / "never-there")
+    assert calls == [1]

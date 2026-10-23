@@ -34,8 +34,12 @@ jobs:
       - name: Install Linux sandbox backend
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y bubblewrap ripgrep
+          # Retries + a short HTTP timeout, so an unreachable mirror fails in
+          # minutes (PR #33: apt sat 6 hours). Config file, not flags: the
+          # install line below is pinned by test_ci_workflow.
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\n' | sudo tee /etc/apt/apt.conf.d/99ci-timeouts
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep
       - name: Install ripgrep (macOS)
         if: runner.os == 'macOS'
         run: brew install ripgrep
