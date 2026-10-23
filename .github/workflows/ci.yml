@@ -19,6 +19,9 @@ jobs:
   checks:
     name: checks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The suite takes ~7 min; a runner whose apt mirror is unreachable once
+    # sat in `apt-get update` for the full 6-hour default (PR #33, d21014b).
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -31,8 +34,8 @@ jobs:
       - name: Install Linux sandbox backend
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap ripgrep
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y bubblewrap ripgrep
       - name: Install ripgrep (macOS)
         if: runner.os == 'macOS'
         run: brew install ripgrep
@@ -69,6 +72,7 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
