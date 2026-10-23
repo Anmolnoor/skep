@@ -82,9 +82,14 @@ from ..projects import (
 )
 from ..provider_hosts import configured_provider_hosts
 from ..shell_prefixes import (
+    command_line_segments,
     dangerous_prefix_reason,
+    is_branch_switch_command,
+    is_history_rewrite_command,
     is_remote_git_command,
+    is_worker_commit_command,
     normalize_remembered_command,
+    queen_command_line_refusal,
 )
 from ..store import RunStore
 from .jobs import Dispatcher, DispatchError
@@ -1825,6 +1830,31 @@ def _check_scope_action(scope: str, action: str) -> None:
         raise ValueError(f"scope {scope!r} has no action {action!r}; known: {known}")
 
 
+def _floor_verdict(scope: str, value: str) -> dict[str, Any] | None:
+    """I4: the floor sits ABOVE every document, so it is consulted before
+    ``decide()`` ever runs (F1 of the P3 review: the hook answered `ask` for
+    `git push`, the one command it exists to refuse). For a shell value the
+    floor is the Queen's own refusal set (v83-F9: the worker git guards
+    applied to the Queen's hands, privilege escalation, the catastrophic
+    commands) over every segment of the raw command line, and the verdict
+    names the registry's floor key — so RSoP, the why-query and the hook all
+    say the same thing. Not a rule: nothing in any layer can lift it."""
+    if scope != "shell":
+        return None
+    reason = queen_command_line_refusal(value)
+    if reason is None:
+        return None
+    git_floor = any(
+        is_remote_git_command(argv)
+        or is_worker_commit_command(argv)
+        or is_branch_switch_command(argv)
+        or is_history_rewrite_command(argv)
+        for argv in command_line_segments(value) or []
+    )
+    key = "floor.worker-git-hard-denies" if git_floor else "floor.never-grantable-prefixes"
+    return {"verdict": "deny", "rule_id": key, "decided_by": f"floor/{key}", "reason": reason}
+
+
 # The Queen-side lanes by definition (policy_schema.SCOPE_ACTIONS): search is
 # the Queen's keyless discovery, fetch the read_url granted-domain lane. An
 # outside agent asking about them is asking what the operator document says.
@@ -1861,7 +1891,12 @@ def policy_decide(
         "value": value,
     }
     decision: dict[str, Any] | None = None
-    if repo and (scope, action) not in _OPERATOR_LANES:
+    floor = _floor_verdict(scope, value)
+    if floor is not None:
+        decision = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
+        record["source"] = "floor"
+        record["note"] = floor["reason"]
+    elif repo and (scope, action) not in _OPERATOR_LANES:
         try:
             why = policy_why(holder, store, repo, scope, action, value)
         except HTTPException as exc:
@@ -1905,6 +1940,14 @@ def policy_why(
         "action": action,
         "value": value,
     }
+    floor = _floor_verdict(scope, value)
+    if floor is not None:
+        # The floor binds workers AND the Queen (v83-F9): one answer, twice.
+        verdict = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
+        view["run"] = {**verdict, "considered": []}
+        view["operator"] = dict(verdict)
+        view["floor"] = floor["reason"]
+        return view
     try:
         resolved = _resolve_for_view(holder, store, resolved_repo, binding_candidates)
     except PolicyResolutionError as exc:

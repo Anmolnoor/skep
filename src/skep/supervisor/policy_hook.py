@@ -78,10 +78,15 @@ def hook_output(record: dict[str, Any] | None, *, error: str | None = None) -> d
         decision = _HOOK_DECISIONS.get(str(record.get("verdict")), "ask")
         if record.get("rule_id") == DEFAULT_DENY_RULE_ID:
             decision = "ask"
-        reason = (
-            f"skep: {record.get('verdict')} by {record.get('decided_by')} "
-            f"({record.get('source')} policy)"
-        )
+            reason = (
+                f"skep: no rule matches in the {record.get('source')} policy — asking you "
+                "(an unlisted command cards for skep's own workers too)"
+            )
+        else:
+            reason = (
+                f"skep: {record.get('verdict')} by {record.get('decided_by')} "
+                f"({record.get('source')} policy)"
+            )
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

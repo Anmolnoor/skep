@@ -130,7 +130,11 @@ def test_why_answers_with_the_rule_that_decided_or_the_default_deny(
     store, holder = _parts(config)
     try:
         allowed = policy_why(holder, store, str(repo), "shell", "run", "uv sync")
-        denied = policy_why(holder, store, str(repo), "shell", "run", "rm -rf /")
+        denied = policy_why(holder, store, str(repo), "shell", "run", "npm install")
+        floored = policy_why(
+            holder, store, str(repo), "shell", "run", "cd /x && git push origin main"
+        )
+        wrecker = policy_why(holder, store, str(repo), "shell", "run", "sudo rm -rf /")
         operator = policy_why(holder, store, str(repo), "network", "search", "anything")
     finally:
         store.close()
@@ -140,6 +144,13 @@ def test_why_answers_with_the_rule_that_decided_or_the_default_deny(
     assert [rule["rule_id"] for rule in allowed["run"]["considered"]] == ["shell:uv sync"]
     assert denied["run"]["verdict"] == "deny"
     assert denied["run"]["rule_id"] == "default-deny"
+    # F1 (I4): the floor answers before any document, for the run AND the
+    # Queen, naming the registry's floor key; a compound line does not hide it.
+    assert floored["run"]["rule_id"] == "floor.worker-git-hard-denies"
+    assert floored["operator"]["decided_by"] == "floor/floor.worker-git-hard-denies"
+    assert "remote git" in floored["floor"]
+    assert wrecker["run"]["rule_id"] == "floor.never-grantable-prefixes"
+    assert wrecker["run"]["verdict"] == "deny" and wrecker["run"]["considered"] == []
     assert operator["operator"]["verdict"] == "allow"
     assert operator["operator"]["rule_id"] == "net:search"
 

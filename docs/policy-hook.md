@@ -19,6 +19,13 @@ Three faces, one function (`serve/actions.py::policy_decide`, I5):
 
 ## Which policy answers
 
+- **The floor first (I4).** For `shell`, the Queen's own refusal set — the
+  worker git guards (push/pull/fetch, add/commit, branch switches, history
+  rewrites), privilege escalation, the catastrophic commands — is checked
+  over every segment of the command line before any document is read. A hit
+  is `deny` by the registry's floor key (`floor.worker-git-hard-denies` or
+  `floor.never-grantable-prefixes`), for the run and the Queen alike, and
+  nothing in any layer can lift it.
 - With a `repo` (the hook passes Claude Code's `cwd`), the **run policy**
   decides for `shell` and `filesystem`: the same `resolve_run_policy` a
   dispatch there runs, then `decide()` on the compiled document (the why
@@ -72,6 +79,7 @@ rule; a hook that denied every read would be inventing policy.
 | skep verdict | hook `permissionDecision` |
 |---|---|
 | `allow` by a rule | `allow` |
+| `deny` by the floor (`git push`, `sudo …`, `rm -rf /`) | `deny` — Claude Code refuses the call and names the floor key |
 | `deny` by an explicit deny rule | `deny` — Claude Code refuses the call and shows the rule |
 | `require_approval` | `ask` — Claude Code asks the human |
 | unmatched (`default-deny`) | `ask` — the shape skep gives its own workers: an unlisted command cards, an explicit deny refuses |

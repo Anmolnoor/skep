@@ -5294,14 +5294,15 @@ async function viewPolicies(main) {
         + (rsop.engine.routed_keys ? ` · routed ${rsop.engine.routed_keys.length} knob(s)` : "")
         + (rsop.engine.rule_refusals?.length ? ` · ${rsop.engine.rule_refusals.length} rule refusal(s)` : ""))
       : null;
-    editorBody.replaceChildren(
+    editorBody.replaceChildren(...[
       rsop?.error ? el("p", { class: "note" }, `policy did not resolve: ${rsop.error}`) : table,
       engineNote,
       el("p", { class: "field-help" },
         "inherit = the key is absent from this layer (the layer below decides); set = this "
         + "layer decides. An explicit \"cleared\" state has no stored form yet — remove the "
         + "key here and edit the layer below."),
-      el("div", { class: "actions" }, save));
+      el("div", { class: "actions" }, save),
+    ].filter(Boolean));  // replaceChildren(null) would render the text "null"
   };
   picker.addEventListener("change", renderEditor);
 

@@ -62,6 +62,10 @@ def test_decide_answers_from_the_run_policy_in_a_repo_and_the_operator_otherwise
             holder, store, scope="network", action="search", value="ddgs", repo=str(repo)
         )
         no_repo = policy_decide(holder, store, scope="network", action="search", value="ddgs")
+        pushed = policy_decide(
+            holder, store, scope="shell", action="run", value="git push --force", repo=str(repo)
+        )
+        wrecker = policy_decide(holder, store, scope="shell", action="run", value="sudo rm -rf /")
         unknown = policy_decide(
             holder, store, scope="shell", action="run", value="ls", repo=str(tmp_path / "nowhere")
         )
@@ -81,9 +85,13 @@ def test_decide_answers_from_the_run_policy_in_a_repo_and_the_operator_otherwise
     # the record says so rather than inventing a project (I8).
     assert unknown["source"] == "run" and unknown["project"] is None
     assert "not bound" in unknown["note"]
+    # F1 (I4): the floor is consulted first, repo or not — deny, never ask.
+    assert pushed["verdict"] == "deny" and pushed["source"] == "floor"
+    assert pushed["rule_id"] == "floor.worker-git-hard-denies"
+    assert wrecker["rule_id"] == "floor.never-grantable-prefixes" and wrecker["source"] == "floor"
     # Every call is a line in the ledger, the refused one is not.
     actors = [line["actor"] for line in _ledger(config)]
-    assert actors == ["t", "api", "api", "api", "api", "api"]
+    assert actors == ["t"] + ["api"] * 7
 
 
 def test_the_decide_route_records_and_refuses_unknown_actions(
@@ -207,9 +215,16 @@ def test_the_hook_and_decide_commands_answer_from_the_home(
     assert allowed is not None and allowed["permissionDecision"] == "allow"
     assert "shell:uv sync" in allowed["permissionDecisionReason"]
     unlisted = run_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": str(repo)}
+        {"tool_name": "Bash", "tool_input": {"command": "npm install"}, "cwd": str(repo)}
     )
     assert unlisted is not None and unlisted["permissionDecision"] == "ask"
+    assert "no rule matches" in unlisted["permissionDecisionReason"]
+    # F1 (I4): the floor answers deny, never ask — the hook's reason for being.
+    floored = run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": str(repo)}
+    )
+    assert floored is not None and floored["permissionDecision"] == "deny"
+    assert "floor/floor.worker-git-hard-denies" in floored["permissionDecisionReason"]
     edit = run_hook(
         {"tool_name": "Edit", "tool_input": {"file_path": str(repo / "x.py")}, "cwd": str(repo)}
     )
@@ -217,7 +232,7 @@ def test_the_hook_and_decide_commands_answer_from_the_home(
     assert (
         run_hook({"tool_name": "Read", "tool_input": {"file_path": "x"}, "cwd": str(repo)}) is None
     )
-    assert [line["actor"] for line in _ledger(config)] == ["claude-code"] * 3
+    assert [line["actor"] for line in _ledger(config)] == ["claude-code"] * 4
 
     # The hook must answer even when skep cannot decide — ask, with the reason.
     monkeypatch.setattr(
