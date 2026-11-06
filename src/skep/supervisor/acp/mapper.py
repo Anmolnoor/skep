@@ -17,13 +17,18 @@ from ..policy_paths import workspace_value
 
 _WRITE_KINDS = frozenset({"edit", "delete", "move"})
 _NPX = frozenset({"npx", "npm", "bunx"})
+# B3-F2: every request that opens a session carries its cwd — a client that
+# respawns the agent per turn (T3 after an idle release) never sends session/new
+# again; v1 continues with session/load, v2 with session/resume, both may fork.
+_SESSION_OPENERS = frozenset({"session/new", "session/load", "session/resume", "session/fork"})
 
 
 @dataclass
 class Session:
     """One ACP session as the proxy sees it."""
 
-    cwd: str = ""  # D3: params.cwd of session/new (a --repo override is applied by the caller)
+    cwd: str = ""  # D3: params.cwd of the session opener (the caller applies --repo over it)
+    replaying: bool = False  # B3-F3: a v1 session/load replays history before it answers
     protocol_version: int = 1  # from the initialize RESULT
     client_fs_write: bool = False  # v1 initialize PARAMS clientCapabilities.fs.writeTextFile
     client_terminal: bool = False  # v1 initialize PARAMS clientCapabilities.terminal
@@ -33,6 +38,7 @@ class Session:
     observed: set[str] = field(default_factory=set)  # toolCallIds written as observed rows
     asked: set[str] = field(default_factory=set)  # toolCallIds a permission request named
     _init_id: Any = field(default=None, repr=False)
+    _load_id: Any = field(default=None, repr=False)
 
     def feed(self, direction: str, msg: Mapping[str, Any]) -> None:
         """Fold one decoded frame into the session state; other frames are ignored."""
@@ -43,8 +49,12 @@ class Session:
             caps = _dict(params.get("clientCapabilities"))
             self.client_fs_write = _dict(caps.get("fs")).get("writeTextFile") is True
             self.client_terminal = caps.get("terminal") is True
-        elif direction == "c2a" and method == "session/new":
+        elif direction == "c2a" and method in _SESSION_OPENERS and "result" not in msg:
             self.cwd = str(params.get("cwd") or "")
+            if method == "session/load" and msg.get("id") is not None:
+                self._load_id, self.replaying = msg["id"], True
+        elif direction == "a2c" and self.replaying and msg.get("id") == self._load_id:
+            self.replaying = False  # the load answered (result or error): what follows is live
         elif direction == "a2c" and "result" in msg and _is_init_result(msg, self._init_id):
             result = _dict(msg.get("result"))
             version = result.get("protocolVersion")

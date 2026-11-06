@@ -208,6 +208,39 @@ def test_repo_and_actor_overrides_reach_the_decide_rows(tmp_path: Path) -> None:
     assert gov.session.cwd == str(other)
 
 
+def _ran(tid: str, command: str) -> tuple[Direction, bytes]:
+    update = {"sessionUpdate": "tool_call", "toolCallId": tid, "kind": "execute",
+              "status": "completed", "rawInput": {"command": command}}  # fmt: skip
+    params = {"sessionId": "s", "update": update}
+    return _frame("a2c", method="session/update", params=params)
+
+
+def test_a_loaded_session_binds_its_cwd_and_its_replayed_history_is_not_observed(
+    tmp_path: Path,
+) -> None:
+    # B3-F2/F3 (T3 field test): T3 respawns the agent per turn and continues with
+    # session/load — no session/new, and the agent replays every earlier tool call
+    # before answering the load. The replay bound nothing (repo "") and wrote the
+    # old calls as observed rows again, once per turn.
+    home, repo = _demo_home(tmp_path)
+    load = _frame("c2a", id=3, method="session/load", params={"sessionId": "s", "cwd": str(repo)})
+    _drive(
+        open_governor(home, ["fx"]),
+        repo,
+        [load, _ran("old", "ls"), _frame("a2c", id=3, result=None), _ran("new", "ls")],
+        new=False,
+    )
+    rows = _ledger(home)
+    assert [(r["source"], r["tool_call_id"], r["repo"]) for r in rows] == [
+        ("observed", "new", str(repo))
+    ]
+    # v2 continues with session/resume (no replay) — the cwd binds the same way
+    gov = open_governor(home, ["fx"])
+    resume = _frame("c2a", id=3, method="session/resume", params={"sessionId": "s", "cwd": "/r2"})
+    _drive(gov, repo, [resume], new=False)
+    assert gov.session.cwd == "/r2" and not gov.session.replaying
+
+
 def test_the_forwarded_row_names_the_asking_item_and_a_client_error(tmp_path: Path) -> None:
     home, repo = _demo_home(tmp_path)
     two = {"kind": "edit", "locations": [{"path": str(repo / "a.txt")}, {"path": "/etc/x"}]}

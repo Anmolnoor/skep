@@ -120,6 +120,8 @@ class Governor:
         tid = str(update.get("toolCallId") or "")
         if update.get("sessionUpdate") not in ("tool_call", "tool_call_update") or not tid:
             return None
+        if self.session.replaying:
+            return None  # B3-F3: session/load history — cached for joins, it ran in another life
         call = self.session.tool_calls[tid]
         if call.get("status") not in _RAN or tid in self.session.asked:
             return None  # observed means "ran unasked"; an asked call has its decision rows

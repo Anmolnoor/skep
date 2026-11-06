@@ -299,6 +299,15 @@ is left as written so the delta stays visible.
   JSON-RPC error like an explicit deny, because forwarding a method that
   carries no prompt would run it unapproved (D6's "forward" cells for that
   column are amended to "error").
+- **A11 (D3/D4, B3 field test in T3) — a session has more than one opener.**
+  T3 respawns the agent after a thread goes idle and continues the same
+  session with `session/load` (v1) — v2 clients use `session/resume`, and
+  either may `session/fork`. All four carry `cwd`, so all four bind it
+  (B3-F2; the first build bound `session/new` only and every resumed turn
+  decided against repo ""). A v1 `session/load` replays the session's
+  history as `session/update` notifications before it answers: those are
+  fed to the cache for later joins but never written as observed rows
+  (B3-F3; they were re-observed once per turn).
 
 **Operator decisions (2026-11-06):** D3 accepted, plus a `--repo` override on
 the command line; D6 accepted; engine v2 on for fresh homes (`shell`,

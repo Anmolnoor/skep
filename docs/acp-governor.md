@@ -57,6 +57,11 @@ and the same for `@agentclientprotocol/codex-acp`. Add one provider
 instance per agent. With an adapter installed globally the last three
 rows become its binary name (`claude-agent-acp` / `codex-acp`).
 
+T3 respawns the agent after a thread goes idle and continues the same
+session with `session/load`; the governor binds that request's `cwd` as it
+does `session/new`'s, and the history the agent replays before answering
+the load is cached for joins but never recorded as observed rows.
+
 ## The two rings, honestly
 
 - **Advisory — the permission ask.** skep decides `session/request_permission`
