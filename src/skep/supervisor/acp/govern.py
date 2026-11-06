@@ -425,7 +425,9 @@ def install_hint() -> int:
         args = ["acp", "govern", "--", "npx", "-y", f"@agentclientprotocol/{adapter}"]
         print(f"Local ACP command — {adapter}")
         print(f"  executable: {exe}")
-        print(f"  args (one per row): {' | '.join(args)}")
+        print("  arguments, one row each (B3-F1: a single row is one literal argument):")
+        for arg in args:
+            print(f"    {arg}")
         print()
     print(
         "or, with the adapter installed globally, the last three args become its "

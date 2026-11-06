@@ -50,12 +50,21 @@ an absolute path. `skep acp install-hint` prints exactly what to paste:
 ```
 Local ACP command — claude-agent-acp
   executable: /absolute/path/to/skep
-  args (one per row): acp | govern | -- | npx | -y | @agentclientprotocol/claude-agent-acp
+  arguments, one row each:
+    acp
+    govern
+    --
+    npx
+    -y
+    @agentclientprotocol/claude-agent-acp
 ```
 
-and the same for `@agentclientprotocol/codex-acp`. Add one provider
-instance per agent. With an adapter installed globally the last three
-rows become its binary name (`claude-agent-acp` / `codex-acp`).
+and the same for `@agentclientprotocol/codex-acp`. Click **Add argument**
+once per line: a row is one literal argument, so a single row holding
+`acp govern -- …` reaches skep as one unrecognised word and the provider
+reports "could not create a test session". Add one provider instance per
+agent. With an adapter installed globally the last three rows become its
+binary name (`claude-agent-acp` / `codex-acp`).
 
 T3 respawns the agent after a thread goes idle and continues the same
 session with `session/load`; the governor binds that request's `cwd` as it

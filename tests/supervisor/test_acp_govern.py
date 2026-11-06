@@ -392,6 +392,10 @@ def test_install_hint_prints_the_t3_rows_with_an_absolute_executable(
     out = capsys.readouterr().out
     assert "@agentclientprotocol/claude-agent-acp" in out
     assert "@agentclientprotocol/codex-acp" in out
-    assert "args (one per row): acp | govern | -- | npx | -y |" in out
+    # B3-F1: the field test pasted a `a | b | c` line into ONE T3 row — print rows as rows.
+    rows = [line.strip() for line in out.splitlines()]
+    want = ["acp", "govern", "--", "npx", "-y", "@agentclientprotocol/claude-agent-acp"]
+    assert rows[rows.index("acp") : rows.index("acp") + 6] == want
+    assert "|" not in out
     exe = out.split("executable: ", 1)[1].splitlines()[0]
     assert Path(exe).is_absolute(), exe
