@@ -355,12 +355,14 @@ def test_govern_relays_a_real_child_and_returns_its_code(tmp_path: Path) -> None
     home, repo = _demo_home(tmp_path)
     fixture = ACP_DIR / "claude-agent-acp" / "live-v1.ndjson"
     frames = envelope_frames(fixture, str(repo))
+    trace = tmp_path / "wire.ndjson"
     done = subprocess.run(
         [sys.executable, "-m", "skep", "--home", str(home), "acp", "govern", "--",
          sys.executable, FAKE, str(fixture), str(repo)],
         input=b"".join(raw for d, raw in frames if d == "c2a"),
         capture_output=True,
         timeout=60,
+        env={**os.environ, "SKEP_ACP_TRACE": str(trace)},
     )  # fmt: skip
     assert done.returncode == 3, done.stderr
     assert done.stdout == b"".join(raw for d, raw in frames if d == "a2c")
@@ -368,6 +370,10 @@ def test_govern_relays_a_real_child_and_returns_its_code(tmp_path: Path) -> None
         done.stderr.decode()
     )
     assert {row["source"] for row in _ledger(home)} == {"observed"}
+    # B3-F8: the trace is the fixture envelope — per direction, the frames as sent
+    traced = envelope_frames(trace)
+    for direction in ("c2a", "a2c"):
+        assert [r for d, r in traced if d == direction] == [r for d, r in frames if d == direction]
 
 
 def test_doctor_names_the_preset_modes_and_the_silent_default(

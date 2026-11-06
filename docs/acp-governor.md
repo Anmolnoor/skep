@@ -183,6 +183,21 @@ skep policy why <repo> shell run "git push"
 The floor answered before any document was read (`considered` is empty);
 no grant, group or project overlay can change it.
 
+## Tracing the wire
+
+Set `SKEP_ACP_TRACE=/path/to/trace.ndjson` in the provider's environment
+(T3: the provider's **Environment** section) and the governor appends every
+frame it relays, both directions, in the fixture envelope the tests use:
+
+```json
+{"dir": "c2a", "raw": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session/load\", …}", "t": 1793997000.1}
+```
+
+Nothing is written without the variable. The file is the agent's and the
+client's exact words — scrub paths and ids before sharing it — and
+`tests/fixtures/acp/` loads it unchanged, so a session that misbehaved
+inside a client becomes a golden case.
+
 ## What this does not do
 
 - It does not sandbox the agent. T3 spawned it; T3's (or the agent's)

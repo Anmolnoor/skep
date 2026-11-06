@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -300,15 +301,37 @@ def run(argv: list[str], *, home: Path, repo: str | None, actor: str | None) -> 
             on_frame=gov.on_frame,
         )
 
+        # B3-F8: SKEP_ACP_TRACE=<file> appends every frame in the fixture envelope
+        # (`{"dir","raw","t"}`), so a session inside a client can be replayed by
+        # the golden tests exactly as it happened. Set it in the client's
+        # provider environment; nothing is written without it.
+        trace_path = os.environ.get("SKEP_ACP_TRACE")
+        trace = open(trace_path, "ab") if trace_path else None  # noqa: SIM115 — closed in finally
+        trace_lock = threading.Lock()
+
+        def feed(direction: Direction, raw: bytes) -> None:
+            if trace is not None:
+                env = {"dir": direction, "raw": raw.decode("utf-8", "replace").rstrip("\n")}
+                line = json.dumps({**env, "t": time.time()}).encode("utf-8") + b"\n"
+                with trace_lock, contextlib.suppress(OSError, ValueError):
+                    trace.write(line)
+                    trace.flush()
+            proxy.feed(direction, raw)
+
         def client_loop() -> None:
             with contextlib.suppress(OSError, ValueError):
                 for raw in _lines(sys.stdin.fileno()):
-                    proxy.feed("c2a", raw)
+                    feed("c2a", raw)
             agent_in.close()
 
         threading.Thread(target=client_loop, daemon=True).start()
-        for raw in iter(agent_out.readline, b""):
-            proxy.feed("a2c", raw)
+        try:
+            for raw in iter(agent_out.readline, b""):
+                feed("a2c", raw)
+        finally:
+            if trace is not None:
+                with trace_lock, contextlib.suppress(OSError, ValueError):
+                    trace.close()
         code = proc.wait()
         return 128 - code if code < 0 else code
     finally:
