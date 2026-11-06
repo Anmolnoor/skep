@@ -2628,6 +2628,21 @@ def cmd_policy_decide(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy_decisions(args: argparse.Namespace) -> int:
+    """ADR 0054 A3: read decisions.jsonl back, newest first, with counts."""
+    from .serve.actions import policy_decisions
+
+    config = build_config(args.home, None)
+    try:
+        view = policy_decisions(
+            config.audit_dir, actor=args.actor, since=args.since, limit=args.limit
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    print(json.dumps(view, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_policy_hook(args: argparse.Namespace) -> int:
     """P3 (ADR 0053): the Claude Code PreToolUse hook. Reads the payload on
     stdin, answers in the hook's JSON. No opinion (a tool the engine has no
@@ -3253,6 +3268,13 @@ def register_supervisor_commands(
     )
     policy_hook.add_argument("--actor", default="claude-code", help="recorded on every decision")
     policy_hook.set_defaults(func=cmd_policy_hook)
+    policy_decisions = policy_sub.add_parser(
+        "decisions", help="the decisions ledger, newest first, with verdict counts (ADR 0054)"
+    )
+    policy_decisions.add_argument("--actor", help="glob on the recorded actor, e.g. 'acp:*'")
+    policy_decisions.add_argument("--since", help="ISO time or bare date floor on `at`")
+    policy_decisions.add_argument("--limit", type=int, default=200, help="max rows (default 200)")
+    policy_decisions.set_defaults(func=cmd_policy_decisions)
 
     repo_group = subcommands.add_parser("repo", help="registered repositories (v104)")
     repo_group.set_defaults(func=_group_usage(repo_group))

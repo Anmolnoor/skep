@@ -236,6 +236,7 @@ skep policy rsop REPO
 skep policy why  REPO SCOPE ACTION VALUE
 skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME]
 skep policy hook [--actor NAME]
+skep policy decisions [--actor GLOB] [--since ISO] [--limit N]
 ```
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
@@ -250,7 +251,10 @@ names the rule that decided it (ADR 0052, read-only). `policy decide` is
 the same question asked by an outside agent and RECORDED in
 `<home>/supervisor/audit/policy/decisions.jsonl`; `policy hook` is its
 Claude Code PreToolUse face (payload on stdin, verdict as hook JSON — see
-`docs/policy-hook.md`, ADR 0053 P3).
+`docs/policy-hook.md`, ADR 0053 P3). `policy decisions` reads that ledger
+back, newest first, with counts per verdict and per note source (`observed`,
+`forwarded`); `--actor` is a glob, `--since` a time or bare-date floor
+(also `GET /api/policy/decisions` and the chat `policy_decisions` tool).
 
 ## skep acp
 
@@ -271,7 +275,8 @@ unasked (`source: observed`) and every answer the human gave
 against `session/new`'s `cwd` unless `--repo` names the checkout;
 `--actor` replaces the ledger actor (default `acp:<agent>`). It reads the
 home directly — `skep serve` need not run; an unreadable store forwards
-every ask with the reason.
+every ask with the reason. See what the governed agents did:
+`skep policy decisions --actor 'acp:*'`.
 
 At startup it prints one line to stderr, e.g.
 `skep acp: governing claude-agent-acp (ACP v2) — rings: advisory — home …`.

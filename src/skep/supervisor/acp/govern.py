@@ -336,6 +336,12 @@ def doctor(argv: list[str], *, home: Path) -> int:
         return 1
     finally:
         timer.cancel()
+        # EOF first: codex-acp prints a stack trace when killed mid-handshake
+        with contextlib.suppress(OSError):
+            if proc.stdin:
+                proc.stdin.close()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=2)
         proc.kill()
         proc.wait()
     info = _dict(init.get("agentInfo")) or _dict(init.get("info"))

@@ -17,6 +17,7 @@ import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -4322,6 +4323,42 @@ def _append_policy_ledger(audit_dir: Path, name: str, payload: dict[str, Any]) -
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload) + "\n")
+
+
+def policy_decisions(
+    audit_dir: Path, *, actor: str | None = None, since: str | None = None, limit: int = 200
+) -> dict[str, Any]:
+    """ADR 0054 A3/A9: ``decisions.jsonl`` read back — what the governed agents
+    did. ``actor`` is an fnmatch glob (``acp:*`` the ACP agents, ``human@*``
+    their humans' answers); ``since`` is a string floor on ``at``, so the
+    ledger's ``%Y-%m-%dT%H:%M:%SZ`` and a bare date ``2026-11-06`` both work.
+    Rows come newest-first, at most ``limit``; ``total`` counts every match.
+    ``summary`` counts decisions by verdict and notes by source apart — an
+    ``observed`` or ``forwarded`` row is not a decision (I8)."""
+    if limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    path = audit_dir / "policy" / "decisions.jsonl"
+    summary = dict.fromkeys(("allow", "deny", "require_approval", "observed", "forwarded"), 0)
+    rows: list[dict[str, Any]] = []
+    # ponytail: reads the whole file; tail-seek when a ledger outgrows memory
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if actor is not None and not fnmatch(str(row.get("actor", "")), actor):
+            continue
+        if since is not None and str(row.get("at", "")) < since:
+            continue
+        rows.append(row)
+        source = row.get("source")
+        key = source if source in ("observed", "forwarded") else row.get("verdict")
+        if key in summary:
+            summary[key] += 1
+    return {"rows": rows[::-1][:limit], "total": len(rows), "summary": summary}
 
 
 def _record_engine_flip(audit_dir: Path, before: list[str], after: list[str]) -> None:
