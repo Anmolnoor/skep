@@ -2786,6 +2786,26 @@ that ran unasked). B2: fresh homes start with `shell`+`filesystem` on
 engine v2 (A6), `skep acp install-hint` prints T3's Local ACP command
 rows, and `docs/acp-governor.md` says what each ring does and does not see.
 
+## acp-governor B3 — the field test in T3 Code (2026-11-06)
+
+T3 Code (Beta) with two Local ACP command providers on the branch binary,
+a throwaway repo bound to a demo group. Findings and fixes, on the same
+branch since 1.2.0 is untagged: B3-F1 `install-hint` prints one argument
+per line (the `a | b | c` line was pasted into one T3 row). B3-F2 every
+session opener binds `cwd` — T3 respawns the agent after idle and
+continues with `session/load`, so resumed turns decided against repo "" —
+and a v1 load's replayed history is not written as observed rows (A11).
+B3-F7 a chained shell line (`ls -la; rm -rf build`) is decided one simple
+command at a time with the least favourable segment deciding; command
+substitution and `sh -c` are opaque and match nothing — the prefix
+matcher had allowed the whole line by its first word for the hook and the
+governor, where a real shell runs it. B3-F8 `SKEP_ACP_TRACE` records the
+wire inside a client in the fixture envelope. Observed on the wire: in
+Claude's `auto` (T3's default) the agent never asks, so skep only
+observes; T3's **Manual** mode is Claude's `default` and asks; the agent
+bundled `rm -rf build && … git push` into one command and the floor
+denied the lot before T3 saw it.
+
 ## v1.2.0 — the ACP governor (2026-11-06)
 
 The `acp-governor` B0–B2 work above: `skep acp govern|doctor|install-hint`
