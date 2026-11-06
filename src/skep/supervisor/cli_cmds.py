@@ -3303,6 +3303,11 @@ def register_supervisor_commands(
 
     register_channel_commands(subcommands)
 
+    # ADR 0054 (B1-3): the ACP governor an outside client spawns.
+    from .acp_cmds import register_acp_commands
+
+    register_acp_commands(subcommands)
+
     # v15: nodes + governed local ops.
     from .ops_cmds import register_ops_commands
 

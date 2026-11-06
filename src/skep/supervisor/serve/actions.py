@@ -18,7 +18,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import HTTPException
 
@@ -1922,6 +1922,37 @@ def policy_decide(
     record.update(decision)
     _append_policy_ledger(holder.current.audit_dir, "decisions", record)
     return record
+
+
+def policy_note(
+    audit_dir: Path,
+    *,
+    source: Literal["observed", "forwarded"],
+    actor: str,
+    repo: str | None,
+    scope: str | None,
+    action: str | None,
+    value: str | None,
+    **fields: Any,
+) -> dict[str, Any]:
+    """ADR 0054 A9: a ledger row that is not a decision — what an ACP agent
+    ran unasked (``observed``) or what the human behind the client answered
+    (``forwarded``). ``source`` discriminates these rows from decisions; they
+    carry no ``verdict``. Same ``decisions.jsonl`` as ``policy_decide``."""
+    row: dict[str, Any] = {
+        "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "actor": actor,
+        "repo": repo,
+        "scope": scope,
+        "action": action,
+        "value": value,
+        "source": source,
+        **fields,
+    }
+    # ponytail: the append is unlocked; concurrent governors interleave whole <4 KiB
+    # writes on POSIX — lock when a home gets a second writer
+    _append_policy_ledger(audit_dir, "decisions", row)
+    return row
 
 
 def policy_why(

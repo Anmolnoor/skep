@@ -1,0 +1,50 @@
+[
+  {
+    "fixture": "hard-ring-and-floor.ndjson",
+    "line": 5,
+    "tool_call_id": "push",
+    "probe": {
+      "kind": "decided",
+      "items": [
+        [
+          "shell",
+          "run",
+          "git push"
+        ]
+      ],
+      "cwd": "$REPO"
+    }
+  },
+  {
+    "fixture": "hard-ring-and-floor.ndjson",
+    "line": 6,
+    "tool_call_id": "status",
+    "probe": {
+      "kind": "decided",
+      "items": [
+        [
+          "shell",
+          "run",
+          "git status"
+        ]
+      ],
+      "cwd": "$REPO"
+    }
+  },
+  {
+    "fixture": "hard-ring-and-floor.ndjson",
+    "line": 8,
+    "tool_call_id": "unlisted",
+    "probe": {
+      "kind": "decided",
+      "items": [
+        [
+          "shell",
+          "run",
+          "printf hi > out.txt"
+        ]
+      ],
+      "cwd": "$REPO"
+    }
+  }
+]

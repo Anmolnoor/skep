@@ -47,6 +47,7 @@ class Proxy:
         to_agent: Callable[[bytes], object],
         handlers: Mapping[tuple[Direction, str], Handler],
         on_error: Callable[[str, BaseException], None] | None = None,
+        on_frame: Callable[[Direction, dict[str, Any]], None] | None = None,
     ) -> None:
         self._out: dict[Direction, Callable[[bytes], object]] = {
             "c2a": to_agent,
@@ -54,6 +55,7 @@ class Proxy:
         }
         self._handlers = handlers
         self._on_error = on_error
+        self._on_frame = on_frame
         # (request direction, json.dumps(id)) -> (callback, params.sessionId)
         self._pending: dict[tuple[Direction, str], tuple[_Callback, Any]] = {}
         self._lock = threading.Lock()
@@ -67,6 +69,12 @@ class Proxy:
         if not isinstance(msg, dict):
             self._out[direction](raw)
             return
+        if self._on_frame is not None:
+            try:
+                self._on_frame(direction, msg)
+            except Exception as exc:
+                if self._on_error is not None:
+                    self._on_error("frame", exc)
         method = msg.get("method")
         answerable = msg.get("id") is not None
         if not isinstance(method, str):

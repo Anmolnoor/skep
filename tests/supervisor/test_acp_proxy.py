@@ -231,3 +231,33 @@ def test_ids_are_never_coerced() -> None:
         "str": [{"jsonrpc": "2.0", "id": "1", "result": "str"}],
         "zero": [{"jsonrpc": "2.0", "id": 0, "result": "zero"}],
     }
+
+
+def test_on_frame_sees_every_object_frame_before_dispatch() -> None:
+    frames = envelope_frames(ASK)
+    seen: list[tuple[Direction, Any]] = []
+    errors: list[str] = []
+
+    def handler(msg: dict[str, Any]) -> None:
+        assert seen[-1] == ("a2c", msg.get("id"))  # on_frame ran first
+
+    def on_frame(direction: Direction, msg: dict[str, Any]) -> None:
+        seen.append((direction, msg.get("id")))
+        if msg.get("id") == 2:
+            raise RuntimeError("frame hook broke")
+
+    lines = [*frames, ("a2c", b"{not json\n")]
+    to_client, to_agent = io.BytesIO(), io.BytesIO()
+    proxy = Proxy(
+        to_client.write,
+        to_agent.write,
+        {PERMISSION: handler},
+        on_error=lambda label, exc: errors.append(label),
+        on_frame=on_frame,
+    )
+    for direction, raw in lines:
+        proxy.feed(direction, raw)
+    assert seen == [(d, json.loads(raw).get("id")) for d, raw in frames]
+    assert errors == ["frame", "frame"]  # the c2a request and the a2c response with id 2
+    assert to_client.getvalue() == b"".join(raw for d, raw in lines if d == "a2c")
+    assert to_agent.getvalue() == b"".join(raw for d, raw in lines if d == "c2a")

@@ -1,0 +1,44 @@
+{
+  "to_agent": [
+    {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "outcome": {
+          "outcome": "selected",
+          "optionId": "allow-once"
+        }
+      }
+    }
+  ],
+  "ledger": [
+    {
+      "actor": "acp:claude-agent-acp",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "git status",
+      "source": "observed",
+      "agent": "claude-agent-acp",
+      "session_id": "e445502b-bee2-446e-b738-f433f5cb0fe1",
+      "tool_call_id": "toolu_01JLpmhgVbkCSkyLZHgY7TYw"
+    },
+    {
+      "actor": "acp:claude-agent-acp",
+      "repo": "$REPO",
+      "scope": "filesystem",
+      "action": "write",
+      "value": "workspace",
+      "project": {
+        "project_id": "demo",
+        "name": "demo",
+        "strategy": "trusted_local_dev",
+        "phase": "build"
+      },
+      "source": "run",
+      "verdict": "allow",
+      "rule_id": "fs:workspace",
+      "decided_by": "trusted_local_dev/fs:workspace"
+    }
+  ]
+}

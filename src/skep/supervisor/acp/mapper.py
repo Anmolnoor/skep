@@ -31,6 +31,7 @@ class Session:
     tool_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
     terminals: dict[str, str] = field(default_factory=dict)  # terminalId -> command (v2)
     observed: set[str] = field(default_factory=set)  # toolCallIds written as observed rows
+    asked: set[str] = field(default_factory=set)  # toolCallIds a permission request named
     _init_id: Any = field(default=None, repr=False)
 
     def feed(self, direction: str, msg: Mapping[str, Any]) -> None:

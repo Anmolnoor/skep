@@ -1,0 +1,60 @@
+{
+  "to_agent": [
+    {"jsonrpc": "2.0", "id": 10, "result": {"outcome": {"outcome": "selected", "optionId": "reject-once"}}},
+    {"jsonrpc": "2.0", "id": 15, "error": {"code": -32000, "message": "skep: deny by floor/floor.worker-git-hard-denies"}},
+    {"jsonrpc": "2.0", "id": 17, "error": {"code": -32000, "message": "skep: deny by trusted_local_dev/default-deny"}}
+  ],
+  "ledger": [
+    {
+      "actor": "acp:synthetic-agent", "repo": "$REPO", "scope": "shell", "action": "run", "value": "git push",
+      "source": "floor", "verdict": "deny", "rule_id": "floor.worker-git-hard-denies",
+      "decided_by": "floor/floor.worker-git-hard-denies",
+      "note": "remote git commands never run from chat — skep lands patches after approval; use push_branch/open_pr for the governed remote surface"
+    },
+    {
+      "actor": "acp:synthetic-agent", "repo": "$REPO", "scope": "shell", "action": "run", "value": "git status",
+      "project": {"project_id": "demo", "name": "demo", "strategy": "trusted_local_dev", "phase": "build"},
+      "source": "run", "verdict": "allow", "rule_id": "shell:git status",
+      "decided_by": "trusted_local_dev/shell:git status"
+    },
+    {
+      "actor": "human@synthetic-client", "repo": "$REPO", "scope": "shell", "action": "run", "value": "git status",
+      "source": "forwarded", "agent": "synthetic-agent", "session_id": "s1", "tool_call_id": "status",
+      "request_id": 12, "outcome": "allow_always",
+      "note": "allow, but the agent offered no allow_once (D6: skep never grants always)"
+    },
+    {
+      "actor": "acp:synthetic-agent", "repo": "$REPO", "scope": "shell", "action": "run", "value": "printf hi > out.txt",
+      "project": {"project_id": "demo", "name": "demo", "strategy": "trusted_local_dev", "phase": "build"},
+      "source": "run", "verdict": "deny", "rule_id": "default-deny",
+      "decided_by": "trusted_local_dev/default-deny"
+    },
+    {
+      "actor": "human@synthetic-client", "repo": "$REPO", "scope": "shell", "action": "run", "value": "printf hi > out.txt",
+      "source": "forwarded", "agent": "synthetic-agent", "session_id": "s1", "tool_call_id": "unlisted",
+      "request_id": 13, "outcome": "cancelled", "note": "default-deny"
+    },
+    {
+      "actor": "acp:synthetic-agent", "repo": "$REPO", "scope": "shell", "action": "run", "value": "ls",
+      "project": {"project_id": "demo", "name": "demo", "strategy": "trusted_local_dev", "phase": "build"},
+      "source": "run", "verdict": "allow", "rule_id": "shell:ls", "decided_by": "trusted_local_dev/shell:ls"
+    },
+    {
+      "actor": "acp:synthetic-agent", "repo": "$REPO", "scope": "shell", "action": "run", "value": "git push",
+      "source": "floor", "verdict": "deny", "rule_id": "floor.worker-git-hard-denies",
+      "decided_by": "floor/floor.worker-git-hard-denies",
+      "note": "remote git commands never run from chat — skep lands patches after approval; use push_branch/open_pr for the governed remote surface"
+    },
+    {
+      "actor": "acp:synthetic-agent", "repo": "$REPO", "scope": "filesystem", "action": "write", "value": "workspace",
+      "project": {"project_id": "demo", "name": "demo", "strategy": "trusted_local_dev", "phase": "build"},
+      "source": "run", "verdict": "allow", "rule_id": "fs:workspace", "decided_by": "trusted_local_dev/fs:workspace"
+    },
+    {
+      "actor": "acp:synthetic-agent", "repo": "$REPO", "scope": "filesystem", "action": "write",
+      "value": "/etc/skep-synthetic.txt",
+      "project": {"project_id": "demo", "name": "demo", "strategy": "trusted_local_dev", "phase": "build"},
+      "source": "run", "verdict": "deny", "rule_id": "default-deny", "decided_by": "trusted_local_dev/default-deny"
+    }
+  ]
+}

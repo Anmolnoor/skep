@@ -293,6 +293,12 @@ is left as written so the delta stays visible.
   verdict; forwarded rows are `source: "forwarded"` with `outcome` = the
   option kind the human chose, or `cancelled`. The read face counts them
   apart from decisions (I8).
+- **A10 (D6) — the hard ring has no human hop.** On `terminal/create` and
+  `fs/write_text_file` only `allow` passes through; `require_approval`,
+  default-deny, an unreadable store and any governor failure answer a
+  JSON-RPC error like an explicit deny, because forwarding a method that
+  carries no prompt would run it unapproved (D6's "forward" cells for that
+  column are amended to "error").
 
 **Operator decisions (2026-11-06):** D3 accepted, plus a `--repo` override on
 the command line; D6 accepted; engine v2 on for fresh homes (`shell`,

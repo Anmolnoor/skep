@@ -252,6 +252,45 @@ the same question asked by an outside agent and RECORDED in
 Claude Code PreToolUse face (payload on stdin, verdict as hook JSON — see
 `docs/policy-hook.md`, ADR 0053 P3).
 
+## skep acp
+
+```sh
+skep acp govern [--repo PATH] [--actor NAME] -- AGENT_ARGV...
+skep acp doctor -- AGENT_ARGV...
+```
+
+`acp govern` is the process an ACP client (T3 Code, Zed, …) spawns in place
+of the agent (ADR 0054). It relays every JSON-RPC line unchanged except the
+agent's `session/request_permission`, which it answers from `policy decide`
+— `allow` selects the agent's `allow_once` option, an explicit or floor deny
+selects `reject_once`; `require_approval`, an unmatched action, or anything
+skep cannot read is forwarded to the human behind the client. It never
+selects an "always" option. Every decision, every tool call the agent ran
+unasked (`source: observed`) and every answer the human gave
+(`source: forwarded`) lands in `decisions.jsonl`. The session is decided
+against `session/new`'s `cwd` unless `--repo` names the checkout;
+`--actor` replaces the ledger actor (default `acp:<agent>`). It reads the
+home directly — `skep serve` need not run; an unreadable store forwards
+every ask with the reason.
+
+At startup it prints one line to stderr, e.g.
+`skep acp: governing claude-agent-acp (ACP v2) — rings: advisory — home …`.
+**advisory** is the permission ask — decided only when the agent's own mode
+chooses to ask. **hard** appears only on ACP v1 when the client advertised
+`fs.writeTextFile` or `terminal`: the agent's `terminal/create` and
+`fs/write_text_file` then pass only on `allow`; anything else is refused with
+a JSON-RPC error, because that hop has no human to forward to.
+
+`acp doctor` sends `initialize` and a dry `session/new` (never a prompt) and
+prints the agent's name and version, the mapper preset it gets, the modes it
+advertises with the default marked, the rings, and a WARNING when the
+default mode never asks (`auto`, `agent`, `agent-full-access`,
+`bypassPermissions`).
+
+In T3 Code: Settings → Providers → Add provider → Local ACP command, with
+executable `skep` and one argument per row: `acp`, `govern`, `--`,
+`claude-agent-acp`.
+
 ## Memory
 
 ```sh
