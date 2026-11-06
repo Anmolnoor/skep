@@ -44,7 +44,7 @@ sessions, the UI (shelved), pidfiles / live-session listing.
 
 ## Handoff history
 
-- 2026-11-06 — SDE -> Operator: B0–B2 built on `acp-governor` (17 commits, every one gated and judged, tags `ckpt/acp-day-0..7`), live-smoked on claude-agent-acp and codex-acp (allow / forwarded ask / floor deny) and on the real home (one floor row); **PR #37 open**. Operator's next moves: review and merge; `git tag -a v1.2.0` on main (the workflow publishes PyPI); Air smoke `pipx install skep && skep acp doctor -- npx -y @agentclientprotocol/claude-agent-acp` from the doc alone; B3 field test in T3 per `plans/acp-governor/b3-field-test.md` (fixes on `b3-field-fixes`); B4 comments per `plans/acp-governor/b4-comments.md`. ADR 0054 moves to `docs/adr/` with a README row on acceptance.
+- 2026-11-06 — SDE -> Operator: B0–B2 built on `acp-governor` (every commit gated and judged, tags `ckpt/acp-day-0..7`), live-smoked on claude-agent-acp and codex-acp (allow / forwarded ask / floor deny) and on the real home (one floor row); **PR #37 open**. Operator's next moves: review and merge; `git tag -a v1.2.0` on main (the workflow publishes PyPI); Air smoke `pipx install skep && skep acp doctor -- npx -y @agentclientprotocol/claude-agent-acp` from the doc alone; B3 field test in T3 per `plans/acp-governor/b3-field-test.md` (fixes on `b3-field-fixes`); B4 comments per `plans/acp-governor/b4-comments.md`. ADR 0054 moves to `docs/adr/` with a README row on acceptance.
 
 - 2026-11-06 — Architect -> SDE: ADR 0054 draft written in `adrs/` with nine amendments from the ACP v1/v2 schemas and the tree; operator accepted D3, D6, engine v2 for fresh homes, 1.2.0, one ledger file; feature opened on branch `acp-governor` (app worktree); Implementation starts at B0.
 
