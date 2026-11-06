@@ -2,8 +2,9 @@
 
 **Project:** skep
 **Discovered:** 2026-10-22 at `bc6f4cf` (PR #30, v115-F16). Existing codebase; `.10x/` created by discovery, not by scaffold.
-**Current feature:** `policy-engine-rewrite`
-**Phase:** Delivered — PR #33 merged, v1.1.0 tagged, `shell` on engine v2 since 2026-10-23. Next feature slug: D3/D4 (a stored form for `cleared`/`enforced`). The v1 resolvers are deleted only after the 30-day ledger shows no flips. Operator decision 2026-10-22: all phases land on PR #33 (one review), separate commits per phase, built one by one with gates between. Design and Planning done 2026-10-22: ADR drafts `adrs/0052-policy-registry-harness.md`, `adrs/0053-policy-engine-v2.md`; executor plan local at `plans/policy-engine-rewrite/README.md`.
+**Current feature:** `acp-governor` (Restart Plan Part B, re-scoped) — ADR draft `adrs/0054-acp-governor.md`; executor plan local at `plans/acp-governor/README.md`; branch `acp-governor` (app worktree), one PR at the end.
+**Phase:** B0 — the wire table. Opened 2026-11-06 after the operator accepted D3, D6, engine v2 for fresh homes, version 1.2.0, and one ledger file for observed/forwarded rows.
+**Previous feature:** `policy-engine-rewrite` — Delivered — PR #33 merged, v1.1.0 tagged, `shell` on engine v2 since 2026-10-23, all seven scopes since 2026-11-06 (review 2026-12-05). Next feature slug: D3/D4 (a stored form for `cleared`/`enforced`). The v1 resolvers are deleted only after the 30-day ledger shows no flips. Operator decision 2026-10-22: all phases land on PR #33 (one review), separate commits per phase, built one by one with gates between. Design and Planning done 2026-10-22: ADR drafts `adrs/0052-policy-registry-harness.md`, `adrs/0053-policy-engine-v2.md`; executor plan local at `plans/policy-engine-rewrite/README.md`.
 
 ## Discovery summary `[DISCOVERED]`
 
@@ -13,7 +14,18 @@
 - Release state: pyproject 1.0.2, PyPI 1.0.2 (Aug), internal rounds at v115 — ~2.5 months unreleased.
 - Public signals (2026-10-22): 1 star, 0 forks, 2 open PRs (dependabot).
 
-## Phases — policy-engine-rewrite
+## Phases — acp-governor
+
+| Phase | Owner | State |
+|---|---|---|
+| 0 Open | Architect | **done** 2026-11-06 — ADR 0054 draft + nine amendments from the v1/v2 schemas and the tree (hard ring v1-only; v2 `subject`; ledger read is new; no `acp_sessions`; seed at store creation; `source` discriminates observed/forwarded); operator decisions recorded; handoff to SDE |
+| B0 Wire table | SDE | pending — `scripts/acp_fixture_scan.py`, `scripts/acp_tap.py`, T3's MIT ACP transcripts + live taps of `claude-agent-acp` and `codex-acp` vendored under `tests/fixtures/acp/` (envelope format), `tests/fixtures/acp/README.md` |
+| B1 Proxy | SDE | pending — B1-1 `acp/proxy.py` (pure, byte-identical pass-through), B1-2 `policy_paths.py` + `acp/mapper.py`, B1-3 `acp/govern.py` + `acp_cmds.py` (`skep acp govern|doctor`, `policy_note`), B1-4 `policy_decisions` on three faces |
+| B2 Package | SDE | pending — engine v2 seed for fresh homes, `skep acp install-hint`, `docs/acp-governor.md`, 1.2.0; PR opened; operator tags and smokes on the Air |
+| B3 Field test | Operator | pending — T3 desktop, Supervised + Auto on both agents, GIF, F-list; fixes on `b3-field-fixes` |
+| B4 Deliver | Operator | pending — comments on t3code #6976 and #7340; 48-hour watch seeds v117 |
+
+## Delivered — policy-engine-rewrite (record)
 
 | Phase | Owner | State |
 |---|---|---|
@@ -27,6 +39,8 @@
 
 ## Risks flagged
 
-- Rewrite consumes the quarter's daily-driver window (accepted by operator).
-- Fallback trigger: `shell` scope not cut over by end of week 6 -> drop to P0 + P3 only.
-- Two concurrent sessions on the policy tree have collided before (v70/v77, 2026-08-12) — one branch per phase.
+- The skep PreToolUse hook floor-denies branch/commit/push for Claude Code in the main checkout (as designed); this feature runs in an app worktree the hook does not cover — the judge loop (gates every commit, every new module read in full) is the control there.
+- T3's recorded ndjson may be T3's own orchestration events rather than raw ACP frames; the live taps are then the primary fixtures.
+- Live agents may refuse the tap client (auth, version negotiation) — fall back to the operator running the tap by hand.
+- The fresh-home engine seed makes every test home v2 for two scopes; pins asserting v1-only shapes are fixed, never opted out (`test_policy_engine_switch.py:65-66` is the known one).
+- Two concurrent sessions on one tree collided before (v70/v77) — one Opus writer at a time.
