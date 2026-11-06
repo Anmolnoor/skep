@@ -2,6 +2,7 @@
 
     skep acp govern [--repo PATH] [--actor NAME] -- <agent argv…>
     skep acp doctor -- <agent argv…>
+    skep acp install-hint
 
 Lazy imports mirror channel_cmds and keep the proxy off the CLI's load path.
 """
@@ -32,10 +33,16 @@ def cmd_acp_doctor(args: argparse.Namespace) -> int:
     return doctor(_agent_argv(args), home=args.home)
 
 
+def cmd_acp_install_hint(args: argparse.Namespace) -> int:
+    from .acp.govern import install_hint
+
+    return install_hint()
+
+
 def register_acp_commands(
     subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
-    """``skep acp govern|doctor``."""
+    """``skep acp govern|doctor|install-hint``."""
     from .cli_cmds import _group_usage  # local: cli_cmds registers this module
 
     acp = subcommands.add_parser("acp", help="govern an ACP agent for another client (ADR 0054)")
@@ -55,3 +62,8 @@ def register_acp_commands(
     )
     doctor.add_argument("agent", nargs=argparse.REMAINDER, help="-- the agent's argv")
     doctor.set_defaults(func=cmd_acp_doctor, acp_parser=doctor)
+
+    hint = acp_sub.add_parser(
+        "install-hint", help="print the rows to paste into T3 Code's Local ACP command dialog"
+    )
+    hint.set_defaults(func=cmd_acp_install_hint)

@@ -350,3 +350,15 @@ def test_doctor_names_the_preset_modes_and_the_silent_default(
     not_acp = ["--home", str(tmp_path), "acp", "doctor", "--", sys.executable, "-c", "print('hi')"]
     assert main(not_acp) == 1
     assert "not an ACP agent" in capsys.readouterr().err
+
+
+def test_install_hint_prints_the_t3_rows_with_an_absolute_executable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["acp", "install-hint"]) == 0
+    out = capsys.readouterr().out
+    assert "@agentclientprotocol/claude-agent-acp" in out
+    assert "@agentclientprotocol/codex-acp" in out
+    assert "args (one per row): acp | govern | -- | npx | -y |" in out
+    exe = out.split("executable: ", 1)[1].splitlines()[0]
+    assert Path(exe).is_absolute(), exe

@@ -116,7 +116,10 @@ def test_release_docs_exist_and_name_the_parked_steps() -> None:
     releases = (ROOT / "docs" / "releases" / "README.md").read_text(encoding="utf-8")
     assert "local-release-gates.sh" in releases
     assert "trusted publisher" in releases
-    assert "PARKED" in releases
+    # 1.2.0 (ADR 0054 D8): the PyPI publish step is live, no longer PARKED — the doc
+    # names the live step; the still-parked items keep their own section.
+    assert "Publish to PyPI" in releases
+    assert "parked" in releases
     assert "agent-task-contract" in releases
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")

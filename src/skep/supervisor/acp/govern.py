@@ -12,6 +12,7 @@ import contextlib
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -399,3 +400,34 @@ def _ask(
                 raise RuntimeError(f"{method}: {msg['error']}")
             return _dict(msg.get("result"))
     raise RuntimeError(f"{method}: the agent exited without answering (not an ACP agent?)")
+
+
+_HINT_ADAPTERS = ("claude-agent-acp", "codex-acp")
+
+
+def install_hint() -> int:
+    """``skep acp install-hint``: the rows for T3 Code's Local ACP command dialog.
+
+    T3 launches the executable directly with one literal argument per row (no
+    shell, no PATH expansion), so the executable must be an absolute path.
+    """
+    found = shutil.which("skep")
+    if found:
+        exe = str(Path(found).resolve())
+    elif Path(sys.argv[0]).name == "skep":
+        exe = str(Path(sys.argv[0]).resolve())
+    else:
+        exe = "skep"
+        _say("could not resolve an absolute path to skep; put the full path in the executable row")
+    for adapter in _HINT_ADAPTERS:
+        args = ["acp", "govern", "--", "npx", "-y", f"@agentclientprotocol/{adapter}"]
+        print(f"Local ACP command — {adapter}")
+        print(f"  executable: {exe}")
+        print(f"  args (one per row): {' | '.join(args)}")
+        print()
+    print(
+        "or, with the adapter installed globally, the last three args become its "
+        "binary name (claude-agent-acp / codex-acp)"
+    )
+    print("see docs/acp-governor.md")
+    return 0

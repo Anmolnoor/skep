@@ -50,13 +50,18 @@ In `~/.claude/settings.json` (or the project's `.claude/settings.json`):
       {
         "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch",
         "hooks": [
-          { "type": "command", "command": "uv run --project /path/to/skep skep policy hook" }
+          { "type": "command", "command": "skep policy hook" }
         ]
       }
     ]
   }
 }
 ```
+
+`pipx install skep` (or `uv tool install skep`) puts `skep` on your PATH;
+Claude Code runs the hook command through your PATH, so the bare name works.
+From a dev checkout use `uv run --project /path/to/skep skep policy hook`
+instead.
 
 The hook reads the operator's own home (`~/.skep`), the same store the CLI
 reads; the daemon does not need to be running.

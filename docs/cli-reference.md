@@ -261,6 +261,7 @@ back, newest first, with counts per verdict and per note source (`observed`,
 ```sh
 skep acp govern [--repo PATH] [--actor NAME] -- AGENT_ARGV...
 skep acp doctor -- AGENT_ARGV...
+skep acp install-hint
 ```
 
 `acp govern` is the process an ACP client (T3 Code, Zed, …) spawns in place
@@ -292,9 +293,12 @@ advertises with the default marked, the rings, and a WARNING when the
 default mode never asks (`auto`, `agent`, `agent-full-access`,
 `bypassPermissions`).
 
-In T3 Code: Settings → Providers → Add provider → Local ACP command, with
-executable `skep` and one argument per row: `acp`, `govern`, `--`,
-`claude-agent-acp`.
+`acp install-hint` prints what to paste into T3 Code's Settings → Providers →
+Add provider → Show more → Local ACP command dialog, for claude-agent-acp and
+codex-acp: the absolute path of `skep` (T3 launches it with no shell and no
+PATH lookup) and one argument per row — `acp`, `govern`, `--`, `npx`,
+`-y`, `@agentclientprotocol/<adapter>`. See
+[`acp-governor.md`](acp-governor.md).
 
 ## Memory
 
