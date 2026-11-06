@@ -65,7 +65,7 @@ def test_ollama_worker_uses_the_saved_assistant_ollama_config(repo: Path, tmp_pa
     finally:
         server.stop()
 
-    assert outcome.record.state == "completed"
+    assert outcome.record.state == "completed", outcome.record
     assert outcome.record.summary == "created ollama-backed generated.py"
     # It reached the Ollama endpoint, with the saved model + shared credential.
     assert server.chat_bodies()[0]["model"] == "qwen2.5-coder"
@@ -113,7 +113,7 @@ def test_ollama_worker_honors_a_worker_specific_endpoint_override(
         chat_server.stop()
         worker_server.stop()
 
-    assert outcome.record.state == "completed"
+    assert outcome.record.state == "completed", outcome.record
     # The WORKER Ollama answered with the worker model; the chat one was untouched.
     assert worker_server.chat_bodies()[0]["model"] == "qwen2.5-coder:32b"
     assert chat_server.chat_bodies() == []
