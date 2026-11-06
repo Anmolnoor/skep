@@ -114,6 +114,8 @@ What that policy answers:
 | `git status`, `ls`, `pnpm test` | allow (`shell:<command>`) |
 | a write inside the repo | allow (`fs: workspace`) |
 | `rm -rf build` (unlisted) | default-deny → forwarded: the human in T3 decides |
+| `ls -la; rm -rf build` | default-deny → forwarded: a chained line is decided one command at a time, and `rm` is unlisted |
+| `ls $(cat names)`, `sh -c '…'` | default-deny → forwarded: text a prefix matcher cannot read matches nothing |
 | `git push` | floor deny, before the client sees it |
 
 A repo's run policy compiles **allow lists only** (`allowed_shell_commands`,

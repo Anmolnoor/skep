@@ -73,6 +73,7 @@ from ..policy_schema import (
     document_from_settings,
     operator_document_from_settings,
     pattern_matches,
+    shell_segments,
 )
 from ..projects import (
     PROJECT_PHASES,
@@ -1988,6 +1989,9 @@ def policy_why(
         template = resolved.document.template if resolved.document is not None else None
         decision = decide(resolved.resolved_scopes, scope, action, value, template=template)
         scope_policy = resolved.resolved_scopes.get(scope)
+        # B3-F7: a chained shell line is decided per simple command; `why` shows
+        # the rules any of them touched (none, when the line is opaque).
+        parts = (shell_segments(value) or []) if scope == "shell" else [value]
         view["run"] = {
             "verdict": decision.verdict,
             "rule_id": decision.rule_id,
@@ -1995,7 +1999,8 @@ def policy_why(
             "considered": [
                 asdict(rule)
                 for rule in (scope_policy.rules if scope_policy else ())
-                if rule.action == action and pattern_matches(scope, rule.pattern, value)
+                if rule.action == action
+                and any(pattern_matches(scope, rule.pattern, part) for part in parts)
             ],
         }
     operator = resolve_operator_policy(store).decision(scope, action, value)
