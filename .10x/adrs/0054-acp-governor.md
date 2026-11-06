@@ -305,9 +305,13 @@ is left as written so the delta stays visible.
   either may `session/fork`. All four carry `cwd`, so all four bind it
   (B3-F2; the first build bound `session/new` only and every resumed turn
   decided against repo ""). A v1 `session/load` replays the session's
-  history as `session/update` notifications before it answers: those are
-  fed to the cache for later joins but never written as observed rows
-  (B3-F3; they were re-observed once per turn).
+  history as `session/update` notifications: those are fed to the cache
+  for later joins but never written as observed rows (B3-F3; they were
+  re-observed once per turn). The replay window is not the load's
+  request/response pair — under T3 the replay was recorded even so — but
+  the stretch from any continuing opener to the client's next
+  `session/prompt`, since a continued session can run nothing before it
+  (B3-F9).
 
 **Operator decisions (2026-11-06):** D3 accepted, plus a `--repo` override on
 the command line; D6 accepted; engine v2 on for fresh homes (`shell`,

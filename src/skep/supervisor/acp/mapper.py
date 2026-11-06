@@ -28,7 +28,7 @@ class Session:
     """One ACP session as the proxy sees it."""
 
     cwd: str = ""  # D3: params.cwd of the session opener (the caller applies --repo over it)
-    replaying: bool = False  # B3-F3: a v1 session/load replays history before it answers
+    replaying: bool = False  # B3-F3/F9: a loaded session replays history until the next prompt
     protocol_version: int = 1  # from the initialize RESULT
     client_fs_write: bool = False  # v1 initialize PARAMS clientCapabilities.fs.writeTextFile
     client_terminal: bool = False  # v1 initialize PARAMS clientCapabilities.terminal
@@ -38,7 +38,6 @@ class Session:
     observed: set[str] = field(default_factory=set)  # toolCallIds written as observed rows
     asked: set[str] = field(default_factory=set)  # toolCallIds a permission request named
     _init_id: Any = field(default=None, repr=False)
-    _load_id: Any = field(default=None, repr=False)
 
     def feed(self, direction: str, msg: Mapping[str, Any]) -> None:
         """Fold one decoded frame into the session state; other frames are ignored."""
@@ -51,10 +50,12 @@ class Session:
             self.client_terminal = caps.get("terminal") is True
         elif direction == "c2a" and method in _SESSION_OPENERS and "result" not in msg:
             self.cwd = str(params.get("cwd") or "")
-            if method == "session/load" and msg.get("id") is not None:
-                self._load_id, self.replaying = msg["id"], True
-        elif direction == "a2c" and self.replaying and msg.get("id") == self._load_id:
-            self.replaying = False  # the load answered (result or error): what follows is live
+            # B3-F9: a continued session can run nothing before the client's next
+            # prompt, so everything the agent reports until then is history —
+            # whenever it arrives, before or after the opener's answer.
+            self.replaying = method != "session/new"
+        elif direction == "c2a" and method == "session/prompt":
+            self.replaying = False
         elif direction == "a2c" and "result" in msg and _is_init_result(msg, self._init_id):
             result = _dict(msg.get("result"))
             version = result.get("protocolVersion")

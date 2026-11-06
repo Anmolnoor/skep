@@ -68,8 +68,9 @@ binary name (`claude-agent-acp` / `codex-acp`).
 
 T3 respawns the agent after a thread goes idle and continues the same
 session with `session/load`; the governor binds that request's `cwd` as it
-does `session/new`'s, and the history the agent replays before answering
-the load is cached for joins but never recorded as observed rows.
+does `session/new`'s, and everything the agent reports between that load
+and your next prompt is replayed history — cached for joins, never
+recorded as observed rows.
 
 ## The two rings, honestly
 

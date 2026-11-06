@@ -222,23 +222,27 @@ def test_a_loaded_session_binds_its_cwd_and_its_replayed_history_is_not_observed
     # session/load — no session/new, and the agent replays every earlier tool call
     # before answering the load. The replay bound nothing (repo "") and wrote the
     # old calls as observed rows again, once per turn.
+    # B3-F9: under T3 the replay was recorded even so — the window must not
+    # depend on where the load's answer falls; the client's next prompt ends it.
     home, repo = _demo_home(tmp_path)
     load = _frame("c2a", id=3, method="session/load", params={"sessionId": "s", "cwd": str(repo)})
+    prompt = _frame("c2a", id=4, method="session/prompt", params={"sessionId": "s", "prompt": []})
     _drive(
         open_governor(home, ["fx"]),
         repo,
-        [load, _ran("old", "ls"), _frame("a2c", id=3, result=None), _ran("new", "ls")],
+        [load, _ran("old", "ls"), _frame("a2c", id=3, result=None), _ran("late", "ls"),
+         prompt, _ran("new", "ls")],
         new=False,
-    )
+    )  # fmt: skip
     rows = _ledger(home)
     assert [(r["source"], r["tool_call_id"], r["repo"]) for r in rows] == [
         ("observed", "new", str(repo))
     ]
-    # v2 continues with session/resume (no replay) — the cwd binds the same way
+    # v2 continues with session/resume — the cwd binds the same way
     gov = open_governor(home, ["fx"])
     resume = _frame("c2a", id=3, method="session/resume", params={"sessionId": "s", "cwd": "/r2"})
     _drive(gov, repo, [resume], new=False)
-    assert gov.session.cwd == "/r2" and not gov.session.replaying
+    assert gov.session.cwd == "/r2" and gov.session.replaying
 
 
 def test_the_forwarded_row_names_the_asking_item_and_a_client_error(tmp_path: Path) -> None:
