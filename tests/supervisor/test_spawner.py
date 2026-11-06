@@ -274,3 +274,18 @@ def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(
     finally:
         store.close()
     assert transitions == ["created", "dispatched", "worker_crashed"]
+
+
+def test_proxy_env_keeps_loopback_direct_only_where_the_sandbox_shares_the_host_loopback() -> None:
+    """v115-F9 made loopback direct for Seatbelt, whose loopback is the host's.
+    Under bubblewrap --unshare-net the sandbox loopback is its own namespace, so a
+    worker's own test server on host 127.0.0.1 is reachable only through the
+    netshim bridge — the NO_PROXY exemption must be off there (the proxy admits
+    loopback), or every LLM-worker run against a loopback provider is refused."""
+    from skep.supervisor.spawner import _LOOPBACK_NO_PROXY, _proxy_env
+
+    direct = _proxy_env(8080)
+    assert direct["NO_PROXY"] == direct["no_proxy"] == _LOOPBACK_NO_PROXY
+    bridged = _proxy_env(8080, loopback_direct=False)
+    assert "NO_PROXY" not in bridged and "no_proxy" not in bridged
+    assert bridged["HTTP_PROXY"] == bridged["https_proxy"] == "http://127.0.0.1:8080"
