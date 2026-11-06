@@ -264,3 +264,83 @@ def test_the_hook_and_decide_commands_answer_from_the_home(
     assert record["verdict"] == "allow" and record["actor"] == "cli"
     assert main(["--home", str(home), "policy", "decide", "shell", "execute", "ls"]) != 0
     assert "run_repo" in capsys.readouterr().err
+
+
+def test_policy_decisions_reads_the_ledger_back_with_counts_and_three_faces(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR 0054 A3/A9 (B1-4): one reader, three faces; notes never count as
+    decisions (I8)."""
+    from skep.cli import main
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.serve.actions import policy_decisions, policy_note
+    from skep.supervisor.serve.tools import execute_read_tool
+
+    home = tmp_path / "home"
+    config = build_config(home, None)
+    zeros = {"allow": 0, "deny": 0, "require_approval": 0, "observed": 0, "forwarded": 0}
+    assert policy_decisions(config.audit_dir) == {"rows": [], "total": 0, "summary": zeros}
+
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    try:
+        policy_decide(holder, store, scope="shell", action="run", value="git push", actor="cli")
+        policy_decide(
+            holder, store, scope="shell", action="run", value="git push", actor="acp:codex-acp"
+        )
+        for source, actor in (("observed", "acp:codex-acp"), ("forwarded", "human@t3")):
+            policy_note(
+                config.audit_dir,
+                source=source,  # type: ignore[arg-type]
+                actor=actor,
+                repo=None,
+                scope="shell",
+                action="run",
+                value="ls",
+            )
+    finally:
+        store.close()
+    path = config.audit_dir / "policy" / "decisions.jsonl"
+    rows = _ledger(config)
+    # Distinct times so order and `since` are deterministic.
+    for i, row in enumerate(rows):
+        row["at"] = f"2026-11-0{i + 4}T10:00:00Z"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+
+    everything = policy_decisions(config.audit_dir)
+    assert [r["actor"] for r in everything["rows"]] == [
+        "human@t3",
+        "acp:codex-acp",
+        "acp:codex-acp",
+        "cli",
+    ]
+    assert everything["total"] == 4  # the malformed line is skipped
+    assert everything["summary"] == {**zeros, "deny": 2, "observed": 1, "forwarded": 1}
+    acp = policy_decisions(config.audit_dir, actor="acp:*")
+    assert acp["total"] == 2 and acp["summary"] == {**zeros, "deny": 1, "observed": 1}
+    assert policy_decisions(config.audit_dir, actor="human@*")["total"] == 1
+    assert policy_decisions(config.audit_dir, since="2026-11-06")["total"] == 2
+    assert policy_decisions(config.audit_dir, since="2026-11-05T10:00:00Z")["total"] == 3
+    sliced = policy_decisions(config.audit_dir, limit=1)
+    assert len(sliced["rows"]) == 1 and sliced["total"] == 4
+    assert sliced["rows"][0]["actor"] == "human@t3"
+    with pytest.raises(ValueError, match="limit"):
+        policy_decisions(config.audit_dir, limit=0)
+
+    # The three faces return the one function's answer.
+    assert main(["--home", str(home), "policy", "decisions", "--actor", "acp:*"]) == 0
+    assert json.loads(capsys.readouterr().out) == acp
+    assert main(["--home", str(home), "policy", "decisions", "--limit", "0"]) != 0
+    assert "limit" in capsys.readouterr().err
+    client = serve_client(config)
+    rest = client.get("/api/policy/decisions", params={"actor": "acp:*"})
+    assert rest.status_code == 200 and rest.json() == acp
+    assert client.get("/api/policy/decisions", params={"limit": 0}).status_code == 400
+    store = RunStore(config.db_path)
+    try:
+        chat = execute_read_tool(
+            "policy_decisions", {"actor": "acp:*"}, store=store, holder=ConfigHolder(config, store)
+        )
+    finally:
+        store.close()
+    assert chat == acp

@@ -30,24 +30,14 @@ command cards rather than fails, and an explicit deny refuses.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .policy_paths import workspace_value
 from .policy_schema import DEFAULT_DENY_RULE_ID
 
 _WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 _HOOK_DECISIONS = {"allow": "allow", "require_approval": "ask", "deny": "deny"}
-
-
-def _workspace_value(path: str, cwd: str) -> str:
-    if not path or not cwd:
-        return path or "workspace"
-    try:
-        Path(path).resolve().relative_to(Path(cwd).resolve())
-    except (ValueError, OSError):
-        return path
-    return "workspace"
 
 
 def hook_probe(payload: dict[str, Any]) -> tuple[str, str, str] | None:
@@ -61,7 +51,7 @@ def hook_probe(payload: dict[str, Any]) -> tuple[str, str, str] | None:
         return ("shell", "run", str(inputs.get("command") or ""))
     if tool in _WRITE_TOOLS:
         path = str(inputs.get("file_path") or inputs.get("notebook_path") or "")
-        return ("filesystem", "write", _workspace_value(path, cwd))
+        return ("filesystem", "write", workspace_value(path, cwd))
     if tool == "WebFetch":
         return ("network", "fetch", urlsplit(str(inputs.get("url") or "")).hostname or "")
     if tool == "WebSearch":

@@ -566,7 +566,12 @@ def test_default_coding_worker_uses_saved_assistant_llm_config(repo: Path, tmp_p
     finally:
         server.stop()
 
-    assert outcome.record.state == "completed"
+    assert outcome.record.state == "completed", (
+        outcome.record.summary,
+        outcome.record.verification_outcome,
+        outcome.record.execution_mode,
+        (outcome.record.verification_details or "")[:400],
+    )
     assert outcome.record.summary == "created assistant-backed generated.py"
     assert server.chat_bodies()[0]["model"] == "gpt-oss"
     assert server.requests[-1]["headers"]["Authorization"] == "Bearer sk-fake"
@@ -5271,7 +5276,12 @@ def test_llm_worker_records_provider_token_counts(repo: Path, tmp_path: Path) ->
     finally:
         ollama.stop()
 
-    assert outcome.record.state == "completed"
+    assert outcome.record.state == "completed", (
+        outcome.record.summary,
+        outcome.record.verification_outcome,
+        outcome.record.execution_mode,
+        (outcome.record.verification_details or "")[:400],
+    )
     store = RunStore(config.db_path)
     try:
         usage = store.usage_for(outcome.record.task_id)
@@ -5318,7 +5328,12 @@ def test_llm_worker_token_counts_accumulate_across_repair_rounds(
     finally:
         ollama.stop()
 
-    assert outcome.record.state == "completed"
+    assert outcome.record.state == "completed", (
+        outcome.record.summary,
+        outcome.record.verification_outcome,
+        outcome.record.execution_mode,
+        (outcome.record.verification_details or "")[:400],
+    )
     store = RunStore(config.db_path)
     try:
         usage = store.usage_for(outcome.record.task_id)
@@ -5359,7 +5374,12 @@ def test_llm_worker_without_counts_stays_none_never_zero_guess(repo: Path, tmp_p
     finally:
         ollama.stop()
 
-    assert outcome.record.state == "completed"
+    assert outcome.record.state == "completed", (
+        outcome.record.summary,
+        outcome.record.verification_outcome,
+        outcome.record.execution_mode,
+        (outcome.record.verification_details or "")[:400],
+    )
     store = RunStore(config.db_path)
     try:
         usage = store.usage_for(outcome.record.task_id)

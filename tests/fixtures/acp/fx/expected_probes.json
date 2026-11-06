@@ -1,0 +1,18 @@
+[
+  {
+    "fixture": "tool_call_denied_write.ndjson",
+    "line": 12,
+    "tool_call_id": "toolu_01UGENWURULQ8Y3F7F8Npwzg",
+    "probe": {
+      "kind": "decided",
+      "items": [
+        [
+          "filesystem",
+          "write",
+          "workspace"
+        ]
+      ],
+      "cwd": "$REPO"
+    }
+  }
+]

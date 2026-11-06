@@ -28,6 +28,9 @@ that), so if you can't find it below, it doesn't exist yet.
 - [`cli-reference.md`](cli-reference.md) — every command
 - [`policy-hook.md`](policy-hook.md) — the policy enforcement hook: `decide()`
   for outside agents (Claude Code PreToolUse), every verdict recorded
+- [`acp-governor.md`](acp-governor.md) — `skep acp govern`: skep answers an
+  ACP agent's permission asks inside another client (T3 Code), every verdict
+  recorded
 - [`configuration.md`](configuration.md) — home, worker, policy, and model
   settings
 - [`brain.md`](brain.md) — choosing the assistant model (the v72 dial:

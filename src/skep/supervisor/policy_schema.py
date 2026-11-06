@@ -195,6 +195,45 @@ def _shell_tokens(text: str) -> list[str]:
 
 shell_tokens = _shell_tokens  # P1: the v2 engine vets every layer's shell rules with it
 
+_SHELL_OPAQUE = ("$(", "`", "<(", ">(")  # a second command line hides inside
+_SHELL_C_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+
+def shell_segments(value: str) -> list[str] | None:
+    """The simple commands a shell would run for ``value``, in order.
+
+    B3-F7 (T3 field test): ``allowed_shell_commands`` entries are argv prefixes,
+    and a prefix matcher saw ``ls -la; rm -rf x`` as ``ls``. A worker runs its
+    argv without a shell, so ``;`` was an argument there; the PreToolUse hook
+    and the ACP governor hand the string to a real shell. ``None`` means part
+    of the line is opaque to a prefix matcher — command substitution, a
+    ``sh -c`` string, ``eval`` — and decides as unmatched.
+    """
+    if any(mark in value for mark in _SHELL_OPAQUE):
+        return None
+    # Non-POSIX keeps quotes on the tokens, so a worker's literal '&&' argument
+    # (shlex.join quotes it) stays a word and only bare operators split.
+    lexer = shlex.shlex(value, posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if set(token) <= set(";&|"):
+            segments.append([])
+        elif token not in ("(", ")"):  # grouping changes nothing about what runs
+            segments[-1].append(token)
+    found = [seg for seg in segments if seg]
+    for seg in found:
+        if seg[0] == "eval" or (seg[0] in _SHELL_C_SHELLS and "-c" in seg):
+            return None
+    # ponytail: wrappers that run a command named later (xargs, env, nohup,
+    # sudo, find -exec) still match on the wrapper; list them here when a
+    # policy needs to see through them.
+    return [" ".join(seg) for seg in found] or [value]
+
 
 def pattern_matches(scope: str, pattern: str, value: str) -> bool:
     """Does ``pattern`` cover ``value`` under this scope's matcher?"""
@@ -322,6 +361,23 @@ def decide(
     anything unmatched is denied."""
     _require_scope_action(scope, action)
     label = template or "policy"
+    if scope == "shell" and action == "run":
+        segments = shell_segments(value)
+        if segments is None:
+            segments = []  # opaque: nothing can match it
+        if len(segments) != 1 or segments[0] != value:
+            # B3-F7: a chained line is decided one simple command at a time and
+            # the least favourable segment decides; opaque text matches nothing.
+            parts = [decide(resolved, scope, action, seg, template=template) for seg in segments]
+            if not parts:
+                return PolicyDecision(
+                    verdict="deny",
+                    rule_id=DEFAULT_DENY_RULE_ID,
+                    decided_by=f"{label}/{DEFAULT_DENY_RULE_ID}",
+                    scope=scope,
+                    action=action,
+                )
+            return max(parts, key=lambda part: _VERDICT_RANK[part.verdict])
     scope_policy = resolved.get(scope)
     matches = [
         rule
