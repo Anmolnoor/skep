@@ -10,12 +10,16 @@ from skep.supervisor.acp.proxy import Direction
 ACP_DIR = Path(__file__).parent
 
 
-def envelope_frames(path: Path) -> list[tuple[Direction, bytes]]:
-    """The ``(dir, raw line + newline)`` frames of one envelope ``.ndjson`` file, in order."""
+def envelope_frames(path: Path, repo: str | None = None) -> list[tuple[Direction, bytes]]:
+    """The ``(dir, raw line + newline)`` frames of one envelope ``.ndjson`` file, in order.
+
+    ``repo`` replaces the scrubbed ``$REPO`` placeholder in each raw line.
+    """
     frames: list[tuple[Direction, bytes]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         env = json.loads(line)
-        frames.append((env["dir"], env["raw"].encode("utf-8") + b"\n"))
+        raw = env["raw"] if repo is None else env["raw"].replace("$REPO", repo)
+        frames.append((env["dir"], raw.encode("utf-8") + b"\n"))
     return frames
 
 

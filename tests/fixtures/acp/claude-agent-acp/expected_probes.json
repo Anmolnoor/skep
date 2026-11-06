@@ -1,0 +1,34 @@
+[
+  {
+    "fixture": "live-v1-ask.ndjson",
+    "line": 25,
+    "tool_call_id": "toolu_016BCo4h4NUhEDTBN3KYGFEW",
+    "probe": {
+      "kind": "decided",
+      "items": [
+        [
+          "filesystem",
+          "write",
+          "workspace"
+        ]
+      ],
+      "cwd": "$REPO"
+    }
+  },
+  {
+    "fixture": "live-v2-ask.ndjson",
+    "line": 32,
+    "tool_call_id": "toolu_01KNNMNXDcpiQteCSgQszXfA",
+    "probe": {
+      "kind": "decided",
+      "items": [
+        [
+          "filesystem",
+          "write",
+          "workspace"
+        ]
+      ],
+      "cwd": "$REPO"
+    }
+  }
+]
