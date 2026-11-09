@@ -171,6 +171,23 @@ THREE_FACE_VERBS: dict[str, str] = {
 }
 THREE_FACES: tuple[Path, ...] = (SUPERVISOR / "cli_cmds.py", SUPERVISOR / "serve/app.py", TOOLS)
 
+# first-run O3 (ADR 0056 D7, ADR 0050): `skep onboard`'s step functions. Two
+# faces, not three: onboarding writes the model, the work directory, the
+# sandbox and the locked baseline the Queen itself runs under, so the model is
+# not handed it — the CLI and the REST routes behind the web /setup form are
+# the operator's faces, and each must call the step function by name.
+ONBOARD_VERBS: dict[str, str] = {
+    "onboard_status": "where `skep onboard` resumes; GET /api/onboard",
+    "onboard_model": "step 1, provider + test call + egress line; POST /api/onboard/model",
+    "onboard_workdir": "step 2, create + register via project setup; POST /api/onboard/workdir",
+    "onboard_sandbox": "step 3, the sandbox_backend record (D8); POST /api/onboard/sandbox",
+    "template_preview": "step 4's table before the typed yes; GET /api/onboard/template",
+    "onboard_template": "step 4, the locked baseline through O2's approve path",
+    "onboard_role": "step 5, first_run.json for O4/R1; POST /api/onboard/role",
+    "onboard_check": "`skep onboard --check` and GET /api/onboard/check, egress truth last",
+}
+ONBOARD_FACES: tuple[Path, ...] = (ROOT / "src/skep/cli.py", SUPERVISOR / "serve/app.py")
+
 
 def _tools_tree() -> ast.Module:
     return ast.parse(TOOLS.read_text(encoding="utf-8"))
@@ -356,6 +373,17 @@ def test_three_face_reads_are_called_from_cli_rest_and_chat() -> None:
     for function, why in {**THREE_FACE_READS, **THREE_FACE_VERBS}.items():
         assert len(why.strip()) >= 20, function
         for face in THREE_FACES:
+            assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
+                f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
+            )
+
+
+def test_onboard_steps_are_called_from_the_cli_and_rest() -> None:
+    """first-run O3: the web /setup form is the step functions (ADR 0050) — a
+    face that stops calling one fails here naming it."""
+    for function, why in ONBOARD_VERBS.items():
+        assert len(why.strip()) >= 20, function
+        for face in ONBOARD_FACES:
             assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
                 f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
             )

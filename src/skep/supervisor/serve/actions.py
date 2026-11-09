@@ -1993,6 +1993,7 @@ def baseline_preview(
     template: str | None = None,
     file: str | None = None,
     reapprove: bool = False,
+    layer: PolicyTemplate | None = None,
 ) -> tuple[PolicyTemplate, dict[str, Any]]:
     """first-run O2: the layer ``approve`` would lock, as the explain view
     plus its ``diff`` against the locked layer. Refuses (I9) a second
@@ -2006,7 +2007,11 @@ def baseline_preview(
             "a policy baseline is already approved — `skep policy approve --reapprove` "
             "shows the diff against it and re-locks"
         )
-    if template:
+    if layer is not None:
+        # O3: onboard's candidate (a template, tightened when sandbox is none),
+        # re-validated so it meets the same catalogue and floor checks a file does.
+        layer = PolicyTemplate.model_validate(layer.model_dump())
+    elif template:
         layer = load_policy_template(template)
     elif file:
         try:
@@ -2032,6 +2037,7 @@ def approve_policy_baseline(
     reapprove: bool = False,
     approved_by: str,
     expect_sha256: str | None = None,
+    layer: PolicyTemplate | None = None,
 ) -> dict[str, Any]:
     """first-run O2 (ADR 0056 D1): lock a layer as the approved baseline —
     ``baseline.json`` (0444, a courtesy), ``baseline.lock`` and a
@@ -2039,7 +2045,9 @@ def approve_policy_baseline(
     One verb on three faces (ADR 0050): ``skep policy approve``, ``POST
     /api/policy/baseline/approve`` and the chat card. ``expect_sha256`` is
     the CLI's guard that what it showed is what gets locked."""
-    layer, view = baseline_preview(home, template=template, file=file, reapprove=reapprove)
+    layer, view = baseline_preview(
+        home, template=template, file=file, reapprove=reapprove, layer=layer
+    )
     if expect_sha256 is not None and view["sha256"] != expect_sha256:
         raise ValueError("the baseline changed since it was shown — run approve again")
     row = write_baseline_lock(home, layer, approved_by=approved_by)
