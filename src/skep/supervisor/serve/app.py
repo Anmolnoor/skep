@@ -203,7 +203,7 @@ class PolicyUpdate(BaseModel):
     allowed_shell_commands: list[list[str]] | None = None
     allowed_plugin_risks: list[str] | None = None
     # v44-F7: worker sandbox backend — "auto" (native Seatbelt/bwrap) | "podman".
-    sandbox_backend: Literal["auto", "podman"] | None = None
+    sandbox_backend: Literal["auto", "podman", "none"] | None = None
     # P1 (ADR 0053 D6): scopes routed through policy engine v2.
     policy_engine_v2_scopes: list[str] | None = None
 
