@@ -261,3 +261,13 @@ def test_blocked_rides_the_gate_channel_once_per_transition(
     ]
     assert f"run {task_id}) is blocked" in pushed[0][1]
     assert "not governed by skep" in pushed[1][1]
+
+
+def test_the_web_runs_view_renders_presence_rows() -> None:
+    """The Runs workspace opens with the presence rows (no-build UI: the
+    wiring is the static source)."""
+    app_js = (ROOT / "src/skep/supervisor/serve/static/app.js").read_text()
+    section = app_js.split("async function buildAgentsSection", 1)[1].split("\n}\n", 1)[0]
+    assert '"/api/agents"' in section and "blocked and ungoverned" in section
+    runs_view = app_js.split("async function viewRuns(main)", 1)[1].split("\n}\n", 1)[0]
+    assert "await buildAgentsSection()" in runs_view
