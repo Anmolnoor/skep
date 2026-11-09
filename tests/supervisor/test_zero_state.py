@@ -167,3 +167,35 @@ def test_the_rule_is_born_here_or_opted_in_and_binds_v2_scopes_only(tmp_path: Pa
         assert zero_state_home(store)
     finally:
         store.close()
+
+
+def test_install_hint_names_the_baseline_or_sends_you_to_onboard(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    assert main(["--home", str(home), "acp", "install-hint"]) == 0
+    first, *rows = capsys.readouterr().out.splitlines()
+    assert first == "run skep onboard first — the governor answers from an approved baseline"
+    assert rows[0] == "Local ACP command — claude-agent-acp"  # then the rows, as today
+    assert main(["--home", str(home), "policy", "approve", "--template", "builder", "--yes"]) == 0
+    sha = json.loads((build_config(home, None).home / "policy" / "baseline.lock").read_text())
+    capsys.readouterr()
+    assert main(["--home", str(home), "acp", "install-hint"]) == 0
+    first, *rows = capsys.readouterr().out.splitlines()
+    assert first.startswith("baseline: builder approved ")
+    assert first.endswith(f"sha256 {sha['sha256'][:12]}")
+    assert rows[0] == "Local ACP command — claude-agent-acp"
+
+
+def test_onboard_check_wants_every_scope_routed(tmp_path: Path) -> None:
+    home, _ = _demo_home(tmp_path, fresh=True)
+    supervisor = build_config(home, None).home
+    assert onboard_check(supervisor)["checks"]["engine v2"]["status"] == "ready"
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        store.set_setting("policy_engine_v2_scopes", ["filesystem", "shell"])
+    finally:
+        store.close()
+    probe = onboard_check(supervisor)["checks"]["engine v2"]
+    assert probe["status"] == "blocked"
+    assert probe["detail"].endswith("not routed (engine v1): coding, network, mcp, email, browse")

@@ -36,7 +36,7 @@ def cmd_acp_doctor(args: argparse.Namespace) -> int:
 def cmd_acp_install_hint(args: argparse.Namespace) -> int:
     from .acp.govern import install_hint
 
-    return install_hint()
+    return install_hint(args.home)
 
 
 def register_acp_commands(
