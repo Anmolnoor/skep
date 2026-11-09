@@ -2939,3 +2939,20 @@ operator sees:
 
 Air smoke (`docs/acp-governor.md`): `pipx install skep && skep onboard
 --template builder --yes`, then `skep acp install-hint`.
+
+## first-run O4 — first-run transparency (2026-11-09)
+
+ADR 0056 D6. While `~/.skep/first_run.json` (O3's record, extended) is not
+dismissed, `serve/chat.py` `first_run_events` — wrapped around the one SSE
+choke point every chat turn and card verdict streams through — adds a
+one-line `why` to every verdict card (receipt, denial, confirm card), read
+off the decision the card already carries (rule, layer, reason), and ends
+each turn with a `tally` event (`skep: N allowed · N asked · N denied`)
+that bumps `turns_seen` / `verdicts_seen`. The turn that first crosses 10
+turns or 25 verdicts carries the offer to turn it down. `skep chat` and the
+web chat render both; `skep onboard --quiet | --verbose` and
+`POST /api/onboard/transparency` flip `dismissed` (operator faces only,
+`ONBOARD_VERBS`). Rendering only: no new rows, no new verdicts. The tally
+counts the turn's own decisions, because the Queen's chat verdicts are not
+in `decisions.jsonl`. A home with no `first_run.json` streams exactly as
+before.

@@ -65,6 +65,25 @@ It ends with the egress-truth block, which says where model prompts go,
 which hosts the baseline lets workers reach, and ends with
 `telemetry: none`. It exits 0 only when every check is ready.
 
+## The first session: why under every verdict
+
+While `~/.skep/first_run.json` is active (onboard step ⑤ starts it), every
+verdict card in `skep chat` and the web chat carries one more line, `why:`,
+naming the rule and layer that decided it, for example
+`why: allowed: rule r1 in the learned layer — capability.allow.learned_rule`.
+A card with no rule behind it says it asked by default. Each turn ends with
+a tally:
+
+```
+skep: 6 allowed · 1 asked · 0 denied — skep policy why for any of them
+```
+
+After 10 turns or 25 verdicts the chat offers once to turn this down.
+`skep onboard --quiet` turns it off, `skep onboard --verbose` brings it back
+(the web offer's "Turn it down" button calls `POST /api/onboard/transparency`).
+A home that never ran `skep onboard` has no `first_run.json` and shows none
+of it. The model cannot flip this switch; only you can.
+
 ## In the browser
 
 The `/setup` page has a "First run (skep onboard)" card with the same five

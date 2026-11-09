@@ -185,6 +185,8 @@ ONBOARD_VERBS: dict[str, str] = {
     "onboard_template": "step 4, the locked baseline through O2's approve path",
     "onboard_role": "step 5, first_run.json for O4/R1; POST /api/onboard/role",
     "onboard_check": "`skep onboard --check` and GET /api/onboard/check, egress truth last",
+    "onboard_transparency": "first-run O4: `skep onboard --quiet | --verbose` and "
+    "POST /api/onboard/transparency — the model never gets the switch that hides its verdicts",
 }
 ONBOARD_FACES: tuple[Path, ...] = (ROOT / "src/skep/cli.py", SUPERVISOR / "serve/app.py")
 

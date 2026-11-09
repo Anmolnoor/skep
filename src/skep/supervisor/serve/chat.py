@@ -788,6 +788,29 @@ def _sse(data: dict[str, Any], *, event: str | None = None) -> str:
     return f"{name}data: {json.dumps(data, ensure_ascii=True)}\n\n"
 
 
+def first_run_events(events: Iterator[ChatEvent], personal_home: Path) -> Iterator[ChatEvent]:
+    """first-run O4 (ADR 0056 D6): while ``first_run.json`` is active, every
+    verdict card — a grant-covered receipt, a denial, a confirm card —
+    carries its one-line ``why``, and the turn ends with a ``tally`` event.
+    Rendering only: no new rows, no new verdicts. The flag is read once per
+    turn; dismissed (or never onboarded) passes the events through untouched."""
+    from ..onboard import note_turn, transparency_active, verdict_why
+
+    if not transparency_active(personal_home):
+        yield from events
+        return
+    tally = {"allowed": 0, "asked": 0, "denied": 0}
+    for event, data in events:
+        if event == "action" or (event == "tool" and data.get("decision")):
+            data = {**data, "why": verdict_why(data.get("decision"))}
+            verdict = (data.get("decision") or {}).get("verdict")
+            key = "asked" if event == "action" else "denied" if verdict == "deny" else "allowed"
+            tally[key] += 1
+        if event == "done":
+            yield ("tally", note_turn(personal_home, tally))
+        yield (event, data)
+
+
 def _title_from(content: str) -> str:
     first_line = content.strip().splitlines()[0] if content.strip() else DEFAULT_TITLE
     return first_line[:60]
@@ -2223,7 +2246,7 @@ def add_chat_routes(
         return engine.require_chat(chat_id)
 
     def _as_sse(events: Iterator[ChatEvent]) -> Iterator[str]:
-        for event, data in events:
+        for event, data in first_run_events(events, holder.current.home.parent):
             yield _sse(data, event=event)
 
     @app.get("/api/chats")
