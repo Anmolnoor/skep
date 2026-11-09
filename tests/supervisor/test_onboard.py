@@ -308,3 +308,62 @@ def test_a_refused_typed_yes_locks_nothing(
     assert main([*argv, "--no-chat"]) == 1
     assert "not approved — nothing was locked" in capsys.readouterr().err
     assert not baseline_path(home / "supervisor").exists()
+
+
+def _usable(backend: str | None = None) -> sandbox.SandboxAvailability:
+    return sandbox.SandboxAvailability(True, None, "stub", backend="seatbelt")
+
+
+def test_a_sandbox_switch_after_lock_reopens_the_template_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """O3-F1: `--sandbox none` after a sandboxed lock re-shows ④ and re-locks
+    the tightened builder — the baseline is what ③ says it is (D8)."""
+    from functools import partial
+
+    from skep.supervisor import onboard
+
+    monkeypatch.setattr(onboard, "onboard_sandbox", partial(onboard.onboard_sandbox, probe=_usable))
+    home = tmp_path / "home"
+    argv = _onboard_flags(home, tmp_path / "work")
+    argv[argv.index("none")] = "auto"
+    assert main(argv) == 0
+    state = verify(home / "supervisor")
+    assert isinstance(state, Ok)
+    assert {r.rule_id: r.verdict for r in state.layer.rules}["fs-workspace"] == "allow"
+    capsys.readouterr()
+
+    assert main(["--home", str(home), "onboard", "--sandbox", "none", "--yes", "--no-chat"]) == 0
+    out = capsys.readouterr().out
+    assert "④ template: done" not in out
+    assert "fs-workspace-unsandboxed" in out  # explain re-shown for the new candidate
+    assert "baseline locked: builder" in out
+    state = verify(home / "supervisor")
+    assert isinstance(state, Ok)
+    rules = {r.rule_id: r.verdict for r in state.layer.rules}
+    assert "fs-workspace" not in rules and "coding-workspace" not in rules
+    assert rules["fs-workspace-unsandboxed"] == "require_approval"
+    assert onboard_status(home / "supervisor")["done"]
+
+
+def test_check_names_a_baseline_the_sandbox_no_longer_matches(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Either direction re-opens ④ (none → auto leaves it stricter, still not
+    what onboard shows); nothing is re-locked without the approval path."""
+    home = tmp_path / "home"
+    assert main(_onboard_flags(home, tmp_path / "work")) == 0
+    locked = verify(home / "supervisor")
+    with _holder(home) as (holder, store):
+        onboard_sandbox(holder, store, backend="auto", probe=_usable)
+    status = onboard_status(home / "supervisor")
+    assert status["next"] == "template" and status["relock"] == "builder"
+    assert verify(home / "supervisor") == locked  # not silently rewritten
+    capsys.readouterr()
+    assert main(["--home", str(home), "onboard", "--check"]) == 1
+    out = capsys.readouterr().out
+    assert (
+        "- baseline: blocked - builder locked under another sandbox — not what onboard "
+        "locks for builder with sandbox auto; run skep onboard to re-approve" in out
+    )
+    assert "- steps: blocked - pending: template" in out

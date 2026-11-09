@@ -66,17 +66,34 @@ def _record(home: Path, step: str, record: dict[str, Any]) -> dict[str, Any]:
 
 def onboard_status(supervisor_home: Path) -> dict[str, Any]:
     """Every step's record (or None) and the first incomplete one. The
-    template step is complete only while the baseline verifies — a tampered
-    lock sends onboard back to step ④."""
+    template step is complete only while the baseline verifies AND is what
+    ④ would lock now for the recorded template under the recorded sandbox —
+    a tampered lock, or a sandbox switch after the lock (O3-F1, D8), sends
+    onboard back to step ④. ``relock`` names the template in the second case."""
     home = supervisor_home.parent
     state = _read(home / STATE_FILE)
     first_run = _read(home / FIRST_RUN_FILE)
     records: dict[str, Any] = {step: state.get(step) for step in STEPS[:4]}
-    if records["template"] is not None and not isinstance(verify(supervisor_home), Ok):
-        records["template"] = None
+    relock = None
+    if records["template"] is not None:
+        baseline = verify(supervisor_home)
+        if not isinstance(baseline, Ok):
+            records["template"] = None
+        else:
+            template = str(records["template"]["template"])
+            backend = (records["sandbox"] or {}).get("backend")
+            candidate = baseline_candidate(template, backend)
+            schema = baseline.lock.get("schema_version")
+            if sha256_of(candidate, schema_version=schema) != baseline.lock.get("sha256"):
+                records["template"], relock = None, template
     records["role"] = first_run if first_run.get("role") else None
     pending = [step for step in STEPS if records[step] is None]
-    return {"steps": records, "next": pending[0] if pending else None, "done": not pending}
+    return {
+        "steps": records,
+        "next": pending[0] if pending else None,
+        "done": not pending,
+        "relock": relock,
+    }
 
 
 # --- ① model -----------------------------------------------------------------
@@ -441,8 +458,16 @@ def onboard_check(supervisor_home: Path) -> dict[str, Any]:
     state = _read(home / STATE_FILE)
     checks: dict[str, dict[str, str]] = {}
 
+    steps = onboard_status(supervisor_home)
     baseline = baseline_status(supervisor_home)
-    if baseline["state"] == "ok":
+    if baseline["state"] == "ok" and steps["relock"]:
+        backend_now = (state.get("sandbox") or {}).get("backend")
+        checks["baseline"] = _check(
+            False,
+            f"{baseline['template']} locked under another sandbox — not what onboard locks "
+            f"for {steps['relock']} with sandbox {backend_now}; run skep onboard to re-approve",
+        )
+    elif baseline["state"] == "ok":
         checks["baseline"] = _check(
             True, f"{baseline['template']} locked, sha256 {baseline['sha256'][:12]}"
         )
@@ -489,7 +514,6 @@ def onboard_check(supervisor_home: Path) -> dict[str, Any]:
     provider = status["required"].get("provider", {"status": "blocked", "detail": "no profile"})
     checks["model"] = _check(provider.get("status") == "ready", str(provider.get("detail")))
 
-    steps = onboard_status(supervisor_home)
     pending = [step for step in STEPS if steps["steps"][step] is None]
     checks["steps"] = _check(
         not pending, "all five complete" if not pending else f"pending: {', '.join(pending)}"

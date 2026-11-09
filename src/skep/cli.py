@@ -452,13 +452,19 @@ def _onboard_steps(args: argparse.Namespace, holder: Any, store: Any) -> int:
         record = onboard.onboard_sandbox(holder, store, backend=backend)
         print(f"  {backend}: {record['rings']}")
 
-    # ④ template
-    record = records["template"]
+    # ④ template — re-read: ③ may have just switched the sandbox (O3-F1)
+    status = onboard.onboard_status(holder.current.home)
+    record = status["steps"]["template"]
     if record and args.template in (None, record["template"]):
         print(f"④ template: done — {record['template']} locked")
     else:
         print("④ template")
-        template = args.template
+        if status["relock"]:
+            print(
+                f"  the locked baseline is not what {status['relock']} locks under this "
+                "sandbox — approve the candidate to re-lock"
+            )
+        template = args.template or status["relock"]
         shown = False
         if template is None:
             if not args.yes:
