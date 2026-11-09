@@ -478,7 +478,8 @@ class _TurnPrinter:
                 reason = str(decision.get("reason") or "")
                 detail = decision.get("detail")
                 where = f" ({detail})" if detail else ""
-                if decision.get("verdict") == "allow":
+                # T3-2: the set AutonomyDecision.allows_execution() runs.
+                if decision.get("verdict") in {"allow", "allow_with_constraints"}:
                     note = f"ran without asking — covered by {reason or 'a standing grant'}{where}"
                 else:
                     note = f"denied — {reason or 'policy'}{where}"

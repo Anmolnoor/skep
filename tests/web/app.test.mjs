@@ -167,3 +167,24 @@ test("onboard card: changing the template throws away the preview", async () => 
   for (const fn of template.listeners.change) fn();
   assert.equal(lock.disabled, true);
 });
+
+test("a denial receipt says denied, not 'ran without asking' (T3-2, web twin of v115-F3)", () => {
+  // `decision` rides a denial too (v40-F10): the kicker follows the verdict.
+  const app = loadApp();
+  const node = app.receiptNode({
+    tool: "run_shell",
+    card: { headline: "git push origin main" },
+    decision: { verdict: "deny", reason: "floor.git_push", detail: "workers never push" },
+  });
+  assert.equal(texts(node, "card-kicker")[0], "Denied — this did not run");
+  assert.equal(texts(node, "card-purpose")[0], "denied by floor.git_push (workers never push)");
+  assert.ok(!node.textContent.includes("without asking"));
+});
+
+test("allow_with_constraints ran too — the receipt follows allows_execution()", () => {
+  const app = loadApp();
+  const node = app.receiptNode({
+    tool: "run_shell", decision: { verdict: "allow_with_constraints", reason: "ops.allow.dry_run" },
+  });
+  assert.equal(texts(node, "card-kicker")[0], "Ran without asking — you approved this already");
+});

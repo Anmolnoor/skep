@@ -263,15 +263,25 @@ function whyLine(d) {
 // operator already gave covers it. Same headline and risk as the approval
 // card would have shown, and deliberately no buttons: it is a record, not a
 // decision. Silence here used to be indistinguishable from nothing happening.
+// T3-2 (web twin of v115-F3): `decision` rides a denial too (v40-F10), and
+// the receipt said "ran without asking" on every refusal. The kicker follows
+// the verdict — the same set as AutonomyDecision.allows_execution().
 function receiptNode(d) {
   const card = d.card || {};
-  const covered = d.decision && (d.decision.detail || d.decision.reason);
+  const decision = d.decision || {};
+  const allowed = ["allow", "allow_with_constraints"].includes(decision.verdict);
+  const covered = decision.detail || decision.reason;
+  const denied = decision.reason
+    ? `denied by ${decision.reason}${decision.detail ? ` (${decision.detail})` : ""}`
+    : "denied by policy";
   return el("div", { class: "confirm-card receipt-card" },
-    el("p", { class: "card-kicker" }, "Ran without asking — you approved this already"),
+    el("p", { class: "card-kicker" },
+      allowed ? "Ran without asking — you approved this already" : "Denied — this did not run"),
     el("p", { class: "card-headline mono" }, card.headline || d.tool),
     card.risk ? el("p", { class: "card-risk" },
       el("span", { class: "card-risk-label" }, "Risk: "), card.risk) : null,
-    covered ? el("p", { class: "card-purpose" }, `covered by ${covered}`) : null,
+    !allowed ? el("p", { class: "card-purpose" }, denied)
+      : covered ? el("p", { class: "card-purpose" }, `covered by ${covered}`) : null,
     whyLine(d),
     // v106-F11 (v90-F3): which tier of grant, given when.
     d.grant ? el("p", { class: "note" },
