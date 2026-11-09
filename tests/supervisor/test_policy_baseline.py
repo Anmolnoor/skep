@@ -541,3 +541,90 @@ def test_a_schema_bump_cards_a_reapproval_and_keeps_deciding(
         client.post(f"/api/chats/{chat.chat_id}/commands/{card.action_id}/confirm")
         view = client.get("/api/policy/baseline").json()
         assert view["state"] == "ok" and view["schema_version"] == 1
+
+
+# --- T1: tamper variants the O2 tests left open --------------------------------
+
+
+def test_an_unreadable_lock_fails_closed_and_explain_still_answers(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    pb.write_lock(home, load_policy_template("builder"), approved_by="op")
+    pb.lock_path(home).write_text("{torn")
+    state = pb.verify(home)
+    assert isinstance(state, pb.Tampered) and state.diff[0].startswith(
+        "baseline.lock is unreadable"
+    )
+    assert pb.fail_closed_reason(state) == pb.BASELINE_TAMPERED
+    # The read faces degrade to "no locked layer", not a crash.
+    view = explain_view("baseline", home)
+    assert view["name"] is None and view["status"]["state"] == "tampered"
+
+
+def test_deleting_the_ledger_is_tampering(tmp_path: Path) -> None:
+    """File and lock intact, the approvals ledger gone: the lock no longer
+    matches an approval, so nothing verifies (D1: the ledger is the record)."""
+    home = tmp_path / "home"
+    pb.write_lock(home, load_policy_template("builder"), approved_by="op")
+    pb.ledger_path(home).unlink()
+    state = pb.verify(home)
+    assert isinstance(state, pb.Tampered) and "approvals ledger" in state.diff[0]
+
+
+def test_a_torn_ledger_line_is_not_tampering(tmp_path: Path) -> None:
+    """A half-written line (a crash mid-append) is skipped, not fatal — the
+    last whole approval row still has to match the lock."""
+    home = tmp_path / "home"
+    pb.write_lock(home, load_policy_template("builder"), approved_by="op")
+    with pb.ledger_path(home).open("a") as handle:
+        handle.write('{"kind": "baseline_tamp\n[1, 2]\n')
+    assert isinstance(pb.verify(home), pb.Ok)
+
+
+def test_rule_order_is_content_and_the_diff_names_each_kind_of_change(tmp_path: Path) -> None:
+    """Reordering rules changes the hash (first match decides), so it is
+    tampering with its own diff line; added, removed and changed settings and
+    rules each get theirs."""
+    home = tmp_path / "home"
+    pb.write_lock(home, load_policy_template("builder"), approved_by="op")
+    _edit(home, lambda d: d["rules"].reverse())
+    assert pb.verify(home).diff == ("~ rule order changed",)  # type: ignore[union-attr]
+
+    def widen(d: dict[str, Any]) -> None:  # on top of the reversed file
+        del d["settings"]["default_network"]
+        d["rules"][0]["verdict"] = "allow"  # builder's last rule, an ask
+
+    _edit(home, widen)
+    diff = pb.verify(home).diff  # type: ignore[union-attr]
+    builder = load_policy_template("builder")
+    last = builder.rules[-1]
+    assert last.verdict == "require_approval"
+    assert diff == (
+        f"- setting default_network: {json.dumps(builder.settings['default_network'])}",
+        f"~ rule {last.rule_id}: {last.scope}: require_approval {last.action} {last.pattern}"
+        f" -> {last.scope}: allow {last.action} {last.pattern}",
+    )
+    # And the other way round: a knob the approved layer did not set.
+    bare = builder.model_copy(update={"settings": {}})
+    assert pb.layer_diff(bare, builder)[0].startswith("+ setting allowed_shell_commands: [")
+
+
+def test_deleting_both_files_is_one_tamper_event(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    pb.write_lock(home, load_policy_template("builder"), approved_by="op")
+    pb.baseline_path(home).unlink()
+    pb.lock_path(home).unlink()
+    row = pb.note_event(home, pb.verify(home))
+    assert row is not None and row["key"] == "baseline.json absent"
+    assert pb.note_event(home, pb.verify(home)) is None  # debounced
+    assert pb.status_line(home) == f"baseline: TAMPERED since {row['at']}"
+
+
+def test_a_reapproval_relocks_the_file_read_only(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    pb.write_lock(home, load_policy_template("builder"), approved_by="op")
+    _edit(home, lambda d: d["settings"].update(default_network=["*"]))
+    assert stat.S_IMODE(pb.baseline_path(home).stat().st_mode) == 0o644
+    pb.write_lock(home, load_policy_template("operator"), approved_by="op")
+    assert stat.S_IMODE(pb.baseline_path(home).stat().st_mode) == 0o444
+    state = pb.verify(home)
+    assert isinstance(state, pb.Ok) and state.layer.template == "operator"
