@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, get_args
@@ -153,11 +154,15 @@ def _forge_trial(
     source: str,
     repo: str,
     decision: AutonomyDecision | None,
+    delegation_chain: Sequence[str] = (),
 ) -> dict[str, Any]:
     """v71-F1: the forged tool's sandboxed trial — exactly the run_code lane
     (script caste, sandbox, deny-all egress), so plugin_can_run's
     sandboxed_no_network shape is literally what runs. Tests monkeypatch this
-    seam instead of standing up the dispatch pipeline."""
+    seam instead of standing up the dispatch pipeline.
+
+    R3-F2: the Queen's chain rides it like run_code's, so a role that may not
+    run a script gets no trial through a promote_tool card either (R2 ⊆)."""
     from skep.workers.script_worker import script_instructions
 
     from ..forge import trial_script
@@ -173,6 +178,7 @@ def _forge_trial(
         network=[],
         wall_clock_seconds=SCRIPT_RUN_WALL_CLOCK_SECONDS,
         dispatch_decision=decision,
+        delegation_chain=delegation_chain,
     )
     return _script_run_result(store, task_id)
 
@@ -4212,7 +4218,13 @@ def _execute_mutation(
                 record = dataclasses.replace(record, state="sandboxed")
                 forge.save_plugin(store, record)
             trial_result = _forge_trial(
-                store, holder, runner, source=source, repo=trial_repo, decision=decision
+                store,
+                holder,
+                runner,
+                source=source,
+                repo=trial_repo,
+                decision=decision,
+                delegation_chain=_queen_chain(store, holder, chat_id, actor),
             )
             ok, reason, evidence = forge.trial_verdict(trial_result)
             record = dataclasses.replace(record, trial=evidence)

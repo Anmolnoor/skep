@@ -117,6 +117,7 @@ from ..shell_prefixes import (
     queen_command_line_refusal,
 )
 from ..store import RunStore
+from ..worktree import TREE_LOCK
 from .jobs import Dispatcher, DispatchError
 from .registry import (
     ensure_repo_baseline,
@@ -1347,12 +1348,13 @@ def merge_branch(
     # not standing on, and it is removed whatever happens.
     with tempfile.TemporaryDirectory(prefix="skep-merge-") as tmp:
         work = Path(tmp) / "w"
-        added = subprocess.run(
-            ["git", "-C", str(resolved), "worktree", "add", "--detach", str(work), into],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        with TREE_LOCK:  # every .git/worktrees mutator serializes (worktree.py)
+            added = subprocess.run(
+                ["git", "-C", str(resolved), "worktree", "add", "--detach", str(work), into],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         if added.returncode != 0:
             raise HTTPException(
                 status_code=502, detail=f"could not open a worktree: {added.stderr.strip()}"
@@ -1412,12 +1414,13 @@ def merge_branch(
                 check=False,
             )
         finally:
-            subprocess.run(
-                ["git", "-C", str(resolved), "worktree", "remove", "--force", str(work)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            with TREE_LOCK:
+                subprocess.run(
+                    ["git", "-C", str(resolved), "worktree", "remove", "--force", str(work)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
     ahead = subprocess.run(
         ["git", "-C", str(resolved), "rev-list", "--count", f"{source}..{into}"],
         capture_output=True,

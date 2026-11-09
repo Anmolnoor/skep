@@ -415,3 +415,125 @@ def test_the_queen_dispatches_with_its_role(
     finally:
         store.close()
     assert seen == [["queen@operator"], [], []]
+
+
+# --- T2 audit: escalation attempts the harness did not yet try ---------------
+
+
+def test_decide_holds_a_chain_of_three_to_its_strictest_hop(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """decide() takes any depth (R2; only dispatch caps it): with the strict
+    role outermost, two wider hops under it still pass nothing on, and the
+    row names every hop down to the reason."""
+    ask = {"scope": "coding", "action": "edit", "value": "workspace", "repo": str(repo)}
+    chain = ["queen@assistant", "manager@builder", "lead@builder"]
+    row = _decide(config, role="builder", delegation_chain=chain, **ask)
+    assert (row["verdict"], row["rule_id"], row["delegation_chain"]) == (
+        "deny",
+        EXCEEDS_DELEGATOR,
+        chain,
+    )
+    assert row["decided_by"] == (
+        "delegation:lead@builder/delegation:manager@builder/"
+        "delegation:queen@assistant/role:assistant/coding-denied"
+    )
+    held = _decide(config, delegation_chain=["queen@builder", "m@operator", "l@builder"], **ask)
+    assert (held["verdict"], held["rule_id"]) == ("allow", "coding:workspace-edit")
+
+
+@pytest.mark.parametrize("subject", list(MATRIX), ids=lambda s: f"{s[0]}.{s[1]}:{s[2]}")
+def test_every_two_hop_chain_is_a_subset_of_each_hop(
+    config: SupervisorConfig, repo: Path, subject: Any
+) -> None:
+    """The ⊆ property, exhaustively over two-hop chains of the shipped roles:
+    the delegatee is never looser than itself alone, nor than any hop alone."""
+    scope, action, value = subject
+    ask = {"scope": scope, "action": action, "value": value, "repo": str(repo)}
+    alone = {r: _VERDICT_RANK[_decide(config, role=r, **ask)["verdict"]] for r in DELEGATEES}
+    for outer in ROLES:
+        for inner in ROLES:
+            for delegatee in DELEGATEES:
+                chain = [f"queen@{outer}", f"manager@{inner}"]
+                row = _decide(config, role=delegatee, delegation_chain=chain, **ask)
+                floor = max(alone[delegatee], alone[outer], alone[inner])
+                assert _VERDICT_RANK[row["verdict"]] >= floor, (chain, delegatee, row)
+
+
+def _queen_dispatch(
+    config: SupervisorConfig, repo: Path, chat_role: str, tool: str, args: dict[str, Any]
+) -> tuple[Any, _Runner]:
+    store = RunStore(config.db_path)
+    runner = _Runner()
+    try:
+        chat_id = store.create_chat(title="q", model=None).chat_id
+        store.set_chat_role(chat_id, chat_role)
+        result = execute_mutation(
+            tool,
+            args,
+            store=store,
+            holder=ConfigHolder(config, store),
+            runner=runner,  # type: ignore[arg-type]
+            actor="chat-user",
+            chat_id=chat_id,
+        )
+    finally:
+        store.close()
+    return result, runner
+
+
+def test_the_model_cannot_forge_the_queens_chain(config: SupervisorConfig, repo: Path) -> None:
+    """The chain is the chat's role, read server-side: a dispatch_run whose
+    arguments claim an empty or wider chain is still queen@<chat role>."""
+    for forged in ([], ["queen@builder"]):
+        result, runner = _queen_dispatch(
+            config,
+            repo,
+            "operator",
+            "dispatch_run",
+            {"repo": str(repo), "instructions": "x", "delegation_chain": forged},
+        )
+        assert result["delegation"]["chain"] == ["queen@operator"]
+        assert runner.submitted["dispatch_decision"].delegation["chain"] == ["queen@operator"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("dispatch_run", {"instructions": "x"}),
+        ("batch_dispatch", {"tasks": [{"instructions": "x"}]}),
+        ("batch_dispatch", {"tasks": [{"instructions": "x"}], "manager": "builder"}),
+        ("quick_edit", {"file": "a.py", "instruction": "x"}),
+    ],
+    ids=["dispatch_run", "batch", "team", "quick_edit"],
+)
+def test_a_queen_whose_role_vanished_dispatches_nothing(
+    config: SupervisorConfig, repo: Path, tool: str, args: dict[str, Any]
+) -> None:
+    """A confirmed card from a chat whose custom role file is gone: the
+    dispatch refuses naming the role (I9) — never a worker with no chain."""
+    _custom_role(config, "ops", policy_layer="operator")
+    store = RunStore(config.db_path)
+    runner = _Runner()
+    try:
+        chat_id = store.create_chat(title="q", model=None).chat_id
+        store.set_chat_role(chat_id, "ops")
+        (roles_dir(config.home) / "ops.json").unlink()
+        if "tasks" in args:
+            args = {**args, "tasks": [{**t, "repo": str(repo)} for t in args["tasks"]]}
+        else:
+            args = {**args, "repo": str(repo)}
+        with pytest.raises(ValueError, match="no role 'ops'"):
+            execute_mutation(
+                tool,
+                args,
+                store=store,
+                holder=ConfigHolder(config, store),
+                runner=runner,  # type: ignore[arg-type]
+                actor="chat-user",
+                chat_id=chat_id,
+            )
+    finally:
+        store.close()
+    assert runner.submitted == {}
+    assert not (config.audit_dir / "policy" / "decisions.jsonl").exists()

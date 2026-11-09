@@ -558,9 +558,18 @@ _VERDICT_WORD = {"allow": "allowed", "allow_with_constraints": "allowed", "deny"
 def transparency_active(personal_home: Path) -> bool:
     """While ``first_run.json`` exists and is not dismissed, every verdict
     card carries its ``why``. A home that never onboarded has no file, so
-    nothing changes for it."""
+    nothing changes for it. O4-F1: nor for one whose counters are malformed —
+    it reads as absent, exactly like a malformed file."""
     record = _read(personal_home / FIRST_RUN_FILE)
-    return bool(record) and not record.get("dismissed")
+    return bool(record) and not record.get("dismissed") and _counters(record) is not None
+
+
+def _counters(record: dict[str, Any]) -> tuple[int, int] | None:
+    """``(turns_seen, verdicts_seen)``, or None when either is not a plain int."""
+    turns, verdicts = record.get("turns_seen", 0), record.get("verdicts_seen", 0)
+    if type(turns) is not int or type(verdicts) is not int:
+        return None
+    return turns, verdicts
 
 
 def verdict_why(decision: dict[str, Any] | None) -> str:
@@ -592,7 +601,9 @@ def note_turn(personal_home: Path, tally: dict[str, int]) -> dict[str, Any]:
     path = personal_home / FIRST_RUN_FILE
     # ponytail: unlocked read-modify-write; two concurrent turns can drop one count
     record = _read(path)
-    turns, verdicts = int(record.get("turns_seen", 0)), int(record.get("verdicts_seen", 0))
+    # O4-F1: corrupted after the turn's transparency_active read — start over
+    # rather than kill the chat stream mid-turn.
+    turns, verdicts = _counters(record) or (0, 0)
     record["turns_seen"], record["verdicts_seen"] = turns + 1, verdicts + sum(tally.values())
     _write(path, record)
     view: dict[str, Any] = {

@@ -28,7 +28,7 @@ import tempfile
 import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -456,6 +456,17 @@ def run_task(
                         **(effective_worker_state or {}),
                         APPROVAL_GRANTS_STATE_KEY: grants,
                     }
+                # R3-F1 (ADR 0055 D5): every resume keeps the chain — the
+                # crash resume rebuilt its decision without it, so the
+                # successor's next allow-command took the un-narrowed
+                # allowlist. One seam, so no resume path can drop it.
+                delegation = getattr(prior_task.dispatch_decision, "delegation", None)
+                if (
+                    isinstance(delegation, dict)
+                    and dispatch_decision is not None
+                    and dispatch_decision.delegation is None
+                ):
+                    dispatch_decision = replace(dispatch_decision, delegation=delegation)
         # Resume in the suspended run's preserved worktree when possible: the
         # step cursor is only valid there. Fresh-tree fallback replays from
         # step 0, so the cursor must be stripped (grants make replay converge).

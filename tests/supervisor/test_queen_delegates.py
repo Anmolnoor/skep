@@ -19,14 +19,19 @@ from fastapi import HTTPException
 from skep.cli import main
 from skep.cli_chat import _tool_summary
 from skep.supervisor import RunStore, SupervisorConfig, github
+from skep.supervisor.forge import sync_seed_tools
 from skep.supervisor.github import MergeResult
 from skep.supervisor.roles import EXCEEDS_DELEGATOR, delegation_line
+from skep.supervisor.serve import tools as tools_module
 from skep.supervisor.serve.actions import (
+    allow_shell_command_and_resume,
     created_transition_views_for_task,
     decision_detail_view,
+    pending_approval_or_409,
     policy_decide,
     policy_decisions,
     require_run,
+    resume_crashed_run,
     resume_past_gate,
     submit_run,
     submit_team,
@@ -650,3 +655,276 @@ def test_a_delegated_run_keeps_its_narrowing_through_a_remembered_resume(
     assert resumed["permissions"].shell_allowlist == [*held_allowlist, ["make", "check"]]
     assert resumed["dispatch_decision"].delegation == held["dispatch_decision"]["delegation"]
     assert resumed["dispatch_decision"].reason == "dispatch.allow.resume_after_approval"
+
+
+# --- R3-F1: a crash resume keeps the delegation ------------------------------
+
+
+def test_a_delegated_run_keeps_its_narrowing_through_a_crash_resume(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The T2 repro, end to end with real fake-worker runs: a queen@operator →
+    worker@builder run (``uv sync`` stripped) crashes; resume_run's successor
+    gates on ``make check``; allow-command must not hand back ``uv sync``,
+    which the delegator never held."""
+    run = ["--home", str(config.home.parent), "run", str(repo), "Go. MODE:crashgate", "--quiet"]
+    run += ["--execution-mode", "workspace", "--worker-cmd", _worker_cmd()]
+    assert main([*run, "--role", "builder", "--delegated-by", "queen@operator"]) != 0
+    capsys.readouterr()
+    config = replace(config, worker_command=(sys.executable, str(FAKE_WORKER)))
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    runner = Dispatcher(holder, store)
+
+    def task_json(task_id: str) -> Any:
+        return json.loads((config.audit_dir / task_id / "task.json").read_text())
+
+    try:
+        (crashed,) = store.recent_runs(1)
+        assert crashed.state == "worker_crashed"
+        held = task_json(crashed.task_id)
+        assert ["uv", "sync"] not in held["permissions"]["shell_allowlist"]
+        successor = resume_crashed_run(store, config, runner, crashed.task_id, "tester")
+        gated = _wait_run(store, successor["resumed_as"])
+        assert gated.state == "pending_approval"
+        assert (
+            task_json(gated.task_id)["dispatch_decision"].get("delegation")
+            == (held["dispatch_decision"]["delegation"])
+        )
+        (approval,) = store.pending_approvals()
+        resumed_id = allow_shell_command_and_resume(
+            store,
+            holder,
+            runner,
+            require_run(store, gated.task_id),
+            pending_approval_or_409(store, approval.review_id),
+            approval.review_id,
+            "tester",
+        )
+        _wait_run(store, resumed_id)
+    finally:
+        runner.shutdown(wait=True)
+        store.close()
+    resumed = task_json(resumed_id)
+    assert resumed["permissions"]["shell_allowlist"] == [
+        *held["permissions"]["shell_allowlist"],
+        ["make", "check"],
+    ]
+    assert resumed["dispatch_decision"]["delegation"] == held["dispatch_decision"]["delegation"]
+
+
+# --- R3-F2: the forge trial carries the Queen's chain ------------------------
+
+
+def _promote_seed(
+    config: SupervisorConfig, role: str | None, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    """promote_tool on the shipped seed tool, confirmed in a chat in ``role``,
+    through the real _forge_trial — what reaches the dispatcher."""
+    # The stub runner leaves no run to wait on; the trial reads as failed.
+    monkeypatch.setattr(tools_module, "_script_run_result", lambda *_, **__: {"state": "failed"})
+    store = RunStore(config.db_path)
+    runner = _Runner()
+    try:
+        sync_seed_tools(store)
+        chat_id = store.create_chat(title="forge", model=None).chat_id
+        if role is not None:
+            store.set_chat_role(chat_id, role)
+        execute_mutation(
+            "promote_tool",
+            {"plugin_id": "yt-transcript"},
+            store=store,
+            holder=ConfigHolder(config, store),
+            runner=runner,  # type: ignore[arg-type]
+            actor="chat-user",
+            chat_id=chat_id,
+        )
+    except HTTPException as refused:  # the R2 ⊆ refusal, exactly as run_code's
+        assert refused.status_code == 403, refused.detail
+    except ValueError:
+        pass  # the stubbed trial "failed" — what matters is what was dispatched
+    finally:
+        store.close()
+    return runner.submitted
+
+
+def test_an_assistant_queen_gets_no_script_trial_through_promote_tool(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_code refuses an `assistant` Queen; a confirmed promote_tool card
+    dispatched the same script-caste run with no chain at all. The trial is
+    a Queen dispatch like any other: queen@<chat role>, held by the R2 ⊆."""
+    assert _promote_seed(config, "assistant", monkeypatch) == []
+    assert _promote_seed(config, "operator", monkeypatch)[0]["dispatch_decision"].delegation == {
+        "chain": ["queen@operator"],
+        "role": None,
+        "team": None,
+    }
+    assert (
+        _promote_seed(config, None, monkeypatch)[0]["dispatch_decision"].delegation is None
+    )  # today
+
+
+# --- T2 audit: every Queen dispatch face carries the chain; every resume keeps it
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("dispatch_run", {"instructions": "x"}),
+        ("batch_dispatch", {"tasks": [{"instructions": "x"}]}),
+        ("quick_edit", {"file": "a.py", "instruction": "x"}),
+        ("run_code", {"code": "print(1)"}),
+        ("start_research", {"question": "q?", "source_allowlist": ["example.com"]}),
+    ],
+)
+def test_every_queen_dispatch_tool_passes_its_chain(
+    config: SupervisorConfig,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: str,
+    args: dict[str, Any],
+) -> None:
+    """ADR 0055 D5: whichever tool the Queen dispatches through, a chat in a
+    role dispatches as queen@<role> — no tool is a side door around R2."""
+    from skep.supervisor.serve import actions, tools
+
+    chains: list[Any] = []
+
+    def submit(*_: Any, **kwargs: Any) -> str:
+        chains.append(kwargs.get("delegation_chain"))
+        return "t"
+
+    monkeypatch.setattr(actions, "submit_run", submit)
+    monkeypatch.setattr(actions, "preserved_resumable_hint", lambda *a, **kw: None)
+    monkeypatch.setattr(tools, "_script_run_result", lambda *a, **kw: {})
+    if "tasks" in args:
+        args = {"tasks": [{**t, "repo": str(repo)} for t in args["tasks"]]}
+    else:
+        args = {**args, "repo": str(repo)}
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="q", model=None).chat_id
+        store.set_chat_role(chat_id, "operator")
+        execute_mutation(
+            tool,
+            args,
+            store=store,
+            holder=ConfigHolder(config, store),
+            runner=_Runner(),  # type: ignore[arg-type]
+            actor="chat-user",
+            chat_id=chat_id,
+        )
+    finally:
+        store.close()
+    assert chains == [["queen@operator"]]
+
+
+def _pending_run(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str], *delegated: str
+) -> tuple[str, list[list[str]]]:
+    """A real fake-worker run stopped at an approval gate; its task id and
+    the allowlist it was dispatched with."""
+    run = ["--home", str(config.home.parent), "run", str(repo), "Gate. MODE:pending", "--quiet"]
+    run += ["--execution-mode", "workspace", "--worker-cmd", _worker_cmd(), *delegated]
+    assert main(run) != 0
+    capsys.readouterr()
+    store = RunStore(config.db_path)
+    try:
+        task_id = store.recent_runs(1)[0].task_id
+    finally:
+        store.close()
+    held = json.loads((config.audit_dir / task_id / "task.json").read_text())
+    return task_id, held["permissions"]["shell_allowlist"]
+
+
+@pytest.mark.parametrize("delegated", [True, False], ids=["delegated", "undelegated"])
+def test_allow_command_end_to_end_keeps_a_delegated_runs_narrowing(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str], delegated: bool
+) -> None:
+    """The real allow-command path (persist, re-resolve, resume): a delegated
+    run gains only the remembered command; an undelegated run still takes
+    the re-resolved allowlist, exactly as before R3-6. (Under the approved
+    builder baseline the re-resolved list is the baseline's own — a project
+    write cannot loosen it, ADR 0056 D2 — so it does not name the remembered
+    command; the resume's approval verdict grants that.)"""
+    from skep.supervisor.serve.actions import allow_shell_command_and_resume
+
+    flags = ("--role", "builder", "--delegated-by", "queen@operator") if delegated else ()
+    task_id, held = _pending_run(config, repo, capsys, *flags)
+    assert (["uv", "sync"] in held) is not delegated
+    store = RunStore(config.db_path)
+    runner = _Runner()
+    try:
+        review_id = store.pending_approvals()[0].review_id
+        allow_shell_command_and_resume(
+            store,
+            ConfigHolder(config, store),
+            runner,  # type: ignore[arg-type]
+            require_run(store, task_id),
+            {"reason": "shell.run requires approval for command: make check"},
+            review_id,
+            "tester",
+        )
+    finally:
+        store.close()
+    resumed = runner.submitted[0]
+    allowlist = resumed["permissions"].shell_allowlist
+    assert resumed["dispatch_decision"].reason == "dispatch.allow.resume_after_approval"
+    if delegated:
+        assert allowlist == [*held, ["make", "check"]]
+        assert resumed["dispatch_decision"].delegation["chain"] == ["queen@operator"]
+    else:
+        assert ["uv", "sync"] in allowlist
+        assert resumed["dispatch_decision"].delegation is None
+
+
+def test_a_plain_approve_keeps_the_narrowing_and_the_chain(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    task_id, held = _pending_run(
+        config, repo, capsys, "--role", "builder", "--delegated-by", "queen@operator"
+    )
+    store = RunStore(config.db_path)
+    runner = _Runner()
+    try:
+        resume_past_gate(
+            store,
+            config,
+            runner,  # type: ignore[arg-type]
+            require_run(store, task_id),
+            store.pending_approvals()[0].review_id,
+            "tester",
+        )
+    finally:
+        store.close()
+    resumed = runner.submitted[0]
+    assert resumed["permissions"].shell_allowlist == held
+    assert resumed["dispatch_decision"].delegation == {
+        "chain": ["queen@operator"],
+        "role": "builder",
+        "team": None,
+    }
+
+
+def test_skep_review_approve_resumes_a_delegated_run_with_its_chain(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The CLI resume face (`skep review --approve`, in-process): the
+    successor runs on the narrowed allowlist and its card shows the chain."""
+    task_id, held = _pending_run(
+        config, repo, capsys, "--role", "builder", "--delegated-by", "queen@operator"
+    )
+    review = ["--home", str(config.home.parent), "review", task_id, "--approve"]
+    main([*review, "--actor", "tester"])
+    capsys.readouterr()
+    store = RunStore(config.db_path)
+    try:
+        successor = store.resumed_as_for(task_id)
+    finally:
+        store.close()
+    assert successor is not None
+    task = json.loads((config.audit_dir / successor / "task.json").read_text())
+    assert task["permissions"]["shell_allowlist"] == held
+    assert task["dispatch_decision"]["delegation"]["chain"] == ["queen@operator"]
+    assert task["resume_of"] == task_id
