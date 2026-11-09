@@ -5,9 +5,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import pytest
+from fastapi.testclient import TestClient
 
+from skep.cli import main
+from skep.cli_chat import render_turn, run_chat
+from skep.supervisor import SupervisorConfig
 from skep.supervisor.onboard import (
     FIRST_RUN_FILE,
     note_turn,
@@ -16,6 +21,8 @@ from skep.supervisor.onboard import (
     verdict_why,
 )
 from skep.supervisor.serve.chat import first_run_events
+
+from .test_cli_chat import client, ollama, script_input  # noqa: F401  (fixtures)
 
 ALLOW = {"verdict": "allow", "reason": "capability.allow.learned_rule", "decided_by": "learned/r1"}
 DENY = {"verdict": "deny", "reason": "shell.deny.repo_target"}
@@ -72,3 +79,91 @@ def test_the_offer_comes_once_at_ten_turns_or_25_verdicts(tmp_path: Path) -> Non
     assert not note_turn(tmp_path, {**none, "allowed": 24}).get("offer")
     offer = note_turn(tmp_path, {**none, "denied": 1})["offer"]
     assert "skep onboard --quiet" in offer
+
+
+# ---------- snapshots: the CLI output with the flag on and off ----------
+
+SNAPSHOT_ON = """\
+  ▸ list_runs
+    ✓ 0 runs
+    ran in-turn — read tool
+  ▸ run_shell
+    ✓ ok (2 chars)
+    ran without asking — covered by capability.allow.learned_rule
+    why: allowed: rule r1 in the learned layer — capability.allow.learned_rule
+  ▸ run_shell
+    ✗ no
+    denied — shell.deny.repo_target
+    why: denied: shell.deny.repo_target
+skep: 1 allowed · 1 asked · 1 denied — skep policy why for any of them
+"""
+
+SNAPSHOT_OFF = """\
+  ▸ list_runs
+    ✓ 0 runs
+    ran in-turn — read tool
+  ▸ run_shell
+    ✓ ok (2 chars)
+    ran without asking — covered by capability.allow.learned_rule
+  ▸ run_shell
+    ✗ no
+    denied — shell.deny.repo_target
+"""
+
+
+@pytest.mark.parametrize(
+    ("verbose", "snapshot"), [(True, SNAPSHOT_ON), (False, SNAPSHOT_OFF)], ids=["on", "off"]
+)
+def test_cli_snapshot(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], verbose: bool, snapshot: str
+) -> None:
+    from skep.cli_chat import _render_card
+
+    onboard_transparency(tmp_path / "skep-home", verbose=verbose)
+    _state, actions = render_turn(cast(Any, first_run_events(iter(TURN), tmp_path)))
+    assert capsys.readouterr().out == snapshot
+    _render_card(actions[0])
+    card = capsys.readouterr().out
+    assert ("why: asked: no policy rule covers this tool" in card) is verbose
+
+
+# ---------- the gate: a fresh chat shows why under every card; after dismiss, none ----------
+
+
+def test_gate_fresh_chat_shows_why_then_none_after_dismiss(
+    config: SupervisorConfig,
+    client: TestClient,  # noqa: F811
+    ollama: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["--home", str(config.home.parent), "onboard", "--verbose"]) == 0
+    capsys.readouterr()
+    ollama.script_tool_call("set_policy", {"auto_approve": True})
+    script_input(monkeypatch, ["turn on auto approve"])  # EOF at the card = skip
+    assert run_chat(home=config.home, url="http://unused", client=client) == 0
+    out = capsys.readouterr().out
+    assert "confirm: set_policy" in out
+    assert out.count("why: ") == out.count("confirm: ") == 1
+    assert "skep: 0 allowed · 1 asked · 0 denied" in out
+
+    # Dismiss on the REST face (the web's "Turn it down"), then a fresh chat.
+    response = client.post("/api/onboard/transparency", json={"verbose": False})
+    assert response.status_code == 200 and response.json()["dismissed"] is True
+    ollama.script_tool_call("set_policy", {"auto_approve": True})
+    script_input(monkeypatch, ["turn on auto approve"])
+    assert run_chat(home=config.home, url="http://unused", client=client) == 0
+    out = capsys.readouterr().out
+    assert "confirm: set_policy" in out
+    assert "why: " not in out and "skep: " not in out
+
+
+def test_quiet_and_verbose_flip_the_flag(
+    config: SupervisorConfig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = config.home.parent
+    assert main(["--home", str(home), "onboard", "--quiet"]) == 0
+    assert "why-lines: off" in capsys.readouterr().out
+    assert not transparency_active(home)
+    assert main(["--home", str(home), "onboard", "--verbose"]) == 0
+    assert transparency_active(home)
