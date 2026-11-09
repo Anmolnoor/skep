@@ -93,7 +93,16 @@ from ..projects import (
     validate_allowed_plugin_risks,
 )
 from ..provider_hosts import configured_provider_hosts
-from ..roles import resolve_role, role_decision, tighten
+from ..roles import (
+    Delegator,
+    Role,
+    parse_delegation_chain,
+    resolve_role,
+    role_covers,
+    role_decision,
+    tighten,
+    within_delegator,
+)
 from ..shell_prefixes import (
     command_line_segments,
     dangerous_prefix_reason,
@@ -1887,6 +1896,7 @@ def policy_decide(
     actor: str = "api",
     ring: Literal["advisory", "hard"] = "advisory",
     role: str | None = None,
+    delegation_chain: Sequence[str] = (),
 ) -> dict[str, Any]:
     """P3 (ADR 0053; the CTO record's enforcement hook): ``decide()`` reachable
     from outside, and RECORDED. With a repo, the run policy decides — the
@@ -1908,9 +1918,47 @@ def policy_decide(
     stricter verdict stands (``roles.tighten``) and ``decided_by`` names
     ``role:<name>`` when it decided. A row decided under a role carries
     ``role``; a row without one had no role layer — today's behaviour, byte
-    for byte."""
+    for byte.
+
+    R2 (ADR 0055 D4): ``delegation_chain`` (``actor@role`` hops, outermost
+    first) holds the verdict to what the innermost delegator itself holds —
+    its effective verdict down this same path, under its role, bounded by the
+    hops above it (``roles.within_delegator``). Beyond it: ``exceeds_delegator``
+    and the row carries the chain. The floor stays above every chain (I4).
+    An empty chain — the hook, ``acp govern``, the operator — is today."""
     _check_scope_action(scope, action)
-    role_record = resolve_role(role, holder.current.home) if role is not None else None
+    home = holder.current.home
+    record = _decision_record(
+        holder,
+        store,
+        scope=scope,
+        action=action,
+        value=value,
+        repo=repo,
+        actor=actor,
+        ring=ring,
+        role_record=resolve_role(role, home) if role is not None else None,
+        chain=parse_delegation_chain(delegation_chain, home),
+    )
+    _append_policy_ledger(holder.current.audit_dir, "decisions", record)
+    return record
+
+
+def _decision_record(
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    scope: str,
+    action: str,
+    value: str,
+    repo: str | None,
+    actor: str,
+    ring: Literal["advisory", "hard"],
+    role_record: Role | None,
+    chain: Sequence[Delegator],
+) -> dict[str, Any]:
+    """``policy_decide``'s verdict, unrecorded — the one path a delegator's
+    effective verdict is computed down too (I5: no second evaluator)."""
     record: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "actor": actor,
@@ -1921,6 +1969,8 @@ def policy_decide(
     }
     if role_record is not None:
         record["role"] = role_record.name
+    if chain:
+        record["delegation_chain"] = [hop.entry for hop in chain]
     decision: dict[str, Any] | None = None
     floor = _floor_verdict(scope, value)
     if floor is not None:
@@ -1959,8 +2009,27 @@ def policy_decide(
             "decided_by": operator.decided_by,
         }
         record["source"] = "operator"
-    record.update(tighten(decision, role_record, scope, action, value))
-    _append_policy_ledger(holder.current.audit_dir, "decisions", record)
+    verdict = tighten(decision, role_record, scope, action, value)
+    if chain:
+        *outer, delegator = chain
+        bound = (
+            _decision_record(
+                holder,
+                store,
+                scope=scope,
+                action=action,
+                value=value,
+                repo=repo,
+                actor=delegator.entry,
+                ring=ring,
+                role_record=delegator.role,
+                chain=outer,
+            )
+            if role_covers(delegator.role, scope, action, value)
+            else None
+        )
+        verdict = within_delegator(verdict, delegator, bound)
+    record.update(verdict)
     return record
 
 
