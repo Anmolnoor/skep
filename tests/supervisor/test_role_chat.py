@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -114,3 +115,43 @@ def test_cli_role_list_show_use(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert _chat_role(config, chat_id) == "assistant"
     assert main([*home, "role", "use", "warp"]) == 2
     assert "no role 'warp'" in capsys.readouterr().err
+
+
+def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> None:
+    """D3: a role is a policy context inside the chat too. Under the builder
+    baseline `uv sync` runs in-turn for a chat with no role; the same call in
+    an operator chat cards (role:operator asks), and the floor still denies."""
+    from skep.supervisor import policy_baseline as pb
+    from skep.supervisor.policy_templates import load_policy_template
+    from skep.supervisor.roles import tighten_autonomy
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import mutation_execution_decision
+
+    pb.write_lock(config.home, load_policy_template("builder"), approved_by="op")
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        plain = store.create_chat(title="plain", model=None).chat_id
+        ops = store.create_chat(title="ops", model=None, role="operator").chat_id
+        args = {"command": "uv sync"}
+
+        def decide(chat_id: str, tool: str = "run_shell", **extra: str) -> Any:
+            return mutation_execution_decision(
+                tool, {**args, **extra}, store=store, holder=holder, chat_id=chat_id
+            )
+
+        assert decide(plain).verdict == "allow"
+        carded = decide(ops)
+        assert (carded.verdict, carded.reason, carded.decided_by) == (
+            "require_approval",
+            "shell.require_approval.role_layer",
+            "role:operator/shell-gated",
+        )
+        assert decide(ops, command="git push").verdict == "deny"  # the floor, above roles
+        store.set_chat_role(ops, "gone")  # a role that no longer resolves
+        assert decide(ops).reason == "role.deny.unloadable"
+    finally:
+        store.close()
+    # A role deny refuses with no card, whatever the lane said.
+    denied = tighten_autonomy(None, SHIPPED_ROLES["assistant"], "coding", "edit", "workspace")
+    assert denied is not None and denied.verdict == "deny"

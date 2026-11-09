@@ -1553,7 +1553,7 @@ class ChatEngine:
                         yield ("tool", {"tool": name, "result": refusal})
                         continue
                     decision = mutation_execution_decision(
-                        name, args, store=self.store, holder=self.holder
+                        name, args, store=self.store, holder=self.holder, chat_id=chat_id
                     )
                     if decision is not None and decision.verdict == "deny":
                         # v40-F10: an explicit deny rule refuses without a card

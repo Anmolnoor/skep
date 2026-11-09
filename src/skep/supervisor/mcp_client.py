@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .autonomy import AutonomyDecision
     from .policy_schema import Scope
+    from .roles import Role
     from .store import RunStore
 
 MCP_TRANSPORTS: frozenset[str] = frozenset({"stdio", "http"})
@@ -469,7 +470,19 @@ def mcp_tool_scope_action(store: RunStore, tool: MCPTool) -> tuple[Scope, str]:
     return "mcp", "call"
 
 
-def mcp_scope_decision(store: RunStore, tool: MCPTool) -> AutonomyDecision:
+def mcp_scope_decision(
+    store: RunStore, tool: MCPTool, *, role: Role | None = None
+) -> AutonomyDecision:
+    """R1 (ADR 0055 D3): the chat's role layer tightens the lane below."""
+    from .roles import tighten_autonomy
+
+    lane = _mcp_scope_lane(store, tool)
+    scope, action = mcp_tool_scope_action(store, tool)
+    value = f"{tool.server_id}:{tool.name}"
+    return tighten_autonomy(lane, role, scope, action, value) or lane
+
+
+def _mcp_scope_lane(store: RunStore, tool: MCPTool) -> AutonomyDecision:
     """Decide one MCP tool call against its resolved scope (``mcp``, or
     ``email`` for an email-bound server — v41-F3).
 
