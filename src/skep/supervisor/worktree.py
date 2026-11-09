@@ -20,10 +20,19 @@ from pathlib import Path
 # across the WHOLE sequence: a keep-set snapshot taken outside the lock reopens
 # the same window it was meant to close.
 #
-# ponytail: one process-wide lock — dispatch is not a hot path and git's own
-# .git/worktrees bookkeeping is not concurrency-safe anyway. Per-repo locks if
-# parallel dispatch across many repos ever needs the throughput.
-TREE_LOCK = threading.Lock()
+# Every single ``git worktree add/remove/prune`` holds it too — git's own
+# .git/worktrees bookkeeping is not concurrency-safe: remove/prune rmdir an
+# empty ``.git/worktrees`` (and prune reaps an entry with no gitdir yet), so a
+# concurrent ``add`` dies half-built ("could not create directory of
+# '.git/worktrees/<name>'") — the PR #50 CI approval desync, where a landing
+# raced the run's own post-completion teardown. Reentrant, so the primitives
+# below take it themselves and the sequences above can still wrap them.
+#
+# ponytail: one process-wide lock — dispatch is not a hot path. Per-repo locks
+# if parallel dispatch across many repos ever needs the throughput; a file lock
+# in the git dir if a second process (the CLI's ``skep approve`` beside a
+# running daemon) ever lands often enough to hit the same window.
+TREE_LOCK = threading.RLock()
 
 
 class WorktreeError(Exception):
@@ -102,7 +111,8 @@ def create_worktree(repo: Path, root: Path, task_id: str, ref: str | None = None
     args = ["worktree", "add", "--detach", str(path)]
     if ref is not None:
         args.append(_resolve_ref(repo, ref))
-    proc = _git(repo, *args)
+    with TREE_LOCK:
+        proc = _git(repo, *args)
     if proc.returncode != 0:
         raise WorktreeError(
             f"cannot create worktree for {repo} at {path}: {proc.stderr.strip()}. "
@@ -114,10 +124,11 @@ def create_worktree(repo: Path, root: Path, task_id: str, ref: str | None = None
 
 def remove_worktree(repo: Path, path: Path) -> None:
     """Tear a worktree down; fall back to rmtree if git refuses."""
-    proc = _git(repo, "worktree", "remove", "--force", str(path))
-    if proc.returncode != 0 and path.exists():
-        shutil.rmtree(path, ignore_errors=True)
-    _git(repo, "worktree", "prune")
+    with TREE_LOCK:
+        proc = _git(repo, "worktree", "remove", "--force", str(path))
+        if proc.returncode != 0 and path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+        _git(repo, "worktree", "prune")
 
 
 def cleanup_orphans(repo: Path, root: Path, keep: Iterable[str] = ()) -> list[Path]:
