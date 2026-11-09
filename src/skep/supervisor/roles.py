@@ -77,15 +77,6 @@ class Role(BaseModel):
             raise ValueError(f"unknown caste(s) {unknown}; known: {', '.join(CASTES)}")
         return value
 
-    @field_validator("voice")
-    @classmethod
-    def _known_voice(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        from .serve.chat import validate_personality  # local: chat imports the serve stack
-
-        return validate_personality(value) or None
-
     @property
     def label(self) -> str:
         return f"{ROLE_LAYER}:{self.name}"
@@ -152,6 +143,11 @@ def all_roles(home: Path) -> dict[str, Role]:
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
         try:
             role = Role.model_validate(json.loads(path.read_text(encoding="utf-8")))
+            if role.voice is not None:
+                # local: serve.chat imports the serve stack, which imports this module
+                from .serve.chat import validate_personality
+
+                validate_personality(role.voice)
         except (OSError, ValueError, ValidationError) as exc:
             raise ValueError(f"role file {path} does not load: {exc}") from exc
         if role.name != path.stem:

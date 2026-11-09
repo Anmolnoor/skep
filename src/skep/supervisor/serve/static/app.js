@@ -2189,6 +2189,10 @@ const COMMANDS = {
     usage: "/schedule <name> <repo> <every> <instructions…>",
     desc: "create a recurring schedule the ticker dispatches — every takes 30m/6h/1d (confirm card)",
   },
+  role: {
+    usage: "/role <builder|operator|assistant|custom-role>",
+    desc: "switch this chat's role — prompt, voice and policy layer together; a role only tightens the baseline (confirm card)",
+  },
   personality: {
     usage: "/personality <concise|technical|friendly|custom:text|default>",
     desc: "set this chat's reply style — style only, never policy (confirm card)",
@@ -3207,6 +3211,11 @@ async function viewChat(main, chatId) {
         }
         await proposeCommand("propose_schedule",
           { name: schedName, repo, every, instructions });
+        return;
+      }
+      if (name === "role") {
+        if (args.length !== 1) { commandHelp(`usage: ${spec.usage}`); return; }
+        await proposeCommand("set_role", { name: args[0] });
         return;
       }
       if (name === "personality") {

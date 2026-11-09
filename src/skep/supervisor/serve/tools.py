@@ -193,6 +193,7 @@ COMMAND_TOOL_NAMES = (
             "workon",
             "propose_schedule",
             "set_personality",
+            "set_role",
             "set_persona",
             # v73-F2: crash recovery must not depend on a working model —
             # provider trouble is exactly when runs crash.
@@ -2017,6 +2018,14 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         ["value"],
     ),
     _tool(
+        "set_role",
+        "PROPOSE switching THIS chat's role (requires user confirmation): its "
+        "prompt, voice and policy layer change together. A role only tightens "
+        "the approved baseline. builder, operator, assistant, or a custom role.",
+        {"name": {"type": "string"}},
+        ["name"],
+    ),
+    _tool(
         "set_persona",
         "PROPOSE setting the profile-level PERSONA (requires user "
         "confirmation): the identity every chat starts with — name, how to "
@@ -2314,6 +2323,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "use_provider",
         "remove_provider",
         "set_personality",
+        "set_role",
         "set_persona",
         "set_tts_provider",
     ),
@@ -4863,6 +4873,13 @@ def _execute_mutation(
         normalized = validate_personality(str(args["value"]))
         store.set_chat_personality(chat_id, normalized or None)
         return {"personality": normalized or "default"}
+    if name == "set_role":
+        # R1 (ADR 0055 D3): the chat's role — prompt, voice and layer together.
+        from ..roles import use_role
+
+        if chat_id is None:
+            raise ValueError("set_role only makes sense inside a chat")
+        return use_role(store, holder.current.home, str(args["name"]), chat_id=chat_id)
     if name == "set_persona":
         # v53-F4 (ADR 0028): profile-level identity, one capped file in the
         # personal home; 'default' clears. Oversize is a clean tool error.

@@ -3449,6 +3449,11 @@ def register_supervisor_commands(
 
     register_channel_commands(subcommands)
 
+    # first-run R1 (ADR 0055): roles as records.
+    from .role_cmds import register_role_commands
+
+    register_role_commands(subcommands)
+
     # ADR 0054 (B1-3): the ACP governor an outside client spawns.
     from .acp_cmds import register_acp_commands
 

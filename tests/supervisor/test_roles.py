@@ -24,6 +24,7 @@ from skep.supervisor.roles import (
     tighten,
     use_role,
 )
+from skep.supervisor.serve.chat import validate_personality
 
 
 def test_three_roles_ship_bound_one_to_one_to_the_templates() -> None:
@@ -31,6 +32,7 @@ def test_three_roles_ship_bound_one_to_one_to_the_templates() -> None:
     assert tuple(SHIPPED_ROLES) == TEMPLATE_NAMES
     for name, role in SHIPPED_ROLES.items():
         assert role.policy_layer == name and role.label == f"role:{name}"
+        assert role.voice is not None and validate_personality(role.voice) == role.voice
         assert role.system_prompt and role.default_castes and role.voice
         layer = role.layer()
         assert layer is not None and (layer.name, layer.label) == ("role", f"role:{name}")
@@ -46,8 +48,6 @@ def test_a_role_record_refuses_what_it_cannot_honour() -> None:
         Role(name="x", policy_layer="warp")
     with pytest.raises(ValueError, match="unknown caste"):
         Role(name="x", default_castes=("wizard",))
-    with pytest.raises(ValueError, match="unknown personality"):
-        Role(name="x", voice="grumpy")
     with pytest.raises(ValueError):
         Role(name="Bad Name")
 
@@ -60,6 +60,10 @@ def test_custom_roles_load_from_the_home_and_refuse_naming_the_file(tmp_path: Pa
     )
     roles = all_roles(home)
     assert list(roles) == ["builder", "operator", "assistant", "reviewer"]
+    (roles_dir(home) / "grumpy.json").write_text(json.dumps({"name": "grumpy", "voice": "grumpy"}))
+    with pytest.raises(ValueError, match="unknown personality"):
+        all_roles(home)
+    (roles_dir(home) / "grumpy.json").unlink()
     assert resolve_role("reviewer", home).policy_layer == "operator"
     with pytest.raises(ValueError, match="no role 'warp'; known: builder, operator"):
         resolve_role("warp", home)

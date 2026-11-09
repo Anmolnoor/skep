@@ -245,6 +245,11 @@ COMMANDS: dict[str, dict[str, str]] = {
         "desc": "set the profile-level identity every chat starts with — "
         "identity only, never policy (confirm card)",
     },
+    "role": {
+        "usage": "/role <builder|operator|assistant|custom-role>",
+        "desc": "switch this chat's role — prompt, voice and policy layer together; "
+        "a role only tightens the baseline (confirm card)",
+    },
     "personality": {
         "usage": "/personality <concise|technical|friendly|custom:text|default>",
         "desc": "set this chat's reply style — style only, never policy (confirm card)",
@@ -1007,6 +1012,12 @@ class ChatRepl:
                 print(usage)
                 return
             self._propose_command("set_persona", {"text": " ".join(args)})
+            return
+        if name == "role":
+            if len(args) != 1:
+                print(usage)
+                return
+            self._propose_command("set_role", {"name": args[0]})
             return
         if name == "personality":
             if not args:
