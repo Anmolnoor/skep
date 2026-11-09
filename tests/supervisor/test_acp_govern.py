@@ -409,3 +409,40 @@ def test_install_hint_prints_the_t3_rows_with_an_absolute_executable(
     assert "|" not in out
     exe = out.split("executable: ", 1)[1].splitlines()[0]
     assert Path(exe).is_absolute(), exe
+
+
+def test_a_tampered_baseline_forwards_the_permission_hop_and_refuses_the_hard_ring(
+    tmp_path: Path,
+) -> None:
+    """first-run O2 (ADR 0056 D1): a baseline that no longer matches its lock
+    makes every advisory verdict `ask` and every hard-ring verdict `deny`."""
+    from skep.supervisor import policy_baseline as pb
+    from skep.supervisor.policy_templates import load_policy_template
+
+    home, repo = _demo_home(tmp_path)
+    supervisor = build_config(home, None).home
+    pb.write_lock(supervisor, load_policy_template("builder"), approved_by="op")
+    # `git status` is allowed by the demo policy and by the builder baseline.
+    status = {"kind": "execute", "rawInput": {"command": "git status"}}
+    caps = {"terminal": True}
+    params = {"sessionId": "s", "command": "git", "args": ["status"]}
+    terminal = _frame("a2c", id=6, method="terminal/create", params=params)
+    gov = open_governor(home, ["fx"])
+    to_agent, _ = _drive(gov, repo, [_ask(5, status, SEND), terminal], caps=caps)
+    assert to_agent[0]["result"]["outcome"]["optionId"] == "o-allow_once"
+    assert to_agent[1:] == []  # the hard ring passed it through
+    path = pb.baseline_path(supervisor)
+    path.chmod(0o644)
+    layer = json.loads(path.read_text())
+    layer["settings"]["default_network"].append("evil.example")
+    path.write_text(json.dumps(layer, indent=2))
+    gov = open_governor(home, ["fx"])
+    to_agent, to_client = _drive(gov, repo, [_ask(7, status, SEND), terminal], caps=caps)
+    # Advisory: forwarded to the human behind the client, never allowed.
+    assert to_client[-1]["id"] == 7 and to_client[-1]["method"] == "session/request_permission"
+    # Hard: no human hop, so deny.
+    (refused,) = to_agent
+    assert refused["id"] == 6
+    assert "deny by baseline/baseline_tampered" in refused["error"]["message"]
+    rows = [r for r in _ledger(home) if r.get("rule_id") == "baseline_tampered"]
+    assert [r["verdict"] for r in rows] == ["require_approval", "deny"]

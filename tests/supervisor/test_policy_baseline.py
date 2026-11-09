@@ -17,11 +17,12 @@ from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor import policy_baseline as pb
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.policy_engine import resolve_stack
+from skep.supervisor.policy_golden import freeze, write_golden
 from skep.supervisor.policy_layers import layers_for_repo
 from skep.supervisor.policy_resolver import resolve_operator_policy
 from skep.supervisor.policy_schema import SCOPES
 from skep.supervisor.policy_templates import explain_view, load_policy_template
-from skep.supervisor.serve.actions import effective_policy_view
+from skep.supervisor.serve.actions import effective_policy_view, policy_decide
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import (
     MUTATING_TOOL_NAMES,
@@ -30,6 +31,8 @@ from skep.supervisor.serve.tools import (
 )
 
 from .conftest import serve_client
+
+GOLDEN = Path(__file__).resolve().parents[1] / "fixtures" / "policy_golden"
 
 
 def _edit(home: Path, mutate: Any) -> None:
@@ -381,3 +384,175 @@ def test_chat_reads_the_baseline_and_the_approval_always_cards(config: Superviso
     finally:
         store.close()
     assert view["name"] == "assistant" and view["status"]["state"] == "ok"
+
+
+# --- O2-4: tamper and zero state, end to end ----------------------------------
+
+
+def _tamper(home: Path) -> None:
+    _edit(home, lambda d: d["settings"]["allowed_shell_commands"].append(["make"]))
+
+
+def _decide(config: SupervisorConfig, **kwargs: Any) -> dict[str, Any]:
+    store = RunStore(config.db_path)
+    try:
+        return policy_decide(ConfigHolder(config, store), store, **kwargs)
+    finally:
+        store.close()
+
+
+def test_done_criterion_approve_edit_decide_tampered_until_reapprove(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 0056 §1 done-criterion 2, on a temp home: approve, hand-edit, and
+    the very next decide() answers baseline_tampered until a re-approval."""
+    config = build_config(tmp_path, None)
+    _bound_store(config, repo, project_policy={})
+    approve = ["--home", str(tmp_path), "policy", "approve"]
+    assert main([*approve, "--template", "builder", "--yes"]) == 0
+    assert not capsys.readouterr().err
+    ok = _decide(config, scope="shell", action="run", value="uv sync", repo=str(repo))
+    assert ok["verdict"] == "allow" and ok["source"] == "run"
+    _tamper(config.home)
+    tampered = _decide(config, scope="shell", action="run", value="uv sync", repo=str(repo))
+    assert (tampered["verdict"], tampered["rule_id"], tampered["source"]) == (
+        "require_approval",
+        "baseline_tampered",
+        "baseline",
+    )
+    assert tampered["note"].startswith("baseline: TAMPERED since ")
+    assert main(["--home", str(tmp_path), "policy", "approve", "--reapprove", "--yes"]) == 0
+    shown = capsys.readouterr().out
+    assert shown.startswith("changes against the locked baseline:\n")
+    assert "~ setting allowed_shell_commands:" in shown  # the diff, before the re-lock
+    back = _decide(config, scope="shell", action="run", value="uv sync", repo=str(repo))
+    assert back["verdict"] == "allow" and back["source"] == "run"
+    ledger = _approvals(config.home)
+    assert [r["kind"] for r in ledger] == [
+        "baseline_approved",
+        "baseline_tampered",
+        "baseline_approved",
+    ]
+
+
+def test_policy_decide_fails_closed_on_every_lane_and_names_the_ring(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    _bound_store(config, repo, project_policy={})
+    pb.write_lock(config.home, load_policy_template("builder"), approved_by="op")
+    pb.lock_path(config.home).unlink()  # Missing is treated as tampered
+    in_repo = _decide(config, scope="filesystem", action="write", value="workspace", repo=str(repo))
+    queen = _decide(config, scope="network", action="search", value="ddgs")
+    hard = _decide(config, scope="shell", action="run", value="ls", repo=str(repo), ring="hard")
+    floor = _decide(config, scope="shell", action="run", value="git push", repo=str(repo))
+    assert in_repo["verdict"] == queen["verdict"] == "require_approval"
+    assert in_repo["rule_id"] == queen["rule_id"] == hard["rule_id"] == "baseline_tampered"
+    assert hard["verdict"] == "deny" and hard["decided_by"] == "baseline/baseline_tampered"
+    # The floor is above the baseline, tampered or not (I4): its own deny.
+    assert floor["source"] == "floor" and floor["rule_id"] == "floor.worker-git-hard-denies"
+
+
+def test_skepd_verifies_at_startup_and_cards_once_per_tamper_event(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    _bound_store(config, repo, project_policy={})
+    pb.write_lock(config.home, load_policy_template("builder"), approved_by="op")
+    _tamper(config.home)
+    decide = {"scope": "shell", "action": "run", "value": "uv sync", "repo": str(repo)}
+    with serve_client(config, start_ticker=False) as client:
+        store = RunStore(config.db_path)
+        try:
+            (chat,) = [c for c in store.list_chats() if c.source == "policy"]
+            (card,) = store.pending_chat_actions(chat.chat_id)
+        finally:
+            store.close()
+        assert card.tool == "approve_policy_baseline" and card.args["reapprove"] is True
+        assert any("allowed_shell_commands" in line for line in card.args["diff"])
+        for _ in range(2):
+            answer = client.post("/api/policy/decide", json=decide).json()
+            assert answer["rule_id"] == "baseline_tampered"
+        why = client.get("/api/policy/why", params={**decide}).json()
+        assert why["baseline"].startswith("baseline: TAMPERED since ")
+        store = RunStore(config.db_path)
+        try:
+            assert len(store.pending_chat_actions(chat.chat_id)) == 1  # debounced
+        finally:
+            store.close()
+        confirmed = client.post(f"/api/chats/{chat.chat_id}/commands/{card.action_id}/confirm")
+        assert confirmed.json()["ok"] is True, confirmed.json()
+        assert client.get("/api/policy/baseline").json()["state"] == "ok"
+        assert client.post("/api/policy/decide", json=decide).json()["verdict"] == "allow"
+
+
+def test_the_floor_wins_over_an_approved_baseline_that_reaches_for_it(
+    config: SupervisorConfig,
+) -> None:
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting("policy_engine_v2_scopes", list(SCOPES))
+    finally:
+        store.close()
+    wide = load_policy_template("builder").model_dump(mode="json")
+    wide["rules"] = [r for r in wide["rules"] if r["rule_id"] != "shell-learnable"]
+    wide["rules"].append(
+        {"scope": "shell", "verdict": "allow", "action": "run", "pattern": "*",
+         "rule_id": "shell-everything"}
+    )  # fmt: skip
+    pb.write_lock(config.home, pb._load_layer(wide), approved_by="op")
+    assert _decide(config, scope="shell", action="run", value="make")["verdict"] == "allow"
+    for command, key in (
+        ("git push origin main", "floor.worker-git-hard-denies"),
+        ("sudo make install", "floor.never-grantable-prefixes"),
+    ):
+        record = _decide(config, scope="shell", action="run", value=command)
+        assert (record["verdict"], record["source"], record["rule_id"]) == ("deny", "floor", key)
+
+
+def test_golden_parity_is_byte_identical_with_no_baseline(tmp_path: Path) -> None:
+    seed = json.loads((GOLDEN / "seed.json").read_text())
+    golden = freeze(seed, tmp_path / "home")
+    assert isinstance(pb.verify(tmp_path / "home" / "supervisor"), pb.NoBaseline)
+    for path in write_golden(golden, tmp_path / "out"):
+        assert path.read_bytes() == (GOLDEN / path.name).read_bytes(), path.name
+
+
+def test_a_schema_bump_cards_a_reapproval_and_keeps_deciding(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    _bound_store(config, repo, project_policy={})
+    pb.write_lock(config.home, load_policy_template("builder"), approved_by="op", schema_version=0)
+    decide = {"scope": "shell", "action": "run", "value": "uv run pytest", "repo": str(repo)}
+    with serve_client(config, start_ticker=False) as client:
+        answer = client.post("/api/policy/decide", json=decide).json()
+        assert answer["verdict"] == "allow" and answer["source"] == "run"
+        store = RunStore(config.db_path)
+        try:
+            (chat,) = [c for c in store.list_chats() if c.source == "policy"]
+            (card,) = store.pending_chat_actions(chat.chat_id)
+        finally:
+            store.close()
+        assert card.args["reason"] == "schema_changed"
+        assert client.get("/api/policy/baseline").json()["state"] == "reapprove"
+        client.post(f"/api/chats/{chat.chat_id}/commands/{card.action_id}/confirm")
+        view = client.get("/api/policy/baseline").json()
+        assert view["state"] == "ok" and view["schema_version"] == 1
+
+
+def test_the_zero_state_is_todays_behaviour_and_o5_flips_it_in_one_place(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _bound_store(config, repo, project_policy={})
+    today = _decide(config, scope="shell", action="run", value="uv sync", repo=str(repo))
+    assert today["verdict"] == "allow" and today["source"] == "run"
+    assert "baseline" not in today.get("note", "")
+    monkeypatch.setattr(pb, "NO_BASELINE_REASON", "no_baseline")
+    flipped = _decide(config, scope="shell", action="run", value="uv sync", repo=str(repo))
+    assert (flipped["verdict"], flipped["rule_id"]) == ("require_approval", "no_baseline")
+    store = RunStore(config.db_path)
+    try:
+        assert resolve_operator_policy(store).decision("network", "search", "x").rule_id == (
+            "no_baseline"
+        )
+        assert not store.list_chats()  # the zero state is not a tamper event: no card
+    finally:
+        store.close()

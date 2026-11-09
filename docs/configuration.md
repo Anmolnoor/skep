@@ -44,6 +44,7 @@ The top-level home stores personal setup and serve-level assets:
   supervisor/
     supervisor.sqlite3
     audit/
+    policy/          # the approved baseline: baseline.json + baseline.lock
     results/
     worktrees/
     llm-secret
@@ -176,6 +177,60 @@ is bound to a project (`skep project`), the remembered command lands in that
 **project policy's** `allowed_shell_commands` rather than the global setting, so
 remembering one repo's command does not widen every other repo's allowlist.
 Remembering falls back to the global setting only when the repo is not bound.
+
+## The Policy Baseline
+
+`skep policy approve --template builder` (or `operator`, `assistant`, or
+`--file PATH` for a layer file in the same format) locks one template as
+**your** policy (first-run O2, ADR 0056 D1/D2). It prints the
+`skep policy explain` table of what it is about to lock, asks for a typed
+`yes` (`--yes` for scripts), and writes three things:
+
+```text
+<home>/supervisor/policy/baseline.json        the layer
+<home>/supervisor/policy/baseline.lock        the approval row + the approved layer
+<home>/supervisor/audit/policy/baseline-approvals.jsonl   one row per approval
+```
+
+The ledger row is
+`{"kind":"baseline_approved","sha256":…,"template":…,"approved_by":…,"approved_at":…,"skep_version":…,"schema_version":…}`.
+The hash is over the *loaded* layer as sorted-key JSON, so reformatting the
+file is not a change; editing a setting or a rule is.
+
+The baseline is the registry's `template` layer
+(`floor → global → template → phase → group → project → session → dispatch`),
+and every setting it sets is **enforced**: a project overlay, a group or a
+dispatch argument can no longer change it (RSoP shows their statements as
+`refused: enforced at template:<name>`); a setting the baseline leaves unset
+passes through as before. Its rules join the same slot. Like every layer it
+answers in the scopes routed to engine v2.
+
+Before every outside decision (`skep policy decide`, the Claude Code hook,
+`skep acp govern`) and at serve startup, skep re-checks the file against the
+lock and the lock against the ledger (cached until a file's mtime changes).
+If they disagree — a hand edit, a deleted lock, both files deleted while the
+ledger holds an approval — every decision fails closed with reason
+`baseline_tampered`: `ask` where a human answers (the hook, the ACP
+permission hop, the Queen's own tools), `deny` where none does (the
+governor's hard ring), and dispatch refuses. One card per tamper event lands
+in the "policy baseline" chat; `skep policy why` prints
+`baseline: TAMPERED since <time>`. The floor stays above the baseline either
+way.
+
+```sh
+skep policy baseline status    # one line (+ the diff); exits 1 when tampered
+skep policy baseline diff      # what changed against the locked layer
+skep policy explain baseline   # the locked layer as a table
+skep policy approve --reapprove [--template NAME | --file PATH] [--yes]
+```
+
+`--reapprove` shows the diff against the locked layer first, then re-locks
+(the current `baseline.json` when no source is named). A baseline approved
+under an older layer schema whose content is unchanged keeps applying and
+cards a re-approval instead of tripping. `baseline.json` is also set
+`0444`, but that is a courtesy: workers and the operator are the same Unix
+user, so mode bits are not the enforcement — the hash and the ledger are.
+With no baseline at all, decisions are exactly what they were before O2.
 
 ## Budgets
 
