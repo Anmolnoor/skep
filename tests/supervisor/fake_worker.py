@@ -7,6 +7,8 @@ task instructions:
 - happy:    full event stream, real patch artifact, completed result, exit 0
 - pending:  approval.requested → terminal pending_approval, result, exit 4
 - crash:    task.start then dies without terminal event or result, exit 9
+- crashgate: dies like crash but leaves a v2 resume checkpoint; its resume
+            gates on the shell command ``make check`` (pending, exit 4)
 - hang:     task.start + one heartbeat, then sleeps forever (monitor must kill)
 - envdump:  writes its environment to <workspace>/envdump.json, then happy-min
 - childenv: spawns a grandchild through the worker's REAL child-env boundary
@@ -202,7 +204,8 @@ def main() -> int:
     approval_verdict = task.get("approval_verdict")
     resumed_with_approval = isinstance(approval_verdict, dict) and approval_verdict.get("approved")
 
-    if mode == "pending" and not resumed_with_approval:
+    crash_first = mode == "crashgate" and task.get("resume_of") is None
+    if mode in {"pending", "crashgate"} and not resumed_with_approval:
         # Leave evidence of in-flight work plus a v2 resume checkpoint so the
         # supervisor can resume this exact worktree in-place.
         (workspace / "pending-marker.txt").write_text("suspended here\n")
@@ -230,10 +233,19 @@ def main() -> int:
                 }
             )
         )
-        stream.emit(
-            "approval.requested",
-            {"action": "git_commit", "reason": "instructions asked for a commit"},
-        )
+        if crash_first:
+            return 9
+        gate: dict[str, object] = {
+            "action": "git_commit",
+            "reason": "instructions asked for a commit",
+        }
+        if mode == "crashgate":
+            gate = {
+                "action": "shell.run",
+                "reason": "shell.run requires approval for command: make check",
+                "commands": [["make", "check"]],
+            }
+        stream.emit("approval.requested", gate)
         stream.emit(
             "task.terminal",
             {"status": "pending_approval", "summary": "stopped for approval"},

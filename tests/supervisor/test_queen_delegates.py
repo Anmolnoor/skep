@@ -19,14 +19,19 @@ from fastapi import HTTPException
 from skep.cli import main
 from skep.cli_chat import _tool_summary
 from skep.supervisor import RunStore, SupervisorConfig, github
+from skep.supervisor.forge import sync_seed_tools
 from skep.supervisor.github import MergeResult
 from skep.supervisor.roles import EXCEEDS_DELEGATOR, delegation_line
+from skep.supervisor.serve import tools as tools_module
 from skep.supervisor.serve.actions import (
+    allow_shell_command_and_resume,
     created_transition_views_for_task,
     decision_detail_view,
+    pending_approval_or_409,
     policy_decide,
     policy_decisions,
     require_run,
+    resume_crashed_run,
     resume_past_gate,
     submit_run,
     submit_team,
@@ -650,6 +655,114 @@ def test_a_delegated_run_keeps_its_narrowing_through_a_remembered_resume(
     assert resumed["permissions"].shell_allowlist == [*held_allowlist, ["make", "check"]]
     assert resumed["dispatch_decision"].delegation == held["dispatch_decision"]["delegation"]
     assert resumed["dispatch_decision"].reason == "dispatch.allow.resume_after_approval"
+
+
+# --- R3-F1: a crash resume keeps the delegation ------------------------------
+
+
+def test_a_delegated_run_keeps_its_narrowing_through_a_crash_resume(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The T2 repro, end to end with real fake-worker runs: a queen@operator →
+    worker@builder run (``uv sync`` stripped) crashes; resume_run's successor
+    gates on ``make check``; allow-command must not hand back ``uv sync``,
+    which the delegator never held."""
+    run = ["--home", str(config.home.parent), "run", str(repo), "Go. MODE:crashgate", "--quiet"]
+    run += ["--execution-mode", "workspace", "--worker-cmd", _worker_cmd()]
+    assert main([*run, "--role", "builder", "--delegated-by", "queen@operator"]) != 0
+    capsys.readouterr()
+    config = replace(config, worker_command=(sys.executable, str(FAKE_WORKER)))
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    runner = Dispatcher(holder, store)
+
+    def task_json(task_id: str) -> Any:
+        return json.loads((config.audit_dir / task_id / "task.json").read_text())
+
+    try:
+        (crashed,) = store.recent_runs(1)
+        assert crashed.state == "worker_crashed"
+        held = task_json(crashed.task_id)
+        assert ["uv", "sync"] not in held["permissions"]["shell_allowlist"]
+        successor = resume_crashed_run(store, config, runner, crashed.task_id, "tester")
+        gated = _wait_run(store, successor["resumed_as"])
+        assert gated.state == "pending_approval"
+        assert (
+            task_json(gated.task_id)["dispatch_decision"].get("delegation")
+            == (held["dispatch_decision"]["delegation"])
+        )
+        (approval,) = store.pending_approvals()
+        resumed_id = allow_shell_command_and_resume(
+            store,
+            holder,
+            runner,
+            require_run(store, gated.task_id),
+            pending_approval_or_409(store, approval.review_id),
+            approval.review_id,
+            "tester",
+        )
+        _wait_run(store, resumed_id)
+    finally:
+        runner.shutdown(wait=True)
+        store.close()
+    resumed = task_json(resumed_id)
+    assert resumed["permissions"]["shell_allowlist"] == [
+        *held["permissions"]["shell_allowlist"],
+        ["make", "check"],
+    ]
+    assert resumed["dispatch_decision"]["delegation"] == held["dispatch_decision"]["delegation"]
+
+
+# --- R3-F2: the forge trial carries the Queen's chain ------------------------
+
+
+def _promote_seed(
+    config: SupervisorConfig, role: str | None, monkeypatch: pytest.MonkeyPatch
+) -> list[dict[str, Any]]:
+    """promote_tool on the shipped seed tool, confirmed in a chat in ``role``,
+    through the real _forge_trial — what reaches the dispatcher."""
+    # The stub runner leaves no run to wait on; the trial reads as failed.
+    monkeypatch.setattr(tools_module, "_script_run_result", lambda *_, **__: {"state": "failed"})
+    store = RunStore(config.db_path)
+    runner = _Runner()
+    try:
+        sync_seed_tools(store)
+        chat_id = store.create_chat(title="forge", model=None).chat_id
+        if role is not None:
+            store.set_chat_role(chat_id, role)
+        execute_mutation(
+            "promote_tool",
+            {"plugin_id": "yt-transcript"},
+            store=store,
+            holder=ConfigHolder(config, store),
+            runner=runner,  # type: ignore[arg-type]
+            actor="chat-user",
+            chat_id=chat_id,
+        )
+    except HTTPException as refused:  # the R2 ⊆ refusal, exactly as run_code's
+        assert refused.status_code == 403, refused.detail
+    except ValueError:
+        pass  # the stubbed trial "failed" — what matters is what was dispatched
+    finally:
+        store.close()
+    return runner.submitted
+
+
+def test_an_assistant_queen_gets_no_script_trial_through_promote_tool(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_code refuses an `assistant` Queen; a confirmed promote_tool card
+    dispatched the same script-caste run with no chain at all. The trial is
+    a Queen dispatch like any other: queen@<chat role>, held by the R2 ⊆."""
+    assert _promote_seed(config, "assistant", monkeypatch) == []
+    assert _promote_seed(config, "operator", monkeypatch)[0]["dispatch_decision"].delegation == {
+        "chain": ["queen@operator"],
+        "role": None,
+        "team": None,
+    }
+    assert (
+        _promote_seed(config, None, monkeypatch)[0]["dispatch_decision"].delegation is None
+    )  # today
 
 
 # --- T2 audit: every Queen dispatch face carries the chain; every resume keeps it
