@@ -306,6 +306,11 @@ def test_cli_approve_shows_the_table_takes_a_typed_yes_and_locks(
     capsys.readouterr()
     assert main(["--home", str(tmp_path / "fresh"), "policy", "approve", "--yes"]) != 0
     assert "name a --template" in capsys.readouterr().err
+    os.chmod(pb.baseline_path(home), 0o644)
+    pb.baseline_path(home).write_text("{not json")
+    assert main([*approve, "--reapprove", "--yes"]) != 0
+    assert "baseline.json no longer loads" in capsys.readouterr().err
+    assert main([*approve, "--reapprove", "--template", "builder", "--yes"]) == 0
 
 
 def test_cli_approve_from_a_file_refuses_a_floor_grant(

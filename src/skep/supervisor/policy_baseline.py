@@ -282,6 +282,12 @@ def current_layer(home: Path) -> PolicyTemplate:
         return _load_layer(baseline_path(home).read_text(encoding="utf-8"))
     except OSError as exc:
         raise ValueError("no baseline.json to re-approve — name a --template or a --file") from exc
+    except ValueError as exc:  # pydantic's ValidationError is a ValueError
+        detail = (str(exc).splitlines()[1:2] or [str(exc)])[0].strip()
+        raise ValueError(
+            f"baseline.json no longer loads ({detail}) — fix it, or re-approve from a "
+            "source: --template NAME or --file PATH"
+        ) from exc
 
 
 def fail_closed_reason(state: BaselineState) -> str | None:
