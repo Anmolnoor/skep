@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 
 from skep.cli import main
 from skep.supervisor import RunStore, SupervisorConfig
@@ -22,8 +23,11 @@ from skep.supervisor.roles import (
     role_covers,
     roles_dir,
 )
+from skep.supervisor.serve import actions
+from skep.supervisor.serve.actions import submit_run
+from skep.supervisor.serve.chat import COMMAND_ACTOR
 from skep.supervisor.serve.settings import ConfigHolder
-from skep.supervisor.serve.tools import execute_read_tool
+from skep.supervisor.serve.tools import execute_mutation, execute_read_tool
 
 from .conftest import serve_client
 from .test_role_policy import _decide, _home
@@ -282,3 +286,124 @@ def test_every_face_takes_the_chain(
         assert view["run"]["decided_by"] == "delegation:queen@operator/role:operator/shell-gated"
     finally:
         store.close()
+
+
+class _Runner:
+    def __init__(self) -> None:
+        self.submitted: dict[str, Any] = {}
+
+    def submit(self, repo: Path, instructions: str, **kwargs: Any) -> str:
+        self.submitted = kwargs
+        return "task-1"
+
+
+def _dispatch(config: SupervisorConfig, repo: Path, chain: list[str]) -> dict[str, Any]:
+    store = RunStore(config.db_path)
+    runner = _Runner()
+    try:
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={
+                "allowed_shell_commands": [["uv", "sync"], ["git", "status"]],
+                "default_network": ["pypi.org", "example.com"],
+            },
+        )
+        submit_run(
+            ConfigHolder(config, store),
+            runner,  # type: ignore[arg-type]
+            store,
+            repo=str(repo),
+            instructions="x",
+            delegation_chain=chain,
+        )
+    finally:
+        store.close()
+    return runner.submitted
+
+
+def test_a_delegated_dispatch_drops_the_grants_beyond_the_delegator(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """The worker an `operator` Queen dispatches loses `uv sync` from its
+    allowlist (operator only asks for it — the worker cards instead, a human
+    answers) and keeps `git status`; the drop is recorded with the chain."""
+    plain = _dispatch(config, repo, [])
+    assert ["uv", "sync"] in plain["permissions"].shell_allowlist
+    delegated = _dispatch(config, repo, ["queen@operator"])
+    allowlist = delegated["permissions"].shell_allowlist
+    assert ["uv", "sync"] not in allowlist and ["git", "status"] in allowlist
+    assert delegated["permissions"].network == plain["permissions"].network  # pypi.org held
+    detail = delegated["dispatch_decision"].detail
+    assert "delegated by queen@operator; beyond the delegator, dropped: " in detail
+    assert "shell.run uv sync" in detail and "git status" not in detail
+    rows = [
+        json.loads(line)
+        for line in (config.audit_dir / "policy" / "decisions.jsonl").read_text().splitlines()
+    ]
+    assert {(r["actor"], tuple(r["delegation_chain"]), r["rule_id"]) for r in rows} == {
+        ("dispatch", ("queen@operator",), "exceeds_delegator")
+    }
+    assert "uv sync" in {r["value"] for r in rows}
+    assert len(rows) == len(plain["permissions"].shell_allowlist) - len(allowlist)
+    # Everything else about the dispatch is today's.
+    rest = {k: v for k, v in delegated.items() if k not in ("permissions", "dispatch_decision")}
+    assert rest == {k: v for k, v in plain.items() if k not in ("permissions", "dispatch_decision")}
+
+
+def test_a_delegator_denied_workspace_writes_cannot_dispatch_a_writer(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    with pytest.raises(HTTPException) as refused:
+        _dispatch(config, repo, ["queen@assistant"])
+    assert refused.value.status_code == 403
+    assert "filesystem.write workspace exceeds the delegator" in str(refused.value.detail)
+    assert "role:assistant/fs-workspace-denied" in str(refused.value.detail)
+
+
+def test_dispatch_refuses_a_chain_deeper_than_one(config: SupervisorConfig, repo: Path) -> None:
+    """ADR 0055 D4: depth 1 until a harness proves deeper chains."""
+    with pytest.raises(HTTPException) as refused:
+        _dispatch(config, repo, ["queen@builder", "manager@builder"])
+    assert refused.value.status_code == 400
+    assert "a delegatee may not delegate further yet" in str(refused.value.detail)
+
+
+def test_the_queen_dispatches_with_its_role(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 0055 D5: a chat in a role dispatches as queen@<role>; a chat with
+    no role, and the operator's own typed command, pass no chain."""
+    seen: list[Any] = []
+
+    def submit(*args: Any, **kwargs: Any) -> str:
+        seen.append(kwargs["delegation_chain"])
+        return "t"
+
+    monkeypatch.setattr(actions, "submit_run", submit)
+    monkeypatch.setattr(actions, "preserved_resumable_hint", lambda *a, **kw: None)
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        in_role = store.create_chat(title="r", model=None).chat_id
+        store.set_chat_role(in_role, "operator")
+        bare = store.create_chat(title="b", model=None).chat_id
+        for chat_id, actor in (
+            (in_role, "chat-user"),
+            (bare, "chat-user"),
+            (in_role, COMMAND_ACTOR),
+        ):
+            execute_mutation(
+                "dispatch_run",
+                {"repo": str(repo), "instructions": "x"},
+                store=store,
+                holder=holder,
+                runner=_Runner(),  # type: ignore[arg-type]
+                actor=actor,
+                chat_id=chat_id,
+            )
+    finally:
+        store.close()
+    assert seen == [["queen@operator"], [], []]

@@ -28,6 +28,7 @@ from skep.worker_contract import (
     CodingWorkerTask,
     Event,
     EventType,
+    Permissions,
     TaskIntent,
     TaskState,
 )
@@ -94,6 +95,7 @@ from ..projects import (
 )
 from ..provider_hosts import configured_provider_hosts
 from ..roles import (
+    EXCEEDS_DELEGATOR,
     Delegator,
     Role,
     parse_delegation_chain,
@@ -4078,8 +4080,14 @@ def submit_run(
     requested_actions: list[str] | None = None,
     protocol: str | None = None,
     engine: str | None = None,
+    delegation_chain: Sequence[str] = (),
 ) -> str:
-    """Resolve the repo, fill policy defaults (A5), and dispatch in background."""
+    """Resolve the repo, fill policy defaults (A5), and dispatch in background.
+
+    R2 (ADR 0055 D4): a dispatch made by a bot carries ``delegation_chain``
+    and the worker gets no grant beyond its delegator (``_within_delegation``).
+    Depth 1: a delegatee may not delegate further yet. Empty — the operator,
+    REST, the scheduler — is today."""
     # v101-F10: F1 wrote a resolver that refuses an unknown caste by name, and
     # nothing called it — so an unknown caste reached the contract validator
     # deep in dispatch and surfaced as a 500 with no usable detail. Every
@@ -4113,6 +4121,18 @@ def submit_run(
                 "then call dispatch_run with the returned slug"
             ),
         )
+    try:
+        chain = parse_delegation_chain(delegation_chain, holder.current.home)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if len(chain) > MAX_DELEGATION_DEPTH:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"delegation depth is {MAX_DELEGATION_DEPTH} (ADR 0055 D4): a delegatee may "
+                f"not delegate further yet; got {' → '.join(delegation_chain)}"
+            ),
+        )
     resolved = resolve_repo_arg(repo, repos_root(holder), store)
     ensure_repo_baseline(resolved)
     binding_candidates: list[tuple[str, str]] = []
@@ -4139,6 +4159,12 @@ def submit_run(
         detail = str(exc)
         status = 400 if "must be 'workspace' or 'sandbox'" in detail else 409
         raise HTTPException(status_code=status, detail=detail) from exc
+    permissions = resolved_policy.permissions
+    delegation_note = None
+    if chain:
+        permissions, delegation_note = _within_delegation(
+            holder, store, resolved, chain, permissions
+        )
     try:
         auto_apply_verified_patch = None
         if "auto_apply_verified_patch" in resolved_policy.policy:
@@ -4183,11 +4209,17 @@ def submit_run(
                 effective_dispatch_decision,
                 detail="no project binding; global defaults",
             )
+        if delegation_note is not None:
+            prior = effective_dispatch_decision.detail
+            effective_dispatch_decision = replace(
+                effective_dispatch_decision,
+                detail=f"{prior}; {delegation_note}" if prior else delegation_note,
+            )
         return runner.submit(
             resolved,
             instructions,
             worker_kind=caste,
-            permissions=resolved_policy.permissions,
+            permissions=permissions,
             budget=resolved_policy.budget,
             auto_apply_verified_patch=auto_apply_verified_patch,
             auto_apply_branch=auto_apply_branch,
@@ -4208,6 +4240,81 @@ def submit_run(
         )
     except DispatchError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+MAX_DELEGATION_DEPTH = 1  # ADR 0055 D4: lifted only once a harness proves deeper chains
+
+
+def _within_delegation(
+    holder: ConfigHolder,
+    store: RunStore,
+    repo: Path,
+    chain: Sequence[Delegator],
+    permissions: Permissions,
+) -> tuple[Permissions, str]:
+    """R2 (ADR 0055 D4): a worker a bot dispatched gets no grant beyond its
+    delegator. Every shell prefix and egress host the run policy granted is
+    decided under the chain (``_decision_record``, I5); one beyond the
+    delegator is dropped — the worker then cards for it, so a human answers,
+    never the bot — and its ``exceeds_delegator`` row is recorded. Workspace
+    writes the delegator is denied refuse the dispatch outright: the worker
+    exists to write. Returns the narrowed permissions and the dispatch note."""
+    # ponytail: a prefix is judged as written; a delegator rule narrower than
+    # the prefix (allow `P`, deny `P --x`) is invisible to the worker, which
+    # matches prefixes. Upgrade: the worker asks decide() per command.
+    rows: list[dict[str, Any]] = []
+
+    def row_for(scope: str, action: str, value: str) -> dict[str, Any]:
+        return _decision_record(
+            holder,
+            store,
+            scope=scope,
+            action=action,
+            value=value,
+            repo=str(repo),
+            actor="dispatch",
+            ring="advisory",
+            role_record=None,
+            chain=chain,
+        )
+
+    def kept(scope: str, action: str, value: str) -> bool:
+        row = row_for(scope, action, value)
+        if row["rule_id"] != EXCEEDS_DELEGATOR:
+            return True
+        _append_policy_ledger(holder.current.audit_dir, "decisions", row)
+        rows.append(row)
+        return False
+
+    entries = " → ".join(hop.entry for hop in chain)
+    for path in permissions.write:
+        # An ask stays: the patch card is already the human's gate (I1).
+        row = row_for("filesystem", "write", path)
+        if row["rule_id"] == EXCEEDS_DELEGATOR and row["verdict"] == "deny":
+            _append_policy_ledger(holder.current.audit_dir, "decisions", row)
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"delegated by {entries}: filesystem.write {path} exceeds the delegator "
+                    f"({row['decided_by']}) — a worker it dispatches could write what it "
+                    "may not; dispatch from a role that holds it, or as the operator"
+                ),
+            )
+    narrowed = permissions.model_copy(
+        update={
+            "shell_allowlist": [
+                prefix
+                for prefix in permissions.shell_allowlist
+                if kept("shell", "run", shlex.join(prefix))
+            ],
+            "network": [host for host in permissions.network if kept("network", "connect", host)],
+        }
+    )
+    dropped = [f"{row['scope']}.{row['action']} {row['value']}" for row in rows]
+    note = f"delegated by {entries}" + (
+        f"; beyond the delegator, dropped: {', '.join(dropped)}" if dropped else ""
+    )
+    return narrowed, note
 
 
 def dispatch_run_auto_allowed(

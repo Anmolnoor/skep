@@ -338,7 +338,12 @@ adds a `delegation` block naming the chain and what the delegator holds. A
 delegator whose role has no rule for the action holds nothing to pass on
 (unset is not granted). The floor is above every chain. Also
 `delegation_chain` on `POST /api/policy/decide`, `GET /api/policy/why` and the
-chat `policy_why` tool.
+chat `policy_why` tool. A Queen chat in a role dispatches as `queen@<role>`
+(an operator-typed `/command` and a chat with no role dispatch as today): the
+worker's shell prefixes and egress hosts beyond what that role holds are
+dropped at dispatch — the worker cards for them instead, so a human answers —
+and each drop is a ledger row with `actor: dispatch`; a role denied workspace
+writes cannot dispatch a worker at all. Chains are depth 1 at dispatch.
 
 ## skep acp
 

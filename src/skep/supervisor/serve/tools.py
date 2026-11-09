@@ -2521,6 +2521,19 @@ def _chat_role(store: RunStore, holder: ConfigHolder, chat_id: str | None) -> Ro
     return role_for_chat(store, holder.current.home, chat_id) if chat_id else None
 
 
+def _queen_chain(
+    store: RunStore, holder: ConfigHolder, chat_id: str | None, actor: str
+) -> list[str]:
+    """R2 (ADR 0055 D5): the Queen dispatches with its role — a chat in a role
+    passes ``queen@<role>`` and its worker gets no grant beyond that role. An
+    operator-typed /command (``chat.COMMAND_ACTOR``) is the human's own
+    dispatch, and a chat with no role has no layer: both pass [] — today."""
+    if actor == "operator-command":
+        return []
+    role = _chat_role(store, holder, chat_id)
+    return [f"queen@{role.name}"] if role else []
+
+
 def fetch_grant_decision(
     store: RunStore, host: str, *, role: Role | None = None
 ) -> AutonomyDecision | None:
@@ -3774,6 +3787,7 @@ def _execute_mutation(
             ),
             caste="coding",
             dispatch_decision=decision,
+            delegation_chain=_queen_chain(store, holder, chat_id, actor),
         )
         return {
             "task_id": task_id,
@@ -3879,6 +3893,7 @@ def _execute_mutation(
                 # member — the batch takes the single-dispatch path, unchanged.
                 engine=(None if entry.get("engine") is None else str(entry["engine"])),
                 dispatch_decision=decision,
+                delegation_chain=_queen_chain(store, holder, chat_id, actor),
             )
             for entry in entries
         ]
@@ -3979,6 +3994,7 @@ def _execute_mutation(
             network=[],  # deny-all egress: a script computes, it never phones out
             wall_clock_seconds=wall_clock,
             dispatch_decision=decision,
+            delegation_chain=_queen_chain(store, holder, chat_id, actor),
         )
         result = _script_run_result(store, task_id, wall_clock_seconds=wall_clock)
         if fast_requested:
@@ -4081,6 +4097,7 @@ def _execute_mutation(
             instructions=forge.authoring_instructions(tool_title, purpose, rel_path),
             caste="coding",
             dispatch_decision=decision,
+            delegation_chain=_queen_chain(store, holder, chat_id, actor),
         )
         forge.save_plugin(
             store,
@@ -4661,6 +4678,7 @@ def _execute_mutation(
             max_provider_calls=_optional_int(args, "max_provider_calls"),
             ref=None if args.get("ref") is None else str(args["ref"]),
             dispatch_decision=decision,
+            delegation_chain=_queen_chain(store, holder, chat_id, actor),
             protocol=None if args.get("protocol") is None else str(args["protocol"]),
             engine=None if args.get("engine") is None else str(args["engine"]),
         )
@@ -4703,6 +4721,7 @@ def _execute_mutation(
             execution_mode="sandbox",  # research runs are sandboxed
             network=source_allowlist,
             dispatch_decision=decision,
+            delegation_chain=_queen_chain(store, holder, chat_id, actor),
         )
         return {"task_id": task_id, "state": "research_dispatched"}
     if name == "propose_schedule":
