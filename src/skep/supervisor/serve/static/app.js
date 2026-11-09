@@ -1699,7 +1699,7 @@ async function viewSetup(main, setup) {
 // the same step functions (POST /api/onboard/<step>). The CLI resumes from the
 // records these write, and the other way round.
 async function onboardCard() {
-  const { steps } = await api("GET", "/api/onboard");
+  const { steps, relock } = await api("GET", "/api/onboard");
   const summaries = {
     model: r => `${r.provider} ${r.model} — ${r.egress}`,
     workdir: r => `${r.path} (project ${r.project_id})`,
@@ -1707,8 +1707,12 @@ async function onboardCard() {
     template: r => `${r.template} locked, sha256 ${String(r.sha256).slice(0, 12)}`,
     role: r => r.role,
   };
+  // O3-F1: a sandbox switch after the lock re-opens step 4 — say why.
   const state = name => el("p", { class: "note" },
-    steps[name] ? `done: ${summaries[name](steps[name])}` : "not done yet");
+    steps[name] ? `done: ${summaries[name](steps[name])}`
+      : name === "template" && relock
+        ? `re-lock needed: the locked baseline is not what ${relock} locks under this sandbox`
+        : "not done yet");
   const field = (label, input) => el("div", { class: "field grow" }, el("label", {}, label), input);
   const select = (values, value) => {
     const node = el("select", {}, ...values.map(v => el("option", { value: v }, v)));
@@ -1756,7 +1760,7 @@ async function onboardCard() {
   const saveSandbox = el("button", { class: "primary" }, "Save");
   saveSandbox.addEventListener("click", () => post("sandbox", { backend: backend.value }, saveSandbox));
 
-  const template = select(["assistant", "builder", "operator"], (steps.template || {}).template || "assistant");
+  const template = select(["assistant", "builder", "operator"], (steps.template || {}).template || relock || "assistant");
   const table = el("pre", { class: "mono worker-command-output onboard-table" }, "");
   const typed = el("input", { placeholder: "type yes to lock this as the policy baseline" });
   const lock = el("button", { class: "primary" }, "Lock baseline");
