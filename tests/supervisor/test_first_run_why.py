@@ -69,6 +69,19 @@ def test_dismissed_or_never_onboarded_passes_through_untouched(tmp_path: Path) -
     assert json.loads((tmp_path / FIRST_RUN_FILE).read_text())["turns_seen"] == 0
 
 
+@pytest.mark.parametrize("bad", [None, "many", [1], {}])
+def test_a_malformed_counter_reads_as_absent_never_a_crash(tmp_path: Path, bad: Any) -> None:
+    """O4-F1: a non-int counter raised inside first_run_events and killed the
+    chat stream mid-turn. A malformed record reads as absent — exactly like a
+    malformed file — so the stream is byte-identical; note_turn never raises."""
+    for key in ("turns_seen", "verdicts_seen"):
+        record = {"started_at": "2026-11-09T00:00:00Z", "turns_seen": 0, "verdicts_seen": 0}
+        (tmp_path / FIRST_RUN_FILE).write_text(json.dumps({**record, key: bad}))
+        assert not transparency_active(tmp_path)
+        assert list(first_run_events(iter(TURN), tmp_path)) == TURN
+        assert note_turn(tmp_path, {"allowed": 1, "asked": 0, "denied": 0})["allowed"] == 1
+
+
 def test_the_offer_comes_once_at_ten_turns_or_25_verdicts(tmp_path: Path) -> None:
     onboard_transparency(tmp_path / "skep-home", verbose=True)
     none = {"allowed": 0, "asked": 0, "denied": 0}
