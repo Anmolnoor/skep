@@ -36,7 +36,7 @@ skep status [--personal] [--json]
   incomplete step; a flag that differs from a finished step re-runs it.
   `--provider` takes `mock`, `ollama`, `openai-compatible` or a preset id from
   `skep provider presets`. `--yes` takes every default and skips the typed
-  `yes`.
+  `yes`. See [onboarding.md](onboarding.md).
 - `onboard --check` is `doctor` plus: baseline hash valid (a tampered one is
   named `baseline_tampered`), engine v2 scopes on, the chosen sandbox backend
   present, the work directory writable, the model reachable, all five steps

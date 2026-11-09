@@ -281,6 +281,23 @@ def test_the_rest_face_drives_the_same_steps(config: SupervisorConfig, tmp_path:
     assert onboard_status(config.home)["done"]
 
 
+def test_every_documented_onboard_command_parses() -> None:
+    """O5's Air smoke runs `skep onboard` from the docs alone — a flag the
+    docs name and the parser lacks fails here, not on the Air."""
+    import re
+    import shlex
+
+    from skep.cli import _parser
+
+    docs = Path(__file__).parents[2] / "docs"
+    text = "\n".join((docs / name).read_text() for name in ("onboarding.md", "acp-governor.md"))
+    text = text.replace("\\\n", " ").replace("&&", "\n")
+    commands = re.findall(r"^\s*(skep onboard[^\n]*)", text, re.MULTILINE)  # code lines
+    assert any("--template builder" in command for command in commands)
+    for command in commands:
+        _parser().parse_args(shlex.split(command)[1:])
+
+
 def test_a_refused_typed_yes_locks_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

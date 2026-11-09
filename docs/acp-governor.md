@@ -11,12 +11,16 @@ skep's decision ledger (ADR 0054).
 ## Install
 
 ```sh
-pipx install skep
+pipx install skep && skep onboard --template builder
 ```
 
 On Debian/Ubuntu (PEP 668, an "externally managed" system Python) use
 `pipx` or `uv tool install skep` — never `pip install` into the system
-Python. Either puts `skep` on your PATH.
+Python. Either puts `skep` on your PATH. `skep onboard` connects a model,
+registers a work directory, records the sandbox backend, and locks
+`builder` as the policy baseline the governor answers from (see
+[onboarding.md](onboarding.md); add `--yes` to take the defaults without
+prompts).
 
 Then ask the agent what it will do under skep:
 

@@ -6,6 +6,8 @@ that), so if you can't find it below, it doesn't exist yet.
 ## Start here
 
 - [`quickstart.md`](quickstart.md) — first run in 5 minutes
+- [`onboarding.md`](onboarding.md) — `skep onboard`: model, work directory,
+  sandbox, locked policy baseline, role — and `--check`
 - [`how-to-use-on-new-machine.md`](how-to-use-on-new-machine.md) — full
   source, serve, and Docker setup notes
 - [`demo-gif.md`](demo-gif.md) — the reproducible terminal demo recording
