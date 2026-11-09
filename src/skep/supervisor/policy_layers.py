@@ -22,12 +22,24 @@ from pathlib import Path
 from typing import Any
 
 from .config import SupervisorConfig
-from .policy_baseline import BASELINE_TAMPERED, Ok, fail_closed_reason, verify
+from .policy_baseline import (
+    BASELINE_TAMPERED,
+    NO_BASELINE_REASON,
+    Ok,
+    fail_closed_reason,
+    verify,
+)
 from .policy_engine import Layer, Setting, document_layers
-from .policy_resolver import _match_project_for_repo, _under_root, managed_repos_root
+from .policy_resolver import (
+    _match_project_for_repo,
+    _under_root,
+    engine_v2_scopes,
+    managed_repos_root,
+)
 from .policy_schema import (
     OPERATOR_POLICY_SETTINGS_KEY,
     POLICY_DOCUMENT_SETTINGS_KEY,
+    SCOPES,
     PolicyDocument,
     document_from_settings,
     operator_document_from_settings,
@@ -38,7 +50,7 @@ from .projects import (
     phase_default_policy,
     stored_policy_groups,
 )
-from .serve.settings import policy_view
+from .serve.settings import FRESH_HOME_SEEDED_AT, policy_view
 from .store import RunStore
 
 
@@ -137,14 +149,42 @@ def template_layer(home: Path) -> Layer | None:
     return state.enforced_layer() if isinstance(state, Ok) else None
 
 
-def baseline_guard(home: Path) -> str | None:
-    """The reason every verdict fails closed (``baseline_tampered``), or None.
-    The zero state answers ``NO_BASELINE_REASON`` — None until O5."""
-    return fail_closed_reason(verify(home))
+def zero_state_home(store: RunStore) -> bool:
+    """first-run O5 (ADR 0056 D2): does this home answer ``no_baseline`` while
+    nothing is approved? Yes for a home the store seeded itself (the
+    ``fresh_home_seeded_at`` row, written only when the sqlite file did not
+    exist) or one where ``skep onboard`` has started (``onboard.json``);
+    no for every other home.
+
+    The line is drawn at "born here or opted in" because an upgrade must not
+    turn the operator's running daily driver into a wall of asks: a home that
+    predates the baseline has been deciding from its own stored policy, and
+    flipping it to ask-everything on ``pipx upgrade`` would break the work in
+    flight and teach the operator to click through cards. That home keeps
+    today's behaviour exactly, and ``skep doctor`` / ``skep onboard --check``
+    say in one line how to approve a baseline. A fresh home has nothing to
+    break, so its first answer is "ask until approved", never "allow by seed"."""
+    if store.get_setting(FRESH_HOME_SEEDED_AT) is not None:
+        return True
+    from .onboard import STATE_FILE  # local: onboard imports the serve layer
+
+    return (store_home(store).parent / STATE_FILE).is_file()
+
+
+def baseline_guard(store: RunStore) -> dict[str, str]:
+    """Scope → the reason its every verdict fails closed; empty when none do.
+    ``baseline_tampered`` binds every scope; ``no_baseline`` binds the scopes
+    routed to engine v2, on a ``zero_state_home`` only (I9: unreadable → ask)."""
+    reason = fail_closed_reason(verify(store_home(store)))
+    if reason is None:
+        return {}
+    if reason != NO_BASELINE_REASON:
+        return dict.fromkeys(SCOPES, reason)
+    return dict.fromkeys(engine_v2_scopes(store), reason) if zero_state_home(store) else {}
 
 
 def baseline_tampered(home: Path) -> bool:
-    return baseline_guard(home) == BASELINE_TAMPERED
+    return fail_closed_reason(verify(home)) == BASELINE_TAMPERED
 
 
 def operator_layers(store: RunStore) -> list[Layer]:
@@ -178,4 +218,5 @@ __all__ = [
     "operator_layers",
     "store_home",
     "template_layer",
+    "zero_state_home",
 ]

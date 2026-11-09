@@ -51,6 +51,7 @@ def build_status(
             + _repo_registry_advisories(home)
             + _stale_store_advisories(home)
             + _model_truth_advisories(home)
+            + _baseline_advisories(home)
         )
         payload["stale_pending"] = stale_pending
         return payload
@@ -80,6 +81,7 @@ def build_status(
         + _repo_registry_advisories(home)
         + _stale_store_advisories(home)
         + _model_truth_advisories(home)
+        + _baseline_advisories(home)
     )
     payload["stale_pending"] = stale_pending
     return payload
@@ -269,6 +271,30 @@ def _stale_store_advisories(home: Path) -> list[str]:
         f"only live store is {home / 'supervisor' / 'supervisor.sqlite3'}; "
         "archive or delete the rest."
     ]
+
+
+NO_BASELINE_WARNING = (
+    "no baseline approved — run skep policy approve --template <name> or skep onboard"
+)
+
+
+def _baseline_advisories(home: Path) -> list[str]:
+    """first-run O5 (ADR 0056 D2): a home the zero state does not bind (it
+    predates the baseline) keeps deciding as before — say so in one line."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []  # opening a store here would create (and seed) a fresh home
+    from .supervisor.policy_baseline import NoBaseline, verify
+    from .supervisor.policy_layers import zero_state_home
+    from .supervisor.store import RunStore
+
+    if not isinstance(verify(home / "supervisor"), NoBaseline):
+        return []
+    store = RunStore(db_path)
+    try:
+        return [] if zero_state_home(store) else [NO_BASELINE_WARNING]
+    finally:
+        store.close()
 
 
 def _browse_advisories(home: Path) -> list[str]:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -10,12 +12,25 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from skep.supervisor import SupervisorConfig
+from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.serve import create_app
 from skep.supervisor.serve.app import TERMINAL_STATES
 from skep.supervisor.serve.auth import TOKEN_FILE
+from skep.supervisor.serve.settings import FRESH_HOME_SEEDED_AT
 
 FAKE_WORKER = Path(__file__).with_name("fake_worker.py")
+
+
+def predating_home(db_path: Path) -> Path:
+    """Make the home at ``db_path`` one that predates first-run O5: created by
+    the store, then the ``fresh_home_seeded_at`` stamp removed, so the
+    ``no_baseline`` zero state does not bind and every decision answers from
+    the rules exactly as it did before O5 (``policy_layers.zero_state_home``).
+    For tests about the rules, not about the zero state."""
+    RunStore(db_path).close()
+    with contextlib.closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.execute("DELETE FROM settings WHERE key = ?", (FRESH_HOME_SEEDED_AT,))
+    return db_path
 
 
 def serve_client(config: SupervisorConfig, **app_kwargs: Any) -> TestClient:

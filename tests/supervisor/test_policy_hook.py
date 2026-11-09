@@ -15,11 +15,11 @@ from skep.supervisor.policy_hook import hook_output, hook_probe
 from skep.supervisor.serve.actions import policy_decide
 from skep.supervisor.serve.settings import ConfigHolder
 
-from .conftest import serve_client
+from .conftest import predating_home, serve_client
 
 
 def _seed(config: SupervisorConfig, repo: Path) -> None:
-    store = RunStore(config.db_path)
+    store = RunStore(predating_home(config.db_path))
     try:
         store.set_setting("default_execution_mode", "workspace")
         store.set_setting("allowed_shell_commands", [["uv", "sync"]])

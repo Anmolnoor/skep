@@ -877,19 +877,21 @@ class ResolvedOperatorPolicy:
 
     template: str | None
     resolved_scopes: dict[str, ResolvedScopePolicy]
-    # first-run O2: set (to ``baseline_tampered``) when the approved baseline
-    # does not verify — every Queen-side decision then asks, never allows.
-    fail_closed: str | None = None
+    # first-run O2/O5: scope → ``baseline_tampered`` (a baseline that does not
+    # verify) or ``no_baseline`` (the zero state) — a Queen-side decision in
+    # such a scope asks, never allows. ``policy_layers.baseline_guard``.
+    fail_closed: dict[str, str] = field(default_factory=dict)
 
     def decision(self, scope: str, action: str, value: str) -> PolicyDecision:
         """What the standing policy says about one Queen-side scoped action."""
         decision = decide(self.resolved_scopes, scope, action, value, template=self.template)
-        if self.fail_closed is None:
+        reason = self.fail_closed.get(scope)
+        if reason is None:
             return decision
         return PolicyDecision(
             verdict="require_approval",
-            rule_id=self.fail_closed,
-            decided_by=f"baseline/{self.fail_closed}",
+            rule_id=reason,
+            decided_by=f"baseline/{reason}",
             scope=scope,
             action=action,
         )
@@ -908,14 +910,13 @@ def resolve_operator_policy(store: RunStore) -> ResolvedOperatorPolicy:
     operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
     from .policy_layers import baseline_guard, store_home, template_layer
 
-    home = store_home(store)
     return ResolvedOperatorPolicy(
         template=base.template or operator.template,
         resolved_scopes=resolve(
             base,
             overlays=(operator,),
             v2_scopes=engine_v2_scopes(store),
-            template=template_layer(home),
+            template=template_layer(store_home(store)),
         ),
-        fail_closed=baseline_guard(home),
+        fail_closed=baseline_guard(store),
     )

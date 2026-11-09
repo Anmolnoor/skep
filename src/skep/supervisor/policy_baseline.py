@@ -37,9 +37,9 @@ from .policy_engine import Layer
 from .policy_templates import PolicyTemplate
 
 BASELINE_TAMPERED = "baseline_tampered"
-# O5 (ADR 0056 D2) flips this to "no_baseline": a home with nothing approved
-# then answers `ask`. Until then the zero state is exactly today's behaviour.
-NO_BASELINE_REASON: str | None = None
+# O5 (ADR 0056 D2): a home with nothing approved answers `ask` — on the homes
+# ``policy_layers.zero_state_home`` says the zero state binds, nowhere else.
+NO_BASELINE_REASON = "no_baseline"
 LEDGER_NAME = "baseline-approvals"
 
 
@@ -161,7 +161,7 @@ class Missing:
 
 @dataclass(frozen=True)
 class NoBaseline:
-    """Nothing approved, ever — the zero state (O5 decides what it answers)."""
+    """Nothing approved, ever — the zero state (``no_baseline`` where it binds)."""
 
 
 BaselineState = Ok | Tampered | Missing | NoBaseline
@@ -291,7 +291,9 @@ def current_layer(home: Path) -> PolicyTemplate:
 
 
 def fail_closed_reason(state: BaselineState) -> str | None:
-    """The one place a baseline state becomes a verdict override (or not)."""
+    """The one place a baseline state becomes a verdict override (or not).
+    ``no_baseline`` is a candidate: ``policy_layers.baseline_guard`` drops it
+    on a home the zero state does not bind."""
     if isinstance(state, Tampered | Missing):
         return BASELINE_TAMPERED
     if isinstance(state, NoBaseline):

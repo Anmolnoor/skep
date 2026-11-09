@@ -26,7 +26,7 @@ from skep.supervisor.projects import save_policy_group
 from skep.supervisor.serve.actions import rsop_view
 from skep.supervisor.serve.settings import ConfigHolder
 
-from .conftest import serve_client
+from .conftest import predating_home, serve_client
 
 
 def _seed(store: RunStore, repo: Path) -> None:
@@ -145,8 +145,9 @@ def test_update_policy_validates_the_scopes_and_records_each_flip(
     ]
     assert all(line["at"].endswith("Z") for line in lines)
 
-    # The Queen's standing policy composes through the same switch.
-    store = RunStore(config.db_path)
+    # The Queen's standing policy composes through the same switch (on a home
+    # that predates O5: the zero state would answer no_baseline here).
+    store = RunStore(predating_home(config.db_path))
     try:
         _seed(store, repo)
         store.set_setting("policy_engine_v2_scopes", ["network"])

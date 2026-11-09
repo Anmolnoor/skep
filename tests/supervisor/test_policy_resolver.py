@@ -14,6 +14,8 @@ from skep.supervisor import RunStore
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.policy_resolver import ResolvedRunPolicy, resolve_run_policy
 
+from .conftest import predating_home
+
 
 def _resolve(
     store: RunStore,
@@ -242,7 +244,7 @@ def test_registry_hosts_follow_enforceability_and_strategy(tmp_path: Path, repo:
 
 
 def test_operator_policy_default_allows_search_denies_connect(tmp_path: Path) -> None:
-    store = RunStore(tmp_path / "supervisor.sqlite3")
+    store = RunStore(predating_home(tmp_path / "supervisor.sqlite3"))
     try:
         from skep.supervisor.policy_resolver import resolve_operator_policy
 
@@ -265,7 +267,7 @@ def test_operator_document_rules_compose_with_the_global_document(tmp_path: Path
         PolicyDocument,
     )
 
-    store = RunStore(tmp_path / "supervisor.sqlite3")
+    store = RunStore(predating_home(tmp_path / "supervisor.sqlite3"))
     try:
         store.set_setting(
             POLICY_DOCUMENT_SETTINGS_KEY,
