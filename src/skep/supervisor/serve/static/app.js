@@ -2925,6 +2925,27 @@ async function viewChat(main, chatId) {
     ];
   };
 
+  // first-run O4 (ADR 0056 D6): while first_run.json is active the server
+  // puts a one-line `why` on every verdict card and ends the turn with a
+  // `tally` event; dismissed, neither arrives and nothing renders.
+  const whyLine = (d) => d.why ? el("p", { class: "note card-why" }, `why: ${d.why}`) : null;
+  const tallyNote = (d) => {
+    const turnDown = d.offer ? el("button", {}, "Turn it down") : null;
+    if (turnDown) {
+      turnDown.addEventListener("click", async () => {
+        turnDown.disabled = true;
+        try {
+          await api("POST", "/api/onboard/transparency", { verbose: false });
+          flash("ok", "why-lines off — skep onboard --verbose brings them back");
+        } catch (e) { flash("bad", e.message); turnDown.disabled = false; }
+      });
+    }
+    log.append(el("div", { class: "turn-tally" },
+      el("p", { class: "note" }, d.line),
+      d.offer ? el("p", { class: "note" }, d.offer, " ", turnDown) : null));
+    scrollBottom();
+  };
+
   // v112-F1: the tools whose approve can persist a grant (v90-F3's set) —
   // only these cards earn a keep selector; everything else approves once.
   const REMEMBERABLE_TOOLS = new Set(["read_url", "run_shell", "start_process"]);
@@ -2943,6 +2964,7 @@ async function viewChat(main, chatId) {
     // v81-F13: the id on the DOM lets reconcilers see which cards are drawn.
     const card = el("div", { class: "confirm-card", "data-action-id": d.action_id },
       ...cardBody(d),
+      whyLine(d),
       el("div", { class: "actions" }, approve, refuse, keep));
     const verdict = (verb) => async () => {
       approve.disabled = refuse.disabled = true; // double-click guard
@@ -2979,6 +3001,7 @@ async function viewChat(main, chatId) {
       card.risk ? el("p", { class: "card-risk" },
         el("span", { class: "card-risk-label" }, "Risk: "), card.risk) : null,
       covered ? el("p", { class: "card-purpose" }, `covered by ${covered}`) : null,
+      whyLine(d),
       // v106-F11 (v90-F3): which tier of grant, given when.
       d.grant ? el("p", { class: "note" },
         `${d.grant.tier} grant · given ${d.grant.granted_at}`) : null));
@@ -3412,6 +3435,7 @@ async function viewChat(main, chatId) {
           showWorking(d.tool ? `Running ${d.tool}…` : "Thinking…");
         },
         action: (d) => { hideWorking(); group = null; finishReply(); cardOpen = true; actionCard(d); },
+        tally: (d) => { hideWorking(); group = null; finishReply(); tallyNote(d); },
         // v51-F7: the question text already arrived as a normal message
         // delta; this event only adds the clickable choice buttons.
         clarification: (d) => { hideWorking(); finishReply(); clarificationChoices(d); },

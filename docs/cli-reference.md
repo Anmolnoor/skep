@@ -20,6 +20,7 @@ skep onboard [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env E
              [--workdir DIR] [--sandbox auto|podman|none]
              [--template builder|operator|assistant] [--role ROLE] [--yes] [--no-chat]
 skep onboard --check
+skep onboard --quiet | --verbose
 skep setup --personal [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV]
 skep doctor
 skep status [--personal] [--json]
@@ -41,6 +42,10 @@ skep status [--personal] [--json]
   named `baseline_tampered`), engine v2 scopes on, the chosen sandbox backend
   present, the work directory writable, the model reachable, all five steps
   done — then the egress-truth block, whose last line is `telemetry: none`.
+- `onboard --quiet | --verbose` (first-run O4) turns the first-session
+  `why:` line under every chat verdict card, and the per-turn tally, off or
+  back on (`~/.skep/first_run.json` `dismissed`; REST:
+  `POST /api/onboard/transparency {"verbose": bool}`).
   Exits 0 only when every check is ready.
 - `setup --personal` creates or updates the personal profile.
 - `doctor` reports readiness and exits non-zero when the profile is not ready.

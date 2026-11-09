@@ -120,6 +120,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="doctor plus the baseline, engine, sandbox, workdir and egress checks (read-only)",
     )
+    # first-run O4 (ADR 0056 D6): the why-lines under every verdict card.
+    loudness = onboard.add_mutually_exclusive_group()
+    loudness.add_argument(
+        "--quiet", action="store_true", help="turn the first-run why-lines and tally off"
+    )
+    loudness.add_argument(
+        "--verbose", action="store_true", help="turn the first-run why-lines and tally back on"
+    )
     onboard.set_defaults(func=_onboard)
 
     doctor = subcommands.add_parser(
@@ -317,6 +325,11 @@ def _onboard(args: argparse.Namespace) -> int:
     from .supervisor.store import RunStore
 
     config = build_config(args.home, None)
+    if args.quiet or args.verbose:
+        onboard.onboard_transparency(config.home, verbose=args.verbose)
+        state = "on — a why-line under every verdict card" if args.verbose else "off"
+        print(f"first-run why-lines: {state} (flip with skep onboard --quiet | --verbose)")
+        return 0
     if args.check:
         result = onboard.onboard_check(config.home)
         print(result["report"], end="")

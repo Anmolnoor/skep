@@ -522,3 +522,83 @@ def onboard_check(supervisor_home: Path) -> dict[str, Any]:
     lines += [f"- {name}: {c['status']} - {c['detail']}" for name, c in checks.items()]
     lines += ["", "Egress truth:", *egress]
     return {"ready": ready, "checks": checks, "egress": egress, "report": "\n".join(lines) + "\n"}
+
+
+# --- first-run transparency (O4, ADR 0056 D6) ----------------------------------------------
+
+OFFER_TURNS = 10
+OFFER_VERDICTS = 25
+_VERDICT_WORD = {"allow": "allowed", "allow_with_constraints": "allowed", "deny": "denied"}
+
+
+def transparency_active(personal_home: Path) -> bool:
+    """While ``first_run.json`` exists and is not dismissed, every verdict
+    card carries its ``why``. A home that never onboarded has no file, so
+    nothing changes for it."""
+    record = _read(personal_home / FIRST_RUN_FILE)
+    return bool(record) and not record.get("dismissed")
+
+
+def verdict_why(decision: dict[str, Any] | None) -> str:
+    """The one-line ``why`` under a verdict card, read off the decision the
+    card already carries (I8): the rule and the layer it came from, then the
+    reason code. No decision means no rule named the tool — it asked by default."""
+    if not decision:
+        return "asked: no policy rule covers this tool, so it asks by default"
+    word = _VERDICT_WORD.get(str(decision.get("verdict")), "asked")
+    reason = str(decision.get("reason") or "")
+    decided_by = str(decision.get("decided_by") or "")
+    layer, _, rule = decided_by.rpartition("/")
+    if rule and layer:
+        line = f"{word}: rule {rule} in the {layer} layer"
+    elif rule:
+        line = f"{word}: rule {rule}"
+    else:
+        line = f"{word}: {reason or 'policy'}"
+        reason = ""
+    if reason and reason != rule:
+        line += f" — {reason}"
+    return line
+
+
+def note_turn(personal_home: Path, tally: dict[str, int]) -> dict[str, Any]:
+    """Count one turn and its verdicts in ``first_run.json``; return the
+    tally line, plus the offer to turn it down on the turn that first crosses
+    10 turns or 25 verdicts."""
+    path = personal_home / FIRST_RUN_FILE
+    # ponytail: unlocked read-modify-write; two concurrent turns can drop one count
+    record = _read(path)
+    turns, verdicts = int(record.get("turns_seen", 0)), int(record.get("verdicts_seen", 0))
+    record["turns_seen"], record["verdicts_seen"] = turns + 1, verdicts + sum(tally.values())
+    _write(path, record)
+    view: dict[str, Any] = {
+        **tally,
+        "line": (
+            f"skep: {tally['allowed']} allowed · {tally['asked']} asked · {tally['denied']} denied"
+            " — skep policy why for any of them"
+        ),
+    }
+    before = turns >= OFFER_TURNS or verdicts >= OFFER_VERDICTS
+    after = record["turns_seen"] >= OFFER_TURNS or record["verdicts_seen"] >= OFFER_VERDICTS
+    if after and not before:
+        view["offer"] = (
+            f"skep: {record['turns_seen']} turns and {record['verdicts_seen']} verdicts "
+            "with why-lines on — turn them down with skep onboard --quiet "
+            "(--verbose brings them back)"
+        )
+    return view
+
+
+def onboard_transparency(supervisor_home: Path, *, verbose: bool) -> dict[str, Any]:
+    """`skep onboard --quiet | --verbose` and ``POST /api/onboard/transparency``:
+    flip the why-lines off or on. The counters are kept; ``--verbose`` on a
+    home that never onboarded starts the record. Operator faces only — the
+    model is never handed the switch that hides its own verdicts (I6)."""
+    path = supervisor_home.parent / FIRST_RUN_FILE
+    record = _read(path)
+    record.setdefault("started_at", _now())
+    record.setdefault("turns_seen", 0)
+    record.setdefault("verdicts_seen", 0)
+    record["dismissed"] = not verbose
+    _write(path, record)
+    return record

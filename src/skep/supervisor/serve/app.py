@@ -230,6 +230,13 @@ class BaselineApproveRequest(BaseModel):
     approved_by: str = "api"
 
 
+class TransparencyRequest(BaseModel):
+    """Body of ``POST /api/onboard/transparency`` (first-run O4): false turns
+    the why-lines off, true brings them back."""
+
+    verbose: bool
+
+
 class OnboardStepRequest(BaseModel):
     """Body of ``POST /api/onboard/{step}`` (first-run O3): that step's answers,
     the same ones `skep onboard` takes as flags. The key is an env-var NAME."""
@@ -622,6 +629,13 @@ def create_app(
             return onboard.template_preview(holder, template=template)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/onboard/transparency")
+    def post_onboard_transparency(body: TransparencyRequest) -> dict[str, Any]:
+        """first-run O4 (ADR 0056 D6): `skep onboard --quiet | --verbose`."""
+        from .. import onboard
+
+        return onboard.onboard_transparency(holder.current.home, verbose=body.verbose)
 
     @app.post("/api/onboard/{step}")
     def post_onboard_step(step: str, body: OnboardStepRequest) -> dict[str, Any]:

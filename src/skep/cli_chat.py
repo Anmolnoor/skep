@@ -389,6 +389,8 @@ def _render_card(action: dict[str, Any]) -> None:
         if detail:
             parts.append(f"({detail})")
         lines.append(_c(DIM, "  " + " ".join(part for part in parts if part)))
+    if action.get("why"):
+        lines.append(_c(DIM, f"  why: {action['why']}"))  # first-run O4 (ADR 0056 D6)
     _box(lines)
 
 
@@ -477,6 +479,8 @@ class _TurnPrinter:
                 risk = (data.get("card") or {}).get("risk")
                 if risk:
                     self._write("    " + _c(DIM, f"risk: {risk}") + "\n")
+                if data.get("why"):
+                    self._write("    " + _c(DIM, f"why: {data['why']}") + "\n")
             elif data.get("kind") == "read":
                 self._write("    " + _c(DIM, "ran in-turn — read tool") + "\n")
         elif event == "turn_status":
@@ -490,6 +494,12 @@ class _TurnPrinter:
         elif event == "action":
             self._break_line()
             self.actions.append(data)
+        elif event == "tally":
+            # first-run O4 (ADR 0056 D6): the per-turn tally, and once the offer.
+            self._break_line()
+            for key in ("line", "offer"):
+                if data.get(key):
+                    self._write(_c(DIM, str(data[key])) + "\n")
         elif event == "error":
             self._break_line()
             self._write(_c(RED, f"error: {data.get('detail', '')}") + "\n")
