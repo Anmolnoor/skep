@@ -1211,6 +1211,17 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         ["server_id", "tool"],
     ),
     _tool(
+        "approve_policy_baseline",
+        "PROPOSE locking the policy baseline (requires user confirmation). The "
+        "template becomes an enforced layer no later setting can loosen, "
+        "hash-checked before every decision. reapprove=true re-locks after a "
+        "change; the card shows the diff.",
+        {
+            "template": {"type": "string", "description": "builder, operator or assistant"},
+            "reapprove": {"type": "boolean"},
+        },
+    ),
+    _tool(
         "set_policy",
         "PROPOSE a supervisor policy change (requires user confirmation). "
         "Only pass the fields you want to change. auto_approve is INERT (v81-F14): "
@@ -2217,6 +2228,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "policy_why",
         "policy_explain",
         "policy_decisions",
+        "approve_policy_baseline",
         "set_policy",
         "apply_policy_preset",
         "set_operator_policy",
@@ -3090,7 +3102,7 @@ def execute_read_tool(
     if name == "policy_explain":
         from ..policy_templates import explain_view
 
-        return explain_view(str(args["subject"]))
+        return explain_view(str(args["subject"]), holder.current.home)
     if name == "policy_decisions":
         return actions.policy_decisions(
             holder.current.audit_dir,
@@ -4283,6 +4295,15 @@ def _execute_mutation(
         # the session grants — one shared verb; the REST DELETE is the
         # operator-direct face of the same function (I5).
         return actions.revoke_policy_rule(store, rule_id=str(args["rule_id"]))
+    if name == "approve_policy_baseline":
+        # first-run O2: the card is the typed `yes`; a tamper card carries
+        # reapprove=true plus its reason/diff, which the verb ignores.
+        return actions.approve_policy_baseline(
+            holder.current.home,
+            template=None if args.get("template") is None else str(args["template"]),
+            reapprove=bool(args.get("reapprove")),
+            approved_by=actor,
+        )
     if name == "set_policy":
         return actions.update_policy(store, holder, args)
     if name == "apply_policy_preset":

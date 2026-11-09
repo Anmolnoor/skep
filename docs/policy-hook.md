@@ -89,6 +89,7 @@ rule; a hook that denied every read would be inventing policy.
 | `require_approval` | `ask` — Claude Code asks the human |
 | unmatched (`default-deny`) | `ask` — the shape skep gives its own workers: an unlisted command cards, an explicit deny refuses |
 | skep could not decide (bad home, broken store) | `ask`, with the error as the reason — towards the human, never a silent allow |
+| the approved baseline no longer matches its lock (`baseline_tampered`, first-run O2) | `ask` — every call, until `skep policy approve --reapprove`; the floor still denies first, and `skep acp govern`'s hard ring answers `deny` |
 
 The reason string names the rule (`skep: allow by trusted_local_dev/shell:uv
 run pytest (run policy)`), so `skep policy why` explains any surprise.

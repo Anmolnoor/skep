@@ -53,6 +53,15 @@ from ..castes import resolve_caste
 from ..config import SupervisorConfig
 from ..contracts_io import read_event_log
 from ..memory import MemoryError, MemoryProposal, MemorySource
+from ..policy_baseline import NoBaseline, status_line
+from ..policy_baseline import current_layer as current_baseline_layer
+from ..policy_baseline import fail_closed_reason as baseline_fail_closed_reason
+from ..policy_baseline import layer_diff as baseline_layer_diff
+from ..policy_baseline import locked_layer as locked_baseline_layer
+from ..policy_baseline import note_event as note_baseline_event
+from ..policy_baseline import sha256_of as baseline_sha256
+from ..policy_baseline import verify as verify_baseline
+from ..policy_baseline import write_lock as write_baseline_lock
 from ..policy_registry import registry_keys
 from ..policy_resolver import (
     PolicyResolutionError,
@@ -75,6 +84,7 @@ from ..policy_schema import (
     pattern_matches,
     shell_segments,
 )
+from ..policy_templates import PolicyTemplate, layer_view, load_policy_template
 from ..projects import (
     PROJECT_PHASES,
     PROJECT_POLICY_KEYS,
@@ -1874,6 +1884,7 @@ def policy_decide(
     value: str,
     repo: str | None = None,
     actor: str = "api",
+    ring: Literal["advisory", "hard"] = "advisory",
 ) -> dict[str, Any]:
     """P3 (ADR 0053; the CTO record's enforcement hook): ``decide()`` reachable
     from outside, and RECORDED. With a repo, the run policy decides — the
@@ -1882,7 +1893,12 @@ def policy_decide(
     resolve, the operator document decides and the record says which (I8).
     Every call appends a line to ``<audit>/policy/decisions.jsonl`` — the
     CTO success criterion "Claude Code runs produce decide() verdicts in the
-    audit trail". No second decision path (I5): it is the why-query, kept."""
+    audit trail". No second decision path (I5): it is the why-query, kept.
+
+    first-run O2: after the floor, the baseline. One that does not verify
+    answers every call ``baseline_tampered`` — ``ask`` where a human answers
+    (the advisory ring: the hook, the ACP permission hop), ``deny`` where
+    none does (``ring="hard"``: the governor's terminal and fs writes)."""
     _check_scope_action(scope, action)
     record: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1898,6 +1914,14 @@ def policy_decide(
         decision = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
         record["source"] = "floor"
         record["note"] = floor["reason"]
+    elif (reason := baseline_alarm(holder, store)) is not None:
+        decision = {
+            "verdict": "deny" if ring == "hard" else "require_approval",
+            "rule_id": reason,
+            "decided_by": f"baseline/{reason}",
+        }
+        record["source"] = "baseline"
+        record["note"] = status_line(holder.current.home)
     elif repo and (scope, action) not in _OPERATOR_LANES:
         try:
             why = policy_why(holder, store, repo, scope, action, value)
@@ -1924,6 +1948,102 @@ def policy_decide(
     record.update(decision)
     _append_policy_ledger(holder.current.audit_dir, "decisions", record)
     return record
+
+
+def baseline_alarm(holder: ConfigHolder, store: RunStore) -> str | None:
+    """first-run O2 (ADR 0056 D1): verify the baseline; on a NEW tamper or
+    schema-change event, put one card in front of the operator (the event is
+    recorded in the approvals ledger, so every process — a hook run, the
+    governor, serve — debounces against the same record). Returns the reason
+    decisions fail closed with, or None. Called by ``policy_decide`` and at
+    serve startup."""
+    home = holder.current.home
+    state = verify_baseline(home)
+    row = note_baseline_event(home, state)
+    if row is not None:
+        chat = next((c for c in store.list_chats() if c.source == "policy"), None)
+        if chat is None:
+            chat = store.create_chat(title="policy baseline", model=None, source="policy")
+        if row["reason"] == "schema_changed":
+            text = (
+                "The policy baseline was approved under an older schema. Its content is "
+                "unchanged and still applies; confirm to re-approve it under the new one."
+            )
+        else:
+            text = (
+                f"The policy baseline no longer matches its lock (since {row['at']}). Every "
+                "outside decision now asks, the governor's hard ring denies, and dispatch "
+                "refuses until it is re-approved. What changed:\n"
+                + "\n".join(f"  {line}" for line in row["diff"])
+                + "\nConfirm only if you made this change; otherwise restore the file."
+            )
+        store.add_chat_message(chat.chat_id, role="assistant", content=text)
+        store.add_chat_action(
+            chat.chat_id,
+            tool="approve_policy_baseline",
+            args={"reapprove": True, "reason": row["reason"], "diff": row["diff"]},
+            source="operator",
+        )
+    return baseline_fail_closed_reason(state)
+
+
+def baseline_preview(
+    home: Path,
+    *,
+    template: str | None = None,
+    file: str | None = None,
+    reapprove: bool = False,
+) -> tuple[PolicyTemplate, dict[str, Any]]:
+    """first-run O2: the layer ``approve`` would lock, as the explain view
+    plus its ``diff`` against the locked layer. Refuses (I9) a second
+    approval without ``reapprove`` and a layer outside the catalogue or into
+    the floor (the template model's own validation)."""
+    if template and file:
+        raise ValueError("pass --template or --file, not both")
+    state = verify_baseline(home)
+    if not reapprove and not isinstance(state, NoBaseline):
+        raise ValueError(
+            "a policy baseline is already approved — `skep policy approve --reapprove` "
+            "shows the diff against it and re-locks"
+        )
+    if template:
+        layer = load_policy_template(template)
+    elif file:
+        try:
+            layer = PolicyTemplate.model_validate_json(Path(file).expanduser().read_text("utf-8"))
+        except OSError as exc:
+            raise ValueError(f"cannot read {file}: {exc}") from exc
+    elif reapprove:
+        layer = current_baseline_layer(home)
+    else:
+        raise ValueError("name a --template (builder, operator, assistant) or a --file")
+    view = layer_view(layer, kind="baseline")
+    locked = locked_baseline_layer(home)
+    view["diff"] = baseline_layer_diff(locked, layer) if locked is not None else []
+    view["sha256"] = baseline_sha256(layer)
+    return layer, view
+
+
+def approve_policy_baseline(
+    home: Path,
+    *,
+    template: str | None = None,
+    file: str | None = None,
+    reapprove: bool = False,
+    approved_by: str,
+    expect_sha256: str | None = None,
+) -> dict[str, Any]:
+    """first-run O2 (ADR 0056 D1): lock a layer as the approved baseline —
+    ``baseline.json`` (0444, a courtesy), ``baseline.lock`` and a
+    ``baseline_approved`` row in ``<audit>/policy/baseline-approvals.jsonl``.
+    One verb on three faces (ADR 0050): ``skep policy approve``, ``POST
+    /api/policy/baseline/approve`` and the chat card. ``expect_sha256`` is
+    the CLI's guard that what it showed is what gets locked."""
+    layer, view = baseline_preview(home, template=template, file=file, reapprove=reapprove)
+    if expect_sha256 is not None and view["sha256"] != expect_sha256:
+        raise ValueError("the baseline changed since it was shown — run approve again")
+    row = write_baseline_lock(home, layer, approved_by=approved_by)
+    return {"approved": row, "diff": view["diff"], "table": view["table"]}
 
 
 def policy_note(
@@ -1972,6 +2092,7 @@ def policy_why(
         "scope": scope,
         "action": action,
         "value": value,
+        "baseline": status_line(holder.current.home),
     }
     floor = _floor_verdict(scope, value)
     if floor is not None:

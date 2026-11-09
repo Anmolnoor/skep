@@ -836,6 +836,8 @@ class RunStore:
 
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        # O2: the reader finds the home's policy baseline beside the database.
+        self.db_path = db_path
         # G4: SQLite-WAL, single writer. The connection is shared across dispatch
         # threads (check_same_thread=False) and serialized by self._lock; WAL keeps
         # readers (a concurrent `skep status`, in another process) non-blocking, and

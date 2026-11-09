@@ -235,6 +235,8 @@ skep policy registry
 skep policy rsop REPO
 skep policy why  REPO SCOPE ACTION VALUE
 skep policy explain SUBJECT
+skep policy approve [--template NAME | --file PATH] [--reapprove] [--yes]
+skep policy baseline [status|diff]
 skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME]
 skep policy hook [--actor NAME]
 skep policy decisions [--actor GLOB] [--since ISO] [--limit N]
@@ -256,6 +258,18 @@ Claude Code PreToolUse face (payload on stdin, verdict as hook JSON — see
 back, newest first, with counts per verdict and per note source (`observed`,
 `forwarded`); `--actor` is a glob, `--since` a time or bare-date floor
 (also `GET /api/policy/decisions` and the chat `policy_decisions` tool). `policy explain` renders a policy template (`builder`, `operator`, `assistant`), the approved `baseline` or a `role:<name>` as a Markdown allow / ask / deny table grouped by scope, with its settings and the floor rows no layer lifts — the rule ids are the ones `why` prints (first-run O1, ADR 0056 D3; also `GET /api/policy/explain?subject=` and the chat `policy_explain` tool).
+`policy approve` locks a template (or a `--file` layer) as the policy
+baseline: it prints the explain table, takes a typed `yes` unless `--yes`,
+and writes `baseline.json`, `baseline.lock` and a row in
+`<home>/supervisor/audit/policy/baseline-approvals.jsonl`; a second approval
+needs `--reapprove`, which shows the diff against the locked layer first
+(also `POST /api/policy/baseline/approve` and the chat
+`approve_policy_baseline` card). `policy baseline status` prints one line —
+`baseline: TAMPERED since <time>` when the file no longer matches its lock —
+and exits 1 when tampered; `policy baseline diff` prints what changed (also
+`GET /api/policy/baseline`). `policy explain baseline` shows the locked
+layer. See "The Policy Baseline" in `docs/configuration.md` (first-run O2,
+ADR 0056 D1/D2).
 
 ## skep acp
 

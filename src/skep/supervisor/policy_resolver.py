@@ -611,6 +611,17 @@ def resolve_run_policy(
     # silently running without the grants the project thinks it has would be
     # a policy the record cannot explain (I8), so the refusal teaches (I9).
     missing_groups = policy.pop("_missing_policy_groups", None)
+    # first-run O2 (ADR 0056 D1): a baseline that does not verify contributes
+    # no layer, so resolving on would run under the looser stack beneath it.
+    # The dispatch fails closed and says how to get out (I9).
+    from .policy_layers import baseline_tampered
+
+    if baseline_tampered(config.home):
+        raise PolicyResolutionError(
+            "baseline_tampered: the approved policy baseline no longer matches its lock — "
+            "`skep policy baseline diff` shows what changed; `skep policy approve "
+            "--reapprove` re-locks it"
+        )
     if missing_groups:
         raise PolicyResolutionError(
             f"project policy attaches unknown policy group(s) {missing_groups!r} — "
@@ -866,10 +877,22 @@ class ResolvedOperatorPolicy:
 
     template: str | None
     resolved_scopes: dict[str, ResolvedScopePolicy]
+    # first-run O2: set (to ``baseline_tampered``) when the approved baseline
+    # does not verify — every Queen-side decision then asks, never allows.
+    fail_closed: str | None = None
 
     def decision(self, scope: str, action: str, value: str) -> PolicyDecision:
         """What the standing policy says about one Queen-side scoped action."""
-        return decide(self.resolved_scopes, scope, action, value, template=self.template)
+        decision = decide(self.resolved_scopes, scope, action, value, template=self.template)
+        if self.fail_closed is None:
+            return decision
+        return PolicyDecision(
+            verdict="require_approval",
+            rule_id=self.fail_closed,
+            decided_by=f"baseline/{self.fail_closed}",
+            scope=scope,
+            action=action,
+        )
 
 
 def resolve_operator_policy(store: RunStore) -> ResolvedOperatorPolicy:
@@ -883,7 +906,16 @@ def resolve_operator_policy(store: RunStore) -> ResolvedOperatorPolicy:
         document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
     )
     operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
+    from .policy_layers import baseline_guard, store_home, template_layer
+
+    home = store_home(store)
     return ResolvedOperatorPolicy(
         template=base.template or operator.template,
-        resolved_scopes=resolve(base, overlays=(operator,), v2_scopes=engine_v2_scopes(store)),
+        resolved_scopes=resolve(
+            base,
+            overlays=(operator,),
+            v2_scopes=engine_v2_scopes(store),
+            template=template_layer(home),
+        ),
+        fail_closed=baseline_guard(home),
     )

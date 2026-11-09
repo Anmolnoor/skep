@@ -27,12 +27,15 @@ import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import BaseModel, Field, model_validator
 
 from .netproxy import domain_allowed
 from .shell_prefixes import dangerous_prefix_reason
+
+if TYPE_CHECKING:
+    from .policy_engine import Layer
 
 Scope = Literal["coding", "shell", "filesystem", "network", "mcp", "email", "browse"]
 Verdict = Literal["allow", "require_approval", "deny"]
@@ -277,6 +280,7 @@ def resolve(
     learned: tuple[LearnedRule, ...] = (),
     *,
     v2_scopes: Sequence[str] = (),
+    template: Layer | None = None,
 ) -> dict[str, ResolvedScopePolicy]:
     """Compose base → overlays → learned into per-scope rule sets.
 
@@ -288,6 +292,8 @@ def resolve(
     ``v2_scopes`` (P1, ADR 0053 D6): the scopes the ``policy_engine_v2_scopes``
     setting routes through the v2 stack answer from it; every other scope
     keeps this path. Same signature, same callers — the strangler seam.
+    ``template`` (first-run O2) is the approved baseline layer; like every
+    layer it is v2-only, so it answers in the routed scopes.
     """
     rules: dict[str, list[ResolvedRule]] = {scope: [] for scope in SCOPES}
     for document in (base, *overlays):
@@ -324,7 +330,7 @@ def resolve(
     if v2_scopes:
         from .policy_engine import document_layers, resolve_stack
 
-        v2 = resolve_stack(document_layers(base, overlays, learned)).scopes()
+        v2 = resolve_stack(document_layers(base, overlays, learned, template=template)).scopes()
         for scope in v2_scopes:
             if scope in result:
                 result[scope] = v2[scope]
