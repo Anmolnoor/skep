@@ -216,14 +216,15 @@ def apply_patch_on_branch(
     with tempfile.TemporaryDirectory(prefix="skep-apply-") as tmp:
         apply_dir = Path(tmp) / "worktree"
         # v24-F1: an existing branch is checked out (append a commit); a new
-        # one is created from the repo default (v81-F3 — not HEAD: a clone
-        # parked on another branch must not become the landing base).
+        # one is built detached from the repo default (v81-F3 — not HEAD: a
+        # clone parked on another branch must not become the landing base) and
+        # only named once its commit exists, below.
         start_point = repo_default_branch(repo) or "HEAD"
         with TREE_LOCK:  # never beside a sibling's teardown (worktree.py)
             added = (
                 _git(repo, "worktree", "add", str(apply_dir), branch)
                 if branch_exists
-                else _git(repo, "worktree", "add", "-b", branch, str(apply_dir), start_point)
+                else _git(repo, "worktree", "add", "--detach", str(apply_dir), start_point)
             )
         if added.returncode != 0:
             return f"cannot create apply worktree: {added.stderr.strip()}"
@@ -247,6 +248,16 @@ def apply_patch_on_branch(
             )
             if committed.returncode != 0:
                 return f"commit on {branch} failed: {committed.stderr.strip()}"
+            if not branch_exists:
+                # The branch is born WITH the landing commit, never before it:
+                # `worktree add -b` made it first, so a failed add/apply left
+                # skep/<task_id> at the baseline — reading as landed beside a
+                # denied approval and refusing the retry as "already applied"
+                # (PR #50 CI). `git branch` is create-only, so a concurrent
+                # landing of the same name fails here instead of clobbering.
+                named = _git(apply_dir, "branch", branch)
+                if named.returncode != 0:
+                    return f"cannot create branch {branch}: {named.stderr.strip()}"
         finally:
             with TREE_LOCK:
                 _git(repo, "worktree", "remove", "--force", str(apply_dir))

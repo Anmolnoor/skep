@@ -118,3 +118,22 @@ def test_landing_never_builds_its_worktree_while_a_sibling_is_torn_down(
     assert overlaps == []
     assert results == [None]
     assert "landed" in git(repo, "show", "skep/t1:notes.txt").stdout
+
+
+def test_a_failed_landing_leaves_no_branch_behind(repo: Path, tmp_path: Path) -> None:
+    """git creates the ``-b`` branch before it builds the worktree, so a failed
+    add (here: ``.git/worktrees`` is unusable) used to leave ``skep/<task_id>``
+    at the baseline — reading as landed, and refusing the retry with "was this
+    patch already applied?". A failed landing must change no refs."""
+    patch = _patch(tmp_path)
+    blocker = repo / ".git" / "worktrees"
+    blocker.write_text("not a directory\n", encoding="utf-8")
+
+    error = apply_patch_on_branch(repo, "skep/t1", patch, task_id="t1", actor="tester")
+
+    assert error is not None and "cannot create apply worktree" in error
+    assert git(repo, "branch", "--list", "skep/t1").stdout == ""
+
+    blocker.unlink()  # the repo recovers: the retry lands, not "already applied"
+    assert apply_patch_on_branch(repo, "skep/t1", patch, task_id="t1", actor="tester") is None
+    assert "landed" in git(repo, "show", "skep/t1:notes.txt").stdout
