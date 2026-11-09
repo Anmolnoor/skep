@@ -314,9 +314,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "list_agents",
-        "Coding agents running on this machine right now (Claude Code, Codex, "
-        "...): state working/idle/blocked, and whether skep governs each (its "
-        "run and role). Use for 'what agents are running'.",
+        "Coding agents running now (Claude Code, Codex, ...): working/idle/"
+        "blocked, and whether skep governs each (run, role).",
         {},
     ),
     _tool(
