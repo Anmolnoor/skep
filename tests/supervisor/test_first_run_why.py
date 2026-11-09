@@ -44,6 +44,13 @@ def test_verdict_why_names_rule_layer_and_reason() -> None:
         "asked: rule no_baseline in the baseline layer"
     )
     assert verdict_why(None) == "asked: no policy rule covers this tool, so it asks by default"
+    # T3-3: a decider with no layer — the Queen's shell guard (tools.py).
+    guard = {
+        "verdict": "deny",
+        "reason": "shell.deny.queen_guard",
+        "decided_by": "queen-shell-guard",
+    }
+    assert verdict_why(guard) == "denied: rule queen-shell-guard — shell.deny.queen_guard"
 
 
 def test_every_verdict_gets_a_why_and_the_turn_a_tally(tmp_path: Path) -> None:

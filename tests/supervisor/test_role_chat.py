@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,8 @@ def test_cli_role_list_show_use(tmp_path: Path, capsys: pytest.CaptureFixture[st
     finally:
         store.close()
     home = ["--home", str(tmp_path)]
+    assert main([*home, "role", "list"]) == 0  # T3-3: before any default is set
+    assert "no default role — new chats open with no role layer" in capsys.readouterr().out
     assert main([*home, "role", "use", "builder"]) == 0
     assert main([*home, "role", "list"]) == 0
     out = capsys.readouterr().out
@@ -199,6 +202,26 @@ def test_skep_chat_role_opens_the_new_chat_in_that_role(
     assert client.get("/api/chats").json()["chats"][0]["role"] == "operator"
 
 
+def test_an_interactive_chat_says_which_role_it_runs_in(
+    config: SupervisorConfig,
+    ollama: FakeOllama,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """T3-3: a new interactive chat with a role names it once, and how to switch."""
+    from skep.cli_chat import run_chat
+
+    from .conftest import serve_client
+    from .test_cli_chat import script_input
+
+    script_input(monkeypatch, [])  # EOF at the first prompt
+    assert (
+        run_chat(home=config.home, url="http://unused", client=serve_client(config), role="builder")
+        == 0
+    )
+    assert "this chat runs in role:builder — /role switches it" in capsys.readouterr().out
+
+
 def test_the_web_composer_has_a_role_picker() -> None:
     from skep.supervisor.serve.app import STATIC_DIR
 
@@ -288,5 +311,110 @@ def test_a_chat_whose_role_vanished_still_talks_but_its_lanes_fail_closed(
                 tool, args, store=store, holder=holder, chat_id=chat_id
             )
             assert decision is not None and decision.reason == "role.deny.unloadable", tool
+    finally:
+        store.close()
+
+
+# ---------- T3-3: the terminal role paths no test ran ----------
+
+
+class _StubServe:
+    """Answers the GETs the terminal role paths make."""
+
+    def __init__(self, routes: dict[str, Any]) -> None:
+        self.routes = routes
+        self.calls: list[str] = []
+
+    def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        self.calls.append(path)
+        return self.routes[path]
+
+
+def test_the_terminal_role_command_proposes_or_teaches(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from typing import cast
+
+    from skep import cli_chat
+
+    repl = cli_chat.ChatRepl(cast(Any, _StubServe({})), {"chat_id": "c1"}, show_thinking=False)
+    proposed: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        repl, "_propose_command", lambda tool, args, *a, **k: proposed.append((tool, args))
+    )
+    repl.run_command("/role")
+    repl.run_command("/role builder operator")
+    assert proposed == []
+    assert capsys.readouterr().out.count("usage: /role <builder|operator|assistant") == 2
+    repl.run_command("/role builder")
+    assert proposed == [("set_role", {"name": "builder"})]
+
+
+def test_the_terminal_role_picker(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A new interactive chat asks; Enter takes the default, an unknown name
+    re-asks, and off a TTY nothing is fetched — the server's default applies."""
+    from skep import cli_chat
+
+    roles = {"roles": [{"name": "builder"}, {"name": "operator"}], "default": "builder"}
+    stub = _StubServe({"/api/roles": roles})
+    monkeypatch.setattr(cli_chat, "_tty", lambda: False)
+    assert cli_chat._pick_role(stub) is None and stub.calls == []  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli_chat, "_tty", lambda: True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    replies = iter(["wizard", "operator", ""])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(replies))
+    assert cli_chat._pick_role(stub) == "operator"  # type: ignore[arg-type]
+    assert "no role 'wizard' — pick one of builder, operator" in capsys.readouterr().out
+    assert cli_chat._pick_role(stub) is None  # type: ignore[arg-type]  # Enter: the default
+
+
+def test_terminal_runs_list_names_who_delegated(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from typing import cast
+
+    from skep import cli_chat
+
+    monkeypatch.setattr(cli_chat, "_tty", lambda: False)
+    runs = {
+        "runs": [
+            {
+                "task_id": "t1",
+                "state": "completed",
+                "summary": "fix it",
+                "dispatch_decision": {
+                    "delegation": {"chain": ["queen@operator"], "role": "builder"}
+                },
+            },
+            {"task_id": "t2", "state": "running", "summary": "by hand"},
+        ]
+    }
+    repl = cli_chat.ChatRepl(
+        cast(Any, _StubServe({"/api/runs?limit=10": runs})), {"chat_id": "c1"}, show_thinking=False
+    )
+    repl.run_command("/runs")
+    out = capsys.readouterr().out.splitlines()
+    assert out[1] == "  queen@operator → worker@builder"  # under its own run only
+    assert len(out) == 3
+
+
+def test_set_role_outside_a_chat_is_a_clean_tool_error(config: SupervisorConfig) -> None:
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import execute_mutation
+
+    store = RunStore(config.db_path)
+    try:
+        with pytest.raises(ValueError, match="set_role only makes sense inside a chat"):
+            execute_mutation(
+                "set_role",
+                {"name": "builder"},
+                store=store,
+                holder=ConfigHolder(config, store),
+                runner=None,  # type: ignore[arg-type]
+                actor="tester",
+            )
     finally:
         store.close()

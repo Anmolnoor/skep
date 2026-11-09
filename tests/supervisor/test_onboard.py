@@ -276,6 +276,8 @@ def test_the_rest_face_drives_the_same_steps(config: SupervisorConfig, tmp_path:
     assert locked.status_code == 200
     assert post("/api/onboard/role", json={"role": "builder"}).status_code == 200
     assert post("/api/onboard/frobnicate", json={}).status_code == 404
+    found = client.get("/api/onboard/sandboxes").json()  # T3-3: the Detect button's route
+    assert found["backends"]["none"]["usable"] and found["recommended"] in found["backends"]
     assert client.get("/api/onboard").json()["done"] is True
     check = client.get("/api/onboard/check").json()
     assert check["ready"] is True and check["egress"][-1] == "telemetry: none"
@@ -650,3 +652,78 @@ def test_with_no_daemon_the_last_step_starts_one_or_says_how(
     assert "the daemon did not come up — run skep serve, then skep chat" in (
         capsys.readouterr().err
     )
+
+
+# ---------- T3-3: the branches no test ran ----------
+
+
+def test_provider_resolution_refuses_what_it_cannot_reach() -> None:
+    """Step ① picks a preset by id, builds ollama / openai-compatible ones,
+    and refuses an openai-compatible provider with no endpoint or an unknown
+    name — naming what would work (I9)."""
+    from skep.supervisor.onboard import _preset_for
+    from skep.supervisor.provider_presets import PROVIDER_PRESETS
+
+    preset_id = next(iter(PROVIDER_PRESETS))
+    assert _preset_for(preset_id, None, "m", None) is PROVIDER_PRESETS[preset_id]
+    assert _preset_for("ollama", None, "m", None).cost_class == "local"
+    remote = _preset_for("ollama", "https://ollama.example.com", "m", "OLLAMA_KEY")
+    assert remote.cost_class == "paid" and remote.label == "Ollama"
+    compat = _preset_for("openai-compatible", "http://localhost:8000/v1", "m", None)
+    assert (compat.protocol, compat.base_url) == ("openai_compat", "http://localhost:8000/v1")
+    with pytest.raises(ValueError, match="needs --endpoint"):
+        _preset_for("openai-compatible", None, "m", None)
+    with pytest.raises(ValueError, match="unknown provider 'nope'; known: mock, ollama"):
+        _preset_for("nope", None, "m", None)
+
+
+def test_the_model_and_workdir_steps_refuse_an_empty_answer(tmp_path: Path) -> None:
+    with _holder(tmp_path / "home") as (holder, store):
+        with pytest.raises(ValueError, match="name a --model"):
+            onboard_model(holder, store, provider="ollama", model="  ")
+        with pytest.raises(ValueError, match="name a work directory"):
+            onboard_workdir(holder, store, path="   ")
+    assert onboard_status(tmp_path / "home" / "supervisor")["next"] == "model"  # nothing recorded
+
+
+def test_detect_sandboxes_recommends_the_first_usable_and_never_offers_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /api/onboard/sandboxes's view — no test called it before T3."""
+    from skep.supervisor import onboard
+
+    def probe_none(backend: str | None) -> sandbox.SandboxAvailability:
+        return sandbox.SandboxAvailability(False, "unsupported", "no seatbelt here")
+
+    on_path = {"podman": "/usr/bin/podman", "docker": "/usr/bin/docker"}
+    monkeypatch.setattr("shutil.which", on_path.get)
+    view = onboard.detect_sandboxes(lambda b: _usable() if b == "podman" else probe_none(b))
+    assert view["backends"]["auto"] == {"usable": False, "detail": "unsupported: no seatbelt here"}
+    assert view["backends"]["podman"] == {"usable": True, "detail": "seatbelt"}
+    assert view["recommended"] == "podman"
+    assert view["docker"]["found"] and "no docker backend" in view["docker"]["detail"]
+
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    view = onboard.detect_sandboxes(probe_none)
+    assert view["backends"]["podman"] == {"usable": False, "detail": "podman is not on PATH"}
+    assert view["recommended"] == "none"  # always a usable answer
+    assert view["docker"] == {"found": False, "detail": "not on PATH"}
+
+
+def test_the_podman_rings_line_says_which_runs_leave_it() -> None:
+    from skep.supervisor.onboard import rings_line
+
+    assert rings_line("podman").endswith(
+        "sandbox (podman; a run that needs a domain allowlist uses the native backend)"
+    )
+
+
+def test_previewing_the_already_locked_template_says_so(tmp_path: Path) -> None:
+    from skep.supervisor.onboard import template_preview
+
+    with _holder(tmp_path / "home") as (holder, store):
+        onboard_sandbox(holder, store, backend="none")
+        onboard_template(holder, template="builder", approved_by="tester")
+        view = template_preview(holder, template="builder")
+        assert view["locked"] is True and view["template"] == "builder"
+        assert template_preview(holder, template="operator")["locked"] is False

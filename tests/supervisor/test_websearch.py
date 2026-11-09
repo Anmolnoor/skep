@@ -8,7 +8,9 @@ always ride a confirm card.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -315,6 +317,11 @@ def test_read_url_granted_lane_gets_the_bigger_budget(
         assert captured["max_chars"] == ws.GRANTED_READ_MAX_CHARS
         assert captured["markdown"] is False  # mode='text' respected
         assert captured["guard"] is not None  # redirects still re-decided
+        # T3-3: and the guard decides — a hop stays on the granted host or stops.
+        guard = cast(Callable[[str], bool], captured["guard"])
+        assert guard("docs.python.org") is True
+        assert guard("evil.example") is False
+        assert guard("sub.docs.python.org") is False  # exact host only
     finally:
         store.close()
 
