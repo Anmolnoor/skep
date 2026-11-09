@@ -304,14 +304,21 @@ is left as written so the delta stays visible.
   session with `session/load` (v1) — v2 clients use `session/resume`, and
   either may `session/fork`. All four carry `cwd`, so all four bind it
   (B3-F2; the first build bound `session/new` only and every resumed turn
-  decided against repo ""). A v1 `session/load` replays the session's
-  history as `session/update` notifications: those are fed to the cache
+  decided against repo ""). A continuing opener replays the session's
+  history as `session/update` notifications — v1 `session/load` by the
+  protocol, and v2 `session/resume` too under T3 with claude-agent-acp
+  0.101.0 (B3-F11: the B0 taps saw no replay on a bare resume; T3's resume
+  carries its MCP server and the thread's history came back as v2
+  `tool_call_update`/`terminal_update` frames). Those are fed to the cache
   for later joins but never written as observed rows (B3-F3; they were
-  re-observed once per turn). The replay window is not the load's
+  re-observed once per turn). The replay window is not the opener's
   request/response pair — under T3 the replay was recorded even so — but
   the stretch from any continuing opener to the client's next
   `session/prompt`, since a continued session can run nothing before it
-  (B3-F9).
+  (B3-F9). Confirmed on T3's real wire 2026-11-09
+  (`tests/fixtures/acp/claude-agent-acp/t3-v2-resume-ask.ndjson`): seven
+  replayed calls, zero observed rows, then one observed run, one forwarded
+  ask answered by the human and one floor deny.
 
 **Operator decisions (2026-11-06):** D3 accepted, plus a `--repo` override on
 the command line; D6 accepted; engine v2 on for fresh homes (`shell`,

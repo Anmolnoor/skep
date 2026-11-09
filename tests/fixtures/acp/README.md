@@ -72,6 +72,7 @@ tap log, not the vendored file.
 | `claude-agent-acp/live-v1-ask.ndjson` | same | 1 | `--mode default` (`session/set_mode`) | 38 |
 | `claude-agent-acp/live-v2.ndjson` | same | 2 | none (`auto`) | 33 |
 | `claude-agent-acp/live-v2-ask.ndjson` | same | 2 | `--mode default` (`session/set_config_option`) | 45 |
+| `claude-agent-acp/t3-v2-resume-ask.ndjson` | same, **inside T3 Code (Beta)** via `skep acp govern` with `SKEP_ACP_TRACE` (B3-F11, 2026-11-09) | 2 (`info.name = t3-code`) | T3 Manual mode (= `default`); the thread continued with `session/resume`; prompt: three separate commands | 157 |
 | `codex-acp/live-v1.ndjson` | `@agentclientprotocol/codex-acp@2.5.0` | 1 | `--model 'gpt-6-luna[low]'` (`session/set_model`); default mode `agent` | 34 |
 | `codex-acp/live-v1-ask.ndjson` | same | 1 | `--model 'gpt-6-luna[low]' --mode read-only` (`set_model`, `set_mode`) | 55 |
 | `codex-acp/live-v2.ndjson` | same | 2 | `--model gpt-6-luna` (`session/set_config_option`); default mode `agent` | 57 |
@@ -92,7 +93,8 @@ run; the client advertises no `fs`/`terminal` capability and answers every
 T3 fixtures are MIT, `LICENSE-t3code.txt`; see the root `NOTICE`. Not
 vendored: T3's `muse_*` (`muse.msp-jsonl`), `claude_*`
 (`claude-agent-sdk.query`), `codex` (`codex.app-server`) and `opencode*`
-recordings — none is ACP. T3 has no ACP recording of Claude or Codex.
+recordings — none is ACP. T3 ships no ACP recording of Claude or Codex;
+`t3-v2-resume-ask.ndjson` is ours, taken on the governor's own wire inside T3.
 
 ## (b) Per agent
 
@@ -120,7 +122,14 @@ input: expected \"id\"", …]}}`, run log in (c)).
 
 T3 advertises `clientCapabilities.fs = {readTextFile:false, writeTextFile:false}`
 and `terminal:false` (`kiro/kiro_permission_modes-supervised.ndjson:1`,
-`fx/tool_call_denied_write.ndjson:1`). The tap advertises nothing.
+`fx/tool_call_denied_write.ndjson:1`). The tap advertises nothing. The real
+T3 client (`claude-agent-acp/t3-v2-resume-ask.ndjson:1`) offers
+`protocolVersion: 2`, `info/clientInfo.name = "t3-code"`, the same `fs`/`terminal`
+flags plus `session.notices` and `elicitation.form/url`, and numbers its
+requests from 2^30 (`:1,3,74,77`); it continues an idle thread with
+`session/resume` carrying its own stdio MCP server (`:3`), sets only the
+model after the resume (`:74`), and wraps the user's text in a
+`<t3_code_instructions>` block inside `session/prompt` (`:77`).
 
 ### `session/update` kinds seen
 
@@ -220,6 +229,12 @@ or position.
 | 9 | codex-acp@2.5.0 | v1 | `--model 'gpt-6-luna[low]' --mode read-only` | works (`end_turn`); **never asked and did not write** → `live-v1-ask.ndjson` |
 | 10 | same | v2 | `--model gpt-6-luna --mode read-only` | works, asked for the redirect command → `live-v2-ask.ndjson` |
 
+### Live run inside T3 Code (Beta), 2026-11-09 (B3-F11)
+
+| # | Package | Client | Setup | Result |
+|---|---|---|---|---|
+| 11 | claude-agent-acp@0.101.0 | T3 (v2) through `skep acp govern`, `SKEP_ACP_TRACE` set on the provider | Manual mode, Supervised; the 2026-11-06 thread resumed; prompt asks for `git status`, `rm -rf build`, `git push -u origin main` as three separate calls | `session/resume` replayed the thread's seven calls (`:4-71`), zero observed rows; `git status` ran unasked → observed (`:85-92`); `rm -rf build` asked (`:99`) → default-deny → forwarded, the human allowed once after 45 s (`:100`); `git push` asked (`:111`) → floor deny, no card → `t3-v2-resume-ask.ndjson` + `.golden.json` |
+
 ### Drift found
 
 1. **claude-agent-acp 0.101.0 and codex-acp 2.5.0 speak v2 for real**
@@ -252,6 +267,15 @@ or position.
    (`kiro/kiro_permission_modes-full_access.ndjson:29-30`). Grok's own mode
    runs `echo` silently and asks only for `rm -rf …`
    (`grok/grok_auto_blocked_command.ndjson:74-80` vs `:95-101`).
+9. **v2 `session/resume` replays history under T3** (B3-F11). The bare tap
+   saw no replay on a resume; inside T3, claude-agent-acp 0.101.0 replayed
+   the whole thread between the resume request and its answer
+   (`claude-agent-acp/t3-v2-resume-ask.ndjson:3` → `:4-71` → `:73`), each
+   old call as `terminal_update` + `tool_call_update pending` +
+   `tool_call_update completed|failed` **with its original `toolCallId`**
+   (`:9-13`), and `user_message`/`agent_message` frames with empty
+   `content` (`:4-5`). The governor's replay window is therefore keyed to
+   every opener but `session/new` (A11), not to v1 `session/load` alone.
 
 ## (d) The ADR's open questions, with this evidence
 

@@ -2804,7 +2804,16 @@ wire inside a client in the fixture envelope. Observed on the wire: in
 Claude's `auto` (T3's default) the agent never asks, so skep only
 observes; T3's **Manual** mode is Claude's `default` and asks; the agent
 bundled `rm -rf build && … git push` into one command and the floor
-denied the lot before T3 saw it.
+denied the lot before T3 saw it. B3-F9 the replay window runs from any
+continuing opener to the client's next `session/prompt` — T3 races the
+opener's answer against two seconds of replay silence and may send its
+config and prompt first. B3-F10 a run-detail read tolerates a worktree
+swept under it (CI macOS). B3-F11 the first turn recorded inside T3 with
+the trace on (2026-11-09, `tests/fixtures/acp/claude-agent-acp/t3-v2-resume-ask.ndjson`,
+a golden): T3 speaks v2 and continues a thread with `session/resume`, and
+claude-agent-acp replays the thread's history on it too — seven replayed
+calls, zero observed rows; then `git status` observed, `rm -rf build`
+forwarded to the human (allow once), `git push` floor-denied.
 
 ## v1.2.0 — the ACP governor (2026-11-06)
 

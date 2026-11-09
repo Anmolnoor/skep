@@ -67,10 +67,12 @@ agent. With an adapter installed globally the last three rows become its
 binary name (`claude-agent-acp` / `codex-acp`).
 
 T3 respawns the agent after a thread goes idle and continues the same
-session with `session/load`; the governor binds that request's `cwd` as it
-does `session/new`'s, and everything the agent reports between that load
-and your next prompt is replayed history — cached for joins, never
-recorded as observed rows.
+session with `session/resume` (v2) or `session/load` (v1); the governor
+binds that request's `cwd` as it does `session/new`'s, and everything the
+agent reports between that request and your next prompt is replayed
+history — cached for joins, never recorded as observed rows. Claude's
+adapter replays the thread on a resume too, as `tool_call_update` frames
+carrying the original ids.
 
 ## The two rings, honestly
 
