@@ -26,6 +26,8 @@ from skep.supervisor.serve.actions import (
     decision_detail_view,
     policy_decide,
     policy_decisions,
+    require_run,
+    resume_past_gate,
     submit_run,
     submit_team,
 )
@@ -607,3 +609,44 @@ def test_the_dependabot_chain_end_to_end(
     }
     chained = [row for row in ledger if row.get("delegation_chain")]
     assert chained and all(row["role"] == "builder" for row in chained)
+
+
+# --- R3-6: a resume keeps the narrowing and the chain ------------------------
+
+
+def test_a_delegated_run_keeps_its_narrowing_through_a_remembered_resume(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """allow-command re-resolves the run policy's allowlist for the resume —
+    for a delegated run that would hand back every prefix the delegator
+    lacked. The resume keeps the narrowed allowlist plus only what the human
+    just approved, and carries the chain to the successor's cards."""
+    run = ["--home", str(config.home.parent), "run", str(repo), "Gate. MODE:pending", "--quiet"]
+    run += ["--execution-mode", "workspace", "--worker-cmd", _worker_cmd()]
+    assert main([*run, "--role", "builder", "--delegated-by", "queen@operator"]) != 0
+    capsys.readouterr()
+    store = RunStore(config.db_path)
+    runner = _Runner()
+    try:
+        (record,) = store.recent_runs(1)
+        held = json.loads((config.audit_dir / record.task_id / "task.json").read_text())
+        held_allowlist = held["permissions"]["shell_allowlist"]
+        review_id = store.pending_approvals()[0].review_id
+        resume_past_gate(
+            store,
+            config,
+            runner,  # type: ignore[arg-type]
+            require_run(store, record.task_id),
+            review_id,
+            "tester",
+            shell_allowlist=[*held_allowlist, ["uv", "sync"], ["make", "check"]],
+            remembered=True,
+            granted=[["make", "check"]],
+        )
+    finally:
+        store.close()
+    resumed = runner.submitted[0]
+    assert ["uv", "sync"] not in held_allowlist  # dropped at dispatch
+    assert resumed["permissions"].shell_allowlist == [*held_allowlist, ["make", "check"]]
+    assert resumed["dispatch_decision"].delegation == held["dispatch_decision"]["delegation"]
+    assert resumed["dispatch_decision"].reason == "dispatch.allow.resume_after_approval"

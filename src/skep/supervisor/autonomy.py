@@ -85,6 +85,7 @@ class AutonomyDecision:
             phase=self.phase,
             policy_source=self.policy_source,
             constraints=constraints,
+            delegation=self.delegation,
         )
 
     def with_project_context(
@@ -104,6 +105,7 @@ class AutonomyDecision:
             phase=phase,
             policy_source=policy_source,
             constraints=self.constraints,
+            delegation=self.delegation,
         )
 
 
@@ -173,11 +175,16 @@ def run_request_resolved_decision() -> AutonomyDecision:
     )
 
 
-def resume_after_approval_decision(*, resumed_from_task_id: str) -> AutonomyDecision:
+def resume_after_approval_decision(
+    *, resumed_from_task_id: str, delegation: object = None
+) -> AutonomyDecision:
+    """R3 (ADR 0055 D5): a resume carries the original's ``delegation`` —
+    the successor's cards show the same chain."""
     return AutonomyDecision(
         verdict="allow",
         reason="dispatch.allow.resume_after_approval",
         detail=resumed_from_task_id,
+        delegation=delegation if isinstance(delegation, dict) else None,
     )
 
 

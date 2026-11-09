@@ -3404,12 +3404,19 @@ def resume_past_gate(
     shell_allowlist: list[list[str]] | None = None,
     *,
     remembered: bool = False,
+    granted: Sequence[list[str]] = (),
 ) -> str:
     """Q8: approving a suspended task resumes it past the gate (fresh worker
     run carrying the granted verdict), dispatched on the background pool.
 
     ``shell_allowlist`` overrides the original permissions' allowlist so a
     just-persisted policy change applies to this resume, not only future runs.
+
+    R3 (ADR 0055 D4/D5): not for a delegated run. The re-resolved allowlist
+    is the run policy's, which hands back every prefix the delegator lacked;
+    a delegated worker keeps its narrowed allowlist and gains only
+    ``granted`` — the commands a human just approved. The resume carries the
+    chain so the successor's cards show it.
     """
     task_id = str(run["task_id"])
     audit_task = config.audit_dir / task_id / "task.json"
@@ -3417,6 +3424,10 @@ def resume_past_gate(
         raise HTTPException(status_code=409, detail="original task envelope is missing")
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
     permissions = original.permissions
+    delegation = getattr(original.dispatch_decision, "delegation", None)
+    if shell_allowlist is not None and delegation:
+        held = permissions.shell_allowlist
+        shell_allowlist = [*held, *(list(c) for c in granted if list(c) not in held)]
     if shell_allowlist is not None:
         permissions = permissions.model_copy(update={"shell_allowlist": shell_allowlist})
     # v19-F2: a run created before the provider was configured froze a stale
@@ -3464,7 +3475,7 @@ def resume_past_gate(
             auto_apply_verified_patch=original.auto_apply_verified_patch,
             project_context=original.project_context,
             dispatch_decision=resume_after_approval_decision(
-                resumed_from_task_id=task_id
+                resumed_from_task_id=task_id, delegation=delegation
             ).with_project_context(original.project_context),
             ref=None if run["ref"] is None else str(run["ref"]),
             resume_of=task_id,
@@ -3873,6 +3884,7 @@ def allow_shell_command_and_resume(
         actor,
         shell_allowlist=allowlist,
         remembered=True,
+        granted=normalized_commands,
     )
 
 

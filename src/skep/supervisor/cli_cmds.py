@@ -1539,7 +1539,8 @@ def _resume_pending_approval(
         auto_apply_verified_patch=original.auto_apply_verified_patch,
         project_context=original.project_context,
         dispatch_decision=resume_after_approval_decision(
-            resumed_from_task_id=record.task_id
+            resumed_from_task_id=record.task_id,
+            delegation=getattr(original.dispatch_decision, "delegation", None),
         ).with_project_context(original.project_context),
         ref=record.ref,
         resume_of=record.task_id,
