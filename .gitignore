@@ -19,3 +19,5 @@ plans/
 
 # internal planning stays local (decided 2026-11-09): ADR drafts, status, handoff, CTO decisions
 .10x/
+.coverage
+coverage.xml

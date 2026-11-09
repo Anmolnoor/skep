@@ -5,6 +5,7 @@ No real processes: ``ps`` output is fixture text, logs are temp files.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -46,11 +47,22 @@ def test_parse_ps_reads_rows_and_skips_junk() -> None:
         ("vim codex", None),  # argv[1] only counts behind an interpreter
         ("python -m skep.workers.pi --headless", None),
         ("/bin/zsh -l", None),
+        ("", None),  # T3-3: an empty command line names no agent
     ],
 )
 def test_identify_by_executable_name(args: str, agent: str | None) -> None:
     row = presence.identify(args)
     assert (row["id"] if row else None) == agent
+
+
+def test_ancestry_stops_on_a_ppid_cycle() -> None:
+    """T3-3: ps output is a snapshot — a recycled pid can make a parent chain
+    loop (or a pid its own parent). The walk stops instead of spinning to
+    the cap with repeats."""
+    looped = presence.parse_ps("  10  20 0.0 a\n  20  10 0.0 b\n   7   7 0.0 self\n")
+    assert [p.pid for p in presence._ancestry(looped, 10)] == [10, 20]
+    assert [p.pid for p in presence._ancestry(looped, 7)] == [7]
+    assert presence._ancestry(looped, 99) == []
 
 
 def test_classify_blocked_needs_output_working_falls_back_to_cpu() -> None:
@@ -220,6 +232,8 @@ def test_rest_and_cli_faces_read_the_same_view(
     out = capsys.readouterr().out
     assert rest["summary"] in out
     assert "<- blocked and ungoverned" in out and "role builder" in out
+    assert main(["--home", str(tmp_path / "home"), "agents", "--json"]) == 0  # T3-3
+    assert json.loads(capsys.readouterr().out) == rest
 
 
 def test_blocked_rides_the_gate_channel_once_per_transition(
@@ -271,3 +285,36 @@ def test_the_web_runs_view_renders_presence_rows() -> None:
     assert '"/api/agents"' in section and "blocked and ungoverned" in section
     runs_view = app_js.split("async function viewRuns(main)", 1)[1].split("\n}\n", 1)[0]
     assert "await buildAgentsSection()" in runs_view
+
+
+def test_a_blocked_agent_with_no_chat_to_speak_in_pushes_nothing(
+    config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T3-3: no messenger chat bound — the ungoverned blocked agent has
+    nowhere to speak, so it is skipped (the presence row is the record) and
+    is not retried on the next tick; the governed one still reaches the chat
+    that dispatched its run."""
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.ticker import Ticker
+
+    ps_text = seed_fixture(config, tmp_path)
+    monkeypatch.setattr(presence, "read_ps", lambda: ps_text)
+    store = RunStore(config.db_path)
+    try:
+        task_id = store.runs_with_states(["running"])[0].task_id
+        dispatching = store.chat_for_task(task_id)
+        log = config.audit_dir / task_id / "worker.log"
+        log.parent.mkdir(parents=True)
+        log.write_text(BLOCKED_CLAUDE_TAIL)
+        ticker = Ticker(ConfigHolder(config, store), store)
+        pushed: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            ticker, "_notify", lambda chat, text, kind="info": pushed.append((chat, kind))
+        )
+        ticker._push_presence_blocked()
+        ticker._push_presence_blocked()
+        notes = store.list_notes()
+    finally:
+        store.close()
+    assert pushed == [(dispatching, "action_needed")]
+    assert not [n for n in notes if "blocked" in n.content]  # no note fallback either

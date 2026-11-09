@@ -628,3 +628,21 @@ def test_a_reapproval_relocks_the_file_read_only(tmp_path: Path) -> None:
     assert stat.S_IMODE(pb.baseline_path(home).stat().st_mode) == 0o444
     state = pb.verify(home)
     assert isinstance(state, pb.Ok) and state.layer.template == "operator"
+
+
+def test_the_rest_face_of_approve_refuses_what_argparse_cannot_see(tmp_path: Path) -> None:
+    """T3-3: argparse keeps --template and --file apart on the CLI; REST and
+    chat reach baseline_preview directly, so it refuses both itself, an
+    unreadable file, and a bare --reapprove with no baseline.json left."""
+    from skep.supervisor.serve.actions import baseline_preview
+
+    home = build_config(tmp_path, None).home
+    with pytest.raises(ValueError, match="not both"):
+        baseline_preview(home, template="builder", file="x.json")
+    with pytest.raises(ValueError, match=r"cannot read .*missing\.json"):
+        baseline_preview(home, file=str(tmp_path / "missing.json"))
+    pb.write_lock(home, load_policy_template("builder"), approved_by="op")
+    os.chmod(pb.baseline_path(home), 0o644)
+    pb.baseline_path(home).unlink()
+    with pytest.raises(ValueError, match=r"no baseline\.json to re-approve"):
+        baseline_preview(home, reapprove=True)

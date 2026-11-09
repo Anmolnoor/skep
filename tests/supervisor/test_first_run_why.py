@@ -44,6 +44,13 @@ def test_verdict_why_names_rule_layer_and_reason() -> None:
         "asked: rule no_baseline in the baseline layer"
     )
     assert verdict_why(None) == "asked: no policy rule covers this tool, so it asks by default"
+    # T3-3: a decider with no layer — the Queen's shell guard (tools.py).
+    guard = {
+        "verdict": "deny",
+        "reason": "shell.deny.queen_guard",
+        "decided_by": "queen-shell-guard",
+    }
+    assert verdict_why(guard) == "denied: rule queen-shell-guard — shell.deny.queen_guard"
 
 
 def test_every_verdict_gets_a_why_and_the_turn_a_tally(tmp_path: Path) -> None:
@@ -187,7 +194,8 @@ def test_web_renders_why_and_tally() -> None:
 
     source = (STATIC_DIR / "app.js").read_text()
     assert "whyLine(d)" in source.split("const actionCard = (d)")[1].split("const receiptCard")[0]
-    assert "whyLine(d)" in source.split("const receiptCard = (d)")[1].split("// v54-F2")[0]
+    receipt = source.split("function receiptNode(d)")[1].split("function formatRunAutonomy")[0]
+    assert "whyLine(d)" in receipt
     assert "tally: (d) =>" in source
     assert '"/api/onboard/transparency", { verbose: false }' in source
 

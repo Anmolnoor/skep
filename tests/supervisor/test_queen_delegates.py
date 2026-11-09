@@ -428,6 +428,11 @@ def test_every_face_dispatches_a_team(
     assert main(decisions) == 0
     view = json.loads(capsys.readouterr().out)
     assert view["summary"]["delegated"] == 2  # the manager's hop and the worker's
+    # T3-3: a refused team is an error that names where the roles are listed.
+    bad = ["--home", str(config.home.parent), "team", "--manager", "wizard"]
+    assert main([*bad, "--task", str(repo), "Fix."]) != 0
+    err = capsys.readouterr().err
+    assert "no role 'wizard'" in err and "skep role list" in err
 
 
 # --- R3-4: the cards show the chain — web, chat, CLI ------------------------

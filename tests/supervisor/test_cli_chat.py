@@ -591,7 +591,18 @@ def test_tool_receipts_name_the_lane(capsys: pytest.CaptureFixture[str]) -> None
             "result": {"ok": True, "result": {"exit_code": 0}},
         },
     )
+    # T3-2: allow_with_constraints executes too (AutonomyDecision.allows_execution).
+    printer.feed(
+        "tool",
+        {
+            "tool": "run_shell",
+            "decision": {"verdict": "allow_with_constraints", "reason": "ops.allow.dry_run"},
+            "result": {"ok": True},
+        },
+    )
     out = capsys.readouterr().out
+    assert "ran without asking — covered by ops.allow.dry_run" in out
+    assert "denied — ops.allow" not in out
     assert "ran in-turn — read tool" in out
     assert "denied — shell.deny.repo_target (git -C /repo status)" in out
     assert "ran without asking — covered by capability.allow.learned_rule (uv sync)" in out

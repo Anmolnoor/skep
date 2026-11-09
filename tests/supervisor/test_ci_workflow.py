@@ -51,3 +51,16 @@ def test_local_lint_targets_cover_scripts_like_ci() -> None:
 
     assert "uv run ruff format --check src/skep tests scripts" in makefile
     assert "uv run ruff format src/skep tests scripts" in makefile
+
+
+def test_ci_gates_diff_coverage_on_pull_requests() -> None:
+    """T3-4: the Linux leg measures coverage and a PR's changed lines must be
+    90% covered; the checkout keeps history so diff-cover finds the merge base."""
+    workflow = (Path(__file__).parents[2] / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "fetch-depth: 0" in workflow
+    assert "--with pytest-cov" in workflow and "--cov=skep --cov-report=xml" in workflow
+    assert "github.event_name == 'pull_request'" in workflow
+    assert "uvx diff-cover coverage.xml" in workflow and "--fail-under=90" in workflow

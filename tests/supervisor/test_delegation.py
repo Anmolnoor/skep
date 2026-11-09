@@ -537,3 +537,23 @@ def test_a_queen_whose_role_vanished_dispatches_nothing(
         store.close()
     assert runner.submitted == {}
     assert not (config.audit_dir / "policy" / "decisions.jsonl").exists()
+
+
+def test_a_delegator_face_that_does_not_resolve_holds_nothing(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T3-3 (#7, unrun before): a tampered baseline fails the run face closed
+    with an error — the delegator's own run face has no verdict, so it holds
+    nothing there and the delegatee's face keeps its error rather than being
+    "tightened" against a verdict that does not exist. The operator face
+    still resolves and still carries the chain."""
+    from .test_policy_baseline import _tamper
+
+    _tamper(config.home)
+    why = ["--home", str(config.home.parent), "policy", "why", str(repo)]
+    assert main([*why, "shell", "run", "git status", "--delegated-by", "queen@builder"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["run"]["error"].startswith("baseline_tampered:")
+    assert view["delegation"]["held"]["run"] is None
+    assert view["delegation"]["held"]["operator"]["verdict"] == "require_approval"
+    assert view["operator"]["rule_id"] == "baseline_tampered"
