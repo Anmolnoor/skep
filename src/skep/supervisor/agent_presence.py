@@ -178,6 +178,17 @@ def agent_rows(store: RunStore, audit_dir: Path, ps_text: str) -> list[dict[str,
     return sorted(rows, key=lambda r: r["pid"])
 
 
+def blocked_line(row: dict[str, Any]) -> str:
+    """The one line a newly blocked agent pushes down the gate channel."""
+    who = f"{row['agent']} (pid {row['pid']}"
+    if row["governed"]:
+        return f"⏸ {who}, run {row['task_id'] or '?'}) is blocked waiting for input"
+    return (
+        f"⏸ {who}) is blocked waiting for input — not governed by skep: it is "
+        "asking on a prompt skep does not gate"
+    )
+
+
 def presence_view(store: RunStore, audit_dir: Path) -> dict[str, Any]:
     """The one read every face calls (CLI, REST, chat — ADR 0050)."""
     rows = agent_rows(store, audit_dir, read_ps())

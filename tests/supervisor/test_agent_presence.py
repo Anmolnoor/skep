@@ -220,3 +220,44 @@ def test_rest_and_cli_faces_read_the_same_view(
     out = capsys.readouterr().out
     assert rest["summary"] in out
     assert "<- blocked and ungoverned" in out and "role builder" in out
+
+
+def test_blocked_rides_the_gate_channel_once_per_transition(
+    config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A newly blocked agent pushes one action_needed line — into the chat
+    that dispatched its run when governed, else the newest messenger chat —
+    and stays quiet on later ticks while it stays blocked."""
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.ticker import Ticker
+
+    ps_text = seed_fixture(config, tmp_path)
+    monkeypatch.setattr(presence, "read_ps", lambda: ps_text)
+    store = RunStore(config.db_path)
+    try:
+        task_id = store.runs_with_states(["running"])[0].task_id
+        dispatching = store.chat_for_task(task_id)
+        log = config.audit_dir / task_id / "worker.log"
+        log.parent.mkdir(parents=True)
+        log.write_text(BLOCKED_CLAUDE_TAIL)  # the governed claude blocks too
+        messenger = store.create_chat(title="discord", model=None).chat_id
+        store.bind_channel_session(
+            session_key="discord:1", channel="discord", identity_id="u1", chat_id=messenger
+        )
+        ticker = Ticker(ConfigHolder(config, store), store)
+        pushed: list[tuple[str, str, str]] = []
+        monkeypatch.setattr(
+            ticker, "_notify", lambda chat, text, kind="info": pushed.append((chat, text, kind))
+        )
+
+        ticker._push_presence_blocked()
+        ticker._push_presence_blocked()  # still blocked: no second push
+    finally:
+        store.close()
+
+    assert [(chat, kind) for chat, _, kind in pushed] == [
+        (dispatching, "action_needed"),
+        (messenger, "action_needed"),
+    ]
+    assert f"run {task_id}) is blocked" in pushed[0][1]
+    assert "not governed by skep" in pushed[1][1]
