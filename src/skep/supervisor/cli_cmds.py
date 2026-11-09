@@ -2831,6 +2831,31 @@ def cmd_project_set_phase(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_agents(args: argparse.Namespace) -> int:
+    """first-run L1: coding agents running on this machine and which skep
+    governs — the same presence_view the Queen's list_agents reads."""
+    from .agent_presence import presence_view
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        view = presence_view(store, config.audit_dir)
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(view, indent=2))
+        return 0
+    print(view["summary"])
+    for row in view["agents"]:
+        who = f"governed run {row['task_id'] or '?'}" if row["governed"] else "ungoverned"
+        if row["role"]:
+            who += f" role {row['role']}"
+        gap = "  <- blocked and ungoverned" if row["gap"] else ""
+        print(f"{row['pid']:>7}  {row['agent']:<10} {row['state']:<8} {who}{gap}")
+    print(view["note"])
+    return 0
+
+
 def register_supervisor_commands(
     subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
@@ -3084,6 +3109,12 @@ def register_supervisor_commands(
         help="activate D3: auto-apply safe manifest-only fixes from scheduled runs (U1)",
     )
     tick.set_defaults(func=cmd_tick)
+
+    agents = subcommands.add_parser(
+        "agents", help="coding agents running here: working/idle/blocked, governed or not (L1)"
+    )
+    agents.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    agents.set_defaults(func=cmd_agents)
 
     # v3.5: workflow templates — user-authored, parameterized task recipes.
     template = subcommands.add_parser("template", help="manage workflow templates (v3.5)")

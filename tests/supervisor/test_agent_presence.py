@@ -166,3 +166,57 @@ def test_presence_view_summarizes_the_gap(
         store.close()
     assert view["summary"].startswith("3 agent(s) running: 1 governed by skep, 2 not")
     assert "1 blocked and ungoverned" in view["summary"]
+
+
+def test_gate_the_queen_answers_which_agents_run_and_which_are_governed(
+    config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The L1 gate: asked "what agents are running right now and which are
+    governed", the Queen finds list_agents in its tool index, calls it, and
+    the next model round reads every row — governed with its role, and the
+    blocked-and-ungoverned gap — over fixture process data."""
+    from .fake_ollama import FakeOllama
+    from .test_serve_chat import configured_client
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        client = configured_client(config, ollama)
+        ps_text = seed_fixture(config, tmp_path)
+        monkeypatch.setattr(presence, "read_ps", lambda: ps_text)
+        chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+        ollama.script_tool_call("list_agents", {})
+        ollama.script_reply("three agents; one governed")
+        client.post(
+            f"/api/chats/{chat_id}/messages",
+            json={"content": "what agents are running right now and which are governed?"},
+        )
+        bodies = ollama.chat_bodies()
+    finally:
+        ollama.stop()
+
+    assert "list_agents" in bodies[0]["messages"][0]["content"]  # the index line
+    tool_reply = next(m for m in bodies[-1]["messages"] if m["role"] == "tool")
+    assert "3 agent(s) running: 1 governed by skep, 2 not" in tool_reply["content"]
+    assert "1 blocked and ungoverned" in tool_reply["content"]
+    assert '"role": "builder"' in tool_reply["content"]
+
+
+def test_rest_and_cli_faces_read_the_same_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from skep.cli import main
+    from skep.supervisor.cli_cmds import build_config
+
+    from .conftest import serve_client
+
+    config = build_config(tmp_path / "home", None)  # the home the CLI resolves
+    client = serve_client(config)
+    ps_text = seed_fixture(config, tmp_path)
+    monkeypatch.setattr(presence, "read_ps", lambda: ps_text)
+    rest = client.get("/api/agents").json()
+    assert [r["pid"] for r in rest["agents"]] == [312, 401, 500]
+
+    assert main(["--home", str(tmp_path / "home"), "agents"]) == 0
+    out = capsys.readouterr().out
+    assert rest["summary"] in out
+    assert "<- blocked and ungoverned" in out and "role builder" in out

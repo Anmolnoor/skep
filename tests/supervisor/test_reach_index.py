@@ -95,7 +95,8 @@ def test_reach_block_sizes_are_measured(config: SupervisorConfig) -> None:
         # cut to the first-sentence budget. first-run O2 adds one index line
         # (approve_policy_baseline): the block measured 9.79KB with it.
         # first-run R1 adds one more (set_role, ADR 0055 D3): 9.86KB.
-        assert 0 < len(block) < 9_900
+        # first-run L1 adds list_agents (the presence read): 9.92KB.
+        assert 0 < len(block) < 9_950
         # Skills + MCP sections alone (headers + entries) — the fold-in cost.
         skills_and_mcp = block[block.index("Approved skills") :]
         assert len(skills_and_mcp) < 1_000  # v99-F2: names, not descriptions

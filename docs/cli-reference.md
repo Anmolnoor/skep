@@ -91,6 +91,21 @@ Important options:
 
 `--minimal` cannot be combined with `--template`, `--network`, or `--env-allow`.
 
+## Agents
+
+```sh
+skep agents [--json]
+```
+
+Coding agents running on this machine right now (Claude Code, Codex, Cursor,
+Gemini and ~18 more, matched by process name), each `working`, `idle` or
+`blocked`, and whether skep governs it — running under a skep worker, with the
+run's task id and the dispatching chat's role. `blocked` is read from output,
+which skep only has for processes it started itself; other agents show
+`working`/`idle` by CPU. A `blocked` agent skep does not govern is flagged as
+the gap. Same view as `GET /api/agents` and the Queen's `list_agents`. The
+detection patterns are data from herdr (Apache-2.0; see `NOTICE`).
+
 ## Review and Approval
 
 ```sh
