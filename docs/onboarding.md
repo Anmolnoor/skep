@@ -47,7 +47,10 @@ skips the typed `yes`. `--provider` takes `mock`, `ollama`,
 `openai-compatible`, or a preset id from `skep provider presets`. A flag
 that differs from a step you already finished runs that step again. For
 example, `--template operator` re-locks the baseline and shows the diff
-first.
+first. Changing the sandbox after the baseline is locked (`--sandbox none`
+after `auto`, or back) re-opens step ④ too. The locked baseline must match
+what that template locks under the new sandbox, so you approve the new
+candidate before it is locked.
 
 ## `skep onboard --check`
 
@@ -55,6 +58,9 @@ This is `skep doctor` plus the onboarding checks. It also checks that:
 
 - the baseline still matches its lock (a hand edit is reported as
   `baseline_tampered`)
+- the locked baseline is what step ④ locks for your template under the
+  current sandbox (a sandbox change since the lock means you re-run
+  `skep onboard`)
 - engine v2 is on for every scope (a fresh home is seeded that way)
 - the chosen sandbox backend is present
 - the work directory is writable
