@@ -22,7 +22,7 @@ from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation
 from skep.supervisor.store import RunStore
 
-from .conftest import FAKE_WORKER, git, wait_terminal
+from .conftest import FAKE_WORKER, git, predating_home, wait_terminal
 from .conftest import serve_client as _client
 from .fake_openai import FakeOpenAI
 
@@ -1591,7 +1591,7 @@ def test_set_operator_policy_rule_takes_effect_and_guards_denied_space(
     from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY, PolicyDocument
     from skep.supervisor.serve.tools import MUTATING_TOOL_SPECS
 
-    store = RunStore(config.db_path)
+    store = RunStore(predating_home(config.db_path))
     try:
         result = actions.set_operator_policy_rule(
             store, scope="filesystem", action="read", pattern=f"{tmp_path}/data/*", verdict="allow"

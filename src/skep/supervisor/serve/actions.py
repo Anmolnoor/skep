@@ -53,15 +53,15 @@ from ..castes import resolve_caste
 from ..config import SupervisorConfig
 from ..contracts_io import read_event_log
 from ..memory import MemoryError, MemoryProposal, MemorySource
-from ..policy_baseline import NoBaseline, status_line
+from ..policy_baseline import BASELINE_TAMPERED, NO_BASELINE_REASON, NoBaseline, status_line
 from ..policy_baseline import current_layer as current_baseline_layer
-from ..policy_baseline import fail_closed_reason as baseline_fail_closed_reason
 from ..policy_baseline import layer_diff as baseline_layer_diff
 from ..policy_baseline import locked_layer as locked_baseline_layer
 from ..policy_baseline import note_event as note_baseline_event
 from ..policy_baseline import sha256_of as baseline_sha256
 from ..policy_baseline import verify as verify_baseline
 from ..policy_baseline import write_lock as write_baseline_lock
+from ..policy_layers import baseline_guard
 from ..policy_registry import registry_keys
 from ..policy_resolver import (
     PolicyResolutionError,
@@ -1898,7 +1898,9 @@ def policy_decide(
     first-run O2: after the floor, the baseline. One that does not verify
     answers every call ``baseline_tampered`` — ``ask`` where a human answers
     (the advisory ring: the hook, the ACP permission hop), ``deny`` where
-    none does (``ring="hard"``: the governor's terminal and fs writes)."""
+    none does (``ring="hard"``: the governor's terminal and fs writes).
+    O5: on a fresh home with nothing approved, every call in a scope routed
+    to engine v2 answers ``ask`` with ``no_baseline`` (``baseline_guard``)."""
     _check_scope_action(scope, action)
     record: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1914,9 +1916,10 @@ def policy_decide(
         decision = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
         record["source"] = "floor"
         record["note"] = floor["reason"]
-    elif (reason := baseline_alarm(holder, store)) is not None:
+    elif (reason := baseline_alarm(holder, store).get(scope)) is not None:
+        hard = ring == "hard" and reason == BASELINE_TAMPERED
         decision = {
-            "verdict": "deny" if ring == "hard" else "require_approval",
+            "verdict": "deny" if hard else "require_approval",
             "rule_id": reason,
             "decided_by": f"baseline/{reason}",
         }
@@ -1950,13 +1953,13 @@ def policy_decide(
     return record
 
 
-def baseline_alarm(holder: ConfigHolder, store: RunStore) -> str | None:
+def baseline_alarm(holder: ConfigHolder, store: RunStore) -> dict[str, str]:
     """first-run O2 (ADR 0056 D1): verify the baseline; on a NEW tamper or
     schema-change event, put one card in front of the operator (the event is
     recorded in the approvals ledger, so every process — a hook run, the
-    governor, serve — debounces against the same record). Returns the reason
-    decisions fail closed with, or None. Called by ``policy_decide`` and at
-    serve startup."""
+    governor, serve — debounces against the same record). Returns
+    ``baseline_guard``: scope → the reason its decisions fail closed with.
+    Called by ``policy_decide`` and at serve startup."""
     home = holder.current.home
     state = verify_baseline(home)
     row = note_baseline_event(home, state)
@@ -1984,7 +1987,7 @@ def baseline_alarm(holder: ConfigHolder, store: RunStore) -> str | None:
             args={"reapprove": True, "reason": row["reason"], "diff": row["diff"]},
             source="operator",
         )
-    return baseline_fail_closed_reason(state)
+    return baseline_guard(store)
 
 
 def baseline_preview(
@@ -2131,6 +2134,15 @@ def policy_why(
                 if rule.action == action
                 and any(pattern_matches(scope, rule.pattern, part) for part in parts)
             ],
+        }
+    if baseline_guard(store).get(scope) == NO_BASELINE_REASON:
+        # O5: say what policy_decide answers here, not what the stack beneath would.
+        view["baseline"] += f" — {NO_BASELINE_REASON}: every decision asks until one is"
+        view["run"] = {
+            "verdict": "require_approval",
+            "rule_id": NO_BASELINE_REASON,
+            "decided_by": f"baseline/{NO_BASELINE_REASON}",
+            "considered": [],
         }
     operator = resolve_operator_policy(store).decision(scope, action, value)
     view["operator"] = {

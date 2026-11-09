@@ -48,6 +48,8 @@ ALLOWED_PLUGIN_RISKS = "allowed_plugin_risks"
 SANDBOX_BACKEND = "sandbox_backend"  # v44-F7: "auto" (native) | "podman"; O3: | "none"
 # P1 (ADR 0053 D6): the per-scope kill switch — scopes routed through engine v2.
 POLICY_ENGINE_V2_SCOPES = "policy_engine_v2_scopes"
+# first-run O5 (ADR 0056 D2): when the store seeded a home that did not exist.
+FRESH_HOME_SEEDED_AT = "fresh_home_seeded_at"
 
 # first-run O3 (ADR 0056 D8): "none" is the operator saying no sandbox ring is
 # counted on. Runtime treats it like "auto" (a run that asks for the sandbox

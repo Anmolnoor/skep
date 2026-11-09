@@ -21,6 +21,7 @@ from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
 
 from ..fixtures.acp import ACP_DIR, envelope_frames
+from .conftest import predating_home
 
 FAKE = str(Path(__file__).with_name("fake_acp_agent.py"))
 GOLDEN_FIXTURES = sorted(
@@ -32,15 +33,17 @@ GOLDEN_FIXTURES = sorted(
 )
 
 
-def _demo_home(tmp_path: Path) -> tuple[Path, Path]:
+def _demo_home(tmp_path: Path, *, fresh: bool = False) -> tuple[Path, Path]:
     """The B3 demo policy, as far as a repo's run policy can say it: allow
     `git status`, `ls`, `pnpm test` and `fs: workspace`; everything else is
     unmatched (default-deny -> forward); the floor denies `git push`. The run
     policy compiles allows only, so explicit deny / require_approval live on
-    the operator lanes (`network.fetch`), which decide even with a repo."""
+    the operator lanes (`network.fetch`), which decide even with a repo.
+    A home that predates O5 unless ``fresh`` (then the zero state binds)."""
     repo, home = tmp_path / "repo", tmp_path / "home"
     repo.mkdir()
-    store = RunStore(build_config(home, None).db_path)
+    db_path = build_config(home, None).db_path
+    store = RunStore(db_path if fresh else predating_home(db_path))
     try:
         store.set_setting("default_execution_mode", "workspace")
         store.set_setting("allowed_shell_commands", [["git", "status"], ["ls"], ["pnpm", "test"]])

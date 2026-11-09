@@ -90,6 +90,7 @@ rule; a hook that denied every read would be inventing policy.
 | unmatched (`default-deny`) | `ask` — the shape skep gives its own workers: an unlisted command cards, an explicit deny refuses |
 | skep could not decide (bad home, broken store) | `ask`, with the error as the reason — towards the human, never a silent allow |
 | the approved baseline no longer matches its lock (`baseline_tampered`, first-run O2) | `ask` — every call, until `skep policy approve --reapprove`; the floor still denies first, and `skep acp govern`'s hard ring answers `deny` |
+| a fresh home with no baseline approved yet (`no_baseline`, first-run O5) | `ask` — every call in an engine-v2 scope, until `skep onboard` or `skep policy approve --template NAME`; the floor still denies first. A home from before 1.2.1 keeps deciding by rule |
 
 The reason string names the rule (`skep: allow by trusted_local_dev/shell:uv
 run pytest (run policy)`), so `skep policy why` explains any surprise.

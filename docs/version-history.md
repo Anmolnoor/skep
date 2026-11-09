@@ -2895,3 +2895,47 @@ ready. Web face: a "First run" card on the `/setup` page over
 `GET /api/onboard`, `/api/onboard/check|sandboxes|template` and
 `POST /api/onboard/{step}` — the same functions (`test_surface_parity`
 `ONBOARD_VERBS`).
+
+## first-run O5 — fresh homes ask until a baseline is approved (2026-11-09)
+
+ADR 0056 D2 "Zero state". A home whose sqlite file did not exist is seeded
+with every scope in `SCOPES` on engine v2 (was `shell` + `filesystem`) and a
+`fresh_home_seeded_at` setting. `policy_layers.zero_state_home` is the one
+rule: a home the store seeded itself, or one where `skep onboard` has started
+(`onboard.json`), answers every decision in an engine-v2 scope `ask` with
+reason `no_baseline` while nothing is approved — on all four paths
+(`policy_decide`, `skep policy hook`, `skep acp govern`, the Queen's standing
+policy), through the same fail-closed guard O2 built (`baseline_guard`, now a
+scope → reason map). The floor stays above it. A home that predates O5 keeps
+today's behaviour exactly — an upgrade must not turn a running daily driver
+into a wall of asks — and `skep doctor` / `skep onboard --check` print `no
+baseline approved — run skep policy approve --template <name> or skep
+onboard`. `why` names `no_baseline`. `skep acp install-hint` opens with the
+locked baseline (template, approval time, short sha256) or `run skep onboard
+first — the governor answers from an approved baseline`; `onboard --check`'s
+engine v2 probe is ready only with every scope routed. The golden files
+re-froze with only the seeded switch list moving.
+
+## v1.2.1 — first-run: onboard onto a locked baseline (2026-11-09)
+
+The first-run O1, O2, O3 and O5 work above, as a patch release. What an
+operator sees:
+
+- `skep onboard` (or `skep onboard --template builder --yes`) takes a fresh
+  install from nothing to a locked policy baseline in five resumable steps;
+  `skep onboard --check` is `skep doctor` plus the onboard rings and the
+  egress truth.
+- Three templates — `builder`, `operator`, `assistant` — replace the four
+  old documents (aliases until 1.3.0); `skep policy explain <name>` prints
+  each as an allow / ask / deny table.
+- `skep policy approve --template NAME` locks the baseline
+  (`<home>/policy/baseline.json` + `baseline.lock` + the approvals ledger);
+  an edit fails closed with `baseline_tampered` until `skep policy approve
+  --reapprove`.
+- A fresh install asks for everything until a baseline is approved
+  (`no_baseline`); an existing home keeps deciding as before and is told
+  how to approve one.
+- `skep acp install-hint` names the baseline the governor answers from.
+
+Air smoke (`docs/acp-governor.md`): `pipx install skep && skep onboard
+--template builder --yes`, then `skep acp install-hint`.

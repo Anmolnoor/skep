@@ -220,9 +220,11 @@ def test_the_b3_demo_sequence_holds_under_builder(
 ) -> None:
     """(d) Through `policy_decide`, the one entry the hook, the governor and
     the REST face share: `pnpm test` allow · `rm -rf build` ask · `git push`
-    deny — and the hook renders those three words."""
+    deny — and the hook renders those three words. O5: a fresh home asks
+    (``no_baseline``) until the baseline is approved, so the demo approves it."""
     home = tmp_path / "home"
     assert main(["--home", str(home), "setup", "--template", "builder"]) == 0
+    assert main(["--home", str(home), "policy", "approve", "--template", "builder", "--yes"]) == 0
     capsys.readouterr()
     store, holder = _parts(home)
     try:

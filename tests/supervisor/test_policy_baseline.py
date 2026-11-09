@@ -151,10 +151,10 @@ def test_deleting_both_files_is_not_a_way_back_to_the_zero_state(tmp_path: Path)
     assert isinstance(pb.verify(home), pb.Tampered)
 
 
-def test_the_zero_state_is_explicit_and_answers_nothing_today(tmp_path: Path) -> None:
+def test_the_zero_state_is_explicit_and_names_no_baseline(tmp_path: Path) -> None:
     state = pb.verify(tmp_path / "fresh")
     assert isinstance(state, pb.NoBaseline)
-    assert pb.NO_BASELINE_REASON is None and pb.fail_closed_reason(state) is None
+    assert pb.fail_closed_reason(state) == pb.NO_BASELINE_REASON == "no_baseline"
     assert pb.baseline_status(tmp_path / "fresh")["state"] == "none"
 
 
@@ -243,7 +243,7 @@ def test_the_baseline_is_the_enforced_template_layer(config: SupervisorConfig, r
         assert operator.decision("shell", "run", "uv run pytest -q").rule_id == (
             "shell-uv-run-pytest"
         )
-        assert operator.fail_closed is None
+        assert operator.fail_closed == {}
     finally:
         store.close()
 
@@ -541,23 +541,3 @@ def test_a_schema_bump_cards_a_reapproval_and_keeps_deciding(
         client.post(f"/api/chats/{chat.chat_id}/commands/{card.action_id}/confirm")
         view = client.get("/api/policy/baseline").json()
         assert view["state"] == "ok" and view["schema_version"] == 1
-
-
-def test_the_zero_state_is_todays_behaviour_and_o5_flips_it_in_one_place(
-    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _bound_store(config, repo, project_policy={})
-    today = _decide(config, scope="shell", action="run", value="uv sync", repo=str(repo))
-    assert today["verdict"] == "allow" and today["source"] == "run"
-    assert "baseline" not in today.get("note", "")
-    monkeypatch.setattr(pb, "NO_BASELINE_REASON", "no_baseline")
-    flipped = _decide(config, scope="shell", action="run", value="uv sync", repo=str(repo))
-    assert (flipped["verdict"], flipped["rule_id"]) == ("require_approval", "no_baseline")
-    store = RunStore(config.db_path)
-    try:
-        assert resolve_operator_policy(store).decision("network", "search", "x").rule_id == (
-            "no_baseline"
-        )
-        assert not store.list_chats()  # the zero state is not a tamper event: no card
-    finally:
-        store.close()

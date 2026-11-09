@@ -432,12 +432,22 @@ def _ask(
 _HINT_ADAPTERS = ("claude-agent-acp", "codex-acp")
 
 
-def install_hint() -> int:
+def install_hint(home: Path) -> int:
     """``skep acp install-hint``: the rows for T3 Code's Local ACP command dialog.
 
     T3 launches the executable directly with one literal argument per row (no
     shell, no PATH expansion), so the executable must be an absolute path.
+    first-run O5: the first line says which baseline the governor answers from
+    — or, with none approved, to run ``skep onboard`` first.
     """
+    from ..cli_cmds import build_config  # local: cli_cmds registers the acp family
+    from ..policy_baseline import baseline_status, status_line
+
+    supervisor = build_config(home, None).home
+    if baseline_status(supervisor)["state"] == "none":
+        print("run skep onboard first — the governor answers from an approved baseline")
+    else:
+        print(status_line(supervisor))
     found = shutil.which("skep")
     if found:
         exe = str(Path(found).resolve())

@@ -14,6 +14,7 @@ from skep.supervisor.policy_resolver import (
     run_policy_for_repo,
 )
 from skep.supervisor.policy_schema import (
+    SCOPES,
     LearnedRule,
     LearnedRuleRejected,
     PolicyDocument,
@@ -25,7 +26,7 @@ from skep.supervisor.projects import save_policy_group
 from skep.supervisor.serve.actions import rsop_view
 from skep.supervisor.serve.settings import ConfigHolder
 
-from .conftest import serve_client
+from .conftest import predating_home, serve_client
 
 
 def _seed(store: RunStore, repo: Path) -> None:
@@ -61,7 +62,7 @@ def test_a_fresh_home_seeds_the_switch_and_a_flipped_scope_answers_from_v2(
 ) -> None:
     store = RunStore(config.db_path)
     try:
-        assert engine_v2_scopes(store) == ("filesystem", "shell")
+        assert engine_v2_scopes(store) == tuple(sorted(SCOPES))
         _seed(store, repo)
         store.set_setting("policy_engine_v2_scopes", [])  # all-v1: the parity baseline
         before = run_policy_for_repo(store, config, repo)
@@ -139,13 +140,14 @@ def test_update_policy_validates_the_scopes_and_records_each_flip(
     assert back.status_code == 200 and back.json()["policy_engine_v2_scopes"] == []
     lines = [json.loads(line) for line in ledger.read_text().splitlines()]
     assert [(line["from"], line["to"]) for line in lines] == [
-        (["filesystem", "shell"], ["shell"]),
+        (sorted(SCOPES), ["shell"]),
         (["shell"], []),
     ]
     assert all(line["at"].endswith("Z") for line in lines)
 
-    # The Queen's standing policy composes through the same switch.
-    store = RunStore(config.db_path)
+    # The Queen's standing policy composes through the same switch (on a home
+    # that predates O5: the zero state would answer no_baseline here).
+    store = RunStore(predating_home(config.db_path))
     try:
         _seed(store, repo)
         store.set_setting("policy_engine_v2_scopes", ["network"])

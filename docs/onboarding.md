@@ -9,6 +9,10 @@ steps. Plain prompts, no full-screen UI, so it works over SSH and inside
 another tool's terminal. Every step writes a record under `~/.skep`, so
 running it again picks up at the first step that is not done yet.
 
+A fresh install asks for everything (`ask`, reason `no_baseline`) until a
+baseline is approved; a home from an earlier skep keeps deciding as before,
+and `skep doctor` says how to approve one.
+
 | Step | What it asks | What it writes |
 |---|---|---|
 | ① model | provider, model, endpoint, and the **name** of the env var that holds the API key (never the key itself). It looks for a local Ollama first, makes one test call, and prints where prompts go (`LOCAL … nothing leaves this machine` or `CLOUD … leaves this machine for <host>`) | the provider registry, the assistant settings, `profile.json` |
@@ -51,7 +55,7 @@ This is `skep doctor` plus the onboarding checks. It also checks that:
 
 - the baseline still matches its lock (a hand edit is reported as
   `baseline_tampered`)
-- engine v2 is on for at least one scope
+- engine v2 is on for every scope (a fresh home is seeded that way)
 - the chosen sandbox backend is present
 - the work directory is writable
 - the model is reachable

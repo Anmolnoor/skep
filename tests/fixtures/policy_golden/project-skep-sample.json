@@ -151,7 +151,12 @@
     "default_network": [],
     "default_wall_clock_seconds": 900,
     "policy_engine_v2_scopes": [
+      "browse",
+      "coding",
+      "email",
       "filesystem",
+      "mcp",
+      "network",
       "shell"
     ],
     "sandbox_backend": "auto",

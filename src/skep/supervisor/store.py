@@ -34,6 +34,7 @@ from .memory import (
     validate_source_kind,
 )
 from .nodes import Node, validate_node
+from .policy_schema import SCOPES
 from .providers import ProviderHealth, ProviderProfile, validate_provider_profile
 from .serve.channels import (
     CHANNELS,
@@ -855,10 +856,16 @@ class RunStore:
         self._conn.executescript(_SCHEMA)
         self._migrate(rebuild_chat_fts=chat_fts_is_new)
         if fresh:
-            # ADR 0054 A6/D8: a home that never existed starts with shell+filesystem on engine v2
-            self._conn.execute(
+            # ADR 0056 D2 (O5): a home that never existed starts with every scope on
+            # engine v2, and remembers it was born here, so later code can tell it
+            # from a home that existed before this skep (an upgrade).
+            now = _now()
+            self._conn.executemany(
                 "INSERT OR IGNORE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
-                ("policy_engine_v2_scopes", json.dumps(["filesystem", "shell"]), _now()),
+                [
+                    ("policy_engine_v2_scopes", json.dumps(list(SCOPES)), now),
+                    ("fresh_home_seeded_at", json.dumps(now), now),
+                ],
             )
         self._conn.commit()
 

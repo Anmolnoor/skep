@@ -329,9 +329,11 @@ advertises with the default marked, the rings, and a WARNING when the
 default mode never asks (`auto`, `agent`, `agent-full-access`,
 `bypassPermissions`).
 
-`acp install-hint` prints what to paste into T3 Code's Settings → Providers →
-Add provider → Show more → Local ACP command dialog, for claude-agent-acp and
-codex-acp: the absolute path of `skep` (T3 launches it with no shell and no
+`acp install-hint` first names the locked baseline the governor answers from
+(template, approval time, short sha256) — or says `run skep onboard first`
+when none is approved — then prints what to paste into T3 Code's Settings →
+Providers → Add provider → Show more → Local ACP command dialog, for
+claude-agent-acp and codex-acp: the absolute path of `skep` (T3 launches it with no shell and no
 PATH lookup) and one argument per row — `acp`, `govern`, `--`, `npx`,
 `-y`, `@agentclientprotocol/<adapter>`. See
 [`acp-governor.md`](acp-governor.md).

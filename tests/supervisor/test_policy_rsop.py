@@ -14,13 +14,13 @@ from skep.supervisor.serve.actions import policy_why, rsop_view
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_read_tool
 
-from .conftest import serve_client
+from .conftest import predating_home, serve_client
 
 
 def _seed(config: SupervisorConfig, repo: Path) -> None:
     """global default_network → group adds a host → project overrides a budget;
     maintain phase sets the landing branch; one key is never set anywhere."""
-    store = RunStore(config.db_path)
+    store = RunStore(predating_home(config.db_path))
     try:
         store.set_setting("default_network", ["pypi.org"])
         store.set_setting("default_execution_mode", "workspace")

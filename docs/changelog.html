@@ -50,16 +50,16 @@
   <section class="wrap" style="padding-bottom: clamp(32px, 4vw, 48px);">
     <div style="padding: clamp(22px, 3vw, 32px); border: 1px solid rgba(123,224,140,0.3); border-radius: 14px; background: var(--bg-card);">
       <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 14px;">
-        <span class="mono" style="font-size: 22px; font-weight: 600; color: var(--text-bright);">v1.2.0</span>
+        <span class="mono" style="font-size: 22px; font-weight: 600; color: var(--text-bright);">v1.2.1</span>
         <span class="pill" style="background: rgba(123,224,140,0.13); color: var(--green);">Latest</span>
-        <span class="mono" style="font-size: 12.5px; color: var(--text-ghost);">2026-11-06 · PyPI + GitHub release</span>
+        <span class="mono" style="font-size: 12.5px; color: var(--text-ghost);">2026-11-09 · PyPI + GitHub release</span>
       </div>
-      <p style="margin: 0 0 16px; max-width: 74ch; font-size: 15px; line-height: 1.65; color: var(--text-mid);">The ACP governor. <span class="mono" style="font-size: 13.5px;">skep acp govern</span> sits between any ACP client and its agent — T3 Code first — and answers the agent's permission asks from the same policy every skep run uses: allow by policy, deny by the floor, forward the rest to the human. Every verdict, every tool call the agent ran unasked, and every answer the human gave lands in the ledger, read back with <span class="mono" style="font-size: 13.5px;">skep policy decisions</span>. <span class="mono" style="font-size: 13.5px;">skep acp doctor</span> says which rings are live and <span class="mono" style="font-size: 13.5px;">skep acp install-hint</span> prints what to paste into T3. A fresh home now starts with shell and filesystem on engine v2.</p>
+      <p style="margin: 0 0 16px; max-width: 74ch; font-size: 15px; line-height: 1.65; color: var(--text-mid);">First run: onboard onto a locked baseline. <span class="mono" style="font-size: 13.5px;">skep onboard</span> walks model, work directory, sandbox, template and role in five resumable steps and locks the template you approve as the policy baseline — hashed, ledgered, and failing closed if anything edits it. Three templates (<span class="mono" style="font-size: 13.5px;">builder</span>, <span class="mono" style="font-size: 13.5px;">operator</span>, <span class="mono" style="font-size: 13.5px;">assistant</span>) explain themselves with <span class="mono" style="font-size: 13.5px;">skep policy explain</span>. A fresh install routes every scope through engine v2 and asks for everything until a baseline is approved; an existing home keeps deciding as before and is told how to approve one.</p>
       <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-        <span class="pill" style="background: rgba(123,224,140,0.1); color: var(--green);">skep acp govern</span>
-        <span class="pill" style="background: rgba(103,211,232,0.1); color: #67D3E8;">Decision ledger read</span>
-        <span class="pill" style="background: rgba(255,107,31,0.1); color: var(--orange-soft);">T3 Code install hint</span>
-        <span class="pill" style="background: rgba(167,139,250,0.12); color: #A78BFA;">Engine v2 for fresh homes</span>
+        <span class="pill" style="background: rgba(123,224,140,0.1); color: var(--green);">skep onboard</span>
+        <span class="pill" style="background: rgba(103,211,232,0.1); color: #67D3E8;">Locked baseline</span>
+        <span class="pill" style="background: rgba(255,107,31,0.1); color: var(--orange-soft);">skep policy explain</span>
+        <span class="pill" style="background: rgba(167,139,250,0.12); color: #A78BFA;">Ask until approved</span>
       </div>
       <div style="display: flex; flex-wrap: wrap; gap: 18px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line-inner); font-size: 13.5px; color: var(--text-dim);">
         <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="package" style="width: 15px; height: 15px; color: var(--green);"></i><span class="mono" style="font-size: 12.5px;">pipx install skep</span></span>
@@ -76,6 +76,11 @@
       <p style="margin: 0 0 34px; max-width: 62ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Milestones from the internal version history — each one field-tested, fixed, and landed with its own evidence before the next began.</p>
 
       <div class="timeline">
+        <div class="t-item major">
+          <div class="when">2026-11-09 · v1.2.1</div>
+          <h3>First run: onboard onto a locked baseline</h3>
+          <p>A fresh install starts asking, not allowing. <span class="mono">skep onboard</span> picks the model, the work directory, the sandbox, one of three templates and a role, resumably, and <span class="mono">skep policy approve</span> locks the template as the baseline: a SHA-256 in a lock file and an approvals ledger, enforced as the template layer, failing closed with <span class="mono">baseline_tampered</span> when edited. Until one is approved a fresh home answers every decision <span class="mono">ask</span> with <span class="mono">no_baseline</span>; an upgraded home keeps its behaviour and <span class="mono">skep doctor</span> says how to approve. Install with <span class="mono">pipx install skep &amp;&amp; skep onboard --template builder --yes</span>.</p>
+        </div>
         <div class="t-item major">
           <div class="when">2026-11-06 · v1.2.0</div>
           <h3>The ACP governor</h3>

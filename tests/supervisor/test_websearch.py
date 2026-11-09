@@ -16,6 +16,8 @@ from skep.supervisor.serve.chat import SYSTEM_PROMPT
 from skep.supervisor.serve.tools import READ_TOOL_NAMES, execute_read_tool
 from skep.supervisor.serve.websearch import WebSearchError, search_web
 
+from .conftest import predating_home
+
 _HITS = [
     {"title": "MCP docs", "href": "https://modelcontextprotocol.io/docs", "body": "The spec."},
     {"title": "skep on GitHub", "href": "https://github.com/anmolnoor/skep", "body": ""},
@@ -75,7 +77,7 @@ def test_search_web_is_a_read_tool_with_clean_failure(
         "skep.supervisor.serve.websearch.search_web",
         lambda query, max_results=5: (_ for _ in ()).throw(WebSearchError("offline")),
     )
-    store = RunStore(tmp_path / "supervisor.sqlite3")
+    store = RunStore(predating_home(tmp_path / "supervisor.sqlite3"))
     try:
         result = execute_read_tool(
             "search_web",
@@ -101,7 +103,7 @@ def test_search_web_carries_decided_by_and_honors_an_operator_deny(
         "skep.supervisor.serve.websearch.search_web",
         lambda query, max_results=5: [{"title": "t", "url": "https://a", "host": "a"}],
     )
-    store = RunStore(tmp_path / "supervisor.sqlite3")
+    store = RunStore(predating_home(tmp_path / "supervisor.sqlite3"))
     try:
         allowed = execute_read_tool(
             "search_web",
@@ -184,7 +186,7 @@ def test_read_url_is_carded_and_fetches_nothing_until_confirmed(
     from skep.supervisor import RunStore
     from skep.supervisor.policy_schema import OPERATOR_POLICY_SETTINGS_KEY, PolicyDocument
 
-    store = RunStore(tmp_path / "supervisor.sqlite3")
+    store = RunStore(predating_home(tmp_path / "supervisor.sqlite3"))
     try:
         result = execute_mutation(
             "read_url",

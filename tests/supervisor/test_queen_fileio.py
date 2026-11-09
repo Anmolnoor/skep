@@ -29,6 +29,7 @@ from skep.supervisor.serve.fileio import (
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import MUTATING_TOOL_NAMES
 
+from .conftest import predating_home
 from .fake_ollama import FakeOllama
 from .test_serve_chat import sse_events
 from .test_serve_chat_tools import chat_client
@@ -39,6 +40,12 @@ def ollama() -> Iterator[FakeOllama]:
     server = FakeOllama(api_key="sk-fake").start()
     yield server
     server.stop()
+
+
+@pytest.fixture(autouse=True)
+def _predates_baseline(config: SupervisorConfig) -> None:
+    """These tests are about the Queen's read rules, not the O5 zero state."""
+    predating_home(config.db_path)
 
 
 @pytest.fixture()

@@ -29,10 +29,11 @@ from skep.supervisor.serve.tools import (
 )
 from skep.supervisor.store import RunStore
 
+from .conftest import predating_home
+
 
 def _parts(config: SupervisorConfig) -> tuple[RunStore, ConfigHolder]:
-    config.home.mkdir(parents=True, exist_ok=True)
-    store = RunStore(config.db_path)
+    store = RunStore(predating_home(config.db_path))
     return store, ConfigHolder(config, store)
 
 

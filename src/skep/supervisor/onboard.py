@@ -460,10 +460,12 @@ def onboard_check(supervisor_home: Path) -> dict[str, Any]:
         hosts = configured_provider_hosts(store, home)
     finally:
         store.close()
+    # O5: a fresh home seeds every scope, so anything less is a narrowed switch.
+    missing = [scope for scope in SCOPES if scope not in scopes]
     checks["engine v2"] = _check(
-        bool(scopes),
-        f"{len(scopes)}/{len(SCOPES)} scopes ({', '.join(scopes) or 'none'}) — "
-        "the baseline governs these; the rest resolve on engine v1",
+        not missing,
+        f"{len(scopes)}/{len(SCOPES)} scopes — the baseline governs these"
+        + (f"; not routed (engine v1): {', '.join(missing)}" if missing else ""),
     )
 
     if backend not in SANDBOX_BACKENDS:
