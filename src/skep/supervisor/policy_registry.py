@@ -13,9 +13,11 @@ without a registry line fails the suite, and a registry line without a key
 behind it fails too.
 
 Layer vocabulary (the order the engine applies them, lowest first):
-``floor`` → ``global`` → ``template`` → ``phase`` → ``group`` → ``project``
-→ ``session`` → ``dispatch``. ``layers`` on a key says which of those may
-set it today. ``enforced_at`` is the P1 "enforced" semantic declared now:
+``floor`` → ``global`` → ``template`` → ``role`` → ``phase`` → ``group`` →
+``project`` → ``session`` → ``dispatch``. ``role`` (first-run R1, ADR 0055
+D2) carries rules only and tightens, never loosens (``roles.tighten``).
+``layers`` on a key says which of those may set it today. ``enforced_at``
+is the P1 "enforced" semantic declared now:
 the trust ramp is settable only at ``project`` (ADR 0048 encoded that by
 leaving it out of ``GROUPABLE_POLICY_KEYS``). The floor entries have no
 layers at all — they are listed so RSoP can show them as "not
@@ -34,6 +36,7 @@ LAYERS: tuple[str, ...] = (
     "floor",
     "global",
     "template",
+    "role",
     "phase",
     "group",
     "project",

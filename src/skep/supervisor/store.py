@@ -651,6 +651,8 @@ class ChatRecord:
     # request wall after a 4xx — replay and compaction stay under
     # min(num_ctx budget, this). None = the provider has never pushed back.
     provider_ceiling_chars: int | None = None
+    # first-run R1 (ADR 0055 D3): the role this chat runs in; None = no role layer.
+    role: str | None = None
     # v74-F3: tools this chat described via describe_tools — their full
     # schemas ride the advertised tools array from then on. Advertisement
     # only, never permission (the executor accepts any registered tool).
@@ -1018,6 +1020,9 @@ class RunStore:
         if "active_tools_json" not in chat_columns:
             # v74-F3: tools described via describe_tools, advertised in full.
             self._conn.execute("ALTER TABLE chats ADD COLUMN active_tools_json TEXT")
+        if "role" not in chat_columns:
+            # first-run R1 (ADR 0055 D3): the chat's role, beside personality.
+            self._conn.execute("ALTER TABLE chats ADD COLUMN role TEXT")
         if "source" not in chat_columns:
             # v44-F1: which face opened the chat — 'web', 'terminal', or a channel name.
             self._conn.execute("ALTER TABLE chats ADD COLUMN source TEXT NOT NULL DEFAULT 'web'")
@@ -3532,7 +3537,9 @@ class RunStore:
     # -- chats (v6: sessions with the Queen's own model) -----------------------
 
     @_locked
-    def create_chat(self, *, title: str, model: str | None, source: str = "web") -> ChatRecord:
+    def create_chat(
+        self, *, title: str, model: str | None, source: str = "web", role: str | None = None
+    ) -> ChatRecord:
         now = _now()
         chat = ChatRecord(
             chat_id=str(uuid.uuid4()),
@@ -3541,11 +3548,20 @@ class RunStore:
             created_at=now,
             updated_at=now,
             source=source,
+            role=role,
         )
         self._conn.execute(
-            "INSERT INTO chats (chat_id, title, model, created_at, updated_at, source)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (chat.chat_id, chat.title, chat.model, chat.created_at, chat.updated_at, chat.source),
+            "INSERT INTO chats (chat_id, title, model, created_at, updated_at, source, role)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                chat.chat_id,
+                chat.title,
+                chat.model,
+                chat.created_at,
+                chat.updated_at,
+                chat.source,
+                chat.role,
+            ),
         )
         self._conn.commit()
         return chat
@@ -3553,7 +3569,7 @@ class RunStore:
     _CHAT_COLUMNS = (
         "chat_id, title, model, created_at, updated_at, source, personality,"
         " context_summary, COALESCE(compacted_through, 0), project_id,"
-        " provider_ceiling_chars, active_tools_json"
+        " provider_ceiling_chars, role, active_tools_json"
     )
 
     @staticmethod
@@ -3620,6 +3636,12 @@ class RunStore:
         cursor = self._conn.execute(
             "UPDATE chats SET personality = ? WHERE chat_id = ?", (personality, chat_id)
         )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    @_locked
+    def set_chat_role(self, chat_id: str, role: str | None) -> bool:
+        cursor = self._conn.execute("UPDATE chats SET role = ? WHERE chat_id = ?", (role, chat_id))
         self._conn.commit()
         return cursor.rowcount > 0
 

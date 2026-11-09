@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 
 from . import sandbox
 from .policy_baseline import NoBaseline, Ok, Tampered, sha256_of, verify
-from .policy_templates import TEMPLATE_NAMES, PolicyTemplate, load_policy_template
+from .policy_templates import PolicyTemplate, load_policy_template
 from .serve.settings import SANDBOX_BACKEND, SANDBOX_BACKENDS, ConfigHolder
 from .store import RunStore
 
@@ -402,10 +402,12 @@ def onboard_template(
 
 
 def onboard_role(holder: ConfigHolder, *, role: str) -> dict[str, Any]:
-    """⑤ The three roles are the template names, 1:1, until R1 makes roles
-    records. ``first_run.json`` keeps its counters across re-runs."""
-    if role not in TEMPLATE_NAMES:
-        raise ValueError(f"role must be one of {', '.join(TEMPLATE_NAMES)}")
+    """⑤ A role record (R1, ADR 0055: the three shipped ones bind 1:1 to the
+    templates; a home's custom roles count too). ``first_run.json`` keeps its
+    counters across re-runs."""
+    from .roles import resolve_role
+
+    role = resolve_role(role, holder.current.home).name
     path = _personal_home(holder) / FIRST_RUN_FILE
     current = _read(path)
     record = {
