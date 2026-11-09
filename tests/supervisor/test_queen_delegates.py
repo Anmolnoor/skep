@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import shlex
 import sys
+import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,20 +18,23 @@ from fastapi import HTTPException
 
 from skep.cli import main
 from skep.cli_chat import _tool_summary
-from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor import RunStore, SupervisorConfig, github
+from skep.supervisor.github import MergeResult
 from skep.supervisor.roles import EXCEEDS_DELEGATOR, delegation_line
 from skep.supervisor.serve.actions import (
     created_transition_views_for_task,
     decision_detail_view,
+    policy_decide,
     policy_decisions,
     submit_run,
     submit_team,
 )
-from skep.supervisor.serve.app import STATIC_DIR
+from skep.supervisor.serve.app import STATIC_DIR, TERMINAL_STATES
+from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
-from skep.supervisor.serve.tools import execute_mutation
+from skep.supervisor.serve.tools import execute_mutation, mutation_execution_decision
 
-from .conftest import FAKE_WORKER, serve_client
+from .conftest import FAKE_WORKER, git, serve_client
 from .test_role_policy import _home
 
 APP_POLICY = {
@@ -478,3 +483,127 @@ def test_the_web_face_renders_the_chain_on_every_run_view() -> None:
     tool_line = source.split("const toolLine = (tool, raw = null) => {")[1][:2000]
     assert "delegationText(result.delegation)" in tool_line
     assert 'tool === "batch_dispatch" && result.team' in tool_line
+
+
+# --- R3-5: the operator's dependabot loop, end to end with a stub worker -----
+
+
+def _wait_run(store: RunStore, task_id: str, timeout: float = 30.0) -> Any:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        record = store.get_run(task_id)
+        if record is not None and record.state in TERMINAL_STATES:
+            return record
+        time.sleep(0.05)
+    raise AssertionError(f"run {task_id} never settled")
+
+
+def test_the_dependabot_chain_end_to_end(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The R3 field test, automated: a Queen chat in `operator` dispatches a
+    `builder` worker to test a dependabot branch; the worker holds builder ∩
+    operator and never a remote verb; G10 re-verifies; the patch lands only
+    through the land card; the PR merges only through the merge card (gh
+    stubbed). Every hop is in the ledger with its role — the gate."""
+    git(repo, "checkout", "-qb", "dependabot/pip/requests-2.32.3")
+    (repo / "requirements.txt").write_text("requests==2.32.3\n")
+    git(repo, "add", "requirements.txt")
+    git(repo, "commit", "-qm", "Bump requests from 2.32.2 to 2.32.3")
+    bump = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "checkout", "-q", "main")
+    merges: list[dict[str, Any]] = []
+
+    def merge_pull_request(**kwargs: Any) -> MergeResult:
+        merges.append(kwargs)
+        return MergeResult(merged=True, detail="merged #41")
+
+    monkeypatch.setattr(github, "merge_pull_request", merge_pull_request)
+    config = replace(config, worker_command=(sys.executable, str(FAKE_WORKER)))
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    runner = Dispatcher(holder, store)
+    chat_id = store.create_chat(title="dependabot", model=None).chat_id
+    store.set_chat_role(chat_id, "operator")
+
+    def queen(name: str, args: dict[str, Any]) -> Any:
+        """A Queen tool call the way chat.py runs one: the decision first (a
+        deny never cards), then the human's confirm executes it."""
+        decision = mutation_execution_decision(
+            name, args, store=store, holder=holder, chat_id=chat_id
+        )
+        assert decision is None or decision.verdict != "deny", (name, decision)
+        return decision, execute_mutation(
+            name,
+            args,
+            store=store,
+            holder=holder,
+            runner=runner,
+            actor="chat-user",
+            chat_id=chat_id,
+        )
+
+    try:
+        _, sent = queen(
+            "dispatch_run",
+            {
+                "repo": str(repo),
+                "instructions": "Test the requests bump; verify by the suite. MODE:happy",
+                "ref": "dependabot/pip/requests-2.32.3",
+                "role": "builder",
+                "execution_mode": "workspace",
+            },
+        )
+        task_id = sent["task_id"]
+        assert sent["delegation"] == {"chain": ["queen@operator"], "role": "builder"}
+        record = _wait_run(store, task_id)
+        assert (record.state, record.verification_outcome) == ("completed", "passed")
+        assert record.base_commit == bump  # the worker tested the dependabot head
+        deadline = time.monotonic() + 30.0  # recorded just after the terminal state
+        while (reverify := store.reverification_for(task_id)) is None:
+            assert time.monotonic() < deadline, "never re-verified"
+            time.sleep(0.05)
+        assert reverify.confirmed  # G10 (I2)
+        # The worker held builder ∩ operator — and no remote verb, ever (I4).
+        task = json.loads((config.audit_dir / task_id / "task.json").read_text())
+        allowlist = [shlex.join(prefix) for prefix in task["permissions"]["shell_allowlist"]]
+        assert "uv sync" not in allowlist and "git status" in allowlist
+        assert not [p for p in allowlist if p.split()[:2][-1] in {"push", "pull", "fetch"}]
+        assert task["dispatch_decision"]["delegation"]["role"] == "builder"
+        push = policy_decide(
+            holder,
+            store,
+            scope="shell",
+            action="run",
+            value="git push origin HEAD",
+            repo=str(repo),
+            role="builder",
+            delegation_chain=["queen@operator"],
+        )
+        assert (push["verdict"], push["source"]) == ("deny", "floor")
+        # Landing IS the commit, behind the land card (I1)…
+        land_decision, landed = queen("land_run", {"task_id": task_id})
+        assert land_decision is None or land_decision.verdict == "require_approval"
+        assert (landed["action"], landed["branch"]) == ("applied", f"skep/{task_id}")
+        assert git(repo, "show", f"skep/{task_id}:existing.py").stdout == "value = 1\n"
+        assert git(repo, "show", "main:existing.py").stdout == "value = 0\n"  # main untouched
+        # …and the PR merges only behind the merge card, on the operator's gh.
+        merge_decision, merged = queen("merge_pr", {"repo": str(repo), "pr": "41"})
+        assert merge_decision is None or merge_decision.verdict == "require_approval"
+        assert merged == {"merged": True, "detail": "merged #41"}
+        assert merges[0]["pr"] == "41"
+    finally:
+        runner.shutdown(wait=True)
+        store.close()
+    # The gate: every hop in the ledger, with its role.
+    ledger = _ledger(config)
+    hop = next(row for row in ledger if row.get("source") == "delegated")
+    assert {k: hop[k] for k in ("actor", "value", "role", "delegation_chain", "task_id")} == {
+        "actor": "queen@operator",
+        "value": "worker@builder",
+        "role": "builder",
+        "delegation_chain": ["queen@operator"],
+        "task_id": task_id,
+    }
+    chained = [row for row in ledger if row.get("delegation_chain")]
+    assert chained and all(row["role"] == "builder" for row in chained)
