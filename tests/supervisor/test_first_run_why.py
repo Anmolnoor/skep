@@ -190,3 +190,81 @@ def test_web_renders_why_and_tally() -> None:
     assert "whyLine(d)" in source.split("const receiptCard = (d)")[1].split("// v54-F2")[0]
     assert "tally: (d) =>" in source
     assert '"/api/onboard/transparency", { verbose: false }' in source
+
+
+# ---------- T2 audit: rendering only — nothing leaks, nothing miscounts ----------
+
+
+def test_why_lines_never_reach_the_transcript_or_the_model(
+    config: SupervisorConfig,
+    client: TestClient,  # noqa: F811
+    ollama: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D6 is rendering only: the why and the tally ride the stream to the
+    operator, never into the stored transcript the model is replayed from,
+    and never into a request the model receives on the next turn."""
+    from skep.supervisor import RunStore
+
+    assert main(["--home", str(config.home.parent), "onboard", "--verbose"]) == 0
+    ollama.script_tool_call("set_policy", {"auto_approve": True})
+    script_input(monkeypatch, ["turn on auto approve"])
+    assert run_chat(home=config.home, url="http://unused", client=client) == 0
+    assert "why: " in capsys.readouterr().out
+    store = RunStore(config.db_path)
+    try:
+        (chat,) = store.list_chats()
+        stored = " ".join(m.content or "" for m in store.chat_messages(chat.chat_id))
+    finally:
+        store.close()
+    sent = json.dumps(ollama.chat_bodies())
+    for text in (stored, sent):
+        assert "why: " not in text and "skep policy why" not in text and "allowed ·" not in text
+
+
+@pytest.mark.parametrize("content", ["[]", "{", '"dismissed"', "null"])
+def test_a_malformed_record_is_inert_and_byte_identical(tmp_path: Path, content: str) -> None:
+    """A first_run.json that is not a JSON object is not an onboarded home:
+    the stream passes through untouched and the file is never rewritten."""
+    (tmp_path / FIRST_RUN_FILE).write_text(content)
+    assert not transparency_active(tmp_path)
+    assert list(first_run_events(iter(TURN), tmp_path)) == TURN
+    assert (tmp_path / FIRST_RUN_FILE).read_text() == content
+
+
+def test_a_constrained_allow_is_counted_and_worded_as_allowed(tmp_path: Path) -> None:
+    constrained = {"verdict": "allow_with_constraints", "decided_by": "run/net-allowlist"}
+    assert verdict_why(constrained) == "allowed: rule net-allowlist in the run layer"
+    onboard_transparency(tmp_path / "skep-home", verbose=True)
+    turn: list[tuple[str, dict[str, Any]]] = [
+        ("tool", {"tool": "run_shell", "decision": constrained, "result": {"ok": True}}),
+        # A card's resolution on the confirm stream carries no decision: the
+        # verdict was counted when the card was asked, never twice.
+        ("tool", {"tool": "set_policy", "result": {"ok": True}}),
+        ("done", {"state": "idle"}),
+    ]
+    events = list(first_run_events(iter(turn), tmp_path))
+    tally = next(data for event, data in events if event == "tally")
+    assert (tally["allowed"], tally["asked"], tally["denied"]) == (1, 0, 0)
+    assert "why" not in events[1][1]
+
+
+def test_dismissed_keeps_the_counters_and_verbose_resumes_them(tmp_path: Path) -> None:
+    onboard_transparency(tmp_path / "skep-home", verbose=True)
+    list(first_run_events(iter(TURN), tmp_path))
+    quiet = onboard_transparency(tmp_path / "skep-home", verbose=False)
+    assert (quiet["turns_seen"], quiet["verdicts_seen"], quiet["dismissed"]) == (1, 3, True)
+    list(first_run_events(iter(TURN), tmp_path))  # dismissed: no counting either
+    loud = onboard_transparency(tmp_path / "skep-home", verbose=True)
+    assert (loud["turns_seen"], loud["verdicts_seen"], loud["dismissed"]) == (1, 3, False)
+
+
+def test_the_switch_is_operator_only() -> None:
+    """I6: the model is never handed the switch that hides its own verdicts —
+    no chat tool reaches onboard_transparency (the CLI and REST faces are
+    pinned by the gate test above)."""
+    from skep.supervisor.serve.tools import COMMAND_TOOL_NAMES, TOOL_SPECS
+
+    assert "transparency" not in json.dumps(TOOL_SPECS)
+    assert not [name for name in COMMAND_TOOL_NAMES if "transparen" in name]

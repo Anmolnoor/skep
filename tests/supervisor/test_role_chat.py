@@ -206,3 +206,87 @@ def test_the_web_composer_has_a_role_picker() -> None:
     assert 'api("GET", "/api/roles")' in source
     assert '"aria-label": "chat role"' in source
     assert "role: roleSelect.hidden ? null : roleSelect.value" in source
+
+
+# --- T2 audit: a role that stops loading never silently drops its layer ------
+
+
+def test_cli_role_list_and_show_refuse_naming_the_broken_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from skep.supervisor.roles import roles_dir
+
+    config = build_config(tmp_path, None)
+    roles_dir(config.home).mkdir(parents=True)
+    (roles_dir(config.home) / "broken.json").write_text("{")
+    home = ["--home", str(tmp_path)]
+    assert main([*home, "role", "list"]) != 0
+    assert "broken.json does not load" in capsys.readouterr().err
+    assert main([*home, "role", "show", "builder"]) != 0
+    assert "broken.json does not load" in capsys.readouterr().err
+    (roles_dir(config.home) / "broken.json").unlink()
+    assert main([*home, "role", "show", "warp"]) != 0
+    assert "no role 'warp'" in capsys.readouterr().err
+
+
+def test_a_default_role_whose_file_vanished_opens_no_chat_without_its_layer(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """`skep role use ops` then the file goes: a new chat refuses (400, naming
+    the role) rather than opening with no role layer; naming a role that
+    loads still works."""
+    from skep.supervisor.roles import roles_dir, use_role
+
+    client, _chat = chat_client(config, ollama)
+    roles_dir(config.home).mkdir(parents=True, exist_ok=True)
+    (roles_dir(config.home) / "ops.json").write_text('{"name": "ops", "policy_layer": "operator"}')
+    store = RunStore(config.db_path)
+    try:
+        use_role(store, config.home, "ops")  # `skep role use ops`'s verb
+    finally:
+        store.close()
+    assert client.post("/api/chats", json={}).json()["role"] == "ops"
+    (roles_dir(config.home) / "ops.json").unlink()
+    refused = client.post("/api/chats", json={})
+    assert refused.status_code == 400 and "no role 'ops'" in refused.text
+    assert client.post("/api/chats", json={"role": "operator"}).json()["role"] == "operator"
+
+
+def test_a_chat_whose_role_vanished_still_talks_but_its_lanes_fail_closed(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """The prompt drops a role that no longer loads (the turn still runs),
+    but every Queen lane refuses (role.deny.unloadable) — no lane ever runs
+    with the layer silently gone."""
+    from skep.supervisor.roles import roles_dir
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import mutation_execution_decision
+
+    client, chat_id = chat_client(config, ollama)
+    roles_dir(config.home).mkdir(parents=True, exist_ok=True)
+    (roles_dir(config.home) / "ops.json").write_text('{"name": "ops", "policy_layer": "operator"}')
+    store = RunStore(config.db_path)
+    try:
+        store.set_chat_role(chat_id, "ops")
+    finally:
+        store.close()
+    (roles_dir(config.home) / "ops.json").unlink()
+    ollama.script_reply("hello.")
+    sent = client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+    assert sent.status_code == 200 and "hello." in sent.text
+    system = ollama.chat_bodies()[-1]["messages"][0]["content"]
+    assert "Role ops" not in system
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        for tool, args in (
+            ("run_shell", {"command": "ls"}),
+            ("read_file", {"path": "README.md"}),
+            ("read_url", {"url": "https://example.com/"}),
+        ):
+            decision = mutation_execution_decision(
+                tool, args, store=store, holder=holder, chat_id=chat_id
+            )
+            assert decision is not None and decision.reason == "role.deny.unloadable", tool
+    finally:
+        store.close()

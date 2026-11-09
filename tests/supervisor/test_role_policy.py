@@ -146,3 +146,27 @@ def test_rest_and_chat_faces_take_the_role(
         assert view["run"]["decided_by"] == "role:operator/shell-gated"
     finally:
         store.close()
+
+
+def test_a_tampered_baseline_beats_every_role_and_chain(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D2: the role sits under the baseline. A hand-edited baseline answers
+    baseline_tampered whatever the role or the chain — a role's own allow
+    never lifts it — and the row still says which role and chain asked."""
+    from .test_policy_baseline import _tamper
+
+    config = _home(tmp_path, repo, capsys)
+    _tamper(config.home)
+    ask = {"scope": "shell", "action": "run", "value": "git status", "repo": str(repo)}
+    for role in (None, "builder", "operator"):
+        for chain in ([], ["queen@builder"]):
+            row = _decide(config, role=role, delegation_chain=chain, **ask)
+            assert (row["verdict"], row["rule_id"], row["source"]) == (
+                "require_approval",
+                "baseline_tampered",
+                "baseline",
+            ), (role, chain)
+            assert row.get("role") == role and row.get("delegation_chain", []) == chain
+    hard = _decide(config, role="builder", ring="hard", **ask)
+    assert (hard["verdict"], hard["rule_id"]) == ("deny", "baseline_tampered")
