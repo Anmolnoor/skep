@@ -198,6 +198,61 @@ def test_interactive_onboard_resumes_after_an_interrupt(
     assert onboard.onboard_status(home)["done"]
 
 
+def _onboard_flags(home: Path, workdir: Path) -> list[str]:
+    """The non-interactive form the docs give, on a stubbed provider."""
+    return [
+        *("--home", str(home), "onboard", "--provider", "mock", "--model", "stub"),
+        *("--workdir", str(workdir), "--sandbox", "none", "--template", "builder"),
+        *("--yes", "--no-chat"),
+    ]
+
+
+def test_flag_driven_onboard_then_check_is_ready_with_telemetry_none_last(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The O3 done-criterion: a locked baseline, a registered project, the
+    sandbox record and first_run.json; then --check exits 0 and its last
+    line is the egress truth's `telemetry: none`."""
+    home, work = tmp_path / "home", tmp_path / "work"
+    assert main(_onboard_flags(home, work)) == 0
+    capsys.readouterr()
+    assert isinstance(verify(home / "supervisor"), Ok)
+    assert json.loads((home / "onboard.json").read_text())["sandbox"]["backend"] == "none"
+    assert json.loads((home / "first_run.json").read_text())["role"] == "builder"
+    with _holder(home) as (_, store):
+        assert [p.project_id for p in list_projects(store)] == ["work"]
+
+    assert main(["--home", str(home), "onboard", "--check"]) == 0
+    out = capsys.readouterr().out
+    assert out.rstrip().splitlines()[-1] == "telemetry: none"
+    assert "- baseline: ready - builder locked" in out
+    assert "- sandbox: ready - none" in out
+    assert "model: mock — no call leaves this machine" in out
+
+
+def test_check_names_a_tampered_baseline_and_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    assert main(_onboard_flags(home, tmp_path / "work")) == 0
+    _unlock(home)
+    capsys.readouterr()
+    assert main(["--home", str(home), "onboard", "--check"]) == 1
+    out = capsys.readouterr().out
+    assert "- baseline: blocked - baseline_tampered:" in out
+    assert "- steps: blocked - pending: template" in out
+    assert out.rstrip().splitlines()[-1] == "telemetry: none"
+
+
+def test_check_on_a_fresh_home_is_not_ready(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--home", str(tmp_path / "home"), "onboard", "--check"]) == 1
+    out = capsys.readouterr().out
+    assert "- baseline: blocked - none approved — run skep onboard" in out
+    assert "- sandbox: blocked - not chosen" in out
+
+
 def test_a_refused_typed_yes_locks_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
