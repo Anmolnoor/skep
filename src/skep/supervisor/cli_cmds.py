@@ -750,6 +750,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     auto_apply_verified_patch: bool | None = None
     project_context = None
     resolved_policy: ResolvedRunPolicy | None = None
+    delegation: dict[str, Any] | None = None
+    delegation_note: str | None = None
     try:
         if args.template:
             template_bound = (
@@ -846,6 +848,24 @@ def cmd_run(args: argparse.Namespace) -> int:
                     auto_apply_verified_patch = (
                         raw_auto_apply if isinstance(raw_auto_apply, bool) else None
                     )
+        if args.role or args.delegated_by:
+            # first-run R3 (ADR 0055 D5): the same narrowing POST /api/runs does.
+            from fastapi import HTTPException
+
+            from .serve.actions import delegate_permissions
+            from .serve.settings import ConfigHolder
+
+            try:
+                permissions, delegation, delegation_note = delegate_permissions(
+                    ConfigHolder(config, store),
+                    store,
+                    repo,
+                    permissions,
+                    role=args.role,
+                    delegation_chain=args.delegated_by or [],
+                )
+            except HTTPException as exc:
+                return _err(str(exc.detail), next_command="skep role list")
     except PolicyResolutionError as exc:
         return _err(
             str(exc),
@@ -887,6 +907,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         dispatch_decision = dispatch_decision.with_network_audit(
             resolved_policy.network_requested, resolved_policy.network_resolved
         )
+    on_run_created: Callable[[str], None] | None = None
+    if delegation is not None:
+        from .serve.actions import delegated_decision, record_delegation
+
+        dispatch_decision = delegated_decision(dispatch_decision, delegation, delegation_note)
+        hop = delegation
+
+        def on_run_created(task_id: str) -> None:
+            record_delegation(config.audit_dir, hop, repo=str(repo), task=task_id)
 
     tail: _PhaseTail | None = None
     if matched_template is not None:
@@ -917,6 +946,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             dispatch_decision=dispatch_decision,
             ref=ref,
             resume_of=args.resume_of,
+            on_run_created=on_run_created,
             execution_mode=execution_mode,
             planning_protocol=planning_protocol,
             # v90-F1 (ADR 0047): the project's chosen coding agent.
@@ -2919,6 +2949,19 @@ def register_supervisor_commands(
         help="how the worker plans: one upfront plan (default) or the bounded "
         "act-observe loop (ADR 0040); omit to use the project policy's "
         "worker_protocol knob",
+    )
+    run.add_argument(
+        "--role",
+        default=None,
+        help="the worker's role (skep role list); its layer narrows the worker's grants",
+    )
+    run.add_argument(
+        "--delegated-by",
+        action="append",
+        default=None,
+        metavar="ACTOR@ROLE",
+        help="dispatch as this delegator (repeat outermost first); the worker holds "
+        "no more than it does (ADR 0055)",
     )
     run.add_argument("--quiet", action="store_true", help="suppress the live phase tail")
     run.set_defaults(func=cmd_run)

@@ -134,6 +134,10 @@ class RunRequest(BaseModel):
     # submit_run already took it; this route simply never passed it, so the
     # CLI/REST operator had no way to run one brief on a named engine.
     engine: str | None = None
+    # first-run R3 (ADR 0055 D5): the worker's own role, and who delegated
+    # (actor@role, outermost first) — the worker holds no more than either.
+    role: str | None = None
+    delegation_chain: list[str] = Field(default_factory=list)
 
 
 class ResolveRequest(BaseModel):
@@ -512,6 +516,8 @@ def create_app(
             requested_actions=body.requested_actions,
             protocol=body.protocol,
             engine=body.engine,
+            role=body.role,
+            delegation_chain=body.delegation_chain,
         )
         response = {"task_id": task_id, "state": "dispatched"}
         if hint is not None:

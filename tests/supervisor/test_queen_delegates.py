@@ -6,17 +6,26 @@ the dispatch decision. Temp homes, the builder baseline approved."""
 from __future__ import annotations
 
 import json
+import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi import HTTPException
 
+from skep.cli import main
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.roles import EXCEEDS_DELEGATOR
-from skep.supervisor.serve.actions import decision_detail_view, submit_run
+from skep.supervisor.serve.actions import (
+    created_transition_views_for_task,
+    decision_detail_view,
+    submit_run,
+)
 from skep.supervisor.serve.settings import ConfigHolder
+from skep.supervisor.serve.tools import execute_mutation
 
+from .conftest import FAKE_WORKER, serve_client
 from .test_role_policy import _home
 
 APP_POLICY = {
@@ -50,6 +59,9 @@ class _Runner:
         self.submitted.append({"instructions": instructions, **kwargs})
         return f"task-{len(self.submitted)}"
 
+    def shutdown(self, **_: Any) -> None:
+        pass
+
 
 def _dispatch(config: SupervisorConfig, repo: Path, **kwargs: Any) -> dict[str, Any]:
     store = RunStore(config.db_path)
@@ -66,6 +78,10 @@ def _dispatch(config: SupervisorConfig, repo: Path, **kwargs: Any) -> dict[str, 
     finally:
         store.close()
     return runner.submitted[0]
+
+
+def _worker_cmd() -> str:
+    return shlex.join([sys.executable, str(FAKE_WORKER)])
 
 
 def _ledger(config: SupervisorConfig) -> list[dict[str, Any]]:
@@ -148,3 +164,65 @@ def test_bad_roles_and_worker_hops_refuse(
     with pytest.raises(HTTPException) as refused:
         _dispatch(config, repo, **kwargs)
     assert refused.value.status_code == 400 and message in refused.value.detail
+
+
+# --- R3-2: the faces (ADR 0050) — REST, `skep run`, the chat tools ----------
+
+
+def test_rest_post_runs_takes_the_role_and_the_chain(config: SupervisorConfig, repo: Path) -> None:
+    runner = _Runner()
+    with serve_client(config, dispatcher=runner) as client:
+        body = {"repo": str(repo), "instructions": "x", "role": "builder"}
+        sent = client.post("/api/runs", json=body | {"delegation_chain": ["queen@operator"]})
+        assert sent.status_code == 202, sent.text
+        refused = client.post("/api/runs", json=body | {"delegation_chain": ["worker@builder"]})
+        assert refused.status_code == 400 and "a worker never dispatches" in refused.text
+    decision = runner.submitted[0]["dispatch_decision"]
+    assert decision.delegation == {"chain": ["queen@operator"], "role": "builder", "team": None}
+    assert _ledger(config)[-1]["task_id"] == "task-1"
+
+
+def test_skep_run_takes_the_role_and_the_chain(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`skep run --role --delegated-by`: the in-process dispatch narrows the
+    same way, the hop row names the real task, and the run's dispatch
+    decision carries the chain on the store's record."""
+    run = ["--home", str(config.home.parent), "run", str(repo), "Fix. MODE:happy", "--quiet"]
+    run += ["--execution-mode", "workspace", "--worker-cmd", _worker_cmd()]
+    assert main([*run, "--role", "builder", "--delegated-by", "queen@operator"]) == 0
+    capsys.readouterr()
+    hop = _ledger(config)[-1]
+    store = RunStore(config.db_path)
+    try:
+        (record,) = store.recent_runs(5)
+        created = created_transition_views_for_task(store, record.task_id)
+    finally:
+        store.close()
+    assert (hop["source"], hop["task_id"], hop["role"]) == ("delegated", record.task_id, "builder")
+    assert created["dispatch_decision"]["delegation"]["chain"] == ["queen@operator"]
+    assert main([*run, "--role", "warp"]) != 0
+    assert "no role 'warp'" in capsys.readouterr().err
+
+
+def test_the_queen_dispatches_a_worker_with_a_role(config: SupervisorConfig, repo: Path) -> None:
+    """dispatch_run role=: the worker's role rides to submit_run beside the
+    Queen's chain, and the result the chat card renders names both."""
+    store = RunStore(config.db_path)
+    runner = _Runner()
+    try:
+        chat_id = store.create_chat(title="r", model=None).chat_id
+        store.set_chat_role(chat_id, "operator")
+        result = execute_mutation(
+            "dispatch_run",
+            {"repo": str(repo), "instructions": "x", "role": "builder"},
+            store=store,
+            holder=ConfigHolder(config, store),
+            runner=runner,  # type: ignore[arg-type]
+            actor="chat-user",
+            chat_id=chat_id,
+        )
+    finally:
+        store.close()
+    assert result["delegation"] == {"chain": ["queen@operator"], "role": "builder"}
+    assert runner.submitted[0]["dispatch_decision"].delegation["role"] == "builder"

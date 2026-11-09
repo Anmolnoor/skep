@@ -4134,7 +4134,7 @@ def submit_run(
                 "then call dispatch_run with the returned slug"
             ),
         )
-    chain, worker_role = delegation_inputs(holder, delegation_chain, role, team=team)
+    delegation_inputs(holder, delegation_chain, role, team=team)  # refuse before the repo resolves
     resolved = resolve_repo_arg(repo, repos_root(holder), store)
     ensure_repo_baseline(resolved)
     binding_candidates: list[tuple[str, str]] = []
@@ -4161,13 +4161,15 @@ def submit_run(
         detail = str(exc)
         status = 400 if "must be 'workspace' or 'sandbox'" in detail else 409
         raise HTTPException(status_code=status, detail=detail) from exc
-    permissions = resolved_policy.permissions
-    delegation: dict[str, Any] | None = None
-    delegation_note = None
-    if chain or worker_role is not None:
-        permissions, delegation, delegation_note = _within_delegation(
-            holder, store, resolved, chain, permissions, worker_role, team
-        )
+    permissions, delegation, delegation_note = delegate_permissions(
+        holder,
+        store,
+        resolved,
+        resolved_policy.permissions,
+        role=role,
+        delegation_chain=delegation_chain,
+        team=team,
+    )
     try:
         auto_apply_verified_patch = None
         if "auto_apply_verified_patch" in resolved_policy.policy:
@@ -4212,13 +4214,9 @@ def submit_run(
                 effective_dispatch_decision,
                 detail="no project binding; global defaults",
             )
-        if delegation_note is not None:
-            prior = effective_dispatch_decision.detail
-            effective_dispatch_decision = replace(
-                effective_dispatch_decision,
-                detail=f"{prior}; {delegation_note}" if prior else delegation_note,
-                delegation=delegation,
-            )
+        effective_dispatch_decision = delegated_decision(
+            effective_dispatch_decision, delegation, delegation_note
+        )
         task_id = runner.submit(
             resolved,
             instructions,
@@ -4268,6 +4266,37 @@ def delegation_inputs(
     return chain, worker_role
 
 
+def delegate_permissions(
+    holder: ConfigHolder,
+    store: RunStore,
+    repo: Path,
+    permissions: Permissions,
+    *,
+    role: str | None,
+    delegation_chain: Sequence[str],
+    team: str | None = None,
+) -> tuple[Permissions, dict[str, Any] | None, str | None]:
+    """The worker's permissions held to its role and its chain, with the
+    delegation record for the dispatch decision and the dispatch note — or
+    the permissions untouched (and two Nones) when neither is given: today.
+    ``submit_run`` and ``skep run`` both narrow here (ADR 0050: one verb)."""
+    chain, worker_role = delegation_inputs(holder, delegation_chain, role, team=team)
+    if not chain and worker_role is None:
+        return permissions, None, None
+    return _within_delegation(holder, store, repo, chain, permissions, worker_role, team)
+
+
+def delegated_decision(
+    decision: AutonomyDecision, delegation: dict[str, Any] | None, note: str | None
+) -> AutonomyDecision:
+    """The dispatch decision carrying who delegated (its payload, so every
+    run card reads the chain) and the note on its detail (I8)."""
+    if delegation is None:
+        return decision
+    prior = decision.detail
+    return replace(decision, detail=f"{prior}; {note}" if prior else note, delegation=delegation)
+
+
 def check_dispatch_chain(chain: Sequence[Delegator], *, team: str | None) -> None:
     """ADR 0055 D4/D5: who may sit in a dispatch chain. A worker never
     dispatches — no hop is ``worker@…``. Depth is 1, except a team member's
@@ -4302,7 +4331,7 @@ def check_dispatch_chain(chain: Sequence[Delegator], *, team: str | None) -> Non
 
 
 def record_delegation(
-    audit_dir: Path, delegation: dict[str, Any], *, repo: str, task: str
+    audit_dir: Path, delegation: dict[str, Any], *, repo: str | None, task: str | None
 ) -> dict[str, Any]:
     """R3 (ADR 0055 D5): one ``delegated`` ledger row per hop — the
     innermost delegator (``actor@role``; ``operator`` for a role-only

@@ -63,6 +63,11 @@ _SCRIPT_RUN_POLL_SECONDS = 0.1
 # v51-F5 (ADR 0025): batch dispatch is N independent governed runs submitted
 # together, not a new execution model. The cap matches Hermes's batch size.
 BATCH_DISPATCH_CAP = 3
+# first-run R3 (ADR 0055 D5): the worker's own role on a dispatch.
+_WORKER_ROLE = {
+    "type": "string",
+    "description": "worker role, at most yours",
+}
 # v83-F7 (ADR 0041): reasoning-only analysts per delegate_analysis call — a
 # separate resource class from the worker cap above (raising either is its
 # own policy question).
@@ -938,6 +943,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                         "repo": {"type": "string"},
                         "instructions": {"type": "string"},
                         "caste": {"type": "string", "enum": caste_names()},
+                        "role": {"type": "string"},
                         "execution_mode": {"type": "string", "enum": ["workspace", "sandbox"]},
                         "engine": {
                             "type": "string",
@@ -1772,6 +1778,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "work that landed on a non-default branch",
             },
             "caste": {"type": "string", "enum": caste_names(), "description": _caste_guidance()},
+            "role": _WORKER_ROLE,
             "engine": {
                 "type": "string",
                 "enum": engine_names(),
@@ -3894,6 +3901,7 @@ def _execute_mutation(
                 engine=(None if entry.get("engine") is None else str(entry["engine"])),
                 dispatch_decision=decision,
                 delegation_chain=_queen_chain(store, holder, chat_id, actor),
+                role=None if entry.get("role") is None else str(entry["role"]),
             )
             for entry in entries
         ]
@@ -4661,6 +4669,8 @@ def _execute_mutation(
             repo=str(args["repo"]),
             ref=None if args.get("ref") is None else str(args["ref"]),
         )
+        chain = _queen_chain(store, holder, chat_id, actor)
+        role = None if args.get("role") is None else str(args["role"])
         task_id = actions.submit_run(
             holder,
             runner,
@@ -4678,7 +4688,8 @@ def _execute_mutation(
             max_provider_calls=_optional_int(args, "max_provider_calls"),
             ref=None if args.get("ref") is None else str(args["ref"]),
             dispatch_decision=decision,
-            delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            delegation_chain=chain,
+            role=role,
             protocol=None if args.get("protocol") is None else str(args["protocol"]),
             engine=None if args.get("engine") is None else str(args["engine"]),
         )
@@ -4691,6 +4702,9 @@ def _execute_mutation(
             "repo": str(args["repo"]),
             "caste": str(args.get("caste") or "coding"),
         }
+        if chain or role:
+            # R3: the chat card shows who delegated, under which role.
+            result_view["delegation"] = {"chain": chain, "role": role}
         if hint is not None:
             result_view["hint"] = hint
         return result_view

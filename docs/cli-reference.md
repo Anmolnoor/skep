@@ -87,6 +87,10 @@ Important options:
 - `--env-allow ENV` passes one environment variable; repeatable.
 - `--caste CASTE` selects the worker kind. The common launch path is `coding`.
 - `--auto-approve` enables configured safe auto-approval rules.
+- `--role NAME` gives the worker a role: its layer narrows the worker's grants
+  (see Roles).
+- `--delegated-by ACTOR@ROLE` dispatches as that delegator (repeat, outermost
+  first); the worker holds no more than it does.
 - `--quiet` suppresses the live phase tail.
 
 `--minimal` cannot be combined with `--template`, `--network`, or `--env-allow`.
@@ -344,6 +348,18 @@ worker's shell prefixes and egress hosts beyond what that role holds are
 dropped at dispatch — the worker cards for them instead, so a human answers —
 and each drop is a ledger row with `actor: dispatch`; a role denied workspace
 writes cannot dispatch a worker at all. Chains are depth 1 at dispatch.
+
+A worker can be dispatched with its own role (first-run R3, ADR 0055 D5):
+`--role NAME [--delegated-by ACTOR@ROLE]` on `skep run`, `role` and
+`delegation_chain` on `POST /api/runs`, `role` on the chat's `dispatch_run`
+and per task in `batch_dispatch`. The worker's grants are its role ∩ its
+delegator's — a grant either makes stricter is dropped the same way and
+recorded under the worker's role. Every delegated or role-bearing dispatch is
+one `source: delegated` row in the decisions ledger (`skep policy decisions`):
+the delegator as `actor`, `worker@<role>` as `value`, `role`,
+`delegation_chain` and `task_id`. The run's dispatch decision carries
+`delegation` (`chain`, `role`, `team`), shown on the run cards. A worker never
+dispatches: a `worker@…` hop refuses.
 
 ## skep acp
 
