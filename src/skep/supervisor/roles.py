@@ -19,13 +19,24 @@ passes through, as it does for the baseline (ADR 0056 D2). The floor is above
 all of it (I4): it is already ``deny``, and nothing is stricter.
 
 No role means no role layer — exactly today's behaviour.
+
+**Delegation is subset-only (R2, ADR 0055 D4).** A bot that dispatches a bot
+passes ``delegation_chain`` — ``actor@role`` hops, outermost first. The
+delegatee holds no more than its delegator: the delegator's own effective
+verdict (the same stack, under its role, bounded by the hops above it) is
+one more tightening, and when it is the stricter one the row says
+``exceeds_delegator`` and names the hop (``within_delegator``). Decision #7:
+a delegator whose role layer has no rule for the action holds nothing to
+pass on — ``unset`` is "not granted" here, not "passes through". An empty
+chain is no constraint — exactly today.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -203,22 +214,30 @@ def use_role(
     return {"chat_id": chat_id, "role": role.name, "layer": role.label}
 
 
-def role_decision(role: Role, scope: str, action: str, value: str) -> PolicyDecision | None:
-    """What the role layer alone says, or None when it has no rule for this.
-    A chained shell line is judged per simple command, the least favourable
-    matched one deciding (B3-F7's rule)."""
+def _role_hits(role: Role, scope: str, action: str, value: str) -> list[PolicyDecision | None]:
+    """The role layer's rule per part of the action, None where it has none.
+    A chained shell line is judged per simple command (B3-F7's rule)."""
     layer = role.layer()
     if layer is None:
-        return None
+        return []
     scopes = resolve_stack([layer]).scopes()
     parts = (shell_segments(value) or []) if scope == "shell" and action == "run" else [value]
-    hits = [
-        hit
-        for part in parts
-        if (hit := decide(scopes, scope, action, part, template=layer.label)).rule_id
-        != DEFAULT_DENY_RULE_ID
-    ]
+    hits = [decide(scopes, scope, action, part, template=layer.label) for part in parts]
+    return [None if hit.rule_id == DEFAULT_DENY_RULE_ID else hit for hit in hits]
+
+
+def role_decision(role: Role, scope: str, action: str, value: str) -> PolicyDecision | None:
+    """What the role layer alone says, or None when it has no rule for this —
+    the least favourable matched part deciding."""
+    hits = [hit for hit in _role_hits(role, scope, action, value) if hit is not None]
     return max(hits, key=lambda hit: _VERDICT_RANK[hit.verdict], default=None)
+
+
+def role_covers(role: Role, scope: str, action: str, value: str) -> bool:
+    """Decision #7: the role layer has a rule for every part of the action.
+    A delegator's role that does not is ``unset`` there — nothing to pass on."""
+    hits = _role_hits(role, scope, action, value)
+    return bool(hits) and all(hit is not None for hit in hits)
 
 
 def tighten(
@@ -258,3 +277,49 @@ def tighten_autonomy(
         detail=f"{role.label if role else ''} decides {scope}.{action} {value}",
         decided_by=hit.decided_by,
     )
+
+
+EXCEEDS_DELEGATOR = "exceeds_delegator"
+
+
+class Delegator(NamedTuple):
+    entry: str  # "actor@role", exactly as the chain carries it
+    role: Role
+
+
+def parse_delegation_chain(entries: Sequence[str], home: Path) -> list[Delegator]:
+    """ADR 0055 D4: ``actor@role`` hops, outermost first. Every hop names a
+    role that resolves (I9) — a delegator with no role has no layer, and an
+    absent layer holds nothing to delegate (decision #7)."""
+    chain = []
+    for entry in entries:
+        actor, _, name = entry.partition("@")
+        if not actor or not name:
+            raise ValueError(
+                f"delegation_chain entry {entry!r} must be actor@role, e.g. queen@operator"
+            )
+        chain.append(Delegator(entry, resolve_role(name, home)))
+    return chain
+
+
+def within_delegator(
+    verdict: dict[str, Any], delegator: Delegator, bound: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The delegatee's ``verdict`` held to its delegator's own effective
+    verdict ``bound`` — None when the delegator's role is unset here (#7:
+    not granted, so ``deny``). The stricter stands. When the delegator is
+    what made it stricter the row says ``exceeds_delegator`` and
+    ``decided_by`` names the hop, then the delegator's own reason:
+    ``delegation:queen@operator/role:operator/shell-gated``. A delegator that
+    would itself have to ask passes on an ask, never a grant: a human still
+    answers it, exactly as for the delegator."""
+    held = "deny" if bound is None else str(bound["verdict"])
+    if _VERDICT_RANK[held] <= _VERDICT_RANK[str(verdict["verdict"])]:
+        return verdict
+    reason = "unset" if bound is None else bound["decided_by"]
+    return {
+        **verdict,
+        "verdict": held,
+        "rule_id": EXCEEDS_DELEGATOR,
+        "decided_by": f"delegation:{delegator.entry}/{reason}",
+    }
