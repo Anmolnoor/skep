@@ -72,6 +72,7 @@ from ..shell_prefixes import (
     normalize_remembered_command,
 )
 from ..store import RunStore
+from ..unlocked import record_gate, unlocked_active
 from .jobs import Dispatcher, DispatchError
 from .registry import (
     ensure_repo_baseline,
@@ -2845,7 +2846,7 @@ def auto_resume_unlocked_gate(
     gate = next((a for a in store.pending_approvals() if a.task_id == task_id), None)
     if gate is None:
         return None
-    return resume_past_gate(
+    resumed = resume_past_gate(
         store,
         holder.current,
         runner,
@@ -2854,6 +2855,22 @@ def auto_resume_unlocked_gate(
         "auto:unlocked",
         session=False,
     )
+    if unlocked_active():
+        # SKEP_UNLOCKED: record the worker escalation this auto-answered. Under
+        # the global probe every project reaches here; the log distinguishes
+        # which asks the sandbox tier is skipping (shell/network/capability) so
+        # the report can rank worker-side friction.
+        record_gate(
+            holder.current.audit_dir,
+            gate=f"worker.escalation.{gate.action or 'unknown'}",
+            surface="worker_escalation",
+            would="ask",
+            reason=gate.reason or "capability_approval_required",
+            action={"task_id": task_id, "action": gate.action, "detail": gate.reason},
+            disposition="bypassed",
+            run_id=task_id,
+        )
+    return resumed
 
 
 def _persist_remembered_command(

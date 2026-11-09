@@ -61,6 +61,7 @@ from .templates import (
     load_template_file,
     validate_template,
 )
+from .unlocked import cmd_unlocked_report
 
 STATE_EXIT_CODES = {
     "completed": 0,
@@ -2740,6 +2741,20 @@ def register_supervisor_commands(
         help="activate D3: auto-apply safe manifest-only fixes from scheduled runs (U1)",
     )
     tick.set_defaults(func=cmd_tick)
+
+    # SKEP_UNLOCKED (ADR 0052 probe): read the gate-instrumentation JSONL back
+    # as a grouped report — would-have-denied, auto-allowed friction, and the
+    # ask-only gates that are relaxation candidates.
+    unlocked_report = subcommands.add_parser(
+        "unlocked-report",
+        help="summarize the SKEP_UNLOCKED gate log (which gates protect vs. only add friction)",
+    )
+    unlocked_report.add_argument(
+        "--session",
+        default=None,
+        help="scope to one serve/CLI session id (e.g. pid12345); default is every session",
+    )
+    unlocked_report.set_defaults(func=cmd_unlocked_report)
 
     # v3.5: workflow templates — user-authored, parameterized task recipes.
     template = subcommands.add_parser("template", help="manage workflow templates (v3.5)")

@@ -238,6 +238,19 @@ The full model is at
 [skep.anmolnoor.com/security.html](https://skep.anmolnoor.com/security.html).
 Holes poked in it are the most valuable issues you can file.
 
+## Unlocked mode (experimental — LOCAL testing only, never production)
+
+`SKEP_UNLOCKED=1` turns skep into a **capability probe**: the friction gates
+contained by the sandbox auto-resolve (dispatch cards, worker escalations,
+verified-patch landing, run egress), while every gate records what it *would*
+have decided so `skep unlocked-report` can show which gates protect something
+real versus which only add friction. The never-grantable deny floor (git
+push/pull/fetch, sudo, catastrophic commands) and the safety core (G10
+re-verification, landing-branch validation, the sandbox wall) are **never
+bypassed** — only logged. **This bypasses governance and is for local capability
+testing only — never production.** Default is off; unsetting the variable
+restores governed skep byte-for-byte. See [`newversion.md`](newversion.md).
+
 ## How skep compares
 
 Tools in this space usually do one of three things well: cloud sandboxes give

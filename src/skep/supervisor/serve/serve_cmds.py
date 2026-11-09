@@ -102,6 +102,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
     app = create_app(config, web_ui_url=f"http://{args.host}:{args.port}/")
     banner = f"skep serve: http://{args.host}:{args.port}  (home: {config.home})"
     print(banner, flush=True)
+    # SKEP_UNLOCKED: an unmissable boot banner so an unlocked run can never be
+    # mistaken for a governed one. serve.env is loaded above, so a config-side
+    # SKEP_UNLOCKED=1 is already in the process env by now.
+    from ..unlocked import unlocked_active, unlocked_banner, unlocked_tier
+
+    unlocked_boot = unlocked_banner(unlocked_tier()) if unlocked_active() else None
+    if unlocked_boot:
+        print(unlocked_boot, flush=True)
     if loaded_env:
         # Names only, stdout only — the log file is not a second credential
         # store and neither is this line.
@@ -111,6 +119,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"  access token: {ensure_token(config.home)}", flush=True)
     log_path = config.home.parent / SERVE_LOG_FILE
     write_boot_banner(log_path, banner)
+    if unlocked_boot:
+        write_boot_banner(log_path, unlocked_boot)
     uvicorn.run(
         app,
         host=args.host,

@@ -19,6 +19,7 @@ skep [--home HOME] [--version] <command> ...
 skep setup --personal [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV]
 skep doctor
 skep status [--personal] [--json]
+skep unlocked-report [--session SESSION]
 ```
 
 - `setup --personal` creates or updates the personal profile.
@@ -28,6 +29,10 @@ skep status [--personal] [--json]
 - `status --personal` shows recent supervised runs, pending approvals, and
   re-verification status.
 - `status --json` emits machine-readable status.
+- `unlocked-report` summarizes the `SKEP_UNLOCKED` capability-probe gate log
+  (experimental, local testing only) — which gates would have denied, which
+  auto-allowed as friction, and which only ever ask (relaxation candidates).
+  `--session` scopes to one serve/CLI session id. See `newversion.md`.
 
 ## Run
 

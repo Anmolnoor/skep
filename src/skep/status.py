@@ -51,6 +51,7 @@ def build_status(
             + _repo_registry_advisories(home)
             + _stale_store_advisories(home)
             + _unlocked_advisories(home)
+            + _unlocked_env_advisory(home)
         )
         payload["stale_pending"] = stale_pending
         return payload
@@ -80,6 +81,7 @@ def build_status(
         + _repo_registry_advisories(home)
         + _stale_store_advisories(home)
         + _unlocked_advisories(home)
+        + _unlocked_env_advisory(home)
     )
     payload["stale_pending"] = stale_pending
     return payload
@@ -344,6 +346,40 @@ def _unlocked_advisories(home: Path) -> list[str]:
         f"{'; '.join(sorted(unlocked))}. Outbound content, policy changes, and the "
         "hard git denies still gate. Turn off with "
         "`skep project setup <repo> --no-unlocked`."
+    ]
+
+
+def _unlocked_env_advisory(home: Path) -> list[str]:
+    """SKEP_UNLOCKED (ADR 0052 probe): name the process-wide capability probe
+    when it is enabled, from this shell's env OR the daemon's serve.env — a
+    global zero-ask run must never read as governed skep (I8). This is distinct
+    from _unlocked_advisories, which names per-PROJECT unlocked policy keys."""
+    from .supervisor.unlocked import unlocked_active
+
+    sources: list[str] = []
+    if unlocked_active():
+        sources.append("this shell's SKEP_UNLOCKED")
+    env_file = home / "serve.env"
+    if env_file.is_file():
+        for raw in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("export "):
+                line = line[len("export ") :].lstrip()
+            if not line.upper().startswith("SKEP_UNLOCKED=") or "=" not in line:
+                continue
+            value = line.split("=", 1)[1].strip().strip("\"'").lower()
+            if value not in {"", "0", "false", "off", "no"}:
+                sources.append(str(env_file))
+    if not sources:
+        return []
+    return [
+        "SKEP_UNLOCKED is ENABLED (via "
+        + " and ".join(sources)
+        + ") — this is the global capability probe, NOT governed skep: "
+        "sandbox-contained approvals auto-allow across EVERY project and run "
+        "egress opens to all hosts. Every bypassed gate is logged; read it with "
+        "`skep unlocked-report`. Unset SKEP_UNLOCKED (and clear it from serve.env) "
+        "to restore governance."
     ]
 
 

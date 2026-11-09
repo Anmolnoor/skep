@@ -50,6 +50,7 @@ from .projects import (
 )
 from .serve.settings import RUN_EXECUTION_MODES, policy_view
 from .store import ProjectPolicyRecord, RunStore
+from .unlocked import record_gate, unlocked_active
 
 _PROJECT_RUN_POLICY_FIELDS = PROJECT_POLICY_KEYS
 
@@ -259,6 +260,13 @@ def run_policy_for_repo(
     # v90-F4: G10-confirmed with the project's PINNED verify_command, onto a
     # skep/* branch only (I1, I2) — a human click remains the path for
     # anything the rule blocks.
+    # unlocked-global (SKEP_UNLOCKED): the process-wide capability probe makes
+    # EVERY project resolve as unlocked, layered on top of the per-project key
+    # (ADR 0052). Marked in provenance ("unlocked-global") so it is
+    # distinguishable from a project that set unlocked=true under governance.
+    # Default off ⇒ this branch never fires ⇒ resolution is byte-for-byte main.
+    if unlocked_active():
+        _layer_set("unlocked", True, "unlocked-global")
     if effective.get("unlocked") is True:
         _layer_set("auto_apply_verified_patch", True, "unlocked")
     effective["_provenance"] = provenance
@@ -674,6 +682,23 @@ def resolve_run_policy(
     # allowlist regardless of creation path or merge order. ``["*"]`` is left
     # as-is (a single element sorts to itself anyway).
     chosen_network = sorted(dict.fromkeys(chosen_network))
+    # unlocked-global: the sandbox tier opens run egress to all hosts (the
+    # capability probe), logging the allowlist it WOULD have resolved. Gated on
+    # the GLOBAL flag, not policy["unlocked"], so a per-project ADR 0052 project
+    # keeps its per-host grant lane unchanged whenever the probe is off. The G2
+    # env allowlist (spawner.build_worker_env) still strips credentials, so
+    # blanket egress cannot authenticate — ADR 0052's trade, widened on purpose.
+    if unlocked_active() and chosen_network != ["*"]:
+        record_gate(
+            config.audit_dir,
+            gate="network.egress",
+            surface="run_policy",
+            would="ask",
+            reason="unlocked.blanket_egress",
+            action={"repo": str(repo), "would_allow": chosen_network},
+            disposition="bypassed",
+        )
+        chosen_network = ["*"]
     # v40-F7 (v36-F3): compile the resolved knobs into ONE policy document and
     # read the legacy fields back out of it — Permissions is the compiled
     # artifact of resolved policy, which is why this needs no contract bump

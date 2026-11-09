@@ -39,6 +39,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..store import ChatActionRecord, RunStore
+from ..unlocked import record_mutation_gate, unlocked_active
 from . import actions
 from .cards import card_summary
 from .jobs import Dispatcher
@@ -1522,6 +1523,20 @@ class ChatEngine:
                     decision = mutation_execution_decision(
                         name, args, store=self.store, holder=self.holder
                     )
+                    if unlocked_active():
+                        # SKEP_UNLOCKED: instrument every Queen mutating-verb
+                        # attempt with what the card oracle WOULD have decided.
+                        # This only LOGS — the sandbox tier does not bypass the
+                        # card layer (dispatch already auto-allows via the
+                        # injected unlocked policy; host/outbound verbs still
+                        # card). The deny arm below is untouched (I4).
+                        record_mutation_gate(
+                            self.holder.current.audit_dir,
+                            chat_id=chat_id,
+                            name=name,
+                            args=args,
+                            decision=decision,
+                        )
                     if decision is not None and decision.verdict == "deny":
                         # v40-F10: an explicit deny rule refuses without a card
                         # — a card could be confirmed, and deny space must stay
