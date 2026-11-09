@@ -22,18 +22,12 @@ gate, builds the wheel/sdist, twine-checks them, smoke-installs the wheel, and
 cuts the GitHub release with artifacts attached. `ci.yml` publishes the GHCR
 image on the same tag.
 
-## PyPI publish — PARKED (operator action to un-park)
+## PyPI publish — live on `v*` tags
 
-The `pypa/gh-action-pypi-publish` step in `release.yml` is deliberately
-commented out until PyPI trusted publishing is configured. To un-park:
-
-1. On pypi.org: create the `skep` project (or claim the name), then under
-   *Publishing* add a **trusted publisher**: repository `Anmolnoor/skep`,
-   workflow `release.yml`, environment blank.
-2. Uncomment the publish step in `.github/workflows/release.yml`.
-3. Tag the release. `uvx skep` and `uv tool install skep` work from then on.
-
-No API token needs to exist anywhere; trusted publishing is OIDC.
+`release.yml`'s `Publish to PyPI` step (`pypa/gh-action-pypi-publish`) runs
+on every `v*` tag through the PyPI trusted publisher (repository
+`Anmolnoor/skep`, workflow `release.yml`) — OIDC, no API token anywhere. A
+manual workflow run never reaches it; it only exercises the TestPyPI lane.
 
 ## Go/no-go: what remains is one decision
 

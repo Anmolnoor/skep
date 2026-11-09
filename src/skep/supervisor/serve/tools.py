@@ -364,6 +364,17 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         },
         ["repo", "scope", "action", "value"],
     ),
+    _tool(
+        "policy_decisions",
+        "Recent policy ledger rows with counts. actor=acp:* is the governed ACP "
+        "agents, human@* their humans' answers; observed = ran unasked, "
+        "forwarded = the human answered. Read-only; no dispatch.",
+        {
+            "actor": {"type": "string", "description": "glob, e.g. acp:*"},
+            "since": {"type": "string", "description": "ISO time or date"},
+            "limit": {"type": "integer"},
+        },
+    ),
     _tool("list_templates", "Saved workflow templates (hand-authored and learned).", {}),
     _tool("list_skills", "Learned-skill candidates and skill-pack ladder states.", {}),
     _tool(
@@ -2190,6 +2201,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "policy_registry",
         "policy_rsop",
         "policy_why",
+        "policy_decisions",
         "set_policy",
         "apply_policy_preset",
         "set_operator_policy",
@@ -3059,6 +3071,13 @@ def execute_read_tool(
             str(args["scope"]),
             str(args["action"]),
             str(args["value"]),
+        )
+    if name == "policy_decisions":
+        return actions.policy_decisions(
+            holder.current.audit_dir,
+            actor=None if args.get("actor") is None else str(args["actor"]),
+            since=None if args.get("since") is None else str(args["since"]),
+            limit=int(args.get("limit") or 200),
         )
     if name == "list_approvals":
         approvals = []

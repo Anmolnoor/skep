@@ -54,6 +54,7 @@ from .actions import (
     pending_approval_or_409,
     policy_block_views,
     policy_decide,
+    policy_decisions,
     policy_why,
     preserved_resumable_hint,
     project_context_detail_view,
@@ -525,6 +526,16 @@ def create_app(
                 repo=body.repo,
                 actor=body.actor,
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/policy/decisions")
+    def get_policy_decisions(
+        actor: str | None = None, since: str | None = None, limit: int = 200
+    ) -> dict[str, Any]:
+        """ADR 0054 A3: decisions.jsonl read back — what the governed agents did."""
+        try:
+            return policy_decisions(holder.current.audit_dir, actor=actor, since=since, limit=limit)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

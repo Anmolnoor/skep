@@ -85,28 +85,33 @@ def build_worker_env(
 _LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
 
 
-def _proxy_env(port: int) -> dict[str, str]:
+def _proxy_env(port: int, *, loopback_direct: bool = True) -> dict[str, str]:
     """Env that routes the worker's HTTP(S) tooling through the D1 filtering proxy.
 
     pip / git / curl / requests all honour these. Combined with the Seatbelt pin
     to ``localhost:port`` (the worker's only allowed egress), the proxy is the
     sole path out — so the domain allowlist is enforced, not merely suggested.
+
+    ``loopback_direct`` is for a sandbox whose loopback IS the host's (Seatbelt):
+    v115-F9 — loopback is not egress, so a worker's own test server on 127.0.0.1
+    is reached directly, not through the proxy, which answered a dead loopback
+    port with "502 Bad Gateway" where a test expected a connection error. Under
+    bubblewrap ``--unshare-net`` the sandbox loopback is a different namespace:
+    a host loopback server is reachable only through the netshim bridge, and
+    the proxy admits loopback (v115-F9 too) — so there the exemption must be off.
     """
     url = f"http://127.0.0.1:{port}"
-    return {
+    env = {
         "HTTP_PROXY": url,
         "HTTPS_PROXY": url,
         "ALL_PROXY": url,
         "http_proxy": url,
         "https_proxy": url,
         "all_proxy": url,
-        # v115-F9: loopback is not egress — a worker's own test servers on
-        # 127.0.0.1 are reached directly (Seatbelt now permits it), not through
-        # the proxy, which answered a dead loopback port with "502 Bad Gateway"
-        # where a test expected a connection error.
-        "NO_PROXY": _LOOPBACK_NO_PROXY,
-        "no_proxy": _LOOPBACK_NO_PROXY,
     }
+    if loopback_direct:
+        env["NO_PROXY"] = env["no_proxy"] = _LOOPBACK_NO_PROXY
+    return env
 
 
 def effective_network_domains(task: CodingWorkerTask) -> tuple[str, ...]:
@@ -178,7 +183,9 @@ def spawn_worker(
     else:
         network = sandbox.NetworkPolicy(allow=domains)
     backend = resolve_sandbox_backend(config, network) if use_sandbox else None
+    own_netns = False  # bubblewrap --unshare-net: the sandbox loopback is not the host's
     if use_sandbox and sandbox.availability(backend).usable:
+        own_netns = sandbox.availability(backend).backend == "bubblewrap"
         workspace = Path(task.workspace)
         # v109-F4: ``extra_writable`` is per-run (the project dependency-cache
         # root); every backend consumes this one list (Seatbelt subpaths,
@@ -206,7 +213,7 @@ def spawn_worker(
         # endpoint/model) — same class as SKEP_HOME and the proxy env below.
         env.update(extra_env)
     if proxy_port is not None:
-        env.update(_proxy_env(proxy_port))
+        env.update(_proxy_env(proxy_port, loopback_direct=not own_netns))
     log_handle = log_path.open("ab")
     try:
         return subprocess.Popen(

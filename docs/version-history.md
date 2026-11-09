@@ -2674,7 +2674,8 @@ through skep's own cards — A0 found the provider key dead for inference
 while `doctor` said ready (fixed as v115-F5); A4, the starlette bump, was
 the first real self-maintenance run and took eight attempts, each one a
 v115 fix (PR #29 is the patch skep landed on itself). The ACP adapter
-(Part B) stays open on the Restart Plan; A7/A8 hygiene and record
+(Part B) stayed open on the Restart Plan — it shipped as the ACP governor
+(`acp-governor B0–B2` and v1.2.0 below); A7/A8 hygiene and record
 catch-up land with this release.
 
 ## v114 — the policy engine under a hostile operator (2026-10-21, F1–F5)
@@ -2751,3 +2752,74 @@ flip `shell` first, after the golden parity suite is green; install the
 Claude Code hook from `docs/policy-hook.md`. Linux/macOS CI gates stay
 the same, with job timeouts so an unreachable apt mirror fails in minutes.
 
+## acp-governor B0–B2 — skep governs agents inside other clients (2026-11-06)
+
+ADR draft 0054 (Restart Plan Part B, re-scoped against P3): skep ships as
+a transparent ACP proxy any ACP client spawns in place of the agent,
+answering the permission hop from `decide()`. B0: T3 Code's recorded
+transcripts vendored with notice, and eight live taps of
+`@agentclientprotocol/claude-agent-acp` 0.101.0 and `codex-acp` 2.5.0 (v1
+and v2, default and asking modes) written up as the wire table in
+`tests/fixtures/acp/README.md` — both adapters speak v2 when offered, the
+default modes (Claude `auto`, Codex `agent`) never ask, Claude's first
+announce has an empty `rawInput`, Codex's v2 request shell-quotes the
+command, a shell redirect is a write the `filesystem` scope never sees,
+and options are chosen by kind, never position (grok lists
+`allow_always` first). B1-1: the I/O-free proxy core — every unclaimed
+line relayed as its original bytes, ids never renumbered, cancels bound to
+their direction. B1-2: `workspace_value` lifted to `policy_paths` with the
+symlink escape pinned, and the mapper — session state joined on
+`toolCallId`, per-agent presets as data rows, an unreadable call forwarded
+with the missing field named. B1-3: `skep acp govern` (allow selects
+`allow_once`, explicit or floor deny `reject_once`, everything else
+forwarded to the human, never an "always") and `skep acp doctor`; on ACP v1
+with a client that advertised `fs`/`terminal` the hard ring passes only
+`allow` (A10, no human hop to forward to). B1-4: `skep policy decisions`
+on three faces, `observed` and `forwarded` rows counted apart from
+decisions (A9). The Day 5 live smoke under T3-shaped asking modes: Claude's
+Write allowed from `fs: workspace`, Codex's `rm -rf build` forwarded to the
+human, `git push` floor-denied for both before the client saw it, and
+read-only commands observed unasked. Review findings folded in before each
+commit (cancel direction, a shutdown abort when the agent exits first, a
+floor bypass through unquoted hard-ring args, observed rows only for calls
+that ran unasked). B2: fresh homes start with `shell`+`filesystem` on
+engine v2 (A6), `skep acp install-hint` prints T3's Local ACP command
+rows, and `docs/acp-governor.md` says what each ring does and does not see.
+
+## acp-governor B3 — the field test in T3 Code (2026-11-06)
+
+T3 Code (Beta) with two Local ACP command providers on the branch binary,
+a throwaway repo bound to a demo group. Findings and fixes, on the same
+branch since 1.2.0 is untagged: B3-F1 `install-hint` prints one argument
+per line (the `a | b | c` line was pasted into one T3 row). B3-F2 every
+session opener binds `cwd` — T3 respawns the agent after idle and
+continues with `session/load`, so resumed turns decided against repo "" —
+and a v1 load's replayed history is not written as observed rows (A11).
+B3-F7 a chained shell line (`ls -la; rm -rf build`) is decided one simple
+command at a time with the least favourable segment deciding; command
+substitution and `sh -c` are opaque and match nothing — the prefix
+matcher had allowed the whole line by its first word for the hook and the
+governor, where a real shell runs it. B3-F8 `SKEP_ACP_TRACE` records the
+wire inside a client in the fixture envelope. Observed on the wire: in
+Claude's `auto` (T3's default) the agent never asks, so skep only
+observes; T3's **Manual** mode is Claude's `default` and asks; the agent
+bundled `rm -rf build && … git push` into one command and the floor
+denied the lot before T3 saw it. B3-F9 the replay window runs from any
+continuing opener to the client's next `session/prompt` — T3 races the
+opener's answer against two seconds of replay silence and may send its
+config and prompt first. B3-F10 a run-detail read tolerates a worktree
+swept under it (CI macOS). B3-F11 the first turn recorded inside T3 with
+the trace on (2026-11-09, `tests/fixtures/acp/claude-agent-acp/t3-v2-resume-ask.ndjson`,
+a golden): T3 speaks v2 and continues a thread with `session/resume`, and
+claude-agent-acp replays the thread's history on it too — seven replayed
+calls, zero observed rows; then `git status` observed, `rm -rf build`
+forwarded to the human (allow once), `git push` floor-denied.
+
+## v1.2.0 — the ACP governor (2026-11-06)
+
+The `acp-governor` B0–B2 work above: `skep acp govern|doctor|install-hint`
+and `skep policy decisions`. Operator notes: a fresh home starts with
+`shell` and `filesystem` on engine v2; an existing home keeps its switch.
+Install with `pipx install skep && skep acp doctor -- npx -y
+@agentclientprotocol/claude-agent-acp`. ADR draft 0054 moves to
+`docs/adr/` on acceptance.

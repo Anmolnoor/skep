@@ -284,7 +284,8 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         invariant="I5",
         doc="P1 kill switch (ADR 0053 D6): the scopes whose knobs and rules answer from "
         "policy engine v2; every other scope keeps the v1 path. Flips are recorded in "
-        "<audit>/policy/engine-flips.jsonl; cut over shell first, after golden parity",
+        "<audit>/policy/engine-flips.jsonl. A fresh home is seeded with filesystem+shell "
+        "(ADR 0054 A6); an existing home keeps its switch",
     ),
     _knob(
         "auto_approve",

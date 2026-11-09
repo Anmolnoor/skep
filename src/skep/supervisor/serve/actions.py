@@ -17,8 +17,9 @@ import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import HTTPException
 
@@ -72,6 +73,7 @@ from ..policy_schema import (
     document_from_settings,
     operator_document_from_settings,
     pattern_matches,
+    shell_segments,
 )
 from ..projects import (
     PROJECT_PHASES,
@@ -1924,6 +1926,37 @@ def policy_decide(
     return record
 
 
+def policy_note(
+    audit_dir: Path,
+    *,
+    source: Literal["observed", "forwarded"],
+    actor: str,
+    repo: str | None,
+    scope: str | None,
+    action: str | None,
+    value: str | None,
+    **fields: Any,
+) -> dict[str, Any]:
+    """ADR 0054 A9: a ledger row that is not a decision — what an ACP agent
+    ran unasked (``observed``) or what the human behind the client answered
+    (``forwarded``). ``source`` discriminates these rows from decisions; they
+    carry no ``verdict``. Same ``decisions.jsonl`` as ``policy_decide``."""
+    row: dict[str, Any] = {
+        "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "actor": actor,
+        "repo": repo,
+        "scope": scope,
+        "action": action,
+        "value": value,
+        "source": source,
+        **fields,
+    }
+    # ponytail: the append is unlocked; concurrent governors interleave whole <4 KiB
+    # writes on POSIX — lock when a home gets a second writer
+    _append_policy_ledger(audit_dir, "decisions", row)
+    return row
+
+
 def policy_why(
     holder: ConfigHolder, store: RunStore, repo: str, scope: str, action: str, value: str
 ) -> dict[str, Any]:
@@ -1956,6 +1989,9 @@ def policy_why(
         template = resolved.document.template if resolved.document is not None else None
         decision = decide(resolved.resolved_scopes, scope, action, value, template=template)
         scope_policy = resolved.resolved_scopes.get(scope)
+        # B3-F7: a chained shell line is decided per simple command; `why` shows
+        # the rules any of them touched (none, when the line is opaque).
+        parts = (shell_segments(value) or []) if scope == "shell" else [value]
         view["run"] = {
             "verdict": decision.verdict,
             "rule_id": decision.rule_id,
@@ -1963,7 +1999,8 @@ def policy_why(
             "considered": [
                 asdict(rule)
                 for rule in (scope_policy.rules if scope_policy else ())
-                if rule.action == action and pattern_matches(scope, rule.pattern, value)
+                if rule.action == action
+                and any(pattern_matches(scope, rule.pattern, part) for part in parts)
             ],
         }
     operator = resolve_operator_policy(store).decision(scope, action, value)
@@ -4291,6 +4328,42 @@ def _append_policy_ledger(audit_dir: Path, name: str, payload: dict[str, Any]) -
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload) + "\n")
+
+
+def policy_decisions(
+    audit_dir: Path, *, actor: str | None = None, since: str | None = None, limit: int = 200
+) -> dict[str, Any]:
+    """ADR 0054 A3/A9: ``decisions.jsonl`` read back — what the governed agents
+    did. ``actor`` is an fnmatch glob (``acp:*`` the ACP agents, ``human@*``
+    their humans' answers); ``since`` is a string floor on ``at``, so the
+    ledger's ``%Y-%m-%dT%H:%M:%SZ`` and a bare date ``2026-11-06`` both work.
+    Rows come newest-first, at most ``limit``; ``total`` counts every match.
+    ``summary`` counts decisions by verdict and notes by source apart — an
+    ``observed`` or ``forwarded`` row is not a decision (I8)."""
+    if limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    path = audit_dir / "policy" / "decisions.jsonl"
+    summary = dict.fromkeys(("allow", "deny", "require_approval", "observed", "forwarded"), 0)
+    rows: list[dict[str, Any]] = []
+    # ponytail: reads the whole file; tail-seek when a ledger outgrows memory
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if actor is not None and not fnmatch(str(row.get("actor", "")), actor):
+            continue
+        if since is not None and str(row.get("at", "")) < since:
+            continue
+        rows.append(row)
+        source = row.get("source")
+        key = source if source in ("observed", "forwarded") else row.get("verdict")
+        if key in summary:
+            summary[key] += 1
+    return {"rows": rows[::-1][:limit], "total": len(rows), "summary": summary}
 
 
 def _record_engine_flip(audit_dir: Path, before: list[str], after: list[str]) -> None:

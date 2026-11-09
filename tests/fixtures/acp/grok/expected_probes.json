@@ -1,0 +1,18 @@
+[
+  {
+    "fixture": "grok_auto_blocked_command.ndjson",
+    "line": 100,
+    "tool_call_id": "call-a578f4fc-2b4d-4e69-a435-4bc42ace7377-1",
+    "probe": {
+      "kind": "decided",
+      "items": [
+        [
+          "shell",
+          "run",
+          "rm -rf ~/grok-auto-probe-does-not-exist"
+        ]
+      ],
+      "cwd": "$REPO"
+    }
+  }
+]

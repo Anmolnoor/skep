@@ -1,45 +1,52 @@
 # Handoff
 
-## Current handoff — CTO -> Architect + Staff Engineer
+## Current handoff — Architect -> SDE, start at B0
 
-**Feature:** `policy-engine-rewrite` — read `decisions/cto/policy-engine-rewrite.md` in full first.
+**Feature:** `acp-governor` — read `adrs/0054-acp-governor.md` in full first,
+amendments A1–A9 included; then `plans/acp-governor/README.md` (local) for the
+day-by-day steps, anchors and gates.
 
-**What to produce:** two ADR drafts in `.10x/adrs/` (house numbers 0052, 0053 when accepted into `docs/adr/`):
+**What to produce, one branch (`acp-governor`), one PR:**
 
-1. **P0 — policy registry + characterization harness + RSoP.**
-   Decide: registry shape (Python table vs JSON vs pydantic model), where
-   layer eligibility and "enforced" metadata live, how golden files are
-   generated from the operator's real `~/.skep` (snapshot into a temp home —
-   never read operator state in tests, per CLAUDE.md), RSoP payload shape
-   (`{key, value, source_layer, source_name, overridden_by: [...]}` for both
-   the run-policy stack and scope-document rules), and the "why" query API
-   (`would <scope>.<action> <pattern> in <repo> be allowed?` -> verdict +
-   decided_by, no dispatch). All three faces (chat tool, CLI, REST) per ADR
-   0050; `test_surface_parity.py` will enforce it.
-2. **P1 — engine v2.**
-   Decide: the unified schema (rules + knobs in one layer stack), tri-state
-   semantics, "enforced" semantics vs today's `GROUPABLE_POLICY_KEYS` list
-   and trust ramp, how the floor (I4, ADR 0044) stays inexpressible, the
-   per-scope kill switch mechanism, cutover order (`shell` first), and the
-   migration of stored documents (`policy_document`, `operator_policy_document`,
-   `policy_groups`, project overlays) — forward-only, with the old reader
-   kept until deletion.
+1. **B0 — the wire table.** `scripts/acp_fixture_scan.py`, `scripts/acp_tap.py`
+   (stdio logger + minimal ACP client), T3's MIT ACP transcripts and the live
+   taps of `claude-agent-acp` (v1 and v2) and `codex-acp` vendored under
+   `tests/fixtures/acp/<agent>/` in the envelope format, with
+   `LICENSE-t3code.txt` and a root `NOTICE`; `tests/fixtures/acp/README.md`
+   is the table. Gate: both live agents' `tool_call` shapes for a shell
+   command and a file write, the permission options offered, and whether the
+   permission request itself carries kind/rawInput/locations.
+2. **B1 — the proxy.** `acp/proxy.py` (pure; transparency test byte-identical
+   on every fixture), `policy_paths.workspace_value` + `acp/mapper.py`
+   (`expected_probes.json` per agent), `acp/govern.py` + `acp_cmds.py`
+   (`skep acp govern|doctor`; `policy_note`; golden `expected_ledger.jsonl`
+   per agent; floor `git push` → `reject_once`; never `*_always`),
+   `policy_decisions` on three faces.
+3. **B2 — package.** Engine v2 seed at store creation for fresh homes,
+   `skep acp install-hint`, `docs/acp-governor.md`, hook doc in installed
+   form, 1.2.0 everywhere, version-history entries. PR to `main`.
 
-**Constraints from the CTO file that are not negotiable:** same entry-point
-signatures; floor outside the engine; I5 one boundary; I8 unresolved renders
-unresolved; old resolvers deleted only after the 30-day ledger is clean.
+**Constraints that are not negotiable:** I5 one boundary (the proxy carries no
+decision logic — it is `hook_probe` with an ACP front over `policy_decide`);
+fail-to-ask (store unreadable, unknown agent, unreadable `rawInput`, any
+exception → forward to the human; never a silent allow); D6 no standing
+grants; pass-through is the original bytes; no new runtime dependency; the
+five gates green on every commit; fixtures scrubbed of host paths.
 
-**Known seams to read before designing:** `supervisor/policy_schema.py`
-(resolve/decide, learned-rule vetting), `supervisor/policy_resolver.py`
-(`run_policy_for_repo`, groups merge), `supervisor/policy.py`
-(auto-approval), `serve/actions.py::effective_policy_view`,
-`serve/settings.py::policy_view`, `workers/capabilities.py` (the floor),
-ADRs 0022, 0044, 0047, 0048, 0050, `docs/invariants.md` Part I.
+**Known seams to read before coding:** `supervisor/policy_hook.py`,
+`cli_cmds.py::cmd_policy_hook`, `serve/actions.py::policy_decide` /
+`_floor_verdict` / `_append_policy_ledger`, `netshim.py` (REMAINDER argv,
+signal forwarding), `channel_cmds.py` (command-group template),
+`tests/supervisor/test_policy_hook.py`, `tests/supervisor/conftest.py`.
 
-**Not in scope for Design:** P2 editor UI and P3 hook details beyond
-confirming `decide()` will have a stable external face.
+**Not in scope:** T3 code changes, a sandbox, verification of proxied
+sessions, the UI (shelved), pidfiles / live-session listing.
 
 ## Handoff history
+
+- 2026-11-06 — SDE -> Operator: B0–B2 built on `acp-governor` (every commit gated and judged, tags `ckpt/acp-day-0..7`), live-smoked on claude-agent-acp and codex-acp (allow / forwarded ask / floor deny) and on the real home (one floor row); **PR #37 open**. Operator's next moves: review and merge; `git tag -a v1.2.0` on main (the workflow publishes PyPI); Air smoke `pipx install skep && skep acp doctor -- npx -y @agentclientprotocol/claude-agent-acp` from the doc alone; B3 field test in T3 per `plans/acp-governor/b3-field-test.md` (fixes on `b3-field-fixes`); B4 comments per `plans/acp-governor/b4-comments.md`. ADR 0054 moves to `docs/adr/` with a README row on acceptance.
+
+- 2026-11-06 — Architect -> SDE: ADR 0054 draft written in `adrs/` with nine amendments from the ACP v1/v2 schemas and the tree; operator accepted D3, D6, engine v2 for fresh homes, 1.2.0, one ledger file; feature opened on branch `acp-governor` (app worktree); Implementation starts at B0.
 
 - 2026-10-22 — CTO -> Architect + Staff: ADR drafts 0052 (P0) and 0053 (P1) written in `adrs/`; Planning folded into the local executor plan; Implementation of P0 started on `p0-policy-registry-harness`.
 

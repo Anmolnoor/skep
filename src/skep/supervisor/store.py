@@ -841,6 +841,7 @@ class RunStore:
         # readers (a concurrent `skep status`, in another process) non-blocking, and
         # busy_timeout makes a cross-process writer wait its turn instead of raising.
         self._lock = threading.RLock()
+        fresh = not db_path.exists()  # before connect: the connect creates the file
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
@@ -851,6 +852,12 @@ class RunStore:
         ).fetchone()[0]
         self._conn.executescript(_SCHEMA)
         self._migrate(rebuild_chat_fts=chat_fts_is_new)
+        if fresh:
+            # ADR 0054 A6/D8: a home that never existed starts with shell+filesystem on engine v2
+            self._conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
+                ("policy_engine_v2_scopes", json.dumps(["filesystem", "shell"]), _now()),
+            )
         self._conn.commit()
 
     def _migrate(self, *, rebuild_chat_fts: bool = False) -> None:

@@ -236,6 +236,7 @@ skep policy rsop REPO
 skep policy why  REPO SCOPE ACTION VALUE
 skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME]
 skep policy hook [--actor NAME]
+skep policy decisions [--actor GLOB] [--since ISO] [--limit N]
 ```
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
@@ -250,7 +251,54 @@ names the rule that decided it (ADR 0052, read-only). `policy decide` is
 the same question asked by an outside agent and RECORDED in
 `<home>/supervisor/audit/policy/decisions.jsonl`; `policy hook` is its
 Claude Code PreToolUse face (payload on stdin, verdict as hook JSON — see
-`docs/policy-hook.md`, ADR 0053 P3).
+`docs/policy-hook.md`, ADR 0053 P3). `policy decisions` reads that ledger
+back, newest first, with counts per verdict and per note source (`observed`,
+`forwarded`); `--actor` is a glob, `--since` a time or bare-date floor
+(also `GET /api/policy/decisions` and the chat `policy_decisions` tool).
+
+## skep acp
+
+```sh
+skep acp govern [--repo PATH] [--actor NAME] -- AGENT_ARGV...
+skep acp doctor -- AGENT_ARGV...
+skep acp install-hint
+```
+
+`acp govern` is the process an ACP client (T3 Code, Zed, …) spawns in place
+of the agent (ADR 0054). It relays every JSON-RPC line unchanged except the
+agent's `session/request_permission`, which it answers from `policy decide`
+— `allow` selects the agent's `allow_once` option, an explicit or floor deny
+selects `reject_once`; `require_approval`, an unmatched action, or anything
+skep cannot read is forwarded to the human behind the client. It never
+selects an "always" option. Every decision, every tool call the agent ran
+unasked (`source: observed`) and every answer the human gave
+(`source: forwarded`) lands in `decisions.jsonl`. The session is decided
+against `session/new`'s `cwd` unless `--repo` names the checkout;
+`--actor` replaces the ledger actor (default `acp:<agent>`). It reads the
+home directly — `skep serve` need not run; an unreadable store forwards
+every ask with the reason. See what the governed agents did:
+`skep policy decisions --actor 'acp:*'`.
+
+At startup it prints one line to stderr, e.g.
+`skep acp: governing claude-agent-acp (ACP v2) — rings: advisory — home …`.
+**advisory** is the permission ask — decided only when the agent's own mode
+chooses to ask. **hard** appears only on ACP v1 when the client advertised
+`fs.writeTextFile` or `terminal`: the agent's `terminal/create` and
+`fs/write_text_file` then pass only on `allow`; anything else is refused with
+a JSON-RPC error, because that hop has no human to forward to.
+
+`acp doctor` sends `initialize` and a dry `session/new` (never a prompt) and
+prints the agent's name and version, the mapper preset it gets, the modes it
+advertises with the default marked, the rings, and a WARNING when the
+default mode never asks (`auto`, `agent`, `agent-full-access`,
+`bypassPermissions`).
+
+`acp install-hint` prints what to paste into T3 Code's Settings → Providers →
+Add provider → Show more → Local ACP command dialog, for claude-agent-acp and
+codex-acp: the absolute path of `skep` (T3 launches it with no shell and no
+PATH lookup) and one argument per row — `acp`, `govern`, `--`, `npx`,
+`-y`, `@agentclientprotocol/<adapter>`. See
+[`acp-governor.md`](acp-governor.md).
 
 ## Memory
 
