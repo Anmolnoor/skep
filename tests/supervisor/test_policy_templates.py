@@ -433,3 +433,66 @@ def test_explain_on_three_faces_says_the_same_words(
     finally:
         store.close()
     assert chat == view
+
+
+# --- T1: the door a hand-written layer comes through ----------------------------
+
+
+def _builder_with(mutate: Any) -> dict[str, Any]:
+    layer = load_policy_template("builder").model_dump(mode="json")
+    mutate(layer)
+    return layer
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda d: d["settings"].update(frobnicate=True), "unknown knob 'frobnicate'"),
+        (
+            lambda d: d["settings"]["allowed_shell_commands"].append(["sudo", "make"]),
+            "sudo make",
+        ),
+        (
+            lambda d: d["rules"].append(
+                {"scope": "shell", "verdict": "allow", "action": "edit", "rule_id": "x"}
+            ),
+            "scope 'shell' has no action 'edit'",
+        ),
+        (lambda d: d["rules"].append(dict(d["rules"][0])), "repeats a rule_id"),
+    ],
+    ids=["unknown-knob", "floor-prefix-in-a-knob", "action-outside-scope", "repeated-rule-id"],
+)
+def test_a_layer_file_outside_the_catalogue_is_refused_at_the_door(
+    mutate: Any, match: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D3: what `skep policy approve --file` accepts is a template — a knob the
+    registry lacks, a floor prefix smuggled in through the shell allowlist
+    knob (not a rule), an action its scope does not have, or a rule_id that
+    two rules share (the diff and `why` key on it) never reach the lock."""
+    layer = _builder_with(mutate)
+    with pytest.raises(ValueError, match=match):
+        type(load_policy_template("builder")).model_validate(layer)
+    path = tmp_path / "layer.json"
+    path.write_text(json.dumps(layer))
+    argv = ["--home", str(tmp_path), "policy", "approve", "--file", str(path), "--yes"]
+    assert main(argv) != 0
+    assert match in capsys.readouterr().err
+    assert not (build_config(tmp_path, None).home / "policy" / "baseline.json").exists()
+
+
+def test_a_shipped_file_must_name_itself_and_a_real_pack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A packaging slip (operator.json saved over builder.json, a renamed
+    pack) fails the load instead of locking the wrong template."""
+    from skep.supervisor import policy_templates
+
+    renamed = load_policy_template("operator").model_dump(mode="json")
+    packless = _builder_with(lambda d: d.update(pack="no-such-pack"))
+    monkeypatch.setattr(policy_templates, "TEMPLATES_DIR", tmp_path)
+    (tmp_path / "builder.json").write_text(json.dumps(renamed))
+    with pytest.raises(ValueError, match=r"builder\.json names itself 'operator'"):
+        load_policy_template("builder")
+    (tmp_path / "builder.json").write_text(json.dumps(packless))
+    with pytest.raises(ValueError, match="unknown pack 'no-such-pack'"):
+        load_policy_template("personal-dev")  # the alias takes the same door
