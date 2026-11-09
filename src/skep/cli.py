@@ -73,7 +73,7 @@ def _parser() -> argparse.ArgumentParser:
         "--template",
         default=None,
         metavar="NAME",
-        help="apply a policy template (locked-down, personal-dev, homelab-ops, assistant)",
+        help="apply a policy template (builder, operator, assistant)",
     )
     setup.add_argument(
         "--dry-run",
@@ -214,25 +214,25 @@ def _setup_template(args: argparse.Namespace) -> int:
         document_from_settings,
     )
     from .supervisor.policy_templates import (
-        derived_global_knobs,
+        deprecation_line,
         diff_resolved_views,
+        explain_view,
         load_policy_template,
-        render_policy_table,
         resolved_view,
     )
     from .supervisor.store import RunStore
 
     try:
-        document = load_policy_template(args.template)
+        template = load_policy_template(args.template)
+        explained = explain_view(args.template)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    if explained["deprecated_alias"]:
+        print(deprecation_line(explained["deprecated_alias"]), file=sys.stderr)
+    document = template.document()
     view = resolved_view(document)
-    print(
-        f"policy template: {document.template}"
-        + (f"  (pack: {document.pack})" if document.pack else "")
-    )
-    print(render_policy_table(view))
+    print(explained["table"])
     if args.dry_run:
         print("dry run — nothing written")
         return 0
@@ -250,13 +250,14 @@ def _setup_template(args: argparse.Namespace) -> int:
                 print("re-run with --apply to switch", file=sys.stderr)
                 return 1
         store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, document.model_dump_json())
-        # The legacy knobs the compiled run policy reads (F7) follow the
-        # template; machine-specific knobs (trusted roots, execution mode)
-        # stay the operator's.
+        # The template's knobs (O1: stated in the file, no longer derived from
+        # its rules) are written beside the document so the compiled run
+        # policy (F7) reflects the template too; machine-specific knobs
+        # (trusted roots, execution mode) stay the operator's.
         from .supervisor.serve.actions import update_policy
         from .supervisor.serve.settings import ConfigHolder
 
-        update_policy(store, ConfigHolder(config, store), derived_global_knobs(document))
+        update_policy(store, ConfigHolder(config, store), dict(template.settings))
     finally:
         store.close()
     print(f"applied template {document.template!r}")

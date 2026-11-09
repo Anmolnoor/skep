@@ -157,6 +157,17 @@ CHAT_ONLY: dict[str, str] = {
 }
 
 
+# first-run O1 (ADR 0056 D3, ADR 0050): READ verbs the AST gate above cannot
+# see — `_execute_mutation` is mutations only — that an ADR nonetheless
+# requires on all three faces. One shared function per verb; the CLI module,
+# the REST app and the chat read dispatcher must each call it by name.
+THREE_FACE_READS: dict[str, str] = {
+    "explain_view": "`skep policy explain` — a template, the baseline or a role as the "
+    "allow / ask / deny table (first-run O1)",
+}
+THREE_FACES: tuple[Path, ...] = (SUPERVISOR / "cli_cmds.py", SUPERVISOR / "serve/app.py", TOOLS)
+
+
 def _tools_tree() -> ast.Module:
     return ast.parse(TOOLS.read_text(encoding="utf-8"))
 
@@ -330,3 +341,16 @@ def test_a_verb_with_no_face_and_no_ruling_fails() -> None:
     calls = {"land_run": {"land_run"}, "frobnicate": {"frobnicate_the_repo"}}
     assert verbs_without_operator_face(calls, surface) == {"frobnicate"}
     assert not {"frobnicate"} & (set(CHAT_ONLY) | KNOWN_GAPS)
+
+
+def test_three_face_reads_are_called_from_cli_rest_and_chat() -> None:
+    """ADR 0050 for reads: `policy explain` ships on the CLI, `GET
+    /api/policy/explain` and the chat `policy_explain` tool, all landing on
+    `policy_templates.explain_view`. A face that drops the call fails here
+    naming the file."""
+    for function, why in THREE_FACE_READS.items():
+        assert len(why.strip()) >= 20, function
+        for face in THREE_FACES:
+            assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
+                f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
+            )

@@ -512,6 +512,17 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.get("/api/policy/explain")
+    def get_policy_explain(subject: str) -> dict[str, Any]:
+        """first-run O1 (ADR 0056 D3): a template, the baseline or a role as
+        the allow / ask / deny table — the CLI's `skep policy explain`."""
+        from ..policy_templates import explain_view
+
+        try:
+            return explain_view(subject)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/api/policy/decide")
     def post_policy_decide(body: PolicyDecideRequest) -> dict[str, Any]:
         """P3 (ADR 0053): decide() for an outside agent — the why-query,

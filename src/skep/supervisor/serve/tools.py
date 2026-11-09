@@ -375,6 +375,20 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
             "limit": {"type": "integer"},
         },
     ),
+    _tool(
+        "policy_explain",
+        "A policy template (builder, operator, assistant), the approved baseline "
+        "or a role as an allow / ask / deny table grouped by scope, with its "
+        "settings and the floor rows that no layer lifts. The same words "
+        "policy_why uses. Read-only.",
+        {
+            "subject": {
+                "type": "string",
+                "description": "a template name, 'baseline', or 'role:<name>'",
+            }
+        },
+        ["subject"],
+    ),
     _tool("list_templates", "Saved workflow templates (hand-authored and learned).", {}),
     _tool("list_skills", "Learned-skill candidates and skill-pack ladder states.", {}),
     _tool(
@@ -2201,6 +2215,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "policy_registry",
         "policy_rsop",
         "policy_why",
+        "policy_explain",
         "policy_decisions",
         "set_policy",
         "apply_policy_preset",
@@ -3072,6 +3087,10 @@ def execute_read_tool(
             str(args["action"]),
             str(args["value"]),
         )
+    if name == "policy_explain":
+        from ..policy_templates import explain_view
+
+        return explain_view(str(args["subject"]))
     if name == "policy_decisions":
         return actions.policy_decisions(
             holder.current.audit_dir,

@@ -2679,6 +2679,24 @@ def cmd_policy_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy_explain(args: argparse.Namespace) -> int:
+    """first-run O1 (ADR 0056 D3): a template, the baseline or a role as the
+    allow / ask / deny table — the words `why` uses, paste-ready. Floor rows
+    are dimmed on a TTY only, so a redirect or a paste stays plain text."""
+    from .policy_templates import deprecation_line, explain_view, is_floor_line
+
+    try:
+        view = explain_view(args.subject)
+    except ValueError as exc:
+        return _err(str(exc))
+    if view["deprecated_alias"]:
+        print(deprecation_line(view["deprecated_alias"]), file=sys.stderr)
+    dim = sys.stdout.isatty()
+    for line in view["table"].splitlines():
+        print(f"\x1b[2m{line}\x1b[0m" if dim and is_floor_line(line) else line)
+    return 0
+
+
 def cmd_policy_why(args: argparse.Namespace) -> int:
     """P0-3 (ADR 0052): would <scope>.<action> <value> be allowed in <repo>?"""
     from fastapi import HTTPException
@@ -3253,6 +3271,15 @@ def register_supervisor_commands(
     policy_why.add_argument("action")
     policy_why.add_argument("value")
     policy_why.set_defaults(func=cmd_policy_why)
+    policy_explain = policy_sub.add_parser(
+        "explain",
+        help="a template, the baseline or a role as an allow / ask / deny table (first-run O1)",
+    )
+    policy_explain.add_argument(
+        "subject",
+        help="a template name (builder, operator, assistant), `baseline`, or `role:<name>`",
+    )
+    policy_explain.set_defaults(func=cmd_policy_explain)
     policy_decide = policy_sub.add_parser(
         "decide", help="decide <scope>.<action> <value> for an outside agent and record it (P3)"
     )

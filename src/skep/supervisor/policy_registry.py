@@ -98,6 +98,10 @@ def _knob(
 
 
 _PROJECT_LAYERS = ("global", "phase", "group", "project", "dispatch")
+# first-run O1 (ADR 0056 D3): the two knobs a policy template carries beside
+# its rules — the egress hosts and the shell prefixes its allow rules name.
+# O2 populates the `template` slot from the approved file and enforces them.
+_TEMPLATE_PROJECT_LAYERS = ("global", "template", "phase", "group", "project", "dispatch")
 _RAMP_LAYERS = ("global", "phase", "project")
 
 # --- run-policy knobs (policy_view globals + PROJECT_POLICY_KEYS) -------------
@@ -107,7 +111,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         scope="network",
         type="list[str]",
         default=[],
-        layers=_PROJECT_LAYERS,
+        layers=_TEMPLATE_PROJECT_LAYERS,
         invariant="I12",
         doc="hosts a worker may reach; [] denies all but the provider, ['*'] allows all; "
         "lists union across layers; enforced by the filtering proxy or the sandbox",
@@ -171,7 +175,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         scope="shell",
         type="list[argv]",
         default=[],
-        layers=("global", "group", "project"),
+        layers=("global", "template", "group", "project"),
         invariant="I4",
         doc="argv prefixes a worker may run without a card; remote-git and sudo prefixes "
         "are refused at every write (dangerous_prefix_reason) and filtered on every read",
