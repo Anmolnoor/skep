@@ -255,7 +255,9 @@ genuinely, I want to compare notes.
 ## Documentation
 
 The curated index lives at [`docs/README.md`](docs/README.md) — start with
-[`docs/quickstart.md`](docs/quickstart.md). Worker adapters and the custom
+[`docs/quickstart.md`](docs/quickstart.md). For agents: [`SKILL.md`](SKILL.md) teaches an agent
+to install and operate skep, and [`docs/agent-guide.md`](docs/agent-guide.md)
+how to explain it to a human. Worker adapters and the custom
 worker contract are in [`docs/workers.md`](docs/workers.md); verification
 semantics in [`docs/verification.md`](docs/verification.md); sandbox
 backends in [`docs/sandboxing.md`](docs/sandboxing.md); configuration in
