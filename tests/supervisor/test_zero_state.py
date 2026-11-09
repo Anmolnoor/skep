@@ -19,7 +19,7 @@ import pytest
 
 from skep.cli import main
 from skep.status import NO_BASELINE_WARNING, build_status
-from skep.supervisor import RunStore
+from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.onboard import STATE_FILE, onboard_check
 from skep.supervisor.policy_layers import zero_state_home
@@ -28,6 +28,7 @@ from skep.supervisor.serve.actions import policy_decide, policy_why
 from skep.supervisor.serve.settings import ConfigHolder
 
 from ..fixtures.acp import ACP_DIR, envelope_frames
+from .conftest import serve_client
 from .test_acp_govern import FAKE, _demo_home, _ledger
 
 ASK_FIXTURE = ACP_DIR / "claude-agent-acp" / "live-v1-ask.ndjson"
@@ -199,3 +200,90 @@ def test_onboard_check_wants_every_scope_routed(tmp_path: Path) -> None:
     probe = onboard_check(supervisor)["checks"]["engine v2"]
     assert probe["status"] == "blocked"
     assert probe["detail"].endswith("not routed (engine v1): coding, network, mcp, email, browse")
+
+
+# --- T1: the zero state's edges ---------------------------------------------------
+
+
+def test_skepd_on_a_fresh_home_answers_no_baseline_and_cards_nothing(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """The REST face and serve startup: the zero state is an answer, not an
+    alarm — no tamper card, no ledger row, until something is approved."""
+    from skep.supervisor import policy_baseline as pb
+
+    decide = {"scope": "shell", "action": "run", "value": "ls", "repo": str(repo)}
+    with serve_client(config, start_ticker=False) as client:
+        answer = client.post("/api/policy/decide", json=decide).json()
+        assert (answer["verdict"], answer["rule_id"], answer["source"]) == (
+            "require_approval",
+            "no_baseline",
+            "baseline",
+        )
+        assert client.get("/api/policy/baseline").json()["state"] == "none"
+    store = RunStore(config.db_path)
+    try:
+        assert [c for c in store.list_chats() if c.source == "policy"] == []
+    finally:
+        store.close()
+    assert not pb.ledger_path(config.home).exists()
+
+
+def test_no_baseline_asks_on_the_hard_ring_where_a_tampered_one_denies(tmp_path: Path) -> None:
+    """Nothing approved yet is unreadable, not hostile (I9): even the hard
+    ring records an ask. A baseline that stopped verifying is the hostile
+    case, and there the hard ring denies."""
+    home, repo = _demo_home(tmp_path, fresh=True)
+
+    def hard() -> dict[str, Any]:
+        config = build_config(home, None)
+        store = RunStore(config.db_path)
+        try:
+            return policy_decide(
+                ConfigHolder(config, store), store, scope="shell", action="run",
+                value="pnpm test", repo=str(repo), ring="hard",
+            )  # fmt: skip
+        finally:
+            store.close()
+
+    assert (hard()["verdict"], hard()["rule_id"]) == ("require_approval", "no_baseline")
+    assert main(["--home", str(home), "policy", "approve", "--template", "builder", "--yes"]) == 0
+    assert hard()["verdict"] == "allow"
+    (build_config(home, None).home / "policy" / "baseline.lock").unlink()  # Missing = tampered
+    assert (hard()["verdict"], hard()["rule_id"]) == ("deny", "baseline_tampered")
+
+
+def test_a_tampered_baseline_binds_every_scope_on_any_home(tmp_path: Path) -> None:
+    """Unlike no_baseline (v2 scopes, zero-state homes), baseline_tampered
+    binds scopes still routed to engine v1, on a home that predates O5 too:
+    approving a baseline opts the home into its lock."""
+    home, repo = _demo_home(tmp_path)  # predates O5: the zero state never bound
+    assert main(["--home", str(home), "policy", "approve", "--template", "builder", "--yes"]) == 0
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        store.set_setting("policy_engine_v2_scopes", ["shell"])
+    finally:
+        store.close()
+    (build_config(home, None).home / "policy" / "baseline.lock").unlink()
+    assert _operator(home, "network", "search", "ddgs") == "baseline_tampered"  # a v1 scope
+    assert _decide(home, "pnpm test", repo)["rule_id"] == "baseline_tampered"
+
+
+def test_install_hint_on_a_tampered_baseline_says_so(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    assert main(["--home", str(home), "policy", "approve", "--template", "builder", "--yes"]) == 0
+    (build_config(home, None).home / "policy" / "baseline.lock").unlink()
+    capsys.readouterr()
+    assert main(["--home", str(home), "acp", "install-hint"]) == 0
+    first = capsys.readouterr().out.splitlines()[0]
+    assert first.startswith("baseline: TAMPERED since ")
+
+
+def test_doctor_on_a_home_with_no_store_does_not_create_one(tmp_path: Path) -> None:
+    """Opening a store creates and seeds it as fresh — a probe must not turn
+    a home it only looked at into a zero-state home."""
+    home = tmp_path / "home"
+    assert NO_BASELINE_WARNING not in build_status(home, provider_timeout=0.01)["advisories"]
+    assert not build_config(home, None).db_path.exists()
