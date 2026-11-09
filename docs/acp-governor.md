@@ -10,9 +10,16 @@ skep's decision ledger (ADR 0054).
 
 ## Install
 
+The Air smoke — a new machine, this doc alone:
+
 ```sh
-pipx install skep && skep onboard --template builder
+pipx install skep && skep onboard --template builder --yes
+skep acp install-hint
 ```
+
+A fresh install asks for everything (`ask`, reason `no_baseline`) until a
+baseline is approved; a home from an earlier skep keeps deciding as before,
+and `skep doctor` says how to approve one.
 
 On Debian/Ubuntu (PEP 668, an "externally managed" system Python) use
 `pipx` or `uv tool install skep` — never `pip install` into the system
@@ -49,9 +56,13 @@ Do the same with `npx -y @agentclientprotocol/codex-acp`.
 Settings → Providers → Add provider → Show more → **Local ACP command**.
 The dialog takes an executable plus one literal argument per row, and T3
 launches it directly — no shell, no PATH lookup — so the executable must be
-an absolute path. `skep acp install-hint` prints exactly what to paste:
+an absolute path. `skep acp install-hint` prints exactly what to paste,
+under one line naming the baseline the governor answers from (or, with none
+approved, `run skep onboard first — the governor answers from an approved
+baseline`):
 
 ```
+baseline: builder approved 2026-11-09T12:00:00Z sha256 0123456789ab
 Local ACP command — claude-agent-acp
   executable: /absolute/path/to/skep
   arguments, one row each:
