@@ -164,6 +164,8 @@ CHAT_ONLY: dict[str, str] = {
 THREE_FACE_READS: dict[str, str] = {
     "explain_view": "`skep policy explain` — a template, the baseline or a role as the "
     "allow / ask / deny table (first-run O1)",
+    "presence_view": "`skep agents`, `GET /api/agents` and the chat `list_agents` tool — "
+    "which coding agents run here and which skep governs (first-run L1)",
 }
 THREE_FACE_VERBS: dict[str, str] = {
     "approve_policy_baseline": "`skep policy approve`, `POST /api/policy/baseline/approve` "

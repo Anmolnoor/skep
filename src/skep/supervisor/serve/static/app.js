@@ -3891,8 +3891,28 @@ function buildRunCard(run) {
       autonomy !== "-" ? el("span", { class: "run-card-autonomy mono" }, autonomy) : null));
 }
 
+// first-run L1: coding agents on this machine, governed or not — the same
+// presence_view as `skep agents` and the Queen's list_agents. Blocked and
+// ungoverned is the gap: an agent waiting on a prompt skep does not gate.
+async function buildAgentsSection() {
+  let view;
+  try { view = await api("GET", "/api/agents"); } catch { return null; }
+  if (!view.agents.length) return null;
+  return el("section", { class: "run-group" },
+    el("div", { class: "run-group-header" },
+      el("h3", {}, "Agents on this machine"),
+      el("span", { class: "run-group-count" }, String(view.agents.length))),
+    el("p", { class: "run-card-summary" }, view.summary),
+    el("ul", {}, view.agents.map(a => el("li", { class: "mono" },
+      `${a.agent} · pid ${a.pid} · ${a.state} · `,
+      a.governed ? `governed run ${a.task_id || "?"}${a.role ? ` (${a.role})` : ""}` : "ungoverned",
+      a.gap ? el("strong", {}, " — blocked and ungoverned") : null))));
+}
+
 async function viewRuns(main) {
   header(main, "Runs", "Everything the hive has done, newest first.");
+  const agents = await buildAgentsSection();
+  if (agents) main.append(agents);
   const { runs } = await api("GET", "/api/runs?limit=100");
   if (!runs.length) { main.append(el("p", { class: "empty-state" }, "No runs yet — assign one.")); return; }
   const cards = el("div", { class: "run-cards" });

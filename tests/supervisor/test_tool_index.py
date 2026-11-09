@@ -178,16 +178,21 @@ def test_the_fresh_chat_floor_is_measured_under_24kb(
     verb the Queen cannot reach is a verb it cannot explain a gate with). Their
     glosses were cut to the first-sentence budget first (20 chars paid); the
     three index lines still cost 190 chars and land the floor at 24.6KB. The
-    pin moves 24.5KB → 25KB, 2.5KB below where v99 found it."""
+    pin moves 24.5KB → 25KB, 2.5KB below where v99 found it.
+    L1 re-measured after R3 (which paid its own way to ~24,997): list_agents
+    is the Queen's only answer to "what agents are running and which are
+    governed" (the L1 gate). Its description was cut first, but an index line
+    costs ~16 chars even with no gloss, so the floor lands at ~25,055. The pin
+    moves 25KB → 25.1KB, 2.4KB below where v99 found it."""
     client = configured_client(config, ollama)
     chat_id = client.post("/api/chats", json={}).json()["chat_id"]
     ollama.script_reply("hello")
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
     body = ollama.chat_bodies()[0]
     floor = len(body["messages"][0]["content"]) + len(json.dumps(body["tools"]))
-    assert floor <= 25_000
+    assert floor <= 25_100
     context = client.get(f"/api/chats/{chat_id}").json()["context"]
-    assert context["floor_chars"] <= 25_000
+    assert context["floor_chars"] <= 25_100
 
 
 def test_describe_tools_activates_and_the_next_round_advertises(

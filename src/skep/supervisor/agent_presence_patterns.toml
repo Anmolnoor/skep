@@ -1,0 +1,280 @@
+# Agent-presence detection patterns — DATA ONLY (first-run L1).
+#
+# Source:  https://github.com/herdrdev/herdr (formerly ogulcancelik/herdr)
+# Commit:  ee5bfb5041bb3e4a49d591c72308aae3c81ecdde (read 2026-11-09)
+# Files:   src/detect/mod.rs (lookup_agent: process names / aliases)
+#          src/detect/manifests/*.toml (state rules)
+# License: Apache License 2.0 — full text beside this file in LICENSE-herdr.txt
+#          (copied verbatim from herdr's LICENSE at that commit). herdr ships
+#          no NOTICE file at that commit; attribution is in skep's NOTICE.
+#
+# Modified from the source: only process names and literal output substrings
+# were taken, lower-cased and flattened to "all of these substrings appear in
+# the output tail" groups. herdr's rule engine (screen regions, priorities,
+# regex and negation clauses, OSC titles) was NOT ported — no herdr code is in
+# skep. A few substrings were lifted out of herdr regexes (e.g. Claude's
+# "esc to interrupt"); they are marked inline.
+#
+# Shape, one [[agents]] table per agent:
+#   id       herdr's agent label
+#   names    executable basenames that identify the agent in `ps`
+#   blocked  groups — any group whose substrings ALL appear => blocked
+#   working  groups — checked only when no blocked group matched
+# No group matched => idle.
+
+[[agents]]
+id = "claude"
+names = ["claude", "claude-code"]
+blocked = [
+  ["do you want to proceed?", "esc to cancel"],
+  ["do you want to proceed?", "bash command"],
+  ["do you want to proceed?", "tab to amend"],
+  ["run a dynamic workflow?", "esc to cancel"],
+  ["waiting for permission"],
+  ["do you want to allow this connection?"],
+  ["ctrl+e to explain"],
+]
+working = [
+  ["esc to interrupt"],  # from herdr's live_turn_working line_regex
+  ["background agents to finish"],  # from background_agents_working
+]
+
+[[agents]]
+id = "codex"
+names = ["codex"]
+blocked = [
+  ["press enter to confirm or esc to cancel"],
+  ["enter to submit answer"],
+  ["enter to submit all"],
+  ["allow command?"],
+  ["do you trust the contents of this directory?"],
+  ["[y/n]"],
+  ["yes (y)"],
+]
+working = [
+  [" to interrupt)"],
+]
+
+[[agents]]
+id = "gemini"
+names = ["gemini"]
+blocked = [
+  ["│ apply this change"],
+  ["│ allow execution"],
+]
+working = [
+  ["esc to cancel"],
+]
+
+[[agents]]
+id = "cursor"
+names = ["cursor-agent", "cursor"]
+blocked = [
+  ["write to this file?", "proceed (y)"],
+  ["(y) (enter)"],
+  ["keep (n)"],
+  ["skip (esc or n)"],
+]
+working = [
+  ["ctrl+c to stop"],
+]
+
+[[agents]]
+id = "devin"
+names = ["devin", "devin-cli"]
+blocked = [
+  ["do you trust the authors of this directory?", "yes, trust "],
+  ["approve once", "select", "confirm", "esc cancel"],
+]
+working = [
+  ["running tools", "esc to interrupt"],
+  ["guide devin while it works"],
+]
+
+[[agents]]
+id = "agy"
+names = ["agy", "antigravity", "antigravity-cli"]
+blocked = [
+  ["navigate", "tab amend"],
+  ["navigate", "esc skip"],
+  ["do you trust the contents of this project?", "yes, i trust this folder"],
+  ["requesting permission for:", "do you want to proceed?"],
+]
+working = []
+
+[[agents]]
+id = "cline"
+names = ["cline"]
+blocked = [
+  ["let cline use this tool"],
+  ["execute command?", "yes"],
+  ["use this tool?", "yes"],
+  ["cline needs permission", "approve tool call?"],
+]
+working = [
+  ["thinking... (esc to cancel)"],
+]
+
+[[agents]]
+id = "opencode"
+names = ["opencode", "opencode2", "open-code"]
+blocked = [
+  ["△ permission required"],
+]
+working = [
+  ["esc to interrupt"],
+  ["ctrl+c to interrupt"],
+]
+
+[[agents]]
+id = "copilot"
+names = ["copilot", "github-copilot", "ghcs"]
+blocked = []
+working = [
+  ["esc to cancel"],
+  ["esc cancel"],
+  ["esc interrupt"],
+]
+
+[[agents]]
+id = "kimi"
+names = ["kimi", "kimi-code"]
+blocked = [
+  ["↵ confirm", "run this command?"],
+  ["↵ confirm", "write this file?"],
+  ["↵ confirm", "apply these edits?"],
+  ["requesting approval", "reject", "approve once"],
+]
+working = []
+
+[[agents]]
+id = "kiro"
+names = ["kiro", "kiro-cli"]
+blocked = [
+  ["tool approval", "approve all pending"],
+  ["to navigate", "to submit", "esc to cancel"],
+]
+working = [
+  ["kiro is working"],
+]
+
+[[agents]]
+id = "droid"
+names = ["droid"]
+blocked = [
+  ["enter to select", "esc to cancel", "↑↓ to navigate"],
+  ["enter select", "esc cancel", "↑↓ navigate"],
+  ["enter select", "esc cancel", "↑/↓ navigate"],
+]
+working = [
+  ["esc to stop"],
+]
+
+[[agents]]
+id = "amp"
+names = ["amp", "amp-local"]
+blocked = [
+  ["waiting for approval"],
+  ["run this command?"],
+  ["allow editing file:"],
+  ["allow creating file:"],
+  ["confirm tool call"],
+]
+working = [
+  ["esc to cancel"],
+]
+
+[[agents]]
+id = "grok"
+names = ["grok", "grok-build"]
+blocked = [
+  [":select", "ctrl+o:yolo", "ctrl+c:cancel"],
+  ["yes, proceed", "no, reject"],
+]
+working = [
+  ["ctrl+.:shortcuts", "esc:cancel"],
+]
+
+[[agents]]
+id = "hermes"
+names = ["hermes", "hermes-agent"]
+blocked = [
+  ["hermes needs your"],
+  ["allow once", "deny"],
+  ["sudo password"],
+]
+working = [
+  ["ctrl+c to interrupt"],
+  ["ctrl+c cancel"],
+]
+
+[[agents]]
+id = "kilo"
+names = ["kilo", "kilo-code"]
+blocked = [
+  ["△ permission required"],
+]
+working = [
+  ["esc interrupt"],
+]
+
+[[agents]]
+id = "qodercli"
+names = ["qodercli", "qoderclicn", "qoder", "qodercn"]
+blocked = [
+  ["permission required"],
+  ["allow once or always?"],
+  ["enter your response"],
+  ["shell awaiting input"],
+]
+working = [
+  ["(esc to cancel,"],
+]
+
+[[agents]]
+id = "qwen"
+names = ["qwen", "qwen-code"]
+blocked = [
+  ["waiting for user confirmation..."],
+  ["yes, allow once", "allow execution of:"],
+  ["yes, allow once", "apply this change?"],
+  ["do you trust this folder?", "trust folder ("],
+]
+working = []
+
+[[agents]]
+id = "letta"
+names = ["letta", "letta-code"]
+blocked = [
+  ["run this command?", "enter to select · esc to cancel"],
+]
+working = []
+
+[[agents]]
+id = "maki"
+names = ["maki"]
+blocked = [
+  ["permission required", "y allow", "n deny"],
+  ["plan complete", "enter confirm"],
+]
+working = []
+
+[[agents]]
+id = "muse"
+names = ["muse", "muse-code", "muse-cli"]
+blocked = [
+  ["do you trust this workspace?", "trust and continue"],
+  ["allow once", "allow for this session"],
+  ["yes, proceed", "yes, don't ask again this session"],
+]
+working = [
+  ["esc to interrupt"],
+]
+
+[[agents]]
+id = "pi"
+names = ["pi"]
+blocked = []
+working = [
+  ["working..."],
+]

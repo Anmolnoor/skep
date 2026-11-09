@@ -512,6 +512,13 @@ def create_app(
             "runs": [run_summary_view(run_store, r) for r in run_store.recent_runs(min(limit, 500))]
         }
 
+    @app.get("/api/agents")
+    def list_agents() -> dict[str, Any]:
+        """first-run L1: the agent-presence table — the CLI's `skep agents`."""
+        from ..agent_presence import presence_view
+
+        return presence_view(run_store, holder.current.audit_dir)
+
     @app.post("/api/runs", status_code=202)
     def create_run(body: RunRequest) -> dict[str, str]:
         # v109-F6: same helper, same line as the chat face — a resumable prior

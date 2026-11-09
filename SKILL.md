@@ -96,6 +96,7 @@ human told you to.
 | would this be allowed? | `policy_why` | `skep policy why <repo> <scope> <action> <value>` |
 | show a policy as a table | `policy_explain` | `skep policy explain <subject>` |
 | the decisions ledger | `policy_decisions` | `skep policy decisions` |
+| which agents run, governed or not | `list_agents` | `skep agents` |
 
 `skep review <task_id>` with no flag shows the patch and evidence.
 `--approve` lands on a new branch `skep/<task_id>`, never the default branch.

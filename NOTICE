@@ -1,1 +1,2 @@
 t3code — Copyright (c) 2026 T3 Tools Inc. — MIT — recorded ACP transcripts under tests/fixtures/acp/, license text in tests/fixtures/acp/LICENSE-t3code.txt
+herdr — https://github.com/herdrdev/herdr — Apache-2.0 — agent process names and output patterns (data only, no code) in src/skep/supervisor/agent_presence_patterns.toml, read at commit ee5bfb5041bb3e4a49d591c72308aae3c81ecdde; license text in src/skep/supervisor/LICENSE-herdr.txt; herdr ships no NOTICE file

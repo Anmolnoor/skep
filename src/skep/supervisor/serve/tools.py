@@ -319,6 +319,12 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         {"limit": {"type": "integer", "description": "max runs to return (default 10)"}},
     ),
     _tool(
+        "list_agents",
+        "Coding agents running now (Claude Code, Codex, ...): working/idle/"
+        "blocked, and whether skep governs each (run, role).",
+        {},
+    ),
+    _tool(
         "get_run",
         "One run in detail: state transitions, commands, approvals, verification.",
         {"task_id": {"type": "string"}},
@@ -2212,6 +2218,7 @@ CORE_TOOL_NAMES = frozenset(
 TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "runs": (
         "list_runs",
+        "list_agents",
         "get_run",
         "list_approvals",
         "await_runs",
@@ -3408,6 +3415,10 @@ def execute_read_tool(
                 for record in records
             ]
         }
+    if name == "list_agents":
+        from ..agent_presence import presence_view
+
+        return presence_view(store, holder.current.audit_dir)
     if name == "list_processes":
         from . import processes
 

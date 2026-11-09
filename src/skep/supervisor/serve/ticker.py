@@ -74,6 +74,8 @@ class Ticker(threading.Thread):
         # pushes. In-memory on purpose: a restart re-alarms only while the
         # provider is STILL down — a fresh reminder, not a duplicate.
         self._provider_ok: dict[str, bool] = {}
+        # first-run L1: pids last seen blocked, for once-per-transition pushes.
+        self._presence_blocked: set[int] = set()
 
     def _interval(self) -> float:
         value = self._store.get_setting(TICKER_INTERVAL_SECONDS)
@@ -193,6 +195,31 @@ class Ticker(threading.Thread):
         else:  # no messenger has ever bound a chat — the durable note is the record
             self._store.create_note(text, actor="provider-health")
 
+    def _push_presence_blocked(self) -> None:
+        """first-run L1: an agent turning ``blocked`` is "come to me" news, so
+        it rides the gate's channel — a chat line plus the outbound push with
+        ``kind='action_needed'`` (what notification_level=approvals lets
+        through) — once per transition, never per tick (I8). A governed
+        agent's line lands in the chat that dispatched its run; any other in
+        the newest messenger chat. No chat to speak in → the presence row is
+        the record."""
+        from ..agent_presence import blocked_line, presence_view
+
+        rows = presence_view(self._store, self._holder.current.audit_dir)["agents"]
+        blocked = {row["pid"]: row for row in rows if row["state"] == "blocked"}
+        for pid, row in blocked.items():
+            if pid in self._presence_blocked:
+                continue
+            chat_id = (
+                self._store.chat_for_task(row["task_id"]) if row["task_id"] else None
+            ) or self._store.latest_channel_chat()
+            if chat_id is None:
+                continue
+            text = blocked_line(row)
+            self._store.add_chat_message(chat_id, role="assistant", content=text)
+            self._notify(chat_id, text, kind="action_needed")
+        self._presence_blocked = set(blocked)
+
     def _prompt_turn(self) -> Callable[..., tuple[str, bool]] | None:
         """v83-F5: the run_due hook for 'prompt' schedules — a read-only Queen
         turn in the bound chat. Lazy import keeps the core scheduler
@@ -232,6 +259,10 @@ class Ticker(threading.Thread):
                 self._probe_provider_health()
             except Exception:
                 logger.exception("provider health sweep failed")
+            try:
+                self._push_presence_blocked()
+            except Exception:
+                logger.exception("agent presence sweep failed")
             try:
                 # v71-F5: observations expire on the tick — the fluid memory
                 # lane earns its no-proposal write by never outliving its TTL.
