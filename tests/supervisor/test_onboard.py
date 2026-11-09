@@ -15,6 +15,7 @@ import pytest
 from skep.cli import main
 from skep.supervisor import RunStore, sandbox
 from skep.supervisor.cli_cmds import build_config
+from skep.supervisor.config import SupervisorConfig
 from skep.supervisor.onboard import (
     baseline_candidate,
     onboard_model,
@@ -29,6 +30,7 @@ from skep.supervisor.projects import list_projects
 from skep.supervisor.serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL
 from skep.supervisor.serve.settings import SANDBOX_BACKEND, ConfigHolder
 
+from .conftest import serve_client
 from .fake_ollama import FakeOllama
 
 
@@ -53,7 +55,7 @@ def _unlock(home: Path) -> None:
 def test_the_five_steps_leave_a_governed_home(tmp_path: Path) -> None:
     home, work = tmp_path / "home", tmp_path / "work"
     with _holder(home) as (holder, store):
-        assert onboard_status(home)["next"] == "model"
+        assert onboard_status(home / "supervisor")["next"] == "model"
         onboard_model(holder, store, provider="mock", model="stub")
         workdir = onboard_workdir(holder, store, path=str(work))
         sandboxed = onboard_sandbox(holder, store, backend="none")
@@ -62,7 +64,7 @@ def test_the_five_steps_leave_a_governed_home(tmp_path: Path) -> None:
         assert store.get_setting(SANDBOX_BACKEND) == "none"
         assert [p.project_id for p in list_projects(store)] == ["work"]
 
-    status = onboard_status(home)
+    status = onboard_status(home / "supervisor")
     assert status["next"] is None and status["done"]
     assert workdir["created"] and (work / ".git").is_dir()
     assert "builder` asks on every write" in sandboxed["rings"]
@@ -95,12 +97,12 @@ def test_a_tampered_baseline_sends_onboard_back_to_the_template_step(tmp_path: P
         onboard_workdir(holder, store, path=str(tmp_path / "w"))
         onboard_sandbox(holder, store, backend="none")
         onboard_template(holder, template="assistant", approved_by="tester")
-        assert onboard_status(home)["next"] == "role"
+        assert onboard_status(home / "supervisor")["next"] == "role"
         _unlock(home)
-        assert onboard_status(home)["next"] == "template"
+        assert onboard_status(home / "supervisor")["next"] == "template"
         # re-running the step re-locks (the reapprove path), and resumes
         onboard_template(holder, template="assistant", approved_by="tester")
-        assert onboard_status(home)["next"] == "role"
+        assert onboard_status(home / "supervisor")["next"] == "role"
 
 
 def test_the_sandbox_step_refuses_what_this_host_cannot_run(tmp_path: Path) -> None:
@@ -137,7 +139,7 @@ def test_the_model_step_makes_a_test_call_and_says_where_prompts_go(tmp_path: Pa
             onboard_model(
                 holder, store, provider="ollama", model="llama3.2", endpoint=fake.base_url
             )
-        assert onboard_status(tmp_path / "home2")["next"] == "model"
+        assert onboard_status(tmp_path / "home2" / "supervisor")["next"] == "model"
     finally:
         fake.stop()
 
@@ -186,7 +188,7 @@ def test_interactive_onboard_resumes_after_an_interrupt(
     assert prompts[-1] == "type yes to lock this as the policy baseline: "
     out = capsys.readouterr().out
     assert "policy template: assistant" in out  # all three explain tables shown first
-    assert onboard.onboard_status(home)["next"] == "template"
+    assert onboard.onboard_status(home / "supervisor")["next"] == "template"
 
     resume = ["--home", str(home), "onboard", "--template", "builder", "--yes", "--no-chat"]
     assert main(resume) == 0
@@ -195,7 +197,7 @@ def test_interactive_onboard_resumes_after_an_interrupt(
     assert f"② work directory: done — {work.resolve()}" in out
     assert "③ sandbox: done — none" in out
     assert "baseline locked: builder" in out
-    assert onboard.onboard_status(home)["done"]
+    assert onboard.onboard_status(home / "supervisor")["done"]
 
 
 def _onboard_flags(home: Path, workdir: Path) -> list[str]:
@@ -251,6 +253,32 @@ def test_check_on_a_fresh_home_is_not_ready(
     out = capsys.readouterr().out
     assert "- baseline: blocked - none approved — run skep onboard" in out
     assert "- sandbox: blocked - not chosen" in out
+
+
+def test_the_rest_face_drives_the_same_steps(config: SupervisorConfig, tmp_path: Path) -> None:
+    """ADR 0050: the web /setup form posts to these routes; they call the
+    step functions, so the CLI sees the same records."""
+    client = serve_client(config)
+    assert client.get("/api/onboard").json()["next"] == "model"
+    post = client.post
+    assert post("/api/onboard/model", json={"provider": "mock", "model": "stub"}).status_code == 200
+    assert post("/api/onboard/workdir", json={"path": str(tmp_path / "w")}).status_code == 200
+    refused = post("/api/onboard/sandbox", json={"backend": "docker"})
+    assert refused.status_code == 400 and "no docker backend" in refused.json()["detail"]
+    assert post("/api/onboard/sandbox", json={"backend": "none"}).status_code == 200
+    preview = client.get("/api/onboard/template", params={"template": "builder"}).json()
+    assert "fs-workspace-unsandboxed" in preview["table"] and not preview["locked"]
+    locked = post(
+        "/api/onboard/template",
+        json={"template": "builder", "expect_sha256": preview["sha256"], "approved_by": "web"},
+    )
+    assert locked.status_code == 200
+    assert post("/api/onboard/role", json={"role": "builder"}).status_code == 200
+    assert post("/api/onboard/frobnicate", json={}).status_code == 404
+    assert client.get("/api/onboard").json()["done"] is True
+    check = client.get("/api/onboard/check").json()
+    assert check["ready"] is True and check["egress"][-1] == "telemetry: none"
+    assert onboard_status(config.home)["done"]
 
 
 def test_a_refused_typed_yes_locks_nothing(

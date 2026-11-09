@@ -229,6 +229,22 @@ class BaselineApproveRequest(BaseModel):
     approved_by: str = "api"
 
 
+class OnboardStepRequest(BaseModel):
+    """Body of ``POST /api/onboard/{step}`` (first-run O3): that step's answers,
+    the same ones `skep onboard` takes as flags. The key is an env-var NAME."""
+
+    provider: str | None = None
+    model: str | None = None
+    endpoint: str | None = None
+    api_key_env: str | None = None
+    path: str | None = None
+    backend: str | None = None
+    template: str | None = None
+    expect_sha256: str | None = None
+    role: str | None = None
+    approved_by: str = "api"
+
+
 class DefaultWorkspaceRequest(BaseModel):
     apply: bool = False
 
@@ -564,6 +580,68 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # first-run O3 (ADR 0056 D7, ADR 0050): the web /setup form is a thin face
+    # over `skep onboard`'s step functions — these routes call exactly them.
+    @app.get("/api/onboard")
+    def get_onboard() -> dict[str, Any]:
+        from .. import onboard
+
+        return onboard.onboard_status(holder.current.home)
+
+    @app.get("/api/onboard/check")
+    def get_onboard_check() -> dict[str, Any]:
+        from .. import onboard
+
+        return onboard.onboard_check(holder.current.home)
+
+    @app.get("/api/onboard/sandboxes")
+    def get_onboard_sandboxes() -> dict[str, Any]:
+        from .. import onboard
+
+        return onboard.detect_sandboxes()
+
+    @app.get("/api/onboard/template")
+    def get_onboard_template(template: str) -> dict[str, Any]:
+        from .. import onboard
+
+        try:
+            return onboard.template_preview(holder, template=template)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/onboard/{step}")
+    def post_onboard_step(step: str, body: OnboardStepRequest) -> dict[str, Any]:
+        from .. import onboard
+
+        try:
+            if step == "model":
+                return onboard.onboard_model(
+                    holder,
+                    run_store,
+                    provider=body.provider or "ollama",
+                    model=body.model or "",
+                    endpoint=body.endpoint,
+                    api_key_env=body.api_key_env,
+                )
+            if step == "workdir":
+                return onboard.onboard_workdir(holder, run_store, path=body.path or "")
+            if step == "sandbox":
+                return onboard.onboard_sandbox(holder, run_store, backend=body.backend or "")
+            if step == "template":
+                return onboard.onboard_template(
+                    holder,
+                    template=body.template or onboard.DEFAULT_TEMPLATE,
+                    approved_by=body.approved_by,
+                    expect_sha256=body.expect_sha256,
+                )
+            if step == "role":
+                return onboard.onboard_role(holder, role=body.role or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=404, detail=f"no onboard step {step!r}; steps: {', '.join(onboard.STEPS)}"
+        )
 
     @app.post("/api/policy/decide")
     def post_policy_decide(body: PolicyDecideRequest) -> dict[str, Any]:

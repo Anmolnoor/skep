@@ -1574,6 +1574,8 @@ async function viewSetup(main, setup) {
       ? el("p", { class: "note" }, `completed ${fmtTs(setup.completed_at)}`)
       : null));
 
+  main.append(await onboardCard());
+
   const llm = await api("GET", "/api/llm/config");
 
   const protocol = el("select", {},
@@ -1691,6 +1693,122 @@ async function viewSetup(main, setup) {
     } catch (e) { flash("bad", e.message); finish.disabled = false; }
   });
   main.append(el("div", { class: "actions" }, finish));
+}
+
+// first-run O3 (ADR 0056 D7): `skep onboard`'s five steps as a thin form over
+// the same step functions (POST /api/onboard/<step>). The CLI resumes from the
+// records these write, and the other way round.
+async function onboardCard() {
+  const { steps } = await api("GET", "/api/onboard");
+  const summaries = {
+    model: r => `${r.provider} ${r.model} — ${r.egress}`,
+    workdir: r => `${r.path} (project ${r.project_id})`,
+    sandbox: r => `${r.backend} — ${r.rings}`,
+    template: r => `${r.template} locked, sha256 ${String(r.sha256).slice(0, 12)}`,
+    role: r => r.role,
+  };
+  const state = name => el("p", { class: "note" },
+    steps[name] ? `done: ${summaries[name](steps[name])}` : "not done yet");
+  const field = (label, input) => el("div", { class: "field grow" }, el("label", {}, label), input);
+  const select = (values, value) => {
+    const node = el("select", {}, ...values.map(v => el("option", { value: v }, v)));
+    node.value = value;
+    return node;
+  };
+  const post = async (step, body, button) => {
+    button.disabled = true;
+    try {
+      await api("POST", `/api/onboard/${step}`, body);
+      flash("ok", `${step} recorded`);
+      route();
+    } catch (e) { flash("bad", e.message); button.disabled = false; }
+  };
+
+  const model = steps.model || {};
+  const provider = el("input", { value: model.provider || "ollama" });
+  const modelName = el("input", { value: model.model || "", placeholder: "e.g. qwen3:14b" });
+  const endpoint = el("input", { value: model.endpoint || "", placeholder: "http://localhost:11434" });
+  const keyEnv = el("input", { value: model.api_key_env || "", placeholder: "env var NAME, never the key" });
+  const saveModel = el("button", { class: "primary" }, "Test and save");
+  saveModel.addEventListener("click", () => post("model", {
+    provider: provider.value.trim(),
+    model: modelName.value.trim(),
+    endpoint: endpoint.value.trim() || null,
+    api_key_env: keyEnv.value.trim() || null,
+  }, saveModel));
+
+  const workdir = el("input", { value: (steps.workdir || {}).path || "", placeholder: "~/workspace" });
+  const saveWorkdir = el("button", { class: "primary" }, "Register");
+  saveWorkdir.addEventListener("click", () => post("workdir", { path: workdir.value.trim() }, saveWorkdir));
+
+  const backend = select(["auto", "podman", "none"], (steps.sandbox || {}).backend || "auto");
+  const detected = el("p", { class: "note" }, "");
+  const detect = el("button", { class: "ghost" }, "Detect");
+  detect.addEventListener("click", async () => {
+    try {
+      const found = await api("GET", "/api/onboard/sandboxes");
+      backend.value = found.recommended;
+      detected.textContent = Object.entries(found.backends)
+        .map(([name, v]) => `${name}: ${v.usable ? "usable" : "unusable"} (${v.detail})`)
+        .concat(`docker: ${found.docker.detail}`).join(" · ");
+    } catch (e) { flash("bad", e.message); }
+  });
+  const saveSandbox = el("button", { class: "primary" }, "Save");
+  saveSandbox.addEventListener("click", () => post("sandbox", { backend: backend.value }, saveSandbox));
+
+  const template = select(["assistant", "builder", "operator"], (steps.template || {}).template || "assistant");
+  const table = el("pre", { class: "mono worker-command-output onboard-table" }, "");
+  const typed = el("input", { placeholder: "type yes to lock this as the policy baseline" });
+  const lock = el("button", { class: "primary" }, "Lock baseline");
+  lock.disabled = true;
+  let shown = null;
+  const preview = el("button", { class: "ghost" }, "Preview");
+  preview.addEventListener("click", async () => {
+    try {
+      shown = await api("GET", `/api/onboard/template?template=${encodeURIComponent(template.value)}`);
+      table.textContent = shown.locked
+        ? "this is already the locked baseline"
+        : [shown.table, ...(shown.tightened || []), ...(shown.diff || [])].join("\n");
+      lock.disabled = false;
+    } catch (e) { flash("bad", e.message); }
+  });
+  template.addEventListener("change", () => { shown = null; lock.disabled = true; table.textContent = ""; });
+  lock.addEventListener("click", () => {
+    if (!shown || typed.value.trim() !== "yes") { flash("bad", "preview, then type yes"); return; }
+    post("template", { template: template.value, expect_sha256: shown.sha256, approved_by: "web" }, lock);
+  });
+
+  const role = select(["assistant", "builder", "operator"],
+    (steps.role || {}).role || (steps.template || {}).template || "assistant");
+  const saveRole = el("button", { class: "primary" }, "Save");
+  saveRole.addEventListener("click", () => post("role", { role: role.value }, saveRole));
+
+  const report = el("pre", { class: "mono worker-command-output onboard-table" }, "");
+  const check = el("button", { class: "ghost" }, "Run onboard --check");
+  check.addEventListener("click", async () => {
+    try {
+      const result = await api("GET", "/api/onboard/check");
+      report.textContent = result.report;
+      flash(result.ready ? "ok" : "bad", result.ready ? "ready" : "not ready yet");
+    } catch (e) { flash("bad", e.message); }
+  });
+
+  return el("div", { class: "card" },
+    el("h3", {}, "First run (skep onboard)"),
+    el("p", { class: "note" }, "The same five steps as `skep onboard` in a terminal."),
+    el("h4", {}, "1 · Model"), state("model"),
+    el("div", { class: "row" }, field("provider", provider), field("model", modelName),
+      field("endpoint", endpoint), field("API key env var", keyEnv), saveModel),
+    el("h4", {}, "2 · Work directory"), state("workdir"),
+    el("div", { class: "row" }, field("path", workdir), saveWorkdir),
+    el("h4", {}, "3 · Sandbox"), state("sandbox"),
+    el("div", { class: "row" }, field("backend", backend), detect, saveSandbox), detected,
+    el("h4", {}, "4 · Policy template"), state("template"),
+    el("div", { class: "row" }, field("template", template), preview, field("approval", typed), lock),
+    table,
+    el("h4", {}, "5 · Role"), state("role"),
+    el("div", { class: "row" }, field("role", role), saveRole),
+    el("div", { class: "row" }, check), report);
 }
 
 // ---------- Notes & Tasks (v76-F7: markdown notes + due-grouped tasks) ----------

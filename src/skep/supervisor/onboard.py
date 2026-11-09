@@ -64,14 +64,15 @@ def _record(home: Path, step: str, record: dict[str, Any]) -> dict[str, Any]:
     return stamped
 
 
-def onboard_status(home: Path) -> dict[str, Any]:
-    """Every step's record (or None) and the first incomplete one, for the
-    personal ``home``. The template step is complete only while the baseline
-    verifies — a tampered lock sends onboard back to step ④."""
+def onboard_status(supervisor_home: Path) -> dict[str, Any]:
+    """Every step's record (or None) and the first incomplete one. The
+    template step is complete only while the baseline verifies — a tampered
+    lock sends onboard back to step ④."""
+    home = supervisor_home.parent
     state = _read(home / STATE_FILE)
     first_run = _read(home / FIRST_RUN_FILE)
     records: dict[str, Any] = {step: state.get(step) for step in STEPS[:4]}
-    if records["template"] is not None and not isinstance(verify(home / "supervisor"), Ok):
+    if records["template"] is not None and not isinstance(verify(supervisor_home), Ok):
         records["template"] = None
     records["role"] = first_run if first_run.get("role") else None
     pending = [step for step in STEPS if records[step] is None]
@@ -425,24 +426,22 @@ def _check(ok: bool, detail: str) -> dict[str, str]:
     return {"status": "ready" if ok else "blocked", "detail": detail}
 
 
-def onboard_check(home: Path) -> dict[str, Any]:
+def onboard_check(supervisor_home: Path) -> dict[str, Any]:
     """`skep onboard --check`: `skep doctor` plus the onboard rings and the
     egress-truth block (ADR 0051) whose last line is ``telemetry: none``.
     Read-only; ``ready`` only when every check is."""
     from ..status import build_status, format_doctor_report
-    from .cli_cmds import build_config
     from .policy_baseline import BASELINE_TAMPERED, baseline_status, locked_layer
     from .policy_schema import SCOPES
     from .provider_hosts import configured_provider_hosts
     from .serve.settings import POLICY_ENGINE_V2_SCOPES, engine_v2_scopes_from
 
-    config = build_config(home, None)
-    home = config.home.parent
+    home = supervisor_home.parent
     status = build_status(home)
     state = _read(home / STATE_FILE)
     checks: dict[str, dict[str, str]] = {}
 
-    baseline = baseline_status(config.home)
+    baseline = baseline_status(supervisor_home)
     if baseline["state"] == "ok":
         checks["baseline"] = _check(
             True, f"{baseline['template']} locked, sha256 {baseline['sha256'][:12]}"
@@ -454,7 +453,7 @@ def onboard_check(home: Path) -> dict[str, Any]:
     else:
         checks["baseline"] = _check(False, "none approved — run skep onboard")
 
-    store = RunStore(config.db_path)
+    store = RunStore(supervisor_home / "supervisor.sqlite3")
     try:
         scopes = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
         backend = store.get_setting(SANDBOX_BACKEND)
@@ -488,7 +487,7 @@ def onboard_check(home: Path) -> dict[str, Any]:
     provider = status["required"].get("provider", {"status": "blocked", "detail": "no profile"})
     checks["model"] = _check(provider.get("status") == "ready", str(provider.get("detail")))
 
-    steps = onboard_status(home)
+    steps = onboard_status(supervisor_home)
     pending = [step for step in STEPS if steps["steps"][step] is None]
     checks["steps"] = _check(
         not pending, "all five complete" if not pending else f"pending: {', '.join(pending)}"
@@ -505,7 +504,7 @@ def onboard_check(home: Path) -> dict[str, Any]:
         model_egress = (
             f"CLOUD — every assistant/worker prompt leaves this machine for {', '.join(hosts)}"
         )
-    locked = locked_layer(config.home)
+    locked = locked_layer(supervisor_home)
     network = (locked.settings.get("default_network") if locked else None) or []
     workers_egress = (
         f"{', '.join(network)} allowed by the baseline; every other host asks"

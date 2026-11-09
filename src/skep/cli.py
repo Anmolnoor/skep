@@ -313,11 +313,11 @@ def _onboard(args: argparse.Namespace) -> int:
     from .supervisor.serve.settings import ConfigHolder
     from .supervisor.store import RunStore
 
+    config = build_config(args.home, None)
     if args.check:
-        result = onboard.onboard_check(args.home)
+        result = onboard.onboard_check(config.home)
         print(result["report"], end="")
         return 0 if result["ready"] else 1
-    config = build_config(args.home, None)
     store = RunStore(config.db_path)
     try:
         code = _onboard_steps(args, ConfigHolder(config, store), store)
@@ -338,7 +338,7 @@ def _onboard(args: argparse.Namespace) -> int:
     print("onboarded — check any time: skep onboard --check")
     if args.no_chat:
         return 0
-    role = onboard.onboard_status(config.home.parent)["steps"]["role"]["role"]
+    role = onboard.onboard_status(config.home)["steps"]["role"]["role"]
     return _onboard_chat(config.home, role)
 
 
@@ -350,7 +350,7 @@ def _onboard_steps(args: argparse.Namespace, holder: Any, store: Any) -> int:
     from .supervisor.serve.setup import default_workspace_path
 
     home = holder.current.home.parent
-    records = onboard.onboard_status(home)["steps"]
+    records = onboard.onboard_status(holder.current.home)["steps"]
 
     def ask(prompt: str, default: str) -> str:
         if args.yes:
@@ -487,7 +487,7 @@ def _onboard_steps(args: argparse.Namespace, holder: Any, store: Any) -> int:
         print(f"⑤ role: done — {record['role']}")
     else:
         print("⑤ role")
-        locked = onboard.onboard_status(home)["steps"]["template"] or {}
+        locked = onboard.onboard_status(holder.current.home)["steps"]["template"] or {}
         role = args.role or ask(
             "  role (builder / operator / assistant)",
             str(locked.get("template") or onboard.DEFAULT_TEMPLATE),

@@ -639,6 +639,9 @@ pre.log, pre.diff {
   background: var(--panel-2); border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm); font-size: 12px; white-space: pre-wrap;
 }
+/* first-run O3: the explain table is wide — scroll it, never wrap it. */
+.onboard-table { white-space: pre; max-height: 320px; }
+.onboard-table:empty { display: none; }
 .worker-activity-gate {
   padding: 6px 8px; border-radius: var(--radius-sm); font-size: 13px;
   background: rgba(240,160,0,.12); color: var(--warn);
