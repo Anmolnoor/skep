@@ -584,6 +584,16 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # first-run R1 (ADR 0055 D3): the new-chat picker's choices and default.
+    @app.get("/api/roles")
+    def get_roles() -> dict[str, Any]:
+        from ..roles import roles_view
+
+        try:
+            return roles_view(run_store, holder.current.home)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # first-run O3 (ADR 0056 D7, ADR 0050): the web /setup form is a thin face
     # over `skep onboard`'s step functions — these routes call exactly them.
     @app.get("/api/onboard")

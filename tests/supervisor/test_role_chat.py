@@ -155,3 +155,54 @@ def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> 
     # A role deny refuses with no card, whatever the lane said.
     denied = tighten_autonomy(None, SHIPPED_ROLES["assistant"], "coding", "edit", "workspace")
     assert denied is not None and denied.verdict == "deny"
+
+
+def test_new_chats_open_in_the_default_role_and_the_picker_can_change_it(
+    config: SupervisorConfig,
+) -> None:
+    """D3: the picker defaults to the onboard choice; `skep role use` wins
+    over it; "" is an explicit no-role; an unknown role refuses."""
+    from .conftest import serve_client
+
+    (config.home.parent / "first_run.json").write_text('{"role": "assistant"}')
+    with serve_client(config) as client:
+        roles = client.get("/api/roles").json()
+        assert roles["default"] == "assistant"
+        assert [r["name"] for r in roles["roles"]] == ["builder", "operator", "assistant"]
+        assert client.post("/api/chats", json={}).json()["role"] == "assistant"
+        assert client.post("/api/chats", json={"role": "builder"}).json()["role"] == "builder"
+        assert client.post("/api/chats", json={"role": ""}).json()["role"] is None
+        refused = client.post("/api/chats", json={"role": "warp"})
+        assert refused.status_code == 400 and "no role 'warp'" in refused.json()["detail"]
+        store = RunStore(config.db_path)
+        try:
+            store.set_setting("default_role", "operator")
+        finally:
+            store.close()
+        assert client.post("/api/chats", json={}).json()["role"] == "operator"
+
+
+def test_skep_chat_role_opens_the_new_chat_in_that_role(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    from skep.cli_chat import run_chat
+
+    from .conftest import serve_client
+
+    client = serve_client(config)
+    assert (
+        run_chat(
+            home=config.home, url="http://unused", client=client, oneshot="/help", role="operator"
+        )
+        == 0
+    )
+    assert client.get("/api/chats").json()["chats"][0]["role"] == "operator"
+
+
+def test_the_web_composer_has_a_role_picker() -> None:
+    from skep.supervisor.serve.app import STATIC_DIR
+
+    source = (STATIC_DIR / "app.js").read_text()
+    assert 'api("GET", "/api/roles")' in source
+    assert '"aria-label": "chat role"' in source
+    assert "role: roleSelect.hidden ? null : roleSelect.value" in source

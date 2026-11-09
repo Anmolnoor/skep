@@ -873,6 +873,9 @@ class ChatCreate(BaseModel):
     title: str | None = None
     model: str | None = None  # None = follow the configured default
     source: str | None = None  # v44-F2: which face opened the chat; None = 'web'
+    # R1 (ADR 0055 D3): the picker's choice. None = the default role
+    # (`skep role use`, else onboard's); "" = explicitly no role.
+    role: str | None = None
 
 
 class ChatProjectSet(BaseModel):
@@ -2257,9 +2260,18 @@ def add_chat_routes(
 
     @app.post("/api/chats", status_code=201)
     def create_chat(body: ChatCreate) -> dict[str, Any]:
+        from ..roles import default_role, resolve_role
+
         title = (body.title or "").strip() or DEFAULT_TITLE
+        role = default_role(run_store, home) if body.role is None else body.role
+        try:
+            role = resolve_role(role, home).name if role else None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return asdict(
-            run_store.create_chat(title=title, model=body.model, source=body.source or "web")
+            run_store.create_chat(
+                title=title, model=body.model, source=body.source or "web", role=role
+            )
         )
 
     @app.get("/api/chats/{chat_id}")
