@@ -252,6 +252,32 @@ function delegationText(delegation) {
   return delegation.team ? `${line} · team ${delegation.team}` : line;
 }
 
+// first-run O4 (ADR 0056 D6): while first_run.json is active the server
+// puts a one-line `why` on every verdict card and ends the turn with a
+// `tally` event; dismissed, neither arrives and nothing renders.
+function whyLine(d) {
+  return d.why ? el("p", { class: "note card-why" }, `why: ${d.why}`) : null;
+}
+
+// v90-F3: a receipt — an action that ran WITHOUT asking because a grant the
+// operator already gave covers it. Same headline and risk as the approval
+// card would have shown, and deliberately no buttons: it is a record, not a
+// decision. Silence here used to be indistinguishable from nothing happening.
+function receiptNode(d) {
+  const card = d.card || {};
+  const covered = d.decision && (d.decision.detail || d.decision.reason);
+  return el("div", { class: "confirm-card receipt-card" },
+    el("p", { class: "card-kicker" }, "Ran without asking — you approved this already"),
+    el("p", { class: "card-headline mono" }, card.headline || d.tool),
+    card.risk ? el("p", { class: "card-risk" },
+      el("span", { class: "card-risk-label" }, "Risk: "), card.risk) : null,
+    covered ? el("p", { class: "card-purpose" }, `covered by ${covered}`) : null,
+    whyLine(d),
+    // v106-F11 (v90-F3): which tier of grant, given when.
+    d.grant ? el("p", { class: "note" },
+      `${d.grant.tier} grant · given ${d.grant.granted_at}`) : null);
+}
+
 function formatRunAutonomy(run) {
   if (!run || typeof run !== "object") return "-";
   const parts = [];
@@ -2944,10 +2970,7 @@ async function viewChat(main, chatId) {
     ];
   };
 
-  // first-run O4 (ADR 0056 D6): while first_run.json is active the server
-  // puts a one-line `why` on every verdict card and ends the turn with a
-  // `tally` event; dismissed, neither arrives and nothing renders.
-  const whyLine = (d) => d.why ? el("p", { class: "note card-why" }, `why: ${d.why}`) : null;
+  // first-run O4: the turn's closing tally (whyLine is top-level, T3-1).
   const tallyNote = (d) => {
     const turnDown = d.offer ? el("button", {}, "Turn it down") : null;
     if (turnDown) {
@@ -3007,25 +3030,7 @@ async function viewChat(main, chatId) {
     return card;
   };
 
-  // v90-F3: a receipt — an action that ran WITHOUT asking because a grant the
-  // operator already gave covers it. Same headline and risk as the approval
-  // card would have shown, and deliberately no buttons: it is a record, not a
-  // decision. Silence here used to be indistinguishable from nothing happening.
-  const receiptCard = (d) => {
-    const card = d.card || {};
-    const covered = d.decision && (d.decision.detail || d.decision.reason);
-    log.append(el("div", { class: "confirm-card receipt-card" },
-      el("p", { class: "card-kicker" }, "Ran without asking — you approved this already"),
-      el("p", { class: "card-headline mono" }, card.headline || d.tool),
-      card.risk ? el("p", { class: "card-risk" },
-        el("span", { class: "card-risk-label" }, "Risk: "), card.risk) : null,
-      covered ? el("p", { class: "card-purpose" }, `covered by ${covered}`) : null,
-      whyLine(d),
-      // v106-F11 (v90-F3): which tier of grant, given when.
-      d.grant ? el("p", { class: "note" },
-        `${d.grant.tier} grant · given ${d.grant.granted_at}`) : null));
-    scrollBottom();
-  };
+  const receiptCard = (d) => { log.append(receiptNode(d)); scrollBottom(); };
 
   // v54-F2: a resolved card hides its buttons (CSS on .resolved) and shows
   // the verdict instead — done, not just dimmed.

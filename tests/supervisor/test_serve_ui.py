@@ -880,8 +880,9 @@ def test_a_grant_covered_action_leaves_a_receipt() -> None:
     assert "if (d.decision) { group = null; receiptCard(d); }" in source
     assert ".receipt-card" in styles
     # No verdict buttons on a receipt.
-    receipt = source[source.index("const receiptCard = (d)") :]
-    receipt = receipt[: receipt.index("// v54-F2")]
+    # T3-1: the body moved to top-level receiptNode (executed in tests/web/).
+    receipt = source[source.index("function receiptNode(d)") :]
+    receipt = receipt[: receipt.index("function formatRunAutonomy")]
     assert "Approve" not in receipt and "Deny" not in receipt
     assert 'class: "actions"' not in receipt
 

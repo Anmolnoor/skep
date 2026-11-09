@@ -187,7 +187,8 @@ def test_web_renders_why_and_tally() -> None:
 
     source = (STATIC_DIR / "app.js").read_text()
     assert "whyLine(d)" in source.split("const actionCard = (d)")[1].split("const receiptCard")[0]
-    assert "whyLine(d)" in source.split("const receiptCard = (d)")[1].split("// v54-F2")[0]
+    receipt = source.split("function receiptNode(d)")[1].split("function formatRunAutonomy")[0]
+    assert "whyLine(d)" in receipt
     assert "tally: (d) =>" in source
     assert '"/api/onboard/transparency", { verbose: false }' in source
 
