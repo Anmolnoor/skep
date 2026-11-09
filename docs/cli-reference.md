@@ -278,11 +278,12 @@ skep project show    PROJECT_ID
 skep project set-phase PROJECT_ID PHASE
 skep policy registry
 skep policy rsop REPO
-skep policy why  REPO SCOPE ACTION VALUE [--role NAME]
+skep policy why  REPO SCOPE ACTION VALUE [--role NAME] [--delegated-by ACTOR@ROLE ...]
 skep policy explain SUBJECT
 skep policy approve [--template NAME | --file PATH] [--reapprove] [--yes]
 skep policy baseline [status|diff]
 skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME] [--role NAME]
+                   [--delegated-by ACTOR@ROLE ...]
 skep policy hook [--actor NAME]
 skep policy decisions [--actor GLOB] [--since ISO] [--limit N]
 ```
@@ -341,6 +342,23 @@ role decided, `why` adds a `role` block naming the layer, and the ledger row
 carries `role` (also `role` on `GET /api/policy/why`, `POST
 /api/policy/decide` and the chat `policy_why` tool; `GET /api/roles` and
 `role` on `POST /api/chats` behind the web picker).
+
+Delegation is subset-only (first-run R2, ADR 0055 D4): `--delegated-by
+ACTOR@ROLE` (repeat, outermost first — e.g. `--delegated-by queen@operator`)
+holds the verdict to what that delegator itself holds — its own effective
+verdict, under its role, bounded by the hops above it. Anything beyond it is
+`exceeds_delegator` (`deny` where the delegator holds no grant, an ask where it
+would itself have to ask) and the ledger row carries `delegation_chain`; `why`
+adds a `delegation` block naming the chain and what the delegator holds. A
+delegator whose role has no rule for the action holds nothing to pass on
+(unset is not granted). The floor is above every chain. Also
+`delegation_chain` on `POST /api/policy/decide`, `GET /api/policy/why` and the
+chat `policy_why` tool. A Queen chat in a role dispatches as `queen@<role>`
+(an operator-typed `/command` and a chat with no role dispatch as today): the
+worker's shell prefixes and egress hosts beyond what that role holds are
+dropped at dispatch — the worker cards for them instead, so a human answers —
+and each drop is a ledger row with `actor: dispatch`; a role denied workspace
+writes cannot dispatch a worker at all. Chains are depth 1 at dispatch.
 
 ## skep acp
 

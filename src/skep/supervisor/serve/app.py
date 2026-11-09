@@ -15,9 +15,9 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -218,6 +218,7 @@ class PolicyDecideRequest(BaseModel):
     repo: str | None = None
     actor: str = "api"
     role: str | None = None  # R1: decide under this role's layer
+    delegation_chain: list[str] = []  # R2: actor@role hops, outermost first
 
 
 class BaselineApproveRequest(BaseModel):
@@ -556,11 +557,25 @@ def create_app(
 
     @app.get("/api/policy/why")
     def get_policy_why(
-        repo: str, scope: str, action: str, value: str, role: str | None = None
+        repo: str,
+        scope: str,
+        action: str,
+        value: str,
+        role: str | None = None,
+        delegation_chain: Annotated[list[str] | None, Query()] = None,
     ) -> dict[str, Any]:
         """P0-3 (ADR 0052): would <scope>.<action> <value> be allowed in <repo>?"""
         try:
-            return policy_why(holder, run_store, repo, scope, action, value, role=role)
+            return policy_why(
+                holder,
+                run_store,
+                repo,
+                scope,
+                action,
+                value,
+                role=role,
+                delegation_chain=delegation_chain or (),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -691,6 +706,7 @@ def create_app(
                 repo=body.repo,
                 actor=body.actor,
                 role=body.role,
+                delegation_chain=body.delegation_chain,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

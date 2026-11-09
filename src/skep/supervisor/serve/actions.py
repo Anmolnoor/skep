@@ -28,6 +28,7 @@ from skep.worker_contract import (
     CodingWorkerTask,
     Event,
     EventType,
+    Permissions,
     TaskIntent,
     TaskState,
 )
@@ -93,7 +94,17 @@ from ..projects import (
     validate_allowed_plugin_risks,
 )
 from ..provider_hosts import configured_provider_hosts
-from ..roles import resolve_role, role_decision, tighten
+from ..roles import (
+    EXCEEDS_DELEGATOR,
+    Delegator,
+    Role,
+    parse_delegation_chain,
+    resolve_role,
+    role_covers,
+    role_decision,
+    tighten,
+    within_delegator,
+)
 from ..shell_prefixes import (
     command_line_segments,
     dangerous_prefix_reason,
@@ -1887,6 +1898,7 @@ def policy_decide(
     actor: str = "api",
     ring: Literal["advisory", "hard"] = "advisory",
     role: str | None = None,
+    delegation_chain: Sequence[str] = (),
 ) -> dict[str, Any]:
     """P3 (ADR 0053; the CTO record's enforcement hook): ``decide()`` reachable
     from outside, and RECORDED. With a repo, the run policy decides — the
@@ -1908,9 +1920,47 @@ def policy_decide(
     stricter verdict stands (``roles.tighten``) and ``decided_by`` names
     ``role:<name>`` when it decided. A row decided under a role carries
     ``role``; a row without one had no role layer — today's behaviour, byte
-    for byte."""
+    for byte.
+
+    R2 (ADR 0055 D4): ``delegation_chain`` (``actor@role`` hops, outermost
+    first) holds the verdict to what the innermost delegator itself holds —
+    its effective verdict down this same path, under its role, bounded by the
+    hops above it (``roles.within_delegator``). Beyond it: ``exceeds_delegator``
+    and the row carries the chain. The floor stays above every chain (I4).
+    An empty chain — the hook, ``acp govern``, the operator — is today."""
     _check_scope_action(scope, action)
-    role_record = resolve_role(role, holder.current.home) if role is not None else None
+    home = holder.current.home
+    record = _decision_record(
+        holder,
+        store,
+        scope=scope,
+        action=action,
+        value=value,
+        repo=repo,
+        actor=actor,
+        ring=ring,
+        role_record=resolve_role(role, home) if role is not None else None,
+        chain=parse_delegation_chain(delegation_chain, home),
+    )
+    _append_policy_ledger(holder.current.audit_dir, "decisions", record)
+    return record
+
+
+def _decision_record(
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    scope: str,
+    action: str,
+    value: str,
+    repo: str | None,
+    actor: str,
+    ring: Literal["advisory", "hard"],
+    role_record: Role | None,
+    chain: Sequence[Delegator],
+) -> dict[str, Any]:
+    """``policy_decide``'s verdict, unrecorded — the one path a delegator's
+    effective verdict is computed down too (I5: no second evaluator)."""
     record: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "actor": actor,
@@ -1921,6 +1971,8 @@ def policy_decide(
     }
     if role_record is not None:
         record["role"] = role_record.name
+    if chain:
+        record["delegation_chain"] = [hop.entry for hop in chain]
     decision: dict[str, Any] | None = None
     floor = _floor_verdict(scope, value)
     if floor is not None:
@@ -1959,8 +2011,27 @@ def policy_decide(
             "decided_by": operator.decided_by,
         }
         record["source"] = "operator"
-    record.update(tighten(decision, role_record, scope, action, value))
-    _append_policy_ledger(holder.current.audit_dir, "decisions", record)
+    verdict = tighten(decision, role_record, scope, action, value)
+    if chain:
+        *outer, delegator = chain
+        bound = (
+            _decision_record(
+                holder,
+                store,
+                scope=scope,
+                action=action,
+                value=value,
+                repo=repo,
+                actor=delegator.entry,
+                ring=ring,
+                role_record=delegator.role,
+                chain=outer,
+            )
+            if role_covers(delegator.role, scope, action, value)
+            else None
+        )
+        verdict = within_delegator(verdict, delegator, bound)
+    record.update(verdict)
     return record
 
 
@@ -2108,6 +2179,7 @@ def policy_why(
     value: str,
     *,
     role: str | None = None,
+    delegation_chain: Sequence[str] = (),
 ) -> dict[str, Any]:
     """P0-3 (ADR 0052 D4): would <scope>.<action> <value> in <repo> be allowed?
     The same resolve_run_policy a dispatch runs, then decide() on the compiled
@@ -2117,8 +2189,55 @@ def policy_why(
     R1 (ADR 0055 D2, done-criterion 4): with a ``role`` the answer names the
     role layer — ``role`` says what ``role:<name>`` alone decides (or that it
     has no rule here) and both verdicts are tightened by it, exactly as
-    ``policy_decide`` does."""
+    ``policy_decide`` does.
+
+    R2 (ADR 0055 D4): with a ``delegation_chain`` the answer shows it — a
+    ``delegation`` block names the chain and what the innermost delegator
+    itself holds on each face (its own ``why``, bounded by the hops above),
+    and both faces are held to it exactly as ``policy_decide`` holds them."""
     _check_scope_action(scope, action)
+    if delegation_chain:
+        *outer, delegator = parse_delegation_chain(delegation_chain, holder.current.home)
+        answer = policy_why(holder, store, repo, scope, action, value, role=role)
+        covered = role_covers(delegator.role, scope, action, value)
+        bound = (
+            policy_why(
+                holder,
+                store,
+                repo,
+                scope,
+                action,
+                value,
+                role=delegator.role.name,
+                delegation_chain=[hop.entry for hop in outer],
+            )
+            if covered
+            else None
+        )
+        held: dict[str, Any] = {}
+        for face in ("run", "operator"):
+            own = None if bound is None else bound[face]
+            if own is not None and "verdict" not in own:
+                own = None  # a delegator face that did not resolve holds nothing (#7)
+            held[face] = None if own is None else {k: own[k] for k in ("verdict", "decided_by")}
+            if "verdict" in answer[face]:
+                answer[face] = within_delegator(answer[face], delegator, own)
+        answer["delegation"] = {
+            "chain": list(delegation_chain),
+            "delegator": delegator.entry,
+            "held": held,
+            "note": (
+                f"delegated by {' → '.join(delegation_chain)}: the delegatee holds no more "
+                f"than {delegator.entry} does — "
+                + (
+                    "the stricter verdict stands; beyond it is exceeds_delegator"
+                    if covered
+                    else f"role:{delegator.role.name} has no rule for this, so it holds "
+                    "nothing to pass on (unset is not granted)"
+                )
+            ),
+        }
+        return answer
     if role is not None:
         role_record = resolve_role(role, holder.current.home)
         answer = policy_why(holder, store, repo, scope, action, value)
@@ -3961,8 +4080,14 @@ def submit_run(
     requested_actions: list[str] | None = None,
     protocol: str | None = None,
     engine: str | None = None,
+    delegation_chain: Sequence[str] = (),
 ) -> str:
-    """Resolve the repo, fill policy defaults (A5), and dispatch in background."""
+    """Resolve the repo, fill policy defaults (A5), and dispatch in background.
+
+    R2 (ADR 0055 D4): a dispatch made by a bot carries ``delegation_chain``
+    and the worker gets no grant beyond its delegator (``_within_delegation``).
+    Depth 1: a delegatee may not delegate further yet. Empty — the operator,
+    REST, the scheduler — is today."""
     # v101-F10: F1 wrote a resolver that refuses an unknown caste by name, and
     # nothing called it — so an unknown caste reached the contract validator
     # deep in dispatch and surfaced as a 500 with no usable detail. Every
@@ -3996,6 +4121,18 @@ def submit_run(
                 "then call dispatch_run with the returned slug"
             ),
         )
+    try:
+        chain = parse_delegation_chain(delegation_chain, holder.current.home)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if len(chain) > MAX_DELEGATION_DEPTH:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"delegation depth is {MAX_DELEGATION_DEPTH} (ADR 0055 D4): a delegatee may "
+                f"not delegate further yet; got {' → '.join(delegation_chain)}"
+            ),
+        )
     resolved = resolve_repo_arg(repo, repos_root(holder), store)
     ensure_repo_baseline(resolved)
     binding_candidates: list[tuple[str, str]] = []
@@ -4022,6 +4159,12 @@ def submit_run(
         detail = str(exc)
         status = 400 if "must be 'workspace' or 'sandbox'" in detail else 409
         raise HTTPException(status_code=status, detail=detail) from exc
+    permissions = resolved_policy.permissions
+    delegation_note = None
+    if chain:
+        permissions, delegation_note = _within_delegation(
+            holder, store, resolved, chain, permissions
+        )
     try:
         auto_apply_verified_patch = None
         if "auto_apply_verified_patch" in resolved_policy.policy:
@@ -4066,11 +4209,17 @@ def submit_run(
                 effective_dispatch_decision,
                 detail="no project binding; global defaults",
             )
+        if delegation_note is not None:
+            prior = effective_dispatch_decision.detail
+            effective_dispatch_decision = replace(
+                effective_dispatch_decision,
+                detail=f"{prior}; {delegation_note}" if prior else delegation_note,
+            )
         return runner.submit(
             resolved,
             instructions,
             worker_kind=caste,
-            permissions=resolved_policy.permissions,
+            permissions=permissions,
             budget=resolved_policy.budget,
             auto_apply_verified_patch=auto_apply_verified_patch,
             auto_apply_branch=auto_apply_branch,
@@ -4091,6 +4240,81 @@ def submit_run(
         )
     except DispatchError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+MAX_DELEGATION_DEPTH = 1  # ADR 0055 D4: lifted only once a harness proves deeper chains
+
+
+def _within_delegation(
+    holder: ConfigHolder,
+    store: RunStore,
+    repo: Path,
+    chain: Sequence[Delegator],
+    permissions: Permissions,
+) -> tuple[Permissions, str]:
+    """R2 (ADR 0055 D4): a worker a bot dispatched gets no grant beyond its
+    delegator. Every shell prefix and egress host the run policy granted is
+    decided under the chain (``_decision_record``, I5); one beyond the
+    delegator is dropped — the worker then cards for it, so a human answers,
+    never the bot — and its ``exceeds_delegator`` row is recorded. Workspace
+    writes the delegator is denied refuse the dispatch outright: the worker
+    exists to write. Returns the narrowed permissions and the dispatch note."""
+    # ponytail: a prefix is judged as written; a delegator rule narrower than
+    # the prefix (allow `P`, deny `P --x`) is invisible to the worker, which
+    # matches prefixes. Upgrade: the worker asks decide() per command.
+    rows: list[dict[str, Any]] = []
+
+    def row_for(scope: str, action: str, value: str) -> dict[str, Any]:
+        return _decision_record(
+            holder,
+            store,
+            scope=scope,
+            action=action,
+            value=value,
+            repo=str(repo),
+            actor="dispatch",
+            ring="advisory",
+            role_record=None,
+            chain=chain,
+        )
+
+    def kept(scope: str, action: str, value: str) -> bool:
+        row = row_for(scope, action, value)
+        if row["rule_id"] != EXCEEDS_DELEGATOR:
+            return True
+        _append_policy_ledger(holder.current.audit_dir, "decisions", row)
+        rows.append(row)
+        return False
+
+    entries = " → ".join(hop.entry for hop in chain)
+    for path in permissions.write:
+        # An ask stays: the patch card is already the human's gate (I1).
+        row = row_for("filesystem", "write", path)
+        if row["rule_id"] == EXCEEDS_DELEGATOR and row["verdict"] == "deny":
+            _append_policy_ledger(holder.current.audit_dir, "decisions", row)
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"delegated by {entries}: filesystem.write {path} exceeds the delegator "
+                    f"({row['decided_by']}) — a worker it dispatches could write what it "
+                    "may not; dispatch from a role that holds it, or as the operator"
+                ),
+            )
+    narrowed = permissions.model_copy(
+        update={
+            "shell_allowlist": [
+                prefix
+                for prefix in permissions.shell_allowlist
+                if kept("shell", "run", shlex.join(prefix))
+            ],
+            "network": [host for host in permissions.network if kept("network", "connect", host)],
+        }
+    )
+    dropped = [f"{row['scope']}.{row['action']} {row['value']}" for row in rows]
+    note = f"delegated by {entries}" + (
+        f"; beyond the delegator, dropped: {', '.join(dropped)}" if dropped else ""
+    )
+    return narrowed, note
 
 
 def dispatch_run_auto_allowed(
