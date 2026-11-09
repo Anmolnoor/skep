@@ -9,6 +9,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -308,3 +309,285 @@ def test_a_refused_typed_yes_locks_nothing(
     assert main([*argv, "--no-chat"]) == 1
     assert "not approved — nothing was locked" in capsys.readouterr().err
     assert not baseline_path(home / "supervisor").exists()
+
+
+# --- T1: what O3 promised and nothing pinned ------------------------------------
+
+
+def _approvals(home: Path) -> list[str]:
+    from skep.supervisor.policy_baseline import ledger_path
+
+    rows = [json.loads(line) for line in ledger_path(home / "supervisor").read_text().splitlines()]
+    return [row["template"] for row in rows if row["kind"] == "baseline_approved"]
+
+
+def test_a_flag_that_differs_from_a_record_reruns_only_that_step(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    assert main(_onboard_flags(home, tmp_path / "work")) == 0
+    capsys.readouterr()
+    # Nothing changed: every step is done and nothing is re-approved.
+    assert main(["--home", str(home), "onboard", "--yes", "--no-chat"]) == 0
+    out = capsys.readouterr().out
+    assert "④ template: done — builder locked" in out and "⑤ role: done — builder" in out
+    assert _approvals(home) == ["builder"]
+    # A different --template re-runs step ④ alone: the diff, then the re-lock.
+    argv = ["--home", str(home), "onboard", "--template", "operator", "--yes", "--no-chat"]
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "① model: done" in out and "③ sandbox: done — none" in out
+    assert "changes against the locked baseline:" in out
+    assert "~ template: 'builder' -> 'operator'" in out
+    assert "baseline locked: operator" in out
+    assert _approvals(home) == ["builder", "operator"]
+    state = verify(home / "supervisor")
+    assert isinstance(state, Ok) and state.layer.template == "operator"
+    assert onboard_status(home / "supervisor")["steps"]["template"]["template"] == "operator"
+
+
+def test_yes_with_no_model_flags_takes_the_local_ollama_or_names_the_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--yes` takes every default: the first local Ollama model, and the
+    least-privilege template (`assistant`, plan decision #4) with the role
+    following it. No local Ollama: a refusal that names the flags."""
+    from skep.supervisor import onboard
+
+    argv = ["--home", str(tmp_path / "home"), "onboard", "--yes", "--no-chat"]
+    argv += ["--workdir", str(tmp_path / "work"), "--sandbox", "none"]
+    nothing: tuple[list[str] | None, ...] = (None, [])
+    for found in nothing:
+        monkeypatch.setattr(onboard, "detect_ollama", lambda *a, found=found, **k: found)
+        assert main(argv) == 1
+        err = capsys.readouterr().err
+        assert "no local Ollama with a model — pass --provider and --model" in err
+        assert "finished steps are kept" in err
+
+    fake = FakeOllama(models=["llama3.2"]).start()
+    try:
+        fake.script_reply("pong")
+        monkeypatch.setattr(onboard, "detect_ollama", lambda *a, **k: ["llama3.2", "qwen3"])
+        monkeypatch.setattr(onboard, "OLLAMA_LOCAL", fake.base_url)
+        assert main(argv) == 0
+    finally:
+        fake.stop()
+    steps = onboard_status(tmp_path / "home" / "supervisor")["steps"]
+    assert (steps["model"]["provider"], steps["model"]["model"]) == ("ollama", "llama3.2")
+    assert steps["template"]["template"] == "assistant"
+    assert steps["role"]["role"] == "assistant"
+
+
+def test_an_existing_non_git_workdir_is_registered_but_never_committed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    work = tmp_path / "notes"
+    work.mkdir()
+    (work / "today.md").write_text("mine\n")
+    assert main(_onboard_flags(tmp_path / "home", work)) == 0
+    out = capsys.readouterr().out
+    assert f"using {work.resolve()}" in out
+    assert "not a git repository — dispatch needs one" in out
+    assert not (work / ".git").exists()
+    record = onboard_status(tmp_path / "home" / "supervisor")["steps"]["workdir"]
+    assert (record["created"], record["git"]) == (False, False)
+
+
+def test_rerunning_the_role_step_keeps_the_first_run_counters(tmp_path: Path) -> None:
+    """O4 counts turns and verdicts in first_run.json; changing the role must
+    not reset them (or un-dismiss the transparency)."""
+    home = tmp_path / "home"
+    with _holder(home) as (holder, _store):
+        first = onboard_role(holder, role="builder")
+        path = home / "first_run.json"
+        path.write_text(
+            json.dumps({**first, "turns_seen": 7, "verdicts_seen": 19, "dismissed": True})
+        )
+        again = onboard_role(holder, role="operator")
+        assert again == {**first, "turns_seen": 7, "verdicts_seen": 19, "dismissed": True,
+                         "role": "operator"}  # fmt: skip
+        with pytest.raises(ValueError, match="no role 'admin'; known: builder, operator"):
+            onboard_role(holder, role="admin")
+    assert json.loads(path.read_text())["role"] == "operator"
+
+
+def test_the_model_step_refuses_what_it_cannot_reach(tmp_path: Path) -> None:
+    with _holder(tmp_path / "home") as (holder, store):
+        with pytest.raises(ValueError, match="openai-compatible provider needs --endpoint"):
+            onboard_model(holder, store, provider="openai-compatible", model="m")
+        with pytest.raises(ValueError, match="unknown provider 'warp'"):
+            onboard_model(holder, store, provider="warp", model="m")
+    assert onboard_status(tmp_path / "home" / "supervisor")["next"] == "model"
+
+
+def test_detect_ollama_lists_models_or_answers_none() -> None:
+    from skep.supervisor.onboard import detect_ollama
+
+    fake = FakeOllama(models=["llama3.2", "qwen3"]).start()
+    url = fake.base_url
+    try:
+        assert detect_ollama(url) == ["llama3.2", "qwen3"]
+    finally:
+        fake.stop()
+    assert detect_ollama(url, timeout=0.5) is None  # nothing answers there now
+
+
+def test_rest_refuses_a_stale_preview_and_a_bad_role(config: SupervisorConfig) -> None:
+    """The web form posts the sha256 of the table the operator saw; a
+    different candidate is refused (they approve what they read), and no
+    baseline is written."""
+    client = serve_client(config)
+    stale = client.post(
+        "/api/onboard/template",
+        json={"template": "builder", "expect_sha256": "0" * 64, "approved_by": "web"},
+    )
+    assert stale.status_code == 400 and "changed since it was shown" in stale.json()["detail"]
+    assert not baseline_path(config.home).exists()
+    bad = client.post("/api/onboard/role", json={"role": "admin"})
+    assert bad.status_code == 400 and "no role 'admin'" in bad.json()["detail"]
+    unknown = client.get("/api/onboard/template", params={"template": "warp"})
+    assert unknown.status_code == 400 and "no policy template" in unknown.json()["detail"]
+
+
+def test_check_tells_the_egress_truth_and_each_blocked_reason(tmp_path: Path) -> None:
+    """ADR 0051 / I12: the model line says where prompts go (nowhere, this
+    machine, or which cloud host), the workers line says what the baseline
+    lets out; a schema-changed baseline and a vanished workdir each block."""
+    from skep.supervisor.onboard import onboard_check
+    from skep.supervisor.policy_baseline import write_lock
+    from skep.supervisor.policy_templates import load_policy_template
+
+    home = tmp_path / "home"
+    supervisor = build_config(home, None).home
+
+    def check() -> dict[str, Any]:
+        return onboard_check(supervisor)
+
+    def set_base_url(url: str) -> None:
+        with _holder(home) as (_, store):
+            store.set_setting(LLM_BASE_URL, url)
+
+    assert check()["egress"] == [
+        "model: no provider configured — nothing is sent",
+        "workers: no host allowed by default; every connection asks",
+        "telemetry: none",
+    ]
+    set_base_url("http://127.0.0.1:11434")
+    assert check()["egress"][0] == "model: LOCAL (127.0.0.1) — nothing leaves this machine"
+    set_base_url("https://api.example.com/v1")
+    assert check()["egress"][0] == (
+        "model: CLOUD — every assistant/worker prompt leaves this machine for api.example.com"
+    )
+    builder = load_policy_template("builder")
+    write_lock(supervisor, builder, approved_by="t", schema_version=0)
+    result = check()
+    assert result["egress"][1] == (
+        f"workers: {', '.join(builder.settings['default_network'])} allowed by the baseline; "
+        "every other host asks"
+    )
+    assert result["checks"]["baseline"] == {
+        "status": "blocked",
+        "detail": "schema changed — `skep policy approve --reapprove`",
+    }
+    work = tmp_path / "work"
+    assert main(_onboard_flags(home, work)) == 0
+    work.rename(tmp_path / "moved")
+    result = check()
+    assert result["checks"]["workdir"] == {
+        "status": "blocked",
+        "detail": f"{work.resolve()} is NOT writable",
+    }
+    assert not result["ready"]
+
+
+def test_the_last_step_attaches_to_a_running_daemon_and_opens_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """⑤'s hand-off (D7): a daemon that answers /api/status with this home's
+    token is attached to — no second daemon — and `skep chat` opens with the
+    role noted."""
+    import subprocess
+
+    import httpx
+
+    import skep.cli_chat
+    from skep.supervisor.serve.auth import TOKEN_FILE
+
+    home = tmp_path / "home"
+    supervisor = build_config(home, None).home
+    supervisor.mkdir(parents=True)
+    (supervisor / TOKEN_FILE).write_text("tok\n")
+    monkeypatch.delenv("SKEP_SERVE_URL", raising=False)
+    seen: list[dict[str, Any]] = []
+
+    def get(url: str, headers: dict[str, str], timeout: float) -> httpx.Response:
+        seen.append({"url": url, **headers})
+        return httpx.Response(200)
+
+    monkeypatch.setattr(httpx, "get", get)
+    real_popen = subprocess.Popen  # git still runs (the workdir baseline)
+
+    def popen(argv: list[str], *args: Any, **kwargs: Any) -> Any:
+        assert "serve" not in argv, "started a second daemon"
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    chats: list[dict[str, Any]] = []
+
+    def run_chat(**kwargs: Any) -> int:
+        chats.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(skep.cli_chat, "run_chat", run_chat)
+    argv = [a for a in _onboard_flags(home, tmp_path / "work") if a != "--no-chat"]
+    assert main(argv) == 0
+    assert seen[0]["url"] == f"{skep.cli_chat.DEFAULT_URL}/api/status"
+    assert seen[0][skep.cli_chat.TOKEN_HEADER] == "tok"
+    assert chats == [{"home": supervisor, "url": skep.cli_chat.DEFAULT_URL, "role": "builder"}]
+    assert "your first chat opens in role:builder" in capsys.readouterr().out
+
+
+def test_with_no_daemon_the_last_step_starts_one_or_says_how(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import itertools
+    import subprocess
+    import sys
+    import time
+
+    import httpx
+
+    import skep.cli_chat
+    from skep.cli import _onboard_chat
+    from skep.supervisor.serve.auth import TOKEN_FILE
+
+    supervisor = build_config(tmp_path / "home", None).home
+    supervisor.mkdir(parents=True)
+    monkeypatch.setenv("SKEP_SERVE_URL", "http://127.0.0.1:8899")
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: httpx.Response(200))
+    monkeypatch.setattr(skep.cli_chat, "run_chat", lambda **kw: 0)
+    started: list[list[str]] = []
+
+    def popen(argv: list[str], **kwargs: Any) -> None:
+        started.append(argv)
+        assert kwargs["start_new_session"] is True  # outlives `skep onboard`
+        (supervisor / TOKEN_FILE).write_text("tok")  # the daemon came up
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    assert _onboard_chat(supervisor, "operator") == 0
+    assert started == [
+        [sys.executable, "-m", "skep", "--home", str(supervisor.parent), "serve",
+         "--port", "8899"],
+    ]  # fmt: skip
+    assert "starting the daemon: skep serve --port 8899" in capsys.readouterr().out
+
+    # A daemon that never answers: give up at the deadline and say what to run.
+    (supervisor / TOKEN_FILE).unlink()
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: None)
+    clock = itertools.count(0, 10)
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    assert _onboard_chat(supervisor, "operator") == 1
+    assert "the daemon did not come up — run skep serve, then skep chat" in (
+        capsys.readouterr().err
+    )
