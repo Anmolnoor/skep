@@ -167,3 +167,13 @@ def test_quiet_and_verbose_flip_the_flag(
     assert not transparency_active(home)
     assert main(["--home", str(home), "onboard", "--verbose"]) == 0
     assert transparency_active(home)
+
+
+def test_web_renders_why_and_tally() -> None:
+    from skep.supervisor.serve.app import STATIC_DIR
+
+    source = (STATIC_DIR / "app.js").read_text()
+    assert "whyLine(d)" in source.split("const actionCard = (d)")[1].split("const receiptCard")[0]
+    assert "whyLine(d)" in source.split("const receiptCard = (d)")[1].split("// v54-F2")[0]
+    assert "tally: (d) =>" in source
+    assert '"/api/onboard/transparency", { verbose: false }' in source
