@@ -63,6 +63,11 @@ _SCRIPT_RUN_POLL_SECONDS = 0.1
 # v51-F5 (ADR 0025): batch dispatch is N independent governed runs submitted
 # together, not a new execution model. The cap matches Hermes's batch size.
 BATCH_DISPATCH_CAP = 3
+# first-run R3 (ADR 0055 D5): the worker's own role on a dispatch.
+_WORKER_ROLE = {
+    "type": "string",
+    "description": "worker role, at most yours",
+}
 # v83-F7 (ADR 0041): reasoning-only analysts per delegate_analysis call — a
 # separate resource class from the worker cap above (raising either is its
 # own policy question).
@@ -927,14 +932,16 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "batch_dispatch",
-        "PROPOSE dispatching up to 3 worker runs IN PARALLEL — one card, one "
+        "PROPOSE 1-3 parallel worker runs, or a team. One card, one "
         "confirm for the whole batch (auto-resolves only when EVERY task "
         "matches its project's auto-dispatch policy). Each task is an "
         "independent, fully governed run: own worktree, own policy, own "
         "audit trail, own re-verification. Returns one task id per task; "
         "watch them with list_runs/get_run. Set a per-task 'engine' to run the "
         "SAME brief on different coding agents (see compare-coding-engines); "
-        "any explicit engine makes the whole batch card.",
+        "any explicit engine makes the whole batch card. Set 'manager' to run "
+        "them as a team: you → a manager in that role → the workers, each held "
+        "to the manager (and the manager to you); one ledger thread.",
         {
             "tasks": {
                 "type": "array",
@@ -945,6 +952,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                         "repo": {"type": "string"},
                         "instructions": {"type": "string"},
                         "caste": {"type": "string", "enum": caste_names()},
+                        "role": {"type": "string"},
                         "execution_mode": {"type": "string", "enum": ["workspace", "sandbox"]},
                         "engine": {
                             "type": "string",
@@ -957,7 +965,11 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                     },
                     "required": ["repo", "instructions"],
                 },
-            }
+            },
+            "manager": {
+                "type": "string",
+                "description": "the manager's role; task roles default to it",
+            },
         },
         ["tasks"],
     ),
@@ -1779,6 +1791,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "work that landed on a non-default branch",
             },
             "caste": {"type": "string", "enum": caste_names(), "description": _caste_guidance()},
+            "role": _WORKER_ROLE,
             "engine": {
                 "type": "string",
                 "enum": engine_names(),
@@ -3889,6 +3902,17 @@ def _execute_mutation(
             if not isinstance(entry, dict) or "repo" not in entry or "instructions" not in entry:
                 raise ValueError("each task must be an object with repo and instructions")
             entries.append(entry)
+        if args.get("manager"):
+            # R3 (ADR 0055 D5): the batch as a team — Queen → manager → workers.
+            return actions.submit_team(
+                holder,
+                runner,
+                store,
+                manager=str(args["manager"]),
+                tasks=entries,
+                delegation_chain=_queen_chain(store, holder, chat_id, actor),
+                dispatch_decision=decision,
+            )
         task_ids = [
             actions.submit_run(
                 holder,
@@ -3906,6 +3930,7 @@ def _execute_mutation(
                 engine=(None if entry.get("engine") is None else str(entry["engine"])),
                 dispatch_decision=decision,
                 delegation_chain=_queen_chain(store, holder, chat_id, actor),
+                role=None if entry.get("role") is None else str(entry["role"]),
             )
             for entry in entries
         ]
@@ -4673,6 +4698,8 @@ def _execute_mutation(
             repo=str(args["repo"]),
             ref=None if args.get("ref") is None else str(args["ref"]),
         )
+        chain = _queen_chain(store, holder, chat_id, actor)
+        role = None if args.get("role") is None else str(args["role"])
         task_id = actions.submit_run(
             holder,
             runner,
@@ -4690,7 +4717,8 @@ def _execute_mutation(
             max_provider_calls=_optional_int(args, "max_provider_calls"),
             ref=None if args.get("ref") is None else str(args["ref"]),
             dispatch_decision=decision,
-            delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            delegation_chain=chain,
+            role=role,
             protocol=None if args.get("protocol") is None else str(args["protocol"]),
             engine=None if args.get("engine") is None else str(args["engine"]),
         )
@@ -4703,6 +4731,9 @@ def _execute_mutation(
             "repo": str(args["repo"]),
             "caste": str(args.get("caste") or "coding"),
         }
+        if chain or role:
+            # R3: the chat card shows who delegated, under which role.
+            result_view["delegation"] = {"chain": chain, "role": role}
         if hint is not None:
             result_view["hint"] = hint
         return result_view

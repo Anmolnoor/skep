@@ -339,10 +339,17 @@ def test_a_delegated_dispatch_drops_the_grants_beyond_the_delegator(
     detail = delegated["dispatch_decision"].detail
     assert "delegated by queen@operator; beyond the delegator, dropped: " in detail
     assert "shell.run uv sync" in detail and "git status" not in detail
-    rows = [
+    ledger = [
         json.loads(line)
         for line in (config.audit_dir / "policy" / "decisions.jsonl").read_text().splitlines()
     ]
+    # R3: the hop itself is one `delegated` row after the drops.
+    *rows, hop = ledger
+    assert (hop["source"], hop["actor"], hop["task_id"]) == (
+        "delegated",
+        "queen@operator",
+        "task-1",
+    )
     assert {(r["actor"], tuple(r["delegation_chain"]), r["rule_id"]) for r in rows} == {
         ("dispatch", ("queen@operator",), "exceeds_delegator")
     }
@@ -364,11 +371,12 @@ def test_a_delegator_denied_workspace_writes_cannot_dispatch_a_writer(
 
 
 def test_dispatch_refuses_a_chain_deeper_than_one(config: SupervisorConfig, repo: Path) -> None:
-    """ADR 0055 D4: depth 1 until a harness proves deeper chains."""
+    """ADR 0055 D4: depth 1 outside a team (R3 lifts it to 2 for a team's
+    manager hop only — test_queen_delegates.py)."""
     with pytest.raises(HTTPException) as refused:
         _dispatch(config, repo, ["queen@builder", "manager@builder"])
     assert refused.value.status_code == 400
-    assert "a delegatee may not delegate further yet" in str(refused.value.detail)
+    assert "a delegatee may not delegate further" in str(refused.value.detail)
 
 
 def test_the_queen_dispatches_with_its_role(
