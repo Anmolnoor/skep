@@ -465,7 +465,7 @@ def test_rerunning_the_role_step_keeps_the_first_run_counters(tmp_path: Path) ->
         again = onboard_role(holder, role="operator")
         assert again == {**first, "turns_seen": 7, "verdicts_seen": 19, "dismissed": True,
                          "role": "operator"}  # fmt: skip
-        with pytest.raises(ValueError, match="role must be one of builder, operator, assistant"):
+        with pytest.raises(ValueError, match="no role 'admin'; known: builder, operator"):
             onboard_role(holder, role="admin")
     assert json.loads(path.read_text())["role"] == "operator"
 
@@ -503,7 +503,7 @@ def test_rest_refuses_a_stale_preview_and_a_bad_role(config: SupervisorConfig) -
     assert stale.status_code == 400 and "changed since it was shown" in stale.json()["detail"]
     assert not baseline_path(config.home).exists()
     bad = client.post("/api/onboard/role", json={"role": "admin"})
-    assert bad.status_code == 400 and "role must be one of" in bad.json()["detail"]
+    assert bad.status_code == 400 and "no role 'admin'" in bad.json()["detail"]
     unknown = client.get("/api/onboard/template", params={"template": "warp"})
     assert unknown.status_code == 400 and "no policy template" in unknown.json()["detail"]
 
@@ -602,8 +602,8 @@ def test_the_last_step_attaches_to_a_running_daemon_and_opens_chat(
     assert main(argv) == 0
     assert seen[0]["url"] == f"{skep.cli_chat.DEFAULT_URL}/api/status"
     assert seen[0][skep.cli_chat.TOKEN_HEADER] == "tok"
-    assert chats == [{"home": supervisor, "url": skep.cli_chat.DEFAULT_URL}]
-    assert "role: builder — noted in first_run.json" in capsys.readouterr().out
+    assert chats == [{"home": supervisor, "url": skep.cli_chat.DEFAULT_URL, "role": "builder"}]
+    assert "your first chat opens in role:builder" in capsys.readouterr().out
 
 
 def test_with_no_daemon_the_last_step_starts_one_or_says_how(

@@ -2619,6 +2619,7 @@ def cmd_policy_decide(args: argparse.Namespace) -> int:
             value=args.value,
             repo=args.repo,
             actor=args.actor,
+            role=args.role,
         )
     except ValueError as exc:
         return _err(str(exc))
@@ -2775,7 +2776,13 @@ def cmd_policy_why(args: argparse.Namespace) -> int:
     store = RunStore(config.db_path)
     try:
         view = policy_why(
-            ConfigHolder(config, store), store, args.repo, args.scope, args.action, args.value
+            ConfigHolder(config, store),
+            store,
+            args.repo,
+            args.scope,
+            args.action,
+            args.value,
+            role=args.role,
         )
     except ValueError as exc:
         return _err(str(exc))
@@ -3339,6 +3346,7 @@ def register_supervisor_commands(
     policy_why.add_argument("scope")
     policy_why.add_argument("action")
     policy_why.add_argument("value")
+    policy_why.add_argument("--role", help="answer under this role's layer (skep role list)")
     policy_why.set_defaults(func=cmd_policy_why)
     policy_explain = policy_sub.add_parser(
         "explain",
@@ -3376,6 +3384,7 @@ def register_supervisor_commands(
     policy_decide.add_argument("value")
     policy_decide.add_argument("--repo", help="the checkout the action happens in (slug or path)")
     policy_decide.add_argument("--actor", default="cli", help="who asked (recorded)")
+    policy_decide.add_argument("--role", help="decide under this role's layer (recorded)")
     policy_decide.set_defaults(func=cmd_policy_decide)
     policy_hook = policy_sub.add_parser(
         "hook",
@@ -3439,6 +3448,11 @@ def register_supervisor_commands(
     from .channel_cmds import register_channel_commands
 
     register_channel_commands(subcommands)
+
+    # first-run R1 (ADR 0055): roles as records.
+    from .role_cmds import register_role_commands
+
+    register_role_commands(subcommands)
 
     # ADR 0054 (B1-3): the ACP governor an outside client spawns.
     from .acp_cmds import register_acp_commands

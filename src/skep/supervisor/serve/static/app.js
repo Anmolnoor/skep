@@ -2193,6 +2193,10 @@ const COMMANDS = {
     usage: "/schedule <name> <repo> <every> <instructions…>",
     desc: "create a recurring schedule the ticker dispatches — every takes 30m/6h/1d (confirm card)",
   },
+  role: {
+    usage: "/role <builder|operator|assistant|custom-role>",
+    desc: "switch this chat's role — prompt, voice and policy layer together; a role only tightens the baseline (confirm card)",
+  },
   personality: {
     usage: "/personality <concise|technical|friendly|custom:text|default>",
     desc: "set this chat's reply style — style only, never policy (confirm card)",
@@ -2247,9 +2251,12 @@ function projectIdForRepo(repo) {
 
 async function viewChat(main, chatId) {
   let activeChatId = chatId || null;
-  const [llm, chatList] = await Promise.all([
+  // R1 (ADR 0055 D3): the role picker's choices; a broken custom role file
+  // must not take the chat view down with it — no picker, server default.
+  const [llm, chatList, roleList] = await Promise.all([
     api("GET", "/api/llm/config"),
     api("GET", "/api/chats"),
+    api("GET", "/api/roles").catch(() => ({ roles: [], default: null })),
   ]);
   let chats = chatList.chats;
   const chatSidebar = el("nav", { class: "chat-sidebar", "aria-label": "Chats" });
@@ -2383,6 +2390,17 @@ async function viewChat(main, chatId) {
     : [el("option", { value: "" }, "No model")]);
   modelSelect.value = activeChat?.model || llm.default_model || "";
   modelSelect.disabled = Boolean(activeChatId);
+  // R1: a new chat opens with a role picker defaulting to the onboard choice
+  // (or `skep role use`); an open chat switches with /role (a confirm card).
+  const roleSelect = el("select", {
+    class: "composer-model-select",
+    "aria-label": "chat role",
+    title: activeChatId ? "switch with /role <name>" : "role for the next new chat",
+  }, [el("option", { value: "" }, "no role"),
+    ...roleList.roles.map(role => el("option", { value: role.name }, `role: ${role.name}`))]);
+  roleSelect.value = activeChatId ? (activeChat?.role || "") : (roleList.default || "");
+  roleSelect.disabled = Boolean(activeChatId);
+  roleSelect.hidden = roleList.roles.length === 0;
   const contextPopover = el("div", { class: "context-popover" });
   let llmUsage = null; // v74-F6: the local token tally, fetched on hover
   const contextMeter = el("div", {
@@ -2673,6 +2691,7 @@ async function viewChat(main, chatId) {
         attachInput,
         mic,
         voiceToggle,
+        roleSelect,
         modelSelect,
         send)),
     el("div", { class: "composer-status-row" },
@@ -3236,6 +3255,11 @@ async function viewChat(main, chatId) {
           { name: schedName, repo, every, instructions });
         return;
       }
+      if (name === "role") {
+        if (args.length !== 1) { commandHelp(`usage: ${spec.usage}`); return; }
+        await proposeCommand("set_role", { name: args[0] });
+        return;
+      }
       if (name === "personality") {
         const value = args.join(" ").trim();
         if (!value) { commandHelp(`usage: ${spec.usage}`); return; }
@@ -3491,12 +3515,16 @@ async function viewChat(main, chatId) {
 
   const ensureChat = async () => {
     if (activeChatId) return;
-    activeChat = await api("POST", "/api/chats", { model: modelSelect.value || null });
+    activeChat = await api("POST", "/api/chats",
+      { model: modelSelect.value || null, role: roleSelect.hidden ? null : roleSelect.value });
     activeChatId = activeChat.chat_id;
     chats = [activeChat, ...chats.filter(chat => chat.chat_id !== activeChatId)];
     modelSelect.value = activeChat.model || llm.default_model || "";
     modelSelect.disabled = true;
     modelSelect.title = "start a new chat to change model";
+    roleSelect.value = activeChat.role || "";
+    roleSelect.disabled = true;
+    roleSelect.title = "switch with /role <name>";
     history.replaceState(null, "", `#/chat/${activeChatId}`);
     setShellActiveRoute(location.hash);
     renderSidebarChats(chatSidebar, chats, activeChatId, llm.default_model);

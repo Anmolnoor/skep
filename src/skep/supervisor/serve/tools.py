@@ -25,6 +25,7 @@ from ..engines import engine_names
 from ..memory import MEMORY_CLASSES, MemoryError
 from ..projects import list_projects, project_to_dict
 from ..providers import PROVIDER_COST_CLASSES, PROVIDER_PROTOCOLS
+from ..roles import Role, role_for_chat, tighten_autonomy
 from ..store import ChatSearchHit, RunStore
 from . import actions
 from .jobs import Dispatcher
@@ -193,6 +194,7 @@ COMMAND_TOOL_NAMES = (
             "workon",
             "propose_schedule",
             "set_personality",
+            "set_role",
             "set_persona",
             # v73-F2: crash recovery must not depend on a working model —
             # provider trouble is exactly when runs crash.
@@ -361,6 +363,7 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
             "scope": {"type": "string", "description": "shell, network, filesystem, …"},
             "action": {"type": "string", "description": "e.g. run, connect, write"},
             "value": {"type": "string", "description": "the command, host or path"},
+            "role": {"type": "string", "description": "optional: answer under this role"},
         },
         ["repo", "scope", "action", "value"],
     ),
@@ -2016,6 +2019,14 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         ["value"],
     ),
     _tool(
+        "set_role",
+        "PROPOSE switching THIS chat's role (requires user confirmation): its "
+        "prompt, voice and policy layer change together. A role only tightens "
+        "the approved baseline. builder, operator, assistant, or a custom role.",
+        {"name": {"type": "string"}},
+        ["name"],
+    ),
+    _tool(
         "set_persona",
         "PROPOSE setting the profile-level PERSONA (requires user "
         "confirmation): the identity every chat starts with — name, how to "
@@ -2313,6 +2324,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "use_provider",
         "remove_provider",
         "set_personality",
+        "set_role",
         "set_persona",
         "set_tts_provider",
     ),
@@ -2499,7 +2511,19 @@ def _schedule_summary(schedule: Any) -> dict[str, Any]:
     }
 
 
-def fetch_grant_decision(store: RunStore, host: str) -> AutonomyDecision | None:
+def _chat_role(store: RunStore, holder: ConfigHolder, chat_id: str | None) -> Role | None:
+    """R1: the chat's role for the Queen's lanes; no chat, no role layer."""
+    return role_for_chat(store, holder.current.home, chat_id) if chat_id else None
+
+
+def fetch_grant_decision(
+    store: RunStore, host: str, *, role: Role | None = None
+) -> AutonomyDecision | None:
+    """R1 (ADR 0055 D3): the chat's role layer tightens the lane below."""
+    return tighten_autonomy(_fetch_grant_lane(store, host), role, "network", "fetch", host)
+
+
+def _fetch_grant_lane(store: RunStore, host: str) -> AutonomyDecision | None:
     """v72-F7: the granted-domain read_url lane. An explicit ``network/fetch``
     rule decides — allow runs in-turn, deny refuses without a card; no
     matching rule returns None and the per-URL card stays exactly as it was.
@@ -2605,6 +2629,22 @@ def _command_registered_repo(
 
 
 def queen_shell_decision(
+    store: RunStore,
+    holder: ConfigHolder,
+    *,
+    command: str,
+    cwd: str | None,
+    background: bool = False,
+    role: Role | None = None,
+) -> AutonomyDecision | None:
+    """R1 (ADR 0055 D3): the chat's role layer tightens the lane below — a
+    role that asks for a command cards it even where a standing rule allows."""
+    lane = _queen_shell_lane(store, holder, command=command, cwd=cwd, background=background)
+    action = "run_background" if background else "run"
+    return tighten_autonomy(lane, role, "shell", action, command)
+
+
+def _queen_shell_lane(
     store: RunStore,
     holder: ConfigHolder,
     *,
@@ -3098,6 +3138,7 @@ def execute_read_tool(
             str(args["scope"]),
             str(args["action"]),
             str(args["value"]),
+            role=None if args.get("role") is None else str(args["role"]),
         )
     if name == "policy_explain":
         from ..policy_templates import explain_view
@@ -3569,9 +3610,10 @@ def _execute_mutation(
         )
         redirect_guard = None
         if granted:
+            hop_role = _chat_role(store, holder, chat_id)
 
             def _hop_allowed(candidate_host: str) -> bool:
-                hop = fetch_grant_decision(store, candidate_host)
+                hop = fetch_grant_decision(store, candidate_host, role=hop_role)
                 return hop is not None and hop.allows_execution()
 
             redirect_guard = _hop_allowed
@@ -3617,7 +3659,11 @@ def _execute_mutation(
         except ValueError as exc:
             raise ValueError(f"command could not be parsed: {exc}") from exc
         last_guard = decision or queen_shell_decision(
-            store, holder, command=shell_command, cwd=shell_cwd
+            store,
+            holder,
+            command=shell_command,
+            cwd=shell_cwd,
+            role=_chat_role(store, holder, chat_id),
         )
         if last_guard is not None and last_guard.verdict == "deny":
             raise ValueError(last_guard.detail or "denied by policy")
@@ -3736,7 +3782,12 @@ def _execute_mutation(
         start_command = str(args["command"])
         start_cwd = None if args.get("cwd") is None else str(args["cwd"])
         start_guard = decision or queen_shell_decision(
-            store, holder, command=start_command, cwd=start_cwd, background=True
+            store,
+            holder,
+            command=start_command,
+            cwd=start_cwd,
+            background=True,
+            role=_chat_role(store, holder, chat_id),
         )
         if start_guard is not None and start_guard.verdict == "deny":
             raise ValueError(start_guard.detail or "denied by policy")
@@ -3940,7 +3991,11 @@ def _execute_mutation(
         )
 
         last_guard = queen_filesystem_decision(
-            store, holder, action="read", path=str(args.get("path") or "")
+            store,
+            holder,
+            action="read",
+            path=str(args.get("path") or ""),
+            role=_chat_role(store, holder, chat_id),
         )
         if last_guard.verdict == "deny":
             raise ValueError(f"denied by policy: {last_guard.decided_by or last_guard.reason}")
@@ -4233,7 +4288,9 @@ def _execute_mutation(
         # Last guard: a deny rule refuses even on a confirmed card — denied
         # space stays unreachable by confirmation.
         last_guard = mcp_scope_decision(
-            store, MCPTool(server_id=server_id, name=tool_name, description="")
+            store,
+            MCPTool(server_id=server_id, name=tool_name, description=""),
+            role=_chat_role(store, holder, chat_id),
         )
         if last_guard.verdict == "deny":
             raise ValueError(f"denied by policy: {last_guard.decided_by or last_guard.reason}")
@@ -4861,6 +4918,13 @@ def _execute_mutation(
         normalized = validate_personality(str(args["value"]))
         store.set_chat_personality(chat_id, normalized or None)
         return {"personality": normalized or "default"}
+    if name == "set_role":
+        # R1 (ADR 0055 D3): the chat's role — prompt, voice and layer together.
+        from ..roles import use_role
+
+        if chat_id is None:
+            raise ValueError("set_role only makes sense inside a chat")
+        return use_role(store, holder.current.home, str(args["name"]), chat_id=chat_id)
     if name == "set_persona":
         # v53-F4 (ADR 0028): profile-level identity, one capped file in the
         # personal home; 'default' clears. Oversize is a clean tool error.
@@ -4982,8 +5046,19 @@ def mutation_executes_in_turn(
 
 
 def mutation_execution_decision(
-    name: str, args: dict[str, Any], *, store: RunStore, holder: ConfigHolder
+    name: str,
+    args: dict[str, Any],
+    *,
+    store: RunStore,
+    holder: ConfigHolder,
+    chat_id: str | None = None,
 ) -> AutonomyDecision | None:
+    # R1 (ADR 0055 D3): the chat's role layer tightens the Queen's own lanes.
+    # A role file that no longer loads refuses rather than dropping the layer.
+    try:
+        role = _chat_role(store, holder, chat_id)
+    except ValueError as exc:
+        return AutonomyDecision(verdict="deny", reason="role.deny.unloadable", detail=str(exc))
     if name == "call_mcp_tool":
         # v40-F10: the resolved mcp scope decides — allow runs inside the
         # turn, require_approval cards, deny refuses without a card.
@@ -4996,6 +5071,7 @@ def mutation_execution_decision(
                 name=str(args.get("tool") or ""),
                 description="",
             ),
+            role=role,
         )
     if name == "run_code":
         # v51-F3: run_code auto-resolves exactly where a plain dispatch_run
@@ -5054,6 +5130,7 @@ def mutation_execution_decision(
             holder,
             command=str(args.get("command") or ""),
             cwd=None if args.get("cwd") is None else str(args["cwd"]),
+            role=role,
         )
     if name == "start_process":
         # v83-F8: the run_background action — a 'run' grant never covers a
@@ -5064,6 +5141,7 @@ def mutation_execution_decision(
             command=str(args.get("command") or ""),
             cwd=None if args.get("cwd") is None else str(args["cwd"]),
             background=True,
+            role=role,
         )
     if name == "stop_process":
         # v83-F8 (review item 3): stopping CARDS by default — the operator
@@ -5075,7 +5153,7 @@ def mutation_execution_decision(
         if record is None:
             return None  # the honest not-found error surfaces on confirm
         stop_decision = queen_shell_decision(
-            store, holder, command=record.command, cwd=None, background=True
+            store, holder, command=record.command, cwd=None, background=True, role=role
         )
         if stop_decision is not None and stop_decision.allows_execution():
             return AutonomyDecision(
@@ -5101,7 +5179,7 @@ def mutation_execution_decision(
         from .fileio import queen_filesystem_decision
 
         return queen_filesystem_decision(
-            store, holder, action="read", path=str(args.get("path") or "")
+            store, holder, action="read", path=str(args.get("path") or ""), role=role
         )
     if name == "read_url":
         # v72-F7: a standing network/fetch grant runs the read in-turn;
@@ -5112,7 +5190,7 @@ def mutation_execution_decision(
         host = urllib.parse.urlparse(str(args.get("url") or "")).hostname or ""
         if not host:
             return None
-        return fetch_grant_decision(store, host)
+        return fetch_grant_decision(store, host, role=role)
     if name != "dispatch_run":
         return None
     return actions.dispatch_run_decision(

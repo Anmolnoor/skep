@@ -171,6 +171,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     chat.add_argument("--thinking", action="store_true", help="show the model's thinking, dim")
     chat.add_argument(
+        "--role", default=None, help="open the new chat in this role (default: skep role list's *)"
+    )
+    chat.add_argument(
         "--oneshot",
         metavar="MESSAGE",
         default=None,
@@ -564,8 +567,8 @@ def _onboard_chat(supervisor_home: Path, role: str) -> int:
                 )
                 return 1
             time.sleep(0.5)
-    print(f"role: {role} — noted in first_run.json; roles as policy records land in R1")
-    return run_chat(home=supervisor_home, url=url)
+    print(f"role: {role} — your first chat opens in role:{role} (skep role list)")
+    return run_chat(home=supervisor_home, url=url, role=role)
 
 
 def _doctor(args: argparse.Namespace) -> int:

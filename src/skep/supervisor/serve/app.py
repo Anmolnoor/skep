@@ -217,6 +217,7 @@ class PolicyDecideRequest(BaseModel):
     value: str
     repo: str | None = None
     actor: str = "api"
+    role: str | None = None  # R1: decide under this role's layer
 
 
 class BaselineApproveRequest(BaseModel):
@@ -547,10 +548,12 @@ def create_app(
         return registry_view()
 
     @app.get("/api/policy/why")
-    def get_policy_why(repo: str, scope: str, action: str, value: str) -> dict[str, Any]:
+    def get_policy_why(
+        repo: str, scope: str, action: str, value: str, role: str | None = None
+    ) -> dict[str, Any]:
         """P0-3 (ADR 0052): would <scope>.<action> <value> be allowed in <repo>?"""
         try:
-            return policy_why(holder, run_store, repo, scope, action, value)
+            return policy_why(holder, run_store, repo, scope, action, value, role=role)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -585,6 +588,16 @@ def create_app(
                 reapprove=body.reapprove,
                 approved_by=body.approved_by,
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # first-run R1 (ADR 0055 D3): the new-chat picker's choices and default.
+    @app.get("/api/roles")
+    def get_roles() -> dict[str, Any]:
+        from ..roles import roles_view
+
+        try:
+            return roles_view(run_store, holder.current.home)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -670,6 +683,7 @@ def create_app(
                 value=body.value,
                 repo=body.repo,
                 actor=body.actor,
+                role=body.role,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

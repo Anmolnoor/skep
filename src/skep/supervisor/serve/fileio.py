@@ -22,6 +22,7 @@ from typing import Any
 from ..autonomy import AutonomyDecision
 from ..policy_resolver import resolve_operator_policy
 from ..policy_schema import DEFAULT_DENY_RULE_ID
+from ..roles import Role, tighten_autonomy
 from ..store import RunStore
 from .registry import repos_root
 from .settings import ConfigHolder
@@ -51,6 +52,19 @@ def operator_roots(store: RunStore, holder: ConfigHolder) -> list[Path]:
 
 
 def queen_filesystem_decision(
+    store: RunStore,
+    holder: ConfigHolder,
+    *,
+    action: str,
+    path: str,
+    role: Role | None = None,
+) -> AutonomyDecision:
+    """R1 (ADR 0055 D3): the chat's role layer tightens the lane below."""
+    lane = _queen_filesystem_lane(store, holder, action=action, path=path)
+    return tighten_autonomy(lane, role, "filesystem", action, lane.detail or path) or lane
+
+
+def _queen_filesystem_lane(
     store: RunStore, holder: ConfigHolder, *, action: str, path: str
 ) -> AutonomyDecision:
     """Decide one Queen-side filesystem access against the filesystem scope.

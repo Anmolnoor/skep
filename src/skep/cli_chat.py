@@ -245,6 +245,11 @@ COMMANDS: dict[str, dict[str, str]] = {
         "desc": "set the profile-level identity every chat starts with — "
         "identity only, never policy (confirm card)",
     },
+    "role": {
+        "usage": "/role <builder|operator|assistant|custom-role>",
+        "desc": "switch this chat's role — prompt, voice and policy layer together; "
+        "a role only tightens the baseline (confirm card)",
+    },
     "personality": {
         "usage": "/personality <concise|technical|friendly|custom:text|default>",
         "desc": "set this chat's reply style — style only, never policy (confirm card)",
@@ -1018,6 +1023,12 @@ class ChatRepl:
                 return
             self._propose_command("set_persona", {"text": " ".join(args)})
             return
+        if name == "role":
+            if len(args) != 1:
+                print(usage)
+                return
+            self._propose_command("set_role", {"name": args[0]})
+            return
         if name == "personality":
             if not args:
                 print(usage)
@@ -1217,6 +1228,7 @@ def _run_oneshot(
     continue_latest: bool = False,
     url: str = DEFAULT_URL,
     yes: bool = False,
+    role: str | None = None,
 ) -> int:
     """The scripting face: one message, stream the reply, exit 0.
 
@@ -1234,7 +1246,9 @@ def _run_oneshot(
     exchange keeps ONE transcript instead of re-asking from scratch. The
     flagless default stays a fresh chat per invocation — right for cron.
     """
-    chat, _resumed = _resolve_chat(serve, chat_id=chat_id, continue_latest=continue_latest)
+    chat, _resumed = _resolve_chat(
+        serve, chat_id=chat_id, continue_latest=continue_latest, role=role
+    )
     repl = ChatRepl(serve, chat, show_thinking=show_thinking, url=url)
     repl.auto_confirm = yes
     # v48-F5: /commands are deck, never model — the same interception as the
@@ -1246,8 +1260,29 @@ def _run_oneshot(
     return 0
 
 
+def _pick_role(client: ServeClient) -> str | None:
+    """R1 (ADR 0055 D3): a new interactive chat opens with a role picker,
+    Enter taking the default (`skep role use`, else onboard's). Off a TTY the
+    server applies the default — None."""
+    if not _tty() or not sys.stdin.isatty():
+        return None
+    view = client.get("/api/roles")
+    names = [str(role["name"]) for role in view["roles"]]
+    default = view.get("default") or "none"
+    while True:
+        answer = input(f"role ({' / '.join(names)}) [{default}]: ").strip()
+        if not answer or answer in names:
+            return answer or None
+        print(_c(DIM, f"no role {answer!r} — pick one of {', '.join(names)}"))
+
+
 def _resolve_chat(
-    client: ServeClient, *, chat_id: str | None, continue_latest: bool
+    client: ServeClient,
+    *,
+    chat_id: str | None,
+    continue_latest: bool,
+    role: str | None = None,
+    pick_role: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     """(chat record, is_resumed) for the requested session."""
     if chat_id:
@@ -1259,7 +1294,11 @@ def _resolve_chat(
             return dict(chats[0]), True
         print(_c(DIM, "no chats yet — starting a new one"))
     title = f"terminal {datetime.now():%Y-%m-%d %H:%M}"
-    return dict(client.post("/api/chats", {"title": title, "source": "terminal"})), False
+    body: dict[str, Any] = {"title": title, "source": "terminal"}
+    chosen = role or (_pick_role(client) if pick_role else None)
+    if chosen:
+        body["role"] = chosen
+    return dict(client.post("/api/chats", body)), False
 
 
 def run_chat(
@@ -1272,6 +1311,7 @@ def run_chat(
     oneshot: str | None = None,
     yes: bool = False,
     client: HttpxClientLike | None = None,
+    role: str | None = None,
 ) -> int:
     token_path = home / TOKEN_FILE
     if not token_path.is_file():
@@ -1288,10 +1328,15 @@ def run_chat(
                 continue_latest=continue_latest,
                 url=url,
                 yes=yes,
+                role=role,
             )
         _print_banner(serve)
-        chat, resumed = _resolve_chat(serve, chat_id=chat_id, continue_latest=continue_latest)
+        chat, resumed = _resolve_chat(
+            serve, chat_id=chat_id, continue_latest=continue_latest, role=role, pick_role=True
+        )
         repl = ChatRepl(serve, chat, show_thinking=show_thinking, url=url)
+        if not resumed and chat.get("role"):
+            print(_c(DIM, f"this chat runs in role:{chat['role']} — /role switches it"))
         if resumed:
             # v77-F5: one summary line instead of twenty messages of scroll —
             # what was withheld and the command that shows it are both named.
@@ -1334,4 +1379,5 @@ def cmd_chat(args: argparse.Namespace) -> int:
         show_thinking=args.thinking,
         oneshot=args.oneshot,
         yes=bool(getattr(args, "yes", False)),
+        role=args.role,
     )

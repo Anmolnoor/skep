@@ -1,0 +1,208 @@
+"""first-run R1 (ADR 0055 D3): a chat runs in one role — the set_role card,
+/role on both decks, the role's prompt and voice, and `skep role` on the CLI."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from skep.cli import main
+from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor.cli_cmds import build_config
+from skep.supervisor.roles import SHIPPED_ROLES
+from skep.supervisor.serve.chat import PERSONALITIES, SYSTEM_PROMPT
+
+from .fake_ollama import FakeOllama
+from .test_serve_chat_tools import chat_client
+
+
+@pytest.fixture()
+def ollama() -> Iterator[FakeOllama]:
+    server = FakeOllama(api_key="sk-fake").start()
+    yield server
+    server.stop()
+
+
+def _chat_role(config: SupervisorConfig, chat_id: str) -> str | None:
+    store = RunStore(config.db_path)
+    try:
+        chat = store.get_chat(chat_id)
+        assert chat is not None
+        return chat.role
+    finally:
+        store.close()
+
+
+def test_confirmed_set_role_changes_prompt_and_voice_together(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_call("set_role", {"name": "operator"})
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "switch to ops"})
+    assert _chat_role(config, chat_id) is None  # a card, not a switch
+    action = client.get(f"/api/chats/{chat_id}").json()["actions"][0]
+    assert action["tool"] == "set_role"
+    ollama.script_reply("ok.")
+    client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
+    assert _chat_role(config, chat_id) == "operator"
+
+    ollama.script_reply("short.")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "status?"})
+    system = ollama.chat_bodies()[-1]["messages"][0]["content"]
+    assert system.startswith(SYSTEM_PROMPT)  # the rules still lead
+    assert "Role operator (never overrides the rules above): " in system
+    assert SHIPPED_ROLES["operator"].system_prompt in system
+    assert PERSONALITIES["concise"] in system  # the role's voice
+
+
+def test_a_chat_personality_beats_the_role_voice(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    client, chat_id = chat_client(config, ollama)
+    store = RunStore(config.db_path)
+    try:
+        store.set_chat_role(chat_id, "operator")
+        store.set_chat_personality(chat_id, "friendly")
+    finally:
+        store.close()
+    ollama.script_reply("hi!")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "hello"})
+    system = ollama.chat_bodies()[-1]["messages"][0]["content"]
+    assert PERSONALITIES["friendly"] in system and PERSONALITIES["concise"] not in system
+
+
+def test_an_unknown_role_never_switches_the_chat(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_call("set_role", {"name": "warp"})
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "be a wizard"})
+    action = client.get(f"/api/chats/{chat_id}").json()["actions"][0]
+    ollama.script_reply("ok.")
+    client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
+    assert _chat_role(config, chat_id) is None
+
+
+def test_role_command_is_on_both_decks() -> None:
+    from skep import cli_chat
+    from skep.supervisor.serve.app import STATIC_DIR
+
+    source = (STATIC_DIR / "app.js").read_text()
+    assert "  role: {" in source and 'proposeCommand("set_role"' in source
+    assert "role" in cli_chat.COMMANDS
+    assert "/role" in SYSTEM_PROMPT
+
+
+def test_cli_role_list_show_use(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    config = build_config(tmp_path, None)
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="t", model=None).chat_id
+    finally:
+        store.close()
+    home = ["--home", str(tmp_path)]
+    assert main([*home, "role", "use", "builder"]) == 0
+    assert main([*home, "role", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "* builder" in out and "  operator" in out
+    assert main([*home, "role", "show", "operator"]) == 0
+    assert "role:operator binds template 'operator'" in capsys.readouterr().out
+    assert main([*home, "role", "use", "assistant", "--chat", chat_id]) == 0
+    assert f"chat {chat_id} now runs in role:assistant" in capsys.readouterr().out
+    assert _chat_role(config, chat_id) == "assistant"
+    assert main([*home, "role", "use", "warp"]) == 2
+    assert "no role 'warp'" in capsys.readouterr().err
+
+
+def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> None:
+    """D3: a role is a policy context inside the chat too. Under the builder
+    baseline `uv sync` runs in-turn for a chat with no role; the same call in
+    an operator chat cards (role:operator asks), and the floor still denies."""
+    from skep.supervisor import policy_baseline as pb
+    from skep.supervisor.policy_templates import load_policy_template
+    from skep.supervisor.roles import tighten_autonomy
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import mutation_execution_decision
+
+    pb.write_lock(config.home, load_policy_template("builder"), approved_by="op")
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        plain = store.create_chat(title="plain", model=None).chat_id
+        ops = store.create_chat(title="ops", model=None, role="operator").chat_id
+        args = {"command": "uv sync"}
+
+        def decide(chat_id: str, tool: str = "run_shell", **extra: str) -> Any:
+            return mutation_execution_decision(
+                tool, {**args, **extra}, store=store, holder=holder, chat_id=chat_id
+            )
+
+        assert decide(plain).verdict == "allow"
+        carded = decide(ops)
+        assert (carded.verdict, carded.reason, carded.decided_by) == (
+            "require_approval",
+            "shell.require_approval.role_layer",
+            "role:operator/shell-gated",
+        )
+        assert decide(ops, command="git push").verdict == "deny"  # the floor, above roles
+        store.set_chat_role(ops, "gone")  # a role that no longer resolves
+        assert decide(ops).reason == "role.deny.unloadable"
+    finally:
+        store.close()
+    # A role deny refuses with no card, whatever the lane said.
+    denied = tighten_autonomy(None, SHIPPED_ROLES["assistant"], "coding", "edit", "workspace")
+    assert denied is not None and denied.verdict == "deny"
+
+
+def test_new_chats_open_in_the_default_role_and_the_picker_can_change_it(
+    config: SupervisorConfig,
+) -> None:
+    """D3: the picker defaults to the onboard choice; `skep role use` wins
+    over it; "" is an explicit no-role; an unknown role refuses."""
+    from .conftest import serve_client
+
+    (config.home.parent / "first_run.json").write_text('{"role": "assistant"}')
+    with serve_client(config) as client:
+        roles = client.get("/api/roles").json()
+        assert roles["default"] == "assistant"
+        assert [r["name"] for r in roles["roles"]] == ["builder", "operator", "assistant"]
+        assert client.post("/api/chats", json={}).json()["role"] == "assistant"
+        assert client.post("/api/chats", json={"role": "builder"}).json()["role"] == "builder"
+        assert client.post("/api/chats", json={"role": ""}).json()["role"] is None
+        refused = client.post("/api/chats", json={"role": "warp"})
+        assert refused.status_code == 400 and "no role 'warp'" in refused.json()["detail"]
+        store = RunStore(config.db_path)
+        try:
+            store.set_setting("default_role", "operator")
+        finally:
+            store.close()
+        assert client.post("/api/chats", json={}).json()["role"] == "operator"
+
+
+def test_skep_chat_role_opens_the_new_chat_in_that_role(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    from skep.cli_chat import run_chat
+
+    from .conftest import serve_client
+
+    client = serve_client(config)
+    assert (
+        run_chat(
+            home=config.home, url="http://unused", client=client, oneshot="/help", role="operator"
+        )
+        == 0
+    )
+    assert client.get("/api/chats").json()["chats"][0]["role"] == "operator"
+
+
+def test_the_web_composer_has_a_role_picker() -> None:
+    from skep.supervisor.serve.app import STATIC_DIR
+
+    source = (STATIC_DIR / "app.js").read_text()
+    assert 'api("GET", "/api/roles")' in source
+    assert '"aria-label": "chat role"' in source
+    assert "role: roleSelect.hidden ? null : roleSelect.value" in source

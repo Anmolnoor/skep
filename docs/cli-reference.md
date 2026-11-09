@@ -202,7 +202,7 @@ access token on startup.
 ## Chat
 
 ```sh
-skep chat [--url URL] [--chat ID] [--continue] [--thinking] [--oneshot MESSAGE]
+skep chat [--url URL] [--chat ID] [--continue] [--thinking] [--oneshot MESSAGE] [--role NAME]
 ```
 
 `chat` is the terminal face of the same Queen the web UI talks to. It is an
@@ -221,6 +221,9 @@ daemon: run `skep serve` first. The REPL never opens the store directly.
 - `--oneshot "message"` sends one message to a new chat, streams the reply,
   and exits 0 — no prompts; cards are skipped and reported by id (the
   scripting/cron face).
+- A new interactive chat asks for its role once (Enter takes the default —
+  `skep role use`, else the role `skep onboard` recorded); `--role NAME`
+  skips the question. See "Roles" below.
 
 Messages starting with `/` are the command deck — deterministic operator
 commands the model never sees, identical to the web deck:
@@ -239,6 +242,7 @@ commands the model never sees, identical to the web deck:
 | `/approve <review-id> [branch]` | approve a pending review (confirm card) |
 | `/deny <review-id>` | deny a pending review (confirm card) |
 | `/workon <path>` | make a local directory a first-class workspace (confirm card) |
+| `/role <name>` | switch this chat's role — prompt, voice and policy layer together (confirm card) |
 
 ## Skills
 
@@ -259,11 +263,11 @@ skep project show    PROJECT_ID
 skep project set-phase PROJECT_ID PHASE
 skep policy registry
 skep policy rsop REPO
-skep policy why  REPO SCOPE ACTION VALUE
+skep policy why  REPO SCOPE ACTION VALUE [--role NAME]
 skep policy explain SUBJECT
 skep policy approve [--template NAME | --file PATH] [--reapprove] [--yes]
 skep policy baseline [status|diff]
-skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME]
+skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME] [--role NAME]
 skep policy hook [--actor NAME]
 skep policy decisions [--actor GLOB] [--since ISO] [--limit N]
 ```
@@ -296,6 +300,32 @@ and exits 1 when tampered; `policy baseline diff` prints what changed (also
 `GET /api/policy/baseline`). `policy explain baseline` shows the locked
 layer. See "The Policy Baseline" in `docs/configuration.md` (first-run O2,
 ADR 0056 D1/D2).
+
+## Roles
+
+```sh
+skep role list
+skep role show NAME
+skep role use  NAME [--chat ID]
+```
+
+A role (first-run R1, ADR 0055) is a record — `name`, `policy_layer`,
+`system_prompt`, `default_castes`, `voice` — and a **policy context**:
+`builder`, `operator` and `assistant` ship bound 1:1 to the templates of the
+same name; custom roles live in `~/.skep/roles/<name>.json` and may bind to
+any template. The role's layer sits directly under the approved baseline and
+only tightens it: the stricter of the two verdicts stands, a role with no rule
+for an action has no opinion, and the floor is above every role. A chat runs
+in one role — its prompt, its voice (when the chat has no `/personality`) and
+the Queen's own tool lanes. `role list` marks the default new chats open in
+with `*`; `role show` prints the record and its layer as the explain table;
+`role use NAME` sets that default, `--chat ID` switches one chat (the chat's
+`set_role` card and `/role` are the same verb). `skep policy why|decide
+--role NAME` answers under a role: `decided_by` names `role:<name>` when the
+role decided, `why` adds a `role` block naming the layer, and the ledger row
+carries `role` (also `role` on `GET /api/policy/why`, `POST
+/api/policy/decide` and the chat `policy_why` tool; `GET /api/roles` and
+`role` on `POST /api/chats` behind the web picker).
 
 ## skep acp
 

@@ -93,6 +93,7 @@ from ..projects import (
     validate_allowed_plugin_risks,
 )
 from ..provider_hosts import configured_provider_hosts
+from ..roles import resolve_role, role_decision, tighten
 from ..shell_prefixes import (
     command_line_segments,
     dangerous_prefix_reason,
@@ -1885,6 +1886,7 @@ def policy_decide(
     repo: str | None = None,
     actor: str = "api",
     ring: Literal["advisory", "hard"] = "advisory",
+    role: str | None = None,
 ) -> dict[str, Any]:
     """P3 (ADR 0053; the CTO record's enforcement hook): ``decide()`` reachable
     from outside, and RECORDED. With a repo, the run policy decides — the
@@ -1900,8 +1902,15 @@ def policy_decide(
     (the advisory ring: the hook, the ACP permission hop), ``deny`` where
     none does (``ring="hard"``: the governor's terminal and fs writes).
     O5: on a fresh home with nothing approved, every call in a scope routed
-    to engine v2 answers ``ask`` with ``no_baseline`` (``baseline_guard``)."""
+    to engine v2 answers ``ask`` with ``no_baseline`` (``baseline_guard``).
+
+    R1 (ADR 0055 D2): ``role`` adds the role layer under the baseline — the
+    stricter verdict stands (``roles.tighten``) and ``decided_by`` names
+    ``role:<name>`` when it decided. A row decided under a role carries
+    ``role``; a row without one had no role layer — today's behaviour, byte
+    for byte."""
     _check_scope_action(scope, action)
+    role_record = resolve_role(role, holder.current.home) if role is not None else None
     record: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "actor": actor,
@@ -1910,6 +1919,8 @@ def policy_decide(
         "action": action,
         "value": value,
     }
+    if role_record is not None:
+        record["role"] = role_record.name
     decision: dict[str, Any] | None = None
     floor = _floor_verdict(scope, value)
     if floor is not None:
@@ -1948,7 +1959,7 @@ def policy_decide(
             "decided_by": operator.decided_by,
         }
         record["source"] = "operator"
-    record.update(decision)
+    record.update(tighten(decision, role_record, scope, action, value))
     _append_policy_ledger(holder.current.audit_dir, "decisions", record)
     return record
 
@@ -2089,13 +2100,48 @@ def policy_note(
 
 
 def policy_why(
-    holder: ConfigHolder, store: RunStore, repo: str, scope: str, action: str, value: str
+    holder: ConfigHolder,
+    store: RunStore,
+    repo: str,
+    scope: str,
+    action: str,
+    value: str,
+    *,
+    role: str | None = None,
 ) -> dict[str, Any]:
     """P0-3 (ADR 0052 D4): would <scope>.<action> <value> in <repo> be allowed?
     The same resolve_run_policy a dispatch runs, then decide() on the compiled
     run document, plus the Queen's operator document — no dispatch, no record.
-    Unknown scope or action refuses naming the known set (I9)."""
+    Unknown scope or action refuses naming the known set (I9).
+
+    R1 (ADR 0055 D2, done-criterion 4): with a ``role`` the answer names the
+    role layer — ``role`` says what ``role:<name>`` alone decides (or that it
+    has no rule here) and both verdicts are tightened by it, exactly as
+    ``policy_decide`` does."""
     _check_scope_action(scope, action)
+    if role is not None:
+        role_record = resolve_role(role, holder.current.home)
+        answer = policy_why(holder, store, repo, scope, action, value)
+        hit = role_decision(role_record, scope, action, value)
+        answer["role"] = {
+            "name": role_record.name,
+            "layer": role_record.label,
+            "binds": role_record.policy_layer,
+            "verdict": hit.verdict if hit else None,
+            "decided_by": hit.decided_by if hit else None,
+            "note": (
+                f"{role_record.label} sits under the baseline and only tightens: "
+                + (
+                    f"it says {hit.verdict} ({hit.decided_by}); the stricter verdict stands"
+                    if hit
+                    else "it has no rule for this, so the layers beneath decide"
+                )
+            ),
+        }
+        for face in ("run", "operator"):
+            if "verdict" in answer[face]:
+                answer[face] = tighten(answer[face], role_record, scope, action, value)
+        return answer
     resolved_repo, binding_candidates, project = _repo_project_for_view(holder, store, repo)
     view: dict[str, Any] = {
         "repo": str(resolved_repo),

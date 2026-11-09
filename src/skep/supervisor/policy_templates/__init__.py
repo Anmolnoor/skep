@@ -346,8 +346,8 @@ def _setting_rows(template: PolicyTemplate, layer: str) -> list[dict[str, Any]]:
 def explain_view(subject: str, home: Path | None = None) -> dict[str, Any]:
     """``skep policy explain <template|baseline|role:NAME>`` — one payload on
     every face. A template renders its layer; ``baseline`` renders the layer
-    the lock under ``home`` approved, with its state (O2); ``role:…``
-    answers "none yet" until R1 gives it something to show."""
+    the lock under ``home`` approved, with its state (O2); ``role:NAME``
+    renders the role's layer — its bound template's rules (R1, ADR 0055)."""
     view: dict[str, Any] = {
         "subject": subject,
         "kind": "template",
@@ -376,11 +376,25 @@ def explain_view(subject: str, home: Path | None = None) -> dict[str, Any]:
             status=baseline_status(home) if home is not None else None,
         )
     elif subject.startswith("role:") or subject == "role":
+        from ..roles import SHIPPED_ROLES, all_roles
+
+        name = subject.partition(":")[2]
+        roles = all_roles(home) if home is not None else SHIPPED_ROLES
+        if name not in roles:
+            raise ValueError(f"no role {name!r}; known: {', '.join(roles)}")
+        role = roles[name]
+        bound = load_policy_template(role.policy_layer) if role.policy_layer else None
         view.update(
             kind="role",
             layer="role",
-            name=subject.partition(":")[2] or None,
-            note="none yet — roles land in R1 (ADR 0055)",
+            name=role.name,
+            note=(
+                f"{role.label} binds template {role.policy_layer!r}; it only tightens: "
+                "the stricter of this layer and the baseline stands"
+                if bound is not None
+                else f"{role.label} has no policy layer: the baseline decides alone"
+            ),
+            rules=_rule_rows(bound) if bound is not None else [],
         )
     else:
         template = load_policy_template(subject)
@@ -463,9 +477,12 @@ def render_policy_table(view: dict[str, Any]) -> str:
     ]
     lines += _markdown_table(["scope", "verdict", "action", "pattern", "rule"], rows)
     lines.append("")
-    lines.append(
-        "unlisted → asks (a card); the floor rows sit above every layer and cannot be lifted"
+    unlisted = (
+        "unlisted → no opinion (the baseline decides)"
+        if kind == "role"
+        else "unlisted → asks (a card)"
     )
+    lines.append(f"{unlisted}; the floor rows sit above every layer and cannot be lifted")
     if view["settings"]:
         lines.append("")
         lines.append("settings:")

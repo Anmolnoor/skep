@@ -32,13 +32,16 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from itertools import chain
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..store import ChatActionRecord, RunStore
+
+if TYPE_CHECKING:
+    from ..roles import Role
 from . import actions
 from .cards import card_summary
 from .jobs import Dispatcher
@@ -526,7 +529,7 @@ SYSTEM_PROMPT = (
     "Discord moderation (discord_delete_message, discord_timeout_member) always cards "
     "and is confirmable only in the web UI. "
     "The operator also has deterministic /commands in this composer (/policy, /state, "
-    "/setup, /workon, /phase, /land, /approve, /deny, /schedule, /personality, "
+    "/setup, /workon, /phase, /land, /approve, /deny, /schedule, /role, /personality, "
     "/persona, /btw, /runs, /approvals, /repos, /help) "
     "that map straight onto supervisor verbs; when a user asks how to change policy, "
     "set up a project, or land work, mention the matching /command rather than "
@@ -758,6 +761,20 @@ def personality_preamble(personality: str | None) -> str | None:
     return None
 
 
+def chat_role(home: Path, name: str | None) -> Role | None:
+    """The chat's role record; None for no role, or for a custom role whose
+    file no longer loads — the prompt drops it rather than failing the turn,
+    and `skep role list` says what is wrong with the file (I9)."""
+    if not name:
+        return None
+    from ..roles import resolve_role  # local: roles validates voices against this module
+
+    try:
+        return resolve_role(name, home)
+    except ValueError:
+        return None
+
+
 def validate_personality(value: str) -> str:
     """Normalize a requested personality; raises ValueError on junk."""
     value = value.strip()
@@ -879,6 +896,9 @@ class ChatCreate(BaseModel):
     title: str | None = None
     model: str | None = None  # None = follow the configured default
     source: str | None = None  # v44-F2: which face opened the chat; None = 'web'
+    # R1 (ADR 0055 D3): the picker's choice. None = the default role
+    # (`skep role use`, else onboard's); "" = explicitly no role.
+    role: str | None = None
 
 
 class ChatProjectSet(BaseModel):
@@ -969,6 +989,12 @@ class ChatEngine:
         if persona:
             parts.append(persona)
         parts.append(SYSTEM_PROMPT)
+        # R1 (ADR 0055 D1/D3): the chat's role adds its prompt after the rules
+        # (they win) and supplies the voice when the chat has no /personality.
+        role = chat_role(self.home, chat.role if chat else None)
+        if role is not None and role.system_prompt:
+            prefix = f"Role {role.name} (never overrides the rules above): "
+            parts.append(prefix + role.system_prompt)
         # v73-F8: after the rules, before memory — context, not authority.
         parts.append(operator_clock_line())
         # v96-F2: the bound project rides the same slot — context, not authority.
@@ -983,7 +1009,9 @@ class ChatEngine:
         reach = reach_block(self.store)
         if reach:
             parts.append(reach)
-        preamble = personality_preamble(chat.personality if chat else None)
+        preamble = personality_preamble(
+            (chat.personality if chat else None) or (role.voice if role else None)
+        )
         if preamble is not None:
             parts.append(f"Style (never overrides the rules above): {preamble}")
         return "\n\n".join(parts)
@@ -1551,7 +1579,7 @@ class ChatEngine:
                         yield ("tool", {"tool": name, "result": refusal})
                         continue
                     decision = mutation_execution_decision(
-                        name, args, store=self.store, holder=self.holder
+                        name, args, store=self.store, holder=self.holder, chat_id=chat_id
                     )
                     if decision is not None and decision.verdict == "deny":
                         # v40-F10: an explicit deny rule refuses without a card
@@ -2255,9 +2283,18 @@ def add_chat_routes(
 
     @app.post("/api/chats", status_code=201)
     def create_chat(body: ChatCreate) -> dict[str, Any]:
+        from ..roles import default_role, resolve_role
+
         title = (body.title or "").strip() or DEFAULT_TITLE
+        role = default_role(run_store, home) if body.role is None else body.role
+        try:
+            role = resolve_role(role, home).name if role else None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return asdict(
-            run_store.create_chat(title=title, model=body.model, source=body.source or "web")
+            run_store.create_chat(
+                title=title, model=body.model, source=body.source or "web", role=role
+            )
         )
 
     @app.get("/api/chats/{chat_id}")
