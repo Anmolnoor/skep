@@ -10,8 +10,15 @@ import stat
 from pathlib import Path
 from typing import Any
 
+from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor import policy_baseline as pb
+from skep.supervisor.policy_engine import resolve_stack
+from skep.supervisor.policy_layers import layers_for_repo
+from skep.supervisor.policy_resolver import resolve_operator_policy
+from skep.supervisor.policy_schema import SCOPES
 from skep.supervisor.policy_templates import load_policy_template
+from skep.supervisor.serve.actions import effective_policy_view
+from skep.supervisor.serve.settings import ConfigHolder
 
 
 def _edit(home: Path, mutate: Any) -> None:
@@ -172,3 +179,82 @@ def test_tamper_events_are_recorded_once_and_reset_by_an_approval(tmp_path: Path
     pb.write_lock(home, builder, approved_by="op")
     assert pb.tampered_since(home) is None
     assert pb.status_line(home).startswith("baseline: builder approved ")
+
+
+# --- O2-2: the reader ---------------------------------------------------------
+
+
+def _bound_store(config: SupervisorConfig, repo: Path, *, project_policy: dict[str, Any]) -> None:
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting("policy_engine_v2_scopes", list(SCOPES))
+        store.set_setting("default_execution_mode", "workspace")
+        store.set_setting("allowed_shell_commands", [["uv", "sync"]])
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy=project_policy,
+        )
+        store.add_project_binding(
+            project_id="app", binding_kind="repo_path", binding_value=str(repo)
+        )
+    finally:
+        store.close()
+
+
+def test_the_baseline_is_the_enforced_template_layer(config: SupervisorConfig, repo: Path) -> None:
+    _bound_store(config, repo, project_policy={"allowed_shell_commands": [["make"]]})
+    builder = load_policy_template("builder")
+    store = RunStore(config.db_path)
+    try:
+        before, _ = layers_for_repo(store, config, repo)
+        assert "template" not in [layer.name for layer in before]
+        pb.write_lock(config.home, builder, approved_by="op")
+        layers, _ = layers_for_repo(store, config, repo)
+        assert [layer.name for layer in layers][:3] == ["global", "template", "phase"]
+        knob = resolve_stack(layers).knobs["allowed_shell_commands"]
+        # The project overlay may no longer loosen (or change) what was approved.
+        assert knob.value == builder.settings["allowed_shell_commands"]
+        assert knob.enforced_by == "template:builder"
+        refused = [s for s in knob.chain if s.outcome == "refused"]
+        assert [s.layer for s in refused] == ["project"]
+        assert refused[0].reason == "enforced at template:builder"
+        # unset passes through: a knob the baseline does not set is untouched.
+        mode = resolve_stack(layers).knobs["default_execution_mode"]
+        assert mode.value == "workspace" and mode.enforced_by is None
+        # The rules ride the same slot: the Queen-side stack answers from them.
+        operator = resolve_operator_policy(store)
+        assert operator.decision("shell", "run", "uv run pytest -q").rule_id == (
+            "shell-uv-run-pytest"
+        )
+        assert operator.fail_closed is None
+    finally:
+        store.close()
+
+
+def test_a_tampered_baseline_fails_the_queen_and_dispatch_closed(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    _bound_store(config, repo, project_policy={})
+    pb.write_lock(config.home, load_policy_template("builder"), approved_by="op")
+    _edit(config.home, lambda d: d["settings"].update(default_network=["*"]))
+    store = RunStore(config.db_path)
+    try:
+        # No layer from a baseline that does not verify — and nothing looser either.
+        layers, _ = layers_for_repo(store, config, repo)
+        assert "template" not in [layer.name for layer in layers]
+        decision = resolve_operator_policy(store).decision("network", "search", "ddgs")
+        assert decision.verdict == "require_approval"
+        assert decision.rule_id == pb.BASELINE_TAMPERED
+        view = effective_policy_view(ConfigHolder(config, store), store, str(repo))
+        assert view["error"].startswith("baseline_tampered:")
+        assert "skep policy approve --reapprove" in view["error"]
+    finally:
+        store.close()
+
+
+def test_the_store_finds_its_home() -> None:
+    config = SupervisorConfig(home=Path("/x/home"), worker_command=("w",))
+    assert config.db_path.parent == config.home  # store_home relies on it

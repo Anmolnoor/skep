@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import SupervisorConfig
+from .policy_baseline import BASELINE_TAMPERED, Ok, fail_closed_reason, verify
 from .policy_engine import Layer, Setting, document_layers
 from .policy_resolver import _match_project_for_repo, _under_root, managed_repos_root
 from .policy_schema import (
@@ -54,6 +55,9 @@ def layers_for_repo(
     layers = [
         Layer("global", "global", tuple(Setting(key, value) for key, value in policy.items()))
     ]
+    template = template_layer(config.home)
+    if template is not None:
+        layers.append(template)
     missing: list[str] = []
     match = _match_project_for_repo(store, repo, binding_candidates=binding_candidates)
     trusted_roots = [str(root) for root in policy.get("trusted_workspace_roots") or []]
@@ -115,6 +119,34 @@ def layers_for_repo(
     return layers, missing
 
 
+def store_home(store: RunStore) -> Path:
+    """The home a store belongs to: ``SupervisorConfig.db_path`` is
+    ``<home>/supervisor.sqlite3``, so every policy consult that holds only a
+    store still reaches the home's baseline."""
+    return store.db_path.parent
+
+
+def template_layer(home: Path) -> Layer | None:
+    """first-run O2 (ADR 0056 D2): the approved baseline as the registry's
+    ``template`` layer, every set setting enforced — later layers can no
+    longer change what was approved; ``unset`` passes through. ``verify``
+    runs here, the one chokepoint every decide path loads through, and is
+    re-run whenever a baseline file's mtime changes. Anything but Ok is no
+    layer: ``baseline_guard`` says what a decision does instead."""
+    state = verify(home)
+    return state.enforced_layer() if isinstance(state, Ok) else None
+
+
+def baseline_guard(home: Path) -> str | None:
+    """The reason every verdict fails closed (``baseline_tampered``), or None.
+    The zero state answers ``NO_BASELINE_REASON`` — None until O5."""
+    return fail_closed_reason(verify(home))
+
+
+def baseline_tampered(home: Path) -> bool:
+    return baseline_guard(home) == BASELINE_TAMPERED
+
+
 def operator_layers(store: RunStore) -> list[Layer]:
     """The Queen's standing policy as layers: the global document, then the
     operator overlay (v52-F2), labelled by document."""
@@ -123,7 +155,10 @@ def operator_layers(store: RunStore) -> list[Layer]:
     )
     operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
     return document_layers(
-        base, (operator,), labels=("policy_document", "operator_policy_document")
+        base,
+        (operator,),
+        labels=("policy_document", "operator_policy_document"),
+        template=template_layer(store_home(store)),
     )
 
 
@@ -134,4 +169,13 @@ def flatten(values: dict[str, Any], sources: dict[str, str]) -> dict[str, Any]:
     return out
 
 
-__all__ = ["document_layers", "flatten", "layers_for_repo", "operator_layers"]
+__all__ = [
+    "baseline_guard",
+    "baseline_tampered",
+    "document_layers",
+    "flatten",
+    "layers_for_repo",
+    "operator_layers",
+    "store_home",
+    "template_layer",
+]

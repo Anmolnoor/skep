@@ -21,7 +21,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 from ... import __version__
 from ..policy_paths import workspace_value
@@ -105,13 +105,15 @@ class Governor:
                 line += f"; store unreadable: every decision forwards ({self.store_error})"
             _say(line)
 
-    def _decide(self, item: tuple[str, str, str], cwd: str) -> dict[str, Any]:
+    def _decide(
+        self, item: tuple[str, str, str], cwd: str, ring: Literal["advisory", "hard"] = "advisory"
+    ) -> dict[str, Any]:
         if self.holder is None or self.store is None:
             raise RuntimeError(self.store_error or "no store")
         scope, action, value = item
         return policy_decide(
             self.holder, self.store, scope=scope, action=action, value=value,
-            repo=cwd or None, actor=self.actor,
+            repo=cwd or None, actor=self.actor, ring=ring,
         )  # fmt: skip
 
     def _observe(self, msg: dict[str, Any]) -> None:
@@ -212,7 +214,7 @@ class Governor:
 
     def _ring(self, item: tuple[str, str, str], cwd: str) -> Reply | None:
         # A10: the hard ring has no human hop — only allow passes through.
-        record = self._decide(item, cwd)
+        record = self._decide(item, cwd, ring="hard")
         if record["verdict"] == "allow":
             return None
         return _refuse(f"{record['verdict']} by {record.get('decided_by') or record['rule_id']}")

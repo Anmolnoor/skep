@@ -322,6 +322,14 @@ def create_app(
         except Exception:
             logging.getLogger("skep.serve").exception("session-approval clear failed")
         try:
+            # first-run O2 (ADR 0056 D1): verify the policy baseline before the
+            # first decision; a tampered one cards the operator once.
+            from .actions import baseline_alarm
+
+            baseline_alarm(holder, run_store)
+        except Exception:
+            logging.getLogger("skep.serve").exception("policy baseline check failed")
+        try:
             # v83-F12 (ADR 0043): sync the shipped seed shelf — idempotent,
             # zero-grant only, operator copies and tombstones win.
             from ..seed_skills import load_seed_skills
