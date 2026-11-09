@@ -15,8 +15,9 @@ import pytest
 from fastapi import HTTPException
 
 from skep.cli import main
+from skep.cli_chat import _tool_summary
 from skep.supervisor import RunStore, SupervisorConfig
-from skep.supervisor.roles import EXCEEDS_DELEGATOR
+from skep.supervisor.roles import EXCEEDS_DELEGATOR, delegation_line
 from skep.supervisor.serve.actions import (
     created_transition_views_for_task,
     decision_detail_view,
@@ -24,6 +25,7 @@ from skep.supervisor.serve.actions import (
     submit_run,
     submit_team,
 )
+from skep.supervisor.serve.app import STATIC_DIR
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation
 
@@ -414,3 +416,65 @@ def test_every_face_dispatches_a_team(
     assert main(decisions) == 0
     view = json.loads(capsys.readouterr().out)
     assert view["summary"]["delegated"] == 2  # the manager's hop and the worker's
+
+
+# --- R3-4: the cards show the chain — web, chat, CLI ------------------------
+
+
+def test_delegation_line_reads_the_chain_down_to_the_worker() -> None:
+    assert delegation_line(None) == ""
+    assert delegation_line({"chain": [], "role": "operator", "team": None}) == (
+        "operator → worker@operator"
+    )
+    assert delegation_line(
+        {"chain": ["queen@operator", "manager@builder"], "role": "builder", "team": "T1"}
+    ) == ("queen@operator → manager@builder → worker@builder · team T1")
+    assert delegation_line({"chain": ["queen@operator"], "role": None}) == "queen@operator → worker"
+
+
+def test_every_run_view_shows_the_chain(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A real (fake-worker) delegated run: `skep review` prints the chain,
+    GET /api/runs and /api/runs/{id} carry it for the web cards, and the
+    chat client's tool summary and /runs line render it."""
+    home = ["--home", str(config.home.parent)]
+    run = [*home, "run", str(repo), "Fix. MODE:happy", "--quiet", "--execution-mode", "workspace"]
+    assert main([*run, "--worker-cmd", _worker_cmd(), "--role", "builder"]) == 0
+    assert main([*run, "--worker-cmd", _worker_cmd(), "--delegated-by", "queen@operator"]) == 0
+    capsys.readouterr()
+    store = RunStore(config.db_path)
+    try:
+        roled, chained = (r.task_id for r in reversed(store.recent_runs(2)))
+    finally:
+        store.close()
+    assert main([*home, "review", chained]) == 0
+    assert "delegated:    queen@operator → worker\n" in capsys.readouterr().out
+    with serve_client(config) as client:
+        detail = client.get(f"/api/runs/{roled}").json()
+        listed = {r["task_id"]: r for r in client.get("/api/runs").json()["runs"]}
+    assert detail["dispatch_decision"]["delegation"]["role"] == "builder"
+    assert listed[chained]["dispatch_decision"]["delegation"]["chain"] == ["queen@operator"]
+    summary = _tool_summary(
+        "dispatch_run",
+        {"task_id": "t1", "delegation": {"chain": ["queen@operator"], "role": "builder"}},
+        "",
+    )
+    assert summary == "✓ run t1  (queen@operator → worker@builder)"
+    team = {"team": "T1", "delegation_chain": ["queen@operator", "manager@builder"], "count": 2}
+    assert _tool_summary("batch_dispatch", {"ok": True, "result": team}, "") == (
+        "✓ team T1: queen@operator → manager@builder → 2 worker(s)"
+    )
+
+
+def test_the_web_face_renders_the_chain_on_every_run_view() -> None:
+    """No-build app.js (text pins, the house idiom): delegationText is the
+    twin of delegation_line and sits on the run card, the run detail and the
+    chat's dispatch_run / team lines."""
+    source = (STATIC_DIR / "app.js").read_text()
+    card = source.split("function buildRunCard(run)")[1].split("async function viewRuns")[0]
+    assert "delegationText(run.dispatch_decision.delegation)" in card
+    assert 'kv("delegated"' in source
+    tool_line = source.split("const toolLine = (tool, raw = null) => {")[1][:2000]
+    assert "delegationText(result.delegation)" in tool_line
+    assert 'tool === "batch_dispatch" && result.team' in tool_line

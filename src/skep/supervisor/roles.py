@@ -282,6 +282,20 @@ def tighten_autonomy(
 EXCEEDS_DELEGATOR = "exceeds_delegator"
 
 
+def delegation_line(delegation: object) -> str:
+    """R3 (ADR 0055 D5): a run's dispatch ``delegation`` as one line —
+    ``queen@operator → manager@builder → worker@builder · team <id>`` — the
+    CLI and the chat client's rendering (app.js ``delegationText`` is its
+    twin). Empty for a run nobody delegated."""
+    if not isinstance(delegation, dict):
+        return ""
+    chain = [str(hop) for hop in delegation.get("chain") or []]
+    role = delegation.get("role")
+    hops = [*(chain or ["operator"]), f"worker@{role}" if role else "worker"]
+    team = delegation.get("team")
+    return " → ".join(hops) + (f" · team {team}" if team else "")
+
+
 class Delegator(NamedTuple):
     entry: str  # "actor@role", exactly as the chain carries it
     role: Role

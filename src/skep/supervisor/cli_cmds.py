@@ -45,6 +45,7 @@ from .projects import (
     project_to_dict,
 )
 from .provider_hosts import configured_provider_hosts
+from .roles import delegation_line
 from .scheduler import make_schedule, make_template_schedule, parse_interval, run_due
 from .store import RunRecord, RunStore, UsageRecord
 from .template_suggestion import (
@@ -1199,6 +1200,12 @@ def cmd_review(args: argparse.Namespace) -> int:
                 dispatch = _decision_summary(audited_task.dispatch_decision)
                 if dispatch:
                     lines.append(f"  dispatch:     {dispatch}")
+                # first-run R3: who delegated this run, under which role.
+                delegated = delegation_line(
+                    getattr(audited_task.dispatch_decision, "delegation", None)
+                )
+                if delegated:
+                    lines.append(f"  delegated:    {delegated}")
                 landing = _decision_summary(audited_task.landing_decision)
                 if landing:
                     lines.append(f"  landing:      {landing}")
