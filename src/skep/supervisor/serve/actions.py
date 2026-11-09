@@ -53,10 +53,15 @@ from ..castes import resolve_caste
 from ..config import SupervisorConfig
 from ..contracts_io import read_event_log
 from ..memory import MemoryError, MemoryProposal, MemorySource
+from ..policy_baseline import NoBaseline, status_line
+from ..policy_baseline import current_layer as current_baseline_layer
 from ..policy_baseline import fail_closed_reason as baseline_fail_closed_reason
+from ..policy_baseline import layer_diff as baseline_layer_diff
+from ..policy_baseline import locked_layer as locked_baseline_layer
 from ..policy_baseline import note_event as note_baseline_event
-from ..policy_baseline import status_line
+from ..policy_baseline import sha256_of as baseline_sha256
 from ..policy_baseline import verify as verify_baseline
+from ..policy_baseline import write_lock as write_baseline_lock
 from ..policy_registry import registry_keys
 from ..policy_resolver import (
     PolicyResolutionError,
@@ -79,6 +84,7 @@ from ..policy_schema import (
     pattern_matches,
     shell_segments,
 )
+from ..policy_templates import PolicyTemplate, layer_view, load_policy_template
 from ..projects import (
     PROJECT_PHASES,
     PROJECT_POLICY_KEYS,
@@ -1979,6 +1985,65 @@ def baseline_alarm(holder: ConfigHolder, store: RunStore) -> str | None:
             source="operator",
         )
     return baseline_fail_closed_reason(state)
+
+
+def baseline_preview(
+    home: Path,
+    *,
+    template: str | None = None,
+    file: str | None = None,
+    reapprove: bool = False,
+) -> tuple[PolicyTemplate, dict[str, Any]]:
+    """first-run O2: the layer ``approve`` would lock, as the explain view
+    plus its ``diff`` against the locked layer. Refuses (I9) a second
+    approval without ``reapprove`` and a layer outside the catalogue or into
+    the floor (the template model's own validation)."""
+    if template and file:
+        raise ValueError("pass --template or --file, not both")
+    state = verify_baseline(home)
+    if not reapprove and not isinstance(state, NoBaseline):
+        raise ValueError(
+            "a policy baseline is already approved — `skep policy approve --reapprove` "
+            "shows the diff against it and re-locks"
+        )
+    if template:
+        layer = load_policy_template(template)
+    elif file:
+        try:
+            layer = PolicyTemplate.model_validate_json(Path(file).expanduser().read_text("utf-8"))
+        except OSError as exc:
+            raise ValueError(f"cannot read {file}: {exc}") from exc
+    elif reapprove:
+        layer = current_baseline_layer(home)
+    else:
+        raise ValueError("name a --template (builder, operator, assistant) or a --file")
+    view = layer_view(layer, kind="baseline")
+    locked = locked_baseline_layer(home)
+    view["diff"] = baseline_layer_diff(locked, layer) if locked is not None else []
+    view["sha256"] = baseline_sha256(layer)
+    return layer, view
+
+
+def approve_policy_baseline(
+    home: Path,
+    *,
+    template: str | None = None,
+    file: str | None = None,
+    reapprove: bool = False,
+    approved_by: str,
+    expect_sha256: str | None = None,
+) -> dict[str, Any]:
+    """first-run O2 (ADR 0056 D1): lock a layer as the approved baseline —
+    ``baseline.json`` (0444, a courtesy), ``baseline.lock`` and a
+    ``baseline_approved`` row in ``<audit>/policy/baseline-approvals.jsonl``.
+    One verb on three faces (ADR 0050): ``skep policy approve``, ``POST
+    /api/policy/baseline/approve`` and the chat card. ``expect_sha256`` is
+    the CLI's guard that what it showed is what gets locked."""
+    layer, view = baseline_preview(home, template=template, file=file, reapprove=reapprove)
+    if expect_sha256 is not None and view["sha256"] != expect_sha256:
+        raise ValueError("the baseline changed since it was shown — run approve again")
+    row = write_baseline_lock(home, layer, approved_by=approved_by)
+    return {"approved": row, "diff": view["diff"], "table": view["table"]}
 
 
 def policy_note(

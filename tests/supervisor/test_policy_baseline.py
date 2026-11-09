@@ -10,15 +10,26 @@ import stat
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from skep.cli import main
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor import policy_baseline as pb
+from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.policy_engine import resolve_stack
 from skep.supervisor.policy_layers import layers_for_repo
 from skep.supervisor.policy_resolver import resolve_operator_policy
 from skep.supervisor.policy_schema import SCOPES
-from skep.supervisor.policy_templates import load_policy_template
+from skep.supervisor.policy_templates import explain_view, load_policy_template
 from skep.supervisor.serve.actions import effective_policy_view
 from skep.supervisor.serve.settings import ConfigHolder
+from skep.supervisor.serve.tools import (
+    MUTATING_TOOL_NAMES,
+    execute_read_tool,
+    mutation_execution_decision,
+)
+
+from .conftest import serve_client
 
 
 def _edit(home: Path, mutate: Any) -> None:
@@ -258,3 +269,115 @@ def test_a_tampered_baseline_fails_the_queen_and_dispatch_closed(
 def test_the_store_finds_its_home() -> None:
     config = SupervisorConfig(home=Path("/x/home"), worker_command=("w",))
     assert config.db_path.parent == config.home  # store_home relies on it
+
+
+# --- O2-3: approve and baseline status|diff on three faces --------------------
+
+
+def test_cli_approve_shows_the_table_takes_a_typed_yes_and_locks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    approve = ["--home", str(tmp_path), "policy", "approve"]
+    home = build_config(tmp_path, None).home  # the supervisor home under --home
+    monkeypatch.setattr("builtins.input", lambda prompt: "no")
+    assert main([*approve, "--template", "builder"]) != 0
+    shown = capsys.readouterr()
+    # What is about to be locked: the builder rows, under a baseline header.
+    assert shown.out.startswith("policy baseline: builder\n")
+    assert explain_view("builder")["table"].split("\n", 1)[1] in shown.out
+    assert "nothing was written" in shown.err and not pb.baseline_path(home).exists()
+    monkeypatch.setattr("builtins.input", lambda prompt: "yes")
+    assert main([*approve, "--template", "builder"]) == 0
+    assert "baseline locked: builder sha256 " in capsys.readouterr().out
+    assert isinstance(pb.verify(home), pb.Ok)
+    assert [r["template"] for r in _approvals(home)] == ["builder"]
+    # A second approval must say it re-locks, and shows the diff first.
+    assert main([*approve, "--template", "assistant", "--yes"]) != 0
+    assert "--reapprove" in capsys.readouterr().err
+    assert main([*approve, "--template", "assistant", "--reapprove", "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("changes against the locked baseline:\n")
+    assert "~ template: 'builder' -> 'assistant'" in out
+    with pytest.raises(SystemExit):  # one source: argparse refuses both
+        main([*approve, "--template", "builder", "--file", "x.json"])
+    capsys.readouterr()
+    assert main(["--home", str(tmp_path / "fresh"), "policy", "approve", "--yes"]) != 0
+    assert "name a --template" in capsys.readouterr().err
+
+
+def test_cli_approve_from_a_file_refuses_a_floor_grant(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = build_config(tmp_path, None).home
+    layer = load_policy_template("builder").model_dump(mode="json")
+    layer["rules"].append(
+        {"scope": "shell", "verdict": "allow", "action": "run", "pattern": "git push",
+         "rule_id": "push"}
+    )  # fmt: skip
+    path = tmp_path / "wide.json"
+    path.write_text(json.dumps(layer))
+    assert main(["--home", str(tmp_path), "policy", "approve", "--file", str(path), "--yes"]) != 0
+    assert "push" in capsys.readouterr().err and not pb.baseline_path(home).exists()
+    layer["rules"].pop()
+    path.write_text(json.dumps(layer))
+    assert main(["--home", str(tmp_path), "policy", "approve", "--file", str(path), "--yes"]) == 0
+
+
+def test_cli_baseline_status_diff_and_explain_baseline(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base = ["--home", str(tmp_path), "policy"]
+    home = build_config(tmp_path, None).home
+    assert main([*base, "baseline", "status"]) == 0
+    assert capsys.readouterr().out == "baseline: none approved\n"
+    assert main([*base, "approve", "--template", "builder", "--yes"]) == 0
+    capsys.readouterr()
+    assert main([*base, "explain", "baseline"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("policy baseline: builder\nbaseline: builder approved ")
+    # The locked layer's rows are the builder template's rows.
+    assert explain_view("builder")["table"].split("\n", 1)[1] in out
+    assert main([*base, "baseline", "diff"]) == 0
+    assert capsys.readouterr().out == "no change against the locked baseline\n"
+    _edit(home, lambda d: d["settings"].update(default_network=["*"]))
+    assert main([*base, "baseline"]) == 1
+    out = capsys.readouterr().out
+    assert out.startswith("baseline: TAMPERED since ")
+    assert '  ~ setting default_network: ["pypi.org"' in out
+    assert main([*base, "baseline", "diff"]) == 0
+    assert capsys.readouterr().out.startswith("~ setting default_network:")
+    assert main([*base, "explain", "baseline"]) == 0
+    assert "baseline: TAMPERED since" in capsys.readouterr().out
+
+
+def test_rest_reads_and_approves_the_baseline(config: SupervisorConfig) -> None:
+    client = serve_client(config)
+    assert client.get("/api/policy/baseline").json()["state"] == "none"
+    bad = client.post("/api/policy/baseline/approve", json={"template": "warp"})
+    assert bad.status_code == 400 and "no policy template" in bad.json()["detail"]
+    ok = client.post("/api/policy/baseline/approve", json={"template": "operator"})
+    assert ok.status_code == 200 and ok.json()["approved"]["approved_by"] == "api"
+    view = client.get("/api/policy/baseline").json()
+    assert view["state"] == "ok" and view["template"] == "operator"
+    assert view["line"].startswith("baseline: operator approved ")
+    explained = client.get("/api/policy/explain", params={"subject": "baseline"}).json()
+    assert explained["name"] == "operator" and explained["status"]["state"] == "ok"
+    again = client.post("/api/policy/baseline/approve", json={"template": "builder"})
+    assert again.status_code == 400 and "--reapprove" in again.json()["detail"]
+
+
+def test_chat_reads_the_baseline_and_the_approval_always_cards(config: SupervisorConfig) -> None:
+    assert "approve_policy_baseline" in MUTATING_TOOL_NAMES
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    try:
+        args = {"template": "builder"}
+        assert mutation_execution_decision("approve_policy_baseline", args, store=store,
+                                           holder=holder) is None  # fmt: skip
+        pb.write_lock(config.home, load_policy_template("assistant"), approved_by="op")
+        view = execute_read_tool(
+            "policy_explain", {"subject": "baseline"}, store=store, holder=holder
+        )
+    finally:
+        store.close()
+    assert view["name"] == "assistant" and view["status"]["state"] == "ok"

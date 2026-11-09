@@ -165,6 +165,10 @@ THREE_FACE_READS: dict[str, str] = {
     "explain_view": "`skep policy explain` — a template, the baseline or a role as the "
     "allow / ask / deny table (first-run O1)",
 }
+THREE_FACE_VERBS: dict[str, str] = {
+    "approve_policy_baseline": "`skep policy approve`, `POST /api/policy/baseline/approve` "
+    "and the chat card lock the policy baseline through one verb (first-run O2)",
+}
 THREE_FACES: tuple[Path, ...] = (SUPERVISOR / "cli_cmds.py", SUPERVISOR / "serve/app.py", TOOLS)
 
 
@@ -346,9 +350,10 @@ def test_a_verb_with_no_face_and_no_ruling_fails() -> None:
 def test_three_face_reads_are_called_from_cli_rest_and_chat() -> None:
     """ADR 0050 for reads: `policy explain` ships on the CLI, `GET
     /api/policy/explain` and the chat `policy_explain` tool, all landing on
-    `policy_templates.explain_view`. A face that drops the call fails here
-    naming the file."""
-    for function, why in THREE_FACE_READS.items():
+    `policy_templates.explain_view`; the O2 baseline approval is one verb on
+    the same three faces. A face that drops the call fails here naming the
+    file."""
+    for function, why in {**THREE_FACE_READS, **THREE_FACE_VERBS}.items():
         assert len(why.strip()) >= 20, function
         for face in THREE_FACES:
             assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (

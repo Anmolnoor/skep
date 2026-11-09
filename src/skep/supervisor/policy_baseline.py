@@ -261,9 +261,27 @@ def layer_diff(old: PolicyTemplate, new: PolicyTemplate) -> list[str]:
     for rule_id in sorted(before.keys() & after.keys()):
         if before[rule_id] != after[rule_id]:
             lines.append(f"~ rule {rule_id}: {before[rule_id]} -> {after[rule_id]}")
-    if not lines:
+    if not lines and canonical_bytes(old) != canonical_bytes(new):
         lines.append("~ rule order changed")  # same content, different hash: order is content
     return lines
+
+
+def locked_layer(home: Path) -> PolicyTemplate | None:
+    """The layer the lock says was approved, or None when there is no
+    readable lock — what ``explain baseline`` shows and ``--reapprove``
+    diffs against."""
+    try:
+        return _load_layer(json.loads(lock_path(home).read_text(encoding="utf-8"))["layer"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def current_layer(home: Path) -> PolicyTemplate:
+    """``baseline.json`` as it is now — what a bare ``--reapprove`` re-locks."""
+    try:
+        return _load_layer(baseline_path(home).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError("no baseline.json to re-approve — name a --template or a --file") from exc
 
 
 def fail_closed_reason(state: BaselineState) -> str | None:

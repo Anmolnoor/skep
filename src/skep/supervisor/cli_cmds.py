@@ -2683,18 +2683,85 @@ def cmd_policy_explain(args: argparse.Namespace) -> int:
     """first-run O1 (ADR 0056 D3): a template, the baseline or a role as the
     allow / ask / deny table — the words `why` uses, paste-ready. Floor rows
     are dimmed on a TTY only, so a redirect or a paste stays plain text."""
-    from .policy_templates import deprecation_line, explain_view, is_floor_line
+    from .policy_templates import deprecation_line, explain_view
 
     try:
-        view = explain_view(args.subject)
+        view = explain_view(args.subject, build_config(args.home, None).home)
     except ValueError as exc:
         return _err(str(exc))
     if view["deprecated_alias"]:
         print(deprecation_line(view["deprecated_alias"]), file=sys.stderr)
-    dim = sys.stdout.isatty()
-    for line in view["table"].splitlines():
-        print(f"\x1b[2m{line}\x1b[0m" if dim and is_floor_line(line) else line)
+    _print_table(view["table"])
     return 0
+
+
+def _print_table(table: str) -> None:
+    from .policy_templates import is_floor_line
+
+    dim = sys.stdout.isatty()
+    for line in table.splitlines():
+        print(f"\x1b[2m{line}\x1b[0m" if dim and is_floor_line(line) else line)
+
+
+def cmd_policy_approve(args: argparse.Namespace) -> int:
+    """first-run O2 (ADR 0056 D1): show the layer about to be locked (and,
+    with --reapprove, what changed against the locked one), take a typed
+    `yes`, then write baseline.json + lock + the approvals-ledger row."""
+    import getpass
+
+    from .serve.actions import approve_policy_baseline, baseline_preview
+
+    home = build_config(args.home, None).home
+    try:
+        _layer, view = baseline_preview(
+            home, template=args.template, file=args.file, reapprove=args.reapprove
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    if args.reapprove:
+        print("changes against the locked baseline:")
+        for line in view["diff"] or ["(none)"]:
+            print(f"  {line}")
+        print()
+    _print_table(view["table"])
+    print()
+    if not args.yes:
+        try:
+            answer = input("type yes to lock this as the policy baseline: ")
+        except EOFError:
+            answer = ""
+        if answer.strip() != "yes":
+            return _err("not approved — nothing was written")
+    try:
+        result = approve_policy_baseline(
+            home,
+            template=args.template,
+            file=args.file,
+            reapprove=args.reapprove,
+            approved_by=getpass.getuser(),
+            expect_sha256=view["sha256"],
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    row = result["approved"]
+    print(f"baseline locked: {row['template']} sha256 {row['sha256'][:12]} ({row['approved_at']})")
+    return 0
+
+
+def cmd_policy_baseline(args: argparse.Namespace) -> int:
+    """first-run O2: `status` (the one line plus any diff; exit 1 when
+    tampered) or `diff` (what changed against the locked layer)."""
+    from .policy_baseline import baseline_status, status_line
+
+    home = build_config(args.home, None).home
+    view = baseline_status(home)
+    if args.view == "diff":
+        print("\n".join(view["diff"]) or "no change against the locked baseline")
+        return 0
+    print(status_line(home))
+    for line in view["diff"]:
+        print(f"  {line}")
+    return 1 if view["state"] == "tampered" else 0
 
 
 def cmd_policy_why(args: argparse.Namespace) -> int:
@@ -3253,7 +3320,9 @@ def register_supervisor_commands(
     # v104-F4: the CLI had no `repo` group at all — registration and refresh
     # lived only in REST and chat. Only `refresh` is added here: the verb an
     # operator actually needs to type before reasoning about staleness.
-    policy_group = subcommands.add_parser("policy", help="the policy engine, read-only (P0)")
+    policy_group = subcommands.add_parser(
+        "policy", help="the policy engine: read it, decide, lock the baseline"
+    )
     policy_group.set_defaults(func=_group_usage(policy_group))
     policy_sub = policy_group.add_subparsers(dest="policy_command")
     policy_registry = policy_sub.add_parser("registry", help="every policy setting, as metadata")
@@ -3280,6 +3349,25 @@ def register_supervisor_commands(
         help="a template name (builder, operator, assistant), `baseline`, or `role:<name>`",
     )
     policy_explain.set_defaults(func=cmd_policy_explain)
+    policy_approve = policy_sub.add_parser(
+        "approve",
+        help="lock a template or layer file as the policy baseline (first-run O2)",
+    )
+    approve_source = policy_approve.add_mutually_exclusive_group()
+    approve_source.add_argument("--template", help="builder, operator or assistant")
+    approve_source.add_argument("--file", help="a layer file in the template format")
+    policy_approve.add_argument(
+        "--reapprove",
+        action="store_true",
+        help="re-lock after a change: shows the diff against the locked baseline first",
+    )
+    policy_approve.add_argument("--yes", action="store_true", help="skip the typed `yes`")
+    policy_approve.set_defaults(func=cmd_policy_approve)
+    policy_baseline = policy_sub.add_parser(
+        "baseline", help="the approved baseline: status (exit 1 if tampered) or diff (O2)"
+    )
+    policy_baseline.add_argument("view", nargs="?", choices=("status", "diff"), default="status")
+    policy_baseline.set_defaults(func=cmd_policy_baseline)
     policy_decide = policy_sub.add_parser(
         "decide", help="decide <scope>.<action> <value> for an outside agent and record it (P3)"
     )

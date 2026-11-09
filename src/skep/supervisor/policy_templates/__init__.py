@@ -343,10 +343,11 @@ def _setting_rows(template: PolicyTemplate, layer: str) -> list[dict[str, Any]]:
     return rows
 
 
-def explain_view(subject: str) -> dict[str, Any]:
+def explain_view(subject: str, home: Path | None = None) -> dict[str, Any]:
     """``skep policy explain <template|baseline|role:NAME>`` — one payload on
-    every face. A template renders its layer; ``baseline`` and ``role:…``
-    answer "none yet" until O2 and R1 give them something to show."""
+    every face. A template renders its layer; ``baseline`` renders the layer
+    the lock under ``home`` approved, with its state (O2); ``role:…``
+    answers "none yet" until R1 gives it something to show."""
     view: dict[str, Any] = {
         "subject": subject,
         "kind": "template",
@@ -359,7 +360,21 @@ def explain_view(subject: str) -> dict[str, Any]:
         "floor": floor_rows(),
     }
     if subject == "baseline":
-        view.update(kind="baseline", note="none yet — `skep policy approve` lands in O2")
+        from ..policy_baseline import baseline_status, locked_layer, status_line
+
+        locked = locked_layer(home) if home is not None else None
+        if locked is not None:
+            view.update(
+                name=locked.template,
+                pack=locked.pack,
+                rules=_rule_rows(locked),
+                settings=_setting_rows(locked, TEMPLATE_LAYER),
+            )
+        view.update(
+            kind="baseline",
+            note=status_line(home) if home is not None else "baseline: none approved",
+            status=baseline_status(home) if home is not None else None,
+        )
     elif subject.startswith("role:") or subject == "role":
         view.update(
             kind="role",
@@ -377,6 +392,24 @@ def explain_view(subject: str) -> dict[str, Any]:
             rules=_rule_rows(template),
             settings=_setting_rows(template, TEMPLATE_LAYER),
         )
+    view["table"] = render_policy_table(view)
+    return view
+
+
+def layer_view(template: PolicyTemplate, *, kind: str = "template") -> dict[str, Any]:
+    """Any loaded layer as the explain payload — what ``skep policy approve``
+    shows before it locks a ``--file`` or a template."""
+    view: dict[str, Any] = {
+        "subject": template.template,
+        "kind": kind,
+        "name": template.template,
+        "deprecated_alias": None,
+        "pack": template.pack,
+        "layer": TEMPLATE_LAYER,
+        "rules": _rule_rows(template),
+        "settings": _setting_rows(template, TEMPLATE_LAYER),
+        "floor": floor_rows(),
+    }
     view["table"] = render_policy_table(view)
     return view
 
