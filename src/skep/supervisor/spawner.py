@@ -32,7 +32,7 @@ def resolve_sandbox_backend(config: SupervisorConfig, network: sandbox.NetworkPo
     (the filtering-proxy bridge is bubblewrap-specific). Fail-open toward the
     STRICTER native backend, never toward no sandbox.
     """
-    if config.sandbox_backend in ("auto", ""):
+    if config.sandbox_backend in ("auto", "", "none"):
         return None
     backend = config.sandbox_backend
     if backend == sandbox.PODMAN and network.is_domain_list:

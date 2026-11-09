@@ -2869,3 +2869,29 @@ with unchanged content cards a re-approval instead of tripping.
 `approve_policy_baseline` (always cards) and `policy_explain baseline`.
 No baseline: byte-identical goldens; the `no_baseline` zero state is one
 constant (`policy_baseline.NO_BASELINE_REASON`) for O5 to flip.
+
+## first-run O3 — `skep onboard` (2026-11-09)
+
+ADR 0056 D7/D8. `skep onboard` is the guided form of `skep setup`: ① model
+(local-Ollama probe, the v37-F3 wizard, a test call, the preset's egress
+line) → ② work directory (created if missing, registered through project
+setup with its inferred `verify_command`) → ③ sandbox backend (`auto`,
+`podman` or `none`; docker is reported, not offered — skep has no docker
+backend) → ④ template (the three `explain` tables, default `assistant`,
+locked through O2's approve path after a typed `yes`) → ⑤ role (the three
+template names until R1), recorded in `~/.skep/first_run.json`
+`{started_at, turns_seen, verdicts_seen, dismissed, role}`; then it attaches
+to (or starts) `skep serve` and opens `skep chat` unless `--no-chat`. Each
+step is a function in `supervisor/onboard.py` writing its record to
+`~/.skep/onboard.json`; re-running resumes at the first incomplete step (a
+tampered baseline sends it back to ④), and a flag that differs from a
+finished step re-runs it. `sandbox_backend` accepts `none`: runtime treats it
+like `auto` (never weaker), and the baseline onboard locks turns every
+allowed write/edit into an ask (`fs-workspace-unsandboxed`,
+`coding-workspace-unsandboxed`). `skep onboard --check` is `skep doctor` plus
+baseline hash, engine v2 scopes, sandbox backend, workdir, model, steps, and
+the egress-truth block ending `telemetry: none`; exit 0 only when all are
+ready. Web face: a "First run" card on the `/setup` page over
+`GET /api/onboard`, `/api/onboard/check|sandboxes|template` and
+`POST /api/onboard/{step}` — the same functions (`test_surface_parity`
+`ONBOARD_VERBS`).

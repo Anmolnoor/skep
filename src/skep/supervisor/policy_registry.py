@@ -337,11 +337,12 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     _knob(
         "sandbox_backend",
         scope="coding",
-        type="enum[auto|podman]",
+        type="enum[auto|podman|none]",
         default="auto",
         layers=("global",),
         invariant="I12",
-        doc="which backend wraps sandboxed workers; podman falls back to native, loudly (v44-F7)",
+        doc="which backend wraps sandboxed workers; podman falls back to native, loudly (v44-F7); "
+        "none: no sandbox ring is counted on (first-run O3)",
     ),
     _knob(
         "session_allowed_shell_commands",
