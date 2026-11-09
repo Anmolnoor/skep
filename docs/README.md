@@ -11,6 +11,8 @@ that), so if you can't find it below, it doesn't exist yet.
 - [`how-to-use-on-new-machine.md`](how-to-use-on-new-machine.md) — full
   source, serve, and Docker setup notes
 - [`demo-gif.md`](demo-gif.md) — the reproducible terminal demo recording
+- [`agent-guide.md`](agent-guide.md) — for agents: explaining skep to a
+  human (the operating half is [`../SKILL.md`](../SKILL.md))
 
 ## Concepts
 
