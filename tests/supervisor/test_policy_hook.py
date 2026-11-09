@@ -279,6 +279,7 @@ def test_policy_decisions_reads_the_ledger_back_with_counts_and_three_faces(
     home = tmp_path / "home"
     config = build_config(home, None)
     zeros = {"allow": 0, "deny": 0, "require_approval": 0, "observed": 0, "forwarded": 0}
+    zeros["delegated"] = 0
     assert policy_decisions(config.audit_dir) == {"rows": [], "total": 0, "summary": zeros}
 
     store = RunStore(config.db_path)

@@ -31,6 +31,7 @@ from urllib.parse import quote
 
 import httpx
 
+from .supervisor.roles import delegation_line
 from .supervisor.serve.auth import TOKEN_FILE
 
 DEFAULT_URL = "http://127.0.0.1:8765"
@@ -410,6 +411,10 @@ def _tool_summary(tool: str, result: Any, url: str = "") -> str:
         if result.get("ok") is True and isinstance(result.get("result"), dict):
             # Mutation payloads ride an {ok, result} wrapper — summarize the meat.
             return _tool_summary(tool, result["result"], url)
+        if result.get("team"):
+            # first-run R3: a team run — the chain down to its workers.
+            chain = " → ".join(str(hop) for hop in result.get("delegation_chain") or [])
+            return f"✓ team {result['team']}: {chain} → {result.get('count', '?')} worker(s)"
         lists = [(key, value) for key, value in result.items() if isinstance(value, list)]
         if len(lists) == 1:
             key, value = lists[0]
@@ -418,7 +423,9 @@ def _tool_summary(tool: str, result: Any, url: str = "") -> str:
         if task_id:
             # v77-F5: the id is clickable where the terminal supports OSC 8.
             tid = str(task_id)
-            return f"✓ run {_link(tid, f'{url}/#/runs/{tid}') if url else tid}"
+            line = f"✓ run {_link(tid, f'{url}/#/runs/{tid}') if url else tid}"
+            delegated = delegation_line(result.get("delegation"))
+            return f"{line}  ({delegated})" if delegated else line
     text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=True)
     return f"✓ ok ({len(text)} chars)"
 
@@ -866,6 +873,9 @@ class ChatRepl:
                 summary = str(run.get("summary") or "")[:60]
                 task_ref = self._task_ref(str(run.get("task_id", "?")))
                 print(f"{task_ref}  {run.get('state', '?'):<18}  {summary}")
+                delegated = delegation_line((run.get("dispatch_decision") or {}).get("delegation"))
+                if delegated:
+                    print(_c(DIM, f"  {delegated}"))
             return
         if name == "approvals":
             approvals = self.client.get("/api/approvals")["approvals"]

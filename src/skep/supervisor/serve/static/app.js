@@ -242,6 +242,16 @@ function formatCompactDecision(decision, namespace) {
   return verdict && reason ? `${verdict} ${reason}` : "";
 }
 
+// first-run R3 (ADR 0055 D5): who delegated a run — roles.delegation_line's
+// twin: "queen@operator → manager@builder → worker@builder · team <id>".
+function delegationText(delegation) {
+  if (!delegation || typeof delegation !== "object") return "";
+  const chain = Array.isArray(delegation.chain) ? delegation.chain.map(String) : [];
+  const worker = delegation.role ? `worker@${delegation.role}` : "worker";
+  const line = [...(chain.length ? chain : ["operator"]), worker].join(" → ");
+  return delegation.team ? `${line} · team ${delegation.team}` : line;
+}
+
 function formatRunAutonomy(run) {
   if (!run || typeof run !== "object") return "-";
   const parts = [];
@@ -2841,7 +2851,12 @@ async function viewChat(main, chatId) {
     const result = unwrapToolResult(raw);
     if (result && tool === "dispatch_run" && result.task_id) {
       const where = result.repo ? ` on ${result.repo}` : "";
-      return `dispatched worker ${shortTaskId(result.task_id)}${where}`;
+      const delegated = delegationText(result.delegation);
+      return `dispatched worker ${shortTaskId(result.task_id)}${where}${delegated ? ` — ${delegated}` : ""}`;
+    }
+    if (result && tool === "batch_dispatch" && result.team) {
+      const chain = (result.delegation_chain || []).join(" → ");
+      return `dispatched team ${shortTaskId(result.team)}: ${chain} → ${result.count} worker(s)`;
     }
     if (result && tool === "start_research" && result.task_id) {
       return `dispatched researcher ${shortTaskId(result.task_id)}`;
@@ -3868,6 +3883,10 @@ function buildRunCard(run) {
       (run.summary || run.instructions || "—").slice(0, 120)),
     el("div", { class: "run-card-meta" },
       ...workerChips(run),
+      run.dispatch_decision?.delegation
+        ? el("span", { class: "chip", title: "delegated by" },
+          delegationText(run.dispatch_decision.delegation))
+        : null,
       project ? el("span", {}, project) : null,
       autonomy !== "-" ? el("span", { class: "run-card-autonomy mono" }, autonomy) : null));
 }
@@ -3971,6 +3990,8 @@ async function viewRunDetail(main, taskId) {
     kv("binding", `${detail.project_context.binding_kind}: ${detail.project_context.binding_value}`);
   }
   kv("dispatch", formatDecision(detail.dispatch_decision) || "-");
+  const delegated = delegationText(detail.dispatch_decision?.delegation);
+  if (delegated) kv("delegated", el("span", { class: "mono" }, delegated));
   kv("landing", formatDecision(detail.landing_decision) || "-");
   kv("verification", run.verification_outcome || "-");
   if (detail.reverification) {

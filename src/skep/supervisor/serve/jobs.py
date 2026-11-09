@@ -135,5 +135,7 @@ class Dispatcher:
         exc = future.exception()
         raise DispatchError(str(exc) if exc else "dispatch ended before creating a run")
 
-    def shutdown(self) -> None:
-        self._pool.shutdown(wait=False, cancel_futures=True)
+    def shutdown(self, *, wait: bool = False) -> None:
+        """``wait`` lets the runs finish (``skep team``, which owns its pool);
+        serve's exit cancels what has not started."""
+        self._pool.shutdown(wait=wait, cancel_futures=not wait)

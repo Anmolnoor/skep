@@ -45,6 +45,7 @@ from .projects import (
     project_to_dict,
 )
 from .provider_hosts import configured_provider_hosts
+from .roles import delegation_line
 from .scheduler import make_schedule, make_template_schedule, parse_interval, run_due
 from .store import RunRecord, RunStore, UsageRecord
 from .template_suggestion import (
@@ -750,6 +751,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     auto_apply_verified_patch: bool | None = None
     project_context = None
     resolved_policy: ResolvedRunPolicy | None = None
+    delegation: dict[str, Any] | None = None
+    delegation_note: str | None = None
     try:
         if args.template:
             template_bound = (
@@ -846,6 +849,24 @@ def cmd_run(args: argparse.Namespace) -> int:
                     auto_apply_verified_patch = (
                         raw_auto_apply if isinstance(raw_auto_apply, bool) else None
                     )
+        if args.role or args.delegated_by:
+            # first-run R3 (ADR 0055 D5): the same narrowing POST /api/runs does.
+            from fastapi import HTTPException
+
+            from .serve.actions import delegate_permissions
+            from .serve.settings import ConfigHolder
+
+            try:
+                permissions, delegation, delegation_note = delegate_permissions(
+                    ConfigHolder(config, store),
+                    store,
+                    repo,
+                    permissions,
+                    role=args.role,
+                    delegation_chain=args.delegated_by or [],
+                )
+            except HTTPException as exc:
+                return _err(str(exc.detail), next_command="skep role list")
     except PolicyResolutionError as exc:
         return _err(
             str(exc),
@@ -887,6 +908,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         dispatch_decision = dispatch_decision.with_network_audit(
             resolved_policy.network_requested, resolved_policy.network_resolved
         )
+    on_run_created: Callable[[str], None] | None = None
+    if delegation is not None:
+        from .serve.actions import delegated_decision, record_delegation
+
+        dispatch_decision = delegated_decision(dispatch_decision, delegation, delegation_note)
+        hop = delegation
+
+        def on_run_created(task_id: str) -> None:
+            record_delegation(config.audit_dir, hop, repo=str(repo), task=task_id)
 
     tail: _PhaseTail | None = None
     if matched_template is not None:
@@ -917,6 +947,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             dispatch_decision=dispatch_decision,
             ref=ref,
             resume_of=args.resume_of,
+            on_run_created=on_run_created,
             execution_mode=execution_mode,
             planning_protocol=planning_protocol,
             # v90-F1 (ADR 0047): the project's chosen coding agent.
@@ -949,6 +980,57 @@ def cmd_run(args: argparse.Namespace) -> int:
     elif record.state == "completed":
         print(f"  next:         skep review {record.task_id}")
     return STATE_EXIT_CODES.get(record.state, 3)
+
+
+def cmd_team(args: argparse.Namespace) -> int:
+    """first-run R3 (ADR 0055 D5): `skep team` — a manager in ``--manager``'s
+    role dispatches every ``--task``; one ledger thread. The same
+    ``submit_team`` as ``POST /api/teams`` and the chat's ``batch_dispatch
+    manager=``, in-process like ``skep run``: it waits for every member."""
+    from fastapi import HTTPException
+
+    from .serve.actions import submit_team
+    from .serve.jobs import Dispatcher
+    from .serve.settings import ConfigHolder
+
+    config = build_config(args.home, args.worker_cmd)
+    tasks = [
+        {
+            "repo": repo,
+            "instructions": text,
+            "role": args.role,
+            "execution_mode": args.execution_mode,
+        }
+        for repo, text in args.task
+    ]
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    runner = Dispatcher(holder, store)
+    try:
+        try:
+            team = submit_team(
+                holder,
+                runner,
+                store,
+                manager=args.manager,
+                tasks=tasks,
+                delegation_chain=args.delegated_by or [],
+            )
+        except HTTPException as exc:
+            return _err(str(exc.detail), next_command="skep role list")
+        finally:
+            runner.shutdown(wait=True)
+        print(f"team {team['team']}  ({' → '.join(team['delegation_chain'])} → workers)")
+        codes = [0]
+        for task_id in team["dispatched"]:
+            record = store.get_run(task_id)
+            state = record.state if record is not None else "gone"
+            print(f"  {task_id}  {state}")
+            codes.append(STATE_EXIT_CODES.get(state, 3))
+        print(f"  ledger:  skep policy decisions --team {team['team']}")
+        return max(codes)
+    finally:
+        store.close()
 
 
 def cmd_status_personal(args: argparse.Namespace) -> int:
@@ -1118,6 +1200,12 @@ def cmd_review(args: argparse.Namespace) -> int:
                 dispatch = _decision_summary(audited_task.dispatch_decision)
                 if dispatch:
                     lines.append(f"  dispatch:     {dispatch}")
+                # first-run R3: who delegated this run, under which role.
+                delegated = delegation_line(
+                    getattr(audited_task.dispatch_decision, "delegation", None)
+                )
+                if delegated:
+                    lines.append(f"  delegated:    {delegated}")
                 landing = _decision_summary(audited_task.landing_decision)
                 if landing:
                     lines.append(f"  landing:      {landing}")
@@ -1451,7 +1539,8 @@ def _resume_pending_approval(
         auto_apply_verified_patch=original.auto_apply_verified_patch,
         project_context=original.project_context,
         dispatch_decision=resume_after_approval_decision(
-            resumed_from_task_id=record.task_id
+            resumed_from_task_id=record.task_id,
+            delegation=getattr(original.dispatch_decision, "delegation", None),
         ).with_project_context(original.project_context),
         ref=record.ref,
         resume_of=record.task_id,
@@ -2637,7 +2726,7 @@ def cmd_policy_decisions(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     try:
         view = policy_decisions(
-            config.audit_dir, actor=args.actor, since=args.since, limit=args.limit
+            config.audit_dir, actor=args.actor, since=args.since, limit=args.limit, team=args.team
         )
     except ValueError as exc:
         return _err(str(exc))
@@ -2920,8 +3009,46 @@ def register_supervisor_commands(
         "act-observe loop (ADR 0040); omit to use the project policy's "
         "worker_protocol knob",
     )
+    run.add_argument(
+        "--role",
+        default=None,
+        help="the worker's role (skep role list); its layer narrows the worker's grants",
+    )
+    run.add_argument(
+        "--delegated-by",
+        action="append",
+        default=None,
+        metavar="ACTOR@ROLE",
+        help="dispatch as this delegator (repeat outermost first); the worker holds "
+        "no more than it does (ADR 0055)",
+    )
     run.add_argument("--quiet", action="store_true", help="suppress the live phase tail")
     run.set_defaults(func=cmd_run)
+
+    team = subcommands.add_parser(
+        "team",
+        help="a team run: a manager in a role dispatches 1-3 tasks, one ledger thread (ADR 0055)",
+    )
+    team.add_argument("--manager", required=True, metavar="ROLE", help="the manager's role")
+    team.add_argument(
+        "--task",
+        nargs=2,
+        action="append",
+        required=True,
+        metavar=("REPO", "INSTRUCTIONS"),
+        help="one member run (repeat, up to 3)",
+    )
+    team.add_argument("--role", default=None, help="every member's role (default: the manager's)")
+    team.add_argument(
+        "--delegated-by",
+        action="append",
+        default=None,
+        metavar="ACTOR@ROLE",
+        help="the dispatcher above the manager, e.g. queen@operator",
+    )
+    team.add_argument("--execution-mode", choices=("workspace", "sandbox"), default=None)
+    team.add_argument("--worker-cmd", default=None, help="worker argv prefix, as for `skep run`")
+    team.set_defaults(func=cmd_team)
 
     review = subcommands.add_parser(
         "review",
@@ -3410,6 +3537,7 @@ def register_supervisor_commands(
     policy_decisions.add_argument("--actor", help="glob on the recorded actor, e.g. 'acp:*'")
     policy_decisions.add_argument("--since", help="ISO time or bare date floor on `at`")
     policy_decisions.add_argument("--limit", type=int, default=200, help="max rows (default 200)")
+    policy_decisions.add_argument("--team", help="one team run's thread (first-run R3)")
     policy_decisions.set_defaults(func=cmd_policy_decisions)
 
     repo_group = subcommands.add_parser("repo", help="registered repositories (v104)")

@@ -2956,3 +2956,73 @@ web chat render both; `skep onboard --quiet | --verbose` and
 counts the turn's own decisions, because the Queen's chat verdicts are not
 in `decisions.jsonl`. A home with no `first_run.json` streams exactly as
 before.
+
+## first-run R1 — roles as records (2026-11-09)
+
+ADR 0055 D1–D3. A role is a record — `{name, policy_layer, system_prompt,
+default_castes, voice}` in `supervisor/roles.py` — and a policy context:
+`builder`, `operator` and `assistant` ship bound 1:1 to the templates of the
+same name; custom roles load from `~/.skep/roles/*.json`. `LAYERS` gains
+`role` after `template`; the role layer only tightens (the stricter of the
+stack's verdict and the role's own stands) and the floor is above every role.
+`policy_decide` / `policy_why` take `role` on all three faces and `decided_by`
+names `role:<name>`. A chat runs in one role — its prompt, its voice, and the
+Queen's own tool lanes (`mutation_execution_decision` tightens run_shell,
+read_file, read_url, MCP calls under it); `set_role` card, `/role` on both
+decks, `skep role list|show|use`, and a role picker on new chats defaulting
+to the role `skep onboard` recorded.
+
+## first-run R2 — delegation is subset-only (2026-11-09)
+
+ADR 0055 D4. `policy_decide(delegation_chain=["actor@role", …])`, outermost
+first: the innermost delegator's own effective verdict — down the same path,
+under its role, bounded by the hops above it — is one more tightening; when
+it decides, the row says `exceeds_delegator` and `decided_by` names the hop.
+A delegator that would itself ask passes on an ask; one whose role has no
+rule for the action (`unset`) holds nothing (decision #7). The floor is above
+every chain; an empty chain is today byte for byte. `submit_run` drops the
+worker's shell prefixes and egress hosts beyond the delegator (each drop a
+ledger row) and refuses a writer the delegator may not be; the Queen's
+dispatch lanes pass `queen@<chat role>`. `why --delegated-by` shows the
+chain.
+
+## first-run R3 — the Queen delegates: manager → team under roles (2026-11-09)
+
+ADR 0055 D5. A worker is dispatched with its own role — `role` on the chat's
+`dispatch_run` and per task in `batch_dispatch`, on `POST /api/runs` beside
+`delegation_chain`, and `skep run --role NAME --delegated-by ACTOR@ROLE` —
+and holds its role ∩ its delegator's, the drops recorded under its role.
+Every delegated or role-bearing dispatch writes one `source: delegated` row
+(the delegator, `worker@<role>`, `role`, the chain, the task) and carries
+`delegation` (`chain`, `role`, `team`) on its dispatch decision; the web run
+card and detail, the chat lines, `skep chat`'s `/runs` and `skep review`
+show `queen@operator → worker@builder`. A **team run** is v51's batch with a
+manager as the dispatcher — the chat's `batch_dispatch manager=`, `POST
+/api/teams`, `skep team --manager ROLE --task REPO INSTRUCTIONS`: members run
+under `[<dispatcher>, manager@<role>]`, the one two-hop chain a dispatch
+accepts; deeper chains, a manager not innermost and any `worker@` hop refuse.
+The team is one ledger thread (`skep policy decisions --team ID`). A delegated
+run's remembered-approval resume keeps its narrowing and its chain. The
+operator's dependabot loop (Queen `operator` → worker `builder`) is pinned end
+to end with the fake worker; the live run is the operator's.
+
+## v1.3.0 — first-run: roles and delegation (2026-11-09)
+
+The first-run O4, R1, R2 and R3 work above, as a minor release. What an
+operator sees:
+
+- A chat runs in a role (`builder`, `operator`, `assistant`, or a custom
+  one): the picker on a new chat, `/role`, `skep role use`. The role is a
+  policy layer that only tightens the approved baseline, and `skep policy
+  why --role` names it.
+- The Queen dispatches under its role, and a worker it dispatches holds no
+  more than it does: `exceeds_delegator` rows, `why --delegated-by`.
+- Workers take an explicit role (`skep run --role`, `dispatch_run role=`)
+  and a team run — a manager in a role fanning out to up to three workers —
+  is `skep team` / `batch_dispatch manager=` / `POST /api/teams`, one ledger
+  thread. Run cards show the chain.
+- New chats show a one-line `why` on every verdict card and a turn tally
+  until dismissed (`skep onboard --quiet`).
+
+The four pre-1.2.1 template names are still accepted as aliases in 1.3.0
+(ADR 0056 open question 3 proposed retiring them here; not done in R3).
