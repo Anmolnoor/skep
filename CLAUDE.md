@@ -24,7 +24,8 @@ purpose and keeps the worker-nominated fallback.
 ## Gates (run after every fix commit, all green before moving on)
 
 ```sh
-TMPDIR=$HOME/.cache/skep-test-tmp uv run --with pytest-xdist pytest -q -n auto
+TMPDIR=$HOME/.cache/skep-test-tmp uv run --with pytest-xdist --with pytest-cov pytest -q -n auto --cov=skep --cov-report=xml
+uvx diff-cover coverage.xml --compare-branch=origin/main --fail-under=90  # changed lines run under test
 uv run ruff check .                               # TMPDIR outside /tmp is
 uv run ruff format --check src/skep tests scripts # MANDATORY on Linux: bwrap
 uv run mypy                                       # tmpfs-masks /tmp
@@ -35,7 +36,11 @@ TMPDIR=$HOME/.cache/skep-test-tmp uv run python scripts/scorecard.py  # Overall:
 local ritual never did, and 174 files drifted before the public repo's first
 CI run caught it. Parallel pytest joined with the v106 port: the suite is
 xdist-safe, ~1min vs ~10min serial, and CI runs the same `-n auto` line —
-xdist is injected per-run by `--with`, never a project dependency. The G10
+xdist is injected per-run by `--with`, never a project dependency. Diff
+coverage joined at T3-4 for the same reason: the first-run timeline shipped
+71 changed lines no test ran, the web UI's JS ran in no test at all, and
+nothing measured either. `tests/web/` runs app.js under `node --test` with a
+fake DOM — no npm — wrapped by `test_web_js.py` so this pytest line covers it. The G10
 re-verify default pin stays plain `uv run pytest`; that pin is a project
 policy, not this ritual.)
 
