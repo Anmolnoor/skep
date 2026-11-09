@@ -382,10 +382,11 @@ def test_explain_is_deterministic_grouped_by_scope_with_the_floor_labelled() -> 
     assert all(not line.startswith("|") or line.endswith("|") for line in lines), "pipe table"
 
 
-def test_explain_answers_none_yet_for_baseline_and_role() -> None:
-    baseline = explain_view("baseline")
+def test_explain_answers_none_yet_for_baseline_and_role(tmp_path: Path) -> None:
+    baseline = explain_view("baseline", tmp_path / "fresh")
     assert baseline["kind"] == "baseline" and baseline["name"] is None
-    assert "none yet" in baseline["note"] and "O2" in baseline["note"]
+    assert baseline["note"] == "baseline: none approved"
+    assert baseline["status"]["state"] == "none"
     assert baseline["rules"] == [] and baseline["floor"] == floor_rows()
     role = explain_view("role:builder")
     assert (role["kind"], role["name"], role["layer"]) == ("role", "builder", "role")

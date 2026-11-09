@@ -35,6 +35,7 @@ from .actions import (
     apply_patch,
     approval_event_views_for_task,
     approval_views,
+    approve_policy_baseline,
     command_views_for_task,
     create_branch,
     created_event_view_for_task,
@@ -218,6 +219,16 @@ class PolicyDecideRequest(BaseModel):
     actor: str = "api"
 
 
+class BaselineApproveRequest(BaseModel):
+    """Body of ``POST /api/policy/baseline/approve`` (first-run O2): the
+    layer to lock — a template name or a layer file — or a re-lock."""
+
+    template: str | None = None
+    file: str | None = None
+    reapprove: bool = False
+    approved_by: str = "api"
+
+
 class DefaultWorkspaceRequest(BaseModel):
     apply: bool = False
 
@@ -321,6 +332,14 @@ def create_app(
                 )
         except Exception:
             logging.getLogger("skep.serve").exception("session-approval clear failed")
+        try:
+            # first-run O2 (ADR 0056 D1): verify the policy baseline before the
+            # first decision; a tampered one cards the operator once.
+            from .actions import baseline_alarm
+
+            baseline_alarm(holder, run_store)
+        except Exception:
+            logging.getLogger("skep.serve").exception("policy baseline check failed")
         try:
             # v83-F12 (ADR 0043): sync the shipped seed shelf — idempotent,
             # zero-grant only, operator copies and tombstones win.
@@ -519,9 +538,32 @@ def create_app(
         from ..policy_templates import explain_view
 
         try:
-            return explain_view(subject)
+            return explain_view(subject, holder.current.home)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/policy/baseline")
+    def get_policy_baseline() -> dict[str, Any]:
+        """first-run O2: the baseline's state — ok, reapprove, tampered (with
+        the diff and since when) or none — the CLI's `policy baseline status`."""
+        from ..policy_baseline import baseline_status, status_line
+
+        return {**baseline_status(holder.current.home), "line": status_line(holder.current.home)}
+
+    @app.post("/api/policy/baseline/approve")
+    def post_policy_baseline_approve(body: BaselineApproveRequest) -> dict[str, Any]:
+        """first-run O2 (ADR 0056 D1): lock a layer as the approved baseline —
+        the CLI's `skep policy approve`, the chat card's verb."""
+        try:
+            return approve_policy_baseline(
+                holder.current.home,
+                template=body.template,
+                file=body.file,
+                reapprove=body.reapprove,
+                approved_by=body.approved_by,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/policy/decide")
     def post_policy_decide(body: PolicyDecideRequest) -> dict[str, Any]:

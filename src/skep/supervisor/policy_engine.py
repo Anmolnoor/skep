@@ -372,15 +372,19 @@ def document_layers(
     learned: Sequence[LearnedRule] = (),
     *,
     labels: Sequence[str] = (),
+    template: Layer | None = None,
 ) -> list[Layer]:
-    """The rule stack ``resolve()`` composes: base, overlays, then every
-    learned rule (the documents' own and the extra ones) as the session
-    layer — v1's order, each rule now carrying its source label."""
+    """The rule stack ``resolve()`` composes: base, overlays, the approved
+    baseline in the ``template`` slot (O2), then every learned rule (the
+    documents' own and the extra ones) as the session layer — v1's order,
+    each rule now carrying its source label."""
     names = list(labels) or ["global", *(f"overlay:{index}" for index in range(len(overlays)))]
     layers = [Layer("global", names[0], rules=_document_rules(base))]
     for index, overlay in enumerate(overlays):
         label = names[index + 1] if index + 1 < len(names) else f"overlay:{index}"
         layers.append(Layer("global", label, rules=_document_rules(overlay)))
+    if template is not None:
+        layers.append(template)
     all_learned = [rule for document in (base, *overlays) for rule in document.learned] + list(
         learned
     )

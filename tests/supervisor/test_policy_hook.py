@@ -344,3 +344,37 @@ def test_policy_decisions_reads_the_ledger_back_with_counts_and_three_faces(
     finally:
         store.close()
     assert chat == acp
+
+
+def test_the_hook_asks_with_the_reason_when_the_baseline_is_tampered(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """first-run O2: a hand edit of the approved baseline turns the very next
+    hook answer into `ask` naming baseline_tampered — never allow."""
+    from skep.cli import main
+    from skep.supervisor import policy_baseline as pb
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.policy_templates import load_policy_template
+
+    config = build_config(tmp_path, None)
+    _seed(config, repo)
+    pb.write_lock(config.home, load_policy_template("builder"), approved_by="op")
+
+    def run_hook(payload: dict[str, Any]) -> dict[str, Any]:
+        monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+        assert main(["--home", str(tmp_path), "policy", "hook"]) == 0
+        return dict(json.loads(capsys.readouterr().out)["hookSpecificOutput"])
+
+    bash = {"tool_name": "Bash", "tool_input": {"command": "uv sync"}, "cwd": str(repo)}
+    assert run_hook(bash)["permissionDecision"] == "allow"
+    path = pb.baseline_path(config.home)
+    path.chmod(0o644)  # 0444 is a courtesy, not the enforcement
+    layer = json.loads(path.read_text())
+    layer["settings"]["allowed_shell_commands"].append(["make"])
+    path.write_text(json.dumps(layer, indent=2))
+    out = run_hook(bash)
+    assert out["permissionDecision"] == "ask"
+    assert "baseline/baseline_tampered" in out["permissionDecisionReason"]
+    edit = {"tool_name": "Edit", "tool_input": {"file_path": str(repo / "x")}, "cwd": str(repo)}
+    assert run_hook(edit)["permissionDecision"] == "ask"
+    assert [line["rule_id"] for line in _ledger(config)][-2:] == ["baseline_tampered"] * 2

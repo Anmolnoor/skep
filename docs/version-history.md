@@ -2845,3 +2845,27 @@ settings block per scope — on three faces: the CLI, `GET
 template as the baseline, catalogue membership, no floor grant, the B3 demo
 sequence under `builder` (`pnpm test` allow · `rm` ask · `git push` deny)
 and every alias.
+
+## first-run O2 — the locked baseline (2026-11-09)
+
+ADR 0056 D1/D2, the one new mechanism of the first-run plan.
+`skep policy approve [--template NAME | --file PATH] [--reapprove] [--yes]`
+shows the explain table, takes a typed `yes`, and writes
+`<home>/policy/baseline.json` (`0444`, a courtesy), `baseline.lock` and a
+`baseline_approved` row in `<audit>/policy/baseline-approvals.jsonl` —
+SHA-256 over the loaded layer as sorted-key JSON carrying `schema_version`
+(`policy_baseline.py`). The baseline populates the registry's existing
+`template` layer with every set setting enforced (ADR 0053 D4); its rules
+ride the same slot. `verify()` runs in the v2 reader (`policy_layers.py`),
+mtime-cached, so `policy_decide`, the hook, `acp govern` and serve startup
+share it: Tampered (or a missing lock, or both files gone with an approval
+on record) fails closed with `baseline_tampered` — `ask` on the advisory
+ring, `deny` on the governor's hard ring, dispatch refused, the Queen's own
+lanes asking — with one card per tamper event (debounced through the
+ledger) and `why` printing `baseline: TAMPERED since <time>`. A schema bump
+with unchanged content cards a re-approval instead of tripping.
+`skep policy baseline status|diff`, `skep policy explain baseline`; REST
+`POST /api/policy/baseline/approve`, `GET /api/policy/baseline`; chat
+`approve_policy_baseline` (always cards) and `policy_explain baseline`.
+No baseline: byte-identical goldens; the `no_baseline` zero state is one
+constant (`policy_baseline.NO_BASELINE_REASON`) for O5 to flip.
