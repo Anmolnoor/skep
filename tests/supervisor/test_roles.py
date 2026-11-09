@@ -121,3 +121,32 @@ def test_explain_renders_a_role_as_its_layer() -> None:
     assert "unlisted → no opinion (the baseline decides)" in view["table"]
     with pytest.raises(ValueError, match="no role 'warp'"):
         explain_view("role:warp")
+
+
+# --- T2 audit: a custom role file that lies, shadows or breaks ----------------
+
+
+def test_a_role_file_naming_another_role_refuses(tmp_path: Path) -> None:
+    home = tmp_path / "skep" / "supervisor"
+    roles_dir(home).mkdir(parents=True)
+    (roles_dir(home) / "quiet.json").write_text(json.dumps({"name": "builder"}))
+    with pytest.raises(ValueError, match=r"quiet\.json names itself 'builder'"):
+        all_roles(home)
+
+
+def test_a_file_named_like_a_shipped_role_replaces_it_and_every_reader_sees_it(
+    tmp_path: Path,
+) -> None:
+    """The module's documented override: ~/.skep/roles/operator.json replaces
+    the shipped `operator` — one table, so the layer, `explain` and the
+    resolver all read the replacement, never a mix of the two."""
+    home = tmp_path / "skep" / "supervisor"
+    roles_dir(home).mkdir(parents=True)
+    (roles_dir(home) / "operator.json").write_text(
+        json.dumps({"name": "operator", "policy_layer": "assistant"})
+    )
+    role = resolve_role("operator", home)
+    assert role.policy_layer == "assistant" and role.default_castes == ()
+    assert list(all_roles(home)) == ["builder", "operator", "assistant"]
+    hit = role_decision(role, "coding", "edit", "workspace")
+    assert hit is not None and hit.decided_by == "role:operator/coding-denied"
