@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from skep.cli import main
 from skep.supervisor import RunStore, sandbox
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.onboard import (
@@ -139,3 +140,71 @@ def test_the_model_step_makes_a_test_call_and_says_where_prompts_go(tmp_path: Pa
         assert onboard_status(tmp_path / "home2")["next"] == "model"
     finally:
         fake.stop()
+
+
+def _answers(monkeypatch: pytest.MonkeyPatch, *replies: str | type[BaseException]) -> list[str]:
+    """Script ``input()``; an exception class in the list is raised there."""
+    prompts: list[str] = []
+    queue = list(replies)
+
+    def fake_input(prompt: str = "") -> str:
+        prompts.append(prompt)
+        reply = queue.pop(0)
+        if isinstance(reply, type):
+            raise reply
+        return reply
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    return prompts
+
+
+def test_interactive_onboard_resumes_after_an_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from skep.supervisor import onboard
+
+    home, work = tmp_path / "home", tmp_path / "work"
+    monkeypatch.setattr(onboard, "detect_ollama", lambda *a, **k: None)
+    monkeypatch.setattr(
+        onboard,
+        "detect_sandboxes",
+        lambda *a, **k: {
+            "backends": {"none": {"usable": True, "detail": "no sandbox ring"}},
+            "recommended": "none",
+            "docker": {"found": False, "detail": "not on PATH"},
+        },
+    )
+    prompts = _answers(
+        monkeypatch,
+        *("mock", "stub", "", ""),  # the v37-F3 setup wizard: provider, model, endpoint, key env
+        str(work),
+        "",  # sandbox: the detected default
+        "builder",
+        KeyboardInterrupt,  # at the typed yes
+    )
+    assert main(["--home", str(home), "onboard", "--no-chat"]) == 130
+    assert prompts[-1] == "type yes to lock this as the policy baseline: "
+    out = capsys.readouterr().out
+    assert "policy template: assistant" in out  # all three explain tables shown first
+    assert onboard.onboard_status(home)["next"] == "template"
+
+    resume = ["--home", str(home), "onboard", "--template", "builder", "--yes", "--no-chat"]
+    assert main(resume) == 0
+    out = capsys.readouterr().out
+    assert "① model: done — mock stub" in out
+    assert f"② work directory: done — {work.resolve()}" in out
+    assert "③ sandbox: done — none" in out
+    assert "baseline locked: builder" in out
+    assert onboard.onboard_status(home)["done"]
+
+
+def test_a_refused_typed_yes_locks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    argv = ["--home", str(home), "onboard", "--provider", "mock", "--model", "stub"]
+    argv += ["--workdir", str(tmp_path / "w"), "--sandbox", "none", "--template", "operator"]
+    _answers(monkeypatch, "no")
+    assert main([*argv, "--no-chat"]) == 1
+    assert "not approved — nothing was locked" in capsys.readouterr().err
+    assert not baseline_path(home / "supervisor").exists()

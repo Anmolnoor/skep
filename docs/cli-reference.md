@@ -16,11 +16,32 @@ skep [--home HOME] [--version] <command> ...
 ## Setup and Health
 
 ```sh
+skep onboard [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV]
+             [--workdir DIR] [--sandbox auto|podman|none]
+             [--template builder|operator|assistant] [--role ROLE] [--yes] [--no-chat]
+skep onboard --check
 skep setup --personal [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV]
 skep doctor
 skep status [--personal] [--json]
 ```
 
+- `onboard` is the guided first run (first-run O3): ① model (detects a local
+  Ollama, makes a test call, prints where prompts go) → ② work directory
+  (created if missing, registered as a project with its inferred
+  `verify_command`) → ③ sandbox backend (`none` is a real answer: the baseline
+  then asks on every write) → ④ policy template (default `assistant`, locked
+  through `skep policy approve`'s path after a typed `yes`) → ⑤ role, recorded
+  in `~/.skep/first_run.json`; then it attaches to (or starts) `skep serve` and
+  opens `skep chat` unless `--no-chat`. Re-running resumes at the first
+  incomplete step; a flag that differs from a finished step re-runs it.
+  `--provider` takes `mock`, `ollama`, `openai-compatible` or a preset id from
+  `skep provider presets`. `--yes` takes every default and skips the typed
+  `yes`.
+- `onboard --check` is `doctor` plus: baseline hash valid (a tampered one is
+  named `baseline_tampered`), engine v2 scopes on, the chosen sandbox backend
+  present, the work directory writable, the model reachable, all five steps
+  done — then the egress-truth block, whose last line is `telemetry: none`.
+  Exits 0 only when every check is ready.
 - `setup --personal` creates or updates the personal profile.
 - `doctor` reports readiness and exits non-zero when the profile is not ready.
 - `doctor` also reports non-blocking runtime checks such as sandbox backend

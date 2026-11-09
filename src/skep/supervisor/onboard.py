@@ -394,7 +394,7 @@ def onboard_template(
             approved_by=approved_by,
             expect_sha256=expect_sha256,
         )
-    return _record(home, "template", {"template": template, "sha256": view["sha256"]})
+    return _record(home, "template", {"template": view["template"], "sha256": view["sha256"]})
 
 
 # --- ⑤ role ----------------------------------------------------------------------------
