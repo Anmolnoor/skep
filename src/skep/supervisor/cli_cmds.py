@@ -981,6 +981,57 @@ def cmd_run(args: argparse.Namespace) -> int:
     return STATE_EXIT_CODES.get(record.state, 3)
 
 
+def cmd_team(args: argparse.Namespace) -> int:
+    """first-run R3 (ADR 0055 D5): `skep team` — a manager in ``--manager``'s
+    role dispatches every ``--task``; one ledger thread. The same
+    ``submit_team`` as ``POST /api/teams`` and the chat's ``batch_dispatch
+    manager=``, in-process like ``skep run``: it waits for every member."""
+    from fastapi import HTTPException
+
+    from .serve.actions import submit_team
+    from .serve.jobs import Dispatcher
+    from .serve.settings import ConfigHolder
+
+    config = build_config(args.home, args.worker_cmd)
+    tasks = [
+        {
+            "repo": repo,
+            "instructions": text,
+            "role": args.role,
+            "execution_mode": args.execution_mode,
+        }
+        for repo, text in args.task
+    ]
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    runner = Dispatcher(holder, store)
+    try:
+        try:
+            team = submit_team(
+                holder,
+                runner,
+                store,
+                manager=args.manager,
+                tasks=tasks,
+                delegation_chain=args.delegated_by or [],
+            )
+        except HTTPException as exc:
+            return _err(str(exc.detail), next_command="skep role list")
+        finally:
+            runner.shutdown(wait=True)
+        print(f"team {team['team']}  ({' → '.join(team['delegation_chain'])} → workers)")
+        codes = [0]
+        for task_id in team["dispatched"]:
+            record = store.get_run(task_id)
+            state = record.state if record is not None else "gone"
+            print(f"  {task_id}  {state}")
+            codes.append(STATE_EXIT_CODES.get(state, 3))
+        print(f"  ledger:  skep policy decisions --team {team['team']}")
+        return max(codes)
+    finally:
+        store.close()
+
+
 def cmd_status_personal(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     if not config.db_path.is_file():
@@ -2667,7 +2718,7 @@ def cmd_policy_decisions(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     try:
         view = policy_decisions(
-            config.audit_dir, actor=args.actor, since=args.since, limit=args.limit
+            config.audit_dir, actor=args.actor, since=args.since, limit=args.limit, team=args.team
         )
     except ValueError as exc:
         return _err(str(exc))
@@ -2965,6 +3016,31 @@ def register_supervisor_commands(
     )
     run.add_argument("--quiet", action="store_true", help="suppress the live phase tail")
     run.set_defaults(func=cmd_run)
+
+    team = subcommands.add_parser(
+        "team",
+        help="a team run: a manager in a role dispatches 1-3 tasks, one ledger thread (ADR 0055)",
+    )
+    team.add_argument("--manager", required=True, metavar="ROLE", help="the manager's role")
+    team.add_argument(
+        "--task",
+        nargs=2,
+        action="append",
+        required=True,
+        metavar=("REPO", "INSTRUCTIONS"),
+        help="one member run (repeat, up to 3)",
+    )
+    team.add_argument("--role", default=None, help="every member's role (default: the manager's)")
+    team.add_argument(
+        "--delegated-by",
+        action="append",
+        default=None,
+        metavar="ACTOR@ROLE",
+        help="the dispatcher above the manager, e.g. queen@operator",
+    )
+    team.add_argument("--execution-mode", choices=("workspace", "sandbox"), default=None)
+    team.add_argument("--worker-cmd", default=None, help="worker argv prefix, as for `skep run`")
+    team.set_defaults(func=cmd_team)
 
     review = subcommands.add_parser(
         "review",
@@ -3453,6 +3529,7 @@ def register_supervisor_commands(
     policy_decisions.add_argument("--actor", help="glob on the recorded actor, e.g. 'acp:*'")
     policy_decisions.add_argument("--since", help="ISO time or bare date floor on `at`")
     policy_decisions.add_argument("--limit", type=int, default=200, help="max rows (default 200)")
+    policy_decisions.add_argument("--team", help="one team run's thread (first-run R3)")
     policy_decisions.set_defaults(func=cmd_policy_decisions)
 
     repo_group = subcommands.add_parser("repo", help="registered repositories (v104)")

@@ -925,14 +925,16 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "batch_dispatch",
-        "PROPOSE dispatching up to 3 worker runs IN PARALLEL — one card, one "
+        "PROPOSE 1-3 parallel worker runs, or a team. One card, one "
         "confirm for the whole batch (auto-resolves only when EVERY task "
         "matches its project's auto-dispatch policy). Each task is an "
         "independent, fully governed run: own worktree, own policy, own "
         "audit trail, own re-verification. Returns one task id per task; "
         "watch them with list_runs/get_run. Set a per-task 'engine' to run the "
         "SAME brief on different coding agents (see compare-coding-engines); "
-        "any explicit engine makes the whole batch card.",
+        "any explicit engine makes the whole batch card. Set 'manager' to run "
+        "them as a team: you → a manager in that role → the workers, each held "
+        "to the manager (and the manager to you); one ledger thread.",
         {
             "tasks": {
                 "type": "array",
@@ -956,7 +958,11 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                     },
                     "required": ["repo", "instructions"],
                 },
-            }
+            },
+            "manager": {
+                "type": "string",
+                "description": "the manager's role; task roles default to it",
+            },
         },
         ["tasks"],
     ),
@@ -3884,6 +3890,17 @@ def _execute_mutation(
             if not isinstance(entry, dict) or "repo" not in entry or "instructions" not in entry:
                 raise ValueError("each task must be an object with repo and instructions")
             entries.append(entry)
+        if args.get("manager"):
+            # R3 (ADR 0055 D5): the batch as a team — Queen → manager → workers.
+            return actions.submit_team(
+                holder,
+                runner,
+                store,
+                manager=str(args["manager"]),
+                tasks=entries,
+                delegation_chain=_queen_chain(store, holder, chat_id, actor),
+                dispatch_decision=decision,
+            )
         task_ids = [
             actions.submit_run(
                 holder,

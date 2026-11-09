@@ -72,6 +72,7 @@ from .actions import (
     run_summary_view,
     set_policy_group,
     submit_run,
+    submit_team,
     transition_detail_view,
     update_policy,
     workon,
@@ -137,6 +138,24 @@ class RunRequest(BaseModel):
     # first-run R3 (ADR 0055 D5): the worker's own role, and who delegated
     # (actor@role, outermost first) — the worker holds no more than either.
     role: str | None = None
+    delegation_chain: list[str] = Field(default_factory=list)
+
+
+class TeamTask(BaseModel):
+    repo: str
+    instructions: str
+    caste: str = "coding"
+    role: str | None = None
+    execution_mode: Literal["workspace", "sandbox"] | None = None
+    engine: str | None = None
+
+
+class TeamRequest(BaseModel):
+    """Body of ``POST /api/teams`` (first-run R3) — the chat's
+    ``batch_dispatch`` with ``manager``."""
+
+    manager: str
+    tasks: list[TeamTask] = Field(min_length=1, max_length=3)
     delegation_chain: list[str] = Field(default_factory=list)
 
 
@@ -524,6 +543,20 @@ def create_app(
             response["hint"] = hint
         return response
 
+    @app.post("/api/teams", status_code=202)
+    def create_team(body: TeamRequest) -> dict[str, Any]:
+        """first-run R3 (ADR 0055 D5): a team run — a manager in ``manager``'s
+        role dispatches every task; one ledger thread (the chat's
+        ``batch_dispatch manager=`` and ``skep team``)."""
+        return submit_team(
+            holder,
+            runner,
+            run_store,
+            manager=body.manager,
+            tasks=[task.model_dump(exclude_none=True) for task in body.tasks],
+            delegation_chain=body.delegation_chain,
+        )
+
     @app.get("/api/policy")
     def get_policy() -> dict[str, Any]:
         return policy_view(run_store, holder.current)
@@ -712,11 +745,16 @@ def create_app(
 
     @app.get("/api/policy/decisions")
     def get_policy_decisions(
-        actor: str | None = None, since: str | None = None, limit: int = 200
+        actor: str | None = None,
+        since: str | None = None,
+        limit: int = 200,
+        team: str | None = None,
     ) -> dict[str, Any]:
         """ADR 0054 A3: decisions.jsonl read back — what the governed agents did."""
         try:
-            return policy_decisions(holder.current.audit_dir, actor=actor, since=since, limit=limit)
+            return policy_decisions(
+                holder.current.audit_dir, actor=actor, since=since, limit=limit, team=team
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

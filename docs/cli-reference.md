@@ -274,7 +274,7 @@ skep policy baseline [status|diff]
 skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME] [--role NAME]
                    [--delegated-by ACTOR@ROLE ...]
 skep policy hook [--actor NAME]
-skep policy decisions [--actor GLOB] [--since ISO] [--limit N]
+skep policy decisions [--actor GLOB] [--since ISO] [--limit N] [--team ID]
 ```
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
@@ -360,6 +360,23 @@ the delegator as `actor`, `worker@<role>` as `value`, `role`,
 `delegation_chain` and `task_id`. The run's dispatch decision carries
 `delegation` (`chain`, `role`, `team`), shown on the run cards. A worker never
 dispatches: a `worker@…` hop refuses.
+
+```sh
+skep team --manager ROLE --task REPO INSTRUCTIONS [--task ...] [--role NAME]
+          [--delegated-by ACTOR@ROLE] [--execution-mode workspace|sandbox]
+```
+
+A team run (first-run R3) is a batch of 1-3 runs with a manager as the
+dispatcher: each member runs under `[<dispatcher>, manager@<ROLE>]` — held to
+the manager, and the manager to whoever dispatched the team — with the
+manager's role unless `--role` (or a task's `role`) says otherwise. This is the
+one two-hop chain a dispatch accepts; anything deeper, and a manager anywhere
+but innermost, refuses. The team is one ledger thread: the manager's
+`delegated` row, every member's and every drop carry the team id, and `skep
+policy decisions --team ID` reads it in order. `skep team` waits for its
+members like `skep run`; the same verb is `POST /api/teams` and the chat's
+`batch_dispatch` with `manager` (dispatched as `queen@<chat role>`). The
+manager writes no briefs of its own — the Queen or the operator does.
 
 ## skep acp
 

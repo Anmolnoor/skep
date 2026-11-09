@@ -53,6 +53,7 @@ from ..autonomy import (
 from ..castes import resolve_caste
 from ..config import SupervisorConfig
 from ..contracts_io import read_event_log
+from ..ids import mint_uuid7
 from ..memory import MemoryError, MemoryProposal, MemorySource
 from ..policy_baseline import BASELINE_TAMPERED, NO_BASELINE_REASON, NoBaseline, status_line
 from ..policy_baseline import current_layer as current_baseline_layer
@@ -4450,6 +4451,78 @@ def _within_delegation(
     return narrowed, delegation, note
 
 
+TEAM_CAP = 3  # v51's batch cap: a team is a batch with a manager
+
+
+def submit_team(
+    holder: ConfigHolder,
+    runner: Dispatcher,
+    store: RunStore,
+    *,
+    manager: str,
+    tasks: Sequence[dict[str, Any]],
+    delegation_chain: Sequence[str] = (),
+    dispatch_decision: AutonomyDecision | None = None,
+) -> dict[str, Any]:
+    """R3 (ADR 0055 D5): a team run — v51's batch dispatch with a manager as
+    the dispatcher. The manager is a hop, ``manager@<role>``, under whoever
+    dispatched the team (``delegation_chain``: ``[queen@<role>]`` from a
+    Queen chat, ``[]`` from the operator), so every member runs under
+    ``[…, manager@<role>]``: held to the manager, and the manager to the
+    hops above it (``decide()``, I5). A member's ``role`` defaults to the
+    manager's. One ledger thread: the team id is on the manager's
+    ``delegated`` row, on every member's hop row and on every drop
+    (``skep policy decisions --team``). The Queen or the operator writes the
+    member briefs; the manager authors none (no LLM manager process).
+
+    Everything resolves before anything dispatches — the chain shape, every
+    role (I9). A member refused at dispatch (a 403 on writes) stops the
+    rest, as a batch does; the members already dispatched keep running."""
+    if not tasks or len(tasks) > TEAM_CAP:
+        raise HTTPException(
+            status_code=400, detail=f"a team is 1-{TEAM_CAP} tasks of {{repo, instructions}}"
+        )
+    if any(not task.get("repo") or not task.get("instructions") for task in tasks):
+        raise HTTPException(status_code=400, detail="each task needs repo and instructions")
+    team = mint_uuid7()
+    hop = f"manager@{manager}"
+    chain = [*delegation_chain, hop]
+    for task in tasks:
+        delegation_inputs(holder, chain, str(task.get("role") or manager), team=team)
+    record_delegation(
+        holder.current.audit_dir,
+        {"chain": list(delegation_chain), "role": manager, "team": team, "delegatee": hop},
+        repo=None,
+        task=None,
+    )
+    dispatched = [
+        submit_run(
+            holder,
+            runner,
+            store,
+            repo=str(task["repo"]),
+            instructions=str(task["instructions"]),
+            caste=str(task.get("caste") or "coding"),
+            execution_mode=(
+                None if task.get("execution_mode") is None else str(task["execution_mode"])
+            ),
+            engine=None if task.get("engine") is None else str(task["engine"]),
+            dispatch_decision=dispatch_decision,
+            delegation_chain=chain,
+            role=str(task.get("role") or manager),
+            team=team,
+        )
+        for task in tasks
+    ]
+    return {
+        "team": team,
+        "manager": hop,
+        "delegation_chain": chain,
+        "dispatched": dispatched,
+        "count": len(dispatched),
+    }
+
+
 def dispatch_run_auto_allowed(
     holder: ConfigHolder,
     store: RunStore,
@@ -4875,12 +4948,18 @@ def _append_policy_ledger(audit_dir: Path, name: str, payload: dict[str, Any]) -
 
 
 def policy_decisions(
-    audit_dir: Path, *, actor: str | None = None, since: str | None = None, limit: int = 200
+    audit_dir: Path,
+    *,
+    actor: str | None = None,
+    since: str | None = None,
+    limit: int = 200,
+    team: str | None = None,
 ) -> dict[str, Any]:
     """ADR 0054 A3/A9: ``decisions.jsonl`` read back — what the governed agents
     did. ``actor`` is an fnmatch glob (``acp:*`` the ACP agents, ``human@*``
     their humans' answers); ``since`` is a string floor on ``at``, so the
     ledger's ``%Y-%m-%dT%H:%M:%SZ`` and a bare date ``2026-11-06`` both work.
+    ``team`` (R3) keeps one team run's thread — every hop and drop under it.
     Rows come newest-first, at most ``limit``; ``total`` counts every match.
     ``summary`` counts decisions by verdict and notes by source apart — an
     ``observed`` or ``forwarded`` row is not a decision (I8)."""
@@ -4902,6 +4981,8 @@ def policy_decisions(
         if actor is not None and not fnmatch(str(row.get("actor", "")), actor):
             continue
         if since is not None and str(row.get("at", "")) < since:
+            continue
+        if team is not None and row.get("team") != team:
             continue
         rows.append(row)
         source = row.get("source")
