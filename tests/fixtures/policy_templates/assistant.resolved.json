@@ -1,46 +1,118 @@
 {
-  "coding": [
-    {
-      "verdict": "require_approval",
-      "rule_id": "coding-gated",
-      "action": "edit",
-      "pattern": "*"
-    },
-    {
-      "verdict": "require_approval",
-      "rule_id": "verify-gated",
-      "action": "verify",
-      "pattern": "*"
-    }
-  ],
-  "filesystem": [
-    {
-      "verdict": "allow",
-      "rule_id": "fs-read",
-      "action": "read",
-      "pattern": "*"
-    },
-    {
-      "verdict": "require_approval",
-      "rule_id": "fs-write-gated",
-      "action": "write",
-      "pattern": "*"
-    }
-  ],
-  "network": [
-    {
-      "verdict": "require_approval",
-      "rule_id": "net-gated",
-      "action": "connect",
-      "pattern": "*"
-    }
-  ],
-  "shell": [
-    {
-      "verdict": "require_approval",
-      "rule_id": "shell-gated",
-      "action": "run",
-      "pattern": "*"
-    }
-  ]
+  "rules": {
+    "browse": [
+      {
+        "verdict": "allow",
+        "rule_id": "browse-read",
+        "action": "read",
+        "pattern": "*"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "browse-act-gated",
+        "action": "act",
+        "pattern": "*"
+      }
+    ],
+    "coding": [
+      {
+        "verdict": "require_approval",
+        "rule_id": "verify-gated",
+        "action": "verify",
+        "pattern": "*"
+      },
+      {
+        "verdict": "deny",
+        "rule_id": "coding-denied",
+        "action": "edit",
+        "pattern": "*"
+      }
+    ],
+    "email": [
+      {
+        "verdict": "allow",
+        "rule_id": "email-read",
+        "action": "read",
+        "pattern": "*"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "email-send-gated",
+        "action": "send",
+        "pattern": "*"
+      }
+    ],
+    "filesystem": [
+      {
+        "verdict": "allow",
+        "rule_id": "fs-read",
+        "action": "read",
+        "pattern": "*"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "fs-write-gated",
+        "action": "write",
+        "pattern": "*"
+      },
+      {
+        "verdict": "deny",
+        "rule_id": "fs-workspace-denied",
+        "action": "write",
+        "pattern": "workspace"
+      }
+    ],
+    "mcp": [
+      {
+        "verdict": "allow",
+        "rule_id": "mcp-calendar",
+        "action": "call",
+        "pattern": "calendar:*"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "mcp-notes",
+        "action": "call",
+        "pattern": "notes:*"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "mcp-gated",
+        "action": "call",
+        "pattern": "*"
+      }
+    ],
+    "network": [
+      {
+        "verdict": "allow",
+        "rule_id": "net-search",
+        "action": "search",
+        "pattern": "*"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "net-gated",
+        "action": "connect",
+        "pattern": "*"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "net-fetch-gated",
+        "action": "fetch",
+        "pattern": "*"
+      }
+    ],
+    "shell": [
+      {
+        "verdict": "require_approval",
+        "rule_id": "shell-gated",
+        "action": "run",
+        "pattern": "*"
+      }
+    ]
+  },
+  "settings": {
+    "default_network": [],
+    "allowed_shell_commands": []
+  }
 }

@@ -1,59 +1,33 @@
 {
+  "schema_version": 1,
   "template": "assistant",
   "pack": null,
-  "scopes": [
-    {
-      "scope": "coding",
-      "require_approval": [
-        {
-          "rule_id": "coding-gated",
-          "action": "edit",
-          "pattern": "*"
-        },
-        {
-          "rule_id": "verify-gated",
-          "action": "verify",
-          "pattern": "*"
-        }
-      ]
-    },
-    {
-      "scope": "shell",
-      "require_approval": [
-        {
-          "rule_id": "shell-gated",
-          "action": "run",
-          "pattern": "*"
-        }
-      ]
-    },
-    {
-      "scope": "filesystem",
-      "allow": [
-        {
-          "rule_id": "fs-read",
-          "action": "read",
-          "pattern": "*"
-        }
-      ],
-      "require_approval": [
-        {
-          "rule_id": "fs-write-gated",
-          "action": "write",
-          "pattern": "*"
-        }
-      ]
-    },
-    {
-      "scope": "network",
-      "require_approval": [
-        {
-          "rule_id": "net-gated",
-          "action": "connect",
-          "pattern": "*"
-        }
-      ]
-    }
-  ],
-  "learned": []
+  "settings": {
+    "default_network": [],
+    "allowed_shell_commands": []
+  },
+  "rules": [
+    {"scope": "coding", "verdict": "deny", "action": "edit", "pattern": "*", "rule_id": "coding-denied"},
+    {"scope": "coding", "verdict": "require_approval", "action": "verify", "pattern": "*", "rule_id": "verify-gated"},
+
+    {"scope": "shell", "verdict": "require_approval", "action": "run", "pattern": "*", "rule_id": "shell-gated"},
+
+    {"scope": "filesystem", "verdict": "allow", "action": "read", "pattern": "*", "rule_id": "fs-read"},
+    {"scope": "filesystem", "verdict": "deny", "action": "write", "pattern": "workspace", "rule_id": "fs-workspace-denied"},
+    {"scope": "filesystem", "verdict": "require_approval", "action": "write", "pattern": "*", "rule_id": "fs-write-gated"},
+
+    {"scope": "network", "verdict": "require_approval", "action": "connect", "pattern": "*", "rule_id": "net-gated"},
+    {"scope": "network", "verdict": "allow", "action": "search", "pattern": "*", "rule_id": "net-search"},
+    {"scope": "network", "verdict": "require_approval", "action": "fetch", "pattern": "*", "rule_id": "net-fetch-gated"},
+
+    {"scope": "mcp", "verdict": "allow", "action": "call", "pattern": "calendar:*", "rule_id": "mcp-calendar"},
+    {"scope": "mcp", "verdict": "allow", "action": "call", "pattern": "notes:*", "rule_id": "mcp-notes"},
+    {"scope": "mcp", "verdict": "require_approval", "action": "call", "pattern": "*", "rule_id": "mcp-gated"},
+
+    {"scope": "email", "verdict": "allow", "action": "read", "pattern": "*", "rule_id": "email-read"},
+    {"scope": "email", "verdict": "require_approval", "action": "send", "pattern": "*", "rule_id": "email-send-gated"},
+
+    {"scope": "browse", "verdict": "allow", "action": "read", "pattern": "*", "rule_id": "browse-read"},
+    {"scope": "browse", "verdict": "require_approval", "action": "act", "pattern": "*", "rule_id": "browse-act-gated"}
+  ]
 }

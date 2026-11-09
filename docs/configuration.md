@@ -16,8 +16,10 @@ and dev docs):
   tools decide as `email/read` or `email/send`).
 - **Gate** — a `require_approval` verdict made visible: the approval queue,
   confirm cards, and `skep review`.
-- **Template** — a named, inspectable policy document (`locked-down`,
-  `personal-dev`, `homelab-ops`, `assistant`), diffable on switch.
+- **Template** — a named, inspectable policy layer (`builder`, `operator`,
+  `assistant`; `skep policy explain NAME` renders it), diffable on switch.
+  The ADR 0022 names `locked-down`, `personal-dev`, `homelab-ops` are
+  accepted as aliases until 1.3.0.
 - **Audit** — always on: every decision records `decided_by`, the rule that
   produced it.
 

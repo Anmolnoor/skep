@@ -234,6 +234,7 @@ skep project set-phase PROJECT_ID PHASE
 skep policy registry
 skep policy rsop REPO
 skep policy why  REPO SCOPE ACTION VALUE
+skep policy explain SUBJECT
 skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME]
 skep policy hook [--actor NAME]
 skep policy decisions [--actor GLOB] [--since ISO] [--limit N]
@@ -254,7 +255,7 @@ Claude Code PreToolUse face (payload on stdin, verdict as hook JSON — see
 `docs/policy-hook.md`, ADR 0053 P3). `policy decisions` reads that ledger
 back, newest first, with counts per verdict and per note source (`observed`,
 `forwarded`); `--actor` is a glob, `--since` a time or bare-date floor
-(also `GET /api/policy/decisions` and the chat `policy_decisions` tool).
+(also `GET /api/policy/decisions` and the chat `policy_decisions` tool). `policy explain` renders a policy template (`builder`, `operator`, `assistant`), the approved `baseline` or a `role:<name>` as a Markdown allow / ask / deny table grouped by scope, with its settings and the floor rows no layer lifts — the rule ids are the ones `why` prints (first-run O1, ADR 0056 D3; also `GET /api/policy/explain?subject=` and the chat `policy_explain` tool).
 
 ## skep acp
 

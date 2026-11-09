@@ -2823,3 +2823,25 @@ and `skep policy decisions`. Operator notes: a fresh home starts with
 Install with `pipx install skep && skep acp doctor -- npx -y
 @agentclientprotocol/claude-agent-acp`. ADR draft 0054 moves to
 `docs/adr/` on acceptance.
+
+## first-run O1 — three templates in the layer format + `skep policy explain` (2026-11-09)
+
+ADR 0056 D3. `src/skep/supervisor/policy_templates/{builder,operator,assistant}.json`
+are engine v2 layers — rules AND knobs (`default_network`,
+`allowed_shell_commands`, which the registry now lets the `template` layer
+carry) — each a complete baseline candidate for O2. `personal-dev` →
+`builder`, `homelab-ops` → `operator` (read-only inspection instead of the
+developer toolchain; GitHub fetch allowlist), `assistant` reshaped (calendar
+and notes MCP tools and mail reads flow, sends ask, repo writes denied);
+`locked-down` has no file — it is the `no_baseline` zero state O2/O5 ship.
+The four old names are aliases until 1.3.0 and print a deprecation line;
+`skep setup --template` writes the template's own knobs instead of deriving
+them from its rules. `skep policy explain <template|baseline|role:NAME>`
+renders the layer as a Markdown allow / ask / deny table grouped by scope —
+the rule ids `why` prints, the floor rows labelled "always denied", a
+settings block per scope — on three faces: the CLI, `GET
+/api/policy/explain`, and the chat `policy_explain` read. The harness
+(`tests/supervisor/test_policy_templates.py`) proves golden parity with each
+template as the baseline, catalogue membership, no floor grant, the B3 demo
+sequence under `builder` (`pnpm test` allow · `rm` ask · `git push` deny)
+and every alias.
