@@ -12,7 +12,8 @@ from typing import Any
 
 import pytest
 
-from skep.supervisor import SupervisorConfig
+from skep.cli import main
+from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.policy_schema import _VERDICT_RANK
 from skep.supervisor.roles import (
     EXCEEDS_DELEGATOR,
@@ -21,7 +22,10 @@ from skep.supervisor.roles import (
     role_covers,
     roles_dir,
 )
+from skep.supervisor.serve.settings import ConfigHolder
+from skep.supervisor.serve.tools import execute_read_tool
 
+from .conftest import serve_client
 from .test_role_policy import _decide, _home
 
 ROLES = ("builder", "operator", "assistant")
@@ -209,3 +213,72 @@ def test_a_bad_hop_refuses_naming_what_acceptable_looks_like(
         _decide(config, delegation_chain=["queen"], **ask)
     with pytest.raises(ValueError, match="no role 'warp'; known: builder, operator, assistant"):
         _decide(config, delegation_chain=["queen@warp"], **ask)
+
+
+def test_why_shows_the_chain(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`skep policy why --delegated-by` names the chain, what the delegator
+    holds on each face, and holds both faces to it — the same words as the
+    deny row."""
+    why = ["--home", str(config.home.parent), "policy", "why", str(repo)]
+    assert main([*why, "coding", "edit", "workspace", "--delegated-by", "queen@assistant"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["delegation"]["chain"] == ["queen@assistant"]
+    assert view["delegation"]["held"]["run"] == {
+        "verdict": "deny",
+        "decided_by": "role:assistant/coding-denied",
+    }
+    assert view["run"]["rule_id"] == "exceeds_delegator"
+    assert "the delegatee holds no more than queen@assistant does" in view["delegation"]["note"]
+    assert main([*why, "shell", "run", "uv sync", "--delegated-by", "queen@hollow"]) != 0
+    assert "no role 'hollow'" in capsys.readouterr().err
+    _custom_role(config, "hollow")
+    assert main([*why, "shell", "run", "uv sync", "--delegated-by", "queen@hollow"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["delegation"]["held"] == {"run": None, "operator": None}
+    assert "unset is not granted" in view["delegation"]["note"]
+    assert view["run"]["decided_by"] == "delegation:queen@hollow/unset"
+    assert main([*why, "shell", "run", "uv sync"]) == 0
+    assert "delegation" not in json.loads(capsys.readouterr().out)  # no chain, no block
+
+
+def test_every_face_takes_the_chain(
+    config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR 0050: policy_decide and policy_why take delegation_chain on the
+    CLI, REST and (why) the chat tool."""
+    ask = ["shell", "run", "uv sync"]
+    decide = ["--home", str(config.home.parent), "policy", "decide", *ask]
+    assert main([*decide, "--delegated-by", "queen@operator", "--delegated-by", "m@builder"]) == 0
+    row = json.loads(capsys.readouterr().out)
+    assert row["delegation_chain"] == ["queen@operator", "m@builder"]
+    assert row["rule_id"] == "exceeds_delegator"
+    with serve_client(config) as client:
+        decided = client.post(
+            "/api/policy/decide",
+            json={"scope": "shell", "action": "run", "value": "uv sync"}
+            | {"delegation_chain": ["queen@operator"]},
+        ).json()
+        assert (decided["delegation_chain"], decided["rule_id"]) == (
+            ["queen@operator"],
+            "exceeds_delegator",
+        )
+        params = {"repo": str(repo), "scope": "shell", "action": "run", "value": "uv sync"}
+        why = client.get(
+            "/api/policy/why", params={**params, "delegation_chain": ["queen@operator"]}
+        ).json()
+        assert why["delegation"]["chain"] == ["queen@operator"]
+        refused = client.get("/api/policy/why", params={**params, "delegation_chain": ["q"]})
+        assert refused.status_code == 400 and "actor@role" in refused.json()["detail"]
+    store = RunStore(config.db_path)
+    try:
+        view = execute_read_tool(
+            "policy_why",
+            {**params, "delegation_chain": ["queen@operator"]},
+            store=store,
+            holder=ConfigHolder(config, store),
+        )
+        assert view["run"]["decided_by"] == "delegation:queen@operator/role:operator/shell-gated"
+    finally:
+        store.close()

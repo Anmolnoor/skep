@@ -2620,6 +2620,7 @@ def cmd_policy_decide(args: argparse.Namespace) -> int:
             repo=args.repo,
             actor=args.actor,
             role=args.role,
+            delegation_chain=args.delegated_by or (),
         )
     except ValueError as exc:
         return _err(str(exc))
@@ -2783,6 +2784,7 @@ def cmd_policy_why(args: argparse.Namespace) -> int:
             args.action,
             args.value,
             role=args.role,
+            delegation_chain=args.delegated_by or (),
         )
     except ValueError as exc:
         return _err(str(exc))
@@ -3347,6 +3349,11 @@ def register_supervisor_commands(
     policy_why.add_argument("action")
     policy_why.add_argument("value")
     policy_why.add_argument("--role", help="answer under this role's layer (skep role list)")
+    policy_why.add_argument(
+        "--delegated-by",
+        action="append",
+        help="held to what this delegator holds (actor@role; repeat outermost first)",
+    )
     policy_why.set_defaults(func=cmd_policy_why)
     policy_explain = policy_sub.add_parser(
         "explain",
@@ -3385,6 +3392,11 @@ def register_supervisor_commands(
     policy_decide.add_argument("--repo", help="the checkout the action happens in (slug or path)")
     policy_decide.add_argument("--actor", default="cli", help="who asked (recorded)")
     policy_decide.add_argument("--role", help="decide under this role's layer (recorded)")
+    policy_decide.add_argument(
+        "--delegated-by",
+        action="append",
+        help="held to what this delegator holds (actor@role; repeat outermost first)",
+    )
     policy_decide.set_defaults(func=cmd_policy_decide)
     policy_hook = policy_sub.add_parser(
         "hook",

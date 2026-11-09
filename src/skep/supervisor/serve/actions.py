@@ -2177,6 +2177,7 @@ def policy_why(
     value: str,
     *,
     role: str | None = None,
+    delegation_chain: Sequence[str] = (),
 ) -> dict[str, Any]:
     """P0-3 (ADR 0052 D4): would <scope>.<action> <value> in <repo> be allowed?
     The same resolve_run_policy a dispatch runs, then decide() on the compiled
@@ -2186,8 +2187,55 @@ def policy_why(
     R1 (ADR 0055 D2, done-criterion 4): with a ``role`` the answer names the
     role layer — ``role`` says what ``role:<name>`` alone decides (or that it
     has no rule here) and both verdicts are tightened by it, exactly as
-    ``policy_decide`` does."""
+    ``policy_decide`` does.
+
+    R2 (ADR 0055 D4): with a ``delegation_chain`` the answer shows it — a
+    ``delegation`` block names the chain and what the innermost delegator
+    itself holds on each face (its own ``why``, bounded by the hops above),
+    and both faces are held to it exactly as ``policy_decide`` holds them."""
     _check_scope_action(scope, action)
+    if delegation_chain:
+        *outer, delegator = parse_delegation_chain(delegation_chain, holder.current.home)
+        answer = policy_why(holder, store, repo, scope, action, value, role=role)
+        covered = role_covers(delegator.role, scope, action, value)
+        bound = (
+            policy_why(
+                holder,
+                store,
+                repo,
+                scope,
+                action,
+                value,
+                role=delegator.role.name,
+                delegation_chain=[hop.entry for hop in outer],
+            )
+            if covered
+            else None
+        )
+        held: dict[str, Any] = {}
+        for face in ("run", "operator"):
+            own = None if bound is None else bound[face]
+            if own is not None and "verdict" not in own:
+                own = None  # a delegator face that did not resolve holds nothing (#7)
+            held[face] = None if own is None else {k: own[k] for k in ("verdict", "decided_by")}
+            if "verdict" in answer[face]:
+                answer[face] = within_delegator(answer[face], delegator, own)
+        answer["delegation"] = {
+            "chain": list(delegation_chain),
+            "delegator": delegator.entry,
+            "held": held,
+            "note": (
+                f"delegated by {' → '.join(delegation_chain)}: the delegatee holds no more "
+                f"than {delegator.entry} does — "
+                + (
+                    "the stricter verdict stands; beyond it is exceeds_delegator"
+                    if covered
+                    else f"role:{delegator.role.name} has no rule for this, so it holds "
+                    "nothing to pass on (unset is not granted)"
+                )
+            ),
+        }
+        return answer
     if role is not None:
         role_record = resolve_role(role, holder.current.home)
         answer = policy_why(holder, store, repo, scope, action, value)

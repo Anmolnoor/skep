@@ -364,6 +364,11 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
             "action": {"type": "string", "description": "e.g. run, connect, write"},
             "value": {"type": "string", "description": "the command, host or path"},
             "role": {"type": "string", "description": "optional: answer under this role"},
+            "delegation_chain": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "optional: actor@role hops that delegated it",
+            },
         },
         ["repo", "scope", "action", "value"],
     ),
@@ -3139,6 +3144,7 @@ def execute_read_tool(
             str(args["action"]),
             str(args["value"]),
             role=None if args.get("role") is None else str(args["role"]),
+            delegation_chain=[str(hop) for hop in args.get("delegation_chain") or []],
         )
     if name == "policy_explain":
         from ..policy_templates import explain_view
