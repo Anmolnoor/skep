@@ -164,10 +164,38 @@ def _transient_provider_error(exc: OllamaError) -> bool:
 
 def _provider_rejected_request(exc: OllamaError) -> bool:
     """v73-F1: a non-transient 4xx — the provider REFUSED this request, so an
-    identical retry is pointless but a SMALLER one may pass (the field-test
-    chat wedged behind a size-correlated 400 while fresh chats worked)."""
+    identical retry is pointless."""
     status = getattr(exc, "status", None)
     return status is not None and 400 <= status < 500 and status not in _TRANSIENT_STATUSES
+
+
+# The size words the providers use: ollama.com/fakes "request too large",
+# anthropic "prompt is too long", openai/vLLM "maximum context length",
+# gemini/ollama "exceeds".
+_TOO_LARGE_RE = re.compile(r"too (large|long|big)|context (length|window|size|limit)|exceed")
+
+
+def _request_too_large(exc: OllamaError) -> bool:
+    """ES-F12 (B85): a refusal a SMALLER request may pass — a 413, or a 4xx
+    whose body says so. v73-F1 halved on every 4xx: a bad key (401) or bad
+    arguments (400) drew a [replay halved…] row, an "outgrown" line, and a
+    permanent ceiling when the halved retry happened to pass."""
+    if getattr(exc, "status", None) == 413:
+        return True
+    return _provider_rejected_request(exc) and bool(_TOO_LARGE_RE.search(str(exc).lower()))
+
+
+def _provider_failure_line(exc: OllamaError, *, shrunk: bool) -> str:
+    """v62-F1: the honest line a turn ends on when nothing arrived."""
+    if getattr(exc, "status", None) in (401, 403):
+        return f"the provider rejected the API key ({exc}) — check the API key in Settings."
+    if _provider_rejected_request(exc) and not _request_too_large(exc):
+        return f"the provider refused the request ({exc})."
+    line = (
+        f"the provider dropped before any reply arrived ({exc}) — "
+        "the tool results above stand; ask again to continue."
+    )
+    return line + _OUTGROWN_LINE if shrunk and _request_too_large(exc) else line
 
 
 # v73-F1: the honest teaching line when even the halved retry was refused.
@@ -1475,7 +1503,7 @@ class ChatEngine:
                         shrink_budget is None
                         and not parts
                         and not tool_calls
-                        and _provider_rejected_request(exc)
+                        and _request_too_large(exc)
                     ):
                         # v73-F1: the provider refused the request outright —
                         # an identical retry is pointless, but a SMALLER one
@@ -1505,12 +1533,7 @@ class ChatEngine:
                         # collected, the old path left only a transient error
                         # toast — on reload the chat just ended mid-tools (field
                         # test 2026-07-19: three "hung" turns in a row).
-                        line = (
-                            f"the provider dropped before any reply arrived ({exc}) — "
-                            "the tool results above stand; ask again to continue."
-                        )
-                        if shrink_budget is not None and _provider_rejected_request(exc):
-                            line += _OUTGROWN_LINE
+                        line = _provider_failure_line(exc, shrunk=shrink_budget is not None)
                         yield (None, {"content": line})
                         self.store.add_chat_message(chat_id, role="assistant", content=line)
                     yield ("error", {"detail": str(exc)})
@@ -1969,7 +1992,7 @@ class ChatEngine:
                         # the turn with only a toast).
                         break
             except OllamaError as exc:
-                if shrink_budget is None and not parts and _provider_rejected_request(exc):
+                if shrink_budget is None and not parts and _request_too_large(exc):
                     # v73-F1: same shrink-and-retry as the main loop.
                     shrink_budget = self._effective_budget(chat_id) // 2
                     self.store.add_chat_message(
@@ -1990,12 +2013,7 @@ class ChatEngine:
                     )
                 else:
                     # v62-F1: same silent-death branch as the main loop.
-                    line = (
-                        f"the provider dropped before any reply arrived ({exc}) — "
-                        "the tool results above stand; ask again to continue."
-                    )
-                    if shrink_budget is not None and _provider_rejected_request(exc):
-                        line += _OUTGROWN_LINE
+                    line = _provider_failure_line(exc, shrunk=shrink_budget is not None)
                     yield (None, {"content": line})
                     self.store.add_chat_message(chat_id, role="assistant", content=line)
                 yield ("error", {"detail": str(exc)})

@@ -15,6 +15,8 @@ from collections.abc import Iterator
 import pytest
 
 from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor.serve.chat import _request_too_large
+from skep.supervisor.serve.llm import OllamaError
 
 from .fake_ollama import FakeOllama
 from .test_serve_chat import configured_client, sse_events
@@ -134,3 +136,77 @@ def test_transient_statuses_keep_todays_retry_path(
         assert chat.provider_ceiling_chars is None
     finally:
         store.close()
+
+
+# ES-F12 (B85): only a body that says "too big" is a size problem. The
+# non-size bodies are the raw ollama.com ones lane M1 captured.
+@pytest.mark.parametrize(
+    ("status", "detail", "too_large"),
+    [
+        (413, "", True),
+        (400, "request too large", True),
+        (400, "prompt is too long: 210000 tokens > 200000 maximum", True),
+        (400, "This model's maximum context length is 128000 tokens", True),
+        (400, "the input token count exceeds the maximum allowed", True),
+        (401, "Unauthorized", False),
+        (403, "Forbidden", False),
+        (400, "invalid tool call arguments (ref: 1f2e)", False),
+        (400, "Value looks like object, but can't find closing '}' symbol (ref: 1f2e)", False),
+        (400, "max_tokens must be positive, got: -5", False),
+        (400, "unexpected EOF (ref: 1f2e)", False),
+        (400, "", False),
+    ],
+)
+def test_only_a_size_body_reads_as_too_large(status: int, detail: str, too_large: bool) -> None:
+    message = f"{status} from https://ollama.com" + (f": {detail}" if detail else "")
+    assert _request_too_large(OllamaError(message, status=status)) is too_large
+
+
+def _no_shrink(config: SupervisorConfig, chat_id: str) -> str:
+    """Asserts nothing shrank; returns the persisted failure line."""
+    store = RunStore(config.db_path)
+    try:
+        rows = store.chat_messages(chat_id)
+        assert not [r for r in rows if r.role == "system"]  # no [replay halved…] row
+        chat = store.get_chat(chat_id)
+        assert chat is not None
+        assert chat.provider_ceiling_chars is None
+        assert rows[-1].role == "assistant"
+        assert "outgrown" not in rows[-1].content
+        return rows[-1].content
+    finally:
+        store.close()
+
+
+def test_a_bad_key_says_check_the_key_and_never_shrinks(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """Lane M1-16: a 401 drew the halved retry, a [replay halved…] row and
+    "outgrown the provider"."""
+    client = configured_client(config, ollama)
+    client.put("/api/llm/config", json={"api_key": "sk-bogus"})
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"}).text)
+    assert events[-1][0] == "error"
+    assert len(ollama.chat_bodies()) == 1  # no halved retry
+    assert "check the API key" in _no_shrink(config, chat_id)
+
+
+def test_a_non_size_400_names_the_body_and_never_shrinks(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """Lane M1-21: a 400 for bad arguments was halved; the halved retry
+    passed (the bad row fell out of the window) and a permanent ceiling
+    was recorded for a size that was never the problem."""
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    ollama.reject_over_bytes = 10
+    ollama.reject_body = (
+        '{"error": "Value looks like object, but can\'t find closing \'}\' symbol"}'
+    )
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"}).text)
+    assert events[-1][0] == "error"
+    assert len(ollama.chat_bodies()) == 1
+    line = _no_shrink(config, chat_id)
+    assert "refused the request" in line
+    assert "Value looks like object" in line

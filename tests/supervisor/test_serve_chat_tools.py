@@ -376,9 +376,10 @@ def test_provider_drop_mid_turn_persists_an_honest_line(
     assert events[-1][0] == "error"
     final = client.get(f"/api/chats/{chat_id}").json()["messages"][-1]
     assert final["role"] == "assistant"
-    assert "the provider dropped before any reply arrived" in final["content"]
+    # ES-F12 (B85): a 401 says what to fix, not "dropped" or "too big".
+    assert "check the API key" in final["content"]
     # The live stream carried the same line — reload and stream agree.
-    assert any(name is None and "provider dropped" in d["content"] for name, d in events)
+    assert any(name is None and "check the API key" in d["content"] for name, d in events)
 
 
 def test_inline_think_markup_never_reaches_the_visible_reply(

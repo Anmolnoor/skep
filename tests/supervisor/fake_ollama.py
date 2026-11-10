@@ -29,6 +29,8 @@ class FakeOllama:
         # v73-F1: the provider's own request wall — /api/chat bodies larger
         # than this many bytes draw a 400, like ollama.com in the field.
         self.reject_over_bytes: int | None = None
+        # ES-F12 (B85): what that 400 says — the classifier reads the body.
+        self.reject_body = '{"error": "request too large"}'
         # v74-F2: what POST /api/show reports per model (the real daemon keys
         # context length under the model's ARCHITECTURE prefix). Models not
         # listed here draw a 404, like an older daemon or unknown model.
@@ -211,7 +213,7 @@ class FakeOllama:
                         self._send(status, b'{"error": "transient"}', headers=retry)
                         return
                     if fake.reject_over_bytes is not None and len(raw) > fake.reject_over_bytes:
-                        self._send(400, b'{"error": "request too large"}')
+                        self._send(400, fake.reject_body.encode())
                         return
                     problem = fake.strict and check("ollama", ollama_chat_errors(body))
                     if problem:
