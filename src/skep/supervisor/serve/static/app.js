@@ -2295,6 +2295,22 @@ function projectIdForRepo(repo) {
 
 // ---------- Chat (v6: the Queen's own model) ----------
 
+// v110-F2 + ES-F1: the verdict a drawn card shows once its action left
+// 'proposed' — [label, verb]. A failed or interrupted card never reads as
+// approved, and an executing one (claimed by another tab or a messenger)
+// never reads as denied.
+function cardVerdict(action) {
+  const note = (action.result && (action.result.error || action.result.note)) || "";
+  switch (action.status) {
+    case "confirmed": return ["✓ Approved", "confirm"];
+    case "executing": return ["… Running — confirmed elsewhere", "confirm"];
+    case "failed": return [`✗ Failed — ${note || "the action did not complete"}`, "deny"];
+    case "interrupted": return [`⚠ Interrupted — ${note || "serve stopped mid-run"}`, "deny"];
+    case "superseded": return [`✗ Superseded — ${note || "replaced by a newer card"}`, "deny"];
+    default: return ["✗ Denied", "deny"];
+  }
+}
+
 async function viewChat(main, chatId) {
   let activeChatId = chatId || null;
   // R1 (ADR 0055 D3): the role picker's choices; a broken custom role file
@@ -3142,11 +3158,7 @@ async function viewChat(main, chatId) {
         // buttons: a live Approve on a dead action can only 409, which reads
         // as "approval is broken" (the Aug 9 five-close_pr field test).
         if (drawn && !drawn.classList.contains("resolved")) {
-          const label = action.status === "confirmed" ? "✓ Approved"
-            : action.status === "superseded"
-              ? `✗ Superseded — ${(action.result && action.result.note) || "replaced by a newer card"}`
-              : "✗ Denied";
-          resolveCardUI(drawn, label, action.status === "confirmed" ? "confirm" : "deny");
+          resolveCardUI(drawn, ...cardVerdict(action));
         }
         continue;
       }

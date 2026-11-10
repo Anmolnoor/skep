@@ -356,6 +356,18 @@ def create_app(
         except Exception:
             logging.getLogger("skep.serve").exception("interrupted-run recovery failed")
         try:
+            # ES-F1: a card claimed by a process that died mid-execute ends
+            # 'interrupted' — never re-run, never reopened (either could
+            # double a mutation whose effect is unknown).
+            interrupted = run_store.interrupt_executing_chat_actions()
+            if interrupted:
+                logging.getLogger("skep.serve").warning(
+                    "%d card(s) were executing when serve stopped; marked interrupted",
+                    interrupted,
+                )
+        except Exception:
+            logging.getLogger("skep.serve").exception("interrupted-card sweep failed")
+        try:
             # v86-F1: a serve restart ends the approval session — drop the
             # session-tier shell grants the previous process collected.
             from .settings import SESSION_ALLOWED_SHELL_COMMANDS

@@ -320,6 +320,25 @@ def duplicate_proposal_result(action_id: str) -> dict[str, Any]:
 _SUPERSEDED_BY_NEWER = "superseded by a newer proposal for the same subject"
 
 
+def card_taken(store: RunStore, action_id: str) -> HTTPException:
+    """ES-F1: the 409 for a request that lost the race for a card — it names
+    what won, so a Deny that arrived mid-confirm never reads as a refusal."""
+    action = store.get_chat_action(action_id)
+    status = action.status if action is not None else "gone"
+    if status == "executing":
+        return HTTPException(
+            status_code=409,
+            detail=f"action {action_id!r} is already being confirmed — its result "
+            "lands in this chat when it finishes",
+        )
+    return HTTPException(status_code=409, detail=f"action {action_id!r} already {status}")
+
+
+def executed_status(payload: dict[str, Any]) -> str:
+    """ES-F1: an executed card that failed is 'failed', never 'confirmed' (I8)."""
+    return "confirmed" if payload.get("ok") else "failed"
+
+
 def chat_stream_with_retry(
     base_url: str,
     api_key: str | None,
@@ -1984,11 +2003,11 @@ class ChatEngine:
                 f"/api/chats/{chat_id}/commands/{action_id}/confirm or /deny",
             )
         base_url, api_key, model, protocol = self.resolved_llm(chat)
-        if action.status != "proposed":
-            raise HTTPException(
-                status_code=409, detail=f"action {action_id!r} already {action.status}"
-            )
         if confirm:
+            # ES-F1 (B15 B16 B97): claim first — only the winner executes; a
+            # second confirm, a Deny or the timeout sweep now lose with a 409.
+            if not self.store.claim_chat_action(action_id):
+                raise card_taken(self.store, action_id)
             try:
                 result = execute_mutation(
                     action.tool,
@@ -2018,10 +2037,18 @@ class ChatEngine:
                 payload = {"ok": False, "error": str(exc.detail)}
             except (KeyError, ValueError, TypeError) as exc:
                 payload = {"ok": False, "error": f"bad arguments: {exc}"}
-            self.store.resolve_chat_action(action_id, status="confirmed", result=payload)
+            except BaseException:
+                self.store.unclaim_chat_action(action_id)
+                raise
+            self.store.resolve_chat_action(
+                action_id, status=executed_status(payload), result=payload, claimed=True
+            )
         else:
             payload = {"ok": False, "denied": True, "note": "the user denied this action"}
-            self.store.resolve_chat_action(action_id, status="denied", result=payload)
+            try:
+                self.store.resolve_chat_action(action_id, status="denied", result=payload)
+            except ValueError:
+                raise card_taken(self.store, action_id) from None
         self.store.add_chat_message(
             chat_id,
             role="tool",
@@ -2453,14 +2480,14 @@ def add_chat_routes(
                 detail="this is an assistant proposal; resolve it via "
                 f"/api/chats/{chat_id}/actions/{action_id}/confirm or /deny",
             )
-        if action.status != "proposed":
-            raise HTTPException(
-                status_code=409, detail=f"action {action_id!r} already {action.status}"
-            )
         # v87-F2: a gate mirror's Deny denies the REVIEW — the run terminates
         # honestly (v48-F3); a standing gate question is never just dismissed.
         gate_mirror = action.source == "gate"
         if confirm or gate_mirror:
+            # ES-F1 (B15): the same claim as verdict_events — a double /land
+            # confirm ran land_run twice.
+            if not run_store.claim_chat_action(action_id):
+                raise card_taken(run_store, action_id)
             tool = action.tool if confirm else "deny_review"
             args = action.args if confirm else {"review_id": str(action.args.get("review_id", ""))}
             status = "confirmed" if confirm else "denied"
@@ -2489,15 +2516,24 @@ def add_chat_routes(
                         }
                         status = "superseded"
                     else:
+                        run_store.unclaim_chat_action(action_id)
                         raise  # v54-F2: leave the card pending, buttons return
                 else:
                     payload = {"ok": False, "error": str(exc.detail)}
             except (KeyError, ValueError, TypeError) as exc:
                 payload = {"ok": False, "error": f"bad arguments: {exc}"}
-            run_store.resolve_chat_action(action_id, status=status, result=payload)
+            except BaseException:
+                run_store.unclaim_chat_action(action_id)
+                raise
+            if confirm and status == "confirmed":
+                status = executed_status(payload)
+            run_store.resolve_chat_action(action_id, status=status, result=payload, claimed=True)
         else:
             payload = {"ok": False, "denied": True, "note": "the operator canceled this command"}
-            run_store.resolve_chat_action(action_id, status="denied", result=payload)
+            try:
+                run_store.resolve_chat_action(action_id, status="denied", result=payload)
+            except ValueError:
+                raise card_taken(run_store, action_id) from None
         return {"action_id": action_id, "tool": action.tool, **payload}
 
     @app.post("/api/chats/{chat_id}/commands/{action_id}/confirm")

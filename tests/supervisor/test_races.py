@@ -1,0 +1,332 @@
+"""The ES race round: every check-then-act window in the ledger, raced.
+
+Each test makes its race deterministic the same way: the fake mutation holds
+the winner INSIDE the window until the losers have answered, so a broken
+guard always lets a second caller through and a working one never does.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor.serve import chat as chat_module
+from skep.supervisor.serve.chat import ChatEngine
+from skep.supervisor.serve.jobs import Dispatcher
+from skep.supervisor.serve.settings import ConfigHolder
+from skep.supervisor.serve.ticker import Ticker
+
+from .conftest import serve_client
+from .fake_ollama import FakeOllama
+from .race import race
+
+
+class _HeldMutation:
+    """execute_mutation's stand-in: counts calls and holds each one inside
+    the window until ``release`` is set (bounded, so a broken guard fails the
+    test instead of hanging it)."""
+
+    def __init__(self, result: Any = None, error: Exception | None = None) -> None:
+        self.calls = 0
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._result = {"ran": True} if result is None else result
+        self._error = error
+
+    def __call__(self, tool: str, args: dict[str, Any], **_: Any) -> Any:
+        self.calls += 1
+        self.entered.set()
+        self.release.wait(3)
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+@dataclass
+class Rig:
+    client: TestClient
+    store: RunStore
+    engine: ChatEngine
+    ollama: FakeOllama
+    holder: ConfigHolder
+
+
+@pytest.fixture()
+def rig(config: SupervisorConfig) -> Iterator[Rig]:
+    ollama = FakeOllama(api_key="sk-fake").start()
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
+    )
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    engine = ChatEngine(
+        store=store,
+        holder=holder,
+        runner=Dispatcher(store=store, holder=holder),
+        home=config.home,
+    )
+    yield Rig(client, store, engine, ollama, holder)
+    store.close()
+    ollama.stop()
+
+
+def _card(rig: Rig, *, source: str = "assistant", age_seconds: int = 0) -> tuple[str, str]:
+    chat_id = rig.store.create_chat(title="race", model=None).chat_id
+    stamp = (datetime.now(UTC) - timedelta(seconds=age_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr("skep.supervisor.store._now", lambda: stamp)
+        action_id = rig.store.add_chat_action(
+            chat_id, tool="set_personality", args={"value": "concise"}, source=source
+        )
+    return chat_id, action_id
+
+
+def _verdict(rig: Rig, chat_id: str, action_id: str, *, confirm: bool) -> list[Any]:
+    chat = rig.store.get_chat(chat_id)
+    return list(rig.engine.verdict_events(chat_id, chat, action_id, confirm=confirm, keep="once"))
+
+
+def _tool_rows(store: RunStore, chat_id: str) -> list[dict[str, Any]]:
+    return [json.loads(m.content) for m in store.chat_messages(chat_id) if m.role == "tool"]
+
+
+# ---------- ES-F1: claim the card before executing it ----------
+
+
+def test_only_one_claim_wins(rig: Rig) -> None:
+    """The claim is one conditional UPDATE: of eight racers exactly one moves
+    the card proposed → executing."""
+    _, action_id = _card(rig)
+    outcomes = race(*[lambda: rig.store.claim_chat_action(action_id)] * 8)
+    assert sorted(outcomes) == [False] * 7 + [True]
+    action = rig.store.get_chat_action(action_id)
+    assert action is not None and action.status == "executing"
+
+
+def test_two_confirms_on_one_card_execute_it_once(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B15 (M3-01): two confirms on one card dispatched two runs, and the
+    loser got a 500. Now the loser gets 409 and the mutation runs once."""
+    held = _HeldMutation()
+    monkeypatch.setattr(chat_module, "execute_mutation", held)
+    chat_id, action_id = _card(rig)
+    rig.ollama.script_reply("done")
+
+    def confirm() -> list[Any]:
+        try:
+            return _verdict(rig, chat_id, action_id, confirm=True)
+        finally:
+            held.release.set()  # the loser answering lets the winner finish
+
+    outcomes = race(confirm, confirm)
+
+    assert held.calls == 1
+    losers = [o for o in outcomes if isinstance(o, HTTPException)]
+    assert len(losers) == 1 and losers[0].status_code == 409
+    assert "already" in str(losers[0].detail)
+    action = rig.store.get_chat_action(action_id)
+    assert action is not None and action.status == "confirmed"
+
+
+def test_a_deny_loses_to_a_confirm_already_executing(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B97 (M3-09): a Deny landing mid-confirm recorded 'denied' while the
+    mutation ran. The Deny now loses honestly and the card says confirmed."""
+    held = _HeldMutation()
+    monkeypatch.setattr(chat_module, "execute_mutation", held)
+    chat_id, action_id = _card(rig)
+    rig.ollama.script_reply("done")
+    confirmer = threading.Thread(
+        target=_verdict, args=(rig, chat_id, action_id), kwargs={"confirm": True}
+    )
+    confirmer.start()
+    assert held.entered.wait(3)
+
+    with pytest.raises(HTTPException) as lost:
+        _verdict(rig, chat_id, action_id, confirm=False)
+    held.release.set()
+    confirmer.join(5)
+
+    assert lost.value.status_code == 409
+    assert "already being confirmed" in str(lost.value.detail)
+    action = rig.store.get_chat_action(action_id)
+    assert action is not None and action.status == "confirmed"
+    assert not any(row.get("denied") for row in _tool_rows(rig.store, chat_id))
+
+
+def test_the_timeout_sweep_never_denies_an_executing_card(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B16 (M3-08): the ticker auto-denied a card whose confirm was running;
+    the mutation ran and the card (and the messenger push) said denied."""
+    held = _HeldMutation()
+    monkeypatch.setattr(chat_module, "execute_mutation", held)
+    chat_id, action_id = _card(rig, age_seconds=3600)
+    rig.ollama.script_reply("done")
+    ticker = Ticker(rig.holder, rig.store)
+    pushed: list[str] = []
+    monkeypatch.setattr(ticker, "_notify", lambda chat_id, text, kind="info": pushed.append(text))
+    confirmer = threading.Thread(
+        target=_verdict, args=(rig, chat_id, action_id), kwargs={"confirm": True}
+    )
+    confirmer.start()
+    assert held.entered.wait(3)
+
+    ticker._expire_cards()
+    held.release.set()
+    confirmer.join(5)
+
+    action = rig.store.get_chat_action(action_id)
+    assert action is not None and action.status == "confirmed"
+    assert pushed == []
+    assert not any(row.get("auto") for row in _tool_rows(rig.store, chat_id))
+
+
+def test_two_command_confirms_execute_once(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """B15 (M3-03): the commands endpoints had the same shape — `/land`
+    confirmed twice ran land_run twice."""
+    held = _HeldMutation()
+    monkeypatch.setattr(chat_module, "execute_mutation", held)
+    chat_id, action_id = _card(rig, source="operator")
+    url = f"/api/chats/{chat_id}/commands/{action_id}/confirm"
+
+    def confirm() -> int:
+        try:
+            return rig.client.post(url).status_code
+        finally:
+            held.release.set()
+
+    assert sorted(race(confirm, confirm)) == [200, 409]
+    assert held.calls == 1
+
+
+def test_a_failed_command_is_recorded_failed_not_confirmed(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The nit beside B15: an operator command whose executor refused was
+    recorded 'confirmed' — the record must say it failed (I8)."""
+    held = _HeldMutation(error=HTTPException(status_code=404, detail="no such run"))
+    held.release.set()
+    monkeypatch.setattr(chat_module, "execute_mutation", held)
+    chat_id, action_id = _card(rig, source="operator")
+
+    body = rig.client.post(f"/api/chats/{chat_id}/commands/{action_id}/confirm").json()
+
+    assert body["ok"] is False and body["error"] == "no such run"
+    action = rig.store.get_chat_action(action_id)
+    assert action is not None and action.status == "failed"
+
+
+def test_a_failed_assistant_card_is_recorded_failed(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held = _HeldMutation(error=HTTPException(status_code=409, detail="nothing to land"))
+    held.release.set()
+    monkeypatch.setattr(chat_module, "execute_mutation", held)
+    chat_id, action_id = _card(rig)
+    rig.ollama.script_reply("it failed")
+
+    _verdict(rig, chat_id, action_id, confirm=True)
+
+    action = rig.store.get_chat_action(action_id)
+    assert action is not None and action.status == "failed"
+
+
+def test_an_unexpected_crash_mid_execute_leaves_the_card_retryable(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v54-F2 kept: a confirm that dies on an unexpected error leaves the card
+    pending (buttons come back) rather than stuck 'executing'."""
+    held = _HeldMutation(error=RuntimeError("boom"))
+    held.release.set()
+    monkeypatch.setattr(chat_module, "execute_mutation", held)
+    chat_id, action_id = _card(rig)
+
+    with pytest.raises(RuntimeError):
+        _verdict(rig, chat_id, action_id, confirm=True)
+
+    action = rig.store.get_chat_action(action_id)
+    assert action is not None and action.status == "proposed"
+
+
+def test_a_card_left_executing_by_a_crash_is_interrupted_on_restart(
+    rig: Rig, config: SupervisorConfig
+) -> None:
+    """Restart safety: serve died between the claim and the verdict, so
+    nobody knows whether the mutation ran. Re-running it could double it and
+    reopening the card invites exactly that, so startup records the truth —
+    'interrupted', with a tool row the model reads — and the card is final."""
+    chat_id, action_id = _card(rig)
+    assert rig.store.claim_chat_action(action_id)
+
+    with serve_client(config, start_ticker=False):
+        pass  # the lifespan is the restart
+
+    action = rig.store.get_chat_action(action_id)
+    assert action is not None and action.status == "interrupted"
+    assert action.result is not None and action.result["interrupted"] is True
+    assert [row.get("interrupted") for row in _tool_rows(rig.store, chat_id)] == [True]
+    with pytest.raises(HTTPException) as late:
+        _verdict(rig, chat_id, action_id, confirm=True)
+    assert late.value.status_code == 409
+
+
+def test_a_cancel_loses_to_a_command_already_executing(rig: Rig) -> None:
+    chat_id, action_id = _card(rig, source="operator")
+    assert rig.store.claim_chat_action(action_id)
+
+    denied = rig.client.post(f"/api/chats/{chat_id}/commands/{action_id}/deny")
+
+    assert denied.status_code == 409
+    assert "already being confirmed" in denied.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("source", "verb", "error"),
+    [
+        ("gate", "deny", HTTPException(status_code=503, detail="review store busy")),
+        ("operator", "confirm", RuntimeError("boom")),
+    ],
+)
+def test_a_command_that_blows_up_hands_the_card_back(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, source: str, verb: str, error: Exception
+) -> None:
+    """v54-F2 under the claim: a gate mirror whose review call failed, or a
+    command whose executor crashed, leaves the card pending to retry."""
+    held = _HeldMutation(error=error)
+    held.release.set()
+    monkeypatch.setattr(chat_module, "execute_mutation", held)
+    chat_id, action_id = _card(rig, source=source)
+    client = TestClient(
+        rig.client.app, headers=dict(rig.client.headers), raise_server_exceptions=False
+    )
+
+    response = client.post(f"/api/chats/{chat_id}/commands/{action_id}/{verb}")
+
+    assert response.status_code in (500, 503)
+    action = rig.store.get_chat_action(action_id)
+    assert action is not None and action.status == "proposed"
+
+
+def test_a_broken_interrupted_card_sweep_never_stops_serve(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(_: RunStore) -> int:
+        raise RuntimeError("store unreadable")
+
+    monkeypatch.setattr(RunStore, "interrupt_executing_chat_actions", broken)
+    with serve_client(config, start_ticker=False) as client:
+        assert client.get("/api/chats").status_code == 200
