@@ -6,6 +6,7 @@ Each test names its ledger row. The plumbing tests stay in test_scheduler.py.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -139,3 +140,216 @@ def test_the_schedules_api_answers_400_for_a_garbage_start_at(
             },
         )
     assert response.status_code == 400 and "start_at" in response.json()["detail"]
+
+
+# -- script schedules (B111 B117 B118 B120) -----------------------------------
+
+
+def test_a_script_runs_with_a_clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ES B111: scripts got the daemon's whole env — every serve.env key — and
+    their output goes to a chat and on to the model provider."""
+    from skep.supervisor.scheduler import run_schedule_script
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "CANARY-key")
+    monkeypatch.setenv("CANARY_ENV", "CANARY-serve-env")
+    monkeypatch.setenv("GITHUB_TOKEN", "CANARY-token")
+    monkeypatch.setenv("SKEP_HOME", "/somewhere")
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    monkeypatch.setenv("TZ", "UTC")
+    output, ok = run_schedule_script("env")
+    assert ok is True
+    assert "CANARY" not in output and "SKEP_HOME" not in output
+    names = {line.split("=", 1)[0] for line in output.splitlines()}
+    assert {"PATH", "HOME", "LANG", "TZ"} <= names
+
+
+def test_script_output_is_capped_while_it_streams() -> None:
+    """ES B117: 600 MB of output took serve from 77 MB to 1.84 GB RSS —
+    `subprocess.run(capture_output=True)` buffered it all, then capped."""
+    import subprocess
+    import sys
+
+    probe = (
+        "import resource\n"
+        "from skep.supervisor.scheduler import run_schedule_script\n"
+        "before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss\n"
+        "out, ok = run_schedule_script(\"head -c 150000000 /dev/zero | tr '\\\\0' a\")\n"
+        "after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss\n"
+        "scale = 1 if sys.platform != 'darwin' else 1024\n"
+        "print(ok, len(out), (after - before) // scale)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys\n" + probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    ok, length, grew_kb = result.stdout.split()
+    assert ok == "True" and int(length) < 4100
+    assert int(grew_kb) < 30_000, f"peak RSS grew {grew_kb} kB for a capped script"
+
+
+def test_a_timed_out_script_takes_its_children_with_it(tmp_path: Path) -> None:
+    """ES B118: the timeout killed only `sh`; a backgrounded loop kept writing.
+    The partial output survives too (it was discarded)."""
+    import time
+
+    from skep.supervisor.scheduler import run_schedule_script
+
+    marker = tmp_path / "orphan.txt"
+    output, ok = run_schedule_script(
+        f"echo BEFORE-TIMEOUT; (while :; do date >> {marker}; sleep 0.05; done) & sleep 30",
+        timeout_seconds=0.5,
+    )
+    assert ok is False and "timed out after 0.5s" in output and "BEFORE-TIMEOUT" in output
+    time.sleep(0.3)
+    size = marker.stat().st_size
+    time.sleep(0.4)
+    assert marker.stat().st_size == size, "the backgrounded child outlived the timeout"
+
+
+def test_shutdown_kills_a_running_script_group(tmp_path: Path) -> None:
+    """ES B120: a restart orphaned the in-flight script (it finished with no
+    supervisor). Stopping the ticker kills the running script's group."""
+    import threading
+    import time
+
+    from skep.supervisor.scheduler import kill_running_scripts, run_schedule_script
+
+    marker = tmp_path / "orphan.txt"
+    done: list[tuple[str, bool]] = []
+    worker = threading.Thread(
+        target=lambda: done.append(
+            run_schedule_script(f"(while :; do date >> {marker}; sleep 0.05; done) & sleep 30")
+        )
+    )
+    worker.start()
+    deadline = time.monotonic() + 5
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    kill_running_scripts()
+    worker.join(5)
+    assert done and done[0][1] is False
+    size = marker.stat().st_size
+    time.sleep(0.3)
+    assert marker.stat().st_size == size
+
+
+def test_a_script_interrupted_by_a_restart_fires_at_its_next_slot(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES B120: serve died mid-script and the schedule fired again at once on
+    restart — `mark_schedule_ran` ran only after the script. The slot is now
+    claimed before the script starts; restart records the interruption."""
+    from skep.supervisor import scheduler
+    from skep.supervisor.scheduler import reconcile_interrupted_scripts
+
+    store.add_schedule(
+        make_schedule(
+            name="backup",
+            repo="",
+            instructions="rotate-backup",
+            interval_seconds=3600,
+            worker_kind="script",
+            start_at="2026-06-11T00:00:00Z",
+        )
+    )
+
+    class _ServeDied(BaseException):
+        pass
+
+    def _dies_mid_script(command: str, **_kwargs: object) -> tuple[str, bool]:
+        row = store.get_schedule("backup")
+        assert row is not None and row.next_run_at == "2026-06-11T10:00:00Z"
+        raise _ServeDied
+
+    monkeypatch.setattr(scheduler, "run_schedule_script", _dies_mid_script)
+    with pytest.raises(_ServeDied):
+        run_due(store=store, config=config, now="2026-06-11T09:00:00Z")
+
+    assert reconcile_interrupted_scripts(store) == ["backup"]
+    row = store.get_schedule("backup")
+    assert row is not None and row.last_state is not None
+    assert row.last_state.startswith("script_interrupted")
+    health = store.schedule_health("backup")
+    assert health is not None and health.consecutive_failures == 1
+    # The restart's first tick does not re-run it; the next slot does.
+    assert run_due(store=store, config=config, now="2026-06-11T09:00:05Z") == []
+    assert reconcile_interrupted_scripts(store) == []
+
+
+def test_a_script_that_closes_its_output_still_hits_the_deadline() -> None:
+    """ES B118: EOF on the pipe is not the end of the script."""
+    from skep.supervisor.scheduler import run_schedule_script
+
+    output, ok = run_schedule_script("exec >/dev/null 2>&1; sleep 30", timeout_seconds=0.5)
+    assert ok is False and output == "script timed out after 0.5s"
+
+
+def test_serve_start_reconciles_interrupted_scripts(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES B120: the ticker records an interrupted script once, at start, and a
+    broken reconcile never stops the ticker from starting."""
+    from skep.supervisor.scheduler import SCRIPT_RUNNING_STATE
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.ticker import Ticker
+
+    store.add_schedule(_note("backup"))
+    store.mark_schedule_ran(
+        "backup",
+        ran_at="2026-06-11T09:00:00Z",
+        next_run_at="2030-01-01T00:00:00Z",
+        task_id=None,
+        state=SCRIPT_RUNNING_STATE,
+    )
+    holder = ConfigHolder(config, store)
+    ticker = Ticker(holder, store)
+    ticker.start()
+    ticker.stop()
+    row = store.get_schedule("backup")
+    assert row is not None and (row.last_state or "").startswith("script_interrupted")
+
+    def _boom(_store: RunStore) -> list[str]:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("skep.supervisor.serve.ticker.reconcile_interrupted_scripts", _boom)
+    ticker = Ticker(holder, store)
+    ticker.start()
+    ticker.stop()
+    assert not ticker.is_alive()
+
+
+def test_a_script_that_never_stops_talking_is_capped_and_timed_out() -> None:
+    """ES B117: a `yes`-shaped script is drained and dropped past the cap
+    until its deadline, never buffered."""
+    from skep.supervisor.scheduler import SCRIPT_OUTPUT_CAP, run_schedule_script
+
+    output, ok = run_schedule_script("yes", timeout_seconds=0.3)
+    assert ok is False and output.endswith("script timed out after 0.3s")
+    assert "… (truncated)" in output and len(output) < SCRIPT_OUTPUT_CAP + 80
+
+
+def test_a_broken_card_sweep_never_stops_the_schedule_pass(
+    store: RunStore, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    from skep.supervisor.serve.settings import TICKER_INTERVAL_SECONDS, ConfigHolder
+    from skep.supervisor.serve.ticker import Ticker
+
+    store.set_setting(TICKER_INTERVAL_SECONDS, 1)
+    passed = threading.Event()
+
+    def _boom(_self: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(Ticker, "_expire_cards", _boom)
+    monkeypatch.setattr(Ticker, "_schedule_pass", lambda _self: passed.set())
+    ticker = Ticker(ConfigHolder(config, store), store)
+    ticker.start()
+    try:
+        assert passed.wait(5)
+    finally:
+        ticker.stop()

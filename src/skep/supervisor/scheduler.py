@@ -11,7 +11,14 @@ rules are configured — auto-approval (D3).
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import select
+import signal
+import subprocess
+import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,6 +35,7 @@ from .nodes import OPS_INSPECT_CAPABILITIES, OPS_MUTATING_CAPABILITIES
 from .policy_resolver import PolicyResolutionError, resolve_run_policy, run_policy_for_repo
 from .provider_hosts import configured_provider_hosts
 from .providers import ProviderHealth, ProviderProfile, check_provider_health
+from .spawner import build_worker_env
 from .store import SCHEDULE_SUCCESS_STATES, RunStore, ScheduleRecord
 from .templates import WorkflowTemplate, instantiate
 
@@ -43,6 +51,40 @@ SCRIPT_TIMEOUT_SECONDS = 120
 SCRIPT_OUTPUT_CAP = 4000
 
 
+# ES B111: the ONLY variables a script inherits. Never serve.env's keys,
+# never a *KEY*/*SECRET*/*TOKEN* — the output reaches a chat and the provider.
+SCRIPT_ENV_BASELINE = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TERM",
+    "TMPDIR",
+)
+# ES B117: bytes kept from the pipe — enough for SCRIPT_OUTPUT_CAP chars of
+# any UTF-8; the rest is read and dropped so the script never blocks on it.
+_SCRIPT_READ_CAP = SCRIPT_OUTPUT_CAP * 4
+# ES B120: process groups of the scripts running now, for kill_running_scripts.
+_RUNNING_GROUPS: set[int] = set()
+_RUNNING_LOCK = threading.Lock()
+
+
+def kill_running_scripts() -> None:
+    """ES B120: SIGKILL every running script's whole process group — serve
+    shutdown calls this so a restart never leaves a script running with no
+    supervisor."""
+    with _RUNNING_LOCK:
+        groups = list(_RUNNING_GROUPS)
+    for group in groups:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(group, signal.SIGKILL)
+
+
 def run_schedule_script(
     command: str, *, timeout_seconds: float = SCRIPT_TIMEOUT_SECONDS, stdin: str | None = None
 ) -> tuple[str, bool]:
@@ -51,35 +93,105 @@ def run_schedule_script(
     ``stdin`` carries a chained schedule's last output (v53-F5) — data into
     an operator-vetted command, never a new command.
 
-    SUPERVISOR-SIDE, with the operator's own standing (env, filesystem) — as
-    trusted as the operator's crontab, which is why creation is operator-gated
-    (see the tick branch). Output is stdout+stderr, trimmed and capped, so a
-    chatty script cannot flood a chat transcript.
+    SUPERVISOR-SIDE, with the operator's own filesystem standing — as trusted
+    as the operator's crontab, which is why creation is operator-gated (see
+    the tick branch). Like cron, it gets a minimal env (SCRIPT_ENV_BASELINE),
+    not the daemon's. It runs in its own session, so the timeout kills the
+    whole process group, not just ``sh``. Output is stdout+stderr, read as it
+    streams, trimmed and capped, so a chatty script can flood neither a chat
+    transcript nor the daemon's memory.
     """
-    import subprocess
-
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["/bin/sh", "-c", command],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            input=stdin,
+            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=build_worker_env((), baseline=SCRIPT_ENV_BASELINE),
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return (f"script timed out after {timeout_seconds:g}s", False)
     except OSError as exc:
         return (f"script failed to start: {exc}", False)
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
-    combined = out if not err else (f"{out}\n{err}" if out else err)
-    if len(combined) > SCRIPT_OUTPUT_CAP:
+    with _RUNNING_LOCK:
+        _RUNNING_GROUPS.add(proc.pid)
+    kept = bytearray()
+    truncated = timed_out = False
+    try:
+        if stdin is not None and proc.stdin is not None:
+            # A chained output is already capped (≤ SCRIPT_OUTPUT_CAP), far
+            # below a pipe buffer, so this write cannot block.
+            with contextlib.suppress(BrokenPipeError):
+                proc.stdin.write(stdin.encode())
+            with contextlib.suppress(BrokenPipeError):
+                proc.stdin.close()
+        assert proc.stdout is not None
+        fd = proc.stdout.fileno()
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:  # select retries EINTR itself, so this is the deadline
+                timed_out = True
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break  # EOF: every writer in the group closed the pipe
+            room = _SCRIPT_READ_CAP - len(kept)
+            if len(chunk) > room:
+                truncated = True
+            kept += chunk[: max(room, 0)]
+        if not timed_out:
+            try:
+                proc.wait(timeout=max(deadline - time.monotonic(), 0))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            if timed_out or proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        if proc.stdout is not None:
+            proc.stdout.close()
+        with _RUNNING_LOCK:
+            _RUNNING_GROUPS.discard(proc.pid)
+    combined = kept.decode("utf-8", errors="replace").strip()
+    if truncated or len(combined) > SCRIPT_OUTPUT_CAP:
         combined = combined[:SCRIPT_OUTPUT_CAP] + "\n… (truncated)"
+    if timed_out:
+        note = f"script timed out after {timeout_seconds:g}s"
+        return (f"{combined}\n{note}" if combined else note, False)
     if proc.returncode != 0:
         # A failure always says something, even a mute one.
         return (f"{combined or '(no output)'}\n[exit {proc.returncode}]", False)
     # v51-F6: empty success returns "" so the tick can stay silent (watchdog).
     return (combined, True)
+
+
+SCRIPT_RUNNING_STATE = "script_running"
+
+
+def reconcile_interrupted_scripts(store: RunStore) -> list[str]:
+    """ES B120: at serve start, a schedule still marked running was cut off
+    by the last shutdown. Record that as a health failure; its slot already
+    advanced, so it fires at the next one, not at once."""
+    interrupted: list[str] = []
+    for schedule in store.list_schedules():
+        if schedule.last_state != SCRIPT_RUNNING_STATE:
+            continue
+        state = "script_interrupted: serve stopped mid-script; next run at its next slot"
+        store.mark_schedule_ran(
+            schedule.name,
+            ran_at=schedule.last_run_at or now_ts(),
+            next_run_at=schedule.next_run_at,
+            task_id=None,
+            state=state,
+        )
+        store.record_schedule_outcome(schedule.name, task_id=None, state=state)
+        interrupted.append(schedule.name)
+    return interrupted
 
 
 def parse_interval(spec: str) -> int:
@@ -490,6 +602,16 @@ def run_due(
                 # failure, so a persistently broken script auto-disables.
                 # ponytail: scripts run sequentially inside the tick (120s cap
                 # each); parallelize if a slow monitor ever starves the tick.
+                # ES B120: claim the slot BEFORE the side effect — a serve that
+                # dies mid-script must not re-run it at once on restart
+                # (at-most-once; reconcile_interrupted_scripts records it).
+                store.mark_schedule_ran(
+                    schedule.name,
+                    ran_at=moment,
+                    next_run_at=next_at,
+                    task_id=None,
+                    state=SCRIPT_RUNNING_STATE,
+                )
                 output, script_ok = run_schedule_script(schedule.instructions, stdin=chained)
                 store.record_schedule_output(schedule.name, output)
                 if script_ok and not output:

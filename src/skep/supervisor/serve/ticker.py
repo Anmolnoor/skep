@@ -18,7 +18,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..providers import ProviderProfile
-from ..scheduler import run_due, run_provider_health_checks
+from ..scheduler import (
+    kill_running_scripts,
+    reconcile_interrupted_scripts,
+    run_due,
+    run_provider_health_checks,
+)
 from ..store import RunStore
 from .settings import (
     CARD_TIMEOUT_SECONDS,
@@ -248,6 +253,12 @@ class Ticker(threading.Thread):
         return _turn
 
     def run(self) -> None:
+        try:
+            # ES B120: a script the last shutdown cut off is recorded, once.
+            for name in reconcile_interrupted_scripts(self._store):
+                logger.warning("schedule %r was interrupted mid-script by a restart", name)
+        except Exception:
+            logger.exception("interrupted-script reconcile failed")
         # wait() doubles as the kill switch: it returns True the moment stop()
         # sets the event, so shutdown never waits out a full interval.
         while not self._stop_event.wait(self._interval()):
@@ -334,4 +345,5 @@ class Ticker(threading.Thread):
 
     def stop(self) -> None:
         self._stop_event.set()
+        kill_running_scripts()  # ES B120: no script outlives its supervisor
         self.join(timeout=5.0)
