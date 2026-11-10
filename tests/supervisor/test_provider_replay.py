@@ -9,12 +9,13 @@ continuation — the three paths that resend stored calls and results.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
-from skep.supervisor import SupervisorConfig
+from skep.supervisor import RunStore, SupervisorConfig
 
 from .conftest import serve_client
 from .fake_anthropic import FakeAnthropic
@@ -108,3 +109,45 @@ def test_ollama_native_history_replays_after_switching_to_openai_compat(
     finally:
         ollama.stop()
         openai.stop()
+
+
+def test_a_stored_garbled_tool_call_replays_in_a_valid_shape(
+    config: SupervisorConfig, provider: Any
+) -> None:
+    """ES-F10 (B84): ES-F8 stores a garbled arguments string as-is; resent
+    verbatim it drew a 400 on every later turn (ollama.com, both protocols),
+    wedging the chat. The replay sends an empty object instead — the raw
+    text already lives in the error row that answered the call."""
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={
+            "base_url": provider.base_url,
+            "default_model": "m",
+            "protocol": provider.protocol,
+            "api_key": "sk-fake",
+        },
+    )
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        # The exact rows ES-F8 writes for a truncated-JSON call (lane M1-20).
+        store.add_chat_message(chat_id, role="user", content="runs?")
+        garbled = {"id": "call_bad", "function": {"name": "list_runs", "arguments": '{"limit": 5'}}
+        store.add_chat_message(chat_id, role="assistant", content="", tool_calls=[garbled])
+        error = '{"ok": false, "error": "the arguments for list_runs were not a JSON object"}'
+        store.add_chat_message(
+            chat_id, role="tool", tool_name="list_runs", tool_call_id="call_bad", content=error
+        )
+        store.add_chat_message(chat_id, role="assistant", content="sorry, bad call")
+    finally:
+        store.close()
+
+    for turn in ("say pong", "again"):
+        provider.script_reply("pong")
+        events = sse_events(
+            client.post(f"/api/chats/{chat_id}/messages", json={"content": turn}).text
+        )
+        assert events[-1] == ("done", {"state": "complete"})
+    # The raw text never reaches the wire (json.dumps escapes its quotes).
+    assert '{\\"limit\\": 5' not in json.dumps(provider.chat_bodies())

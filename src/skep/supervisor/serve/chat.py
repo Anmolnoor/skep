@@ -907,6 +907,23 @@ def _malformed_args(call: dict[str, Any]) -> str | None:
         return arguments
 
 
+def _replayable_call(call: dict[str, Any]) -> dict[str, Any]:
+    """ES-F10 (B84): a stored call replays with object arguments — ``{}``
+    when they are not a JSON object. Resent verbatim, ES-F8's garbled string
+    drew a 400 from ollama.com on both protocols on every later turn: one bad
+    call wedged the chat. The raw text stays in the stored row and in the
+    error row that answered the call, which is what the model needs to read."""
+    arguments = call.get("function", {}).get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            arguments = None
+    if not isinstance(arguments, dict):
+        arguments = {}
+    return {**call, "function": {**call.get("function", {}), "arguments": arguments}}
+
+
 class ChatCreate(BaseModel):
     title: str | None = None
     model: str | None = None  # None = follow the configured default
@@ -1121,7 +1138,7 @@ class ChatEngine:
                     {
                         "role": "assistant",
                         "content": record.content,
-                        "tool_calls": record.tool_calls,
+                        "tool_calls": [_replayable_call(c) for c in record.tool_calls],
                     }
                 )
             elif record.role == "user" and record.attachments:

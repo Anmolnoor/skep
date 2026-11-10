@@ -14,6 +14,7 @@ that provokes a refusal on purpose asserts on ``REJECTIONS`` and clears it.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -94,6 +95,14 @@ def openai_chat_errors(body: Any) -> str | None:
                 if not isinstance(function.get("arguments"), str):
                     kind = type(function.get("arguments")).__name__
                     return f"{at}.function.arguments: expected a string, got {kind}"
+                # ollama.com /v1, live (lane M1): a string that is not a JSON
+                # object draws "invalid tool call arguments".
+                try:
+                    parsed = json.loads(function["arguments"])
+                except ValueError:
+                    parsed = None
+                if not isinstance(parsed, dict):
+                    return f"{at}.function.arguments: invalid tool call arguments"
                 open_ids.append(call["id"])
         if role == "tool":
             call_id = message.get("tool_call_id")

@@ -542,10 +542,13 @@ def test_malformed_tool_call_json_is_a_tool_error_not_an_empty_call(
     assert "not a JSON object" in tool_rows[0]["result"]["error"]
     assert '{"limit": 5' in tool_rows[0]["result"]["error"]
     assert events[-1] == ("done", {"state": "complete"})
-    # The replay resends the call as the model sent it, not as an empty call.
+    # ES-F10 (B84): the replay sends a valid empty object (the garbled text
+    # drew a 400 on every later turn); the raw text rides the error row.
     replayed = openai.chat_bodies()[1]["messages"]
     call = next(m for m in replayed if m.get("tool_calls"))["tool_calls"][0]
-    assert call["function"]["arguments"] == '{"limit": 5'
+    assert call["function"]["arguments"] == "{}"
+    result = next(m for m in replayed if m["role"] == "tool")
+    assert '{\\"limit\\": 5' in result["content"]
 
 
 # ---------- v67-F3 (R12b): read-only side questions (/btw) ----------
