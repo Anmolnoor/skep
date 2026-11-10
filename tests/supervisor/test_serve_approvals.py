@@ -243,7 +243,7 @@ def test_approving_a_suspended_run_resumes_it_past_the_gate(
     # The original's approval is resolved and linked to the resume it spawned.
     original = client.get(f"/api/runs/{task_id}").json()["approvals"][0]
     assert original["status"] == "approved"
-    assert original["resolved_by"] == "tester"
+    assert original["resolved_by"] == "operator"
     assert str(payload["resumed_as"]) in original["resolution_note"]
 
 
@@ -523,7 +523,7 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
         }
         assert task["approval_verdict"] == {
             "approved": True,
-            "actor": "tester",
+            "actor": "operator",
             "ts": task["approval_verdict"]["ts"],
             "reason": f"shell.run requires approval for command: {shlex.join(write_argv)}",
             "action": "shell.run",
@@ -653,7 +653,9 @@ def test_approving_a_completed_run_applies_the_patch_on_a_branch(
             "review_id": review_id,
             "action": "apply_patch",
             "status": "approved",
-            "actor": "tester",
+            # ES-F1: the principal decides; the body's claim is a note only.
+            "actor": "operator",
+            "note": "[client-claimed actor: tester]",
             "branch": branch,
             "project_context": {
                 "project_id": "project-1",
@@ -1246,3 +1248,29 @@ def test_cli_resume_keeps_the_original_execution_mode(
         assert captured.get("execution_mode") == "workspace"
     finally:
         store.close()
+
+
+def test_decider_is_the_authenticated_principal_not_the_body(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F1 (B05/B51): a body-supplied ``actor`` is a claim, not an identity —
+    the ledger records the principal the serve token authenticates; the claim
+    survives only as a note annotation (I13)."""
+    client = _client(config)
+    task_id = _dispatch(client, repo, "Commit this. MODE:pending")
+    assert _wait_terminal(client, task_id)["state"] == "pending_approval"
+    review_id = client.get("/api/approvals").json()["approvals"][0]["review_id"]
+
+    denied = client.post(
+        f"/api/approvals/{review_id}/deny", json={"actor": "worker-x", "note": "nope"}
+    )
+    assert denied.status_code == 200
+
+    store = RunStore(config.db_path)
+    try:
+        approval = store.get_approval(review_id)
+    finally:
+        store.close()
+    assert approval is not None
+    assert approval.resolved_by == "operator"
+    assert "worker-x" in str(approval.resolution_note)

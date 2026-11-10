@@ -136,13 +136,13 @@ def test_whole_system_smoke_serves_dispatches_reverifies_and_applies_patch(
         branch_file = _git(repo, "show", f"{branch}:hello.py").stdout
         assert branch_file == 'print("Hello, world!")\n'
         branch_log = _git(repo, "log", "-1", "--format=%B", branch).stdout
-        assert "Approved-by: whole-system-smoke" in branch_log
+        assert "Approved-by: operator" in branch_log
         assert not (repo / "hello.py").exists()
         assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
 
         applied = client.get(f"/api/runs/{task_id}", headers=headers).json()
         assert applied["applied_branch"] == branch
         assert [approval["status"] for approval in applied["approvals"]] == ["approved"]
-        assert applied["approvals"][0]["resolved_by"] == "whole-system-smoke"
+        assert applied["approvals"][0]["resolved_by"] == "operator"  # ES-F1: the principal, not the body
 
     _assert_no_extra_worktrees(repo, repo.parent / ".skep" / "worktrees")

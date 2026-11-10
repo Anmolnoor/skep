@@ -364,7 +364,7 @@ def test_rest_reads_and_approves_the_baseline(config: SupervisorConfig) -> None:
     bad = client.post("/api/policy/baseline/approve", json={"template": "warp"})
     assert bad.status_code == 400 and "no policy template" in bad.json()["detail"]
     ok = client.post("/api/policy/baseline/approve", json={"template": "operator"})
-    assert ok.status_code == 200 and ok.json()["approved"]["approved_by"] == "api"
+    assert ok.status_code == 200 and ok.json()["approved"]["approved_by"] == "operator"
     view = client.get("/api/policy/baseline").json()
     assert view["state"] == "ok" and view["template"] == "operator"
     assert view["line"].startswith("baseline: operator approved ")
