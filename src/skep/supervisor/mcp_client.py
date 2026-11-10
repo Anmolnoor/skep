@@ -266,6 +266,11 @@ class MCPClient:
 
 # -- v40-F10 (v36-F6): the engine goes live ---------------------------------
 
+# ES (B112): ONE total deadline per MCP exchange. httpx's timeout is per
+# read, so a server streaming SSE keep-alives never trips it — a Queen turn
+# hung > 10 min and held serve's shutdown (lane F3 f3-33).
+MCP_CALL_DEADLINE_SECONDS: float = 30
+
 # Registered servers persist as a settings key (JSON-in-settings, the house
 # storage pattern — no new table).
 MCP_SERVERS_SETTINGS_KEY = "mcp_servers"
@@ -359,10 +364,15 @@ def runner_for_config(config: MCPServerConfig) -> MCPRunner:
         url = config.url or ""
 
         def run_http(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+            import time
+
             # The spec requires both accept types; official SDK servers 406 without.
             headers = {"Accept": "application/json, text/event-stream"}
+            budget = MCP_CALL_DEADLINE_SECONDS
+            deadline = time.monotonic() + budget
             try:
-                with httpx.Client(timeout=30) as client:
+                # The per-read timeout bounds silence; the deadline bounds a trickle.
+                with httpx.Client(timeout=budget) as client:
                     with client.stream(
                         "POST",
                         url,
@@ -415,6 +425,8 @@ def runner_for_config(config: MCPServerConfig) -> MCPRunner:
                             # Parse incrementally and stop at our response — a
                             # keep-alive stream must not run out the clock.
                             for line in response.iter_lines():
+                                if time.monotonic() > deadline:
+                                    raise MCPError(f"http MCP call passed its {budget:g}s deadline")
                                 if not line.startswith("data:"):
                                     continue
                                 try:
