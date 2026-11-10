@@ -14,6 +14,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from tests.supervisor.strict_wire import check, ollama_chat_errors
+
 
 class FakeOllama:
     def __init__(self, *, api_key: str | None = None, models: list[str] | None = None) -> None:
@@ -32,6 +34,8 @@ class FakeOllama:
         # listed here draw a 404, like an older daemon or unknown model.
         self.show_context_lengths: dict[str, int] = {}
         self.requests: list[dict[str, Any]] = []
+        # ES-F1 (B43): refuse what the real API refuses (strict_wire).
+        self.strict = True
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -157,6 +161,10 @@ class FakeOllama:
                         return
                     if fake.reject_over_bytes is not None and len(raw) > fake.reject_over_bytes:
                         self._send(400, b'{"error": "request too large"}')
+                        return
+                    problem = fake.strict and check("ollama", ollama_chat_errors(body))
+                    if problem:
+                        self._send(400, json.dumps({"error": problem}).encode())
                         return
                     if not fake.chat_scripts:
                         self._send(500, b'{"error": "no scripted reply left"}')
