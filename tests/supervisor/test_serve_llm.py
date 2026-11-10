@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import stat
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 
@@ -221,6 +222,58 @@ def test_openai_compat_chat_stream_normalizes_reasoning_content(
 
     assert chunks[0] == {"message": {"role": "assistant", "thinking": "checking the state"}}
     assert chunks[1] == {"message": {"role": "assistant", "content": "done"}}
+
+
+def test_openai_compat_replays_stored_tool_calls_in_the_openai_shape(
+    openai: FakeOpenAI,
+) -> None:
+    """History stores tool calls Ollama-native (arguments a dict, no type);
+    /v1/chat/completions 400s on that ("arguments of type string"), which
+    broke every preset chat after its first tool call."""
+    openai.script_reply("ok")
+    stored_call: dict[str, Any] = {
+        "id": "call_1",
+        "function": {"name": "list_tasks", "arguments": {"n": 2}},
+    }
+    # A call already holding a JSON string passes through unchanged.
+    string_call = {"id": "call_2", "function": {"name": "list_notes", "arguments": '{"q":"x"}'}}
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": "wake up friend"},
+        {"role": "assistant", "content": "", "tool_calls": [stored_call, string_call]},
+        {
+            "role": "tool",
+            "tool_name": "list_tasks",
+            "tool_call_id": "call_1",
+            "content": '{"tasks":[]}',
+        },
+        # ES-F2: the strict fake refuses an unanswered call, as the real API
+        # does — every call in the burst gets its result.
+        {"role": "tool", "tool_name": "list_notes", "tool_call_id": "call_2", "content": "[]"},
+    ]
+
+    list(
+        chat_stream(
+            openai.base_url, "sk-fake", model="m", messages=messages, protocol="openai-compat"
+        )
+    )
+
+    sent = openai.chat_bodies()[0]["messages"]
+    assert sent[1]["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "list_tasks", "arguments": '{"n":2}'},
+        },
+        {
+            "id": "call_2",
+            "type": "function",
+            "function": {"name": "list_notes", "arguments": '{"q":"x"}'},
+        },
+    ]
+    assert sent[2] == {"role": "tool", "tool_call_id": "call_1", "content": '{"tasks":[]}'}
+    # The stored history is untouched — the conversion is wire-only.
+    assert stored_call["function"]["arguments"] == {"n": 2}
+    assert messages[2]["tool_name"] == "list_tasks"
 
 
 def test_chat_stream_retries_a_transient_404(
