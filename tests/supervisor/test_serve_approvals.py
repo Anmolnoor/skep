@@ -462,6 +462,7 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
         "-c",
         "from pathlib import Path; Path('generated.py').write_text(\"print('from shell')\\n\")",
     ]
+    verify_argv = [sys.executable, "generated.py"]
     worker_plan = json.dumps(
         {
             "summary": "created generated.py after shell approval",
@@ -489,6 +490,8 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
             json={
                 "trusted_workspace_roots": [str(tmp_path)],
                 "default_execution_mode": "workspace",
+                # ES-F3: the verify label is no grant; the operator allowlisted it.
+                "allowed_shell_commands": [verify_argv],
             },
         )
         server.script_reply(worker_plan)
@@ -536,10 +539,13 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
             # v19-F1: the batch-approval command list is carried on the verdict.
             "commands": [write_argv],
         }
-        assert client.get("/api/policy").json()["allowed_shell_commands"] == [write_argv]
+        assert client.get("/api/policy").json()["allowed_shell_commands"] == [
+            verify_argv,
+            write_argv,
+        ]
         # The just-persisted allowlist reaches the immediate resume too, not
         # only future runs.
-        assert task["permissions"]["shell_allowlist"] == [write_argv]
+        assert task["permissions"]["shell_allowlist"] == [verify_argv, write_argv]
         commands = client.get(f"/api/runs/{payload['resumed_as']}").json()["commands"]
         assert [
             {

@@ -1,14 +1,14 @@
 [
   {
-    "name": "verify shell is allowed",
+    "name": "a verify label without the pin asks (ES-F3)",
     "capability": "shell.run",
     "argv": [
       "echo",
       "ok"
     ],
     "purpose": "verify",
-    "verdict": "allow",
-    "reason": "capability.allow.shell_verify",
+    "verdict": "require_approval",
+    "reason": "capability.require_approval.shell_verify_not_pinned",
     "detail": "echo ok"
   },
   {

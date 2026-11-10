@@ -2383,11 +2383,12 @@ def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> d
             "trust_root": resolved.trust_root,
             # THE allowlist the worker will see, post trust-root logic.
             "shell_allowlist": [list(c) for c in resolved.permissions.shell_allowlist],
-            # v64-F2: verify steps bypass the allowlist entirely; without this
-            # note the Queen burns approval rounds granting pytest for nothing.
+            # v64-F2 / ES-F3: only the pinned verify_command bypasses the
+            # allowlist; a verify LABEL is no grant (B06).
             "shell_verify_note": (
-                "verify-purpose worker commands are always auto-allowed "
-                "(shell_verify); the allowlist applies only to non-verify steps"
+                "only the project's pinned verify_command is auto-allowed "
+                "(shell_verify); every other command, verify-labelled or not, "
+                "needs this allowlist or an approval"
             ),
             "network": list(resolved.permissions.network),
             "allow_git_mutation": resolved.permissions.allow_git_mutation,

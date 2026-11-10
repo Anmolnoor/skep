@@ -171,17 +171,54 @@ def test_shell_exec_git_mutation_labeled_verify_does_not_fast_path() -> None:
         ["git", "-C", "/abs/worktree", "show", "HEAD"],
     ],
 )
-def test_shell_exec_verify_fast_path_keeps_non_mutations(argv: list[str]) -> None:
-    """v20-F1: pytest and read-only git keep the verify fast-path to `allow`."""
-    decision = SHELL_EXEC_PLUGIN.decision(
+def test_shell_exec_verify_fast_path_is_the_pinned_argv_only(argv: list[str]) -> None:
+    """ES-F3 (B06): the fast-path allows exactly the project's pinned
+    verify_command. The same argv, merely LABELLED verify by the worker, takes
+    the allowlist/approval path like any other command."""
+    pinned = SHELL_EXEC_PLUGIN.decision(
+        purpose="verify",
+        argv=argv,
+        command=" ".join(argv),
+        approved_shell_commands=[],
+        shell_allowlist=[],
+        pinned_verify=[tuple(argv)],
+    )
+    assert pinned.verdict == "allow"
+    assert pinned.reason == "capability.allow.shell_verify"
+    labelled = SHELL_EXEC_PLUGIN.decision(
         purpose="verify",
         argv=argv,
         command=" ".join(argv),
         approved_shell_commands=[],
         shell_allowlist=[],
     )
-    assert decision.verdict == "allow"
-    assert decision.reason == "capability.allow.shell_verify"
+    assert labelled.verdict == "require_approval"
+
+
+def test_a_verify_label_buys_nothing_for_an_unpinned_command() -> None:
+    """ES-F3 (B06, mac-p1 P1-c): `purpose: verify` on an arbitrary sqlite3
+    write forged an approval row. Unpinned → approval; allowlisted → the
+    allowlist's own constrained verdict, never the verify fast-path."""
+    argv = ["sqlite3", "supervisor.sqlite3", "INSERT INTO approvals VALUES (1)"]
+    forged = SHELL_EXEC_PLUGIN.decision(
+        purpose="verify",
+        argv=argv,
+        command=" ".join(argv),
+        approved_shell_commands=[],
+        shell_allowlist=[],
+        pinned_verify=[("uv", "run", "pytest")],
+    )
+    assert forged.verdict == "require_approval"
+    allowlisted = SHELL_EXEC_PLUGIN.decision(
+        purpose="verify",
+        argv=["uv", "run", "pytest", "-q"],
+        command="uv run pytest -q",
+        approved_shell_commands=[],
+        shell_allowlist=[("uv", "run", "pytest")],
+        pinned_verify=[("uv", "run", "pytest")],
+    )
+    assert allowlisted.verdict == "allow_with_constraints"
+    assert allowlisted.reason == "capability.allow.shell_allowlist_prefix"
 
 
 def _decide_with_grants(
