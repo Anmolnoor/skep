@@ -21,6 +21,7 @@ scope (env-secret exposure is already closed by the G2 env allowlist).
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -138,21 +139,46 @@ def _bubblewrap_binary() -> str | None:
     return shutil.which(BUBBLEWRAP)
 
 
+# ES-F2 (B50 + B52): the walls every bwrap invocation carries, probe included.
+# --tmpfs /run: a read-only bind does not stop connect() on a unix socket and
+# path sockets ignore the netns, so /run/user/$UID/bus and systemd/private
+# let `systemd-run --user` start a process on the HOST (fedora-p1-04).
+# --unshare-pid (+ the fresh --proc): the worker no longer sees or signals
+# serve and its siblings; pid 1 of the namespace dying also reaps a setsid'd
+# grandchild that killpg alone used to miss. --die-with-parent ties the tree
+# to bwrap; --new-session blocks TIOCSTI keystroke injection into a terminal;
+# --unshare-ipc keeps SysV IPC / mqueues private.
+_BUBBLEWRAP_BASE_ARGS = (
+    "--ro-bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--proc",
+    "/proc",
+    "--tmpfs",
+    "/tmp",
+    "--tmpfs",
+    "/run",
+    "--die-with-parent",
+    "--new-session",
+)
+
+
+def _run_rebinds() -> list[str]:
+    """Bind back the one /run file the toolchain needs: a resolv.conf that is
+    a symlink into /run (systemd-resolved on Fedora/Ubuntu), else DNS dies in
+    allow-all runs. Nothing else under /run is a worker's business."""
+    target = os.path.realpath("/etc/resolv.conf")
+    if target.startswith("/run/") and os.path.isfile(target):
+        return ["--ro-bind", target, target]
+    return []
+
+
 def _bubblewrap_probe_argv(binary: str) -> list[str]:
-    return [
-        binary,
-        "--ro-bind",
-        "/",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--tmpfs",
-        "/tmp",
-        "--unshare-net",
-        "/usr/bin/true",
-    ]
+    return [binary, *_BUBBLEWRAP_BASE_ARGS, "--unshare-net", "/usr/bin/true"]
 
 
 def _bubblewrap_availability() -> SandboxAvailability:
@@ -375,17 +401,7 @@ def _bubblewrap_args(
             "socket to enforce per-domain rules on bubblewrap. Start a FilteringProxy with "
             "a unix_socket_path and pass both, or use deny-all / allow-all."
         )
-    args = [
-        "--ro-bind",
-        "/",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--tmpfs",
-        "/tmp",
-    ]
+    args = [*_BUBBLEWRAP_BASE_ARGS, *_run_rebinds()]
     if network.is_deny_all or network.is_domain_list:
         args.append("--unshare-net")
     tmp_mountpoints: dict[str, None] = {}
