@@ -160,6 +160,11 @@ def watch_worker(
             break
         sleep(poll_seconds)
 
+    # ES-F9 (B133, Q3): the worker is gone — so is everything it started, breach
+    # or not (a crashed worker left `sleep 330` running with PPID 1).
+    # ponytail: the pid was just reaped; reuse needs a full pid-space wrap
+    # inside this window AND a stranger leading a session with that number.
+    kill_session(process.pid)
     events = read_event_log(events_path)
     worker_reported_terminal = bool(events) and events[-1].type is EventType.TASK_TERMINAL
     next_seq = (events[-1].seq + 1) if events else 1

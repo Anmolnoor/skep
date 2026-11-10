@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -2093,3 +2095,34 @@ def test_es_f2_repo_search_never_reads_through_an_out_of_tree_symlink(
     result = registry.invoke("repo.search", {"query": "value", "max_matches": 5})
     assert "CANARY-SEARCH" not in (result.output or "")
     assert "existing.py:1:value = 0" in (result.output or "")
+
+
+def _pid_gone(pid: int, seconds: float = 5.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_es_f9_a_timed_out_command_takes_its_children_with_it(tmp_path: Path) -> None:
+    """ES-F9 (B133, I12): subprocess.run's timeout killed only the direct
+    child; `sh tests/verify.sh` → `sleep 330` kept running with PPID 1 after
+    the run ended (lane M2-25a)."""
+    script = (
+        "import subprocess, sys, time; "
+        "p = subprocess.Popen(['sleep', '61']); "
+        "open('gc.pid', 'w').write(str(p.pid)); time.sleep(30)"
+    )
+    registry = CapabilityRegistry(
+        tmp_path,
+        emit=lambda event_type, payload: None,
+        shell_allowlist=[[sys.executable]],
+        command_timeout_seconds=1,
+    )
+    result = registry.invoke("shell.run", {"argv": [sys.executable, "-c", script]})
+    assert result.exit_code == 124
+    assert _pid_gone(int((tmp_path / "gc.pid").read_text()))

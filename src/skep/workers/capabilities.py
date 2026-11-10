@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -108,6 +110,35 @@ CapabilityVerdict = Literal["allow", "allow_with_constraints", "require_approval
 
 CAPABILITY_REASON_PREFIX = "capability."
 CAPABILITY_REASON_TERMS = frozenset({"allow", "require_approval", "deny"})
+
+
+def _run_in_own_group(
+    argv: Sequence[str], cwd: Path, env: Mapping[str, str], timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` whose timeout kills the command's whole group.
+
+    ES-F9 (B133): run's timeout kills only the direct child, so `sh verify.sh`
+    → `sleep 330` outlived the run with PPID 1. The command leads its own
+    process group (still inside the worker's session, so the supervisor's
+    session kill reaches it on a worker crash) and the group dies on timeout.
+    """
+    popen = subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=dict(env),
+        process_group=0,
+    )
+    try:
+        stdout, stderr = popen.communicate(timeout=float(timeout))
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(popen.pid, signal.SIGKILL)
+        popen.communicate()
+        raise
+    return subprocess.CompletedProcess(list(argv), popen.returncode, stdout, stderr)
 
 
 def tracked_file_readable(workspace: Path, path: Path) -> bool:
@@ -1353,15 +1384,7 @@ class CapabilityRegistry:
                 interval_seconds=_EXEC_HEARTBEAT_SECONDS,
                 emit_immediately=False,
             ):
-                proc = subprocess.run(
-                    argv,
-                    cwd=str(self._workspace),
-                    capture_output=True,
-                    text=True,
-                    timeout=float(timeout),
-                    check=False,
-                    env=self._child_env,
-                )
+                proc = _run_in_own_group(argv, self._workspace, self._child_env, timeout)
         except subprocess.TimeoutExpired:
             duration_ms = int((time.monotonic() - started) * 1000)
             error = (
