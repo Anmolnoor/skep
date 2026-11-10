@@ -18,6 +18,8 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import subprocess
+
     from .autonomy import AutonomyDecision
     from .policy_schema import Scope
     from .roles import Role
@@ -465,13 +467,16 @@ def runner_for_config(config: MCPServerConfig) -> MCPRunner:
             {"jsonrpc": "2.0", "id": 2, "method": method, "params": dict(params)},
         ]
         payload = "".join(json.dumps(r) + "\n" for r in requests)
-        proc = subprocess.run(
-            list(config.command),
-            input=payload,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        if not config.server_id.startswith(FORGED_SERVER_PREFIX):
+            proc = subprocess.run(
+                list(config.command),
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        else:
+            proc = _run_forged_sandboxed(config, payload)
         for line in proc.stdout.splitlines():
             line = line.strip()
             if not line:
@@ -485,6 +490,54 @@ def runner_for_config(config: MCPServerConfig) -> MCPRunner:
         raise MCPError("no JSON-RPC response for the tool request")
 
     return run
+
+
+# ES (B115): promote_tool registers every activated forged/seed tool as
+# ``forge-<plugin_id>``; those servers never run on the bare host.
+FORGED_SERVER_PREFIX = "forge-"
+
+
+def _run_forged_sandboxed(
+    config: MCPServerConfig, payload: str
+) -> subprocess.CompletedProcess[str]:
+    """Run one call of an activated forged tool inside the sandbox its trial
+    used: writes confined to a throwaway workspace, a scrubbed env (serve.env
+    keys never reach it), no backend → refuse (fail closed, I12). Network
+    stays open — an ACTIVE plugin may use it (plugin_can_run); the trial's
+    no-network shape is the gate before activation, not after.
+
+    ponytail: allow-all egress — a per-tool domain allowlist through the
+    FilteringProxy is the upgrade path once tools declare their hosts.
+    """
+    import os
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from . import sandbox
+
+    probe = sandbox.availability()
+    if not probe.usable:
+        raise MCPError(
+            f"forged tool {config.server_id!r} runs only inside the sandbox, and no "
+            f"sandbox backend is usable here ({probe.reason})"
+        )
+    with tempfile.TemporaryDirectory(prefix="skep-forged-") as tmp:
+        workspace = Path(tmp)
+        profile = sandbox.write_profile(
+            workspace / "sandbox.profile", workspace=workspace, network=sandbox.ALLOW_ALL_NETWORK
+        )
+        env = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
+        env.update(HOME=str(workspace), TMPDIR=str(workspace))
+        return subprocess.run(
+            sandbox.wrap_command(list(config.command), profile),
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=workspace,
+            env=env,
+        )
 
 
 def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:
