@@ -19,6 +19,13 @@ sets. ``locked-down`` has no file: it is the zero state (``no_baseline``,
 ADR 0056 D2). The four ADR 0022 names stay accepted as aliases for one
 release (``TEMPLATE_ALIASES``; retire at 1.3.0).
 
+No template has a filesystem ``read`` rule (ES-F2, V4): the Queen's reads
+are decided by the operator roots — inside reads, outside cards — and the
+secret floor sits above both. A baseline approved before this change keeps
+the ``fs-read *`` it was approved with (the lock is the operator's
+approval, and rewriting it would read as tampering); ``skep policy approve
+--reapprove --template <name>`` shows the diff and adopts the shipped one.
+
 Each template ships with a golden (``tests/fixtures/policy_templates/
 <name>.resolved.json``): a verdict or knob change without a doc change
 fails the suite. The harness in ``tests/supervisor/test_policy_templates.py``

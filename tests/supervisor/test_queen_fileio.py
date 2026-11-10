@@ -198,6 +198,56 @@ def test_operator_document_rules_now_govern_queen_reads(
     assert decision.decided_by == "operator-default/op:scratch"
 
 
+@pytest.mark.parametrize("template", ["builder", "operator", "assistant"])
+def test_a_shipped_baseline_leaves_reads_to_the_operator_roots(
+    template: str,
+    config: SupervisorConfig,
+    store: RunStore,
+    holder: ConfigHolder,
+    tmp_path: Path,
+) -> None:
+    """ES-F2 (V4, B01 B33): the templates shipped ``fs-read *``, so under an
+    approved baseline every host path read in-turn and the read_file
+    description ("any other path becomes a card") was false. With the rule
+    gone the operator-roots fallback decides: inside allow, outside card."""
+    from skep.supervisor import policy_baseline as pb
+    from skep.supervisor.policy_schema import SCOPES
+    from skep.supervisor.policy_templates import load_policy_template
+
+    store.set_setting("policy_engine_v2_scopes", list(SCOPES))
+    pb.write_lock(config.home, load_policy_template(template), approved_by="op")
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("real file")
+    outside = queen_filesystem_decision(store, holder, action="read", path=str(elsewhere))
+    assert (outside.verdict, outside.reason) == (
+        "require_approval",
+        "filesystem.require_approval.outside_operator_roots",
+    )
+    inside = queen_filesystem_decision(
+        store, holder, action="read", path=str(config.home / "notes.txt")
+    )
+    assert (inside.verdict, inside.reason) == ("allow", "filesystem.allow.operator_root")
+
+
+def test_the_zero_state_cards_every_read_as_the_description_says(
+    config: SupervisorConfig, store: RunStore, holder: ConfigHolder
+) -> None:
+    """ES-F2 (B33): read_file's description promises roots read in-turn —
+    except on a home with no approved baseline, where every read asks."""
+    from skep.supervisor.policy_schema import SCOPES
+    from skep.supervisor.serve.settings import FRESH_HOME_SEEDED_AT
+    from skep.supervisor.serve.tools import MUTATING_TOOL_SPECS
+
+    store.set_setting("policy_engine_v2_scopes", list(SCOPES))
+    store.set_setting(FRESH_HOME_SEEDED_AT, "2026-11-10T00:00:00Z")
+    decision = queen_filesystem_decision(
+        store, holder, action="read", path=str(config.home / "notes.txt")
+    )
+    assert (decision.verdict, decision.decided_by) == ("require_approval", "baseline/no_baseline")
+    (read_file,) = [t for t in MUTATING_TOOL_SPECS if t["function"]["name"] == "read_file"]
+    assert "Until a policy baseline is approved" in read_file["function"]["description"]
+
+
 def test_workon_bound_project_path_is_an_operator_root(
     config: SupervisorConfig, store: RunStore, holder: ConfigHolder, tmp_path: Path
 ) -> None:

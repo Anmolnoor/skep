@@ -313,7 +313,8 @@ def test_assistant_character_no_shell_personal_tools_flow_repo_writes_denied() -
     assert decide(resolved, "filesystem", "write", "/notes/today.md").verdict == (
         "require_approval"
     )
-    assert decide(resolved, "filesystem", "read", "/notes/today.md").verdict == "allow"
+    # ES-F2 (V4): no template rule for reads — the operator-roots fallback decides.
+    assert decide(resolved, "filesystem", "read", "/notes/today.md").rule_id == "default-deny"
     assert decide(resolved, "mcp", "call", "calendar:list_events").verdict == "allow"
     assert decide(resolved, "mcp", "call", "notes:append").verdict == "allow"
     assert decide(resolved, "mcp", "call", "srv:tool").verdict == "require_approval"

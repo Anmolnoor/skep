@@ -44,12 +44,6 @@
     ],
     "filesystem": [
       {
-        "verdict": "allow",
-        "rule_id": "fs-read",
-        "action": "read",
-        "pattern": "*"
-      },
-      {
         "verdict": "require_approval",
         "rule_id": "fs-write-gated",
         "action": "write",

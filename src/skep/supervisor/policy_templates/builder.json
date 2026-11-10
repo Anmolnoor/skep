@@ -42,7 +42,6 @@
     {"scope": "shell", "verdict": "allow", "action": "run", "pattern": "go test", "rule_id": "shell-go-test"},
     {"scope": "shell", "verdict": "require_approval", "action": "run", "pattern": "*", "rule_id": "shell-learnable"},
 
-    {"scope": "filesystem", "verdict": "allow", "action": "read", "pattern": "*", "rule_id": "fs-read"},
     {"scope": "filesystem", "verdict": "allow", "action": "write", "pattern": "workspace", "rule_id": "fs-workspace"},
     {"scope": "filesystem", "verdict": "require_approval", "action": "write", "pattern": "*", "rule_id": "fs-write-gated"},
 

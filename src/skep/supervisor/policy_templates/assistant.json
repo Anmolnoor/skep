@@ -12,7 +12,6 @@
 
     {"scope": "shell", "verdict": "require_approval", "action": "run", "pattern": "*", "rule_id": "shell-gated"},
 
-    {"scope": "filesystem", "verdict": "allow", "action": "read", "pattern": "*", "rule_id": "fs-read"},
     {"scope": "filesystem", "verdict": "deny", "action": "write", "pattern": "workspace", "rule_id": "fs-workspace-denied"},
     {"scope": "filesystem", "verdict": "require_approval", "action": "write", "pattern": "*", "rule_id": "fs-write-gated"},
 
