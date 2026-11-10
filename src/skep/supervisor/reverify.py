@@ -208,6 +208,7 @@ def reverify(
         reverify_tmp = worktree / ".reverify-tmp"
         reverify_tmp.mkdir(parents=True, exist_ok=True)
         env["TMPDIR"] = str(reverify_tmp)
+        env["CLANG_MODULE_CACHE_PATH"] = str(reverify_tmp / "clang")  # ignores TMPDIR
         # v109-F4: a shared cache sits outside the worktree, so both profiles
         # below need it as an explicit writable root (the offline verify still
         # takes locks in the cache; content-addressed artifacts, never patch

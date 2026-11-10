@@ -75,7 +75,12 @@ def run_code_fast(language: str, code: str, *, skep_home: Path) -> dict[str, Any
         # ES-F4: the worker env rule (G2), not the daemon's own environment —
         # which carries every key serve.env loaded. TMPDIR stays inside the
         # wall (ES-F5: shared temp roots are no longer writable).
-        env = {**build_worker_env(()), "TMPDIR": str(workspace)}
+        # clang/swiftc ignore TMPDIR for their module cache (Mac finding B).
+        env = {
+            **build_worker_env(()),
+            "TMPDIR": str(workspace),
+            "CLANG_MODULE_CACHE_PATH": str(workspace / "clang"),
+        }
         try:
             proc = subprocess.run(
                 wrap_command(argv, profile),

@@ -440,7 +440,8 @@ def test_reverify_env_carries_a_worktree_local_tmpdir(repo: Path, config: Superv
             ref=None,
             config=config,
             verify_command=(
-                'sh -c \'case "$TMPDIR" in *".reverify-tmp") exit 0;; *) exit 7;; esac\''
+                'sh -c \'case "$TMPDIR" in *".reverify-tmp") ;; *) exit 7;; esac; '
+                'case "$CLANG_MODULE_CACHE_PATH" in "$TMPDIR"/*) exit 0;; *) exit 8;; esac\''
             ),
         )
         record = store.reverification_for(happy.record.task_id)

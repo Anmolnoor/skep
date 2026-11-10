@@ -199,8 +199,10 @@ def test_fast_lane_code_does_not_inherit_the_daemon_environment(
     env = captured["env"]
     assert isinstance(env, dict)
     assert "ANTHROPIC_API_KEY" not in env
-    assert set(env) <= {"PATH", "HOME", "TMPDIR"}
+    assert set(env) <= {"PATH", "HOME", "TMPDIR", "CLANG_MODULE_CACHE_PATH"}
     assert env["TMPDIR"] == captured["cwd"]  # private temp inside the wall (B11)
+    # Mac finding B: clang/swiftc ignore TMPDIR for their module cache.
+    assert env["CLANG_MODULE_CACHE_PATH"].startswith(str(captured["cwd"]))
 
 
 def test_spawner_hands_the_profile_this_runs_skep_home(

@@ -243,6 +243,9 @@ def _toolchain_env(workspace: Path, engine: CodingEngine, cache_root: Path) -> d
     env = {
         "npm_config_cache": str(cache_root / "npm"),
         "UV_CACHE_DIR": str(cache_root / "uv"),
+        # Mac finding B: clang -fmodules and swiftc ignore TMPDIR and write
+        # their module cache under /var/folders — outside the Seatbelt wall.
+        "CLANG_MODULE_CACHE_PATH": str(cache_root / "clang"),
     }
     # v107-F3: TMPDIR lives inside the wall too. Unset, Python and every
     # tool fall back to /tmp — which any NESTED bwrap the run spawns (skep's

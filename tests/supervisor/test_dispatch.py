@@ -370,13 +370,16 @@ def test_toolchain_env_resolves_engine_declarations(tmp_path: Path) -> None:
     assert Path(env["npm_config_cache"]).is_dir()
     assert Path(env["UV_CACHE_DIR"]) == cache_root / "uv"
     assert Path(env["UV_CACHE_DIR"]).is_dir()
+    # Mac finding B: clang -fmodules / swiftc ignore TMPDIR and write their
+    # module cache to /var/folders, outside the Seatbelt wall.
+    assert Path(env["CLANG_MODULE_CACHE_PATH"]) == cache_root / "clang"
 
     assert Path(env["TMPDIR"]) == workspace / ".toolchain" / "tmp"
     assert Path(env["TMPDIR"]).is_dir()
 
     builtin = _toolchain_env(workspace, resolve_engine(None), cache_root)
     assert "CLAUDE_CONFIG_DIR" not in builtin
-    assert set(builtin) == {"npm_config_cache", "UV_CACHE_DIR", "TMPDIR"}
+    assert set(builtin) == {"npm_config_cache", "UV_CACHE_DIR", "CLANG_MODULE_CACHE_PATH", "TMPDIR"}
 
 
 def test_project_cache_roots_never_shared_across_projects_or_repos(
