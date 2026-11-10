@@ -682,3 +682,73 @@ def test_a_late_approve_names_the_landing_that_won(
 
     assert late.value.detail == f"already landed on skep/{task_id}"
     assert dead.value.detail == f"approval {denied!r} already denied"
+
+
+# ---------- ES-F5: gate-mirror cards ----------
+
+
+def _gate(rig: Rig, chat_id: str) -> str:
+    return rig.store.add_chat_action(
+        chat_id, tool="approve_review", args={"review_id": "r-1"}, source="gate"
+    )
+
+
+def test_a_gate_mirror_on_the_actions_endpoint_is_refused_and_routed(rig: Rig) -> None:
+    """B98 (M3-14): the UI's `/deny <gate-card-id>` posted to /actions, which
+    dismissed the card while the review stayed pending — the run stuck in
+    pending_approval with no card left to answer."""
+    chat_id = _chat(rig)
+    gate = _gate(rig, chat_id)
+
+    refused = rig.client.post(f"/api/chats/{chat_id}/actions/{gate}/deny")
+
+    assert refused.status_code == 409
+    assert f"/api/chats/{chat_id}/commands/{gate}/" in refused.json()["detail"]
+    action = rig.store.get_chat_action(gate)
+    assert action is not None and action.status == "proposed"
+
+
+def test_a_pending_gate_never_locks_the_conversation(rig: Rig) -> None:
+    """B100 (M3-17): the web composer stays unlocked beside a gate card (a
+    gate can wait; the conversation must not, v87-F2) but the server 409'd
+    every message — and gates never time out, so the chat stayed locked."""
+    chat_id = _chat(rig)
+    _gate(rig, chat_id)
+    rig.ollama.script_reply("still here")
+
+    posted = rig.client.post(f"/api/chats/{chat_id}/messages", json={"content": "status?"})
+
+    assert posted.status_code == 200 and '"state": "complete"' in posted.text
+
+
+def test_a_pending_gate_never_locks_a_messenger(rig: Rig) -> None:
+    from skep.supervisor.serve.channels import ChannelIdentity, ChannelMessage
+    from skep.supervisor.serve.channels.runtime import run_channel_turn
+
+    chat = rig.store.create_chat(title="d", model=None, source="discord")
+    rig.store.bind_channel_session(
+        session_key="discord:g", channel="discord", identity_id="u1", chat_id=chat.chat_id
+    )
+    _gate(rig, chat.chat_id)
+    rig.ollama.script_reply("still here")
+    message = ChannelMessage(
+        channel="discord",
+        identity=ChannelIdentity(channel="discord", identity_id="u1"),
+        text="status?",
+        session_key="discord:g",
+    )
+
+    reply, _ = run_channel_turn(rig.engine, message, web_ui_url="http://x")
+
+    assert reply == "still here"
+
+
+def test_the_last_card_verdict_continues_beside_a_gate(rig: Rig) -> None:
+    chat_id, action_id = _card(rig)
+    _gate(rig, chat_id)
+    rig.ollama.script_reply("noted, leaving it")
+
+    events = _verdict(rig, chat_id, action_id, confirm=False)
+
+    assert ("done", {"state": "awaiting_confirmation"}) not in events
+    assert "".join(str(data.get("content") or "") for _, data in events) == "noted, leaving it"

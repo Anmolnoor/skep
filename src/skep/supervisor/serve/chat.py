@@ -336,6 +336,15 @@ def card_taken(store: RunStore, action_id: str) -> HTTPException:
     return HTTPException(status_code=409, detail=f"action {action_id!r} already {status}")
 
 
+def blocking_cards(store: RunStore, chat_id: str) -> list[ChatActionRecord]:
+    """ES-F5 (B100): the pending cards that hold the conversation — all but a
+    gate mirror (v87-F2: a gate can wait; the conversation must not). The web
+    composer locks on exactly this set (app.js renderPendingCards); the
+    server 409'd on every card, so a gate that never times out locked the
+    chat while the UI showed it open."""
+    return [card for card in store.pending_chat_actions(chat_id) if card.source != "gate"]
+
+
 def executed_status(payload: dict[str, Any]) -> str:
     """ES-F1: an executed card that failed is 'failed', never 'confirmed' (I8)."""
     return "confirmed" if payload.get("ok") else "failed"
@@ -2049,13 +2058,16 @@ class ChatEngine:
             raise HTTPException(
                 status_code=422, detail="keep must be one of 'once', 'session', 'always'"
             )
-        if action.source == "operator":
+        if action.source in ("operator", "gate"):
             # v25-F1: operator commands resolve on the commands endpoints — this
             # path appends tool results to the transcript and resumes the model,
-            # which must never see a /command.
+            # which must never see a /command. ES-F5 (B98): so do gate mirrors,
+            # whose Deny must deny the REVIEW (v87-F2) — resolved here, the card
+            # was dismissed and the run sat in pending_approval with no card.
+            kind = "an operator command" if action.source == "operator" else "a run's approval gate"
             raise HTTPException(
                 status_code=409,
-                detail="this is an operator command; resolve it via "
+                detail=f"this is {kind}; resolve it via "
                 f"/api/chats/{chat_id}/commands/{action_id}/confirm or /deny",
             )
         base_url, api_key, model, protocol = self.resolved_llm(chat)
@@ -2071,7 +2083,7 @@ class ChatEngine:
             raise
         try:
             payload = self._record_verdict(chat_id, action, confirm=confirm, actor=actor, keep=keep)
-            more_pending = bool(self.store.pending_chat_actions(chat_id))
+            more_pending = bool(blocking_cards(self.store, chat_id))
         except BaseException:
             lock.release()
             raise
@@ -2498,7 +2510,7 @@ def add_chat_routes(
         # ES-F2 (B14): the pending-card check happens under the turn lock —
         # checked outside it, two POSTs both passed and both ran turns.
         lock = take_turn(chat_id)
-        if run_store.pending_chat_actions(chat_id) and not body.read_only:
+        if blocking_cards(run_store, chat_id) and not body.read_only:
             # v67-F3: a read-only /btw may run beside a pending card — safe
             # precisely because nothing it does can need confirmation.
             lock.release()

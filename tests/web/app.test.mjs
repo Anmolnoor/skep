@@ -204,3 +204,12 @@ test("cardVerdict: failed and interrupted never read as approved, executing neve
     ["✗ Superseded — replaced by a newer card", "deny"]);
   assert.deepEqual(verdict({ status: "denied" }), ["✗ Denied", "deny"]);
 });
+
+// ---------- ES-F5 (B98): a gate mirror resolves on the commands endpoints ----------
+
+test("resolvesOnCommands: operator commands and gate mirrors, never a model card", () => {
+  const app = loadApp();
+  assert.equal(app.resolvesOnCommands({ source: "operator" }), true);
+  assert.equal(app.resolvesOnCommands({ source: "gate" }), true);
+  assert.equal(app.resolvesOnCommands({ source: "assistant" }), false);
+});

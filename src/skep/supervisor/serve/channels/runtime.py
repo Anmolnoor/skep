@@ -33,6 +33,7 @@ from ..chat import (
     ATTACHMENT_MAX_BYTES,
     TURN_BUSY,
     ChatEngine,
+    blocking_cards,
     chat_turn_lock,
     save_chat_attachment,
 )
@@ -215,7 +216,7 @@ def _channel_turn(
 ) -> tuple[str, list[dict[str, object]]]:
     store = engine.store
     base_url, api_key, model, protocol = llm
-    if store.pending_chat_actions(chat.chat_id):
+    if blocking_cards(store, chat.chat_id):  # ES-F5: a gate never holds the chat
         # v66-F3: buttons can resolve low-risk cards in-channel now — say so.
         return (
             "skep: a confirmation is pending for this conversation — confirm or "

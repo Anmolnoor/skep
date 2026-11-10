@@ -2311,6 +2311,11 @@ function cardVerdict(action) {
   }
 }
 
+// v25-F1 + ES-F5 (B98): operator commands AND gate mirrors resolve on the
+// commands endpoints — a gate's Deny denies the review there; on /actions it
+// was dismissed and the run sat in pending_approval with no card.
+function resolvesOnCommands(card) { return card.source !== "assistant"; }
+
 async function viewChat(main, chatId) {
   let activeChatId = chatId || null;
   // R1 (ADR 0055 D3): the role picker's choices; a broken custom role file
@@ -3189,7 +3194,7 @@ async function viewChat(main, chatId) {
     const card = (detail.actions || []).find(
       a => a.action_id === id && a.status === "proposed");
     if (!card) return false;
-    if (card.source === "operator") {
+    if (resolvesOnCommands(card)) {
       const result = await api("POST", `/api/chats/${activeChatId}/commands/${id}/${verb}`);
       commandResult(verb === "confirm" ? `${card.tool}: result` : `${card.tool}: canceled`, result);
     } else {
