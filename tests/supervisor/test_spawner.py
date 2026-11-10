@@ -168,6 +168,7 @@ def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
         proxy_port: int | None,
         unix_socket_path: str | None = None,
         backend: str | None = None,
+        skep_home: Path | None = None,
     ) -> Path:
         captured["workspace"] = workspace
         captured["extra_writable"] = tuple(extra_writable)

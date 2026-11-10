@@ -10,6 +10,7 @@ physical boundary for network and filesystem writes while the worker runs.
 | --- | --- | --- |
 | macOS | Seatbelt (`sandbox-exec`) | Supported when the host process may apply profiles |
 | Linux | Bubblewrap (`bwrap`) | Supported when `bwrap` is installed and the probe succeeds |
+| Linux (opt-in) | podman (`sandbox_backend=podman`) | Runs with SELinux labelling disabled for the container; the probe proves a mount round trip |
 | Other | none | Unavailable |
 
 Skep probes the backend before launch. If sandboxing is requested but no backend
@@ -20,13 +21,26 @@ can be applied, worker launch fails instead of silently running unsandboxed.
 The sandbox mounts the root filesystem read-only and binds only the intended
 writable roots back as writable:
 
-- the worker workspace
+- the worker workspace (its private `TMPDIR` lives inside it)
 - the results/audit output directory
-- task-specific temp locations needed by the toolchain
+- the worktree's own git metadata and the repo's `objects/` — enough for
+  `git add`/`git commit`; the repo's `hooks/`, `config` and `refs/` stay
+  read-only, and skep's own host-side git runs with hooks and fsmonitor off
 - any explicit extra writable roots from supervisor configuration
 
-This blocks writes outside the workspace/results boundary. Reads are not fully
-confined; Skep relies on the environment allowlist to prevent secret exposure.
+Shared temp dirs (`/tmp`, `/var/folders`) are not writable, and a run whose
+skep home lies inside a writable root is refused.
+
+This blocks writes outside the workspace/results boundary. Reads are open so
+the toolchain works, except the secret floor, which is hidden on every
+backend: `~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials
+~/.docker/config.json ~/.kube` and the skep home's `serve.env`,
+`supervisor/serve-token` and `supervisor/*-secret`. `llm-secret*` stays
+readable: the builtin worker authenticates to its model with it.
+
+On Linux the worker also gets its own PID and IPC namespaces and an empty
+`/run` (no host D-Bus or systemd sockets). On macOS the profile allows
+loopback (a worker's own test servers) except serve's port.
 
 ## Network Modes
 

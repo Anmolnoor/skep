@@ -282,7 +282,9 @@ def test_dispatch_refuses_an_external_engine_without_a_usable_sandbox(
     monkeypatch.setattr(
         dispatch_module,
         "sandbox_availability",
-        lambda backend=None: type("A", (), {"usable": False, "detail": "forced off"})(),
+        lambda backend=None: type(
+            "A", (), {"usable": False, "reason": "probe_rejected", "detail": "forced off"}
+        )(),
     )
     with pytest.raises(ValueError) as excinfo:
         dispatch_module.run_task(
