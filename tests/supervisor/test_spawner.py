@@ -164,13 +164,16 @@ def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
         *,
         workspace: Path,
         extra_writable: list[Path],
+        extra_readable: tuple[Path, ...],
         network: object,
         proxy_port: int | None,
         unix_socket_path: str | None = None,
         backend: str | None = None,
+        skep_home: Path | None = None,
     ) -> Path:
         captured["workspace"] = workspace
         captured["extra_writable"] = tuple(extra_writable)
+        captured["extra_readable"] = extra_readable
         return profile_path
 
     # v44-F7: the spawner resolves a backend then asks availability(backend).
@@ -192,6 +195,8 @@ def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
         "git_metadata_writable_roots",
         lambda _workspace: (gitdir.resolve(),),
     )
+    common = (tmp_path / "repo" / ".git").resolve()
+    monkeypatch.setattr(supervisor_spawner, "git_metadata_readable_roots", lambda _ws: (common,))
     monkeypatch.setattr(subprocess, "Popen", _DummyPopen)
 
     supervisor_spawner.spawn_worker(
@@ -212,6 +217,7 @@ def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
         gitdir.resolve(),
         tmp_path / "cache" / "projects" / "proj-1",
     )
+    assert captured["extra_readable"] == (common,)
 
 
 def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(

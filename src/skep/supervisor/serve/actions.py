@@ -3158,7 +3158,7 @@ def diagnose_run(
     card is the trigger (I6), and nothing here can land or push (I1/I4).
     """
     from .. import sandbox
-    from ..worktree import git_metadata_writable_roots
+    from ..worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
     record = store.get_run(task_id)
     if record is None:
@@ -3175,14 +3175,21 @@ def diagnose_run(
         DIAGNOSE_MAX_TIMEOUT_SECONDS,
     )
     argv: list[str] = ["/bin/sh", "-c", command]
-    if config.sandbox and sandbox.available():
+    if config.sandbox:
         profile = config.audit_dir / task_id / "diagnose.profile.sb"
-        sandbox.write_profile(
-            profile,
-            workspace=workspace,
-            extra_writable=git_metadata_writable_roots(workspace),
-            network=sandbox.DENY_ALL_NETWORK,
-        )
+        try:
+            sandbox.write_profile(
+                profile,
+                workspace=workspace,
+                extra_writable=git_metadata_writable_roots(workspace),
+                extra_readable=git_metadata_readable_roots(workspace),
+                network=sandbox.DENY_ALL_NETWORK,
+                skep_home=config.home.parent,
+            )
+        except sandbox.SandboxUnavailableError as exc:
+            # ES-F1 (B47): the kept tree is the worker's output — never run
+            # it on the bare host because the wall happens to be missing.
+            raise ValueError(str(exc)) from exc
         argv = sandbox.wrap_command(argv, profile)
     env = {name: os.environ[name] for name in ("PATH", "HOME") if name in os.environ}
     # F3's lesson applied here too: TMPDIR must live inside the wall.

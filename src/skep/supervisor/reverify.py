@@ -30,7 +30,13 @@ from skep.worker_contract import Event, EventType
 from . import sandbox
 from .config import SupervisorConfig
 from .store import RunStore
-from .worktree import TREE_LOCK, create_worktree, git_metadata_writable_roots, remove_worktree
+from .worktree import (
+    TREE_LOCK,
+    create_worktree,
+    git_metadata_readable_roots,
+    git_metadata_writable_roots,
+    remove_worktree,
+)
 
 # pytest/usage exit codes: 0 pass, 1..4 real failure, 5 no-tests; 127 = command
 # not found (the supervisor lacks the worker's toolchain — can't re-verify here).
@@ -202,6 +208,7 @@ def reverify(
         reverify_tmp = worktree / ".reverify-tmp"
         reverify_tmp.mkdir(parents=True, exist_ok=True)
         env["TMPDIR"] = str(reverify_tmp)
+        env["CLANG_MODULE_CACHE_PATH"] = str(reverify_tmp / "clang")  # ignores TMPDIR
         # v109-F4: a shared cache sits outside the worktree, so both profiles
         # below need it as an explicit writable root (the offline verify still
         # takes locks in the cache; content-addressed artifacts, never patch
@@ -224,7 +231,9 @@ def reverify(
                     prime_profile,
                     workspace=worktree,
                     extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
+                    extra_readable=git_metadata_readable_roots(worktree),
                     network=sandbox.ALLOW_ALL_NETWORK,
+                    skep_home=config.home.parent,
                 )
             prime_code, _prime_tail = _run_command(
                 "uv sync",
@@ -252,7 +261,9 @@ def reverify(
                 profile_path,
                 workspace=worktree,
                 extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
+                extra_readable=git_metadata_readable_roots(worktree),
                 network=sandbox.DENY_ALL_NETWORK,
+                skep_home=config.home.parent,
             )
         applied = subprocess.run(
             ["git", "-C", str(worktree), "apply", str(patch_path)],
@@ -370,7 +381,29 @@ def reverify_run(
     commands_source = "project" if pinned else "worker"
 
     profile_path: Path | None = None
-    if config.sandbox and sandbox.available():
+    if config.sandbox:
+        if not sandbox.available():
+            # ES-F1 (B47, I12): the patch is the worker's code; running its
+            # verify on the bare host is exactly what the wall is for.
+            outcome = ReverifyOutcome(
+                "unavailable",
+                commands,
+                [],
+                f"sandbox unavailable ({sandbox.availability().reason}) — the patch's "
+                "verify command was not run unconfined on the host; fix the backend "
+                "(`skep doctor`) and re-verify",
+                commands_source=commands_source,
+            )
+            store.record_reverification(
+                task_id,
+                outcome=outcome.outcome,
+                worker_outcome=worker_outcome,
+                confirmed=False,
+                commands=outcome.commands,
+                exit_codes=outcome.exit_codes,
+                detail=outcome.detail,
+            )
+            return outcome
         profile_path = config.audit_dir / task_id / "reverify.profile.sb"
 
     # v109-F4: prime against the same per-project cache dispatch used, so the
