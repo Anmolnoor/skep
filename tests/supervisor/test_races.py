@@ -332,6 +332,16 @@ def test_a_broken_interrupted_card_sweep_never_stops_serve(
         assert client.get("/api/chats").status_code == 200
 
 
+def test_a_deny_after_the_verdict_says_what_won(rig: Rig) -> None:
+    chat_id, action_id = _card(rig)
+    rig.store.resolve_chat_action(action_id, status="denied", result={"ok": False})
+
+    with pytest.raises(HTTPException) as late:
+        _verdict(rig, chat_id, action_id, confirm=False)
+
+    assert late.value.status_code == 409 and "already denied" in str(late.value.detail)
+
+
 # ---------- ES-F2: one turn at a time per chat ----------
 
 
@@ -527,3 +537,39 @@ def test_a_continuation_that_breaks_frees_the_chat(
 
     assert not ok and "provider fell over" in reply
     assert chat_module.chat_turn_lock(chat_id).acquire(blocking=False)
+
+
+# ---------- ES-F3: unattended turns never mutate ----------
+
+
+def test_a_continuation_cards_even_what_policy_would_auto_allow(
+    rig: Rig, repo: Any, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B08 (M3-12): with auto-dispatch on, run-finish continuations
+    dispatched follow-up runs with no card — 5 runs for a 3-step plan, each
+    new run earning another continuation. A continuation fires whether or
+    not anyone is watching, so it may only propose: every follow-up waits
+    for a human, which is also what bounds the chain."""
+    from skep.supervisor.autonomy import AutonomyDecision
+
+    from .test_serve_chat import _bound_run
+
+    held = _HeldMutation()
+    held.release.set()
+    monkeypatch.setattr(chat_module, "execute_mutation", held)
+    monkeypatch.setattr(
+        chat_module,
+        "mutation_execution_decision",
+        lambda *a, **k: AutonomyDecision(verdict="allow", reason="project.auto_dispatch"),
+    )
+    chat_id = _chat(rig)
+    task_id = _bound_run(rig.store, chat_id, repo)
+    chat_module._CONTINUED.discard(task_id)
+    rig.ollama.script_tool_call("dispatch_run", {"repo": str(repo), "instructions": "step 2"})
+    rig.ollama.script_reply("proposed step 2")
+
+    chat_module.run_completion_turn(rig.store, rig.holder, rig.engine.runner, config.home, task_id)
+
+    assert held.calls == 0
+    cards = rig.store.pending_chat_actions(chat_id)
+    assert [card.tool for card in cards] == ["dispatch_run"]

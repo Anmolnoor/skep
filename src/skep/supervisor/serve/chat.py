@@ -1404,6 +1404,8 @@ class ChatEngine:
 
         v83-F5 (ADR 0042): ``unattended`` turns (prompt schedules) also refuse
         network-read tools — store reads only while nobody is watching.
+        ES-F3 (B08): and they never execute a mutation, even one policy would
+        auto-allow — it becomes a card (run-finish continuations).
         """
         previous_read_tool: str | None = None
         # v59-F7: byte-identical read call returning a byte-identical result is
@@ -1675,7 +1677,12 @@ class ChatEngine:
                             {"tool": name, "decision": asdict(decision), "result": payload},
                         )
                         continue
-                    if decision is not None and decision.allows_execution():
+                    # ES-F3 (B08): an unattended turn never executes — it
+                    # fires whether or not anyone is watching, so even a
+                    # policy-allowed mutation becomes a card a human pulls.
+                    # That also bounds the run-finish chain: no continuation
+                    # can dispatch the run that earns the next continuation.
+                    if decision is not None and decision.allows_execution() and not unattended:
                         try:
                             result = execute_mutation(
                                 name,
@@ -2228,7 +2235,8 @@ def run_scheduled_prompt(
 # completed run already mirrors its approval gate as a card (v87-F2), so this
 # is that precedent finishing its sentence. It may never execute: a follow-up
 # run starts only if the operator confirms, which is also why no runaway is
-# possible.
+# possible. (ES-F3: until then only the comment said so — an auto-allowed
+# dispatch executed inside the continuation, B08. `unattended` now cards it.)
 #
 # `unattended=True` on purpose even though a human may well be watching: the
 # turn fires whether or not anyone is, so it gets store reads only. A page
