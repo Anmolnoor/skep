@@ -2195,6 +2195,18 @@ UNATTENDED_READ_REFUSAL = (
     "turns read the store only (runs, approvals, chats, notes, memory). "
     "Do web reads in a live chat instead."
 )
+# ES B121: the store writes that ride READ_TOOL_SPECS (they never card), so
+# read_only alone let a scheduled turn — possibly fed a chained script's
+# output — write notes and tasks unattended. Digests and note ticks deliver
+# through the tick itself, never through these tools.
+UNATTENDED_BLOCKED_STORE_WRITES: frozenset[str] = frozenset(
+    {"add_note", "add_task", "complete_task", "reopen_task"}
+)
+UNATTENDED_WRITE_REFUSAL = (
+    "does not run unattended — this turn (a schedule tick or a run-finished "
+    "follow-up) fires whether or not anyone is watching, so it may read the "
+    "store but never write to it. Put what you would note in your reply."
+)
 
 # -- v74-F3: progressive tool disclosure --------------------------------------
 # The R4 round made every description a mini-manual; the manual is right, the

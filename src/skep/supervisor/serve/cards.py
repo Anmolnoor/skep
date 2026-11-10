@@ -219,6 +219,14 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
             # path ever proposes one, say the engine's own reason, not a guess.
             return refusal
         return "runs a command on this machine"
+    if tool == "propose_schedule" and args.get("caste") == "script":
+        # ES (lane F3): one click grants recurring host shell as the operator;
+        # the card has to say so, with the exact command and interval.
+        command = _render_value(args.get("instructions") or "").strip()
+        return (
+            f"runs `{command}` every {args.get('every')} as you on this host, "
+            "unattended, until disabled"
+        )
     if tool == "set_policy_group":
         # v97-F3 (I8): the two shapes carry opposite blast radii — say which.
         if args.get("fork_from"):

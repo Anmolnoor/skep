@@ -143,3 +143,16 @@ def test_card_summary_omits_absent_parts_entirely() -> None:
 def test_card_summary_tolerates_non_dict_args() -> None:
     summary = card_summary("run_shell", ["not", "a", "dict"], description="Run it.")
     assert summary["headline"] == "run_shell"
+
+
+def test_a_script_schedule_card_says_it_is_standing_host_shell() -> None:
+    """ES (lane F3 lesson 1): one `propose_schedule` click for caste script
+    grants recurring host shell as the operator, and the card was a plain
+    `propose_schedule — disk` headline with no risk line."""
+    args = {"name": "disk", "caste": "script", "every": "1d", "instructions": "df -h"}
+    summary = card_summary("propose_schedule", args)
+    assert summary["risk"] == (
+        "runs `df -h` every 1d as you on this host, unattended, until disabled"
+    )
+    # Other castes keep a quiet card.
+    assert "risk" not in card_summary("propose_schedule", {**args, "caste": "note"})

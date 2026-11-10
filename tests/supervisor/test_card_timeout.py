@@ -307,3 +307,84 @@ def test_gate_mirror_cards_never_time_out(
     action = store.get_chat_action(action_id)
     assert action is not None and action.status == "proposed"
     assert ticker.notes == []
+
+
+def test_a_hung_schedule_pass_cannot_freeze_card_expiry(
+    rig: tuple[_NotingTicker, RunStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES B27: a trickling provider held a prompt-schedule turn open and the
+    one ticker thread with it — a card 94 s past its 20 s timeout stayed
+    confirmable. Card expiry is I6's timeout default; nothing a schedule does
+    may hold it up."""
+    import threading
+
+    from skep.supervisor.serve.settings import TICKER_INTERVAL_SECONDS
+
+    ticker, store = rig
+    store.set_setting(TICKER_INTERVAL_SECONDS, 1)
+    entered, release = threading.Event(), threading.Event()
+
+    def _hung_run_due(**_kwargs: object) -> list[object]:
+        entered.set()
+        release.wait(30)
+        return []
+
+    monkeypatch.setattr("skep.supervisor.serve.ticker.run_due", _hung_run_due)
+    ticker.start()
+    try:
+        assert entered.wait(5), "the schedule pass never started"
+        # The card goes stale only AFTER the schedule pass is stuck.
+        _chat_id, action_id = _card(store, monkeypatch, age_seconds=3600)
+        deadline = datetime.now(UTC) + timedelta(seconds=5)
+        while datetime.now(UTC) < deadline:
+            action = store.get_chat_action(action_id)
+            if action is not None and action.status == "denied":
+                break
+            release.wait(0.1)
+        action = store.get_chat_action(action_id)
+        assert action is not None and action.status == "denied"
+    finally:
+        release.set()
+        ticker.stop()
+
+
+def test_the_schedule_pass_survives_every_broken_job(
+    rig: tuple[_NotingTicker, RunStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES B27: moving the jobs off the ticker thread kept their isolation —
+    each broken job is logged and the pass goes on; a healthy pass logs what
+    each job did."""
+    from types import SimpleNamespace
+
+    ticker, store = rig
+
+    def _boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("boom")
+
+    for target in (
+        "skep.supervisor.serve.ticker.Ticker._probe_provider_health",
+        "skep.supervisor.serve.ticker.Ticker._push_presence_blocked",
+        "skep.supervisor.serve.ticker.run_due",
+        "skep.supervisor.observe.harvest_observations",
+        "skep.supervisor.observe.observe_conversations",
+        "skep.supervisor.dispatch.sweep_expired_preserved_worktrees",
+    ):
+        monkeypatch.setattr(target, _boom)
+    monkeypatch.setattr(store, "expire_observations", _boom)
+    ticker._schedule_pass()  # nothing escapes; run_due's failure ends the pass
+    monkeypatch.setattr("skep.supervisor.serve.ticker.run_due", lambda **_k: [])
+    ticker._schedule_pass()  # ...and the observer's failure is logged too
+
+    ran: list[str] = []
+    monkeypatch.setattr(store, "expire_observations", lambda **_k: ["o1"])
+    monkeypatch.setattr("skep.supervisor.observe.harvest_observations", lambda _s: ["h1"])
+    monkeypatch.setattr("skep.supervisor.observe.observe_conversations", lambda _s: ["d1"])
+    monkeypatch.setattr("skep.supervisor.dispatch.sweep_expired_preserved_worktrees", lambda *_a: 1)
+
+    def _run_due(**_kwargs: object) -> list[SimpleNamespace]:
+        ran.append("run_due")
+        return [SimpleNamespace(name="s", task_id=None, state="note_posted")]
+
+    monkeypatch.setattr("skep.supervisor.serve.ticker.run_due", _run_due)
+    ticker._schedule_pass()
+    assert ran == ["run_due"]
