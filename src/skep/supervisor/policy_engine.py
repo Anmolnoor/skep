@@ -319,6 +319,7 @@ def resolve_stack(layers: Sequence[Layer]) -> ResolvedStack:
                         rule_id=rule.rule_id,
                         action=rule.action,
                         pattern=rule.pattern,
+                        exact=rule.learned and rule.scope == "shell",
                     ),
                     layer.label,
                 )

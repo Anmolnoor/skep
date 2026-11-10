@@ -209,9 +209,15 @@ def _enforcing_sandbox() -> Iterator[None]:
         yield
 
 
+def _rule_view(rule: Any) -> dict[str, Any]:
+    # ES-F4: ``exact`` shows only where it is true (learned shell grants).
+    return {key: value for key, value in asdict(rule).items() if key != "exact" or value}
+
+
 def _scopes_view(resolved: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return {
-        scope: [asdict(rule) for rule in policy.rules] for scope, policy in sorted(resolved.items())
+        scope: [_rule_view(rule) for rule in policy.rules]
+        for scope, policy in sorted(resolved.items())
     }
 
 

@@ -2316,7 +2316,9 @@ def policy_why(
                 asdict(rule)
                 for rule in (scope_policy.rules if scope_policy else ())
                 if rule.action == action
-                and any(pattern_matches(scope, rule.pattern, part) for part in parts)
+                and any(
+                    pattern_matches(scope, rule.pattern, part, exact=rule.exact) for part in parts
+                )
             ],
         }
     if baseline_guard(store).get(scope) == NO_BASELINE_REASON:
