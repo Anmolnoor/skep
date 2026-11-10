@@ -799,6 +799,21 @@ def test_validate_landing_branch_rules(repo: Path) -> None:
     assert validate_landing_branch(repo, "taken") is None
 
 
+def test_landing_branch_names_are_compared_casefolded(repo: Path) -> None:
+    """ES-F5 (B49): on APFS/NTFS `MAIN` and `main` are one ref file — landing
+    on `MAIN` moved refs/heads/main. Refused on every OS (repos move between
+    machines): the default casefolded, and any name that casefold-collides
+    with an existing branch that is not exactly it."""
+    default = git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
+    git(repo, "branch", "Feature/Taken")
+    upper = validate_landing_branch(repo, default.upper())
+    assert upper is not None and "default branch" in upper
+    collide = validate_landing_branch(repo, "feature/taken")
+    assert collide is not None and "Feature/Taken" in collide
+    # The exact existing name is still the v24-F1 append target.
+    assert validate_landing_branch(repo, "Feature/Taken") is None
+
+
 def test_landing_guard_protects_repo_default_not_the_checkout(repo: Path) -> None:
     """v81-F1: the guard protects the repo's REAL default. v81-F15 (live smoke
     finding): the branch the clone has checked out is unlandable for a git

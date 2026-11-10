@@ -158,11 +158,24 @@ def validate_landing_branch(repo: Path, branch: str) -> str | None:
     # v81-F1: guard the repo's REAL default (what runs spawn from), not the
     # operator's current checkout — a clone parked on skep/maintain must not
     # block landing there.
-    if name == repo_default_branch(repo):
-        return f"refusing to land on the default branch {name!r}; choose another name"
+    # ES-F5 (B49): casefold — on a case-insensitive filesystem (APFS, NTFS)
+    # `MAIN` IS refs/heads/main, and repos move between machines, so refuse
+    # on every OS.
+    default = repo_default_branch(repo)
+    if default is not None and name.casefold() == default.casefold():
+        return f"refusing to land on the default branch {default!r}; choose another name"
+    heads = _git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads").stdout
+    clash = next((h for h in heads.split() if h != name and h.casefold() == name.casefold()), None)
+    if clash is not None:
+        return (
+            f"branch {name!r} differs from the existing {clash!r} only by case — on a "
+            "case-insensitive filesystem they are one ref; land on "
+            f"{clash!r} itself or choose another name"
+        )
     # v81-F15 (live smoke finding): git cannot add a worktree for a branch the
     # clone has checked out — refuse with the remedy instead of git internals.
-    if name == default_branch(repo):
+    checked_out = default_branch(repo)
+    if checked_out is not None and name.casefold() == checked_out.casefold():
         return (
             f"branch {name!r} is checked out in the clone at {repo} — git cannot land "
             f"onto a checked-out branch; switch the clone back "
