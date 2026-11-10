@@ -370,7 +370,29 @@ def reverify_run(
     commands_source = "project" if pinned else "worker"
 
     profile_path: Path | None = None
-    if config.sandbox and sandbox.available():
+    if config.sandbox:
+        if not sandbox.available():
+            # ES-F1 (B47, I12): the patch is the worker's code; running its
+            # verify on the bare host is exactly what the wall is for.
+            outcome = ReverifyOutcome(
+                "unavailable",
+                commands,
+                [],
+                f"sandbox unavailable ({sandbox.availability().reason}) — the patch's "
+                "verify command was not run unconfined on the host; fix the backend "
+                "(`skep doctor`) and re-verify",
+                commands_source=commands_source,
+            )
+            store.record_reverification(
+                task_id,
+                outcome=outcome.outcome,
+                worker_outcome=worker_outcome,
+                confirmed=False,
+                commands=outcome.commands,
+                exit_codes=outcome.exit_codes,
+                detail=outcome.detail,
+            )
+            return outcome
         profile_path = config.audit_dir / task_id / "reverify.profile.sb"
 
     # v109-F4: prime against the same per-project cache dispatch used, so the

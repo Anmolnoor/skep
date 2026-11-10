@@ -261,6 +261,20 @@ def _podman_availability() -> SandboxAvailability:
     return SandboxAvailability(True, backend=PODMAN)
 
 
+def require_usable(backend: str | None = None) -> SandboxAvailability:
+    """The probe result, or :class:`SandboxUnavailableError` naming why not."""
+    probe = availability(backend)
+    if not probe.usable:
+        detail = f": {probe.detail}" if probe.detail else ""
+        raise SandboxUnavailableError(
+            f"sandbox enforcement requested but no usable sandbox backend is available "
+            f"(reason={probe.reason!r}, platform={sys.platform!r}){detail}. "
+            "Fix the backend (`skep doctor`) or run in execution mode 'workspace'; "
+            "skep never runs a sandbox run unconfined."
+        )
+    return probe
+
+
 def available() -> bool:
     """True when this process can enforce the native sandbox backend."""
     return availability().usable
@@ -522,8 +536,14 @@ def write_profile(
     unix_socket_path: str | None = None,
     backend: str | None = None,
 ) -> Path:
-    """Materialize the profile for one task and return its path (kept as evidence)."""
-    probe = availability(backend)
+    """Materialize the profile for one task and return its path (kept as evidence).
+
+    ES-F1 (B47, I12): raises :class:`SandboxUnavailableError` when the backend
+    cannot be applied here. Every sandboxed launch writes its profile first, so
+    this is the chokepoint: no wall, no profile, no run — never a quiet
+    unconfined fallback recorded as ``sandbox``.
+    """
+    probe = require_usable(backend)
     if probe.backend == PODMAN:
         return _write_argv_profile(
             profile_path,
@@ -562,14 +582,7 @@ def wrap_command(
     argv: Iterable[str], profile_path: Path, *, backend: str | None = None
 ) -> list[str]:
     """Prefix a worker argv with the active sandbox backend."""
-    probe = availability(backend)
-    if not probe.usable:
-        detail = f": {probe.detail}" if probe.detail else ""
-        raise SandboxUnavailableError(
-            f"sandbox enforcement requested but no usable sandbox backend is available "
-            f"(reason={probe.reason!r}, platform={sys.platform!r}){detail}. "
-            "Disable the sandbox or run from a host process allowed to apply sandbox profiles."
-        )
+    probe = require_usable(backend)
     if probe.backend == PODMAN:
         binary = _podman_binary()
         if binary is None:

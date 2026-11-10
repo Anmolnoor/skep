@@ -184,8 +184,10 @@ def spawn_worker(
         network = sandbox.NetworkPolicy(allow=domains)
     backend = resolve_sandbox_backend(config, network) if use_sandbox else None
     own_netns = False  # bubblewrap --unshare-net: the sandbox loopback is not the host's
-    if use_sandbox and sandbox.availability(backend).usable:
-        own_netns = sandbox.availability(backend).backend == "bubblewrap"
+    if use_sandbox:
+        # ES-F1 (B47): no usable backend raises here — the worker never starts
+        # unconfined under a "sandbox" record.
+        own_netns = sandbox.require_usable(backend).backend == "bubblewrap"
         workspace = Path(task.workspace)
         # v109-F4: ``extra_writable`` is per-run (the project dependency-cache
         # root); every backend consumes this one list (Seatbelt subpaths,

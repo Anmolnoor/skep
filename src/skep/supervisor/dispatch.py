@@ -60,8 +60,9 @@ from .netproxy import FilteringProxy
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
 from .providers import ProviderProfile
 from .reverify import reverify_run
+from .sandbox import DENY_ALL_NETWORK, NetworkPolicy, SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
-from .spawner import effective_network_domains, spawn_worker
+from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
 from .store import RunStore
 from .worker_state import (
     prior_task_from_audit,
@@ -373,24 +374,34 @@ def run_task(
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
     worker_argv = engine.argv if (worker_kind == "coding" and engine.external) else None
+    if execution_mode == "sandbox" and config.sandbox:
+        # ES-F1 (B47, I12): every sandbox-mode run, not only external engines
+        # (v94-F4) — the builtin worker and run_code's script caste took the
+        # spawner's silent unsandboxed fallback while the record said
+        # "sandbox". Refuse before any run record or worktree exists.
+        backend = resolve_sandbox_backend(
+            config,
+            NetworkPolicy(allow=tuple(permissions.network)) if permissions else DENY_ALL_NETWORK,
+        )
+        probe = sandbox_availability(backend)
+        if not probe.usable:
+            raise ValueError(
+                "execution mode 'sandbox' needs a usable sandbox backend and this host "
+                f"has none ({probe.reason}: {probe.detail}) — skep never runs it "
+                "unconfined; fix the backend (`skep doctor`), or dispatch the builtin "
+                "worker with execution mode 'workspace'"
+            )
     if worker_argv is not None:
         # v94-F4: an external agent's commands never pass the capability layer —
         # the sandbox is its ONLY wall (ADR 0047). The resolver coerces the mode
         # on the policy path; this chokepoint covers every other caller (resume,
-        # explicit flags) and the spawner's silent unsandboxed fallback, failing
-        # closed before any run record or worktree exists.
+        # explicit flags), failing closed before any run record or worktree
+        # exists (the sandbox-availability half is ES-F1's guard above).
         if execution_mode != "sandbox":
             raise ValueError(
                 f"coding_engine {engine.name!r} is an external agent confined by "
                 "the sandbox, not the capability layer — it never runs in "
                 f"{execution_mode!r} mode; dispatch it with execution mode 'sandbox'"
-            )
-        if not sandbox_availability().usable:
-            raise ValueError(
-                f"coding_engine {engine.name!r} requires a usable sandbox and this "
-                "host has none — running it unsandboxed would put an unconfined "
-                "agent on the host; fix the sandbox backend (`skep doctor`) or "
-                "switch the project to the builtin engine"
             )
         # v116-F1: a present binary with a way to log in, BEFORE any run
         # record exists. Three claude_code runs died in 1.2 s ("Not logged
@@ -686,6 +697,11 @@ def run_task(
                 # must outlive the worktree), so the wall needs a door for it.
                 extra_writable=(cache_root,),
             )
+        except SandboxUnavailableError as exc:
+            # ES-F1 backstop: the up-front check passed but the backend the
+            # spawner resolved (e.g. podman → native for a resumed host grant)
+            # is unusable. Never retried unconfined.
+            return finish_before_worker(reason="sandbox_unavailable", summary=str(exc))
         except OSError as exc:
             return finish_before_worker(
                 reason="spawn_failed",
