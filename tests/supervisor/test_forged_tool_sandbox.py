@@ -57,7 +57,9 @@ def test_forged_tool_call_is_wrapped_in_the_sandbox_with_a_scrubbed_env(
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setenv("SKEP_FAKE_SECRET", "CANARY")
     config = _forged(tmp_path, tmp_path / "x")
-    assert runner_for_config(config)("tools/call", {"name": "t"}) == {"content": "ok"}
+    assert runner_for_config(config, skep_home=tmp_path / "home")("tools/call", {"name": "t"}) == {
+        "content": "ok"
+    }
     assert seen["argv"][0] == "SANDBOX"
     assert "SKEP_FAKE_SECRET" not in seen["env"]
 
@@ -76,7 +78,9 @@ def test_forged_tool_refuses_to_run_without_a_sandbox(
         lambda backend=None: sandbox.SandboxAvailability(False, reason="missing"),
     )
     with pytest.raises(MCPError, match="sandbox"):
-        runner_for_config(_forged(tmp_path, tmp_path / "x"))("tools/call", {"name": "t"})
+        runner_for_config(_forged(tmp_path, tmp_path / "x"), skep_home=tmp_path / "home")(
+            "tools/call", {"name": "t"}
+        )
 
 
 @pytest.mark.skipif(not sandbox.available(), reason="needs a usable native sandbox backend")
@@ -88,6 +92,19 @@ def test_forged_tool_cannot_write_outside_its_workspace(tmp_path: Path) -> None:
         target.resolve().is_relative_to(root.resolve()) for root in sandbox.default_writable_roots()
     ):
         pytest.skip("tmp_path sits inside a default writable root (B11, fixed by PR #58)")
-    result = runner_for_config(_forged(tmp_path, target))("tools/call", {"name": "t"})
+    result = runner_for_config(_forged(tmp_path, target), skep_home=tmp_path / "home")(
+        "tools/call", {"name": "t"}
+    )
     assert result == {"content": "blocked"}
     assert not target.exists()
+
+
+def test_forged_tool_refuses_without_its_skep_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # B149: the profile hides THIS home's secrets — no home, no run.
+    monkeypatch.setattr(
+        sandbox, "availability", lambda backend=None: sandbox.SandboxAvailability(True)
+    )
+    with pytest.raises(MCPError, match="skep home"):
+        runner_for_config(_forged(tmp_path, tmp_path / "x"))("tools/call", {"name": "t"})

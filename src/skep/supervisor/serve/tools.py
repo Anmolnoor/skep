@@ -2990,7 +2990,9 @@ def execute_read_tool(
         if config is None:
             return {"error": f"no MCP server {server_id!r}; register_mcp_server first"}
         try:
-            tools = MCPClient(config, runner=runner_for_config(config)).list_tools()
+            tools = MCPClient(
+                config, runner=runner_for_config(config, skep_home=holder.current.home.parent)
+            ).list_tools()
         except MCPError as exc:
             return {"error": str(exc)}
         from ..mcp_client import classify_browse_action
@@ -3828,7 +3830,8 @@ def _execute_mutation(
         }
         try:
             handshake = MCPClient(
-                browser_config, runner=runner_for_config(browser_config)
+                browser_config,
+                runner=runner_for_config(browser_config, skep_home=holder.current.home.parent),
             ).list_tools()
             result_view["tools"] = [tool.name for tool in handshake]
         except MCPError as exc:
@@ -4410,7 +4413,10 @@ def _execute_mutation(
         if last_guard.verdict == "deny":
             raise ValueError(f"denied by policy: {last_guard.decided_by or last_guard.reason}")
         try:
-            client = MCPClient(server_config, runner=runner_for_config(server_config))
+            client = MCPClient(
+                server_config,
+                runner=runner_for_config(server_config, skep_home=holder.current.home.parent),
+            )
             call = client.call_tool(tool_name, _object_arg(args, "arguments"))
         except MCPError as exc:
             raise ValueError(str(exc)) from exc

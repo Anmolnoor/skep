@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import subprocess
+    from pathlib import Path
 
     from .autonomy import AutonomyDecision
     from .policy_schema import Scope
@@ -347,7 +348,7 @@ def _jsonrpc_result(message: Mapping[str, object]) -> Mapping[str, object]:
     return result if isinstance(result, Mapping) else {}
 
 
-def runner_for_config(config: MCPServerConfig) -> MCPRunner:
+def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None) -> MCPRunner:
     """A one-shot JSON-RPC runner per transport (tests monkeypatch this seam).
 
     ponytail: one-shot per call (initialize -> request -> done) — a persistent
@@ -476,7 +477,7 @@ def runner_for_config(config: MCPServerConfig) -> MCPRunner:
                 timeout=30,
             )
         else:
-            proc = _run_forged_sandboxed(config, payload)
+            proc = _run_forged_sandboxed(config, payload, skep_home)
         for line in proc.stdout.splitlines():
             line = line.strip()
             if not line:
@@ -498,7 +499,7 @@ FORGED_SERVER_PREFIX = "forge-"
 
 
 def _run_forged_sandboxed(
-    config: MCPServerConfig, payload: str
+    config: MCPServerConfig, payload: str, skep_home: Path | None
 ) -> subprocess.CompletedProcess[str]:
     """Run one call of an activated forged tool inside the sandbox its trial
     used: writes confined to a throwaway workspace, a scrubbed env (serve.env
@@ -522,10 +523,17 @@ def _run_forged_sandboxed(
             f"forged tool {config.server_id!r} runs only inside the sandbox, and no "
             f"sandbox backend is usable here ({probe.reason})"
         )
+    if skep_home is None:
+        # The profile hides THIS home's secrets; guessing it is how #58's fast
+        # lane leaked (Mac finding A). No home, no run (fail closed, I12).
+        raise MCPError(f"forged tool {config.server_id!r} needs its skep home to run sandboxed")
     with tempfile.TemporaryDirectory(prefix="skep-forged-") as tmp:
         workspace = Path(tmp)
         profile = sandbox.write_profile(
-            workspace / "sandbox.profile", workspace=workspace, network=sandbox.ALLOW_ALL_NETWORK
+            workspace / "sandbox.profile",
+            workspace=workspace,
+            network=sandbox.ALLOW_ALL_NETWORK,
+            skep_home=skep_home,
         )
         env = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
         env.update(HOME=str(workspace), TMPDIR=str(workspace))
@@ -556,7 +564,9 @@ def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:
     # A browse server classifies by its own page-state list (v71-F2).
     if config is not None and config.scope != "browse" and tokens and tokens[0] in _MCP_READ_VERBS:
         try:
-            listed = MCPClient(config, runner=runner_for_config(config)).list_tools()
+            listed = MCPClient(
+                config, runner=runner_for_config(config, skep_home=store.db_path.parent.parent)
+            ).list_tools()
         except Exception:  # an unreachable server cannot vouch for a read
             listed = []
         read_only = any(entry.name == tool.name and entry.read_only for entry in listed)
