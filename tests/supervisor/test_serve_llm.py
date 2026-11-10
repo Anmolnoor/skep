@@ -301,6 +301,27 @@ def test_chat_stream_retries_a_transient_404(
     assert len(ollama.chat_bodies()) == 2
 
 
+def test_chat_stream_retries_a_rate_limit(
+    ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F5: a 429 (Retry-After attached, as a rate limit sends it) is
+    transient — the same request goes again."""
+    from skep.supervisor.serve import llm
+
+    monkeypatch.setattr(llm, "_RETRY_DELAY_SECONDS", 0.0)
+    ollama.fail_statuses.append(429)
+    ollama.script_reply("after the wait")
+
+    chunks = list(
+        chat_stream(
+            ollama.base_url, "sk-fake", model="fake", messages=[{"role": "user", "content": "hi"}]
+        )
+    )
+
+    assert "".join(c["message"].get("content", "") for c in chunks) == "after the wait"
+    assert len(ollama.chat_bodies()) == 2
+
+
 def test_chat_stream_gives_up_after_exhausting_retries(
     ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
 ) -> None:

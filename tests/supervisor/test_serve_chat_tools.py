@@ -170,6 +170,26 @@ def test_read_tool_budget_allows_final_answer_from_last_result(
     assert bodies[-1]["messages"][-2]["role"] == "tool"
 
 
+def test_split_tool_calls_and_native_thinking_both_land(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F5: ollama streams each call of a burst in its own chunk and its
+    reasoning in the native thinking field — every call runs, and the
+    thinking streams as thinking, not as the reply."""
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_calls(("list_runs", {"limit": 1}), ("list_runs", {"limit": 2}))
+    ollama.script_reply("both checked", thinking="weighing the runs")
+
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "runs?"}).text
+    )
+
+    assert len([d for name, d in events if name == "tool"]) == 2
+    assert ("thinking", {"thinking": "weighing the runs"}) in events
+    assert "".join(d["content"] for name, d in events if name is None) == "both checked"
+    assert events[-1] == ("done", {"state": "complete"})
+
+
 def test_reasoning_only_stall_mid_tools_is_nudged_back_into_action(
     config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
