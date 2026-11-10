@@ -367,6 +367,40 @@ _NARROW_HINTS = {
 }
 
 
+def _trim_longest_text(data: dict[str, Any], cap: int) -> None:
+    """ES-F11 (B83): trim the longest string (nested dicts included) to its
+    head plus a marker saying how much was cut. read_file's payload is one
+    big ``content`` string — a card-confirmed read nests it under ``result``
+    — so the whole-key drop below deleted it and a default 200-line read
+    replayed with no content at all."""
+    slot: tuple[dict[str, Any], str] | None = None
+    longest = 0
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        for key, value in node.items():
+            if isinstance(value, dict):
+                stack.append(value)
+            elif (
+                isinstance(value, str)
+                and len(value) > longest
+                and (node is not data or key != "note")
+            ):
+                slot, longest = (node, key), len(value)
+    if slot is None:
+        return
+    node, key = slot
+    original: str = node[key]
+    keep = len(original)
+    over = len(json.dumps(data, ensure_ascii=True)) - cap
+    while over > 0 and keep > 0:
+        keep = max(0, keep - over - 64)
+        node[key] = (
+            f"{original[:keep]}… [{len(original) - keep} chars cut; the rest is in the transcript]"
+        )
+        over = len(json.dumps(data, ensure_ascii=True)) - cap
+
+
 def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
     """v73-F7: cap an over-budget replayed tool result at a VALID-JSON boundary.
 
@@ -399,6 +433,7 @@ def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
         if not lists:
             break
         max(lists, key=weight).pop()
+    _trim_longest_text(data, cap)
     droppable = sorted(
         (key for key in data if key not in ("truncated", "note")),
         key=lambda key: weight(data[key]),
