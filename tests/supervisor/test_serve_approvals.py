@@ -243,7 +243,7 @@ def test_approving_a_suspended_run_resumes_it_past_the_gate(
     # The original's approval is resolved and linked to the resume it spawned.
     original = client.get(f"/api/runs/{task_id}").json()["approvals"][0]
     assert original["status"] == "approved"
-    assert original["resolved_by"] == "tester"
+    assert original["resolved_by"] == "operator"
     assert str(payload["resumed_as"]) in original["resolution_note"]
 
 
@@ -462,6 +462,7 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
         "-c",
         "from pathlib import Path; Path('generated.py').write_text(\"print('from shell')\\n\")",
     ]
+    verify_argv = [sys.executable, "generated.py"]
     worker_plan = json.dumps(
         {
             "summary": "created generated.py after shell approval",
@@ -489,6 +490,8 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
             json={
                 "trusted_workspace_roots": [str(tmp_path)],
                 "default_execution_mode": "workspace",
+                # ES-F3: the verify label is no grant; the operator allowlisted it.
+                "allowed_shell_commands": [verify_argv],
             },
         )
         server.script_reply(worker_plan)
@@ -523,7 +526,7 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
         }
         assert task["approval_verdict"] == {
             "approved": True,
-            "actor": "tester",
+            "actor": "operator",
             "ts": task["approval_verdict"]["ts"],
             "reason": f"shell.run requires approval for command: {shlex.join(write_argv)}",
             "action": "shell.run",
@@ -536,10 +539,13 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
             # v19-F1: the batch-approval command list is carried on the verdict.
             "commands": [write_argv],
         }
-        assert client.get("/api/policy").json()["allowed_shell_commands"] == [write_argv]
+        assert client.get("/api/policy").json()["allowed_shell_commands"] == [
+            verify_argv,
+            write_argv,
+        ]
         # The just-persisted allowlist reaches the immediate resume too, not
         # only future runs.
-        assert task["permissions"]["shell_allowlist"] == [write_argv]
+        assert task["permissions"]["shell_allowlist"] == [verify_argv, write_argv]
         commands = client.get(f"/api/runs/{payload['resumed_as']}").json()["commands"]
         assert [
             {
@@ -653,7 +659,9 @@ def test_approving_a_completed_run_applies_the_patch_on_a_branch(
             "review_id": review_id,
             "action": "apply_patch",
             "status": "approved",
-            "actor": "tester",
+            # ES-F1: the principal decides; the body's claim is a note only.
+            "actor": "operator",
+            "note": "[client-claimed actor: tester]",
             "branch": branch,
             "project_context": {
                 "project_id": "project-1",
@@ -789,6 +797,21 @@ def test_validate_landing_branch_rules(repo: Path) -> None:
     assert validate_landing_branch(repo, default) is not None
     # v24-F1: an existing non-default branch is a legal APPEND target now.
     assert validate_landing_branch(repo, "taken") is None
+
+
+def test_landing_branch_names_are_compared_casefolded(repo: Path) -> None:
+    """ES-F5 (B49): on APFS/NTFS `MAIN` and `main` are one ref file — landing
+    on `MAIN` moved refs/heads/main. Refused on every OS (repos move between
+    machines): the default casefolded, and any name that casefold-collides
+    with an existing branch that is not exactly it."""
+    default = git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
+    git(repo, "branch", "Feature/Taken")
+    upper = validate_landing_branch(repo, default.upper())
+    assert upper is not None and "default branch" in upper
+    collide = validate_landing_branch(repo, "feature/taken")
+    assert collide is not None and "Feature/Taken" in collide
+    # The exact existing name is still the v24-F1 append target.
+    assert validate_landing_branch(repo, "Feature/Taken") is None
 
 
 def test_landing_guard_protects_repo_default_not_the_checkout(repo: Path) -> None:
@@ -1246,3 +1269,29 @@ def test_cli_resume_keeps_the_original_execution_mode(
         assert captured.get("execution_mode") == "workspace"
     finally:
         store.close()
+
+
+def test_decider_is_the_authenticated_principal_not_the_body(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F1 (B05/B51): a body-supplied ``actor`` is a claim, not an identity —
+    the ledger records the principal the serve token authenticates; the claim
+    survives only as a note annotation (I13)."""
+    client = _client(config)
+    task_id = _dispatch(client, repo, "Commit this. MODE:pending")
+    assert _wait_terminal(client, task_id)["state"] == "pending_approval"
+    review_id = client.get("/api/approvals").json()["approvals"][0]["review_id"]
+
+    denied = client.post(
+        f"/api/approvals/{review_id}/deny", json={"actor": "worker-x", "note": "nope"}
+    )
+    assert denied.status_code == 200
+
+    store = RunStore(config.db_path)
+    try:
+        approval = store.get_approval(review_id)
+    finally:
+        store.close()
+    assert approval is not None
+    assert approval.resolved_by == "operator"
+    assert "worker-x" in str(approval.resolution_note)

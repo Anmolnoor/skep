@@ -419,3 +419,24 @@ def test_preserved_worktree_ttl_expires_and_sweeps(repo: Path, config: Superviso
         assert not workspace.exists()
     finally:
         store.close()
+
+
+def test_a_legacy_workspace_worktree_still_resumes(repo: Path, config: SupervisorConfig) -> None:
+    """ES-F4 (B07) migration: workspace-mode runs recorded before the move
+    keep their `<repo parent>/.skep/worktrees/<id>` path — a resume still
+    reuses that preserved tree; anything else outside the home's root does not."""
+    from skep.supervisor.dispatch import _resume_workspace
+    from skep.supervisor.worktree import create_worktree
+
+    store = RunStore(config.db_path)
+    try:
+        legacy = create_worktree(repo, repo.parent / ".skep" / "worktrees", "01legacy")
+        stray = create_worktree(repo, repo.parent / "elsewhere", "01stray")
+        for workspace in (legacy, stray):
+            task = mint_task(workspace=workspace, instructions="x", budget=DEFAULT_BUDGET)
+            store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+            assert workspace.name in (legacy.name, stray.name)
+            resumed = _resume_workspace(store, repo, config.worktrees_root, task.task_id)
+            assert resumed == (legacy if workspace == legacy else None)
+    finally:
+        store.close()

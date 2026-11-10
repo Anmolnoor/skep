@@ -222,12 +222,18 @@ def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(
 
     config = build_config(tmp_path / "home", None)
     captured_domains: list[tuple[str, ...]] = []
+    captured_ports: list[tuple[int, ...]] = []
 
     class _FakeProxy:
         def __init__(
-            self, domains: tuple[str, ...], *, unix_socket_path: str | None = None
+            self,
+            domains: tuple[str, ...],
+            *,
+            unix_socket_path: str | None = None,
+            denied_loopback_ports: tuple[int, ...] = (),
         ) -> None:
             captured_domains.append(domains)
+            captured_ports.append(denied_loopback_ports)
             self.port = 8765
             self.unix_socket_path = unix_socket_path
 
@@ -269,6 +275,7 @@ def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(
 
     assert outcome.record.state == "worker_crashed"
     assert captured_domains == [("example.com",)]
+    assert captured_ports == [(8765,)]  # ES-F6: the control plane is refused
     store = RunStore(config.db_path)
     try:
         transitions = [state for state, _, _ in store.transitions_for(outcome.record.task_id)]

@@ -18,7 +18,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ...profile import load_profile, profile_path, run_personal_setup
@@ -45,6 +45,7 @@ from ..templates import (
     template_to_dict,
     validate_template,
 )
+from .auth import annotate_claim, principal
 from .settings import ConfigHolder
 
 _SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -85,7 +86,7 @@ class OpsRunRequest(BaseModel):
     node_id: str
     capability: str
     arguments: dict[str, Any] = Field(default_factory=dict)
-    actor: str = "operator"
+    actor: str | None = None  # ES-F1: ignored; the principal is recorded
 
 
 class NodeRequest(BaseModel):
@@ -151,7 +152,7 @@ class SkillTestRequest(BaseModel):
 
 
 class SkillDecision(BaseModel):
-    actor: str = "operator"
+    actor: str | None = None  # ES-F1: a claim, annotation only
     note: str | None = None
     as_name: str | None = None
 
@@ -1411,7 +1412,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
         }
 
     @app.post("/api/ops/run")
-    def ops_run(body: OpsRunRequest) -> dict[str, Any]:
+    def ops_run(body: OpsRunRequest, request: Request) -> dict[str, Any]:
         from ...workers.ops_executor import OpsExecutionError, execute_ops
         from ..policy_resolver import resolve_ops_decision
 
@@ -1441,7 +1442,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
             "output": result.output,
             "error": result.error,
             "evidence": result.evidence,
-            "actor": body.actor,
+            "actor": principal(request),
         }
 
     @app.post("/api/schedules", status_code=201)
@@ -1661,19 +1662,28 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
         return {"candidate": _candidate_view(candidate), "passed": result.passed}
 
     @app.post("/api/skills/{name}/approve")
-    def approve_skill(name: str, body: SkillDecision) -> dict[str, Any]:
+    def approve_skill(name: str, body: SkillDecision, request: Request) -> dict[str, Any]:
         try:
             candidate, target = approve(
-                run_store, name, actor=body.actor, note=body.note, registry_name=body.as_name
+                run_store,
+                name,
+                actor=principal(request),
+                note=annotate_claim(body.note, body.actor),
+                registry_name=body.as_name,
             )
         except SkillError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"candidate": _candidate_view(candidate), "template": target}
 
     @app.post("/api/skills/{name}/reject")
-    def reject_skill(name: str, body: SkillDecision) -> dict[str, Any]:
+    def reject_skill(name: str, body: SkillDecision, request: Request) -> dict[str, Any]:
         try:
-            candidate = reject(run_store, name, actor=body.actor, note=body.note)
+            candidate = reject(
+                run_store,
+                name,
+                actor=principal(request),
+                note=annotate_claim(body.note, body.actor),
+            )
         except SkillError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"candidate": _candidate_view(candidate)}

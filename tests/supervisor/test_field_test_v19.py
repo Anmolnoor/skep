@@ -83,6 +83,8 @@ def test_v19_field_test_add_readme_push_denied_patch_lands(
                 "trusted_workspace_roots": [str(tmp_path)],
                 "default_execution_mode": "workspace",
                 "auto_apply_verified_patch": False,
+                # ES-F3: a verify label is no grant; the operator allowlisted it.
+                "allowed_shell_commands": [_VERIFY],
             },
         )
         server.script_reply(push_plan)

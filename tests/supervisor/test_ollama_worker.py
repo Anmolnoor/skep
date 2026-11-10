@@ -25,11 +25,12 @@ from .fake_ollama import FakeOllama
 
 _OLLAMA_WORKER = shlex.join([sys.executable, "-m", "skep.workers.ollama"])
 
+_VERIFY = [sys.executable, "generated.py"]
 _PLAN = json.dumps(
     {
         "summary": "created ollama-backed generated.py",
         "files": [{"path": "generated.py", "content": "print('ollama')\n"}],
-        "verify": {"argv": [sys.executable, "generated.py"], "expected_stdout": "ollama\n"},
+        "verify": {"argv": _VERIFY, "expected_stdout": "ollama\n"},
     }
 )
 
@@ -60,6 +61,7 @@ def test_ollama_worker_uses_the_saved_assistant_ollama_config(repo: Path, tmp_pa
                 write=["workspace"],
                 network=["127.0.0.1"],
                 env_allowlist=[],
+                shell_allowlist=[_VERIFY],  # ES-F3: a verify label is no grant
             ),
         )
     finally:
@@ -112,6 +114,7 @@ def test_ollama_worker_honors_a_worker_specific_endpoint_override(
                 network=["127.0.0.1"],
                 # SKEP_OLLAMA_* must reach the worker process.
                 env_allowlist=["SKEP_OLLAMA_URL", "SKEP_OLLAMA_MODEL"],
+                shell_allowlist=[_VERIFY],  # ES-F3: a verify label is no grant
             ),
         )
     finally:

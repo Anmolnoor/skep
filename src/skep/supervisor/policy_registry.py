@@ -362,7 +362,10 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
 # --- scope-document rules: one entry per scope·action (ADR 0022) -------------
 _RULE_DOCS: dict[tuple[str, str], str] = {
     ("coding", "edit"): "the worker may edit the workspace",
-    ("coding", "verify"): "the worker may run its verify step (always auto-allowed)",
+    (
+        "coding",
+        "verify",
+    ): "the worker may run its verify step (fast-path: the pinned verify_command)",
     ("shell", "run"): "a one-off command from a non-repo cwd",
     ("shell", "run_repo"): "a command from inside a registered repo (a file-write pen)",
     ("shell", "run_background"): "a daemon; never from a repo cwd",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -553,6 +553,7 @@ class ShellExecPlugin:
         command: str,
         approved_shell_commands: Sequence[Sequence[str]],
         shell_allowlist: Sequence[Sequence[str]],
+        pinned_verify: Collection[Sequence[str]] = (),
     ) -> RuntimePolicyDecision:
         # v109-F1: judge segments, not lines. `bash -c 'git push'` and a spaced
         # `cd x && git checkout b` hide the git behind argv[0]; every deny in
@@ -607,8 +608,15 @@ class ShellExecPlugin:
         # ``python -m ...``) and read-only git commands keep the fast-path.
         # v109-F1: the same rule reads through wrappers — `bash -c 'git tag'`
         # labeled verify is still a git mutation.
-        if purpose == "verify" and not any(
-            is_git_mutation_argv(_strip_git_chdir(segment)) for segment in segments
+        # ES-F3 (B06): the fast-path is the project's PINNED verify_command,
+        # exact argv — the command G10 re-runs (v88-F4). A worker-chosen
+        # label is not a grant: `purpose: verify` on any other command once
+        # forged an approval row via sqlite3. Everything else labelled verify
+        # takes the allowlist/approval path below, like any other command.
+        if (
+            purpose == "verify"
+            and tuple(argv) in {tuple(pin) for pin in pinned_verify}
+            and not any(is_git_mutation_argv(_strip_git_chdir(segment)) for segment in segments)
         ):
             return RuntimePolicyDecision(
                 verdict="allow",
@@ -646,6 +654,13 @@ class ShellExecPlugin:
                 detail=(
                     f"{command} (bare-flag variant of allowlisted '{' '.join(allowlist_variant)}')"
                 ),
+            )
+        if purpose == "verify":
+            # ES-F3 (I8/I9): say why a verify step asks — it is not the pin.
+            return RuntimePolicyDecision(
+                verdict="require_approval",
+                reason="capability.require_approval.shell_verify_not_pinned",
+                detail=command,
             )
         return RuntimePolicyDecision(
             verdict="require_approval",
