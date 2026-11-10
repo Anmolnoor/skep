@@ -538,7 +538,14 @@ def _ollama_chat_stream(
             timeout=timeout,
         ):
             if line.strip():
-                yield json.loads(line)
+                chunk = json.loads(line)
+                if isinstance(chunk, dict) and chunk.get("error"):
+                    # ES-F6 (B24): a failure after the 200 arrives as an
+                    # {"error"} line; passed through, it read as an empty
+                    # round and drew a stall nudge instead of the provider's
+                    # own words (I8).
+                    raise OllamaError(str(chunk["error"]))
+                yield chunk
     except (httpx.HTTPError, json.JSONDecodeError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
 

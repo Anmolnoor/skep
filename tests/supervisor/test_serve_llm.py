@@ -322,6 +322,22 @@ def test_chat_stream_retries_a_rate_limit(
     assert len(ollama.chat_bodies()) == 2
 
 
+def test_mid_stream_ollama_error_raises_with_the_providers_words(ollama: FakeOllama) -> None:
+    """ES-F6 (B24): ollama reports a failure that starts after the 200 as an
+    {"error"} line in the stream. It used to pass through as a chunk with no
+    message — an empty round the chat then nudged as a stall."""
+    from skep.supervisor.serve.llm import OllamaError
+
+    ollama.script_stream_error("model runner has unexpectedly stopped", after="Work")
+
+    stream = chat_stream(
+        ollama.base_url, "sk-fake", model="fake", messages=[{"role": "user", "content": "hi"}]
+    )
+    assert next(stream)["message"]["content"] == "Work"
+    with pytest.raises(OllamaError, match="model runner has unexpectedly stopped"):
+        next(stream)
+
+
 def test_chat_stream_gives_up_after_exhausting_retries(
     ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
 ) -> None:

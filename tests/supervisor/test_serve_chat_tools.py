@@ -190,6 +190,25 @@ def test_split_tool_calls_and_native_thinking_both_land(
     assert events[-1] == ("done", {"state": "complete"})
 
 
+def test_mid_stream_ollama_error_ends_the_turn_honestly(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F6 (B24): an {"error"} line mid-stream is an error with the
+    provider's words — never an empty round answered by a stall nudge."""
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_call("list_runs", {"limit": 1})
+    ollama.script_stream_error("model runner has unexpectedly stopped", after="Checking")
+
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "runs?"}).text
+    )
+
+    assert events[-1] == ("error", {"detail": "model runner has unexpectedly stopped"})
+    assert len(ollama.chat_bodies()) == 2  # no nudged third round
+    stored = client.get(f"/api/chats/{chat_id}").json()["messages"]
+    assert stored[-1]["content"] == "Checking"  # the half-reply is kept
+
+
 def test_reasoning_only_stall_mid_tools_is_nudged_back_into_action(
     config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
