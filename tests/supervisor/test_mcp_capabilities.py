@@ -159,7 +159,7 @@ def test_b09_unreachable_server_cannot_vouch_for_a_read(
     from skep.supervisor import RunStore
     from skep.supervisor.mcp_client import MCPServerConfig, mcp_scope_decision, save_mcp_server
 
-    def broken(config: object) -> object:
+    def broken(config: object, **_: object) -> object:
         def runner(method: str, params: object) -> object:
             raise OSError("server down")
 

@@ -60,7 +60,7 @@ def fake_runner(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, An
             return {"content": f"ran {params.get('name')}"}
         return {}
 
-    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", lambda config: runner)
+    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", lambda config, **_: runner)
     return calls
 
 

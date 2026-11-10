@@ -230,7 +230,7 @@ def test_list_mcp_tools_labels_browse_tools_by_browse_action(
             ]
         }
 
-    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", lambda config: runner)
+    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", lambda config, **_: runner)
     store = RunStore(config.db_path)
     try:
         from skep.supervisor.serve.tools import execute_read_tool
