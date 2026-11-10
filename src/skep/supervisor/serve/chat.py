@@ -22,11 +22,13 @@ delivers text instead. Same model loop, same tools, same gates.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import re
 import threading
 import time
 import uuid
+import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -337,6 +339,53 @@ def card_taken(store: RunStore, action_id: str) -> HTTPException:
 def executed_status(payload: dict[str, Any]) -> str:
     """ES-F1: an executed card that failed is 'failed', never 'confirmed' (I8)."""
     return "confirmed" if payload.get("ok") else "failed"
+
+
+# ES-F2 (B13 B14): one Queen turn at a time per chat. Two turns on one
+# transcript interleave their tool rows and both answer both questions
+# (M1-39, M3-10/13); every turn — a message, a /btw, a card verdict and its
+# continuation, a channel message, a prompt tick, a run-finish continuation —
+# takes the chat's lock first.
+# ponytail: in-process locks — `skep serve` is ONE process, so this sees every
+# turn it can run. Two serves on one home would need a lease row in the
+# store. The dict keeps one small Lock per chat ever touched (never freed).
+_TURN_LOCKS: dict[str, threading.Lock] = {}
+_TURN_LOCKS_GUARD = threading.Lock()
+TURN_BUSY = "a turn is already running in this chat — try again when it finishes"
+
+
+def chat_turn_lock(chat_id: str) -> threading.Lock:
+    with _TURN_LOCKS_GUARD:
+        return _TURN_LOCKS.setdefault(chat_id, threading.Lock())
+
+
+def take_turn(chat_id: str) -> threading.Lock:
+    """The chat's turn lock, taken — or 409 while another turn runs."""
+    lock = chat_turn_lock(chat_id)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=TURN_BUSY)
+    return lock
+
+
+def held_turn(lock: threading.Lock, events: Iterator[ChatEvent]) -> Iterator[ChatEvent]:
+    """``events``, releasing ``lock`` exactly once when the stream ends, fails
+    or is closed — or is dropped unstarted (a client gone before the first
+    byte never runs a generator's finally; the finalizer covers it)."""
+    held = [lock]
+
+    def release() -> None:
+        with contextlib.suppress(IndexError):
+            held.pop().release()
+
+    def stream() -> Iterator[ChatEvent]:
+        try:
+            yield from events
+        finally:
+            release()
+
+    wrapped = stream()
+    weakref.finalize(wrapped, release)
+    return wrapped
 
 
 def chat_stream_with_retry(
@@ -2003,6 +2052,47 @@ class ChatEngine:
                 f"/api/chats/{chat_id}/commands/{action_id}/confirm or /deny",
             )
         base_url, api_key, model, protocol = self.resolved_llm(chat)
+        # ES-F2 (B13): the verdict and its continuation are a turn — taken
+        # BEFORE the claim, so a busy chat leaves the card pending, not stuck.
+        try:
+            lock = take_turn(chat_id)
+        except HTTPException:
+            current = self.store.get_chat_action(action_id)
+            if current is not None and current.status != "proposed":
+                # A Deny landing mid-confirm says what won, not just "busy".
+                raise card_taken(self.store, action_id) from None
+            raise
+        try:
+            payload = self._record_verdict(chat_id, action, confirm=confirm, actor=actor, keep=keep)
+            more_pending = bool(self.store.pending_chat_actions(chat_id))
+        except BaseException:
+            lock.release()
+            raise
+        # v49-F3: the confirmer's stream carries what the mutation actually did
+        # — the same 'tool' event shape free-executing tools emit. Before this,
+        # the result lived only on the action row and in the transcript, so API
+        # consumers watching the confirm stream saw a continuation with no
+        # outcome (GAP-2, black-box field test).
+        verdict: ChatEvent = ("tool", {"tool": action.tool, "result": payload})
+        if more_pending:
+            # Other cards still open — the model resumes after the last verdict.
+            lock.release()
+            return iter([verdict, ("done", {"state": "awaiting_confirmation"})])
+        return held_turn(
+            lock,
+            chain(
+                [verdict],
+                self.turn_events(
+                    chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
+                ),
+            ),
+        )
+
+    def _record_verdict(
+        self, chat_id: str, action: ChatActionRecord, *, confirm: bool, actor: str, keep: str
+    ) -> dict[str, Any]:
+        """Claim, execute (or deny) and record one card; the tool row's payload."""
+        action_id = action.action_id
         if confirm:
             # ES-F1 (B15 B16 B97): claim first — only the winner executes; a
             # second confirm, a Deny or the timeout sweep now lose with a 409.
@@ -2061,21 +2151,7 @@ class ChatEngine:
             tool_call_id=action.tool_call_id,
             content=json.dumps(payload, ensure_ascii=True),
         )
-        # v49-F3: the confirmer's stream carries what the mutation actually did
-        # — the same 'tool' event shape free-executing tools emit. Before this,
-        # the result lived only on the action row and in the transcript, so API
-        # consumers watching the confirm stream saw a continuation with no
-        # outcome (GAP-2, black-box field test).
-        verdict: ChatEvent = ("tool", {"tool": action.tool, "result": payload})
-        if self.store.pending_chat_actions(chat_id):
-            # Other cards still open — the model resumes after the last verdict.
-            return iter([verdict, ("done", {"state": "awaiting_confirmation"})])
-        return chain(
-            [verdict],
-            self.turn_events(
-                chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
-            ),
-        )
+        return payload
 
 
 def run_scheduled_prompt(
@@ -2108,9 +2184,16 @@ def run_scheduled_prompt(
     if chained is not None:
         # v53-F5 chain semantics: labeled CONTEXT, never new instructions.
         prompt = f"[Context from schedule {schedule.chain!r}]:\n{chained}\n\n{prompt}"
-    store.add_chat_message(chat_id, role="user", content=f"[schedule {schedule.name!r}] {prompt}")
+    # ES-F2: never beside another turn. The ticker thread must not wait out
+    # someone's turn, so a busy chat skips this tick and says so.
+    lock = chat_turn_lock(chat_id)
+    if not lock.acquire(blocking=False):
+        return ("the bound chat was mid-turn, so this tick was skipped", False)
     parts: list[str] = []
     try:
+        store.add_chat_message(
+            chat_id, role="user", content=f"[schedule {schedule.name!r}] {prompt}"
+        )
         for event, data in engine.turn_events(
             chat_id,
             base_url=base_url,
@@ -2124,6 +2207,8 @@ def run_scheduled_prompt(
                 parts.append(str(data["content"]))
     except Exception as exc:  # one broken turn must not break the tick
         return (f"prompt tick failed mid-turn: {exc}", False)
+    finally:
+        lock.release()
     reply = "".join(parts).strip()
     if not reply:
         return ("the scheduled turn produced no reply", False)
@@ -2205,23 +2290,26 @@ def run_completion_turn(
         "propose it as a card. If the run failed, say what you think went wrong "
         "and what you would change. If nothing is needed, say so in one line."
     )
-    store.add_chat_message(chat_id, role="user", content=seed)
-
     parts: list[str] = []
-    try:
-        for event, data in engine.turn_events(
-            chat_id,
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            protocol=protocol,
-            read_only=False,  # it may propose — a card is the human's trigger
-            unattended=True,  # store reads only; nobody may be watching
-        ):
-            if event is None and isinstance(data.get("content"), str):
-                parts.append(str(data["content"]))
-    except Exception as exc:  # a broken turn must never poison the run pool
-        return (f"continuation failed mid-turn: {exc}", False)
+    # ES-F2 (B13): queue behind the turn in flight — this runs on its own
+    # thread (app._on_run_finished), so waiting blocks nothing, and the run's
+    # result still reaches the chat instead of being dropped as "busy".
+    with chat_turn_lock(chat_id):
+        store.add_chat_message(chat_id, role="user", content=seed)
+        try:
+            for event, data in engine.turn_events(
+                chat_id,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                protocol=protocol,
+                read_only=False,  # it may propose — a card is the human's trigger
+                unattended=True,  # store reads only; nobody may be watching
+            ):
+                if event is None and isinstance(data.get("content"), str):
+                    parts.append(str(data["content"]))
+        except Exception as exc:  # a broken turn must never poison the run pool
+            return (f"continuation failed mid-turn: {exc}", False)
     reply = "".join(parts).strip()
     return (reply, bool(reply))
 
@@ -2393,32 +2481,39 @@ def add_chat_routes(
     def post_message(chat_id: str, body: MessageRequest) -> StreamingResponse:
         chat = _require_chat(chat_id)
         base_url, api_key, model, protocol = engine.resolved_llm(chat)
-        if run_store.pending_chat_actions(chat_id) and not body.read_only:
-            # v67-F3: a read-only /btw may run beside a pending card — safe
-            # precisely because nothing it does can need confirmation.
-            raise HTTPException(
-                status_code=409, detail="resolve the pending confirmation card(s) first"
-            )
-        if chat.title == DEFAULT_TITLE and not run_store.chat_messages(chat_id):
-            run_store.set_chat_title(chat_id, _title_from(body.content))
         for name in body.attachments:
             if (
                 not _ATTACHMENT_NAME_RE.match(name)
                 or not (attachments_dir(home, chat_id) / name).is_file()
             ):
                 raise HTTPException(status_code=400, detail=f"unknown attachment {name!r}")
+        # ES-F2 (B14): the pending-card check happens under the turn lock —
+        # checked outside it, two POSTs both passed and both ran turns.
+        lock = take_turn(chat_id)
+        if run_store.pending_chat_actions(chat_id) and not body.read_only:
+            # v67-F3: a read-only /btw may run beside a pending card — safe
+            # precisely because nothing it does can need confirmation.
+            lock.release()
+            raise HTTPException(
+                status_code=409, detail="resolve the pending confirmation card(s) first"
+            )
+        if chat.title == DEFAULT_TITLE and not run_store.chat_messages(chat_id):
+            run_store.set_chat_title(chat_id, _title_from(body.content))
         run_store.add_chat_message(
             chat_id, role="user", content=body.content, attachments=body.attachments or None
         )
         return StreamingResponse(
             _as_sse(
-                engine.turn_events(
-                    chat_id,
-                    base_url=base_url,
-                    api_key=api_key,
-                    model=model,
-                    protocol=protocol,
-                    read_only=body.read_only,
+                held_turn(
+                    lock,
+                    engine.turn_events(
+                        chat_id,
+                        base_url=base_url,
+                        api_key=api_key,
+                        model=model,
+                        protocol=protocol,
+                        read_only=body.read_only,
+                    ),
                 )
             ),
             media_type="text/event-stream",

@@ -330,3 +330,200 @@ def test_a_broken_interrupted_card_sweep_never_stops_serve(
     monkeypatch.setattr(RunStore, "interrupt_executing_chat_actions", broken)
     with serve_client(config, start_ticker=False) as client:
         assert client.get("/api/chats").status_code == 200
+
+
+# ---------- ES-F2: one turn at a time per chat ----------
+
+
+class _HeldTurn:
+    """ChatEngine.turn_events' stand-in: records each turn and holds it open
+    until ``release`` is set, so a second turn can only overlap if no lock
+    stops it."""
+
+    def __init__(self) -> None:
+        self.turns = 0
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, engine: ChatEngine, chat_id: str, **_: Any) -> Iterator[Any]:
+        self.turns += 1
+        self.entered.set()
+        self.release.wait(3)
+        yield (None, {"content": "ok"})
+        yield ("done", {"state": "complete"})
+
+
+def _chat(rig: Rig) -> str:
+    return rig.store.create_chat(title="race", model=None).chat_id
+
+
+def test_two_messages_at_once_run_one_turn(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
+    """B14 (M3-10, M1-39): two POSTs at the same instant both ran turns on one
+    transcript — interleaved tool rows, duplicated cards. The second now gets
+    409 while the first turn runs."""
+    held = _HeldTurn()
+    monkeypatch.setattr(
+        ChatEngine, "turn_events", lambda engine, chat_id, **kw: held(engine, chat_id)
+    )
+    chat_id = _chat(rig)
+
+    def post() -> int:
+        try:
+            response = rig.client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+            return response.status_code
+        finally:
+            held.release.set()
+
+    assert sorted(race(post, post)) == [200, 409]
+    assert held.turns == 1
+
+
+def test_a_card_verdict_waits_its_turn_without_claiming(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B13: a confirm landing while another turn runs in the chat is refused
+    BEFORE the claim, so the card stays pending — never stranded 'executing'."""
+    chat_id, action_id = _card(rig)
+    lock = chat_module.chat_turn_lock(chat_id)
+    assert lock.acquire(blocking=False)
+    try:
+        with pytest.raises(HTTPException) as busy:
+            _verdict(rig, chat_id, action_id, confirm=True)
+    finally:
+        lock.release()
+
+    assert busy.value.status_code == 409 and "turn is already running" in str(busy.value.detail)
+    action = rig.store.get_chat_action(action_id)
+    assert action is not None and action.status == "proposed"
+
+
+def test_a_verdict_with_cards_still_open_frees_the_chat(rig: Rig) -> None:
+    chat_id, first = _card(rig)
+    rig.store.add_chat_action(chat_id, tool="set_personality", args={"value": "friendly"})
+
+    events = _verdict(rig, chat_id, first, confirm=False)
+
+    assert events[-1] == ("done", {"state": "awaiting_confirmation"})
+    assert chat_module.chat_turn_lock(chat_id).acquire(blocking=False)
+
+
+def test_a_stream_dropped_before_its_first_byte_frees_the_chat() -> None:
+    """A client that disconnects before the first byte never starts the
+    generator, so its finally never runs; the finalizer frees the chat."""
+    import gc
+
+    lock = threading.Lock()
+    lock.acquire()
+    stream = chat_module.held_turn(lock, iter([("done", {})]))
+    del stream
+    gc.collect()
+    assert lock.acquire(blocking=False)
+
+
+def test_a_finished_run_waits_for_the_turn_in_flight(
+    rig: Rig, repo: Any, config: SupervisorConfig
+) -> None:
+    """B13 (M3-13): the run-finish continuation took no lock, so it and the
+    operator's turn interleaved on one transcript. It now queues behind the
+    turn in flight — and still runs: the run's result must reach the chat."""
+    from .test_serve_chat import _bound_run
+
+    chat_id = _chat(rig)
+    task_id = _bound_run(rig.store, chat_id, repo)
+    chat_module._CONTINUED.discard(task_id)
+    rig.ollama.script_reply("landed it? say the word")
+    lock = chat_module.chat_turn_lock(chat_id)
+    lock.acquire()
+    outcome: list[tuple[str, bool]] = []
+    continuation = threading.Thread(
+        target=lambda: outcome.append(
+            chat_module.run_completion_turn(
+                rig.store, rig.holder, rig.engine.runner, config.home, task_id
+            )
+        )
+    )
+    continuation.start()
+    continuation.join(0.3)
+    queued = continuation.is_alive()
+    seeded_early = any(m.role == "user" for m in rig.store.chat_messages(chat_id))
+    lock.release()
+    continuation.join(5)
+
+    assert queued and not seeded_early
+    assert outcome and outcome[0][1], outcome
+    assert "say the word" in outcome[0][0]
+
+
+def test_a_prompt_tick_on_a_busy_chat_is_skipped_honestly(rig: Rig) -> None:
+    from types import SimpleNamespace
+
+    chat_id = _chat(rig)
+    schedule = SimpleNamespace(chat_id=chat_id, instructions="digest", chain=None, name="daily")
+    lock = chat_module.chat_turn_lock(chat_id)
+    lock.acquire()
+    try:
+        reply, ok = chat_module.run_scheduled_prompt(
+            rig.store, rig.holder, rig.engine.runner, rig.engine.home, schedule, None
+        )
+    finally:
+        lock.release()
+
+    assert not ok and "skipped" in reply
+    assert rig.store.chat_messages(chat_id) == []
+
+
+def test_a_channel_message_on_a_busy_chat_is_told_to_wait(rig: Rig) -> None:
+    from skep.supervisor.serve.channels import ChannelIdentity, ChannelMessage
+    from skep.supervisor.serve.channels.runtime import run_channel_turn
+
+    identity = ChannelIdentity(channel="discord", identity_id="u1")
+    message = ChannelMessage(
+        channel="discord", identity=identity, text="hi", session_key="discord:t1"
+    )
+    bound = rig.store.create_chat(title="d", model=None, source="discord")
+    rig.store.bind_channel_session(
+        session_key="discord:t1",
+        channel="discord",
+        identity_id="u1",
+        chat_id=bound.chat_id,
+    )
+    lock = chat_module.chat_turn_lock(bound.chat_id)
+    lock.acquire()
+    try:
+        reply, actions = run_channel_turn(rig.engine, message, web_ui_url="http://x")
+    finally:
+        lock.release()
+
+    assert actions == [] and "turn is already running" in reply
+    assert rig.store.chat_messages(bound.chat_id) == []
+
+
+def test_a_bad_keep_is_refused_before_the_chat_is_taken(rig: Rig) -> None:
+    chat_id, action_id = _card(rig)
+    chat = rig.store.get_chat(chat_id)
+    with pytest.raises(HTTPException) as bad:
+        rig.engine.verdict_events(chat_id, chat, action_id, confirm=True, keep="forever")
+    assert bad.value.status_code == 422
+    assert chat_module.chat_turn_lock(chat_id).acquire(blocking=False)
+
+
+def test_a_continuation_that_breaks_frees_the_chat(
+    rig: Rig, repo: Any, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from .test_serve_chat import _bound_run
+
+    def broken(engine: ChatEngine, chat_id: str, **_: Any) -> Iterator[Any]:
+        raise RuntimeError("provider fell over")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ChatEngine, "turn_events", broken)
+    chat_id = _chat(rig)
+    task_id = _bound_run(rig.store, chat_id, repo)
+    chat_module._CONTINUED.discard(task_id)
+
+    reply, ok = chat_module.run_completion_turn(
+        rig.store, rig.holder, rig.engine.runner, config.home, task_id
+    )
+
+    assert not ok and "provider fell over" in reply
+    assert chat_module.chat_turn_lock(chat_id).acquire(blocking=False)
