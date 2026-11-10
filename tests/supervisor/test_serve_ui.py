@@ -1530,8 +1530,8 @@ def test_dead_cards_drop_their_buttons() -> None:
     ]
     assert 'action.status !== "proposed"' in reconciler
     assert '!drawn.classList.contains("resolved")' in reconciler
-    assert "✗ Superseded" in reconciler
-    assert "resolveCardUI(drawn," in reconciler
+    # ES-F1: the labels live in cardVerdict, executed by tests/web/.
+    assert "resolveCardUI(drawn, ...cardVerdict(action))" in reconciler
 
 
 def test_worker_loader_ticks_from_dispatch_and_announces_terminals_once() -> None:

@@ -358,6 +358,24 @@ def create_app(
         except Exception:
             logging.getLogger("skep.serve").exception("interrupted-run recovery failed")
         try:
+            # ES-F1/F4: a card or landing claimed by a process that died
+            # mid-execute ends honestly — never re-run, never reopened (either
+            # could double a mutation whose effect is unknown).
+            interrupted = run_store.interrupt_executing_chat_actions()
+            if interrupted:
+                logging.getLogger("skep.serve").warning(
+                    "%d card(s) were executing when serve stopped; marked interrupted",
+                    interrupted,
+                )
+            landings = run_store.interrupt_applying_approvals()
+            if landings:
+                logging.getLogger("skep.serve").warning(
+                    "%d landing(s) were applying when serve stopped; denied as interrupted",
+                    landings,
+                )
+        except Exception:
+            logging.getLogger("skep.serve").exception("interrupted-card sweep failed")
+        try:
             # v86-F1: a serve restart ends the approval session — drop the
             # session-tier shell grants the previous process collected.
             from .settings import SESSION_ALLOWED_SHELL_COMMANDS
@@ -887,18 +905,17 @@ def create_app(
         """Open (or return) the pending review for a run — how a completed run's
         patch enters the approval queue (the CLI's pending-or-new semantics)."""
         run = _require_run(task_id)
-        pending = [a for a in run_store.approvals_for(task_id) if a.status == "pending"]
-        if pending:
-            return {"review_id": pending[0].review_id}
-        if run["state"] != "pending_approval" and patch_path(run_store, task_id) is None:
-            raise HTTPException(
-                status_code=409, detail="nothing to approve: no pending gate and no patch"
-            )
-        review_id = run_store.enqueue_approval(
+        # ES-F4 (B17): pending-or-new in one store call.
+        review_id = run_store.pending_or_enqueue_approval(
             task_id,
             action="apply_patch",
             reason=landing_reason(str(run.get("instructions") or ""), None),
+            create=run["state"] == "pending_approval" or patch_path(run_store, task_id) is not None,
         )
+        if review_id is None:
+            raise HTTPException(
+                status_code=409, detail="nothing to approve: no pending gate and no patch"
+            )
         return {"review_id": review_id}
 
     @app.post("/api/approvals/{review_id}/approve")

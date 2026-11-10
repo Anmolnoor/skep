@@ -690,8 +690,9 @@ class ChatRepl:
         action_id = str(action.get("action_id"))
         # v63-F1: a card found by cross-chat lookup resolves on ITS chat.
         chat_id = str(action.get("chat_id") or self.chat_id)
-        if action.get("source") == "operator":
+        if action.get("source") in ("operator", "gate"):
             # Deck commands resolve on the commands endpoints — JSON, no stream.
+            # ES-F5 (B98): so do gate mirrors — their Deny denies the review.
             result = self.client.post(f"/api/chats/{chat_id}/commands/{action_id}/{verb}")
             _print_command_result(result)
             if result.get("ok"):

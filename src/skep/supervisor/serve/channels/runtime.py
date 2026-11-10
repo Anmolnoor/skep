@@ -29,7 +29,14 @@ from typing import Any, Protocol
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
-from ..chat import ATTACHMENT_MAX_BYTES, ChatEngine, save_chat_attachment
+from ..chat import (
+    ATTACHMENT_MAX_BYTES,
+    TURN_BUSY,
+    ChatEngine,
+    blocking_cards,
+    chat_turn_lock,
+    save_chat_attachment,
+)
 from . import (
     ChannelConfig,
     ChannelIdentity,
@@ -187,7 +194,30 @@ def run_channel_turn(
             f"skep: configure the assistant first in the web UI (Settings): {web_ui_url}",
             [],
         )
-    if store.pending_chat_actions(chat.chat_id):
+    # ES-F2 (B13 B14): one turn at a time per chat — the web and a messenger
+    # bound to the same chat share the lock.
+    lock = chat_turn_lock(chat.chat_id)
+    if not lock.acquire(blocking=False):
+        return (f"skep: {TURN_BUSY}", [])
+    try:
+        return _channel_turn(
+            engine, chat, message, (base_url, api_key, model, protocol), web_ui_url=web_ui_url
+        )
+    finally:
+        lock.release()
+
+
+def _channel_turn(
+    engine: ChatEngine,
+    chat: Any,
+    message: ChannelMessage,
+    llm: tuple[str, str | None, str, Any],
+    *,
+    web_ui_url: str,
+) -> tuple[str, list[dict[str, object]]]:
+    store = engine.store
+    base_url, api_key, model, protocol = llm
+    if blocking_cards(store, chat.chat_id):  # ES-F5: a gate never holds the chat
         # v66-F3: buttons can resolve low-risk cards in-channel now — say so.
         return (
             "skep: a confirmation is pending for this conversation — confirm or "
