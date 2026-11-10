@@ -86,12 +86,6 @@ def test_forged_tool_refuses_to_run_without_a_sandbox(
 @pytest.mark.skipif(not sandbox.available(), reason="needs a usable native sandbox backend")
 def test_forged_tool_cannot_write_outside_its_workspace(tmp_path: Path) -> None:
     target = tmp_path / "escape.txt"
-    # Until the shared-temp-roots fix (B11, PR #58) lands, Seatbelt's default
-    # roots include the host temp dir that holds tmp_path, so "outside" isn't.
-    if sys.platform == "darwin" and any(
-        target.resolve().is_relative_to(root.resolve()) for root in sandbox.default_writable_roots()
-    ):
-        pytest.skip("tmp_path sits inside a default writable root (B11, fixed by PR #58)")
     result = runner_for_config(_forged(tmp_path, target), skep_home=tmp_path / "home")(
         "tools/call", {"name": "t"}
     )
