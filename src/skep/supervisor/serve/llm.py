@@ -714,6 +714,13 @@ def _openai_chat_stream(
             if data == "[DONE]":
                 break
             payload = json.loads(data)
+            error = payload.get("error")
+            if error:
+                # ES-F14 (B90): the ES-F6 rule for openai-compat — a failure
+                # after the 200 rides the stream; skipped, a partial reply
+                # read as complete and an error-only one as a stall (I8).
+                detail = error.get("message") if isinstance(error, dict) else None
+                raise OllamaError(str(detail or error))
             for choice in payload.get("choices", []):
                 delta = choice.get("delta") or {}
                 thinking = _openai_delta_thinking(delta)

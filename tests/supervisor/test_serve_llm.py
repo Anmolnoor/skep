@@ -339,6 +339,29 @@ def test_mid_stream_ollama_error_raises_with_the_providers_words(ollama: FakeOll
         next(stream)
 
 
+@pytest.mark.parametrize("after", ["Hel", ""])
+def test_mid_stream_openai_error_raises_with_the_providers_words(
+    openai: FakeOpenAI, after: str
+) -> None:
+    """ES-F14 (B90): the ES-F6 fix for openai-compat. The error line was
+    skipped (only ``choices`` was read): a partial reply came back as a
+    complete one, an error-only stream as an empty round (lane M1-40)."""
+    from skep.supervisor.serve.llm import OllamaError
+
+    openai.script_stream_error("upstream model crashed", after=after)
+    stream = chat_stream(
+        openai.base_url,
+        "sk-fake",
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],
+        protocol="openai-compat",
+    )
+    if after:
+        assert next(stream)["message"]["content"] == after
+    with pytest.raises(OllamaError, match="upstream model crashed"):
+        next(stream)
+
+
 def test_a_missing_model_fails_fast_with_the_providers_words(
     ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
 ) -> None:

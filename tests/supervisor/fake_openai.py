@@ -47,6 +47,15 @@ class FakeOpenAI:
         chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
         self.chat_scripts.append(chunks)
 
+    def script_stream_error(self, message: str, *, after: str = "") -> None:
+        """ES-F14 (B90): a failure after the 200 rides the SSE stream as a
+        ``data: {"error": {...}}`` line (the OpenAI/vLLM/OpenRouter shape)."""
+        chunks: list[dict[str, Any]] = []
+        if after:
+            chunks.append({"choices": [{"delta": {"content": after}}]})
+        chunks.append({"error": {"message": message, "type": "server_error"}})
+        self.chat_scripts.append(chunks)
+
     def script_drop(self) -> None:
         """v59-F4: the next chat call sends a partial body then slams the
         connection — the client sees a transport-class incomplete read."""
