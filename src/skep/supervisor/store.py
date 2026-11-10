@@ -1420,6 +1420,67 @@ class RunStore:
         return review_id
 
     @_locked
+    def pending_or_enqueue_approval(
+        self, task_id: str, *, action: str, reason: str, create: bool = True
+    ) -> str | None:
+        """ES-F4 (B17): the task's open review — pending, or mid-landing — or
+        a new one, in ONE locked call. Read-then-enqueue as two calls let
+        three concurrent lands mint two reviews for one patch, and the
+        second's failed apply left a phantom 'denied' in the ledger.
+        ``create=False`` (nothing to land) returns None instead of minting."""
+        row = self._conn.execute(
+            "SELECT review_id FROM approvals WHERE task_id = ?"
+            " AND status IN ('pending', 'applying') ORDER BY requested_at LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is not None:
+            return str(row[0])
+        if not create:
+            return None
+        return self.enqueue_approval(task_id, action=action, reason=reason)
+
+    @_locked
+    def claim_approval(self, review_id: str) -> bool:
+        """ES-F4 (B17): pending → applying in ONE conditional UPDATE — the
+        card claim (ES-F1) for landings. Only the winner runs git."""
+        cursor = self._conn.execute(
+            "UPDATE approvals SET status = 'applying' WHERE review_id = ? AND status = 'pending'",
+            (review_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
+    def unclaim_approval(self, review_id: str) -> None:
+        """An apply that blew up unexpectedly hands the review back, pending."""
+        self._conn.execute(
+            "UPDATE approvals SET status = 'pending' WHERE review_id = ? AND status = 'applying'",
+            (review_id,),
+        )
+        self._conn.commit()
+
+    @_locked
+    def interrupt_applying_approvals(self) -> int:
+        """ES-F4 restart safety: a review still 'applying' at serve start was
+        claimed by a process that died mid-git. Whether a commit landed is
+        unknown, so it ends 'denied' with a note saying so — never quietly
+        pending again, where a retry could stack a second commit (I8)."""
+        rows = self._conn.execute(
+            "SELECT review_id FROM approvals WHERE status = 'applying'"
+        ).fetchall()
+        for (review_id,) in rows:
+            self.resolve_approval(
+                str(review_id),
+                approved=False,
+                actor="skep-serve-restart",
+                note="interrupted: skep serve stopped while this landing was being "
+                "applied — check the repo for this task's skep/ branch or commit "
+                "before landing it again",
+                claimed=True,
+            )
+        return len(rows)
+
+    @_locked
     def approval_commands(self, review_id: str) -> list[list[str]] | None:
         """The batch-approval command list stored with an approval (v19-F1)."""
         row = self._conn.execute(
@@ -1449,19 +1510,22 @@ class RunStore:
         note: str | None = None,
         remembered: bool = False,
         landing_branch: str | None = None,
+        claimed: bool = False,
     ) -> None:
         """Record the verdict with actor + timestamp; resolution is final.
 
         v30: ``landing_branch`` records where an apply_patch approval actually
         landed (default skep/<task_id>, a named branch, or an integration
         branch) so the applied-branch view is accurate for every landing path.
+        ES-F4: a ``claimed`` landing resolves from 'applying' (only its
+        claimer holds it there); everything else from 'pending'.
         """
         row = self._conn.execute(
             "SELECT status FROM approvals WHERE review_id = ?", (review_id,)
         ).fetchone()
         if row is None:
             raise KeyError(f"no approval {review_id!r}")
-        if row[0] != "pending":
+        if row[0] != ("applying" if claimed else "pending"):
             raise ValueError(f"approval {review_id!r} already resolved as {row[0]!r}")
         resolved_at = _now()
         self._conn.execute(

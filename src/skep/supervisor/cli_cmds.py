@@ -1402,10 +1402,12 @@ def open_pr_for_branch(
 
 
 def _pending_or_new(store: RunStore, record: RunRecord, *, reason: str) -> str:
-    pending = [a for a in store.approvals_for(record.task_id) if a.status == "pending"]
-    if pending:
-        return pending[0].review_id
-    return store.enqueue_approval(record.task_id, action="apply_patch", reason=reason)
+    # ES-F4: one locked store call, the same pending-or-new the serve uses.
+    review_id = store.pending_or_enqueue_approval(
+        record.task_id, action="apply_patch", reason=reason
+    )
+    assert review_id is not None  # create=True always mints
+    return review_id
 
 
 def _prompt_inline_approval(

@@ -573,3 +573,112 @@ def test_a_continuation_cards_even_what_policy_would_auto_allow(
     assert held.calls == 0
     cards = rig.store.pending_chat_actions(chat_id)
     assert [card.tool for card in cards] == ["dispatch_run"]
+
+
+# ---------- ES-F4: one landing per approval ----------
+
+
+def _landable_run(store: RunStore, repo: Any, tmp_path: Any) -> dict[str, Any]:
+    from skep.supervisor import mint_task
+    from skep.supervisor.serve.actions import require_run
+
+    task = mint_task(workspace=repo, instructions="land me")
+    store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+    store.transition(task.task_id, "completed")
+    patch = tmp_path / "task.patch"
+    patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
+    store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+    return require_run(store, str(task.task_id))
+
+
+def test_three_lands_at_once_land_once_with_honest_losers(
+    rig: Rig, repo: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B17 (M3-05): three concurrent lands onto one named branch made two
+    approvals (one a phantom 'denied … apply failed'), a 500 from resolving
+    an approval twice, and a 409 telling the operator to re-run a task that
+    had just landed. Now one landing; the others 409 'already being
+    applied', and the ledger holds exactly one approved review."""
+    from skep.supervisor.serve import actions
+
+    held = _HeldMutation()
+    monkeypatch.setattr(actions, "apply_patch_on_branch", lambda *a, **k: held(*a[:2]) and None)
+    run = _landable_run(rig.store, repo, tmp_path)
+
+    answered: list[int] = []
+
+    def land() -> Any:
+        try:
+            return actions.land_run(rig.store, run, "operator", branch="skep/race-land")
+        finally:
+            answered.append(1)
+            if len(answered) == 2:  # both losers answered while the winner held
+                held.release.set()
+
+    outcomes = race(land, land, land)
+
+    assert held.calls == 1
+    landed = [o for o in outcomes if isinstance(o, dict)]
+    losers = [o for o in outcomes if isinstance(o, HTTPException)]
+    assert [o["branch"] for o in landed] == ["skep/race-land"]
+    assert [o.status_code for o in losers] == [409, 409]
+    assert all("already being applied" in str(o.detail) for o in losers)
+    approvals = rig.store.approvals_for(str(run["task_id"]))
+    assert [(a.status, a.landing_branch) for a in approvals] == [("approved", "skep/race-land")]
+
+
+def test_a_landing_left_applying_by_a_crash_is_denied_honestly_on_restart(
+    rig: Rig, repo: Any, tmp_path: Any, config: SupervisorConfig
+) -> None:
+    run = _landable_run(rig.store, repo, tmp_path)
+    review_id = rig.store.enqueue_approval(str(run["task_id"]), action="apply_patch", reason="land")
+    assert rig.store.claim_approval(review_id)
+
+    with serve_client(config, start_ticker=False):
+        pass
+
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "denied"
+    assert "interrupted" in (approval.resolution_note or "")
+
+
+def test_a_landing_whose_git_blows_up_hands_the_review_back(
+    rig: Rig, repo: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.serve import actions
+
+    def boom(*_: Any, **__: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(actions, "apply_patch_on_branch", boom)
+    run = _landable_run(rig.store, repo, tmp_path)
+
+    with pytest.raises(OSError):
+        actions.land_run(rig.store, run, "operator")
+
+    [approval] = rig.store.approvals_for(str(run["task_id"]))
+    assert approval.status == "pending"
+
+
+def test_a_late_approve_names_the_landing_that_won(
+    rig: Rig, repo: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loser of a landing race that arrives after the winner finished is
+    told where the patch landed — not a git error about an existing branch."""
+    from skep.supervisor.serve import actions
+
+    monkeypatch.setattr(actions, "apply_patch_on_branch", lambda *a, **k: None)
+    run = _landable_run(rig.store, repo, tmp_path)
+    task_id = str(run["task_id"])
+    review_id = rig.store.enqueue_approval(task_id, action="apply_patch", reason="land")
+    actions.apply_patch(rig.store, run, review_id, "operator", None)
+    denied = rig.store.enqueue_approval(task_id, action="apply_patch", reason="land")
+    rig.store.resolve_approval(denied, approved=False, actor="operator")
+
+    with pytest.raises(HTTPException) as late:
+        actions.apply_patch(rig.store, run, review_id, "operator", None)
+    with pytest.raises(HTTPException) as dead:
+        actions.apply_patch(rig.store, run, denied, "operator", None)
+
+    assert late.value.detail == f"already landed on skep/{task_id}"
+    assert dead.value.detail == f"approval {denied!r} already denied"

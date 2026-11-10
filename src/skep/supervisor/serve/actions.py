@@ -1472,19 +1472,16 @@ def land_run(
             detail="run is waiting on a mid-run gate; approve that review first "
             "(approve_review resumes it), then land the completed run",
         )
-    pending = [a for a in store.approvals_for(task_id) if a.status == "pending"]
-    if pending:
-        review_id = pending[0].review_id
-    else:
-        if patch_path(store, task_id) is None:
-            raise HTTPException(
-                status_code=409, detail="nothing to land: this run produced no patch"
-            )
-        review_id = store.enqueue_approval(
-            task_id,
-            action="apply_patch",
-            reason=landing_reason(str(run.get("instructions") or ""), branch),
-        )
+    # ES-F4 (B17): pending-or-new in one store call — concurrent lands share
+    # one review, and apply_patch's claim lets exactly one of them land it.
+    review_id = store.pending_or_enqueue_approval(
+        task_id,
+        action="apply_patch",
+        reason=landing_reason(str(run.get("instructions") or ""), branch),
+        create=patch_path(store, task_id) is not None,
+    )
+    if review_id is None:
+        raise HTTPException(status_code=409, detail="nothing to land: this run produced no patch")
     landed = apply_patch(store, run, review_id, actor, note, branch=branch)
     result: dict[str, Any] = {"action": "applied", "branch": landed}
     # v109-F3: the Aug 3 model re-proposed land_run a minute after this very
@@ -3097,7 +3094,16 @@ def apply_patch(
             raise HTTPException(status_code=400, detail=error)
     else:
         target = f"skep/{task_id}"
-    failure = apply_patch_on_branch(repo, target, patch, task_id=task_id, actor=actor)
+    # ES-F4 (B17): claim the review before git runs — two approves of one
+    # landing each applied, and the loser's failure denied (or 500'd on) a
+    # review that had just landed, telling the operator to re-run it.
+    if not store.claim_approval(review_id):
+        raise landing_taken(store, review_id)
+    try:
+        failure = apply_patch_on_branch(repo, target, patch, task_id=task_id, actor=actor)
+    except BaseException:
+        store.unclaim_approval(review_id)
+        raise
     if failure is not None:
         # v81-F3: name the advance instead of shrugging "the repo may have moved".
         base = run.get("base_commit")
@@ -3113,11 +3119,29 @@ def apply_patch(
         # v81-F2: a failed land must not linger as an untouched pending gate —
         # deny it with the failure note; a retry (land_run) enqueues afresh.
         store.resolve_approval(
-            review_id, approved=False, actor=actor, note=f"apply failed: {failure}"
+            review_id, approved=False, actor=actor, note=f"apply failed: {failure}", claimed=True
         )
         raise HTTPException(status_code=409, detail=failure)
-    store.resolve_approval(review_id, approved=True, actor=actor, note=note, landing_branch=target)
+    store.resolve_approval(
+        review_id, approved=True, actor=actor, note=note, landing_branch=target, claimed=True
+    )
     return target
+
+
+def landing_taken(store: RunStore, review_id: str) -> HTTPException:
+    """ES-F4: the 409 for an approve that lost the landing race — it names
+    what won instead of a git error about a branch that already exists."""
+    approval = store.get_approval(review_id)
+    status = approval.status if approval is not None else "gone"
+    if status == "applying":
+        detail = (
+            "this landing is already being applied by another request — its result is the verdict"
+        )
+    elif approval is not None and status == "approved":
+        detail = f"already landed on {approval.landing_branch or 'its branch'}"
+    else:
+        detail = f"approval {review_id!r} already {status}"
+    return HTTPException(status_code=409, detail=detail)
 
 
 # v107-F2: diagnose_run bounds — generous enough for one test file, capped
