@@ -139,7 +139,13 @@ def test_the_schedules_api_answers_400_for_a_garbage_start_at(
                 "start_at": "tomorrow",
             },
         )
+        too_long = client.post(
+            "/api/schedules",
+            json={"name": "s", "caste": "script", "every": "99999999999999d", "instructions": "x"},
+        )
     assert response.status_code == 400 and "start_at" in response.json()["detail"]
+    # ES B110 at the REST face: the overflow is a 400, not a 201.
+    assert too_long.status_code == 400 and "366d" in too_long.json()["detail"]
 
 
 # -- script schedules (B111 B117 B118 B120) -----------------------------------
@@ -353,3 +359,40 @@ def test_a_broken_card_sweep_never_stops_the_schedule_pass(
         assert passed.wait(5)
     finally:
         ticker.stop()
+
+
+@pytest.mark.parametrize("pack", ["trusted_local_dev", "public_free", None])
+def test_a_seeded_schedule_first_fires_one_interval_out(
+    repo: Path, config: SupervisorConfig, pack: str | None
+) -> None:
+    """ES B99: `/workon` seeded a weekly maintenance schedule that dispatched
+    an unasked coding run about 1 s later — a seed was eligible on the next
+    tick. Its first fire is now one interval from setup."""
+    from datetime import UTC, datetime, timedelta
+
+    from .conftest import serve_client
+
+    body: dict[str, object] = {
+        "project_id": "seeded",
+        "name": "Seeded",
+        "phase": "build",
+        "repo_path": str(repo),
+    }
+    if pack is not None:
+        body["pack"] = pack
+    else:  # the first-party seeds (no pack)
+        body["strategy"] = "trusted_local_dev"
+    with serve_client(config) as client:
+        result = client.post("/api/projects/setup", json=body).json()
+    seeded = result["seeded_schedules"]
+    assert seeded, result
+    now = datetime.now(UTC)
+    for view in seeded:
+        first = datetime.strptime(view["next_run_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        interval = timedelta(seconds=view["interval_seconds"])
+        assert first > now + interval - timedelta(minutes=1), view
+    store = RunStore(config.db_path)
+    try:
+        assert run_due(store=store, config=config) == []
+    finally:
+        store.close()

@@ -34,7 +34,14 @@ from ..projects import (
     project_to_dict,
     validate_project_definition,
 )
-from ..scheduler import make_schedule, make_template_schedule, parse_interval, validate_chain
+from ..scheduler import (
+    make_schedule,
+    make_template_schedule,
+    next_run_after,
+    now_ts,
+    parse_interval,
+    validate_chain,
+)
 from ..skill_cmds import SkillError, approve, propose, reject, run_candidate_test
 from ..store import RunStore
 from ..template_suggestion import TemplateSuggestion, suggest_template
@@ -861,6 +868,13 @@ def _carry_forward_existing(
     return {**stored.policy, **base_policy}, [*bindings, *kept]
 
 
+def _first_slot(every: str) -> str:
+    """ES B99: a SEEDED schedule first fires one interval from now. Nobody
+    asked for it — `/workon` dispatched an unasked coding run ~1 s after
+    setup when seeds were eligible on the next tick."""
+    return next_run_after(now_ts(), parse_interval(every))
+
+
 def setup_project_record(
     *,
     run_store: RunStore,
@@ -985,6 +999,7 @@ def setup_project_record(
                             repo=schedule_repo,
                             interval_seconds=parse_interval(schedule_seed.every),
                             enabled=schedule_seed.enabled,
+                            start_at=_first_slot(schedule_seed.every),
                         )
                     else:
                         assert schedule_seed.instructions is not None
@@ -994,6 +1009,7 @@ def setup_project_record(
                             instructions=schedule_seed.instructions,
                             interval_seconds=parse_interval(schedule_seed.every),
                             enabled=schedule_seed.enabled,
+                            start_at=_first_slot(schedule_seed.every),
                         )
                     run_store.add_schedule(schedule)
                     seeded_schedules.append(_schedule_view(run_store, schedule))
@@ -1011,6 +1027,7 @@ def setup_project_record(
                         repo=schedule_repo,
                         instructions=project_schedule_seed.instructions,
                         interval_seconds=parse_interval(project_schedule_seed.every),
+                        start_at=_first_slot(project_schedule_seed.every),
                     )
                     run_store.add_schedule(schedule)
                     seeded_schedules.append(_schedule_view(run_store, schedule))
