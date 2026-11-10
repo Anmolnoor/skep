@@ -472,3 +472,8 @@ def test_es_f1_an_exactly_allowlisted_alias_runs() -> None:
 def test_es_f1_normal_commands_still_reach_the_allowlist(argv: list[str]) -> None:
     decision = _decide_with_grants(argv, allowlist=[tuple(argv)])
     assert decision.verdict == "allow_with_constraints", argv  # type: ignore[attr-defined]
+
+
+def test_es_f1_command_v_git_is_a_lookup_not_a_launch() -> None:
+    decision = _decide_with_grants(["command", "-v", "git"])
+    assert decision.verdict == "require_approval"  # type: ignore[attr-defined]

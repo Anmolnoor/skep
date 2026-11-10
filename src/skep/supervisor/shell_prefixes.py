@@ -538,7 +538,9 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
     if not tokens:
         return []
     result = [tokens]
-    if posixpath.basename(tokens[0]) in _LAUNCHERS:
+    # `command -v/-V x` looks x up; it launches nothing.
+    lookup = posixpath.basename(tokens[0]) == "command" and tokens[1:2] in (["-v"], ["-V"])
+    if posixpath.basename(tokens[0]) in _LAUNCHERS and not lookup:
         # ES-F1 (B124): `timeout 20 git push` runs `git push`. Every suffix that
         # starts at a non-option token is judged as a command of its own, so a
         # launcher option this module does not know cannot hide one.
