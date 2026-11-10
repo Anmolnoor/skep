@@ -195,7 +195,7 @@ def test_fast_lane_code_does_not_inherit_the_daemon_environment(
     monkeypatch.setattr(fastlane, "write_profile", lambda path, **kw: path)
     monkeypatch.setattr(fastlane, "wrap_command", lambda argv, profile: argv)
     monkeypatch.setattr(subprocess, "run", fake_run)
-    fastlane.run_code_fast("python", "print(1)")
+    fastlane.run_code_fast("python", "print(1)", skep_home=Path("/nonexistent/skep-home"))
     env = captured["env"]
     assert isinstance(env, dict)
     assert "ANTHROPIC_API_KEY" not in env

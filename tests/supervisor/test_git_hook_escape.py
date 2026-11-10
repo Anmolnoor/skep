@@ -140,6 +140,7 @@ def test_a_real_sandboxed_worker_can_commit_but_not_plant_hooks(
         profile = sandbox.write_profile(
             tmp_path / "p.profile",
             workspace=wt,
+            skep_home=tmp_path / "skep-home",
             extra_writable=git_metadata_writable_roots(wt),
             network=sandbox.DENY_ALL_NETWORK,
         )

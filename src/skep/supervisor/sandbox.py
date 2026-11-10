@@ -346,14 +346,10 @@ _HOME_SECRET_PATHS = (
 )
 
 
-def _skep_home(skep_home: Path | None) -> Path:
-    return skep_home or Path(os.environ.get("SKEP_HOME") or Path.home() / ".skep")
-
-
-def _refuse_home_inside(skep_home: Path | None, writable_roots: Iterable[Path]) -> None:
+def _refuse_home_inside(skep_home: Path, writable_roots: Iterable[Path]) -> None:
     """ES-F5 (B46): a skep home under a worker-writable root hands the worker
     the store, the baseline and the token — refuse the run, name the fix."""
-    home = _skep_home(skep_home).resolve()
+    home = skep_home.resolve()
     for root in writable_roots:
         if home.is_relative_to(Path(root).resolve()):
             raise SandboxUnavailableError(
@@ -363,10 +359,9 @@ def _refuse_home_inside(skep_home: Path | None, writable_roots: Iterable[Path]) 
             )
 
 
-def secret_paths(skep_home: Path | None = None) -> list[Path]:
+def secret_paths(skep_home: Path) -> list[Path]:
     """The existing secret-floor paths to hide from a worker (resolved)."""
     home = Path.home()
-    skep_home = _skep_home(skep_home)
     supervisor = skep_home / "supervisor"
     candidates = [home / rel for rel in _HOME_SECRET_PATHS]
     candidates += [skep_home / "serve.env", supervisor / "serve-token"]
@@ -656,7 +651,7 @@ def write_profile(
     proxy_port: int | None = None,
     unix_socket_path: str | None = None,
     backend: str | None = None,
-    skep_home: Path | None = None,
+    skep_home: Path,
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -664,6 +659,10 @@ def write_profile(
     cannot be applied here. Every sandboxed launch writes its profile first, so
     this is the chokepoint: no wall, no profile, no run — never a quiet
     unconfined fallback recorded as ``sandbox``.
+
+    ``skep_home`` is required (Mac finding A): ``skep serve --home X`` does
+    not export SKEP_HOME, so an environment fallback hid the wrong home's
+    secrets. Every caller passes the home its own config names.
 
     ``extra_readable`` is bound read-only where a backend hides the host
     (bwrap/podman's tmpfs /tmp); Seatbelt leaves reads open and ignores it.

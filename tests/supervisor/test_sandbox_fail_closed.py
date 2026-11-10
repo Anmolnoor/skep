@@ -34,7 +34,9 @@ def test_write_profile_refuses_when_the_backend_is_unusable(
     """The one chokepoint: no profile (and so no wrapped argv) without a wall."""
     _sandbox_unusable(monkeypatch)
     with pytest.raises(supervisor_sandbox.SandboxUnavailableError, match="missing_binary"):
-        supervisor_sandbox.write_profile(tmp_path / "p.sb", workspace=tmp_path)
+        supervisor_sandbox.write_profile(
+            tmp_path / "p.sb", workspace=tmp_path, skep_home=tmp_path / "skep-home"
+        )
     assert not (tmp_path / "p.sb").exists()
 
 

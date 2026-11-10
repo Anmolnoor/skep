@@ -79,6 +79,7 @@ def test_write_profile_and_wrap_command_roundtrip_podman(
     profile = sandbox.write_profile(
         tmp_path / "sandbox.profile.sb",
         workspace=tmp_path / "ws",
+        skep_home=tmp_path / "skep-home",
         network=DENY_ALL_NETWORK,
         backend="podman",
     )
@@ -178,6 +179,7 @@ def test_podman_smoke_runs_a_real_container_with_no_network(tmp_path: Path) -> N
     profile = sandbox.write_profile(
         tmp_path / "sandbox.profile.sb",
         workspace=workspace,
+        skep_home=tmp_path / "skep-home",
         network=DENY_ALL_NETWORK,
         backend="podman",
     )

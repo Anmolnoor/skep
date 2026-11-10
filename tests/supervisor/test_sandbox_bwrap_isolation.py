@@ -122,7 +122,10 @@ def test_a_real_sandboxed_process_cannot_reach_host_sockets_or_pids(tmp_path: Pa
         workspace.mkdir()
         (workspace / "probe.py").write_text(_PROBE, encoding="utf-8")
         profile = sandbox.write_profile(
-            tmp_path / "p.profile", workspace=workspace, network=sandbox.DENY_ALL_NETWORK
+            tmp_path / "p.profile",
+            workspace=workspace,
+            network=sandbox.DENY_ALL_NETWORK,
+            skep_home=tmp_path / "skep-home",
         )
         argv = sandbox.wrap_command(
             [sys.executable, str(workspace / "probe.py"), str(os.getpid()), *sockets], profile

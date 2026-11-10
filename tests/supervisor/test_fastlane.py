@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,7 +29,9 @@ _live = pytest.mark.skipif(
 
 @_live
 def test_fast_lane_runs_a_pure_computation() -> None:
-    result = run_code_fast("python", "print(sum(range(101)))")
+    result = run_code_fast(
+        "python", "print(sum(range(101)))", skep_home=Path("/nonexistent/skep-home")
+    )
     assert result is not None
     assert result["exit_code"] == 0
     assert result["output"].strip() == "5050"
@@ -48,6 +51,7 @@ def test_fast_lane_network_is_dead() -> None:
         "except OSError:\n"
         "    raise SystemExit(7)\n"
         "raise SystemExit(0)\n",
+        skep_home=Path("/nonexistent/skep-home"),
     )
     assert result is not None
     assert result["exit_code"] == 7  # the connect failed inside the walls
@@ -65,6 +69,7 @@ def test_fast_lane_writes_outside_workspace_fail(tmp_path: Path) -> None:
         result = run_code_fast(
             "python",
             f"open({str(target)!r}, 'w').write('leak')\n",
+            skep_home=tmp_path / "skep-home",
         )
         assert result is not None
         assert result["exit_code"] != 0
@@ -78,7 +83,9 @@ def test_fast_lane_timeout_teaches_the_slow_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("skep.supervisor.serve.fastlane.FAST_LANE_TIMEOUT_SECS", 1)
-    result = run_code_fast("python", "import time; time.sleep(30)")
+    result = run_code_fast(
+        "python", "import time; time.sleep(30)", skep_home=Path("/nonexistent/skep-home")
+    )
     assert result is not None
     assert result["timed_out"] is True
     assert "worker lane" in result["error"]  # the error names the alternative (I9)
@@ -90,7 +97,12 @@ def test_no_sandbox_means_no_fast_lane(monkeypatch: pytest.MonkeyPatch) -> None:
         "skep.supervisor.serve.fastlane.availability",
         lambda: sandbox.SandboxAvailability(False, "missing_binary", "no bwrap"),
     )
-    assert run_code_fast("python", "print('never runs unsandboxed')") is None
+    assert (
+        run_code_fast(
+            "python", "print('never runs unsandboxed')", skep_home=Path("/nonexistent/skep-home")
+        )
+        is None
+    )
 
 
 def test_run_code_fast_request_falls_back_to_worker_dispatch(
@@ -118,12 +130,13 @@ def test_run_code_fast_request_falls_back_to_worker_dispatch(
         lambda store, task_id, **kw: {"task_id": task_id, "state": "completed"},
     )
     store = RunStore(tmp_path / "s.sqlite3")
+    holder = SimpleNamespace(current=SimpleNamespace(home=tmp_path / "home" / "supervisor"))
     try:
         result = tools.execute_mutation(
             "run_code",
             {"repo": "r", "code": "print(1)", "fast": True},
             store=store,
-            holder=None,  # type: ignore[arg-type]
+            holder=holder,  # type: ignore[arg-type]
             runner=None,  # type: ignore[arg-type]
             actor="tester",
         )
@@ -131,3 +144,41 @@ def test_run_code_fast_request_falls_back_to_worker_dispatch(
         store.close()
     assert submitted == ["script"]  # the dispatch happened
     assert result["fast_lane_fallback"] == FAST_LANE_FALLBACK_NOTE
+
+
+def test_fast_lane_profile_uses_serve_home_not_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mac finding A: `skep serve --home X` does not export SKEP_HOME, so a
+    profile that fell back to $SKEP_HOME/~/.skep hid the WRONG serve-token —
+    fast=true could read X's. The tool hands the profile serve's own home."""
+    import subprocess
+
+    from skep.supervisor import RunStore
+    from skep.supervisor.serve import fastlane, tools
+
+    seen: dict[str, object] = {}
+    monkeypatch.setenv("SKEP_HOME", str(tmp_path / "decoy"))
+    monkeypatch.setattr(
+        fastlane, "availability", lambda: sandbox.SandboxAvailability(True, backend="bubblewrap")
+    )
+    monkeypatch.setattr(fastlane, "write_profile", lambda path, **kw: seen.update(kw) or path)
+    monkeypatch.setattr(fastlane, "wrap_command", lambda argv, profile: argv)
+    monkeypatch.setattr(
+        subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", "")
+    )
+    home = tmp_path / "opshome"
+    holder = SimpleNamespace(current=SimpleNamespace(home=home / "supervisor"))
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        tools.execute_mutation(
+            "run_code",
+            {"repo": "r", "code": "print(1)", "fast": True},
+            store=store,
+            holder=holder,  # type: ignore[arg-type]
+            runner=None,  # type: ignore[arg-type]
+            actor="tester",
+        )
+    finally:
+        store.close()
+    assert seen["skep_home"] == home

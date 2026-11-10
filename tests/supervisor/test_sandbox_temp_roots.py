@@ -51,9 +51,12 @@ def test_a_skep_home_inside_a_writable_root_refuses_the_run(tmp_path: Path, wher
         )
 
 
-def test_the_default_home_comes_from_the_environment(
+def test_the_home_is_the_callers_never_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Mac finding A: `skep serve --home X` does not export SKEP_HOME, so an
+    env fallback guarded the wrong home. A decoy $SKEP_HOME changes nothing."""
     monkeypatch.setenv("SKEP_HOME", str(tmp_path / "ws" / "home"))
-    with pytest.raises(sandbox.SandboxUnavailableError):
-        sandbox.write_profile(tmp_path / "p.sb", workspace=tmp_path / "ws")
+    sandbox.write_profile(
+        tmp_path / "p.sb", workspace=tmp_path / "ws", skep_home=tmp_path / "skep-home"
+    )

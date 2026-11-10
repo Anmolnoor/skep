@@ -4014,7 +4014,7 @@ def _execute_mutation(
         if fast_requested:
             from .fastlane import run_code_fast
 
-            fast = run_code_fast(language, str(args["code"]))
+            fast = run_code_fast(language, str(args["code"]), skep_home=holder.current.home.parent)
             if fast is not None:
                 return fast
         # v106-F7: the caller may raise the wall clock up to the ceiling —

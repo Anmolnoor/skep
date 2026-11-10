@@ -43,7 +43,7 @@ def _capped(text: str) -> str:
     return text[:FAST_LANE_OUTPUT_CAP] + "\n… (truncated)"
 
 
-def run_code_fast(language: str, code: str) -> dict[str, Any] | None:
+def run_code_fast(language: str, code: str, *, skep_home: Path) -> dict[str, Any] | None:
     """Run a short python/shell script in the native sandbox, supervisor-side.
 
     Returns None when no native backend is usable — the caller's worker
@@ -60,6 +60,7 @@ def run_code_fast(language: str, code: str) -> dict[str, Any] | None:
             workspace / "sandbox.profile",
             workspace=workspace,
             network=DENY_ALL_NETWORK,
+            skep_home=skep_home,
         )
         argv = (
             [sys.executable, str(script_path)]
