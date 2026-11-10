@@ -10,7 +10,11 @@ from skep.supervisor.serve.channels.slack import (
 )
 
 _CONFIG = ChannelConfig(
-    channel="slack", enabled=True, channel_can_confirm=True, allowed_identities=("C123",)
+    channel="slack",
+    enabled=True,
+    channel_can_confirm=True,
+    allowed_identities=("C123",),
+    allowed_users=("U1",),
 )
 
 
@@ -41,7 +45,11 @@ def test_button_confirms_low_risk_never_shell() -> None:
     identity = ChannelIdentity(channel="slack", identity_id="C123")
     assert (
         handle_button(
-            action_id="confirm", action_class="dispatch_run", identity=identity, config=_CONFIG
+            action_id="confirm",
+            action_class="dispatch_run",
+            identity=identity,
+            config=_CONFIG,
+            user_id="U1",
         ).allowed
         is True
     )
@@ -51,6 +59,7 @@ def test_button_confirms_low_risk_never_shell() -> None:
             action_class="allow_command_review",
             identity=identity,
             config=_CONFIG,
+            user_id="U1",
         ).allowed
         is False
     )
@@ -58,7 +67,11 @@ def test_button_confirms_low_risk_never_shell() -> None:
     outsider = ChannelIdentity(channel="slack", identity_id="COUTSIDE")
     assert (
         handle_button(
-            action_id="confirm", action_class="dispatch_run", identity=outsider, config=_CONFIG
+            action_id="confirm",
+            action_class="dispatch_run",
+            identity=outsider,
+            config=_CONFIG,
+            user_id="U1",
         ).allowed
         is False
     )

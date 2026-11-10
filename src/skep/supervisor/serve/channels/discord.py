@@ -39,8 +39,8 @@ def normalize_inbound(payload: dict[str, object], config: ChannelConfig) -> Norm
     Admission (fail closed): the channel id is allow-listed, OR the gateway
     marked the conversation ``session_bound`` (a thread skep itself created
     under an allow-listed parent), OR it is a DM from an allow-listed user
-    (DM channel ids cannot be known in advance). When ``allowed_users`` is
-    set, the author must additionally be listed — everywhere.
+    (DM channel ids cannot be known in advance). The author must be in
+    ``allowed_users`` — everywhere; an empty list admits nobody (B114).
 
     Mention gating applies only to guild messages arriving via the channel
     allowlist: threads skep created and DMs never need a mention.
@@ -67,7 +67,7 @@ def normalize_inbound(payload: dict[str, object], config: ChannelConfig) -> Norm
             "channel.reject.identity_not_allowlisted",
             audit={"channel": CHANNEL, "identity": channel_id},
         )
-    if config.allowed_users and not user_listed:
+    if not user_listed:  # ES (B114): empty allowed_users admits nobody
         return NormalizedInbound(
             None,
             "channel.reject.user_not_allowlisted",
