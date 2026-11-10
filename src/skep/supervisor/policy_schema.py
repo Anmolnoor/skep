@@ -166,6 +166,10 @@ class ResolvedRule:
     # the operator approved, not every line that starts with it. Deliberate
     # prefix rules (operator document, templates, run allowlists) stay False.
     exact: bool = False
+    # ES-F5 (B34): the layer that stated a rule when it is not the document
+    # ``decide()`` is labelled by — the approved baseline (``template:<name>``).
+    # None keeps the document label, so v1 and v2 answer alike.
+    layer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -415,7 +419,7 @@ def decide(
     return PolicyDecision(
         verdict=winner.verdict,
         rule_id=winner.rule_id,
-        decided_by=f"{label}/{winner.rule_id}",
+        decided_by=f"{winner.layer or label}/{winner.rule_id}",
         scope=scope,
         action=action,
     )
