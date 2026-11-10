@@ -52,8 +52,13 @@ class FakeOpenAI:
         connection — the client sees a transport-class incomplete read."""
         self.chat_scripts.append([{"__drop__": True}])
 
-    def script_tool_call(self, name: str, arguments: dict[str, Any]) -> None:
-        encoded = json.dumps(arguments, separators=(",", ":"))
+    def script_tool_call(self, name: str, arguments: dict[str, Any] | str) -> None:
+        # ES-F8: a str is sent verbatim — how a model's malformed JSON arrives.
+        encoded = (
+            arguments
+            if isinstance(arguments, str)
+            else json.dumps(arguments, separators=(",", ":"))
+        )
         split = max(1, len(encoded) // 2)
         self.chat_scripts.append(
             [

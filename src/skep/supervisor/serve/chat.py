@@ -892,6 +892,21 @@ def _call_args(call: dict[str, Any]) -> dict[str, Any]:
     return dict(arguments) if isinstance(arguments, dict) else {}
 
 
+def _malformed_args(call: dict[str, Any]) -> str | None:
+    """ES-F8 (B35): the raw text of arguments that are not a JSON object.
+
+    ``_call_args`` tolerates the JSON-string variant, but turned a garbled
+    string into ``{}`` — the call ran with no arguments and the model never
+    learned why. Malformed text is now answered with an error row instead."""
+    arguments = call.get("function", {}).get("arguments")
+    if not isinstance(arguments, str) or not arguments.strip():
+        return None
+    try:
+        return None if isinstance(json.loads(arguments), dict) else arguments
+    except json.JSONDecodeError:
+        return arguments
+
+
 class ChatCreate(BaseModel):
     title: str | None = None
     model: str | None = None  # None = follow the configured default
@@ -1509,6 +1524,25 @@ class ChatEngine:
                 # v106-F4 (v101-F15): the model's own call id rides every row
                 # this call produces — position stops being the only link.
                 call_id = str(call.get("id") or "") or None
+                malformed = _malformed_args(call)
+                if malformed is not None:
+                    bad_args: dict[str, Any] = {
+                        "ok": False,
+                        "error": (
+                            f"the arguments for {name} were not a JSON object: "
+                            f"{malformed[:200]} — call it again with valid JSON arguments"
+                        ),
+                    }
+                    previous_read_tool = None
+                    self.store.add_chat_message(
+                        chat_id,
+                        role="tool",
+                        tool_name=name,
+                        tool_call_id=call_id,
+                        content=json.dumps(bad_args, ensure_ascii=True),
+                    )
+                    yield ("tool", {"tool": name, "result": bad_args})
+                    continue
                 if name == CLARIFY_TOOL_NAME:
                     # v51-F7: a turn-ENDING prompt — the third interaction
                     # type (not a read, not a card). The question lands as a

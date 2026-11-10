@@ -582,12 +582,16 @@ def _final_openai_tool_calls(calls: dict[int, dict[str, str]]) -> list[dict[str,
     normalized: list[dict[str, Any]] = []
     for index in sorted(calls):
         call = calls[index]
+        arguments: Any = call["arguments"]
         try:
-            arguments = json.loads(call["arguments"] or "{}")
+            parsed = json.loads(arguments or "{}")
         except json.JSONDecodeError:
-            arguments = {}
-        if not isinstance(arguments, dict):
-            arguments = {}
+            parsed = None
+        # ES-F8 (B35): text that is not a JSON object stays the raw string —
+        # flattening it to {} ran the call with no arguments, silently. The
+        # chat answers a string with an error row the model can act on.
+        if isinstance(parsed, dict):
+            arguments = parsed
         final: dict[str, Any] = {"function": {"name": call["name"], "arguments": arguments}}
         # v106-F4 (v101-F15): the provider's call id survives normalization —
         # it is the only durable link between a call and its result once

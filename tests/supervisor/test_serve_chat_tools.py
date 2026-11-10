@@ -522,6 +522,32 @@ def test_malformed_tool_args_feed_back_and_the_turn_continues(
     assert "here is what I know instead" in streamed
 
 
+def test_malformed_tool_call_json_is_a_tool_error_not_an_empty_call(
+    config: SupervisorConfig, openai: FakeOpenAI
+) -> None:
+    """ES-F8 (B35): arguments that are not a JSON object used to become {} —
+    the call then ran with no arguments and the model never learned why.
+    Now the model reads an error row quoting what it sent, and goes on."""
+    client, chat_id = openai_chat_client(config, openai)
+    openai.script_tool_call("list_runs", '{"limit": 5')  # truncated JSON
+    openai.script_reply("let me retry that properly")
+
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "runs?"}).text
+    )
+
+    tool_rows = [d for name, d in events if name == "tool"]
+    assert len(tool_rows) == 1
+    assert tool_rows[0]["result"]["ok"] is False
+    assert "not a JSON object" in tool_rows[0]["result"]["error"]
+    assert '{"limit": 5' in tool_rows[0]["result"]["error"]
+    assert events[-1] == ("done", {"state": "complete"})
+    # The replay resends the call as the model sent it, not as an empty call.
+    replayed = openai.chat_bodies()[1]["messages"]
+    call = next(m for m in replayed if m.get("tool_calls"))["tool_calls"][0]
+    assert call["function"]["arguments"] == '{"limit": 5'
+
+
 # ---------- v67-F3 (R12b): read-only side questions (/btw) ----------
 
 
