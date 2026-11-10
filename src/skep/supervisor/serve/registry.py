@@ -1464,18 +1464,18 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                 )
             try:
                 validate_chain(run_store, name=body.name, chain=body.chain)
+                schedule = make_schedule(
+                    name=body.name,
+                    repo="",
+                    instructions=body.instructions,
+                    interval_seconds=interval,
+                    worker_kind=body.caste,
+                    once=body.once,
+                    start_at=body.start_at,
+                    chain=body.chain,
+                )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            schedule = make_schedule(
-                name=body.name,
-                repo="",
-                instructions=body.instructions,
-                interval_seconds=interval,
-                worker_kind=body.caste,
-                once=body.once,
-                start_at=body.start_at,
-                chain=body.chain,
-            )
             run_store.add_schedule(schedule)
             return _schedule_view(run_store, schedule)
         if body.repo is None:

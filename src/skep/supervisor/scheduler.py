@@ -114,6 +114,25 @@ def now_ts() -> str:
     return _fmt_ts(datetime.now(UTC))
 
 
+def _start_slot(start_at: str | None) -> str | None:
+    """ES B116: ``start_at`` → the store's ``…Z`` form, or ValueError.
+
+    ``next_run_at`` is compared as a STRING, so a verbatim ``tomorrow`` sorted
+    after every timestamp (never fired) and ``-08:00`` sorted 8 h early. A
+    naive time is UTC — the documented posture."""
+    if start_at is None or start_at == "":
+        return None
+    try:
+        moment = datetime.fromisoformat(start_at.strip())
+    except ValueError as exc:
+        raise ValueError(
+            f"invalid start_at {start_at!r}: use an ISO time, e.g. 2026-07-16T09:00:00Z"
+        ) from exc
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return _fmt_ts(moment.astimezone(UTC))
+
+
 # v14 Step 2: after this many consecutive failed ticks a schedule is auto-disabled
 # (with a recorded reason) so a persistently broken config stops hot-looping.
 MAX_SCHEDULE_CONSECUTIVE_FAILURES = 5
@@ -141,6 +160,7 @@ def make_schedule(
     chain: str | None = None,
 ) -> ScheduleRecord:
     created = now_ts()
+    start = _start_slot(start_at)
     return ScheduleRecord(
         name=name,
         repo=str(repo),
@@ -153,7 +173,7 @@ def make_schedule(
         enabled=enabled,
         created_at=created,
         last_run_at=None,
-        next_run_at=start_at or created,  # default: eligible on the next tick
+        next_run_at=start or created,  # default: eligible on the next tick
         last_task_id=None,
         last_state=None,
         chat_id=chat_id,
@@ -184,6 +204,7 @@ def make_template_schedule(
     """
     instance = instantiate(template, params, repo=str(repo), ref=ref)
     created = now_ts()
+    start = _start_slot(start_at)
     return ScheduleRecord(
         name=name,
         repo=instance.repo,
@@ -196,7 +217,7 @@ def make_template_schedule(
         enabled=enabled,
         created_at=created,
         last_run_at=None,
-        next_run_at=start_at or created,
+        next_run_at=start or created,
         last_task_id=None,
         last_state=None,
         template_name=template.name,

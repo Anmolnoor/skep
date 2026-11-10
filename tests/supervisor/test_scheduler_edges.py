@@ -88,3 +88,54 @@ def test_a_bookkeeping_failure_stays_inside_its_schedule(
     assert [r.name for r in results] == ["first", "second"]
     health = store.schedule_health("second")
     assert health is not None and health.consecutive_failures == 0
+
+
+@pytest.mark.parametrize(
+    ("given", "stored"),
+    [
+        # -08:00 was compared as a string and fired ~3 h early (8 h ignored).
+        ("2026-11-10T09:00:00-08:00", "2026-11-10T17:00:00Z"),
+        ("2026-11-10T09:00:00Z", "2026-11-10T09:00:00Z"),
+        ("2026-11-10T09:00:00", "2026-11-10T09:00:00Z"),  # naive = UTC, as documented
+        ("2026-11-10T09:00:00.250+00:00", "2026-11-10T09:00:00Z"),
+    ],
+)
+def test_start_at_is_normalised_to_utc(given: str, stored: str) -> None:
+    """ES B116: start_at was stored verbatim and compared as a string."""
+    schedule = make_schedule(
+        name="s", repo="", instructions="x", interval_seconds=60, worker_kind="note", start_at=given
+    )
+    assert schedule.next_run_at == stored
+
+
+@pytest.mark.parametrize("garbage", ["tomorrow", "09:00", "2026-13-01T00:00:00Z", "  "])
+def test_garbage_start_at_is_refused(garbage: str) -> None:
+    """ES B116: `tomorrow` sorted after every timestamp and silently never fired."""
+    with pytest.raises(ValueError, match="start_at"):
+        make_schedule(
+            name="s",
+            repo="",
+            instructions="x",
+            interval_seconds=60,
+            worker_kind="note",
+            start_at=garbage,
+        )
+
+
+def test_the_schedules_api_answers_400_for_a_garbage_start_at(
+    config: SupervisorConfig,
+) -> None:
+    from .conftest import serve_client
+
+    with serve_client(config) as client:
+        response = client.post(
+            "/api/schedules",
+            json={
+                "name": "s",
+                "caste": "note",
+                "every": "1d",
+                "instructions": "hi",
+                "start_at": "tomorrow",
+            },
+        )
+    assert response.status_code == 400 and "start_at" in response.json()["detail"]
