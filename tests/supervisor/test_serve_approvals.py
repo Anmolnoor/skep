@@ -18,7 +18,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from skep.profile import run_personal_setup
-from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor import RunStore, SupervisorConfig, run_task
 from skep.supervisor.apply import validate_landing_branch
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.github import PullRequestResult
@@ -1295,3 +1295,42 @@ def test_decider_is_the_authenticated_principal_not_the_body(
     assert approval is not None
     assert approval.resolved_by == "operator"
     assert "worker-x" in str(approval.resolution_note)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "refs/heads/main",
+        "heads/main",
+        "refs/tags/v1",
+        "remotes/origin/x",
+        "Refs/Heads/x",
+        "origin/x",
+    ],
+)
+def test_es_f4_ref_namespace_spellings_are_not_landing_branches(repo: Path, name: str) -> None:
+    """ES-F4 (B127, I1 I8): git accepted `refs/heads/main` as a NEW branch
+    (refs/heads/refs/heads/main), and the run reported applied_branch
+    `refs/heads/main` — which reads as "landed on main"."""
+    git(repo, "remote", "add", "origin", str(repo))
+    error = validate_landing_branch(repo, name)
+    assert error is not None and "ref namespace" in error, name
+
+
+def test_es_f4_a_landed_task_lands_once(repo: Path, config: SupervisorConfig) -> None:
+    """ES-F4 (B128, I1): one completed task landed 7 times on 7 branches."""
+    from skep.supervisor.serve import actions
+
+    outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
+    store = RunStore(config.db_path)
+    try:
+        first = actions.land_run(store, actions.require_run(store, outcome.record.task_id), "t")
+        with pytest.raises(HTTPException) as again:
+            actions.land_run(
+                store, actions.require_run(store, outcome.record.task_id), "t", branch="again"
+            )
+    finally:
+        store.close()
+    assert again.value.status_code == 409
+    assert f"already landed on {first['branch']}" in str(again.value.detail)
+    assert not git(repo, "branch", "--list", "again").stdout.strip()

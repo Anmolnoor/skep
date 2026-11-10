@@ -159,6 +159,17 @@ def validate_landing_branch(repo: Path, branch: str) -> str | None:
         return f"invalid branch name: {branch!r} (use a slug like 'sci-cal' or 'feature/foo')"
     if _git(repo, "check-ref-format", "--branch", name).returncode != 0:
         return f"invalid branch name: {branch!r}"
+    # ES-F4 (B127): `refs/heads/main` is a legal NEW branch to git
+    # (refs/heads/refs/heads/main) — and the run then reported applied_branch
+    # `refs/heads/main`, which reads as "landed on main". A first component
+    # naming a ref namespace or a remote makes every short name ambiguous.
+    first = name.split("/", 1)[0].casefold()
+    remotes = {r.casefold() for r in _git(repo, "remote").stdout.split()}
+    if "/" in name and (first in {"refs", "heads", "tags", "remotes"} or first in remotes):
+        return (
+            f"branch {branch!r} starts with a ref namespace or remote name ({first!r}), "
+            "which makes the landed ref ambiguous; use a plain name like 'feature/foo'"
+        )
     # v81-F1: guard the repo's REAL default (what runs spawn from), not the
     # operator's current checkout — a clone parked on skep/maintain must not
     # block landing there.
@@ -311,6 +322,18 @@ def land_patch(
     An append past that commit still lands (a human asked for the stack), but
     the record stops calling the run confirmed — every landing surface then
     says the landed tree was never re-verified, instead of "confirmed"."""
+    # ES-F4 (B128, I1): one approved patch lands once — a Queen loop or a
+    # double-click landed one task on 7 branches. A follow-up is a new task.
+    landed = next(
+        (
+            a.landing_branch or f"skep/{task_id}"
+            for a in store.approvals_for(task_id)
+            if a.action == "apply_patch" and a.status == "approved"
+        ),
+        None,
+    )
+    if landed is not None:
+        return f"this task already landed on {landed}; a task lands once — dispatch a follow-up"
     verified_base = store.verified_base(task_id)
     moved = moved_past_verified_base(repo, branch, verified_base)
     failure = apply_patch_on_branch(
