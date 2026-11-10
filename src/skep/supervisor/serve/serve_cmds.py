@@ -92,6 +92,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
     from ..cli_cmds import build_config
+    from ..netproxy import record_serve_port
     from .app import create_app
     from .auth import ensure_token
 
@@ -111,6 +112,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"  access token: {ensure_token(config.home)}", flush=True)
     log_path = config.home.parent / SERVE_LOG_FILE
     write_boot_banner(log_path, banner)
+    # ES-F6 (B05): every run's proxy refuses this port on loopback.
+    record_serve_port(config.home, args.port)
     uvicorn.run(
         app,
         host=args.host,

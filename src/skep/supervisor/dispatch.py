@@ -56,7 +56,7 @@ from .config import SupervisorConfig
 from .contracts_io import mint_task, read_event_log, read_result, write_task_file
 from .ingest import IngestOutcome, ingest_run
 from .monitor import MonitorVerdict, synthesize_terminal, watch_worker
-from .netproxy import FilteringProxy
+from .netproxy import FilteringProxy, control_plane_ports
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
 from .providers import ProviderProfile
 from .reverify import reverify_run
@@ -632,7 +632,13 @@ def run_task(
                 proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
                 proxy_unix_path = str(Path(proxy_socket_dir) / "p.sock")
             try:
-                proxy = FilteringProxy(domains, unix_socket_path=proxy_unix_path).start()
+                # ES-F6 (B05): loopback stays open for the project's own test
+                # servers, never for skep serve's port (the control plane).
+                proxy = FilteringProxy(
+                    domains,
+                    unix_socket_path=proxy_unix_path,
+                    denied_loopback_ports=control_plane_ports(config.home),
+                ).start()
             except OSError as exc:
                 return finish_before_worker(
                     reason="proxy_start_failed",
