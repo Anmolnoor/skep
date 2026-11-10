@@ -801,7 +801,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "registered repo REFUSES (a shell there edits files with no patch "
         "card; use quick_edit or dispatch_run) — and git "
         "push/pull/fetch/commit/checkout and sudo never run from chat and "
-        "can never be granted. Output captured and bounded; 60s cap. For "
+        "can never be granted. A command naming a credential file (~/.ssh, "
+        "~/.aws, .env, skep's own tokens) refuses, no card — like read_file. "
+        "Output captured and bounded; 60s cap. For "
         "something that must keep running, propose start_process instead.",
         {
             "command": {"type": "string", "description": "the exact command, verbatim"},
@@ -2712,6 +2714,7 @@ def _queen_shell_lane(
     repo cwds refuse flat (daemons do not belong in checkouts)."""
     from ..policy_resolver import resolve_operator_policy
     from ..policy_schema import DEFAULT_DENY_RULE_ID
+    from ..secret_floor import shell_secret_floor_reason
     from ..shell_prefixes import queen_command_line_refusal
 
     if not command.strip():
@@ -2726,6 +2729,16 @@ def _queen_shell_lane(
             reason="shell.deny.queen_guard",
             detail=reason,
             decided_by="queen-shell-guard",
+        )
+    # ES-F8 (B73): the secret floor, like read_file's — a line naming a
+    # credential path refuses before any rule, grant or card is consulted.
+    secret = shell_secret_floor_reason(command, cwd=cwd, skep_home=holder.current.home)
+    if secret is not None:
+        return AutonomyDecision(
+            verdict="deny",
+            reason="shell.deny.secret_floor",
+            detail=secret,
+            decided_by="floor/floor.secret-reads",
         )
     policy = resolve_operator_policy(store)
     repo = _cwd_registered_repo(store, holder, cwd)

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import os
 from fnmatch import fnmatch
+from glob import iglob
+from itertools import islice
 from pathlib import Path
 
 # Relative to the user's home: a file, or a directory and everything under it.
@@ -79,4 +81,40 @@ def secret_floor_reason(path: str | Path, *, skep_home: Path | None = None) -> s
                 f"{reason} — credential files are never readable by the Queen or a "
                 "worker (the secret floor; no rule, grant or card lifts it)"
             )
+    return None
+
+
+def shell_secret_floor_reason(
+    command: str, *, cwd: str | None, skep_home: Path | None = None
+) -> str | None:
+    """ES-F8 (B73): the floor over a Queen host-shell line. Every argv token
+    (also after ``=`` and a curl-style ``@``) is ``$VAR``/``~``-expanded,
+    resolved against the command's cwd and globbed, then judged by
+    ``secret_floor_reason``; so is the cwd itself.
+
+    ponytail: static tokens only — a shell can build a path at run time
+    (``cat $(printf ~/.s%s/id_rsa sh)``, ``cd ~ && cd .ssh``, a script that
+    opens it). The real fix is sandboxing the Queen's shell (deny the floor
+    paths like the worker sandbox will, B05) — out of scope here."""
+    from .shell_prefixes import command_line_segments
+
+    base = Path(cwd).expanduser() if cwd else Path.cwd()
+    tokens = [token for argv in command_line_segments(command) or [] for token in argv]
+    tokens += [token.strip("'\"") for token in command.split()]  # unparseable lines too
+    candidates = [base]
+    for token in tokens:
+        if "://" in token:
+            continue  # a URL names no local file
+        for part in {token, token.partition("=")[2]}:
+            part = part.removeprefix("@")
+            if not part:
+                continue
+            path = base / Path(os.path.expandvars(part)).expanduser()
+            candidates.append(path)
+            if any(char in part for char in "*?["):
+                candidates += [Path(hit) for hit in islice(iglob(str(path)), 200)]
+    for candidate in candidates:
+        reason = secret_floor_reason(candidate, skep_home=skep_home)
+        if reason is not None:
+            return reason
     return None
