@@ -595,6 +595,44 @@ def _openai_image_message(message: dict[str, Any]) -> dict[str, Any]:
     return {"role": "user", "content": parts}
 
 
+def _call_arguments_json(function: dict[str, Any]) -> str:
+    """History rows carry parsed arguments; the wire wants a JSON string."""
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        return arguments or "{}"
+    return json.dumps(arguments or {}, separators=(",", ":"))
+
+
+def _openai_wire_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Ollama-shaped history row → /v1/chat/completions message.
+
+    History stores tool calls Ollama-native (``arguments`` a dict, no
+    ``type``); chat/completions 400s on that ("arguments of type string"),
+    which broke every preset chat after its first tool call. New dicts only —
+    the stored rows stay Ollama-native for the other protocols.
+    """
+    role = message.get("role")
+    if role == "assistant" and message.get("tool_calls"):
+        calls = []
+        for call in message["tool_calls"]:
+            function = call.get("function") or {}
+            wire: dict[str, Any] = {
+                "type": "function",
+                "function": {
+                    "name": str(function.get("name") or ""),
+                    "arguments": _call_arguments_json(function),
+                },
+            }
+            if call.get("id"):
+                wire["id"] = call["id"]
+            calls.append(wire)
+        return {**message, "tool_calls": calls}
+    if role == "tool":
+        # tool_name is Ollama-native; chat/completions pairs by tool_call_id.
+        return {k: v for k, v in message.items() if k != "tool_name"}
+    return _openai_image_message(message)
+
+
 def _openai_chat_stream(
     base_url: str,
     api_key: str | None,
@@ -604,7 +642,7 @@ def _openai_chat_stream(
     tools: list[dict[str, Any]] | None,
     timeout: float,
 ) -> Iterator[dict[str, Any]]:
-    messages = [_openai_image_message(message) for message in messages]
+    messages = [_openai_wire_message(message) for message in messages]
     body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
     if tools:
         body["tools"] = tools
