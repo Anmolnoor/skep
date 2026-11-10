@@ -246,7 +246,11 @@ def test_serve_records_its_port_for_cli_runs_on_the_same_home(
     from skep.supervisor.serve import serve_cmds
 
     monkeypatch.delenv("SKEP_SERVE_URL", raising=False)
-    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: None)
+    # cmd_serve runs uvicorn.Server via make_server (ES B119): stub the
+    # Server, or a real one binds the port and the test never returns.
+    monkeypatch.setattr(
+        uvicorn.Server, "run", lambda self, sockets=None: setattr(self, "started", True)
+    )
     home = tmp_path / "skep"
     args = argparse.Namespace(
         home=home, worker_cmd=None, auto_approve=False, host="127.0.0.1", port=9187

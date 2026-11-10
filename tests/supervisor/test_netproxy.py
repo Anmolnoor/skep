@@ -480,7 +480,11 @@ def test_skep_serve_records_the_port_it_binds(
 
     from skep.supervisor.serve.serve_cmds import cmd_serve
 
-    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    # cmd_serve runs uvicorn.Server via make_server (ES B119): stub the
+    # Server, or a real one binds the port and the test never returns.
+    monkeypatch.setattr(
+        uvicorn.Server, "run", lambda self, sockets=None: setattr(self, "started", True)
+    )
     args = argparse.Namespace(
         home=tmp_path, worker_cmd=None, auto_approve=False, host="127.0.0.1", port=8799
     )
