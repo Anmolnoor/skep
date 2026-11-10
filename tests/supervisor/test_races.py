@@ -599,10 +599,13 @@ def test_three_lands_at_once_land_once_with_honest_losers(
     an approval twice, and a 409 telling the operator to re-run a task that
     had just landed. Now one landing; the others 409 'already being
     applied', and the ledger holds exactly one approved review."""
+    from skep.supervisor import apply as apply_module  # land_patch's git (ES-F3)
     from skep.supervisor.serve import actions
 
     held = _HeldMutation()
-    monkeypatch.setattr(actions, "apply_patch_on_branch", lambda *a, **k: held(*a[:2]) and None)
+    monkeypatch.setattr(
+        apply_module, "apply_patch_on_branch", lambda *a, **k: held(*a[:2]) and None
+    )
     run = _landable_run(rig.store, repo, tmp_path)
 
     answered: list[int] = []
@@ -645,12 +648,13 @@ def test_a_landing_left_applying_by_a_crash_is_denied_honestly_on_restart(
 def test_a_landing_whose_git_blows_up_hands_the_review_back(
     rig: Rig, repo: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from skep.supervisor import apply as apply_module  # land_patch's git (ES-F3)
     from skep.supervisor.serve import actions
 
     def boom(*_: Any, **__: Any) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(actions, "apply_patch_on_branch", boom)
+    monkeypatch.setattr(apply_module, "apply_patch_on_branch", boom)
     run = _landable_run(rig.store, repo, tmp_path)
 
     with pytest.raises(OSError):
@@ -665,9 +669,10 @@ def test_a_late_approve_names_the_landing_that_won(
 ) -> None:
     """The loser of a landing race that arrives after the winner finished is
     told where the patch landed — not a git error about an existing branch."""
+    from skep.supervisor import apply as apply_module  # land_patch's git (ES-F3)
     from skep.supervisor.serve import actions
 
-    monkeypatch.setattr(actions, "apply_patch_on_branch", lambda *a, **k: None)
+    monkeypatch.setattr(apply_module, "apply_patch_on_branch", lambda *a, **k: None)
     run = _landable_run(rig.store, repo, tmp_path)
     task_id = str(run["task_id"])
     review_id = rig.store.enqueue_approval(task_id, action="apply_patch", reason="land")
