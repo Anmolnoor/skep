@@ -7,6 +7,7 @@ import stat
 from collections.abc import Iterator
 from typing import Any
 
+import httpx
 import pytest
 
 from skep.status import build_status
@@ -336,6 +337,54 @@ def test_mid_stream_ollama_error_raises_with_the_providers_words(ollama: FakeOll
     assert next(stream)["message"]["content"] == "Work"
     with pytest.raises(OllamaError, match="model runner has unexpectedly stopped"):
         next(stream)
+
+
+def test_a_missing_model_fails_fast_with_the_providers_words(
+    ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F7 (B36): a typo'd or unpulled model draws ollama's own 404. It was
+    retried as a v48-F1 flake, three times, and surfaced as a bare "404 from
+    <url>" — the one line that says what is wrong never reached anyone."""
+    from skep.supervisor.serve import llm
+    from skep.supervisor.serve.llm import OllamaError
+
+    monkeypatch.setattr(llm, "_RETRY_DELAY_SECONDS", 0.0)
+    ollama.missing_models.add("qwen3:typo")
+
+    with pytest.raises(OllamaError) as err:
+        list(
+            chat_stream(
+                ollama.base_url,
+                "sk-fake",
+                model="qwen3:typo",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        )
+
+    assert str(err.value) == (
+        f'404 from {ollama.base_url}: model "qwen3:typo" not found, try pulling it first'
+    )
+    assert err.value.status == 404
+    assert len(ollama.chat_bodies()) == 1
+
+
+@pytest.mark.parametrize(
+    ("response", "detail"),
+    [
+        (httpx.Response(404, text="404 page not found\n"), "404 page not found"),
+        (httpx.Response(400, json={"error": {"message": "bad tool_call"}}), "bad tool_call"),
+        (httpx.Response(400, json={"message": "ValidationException"}), "ValidationException"),
+        (httpx.Response(500, json=["odd"]), ""),
+        (httpx.Response(429, json={"error": "x" * 400}), "x" * 300),
+    ],
+)
+def test_error_detail_reads_every_providers_error_body(
+    response: httpx.Response, detail: str
+) -> None:
+    """ES-F7: ollama, OpenAI/Anthropic, Bedrock and non-JSON bodies, capped."""
+    from skep.supervisor.serve.llm import _error_detail
+
+    assert _error_detail(response) == detail
 
 
 def test_chat_stream_gives_up_after_exhausting_retries(

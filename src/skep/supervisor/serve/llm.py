@@ -486,6 +486,22 @@ _STREAM_ATTEMPTS = 3
 _RETRY_DELAY_SECONDS = 0.5
 
 
+def _error_detail(response: httpx.Response) -> str:
+    """ES-F7: the provider's own words from an error body — ollama's
+    ``{"error": "..."}``, the OpenAI/Anthropic ``{"error": {"message"}}``,
+    Bedrock's ``{"message"}`` — capped; plain text when it is not JSON."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text.strip()[:300]
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    if isinstance(error, dict):
+        error = error.get("message")
+    return str(error or payload.get("message") or "")[:300]
+
+
 def _open_stream_lines(
     url: str,
     base_url: str,
@@ -504,11 +520,23 @@ def _open_stream_lines(
         ) as response:
             if response.status_code != 200:
                 response.read()
-                if response.status_code in _TRANSIENT_STATUSES and attempt < _STREAM_ATTEMPTS:
+                detail = _error_detail(response)
+                # ES-F7 (B36): a 404 that names a missing model is the model
+                # name, not a v48-F1 flake — retrying only hides it.
+                lowered = detail.lower()
+                missing_model = (
+                    response.status_code == 404 and "model" in lowered and "not found" in lowered
+                )
+                if (
+                    response.status_code in _TRANSIENT_STATUSES
+                    and attempt < _STREAM_ATTEMPTS
+                    and not missing_model
+                ):
                     time.sleep(_RETRY_DELAY_SECONDS * attempt)
                     continue
                 raise OllamaError(
-                    f"{response.status_code} from {base_url}", status=response.status_code
+                    f"{response.status_code} from {base_url}" + (f": {detail}" if detail else ""),
+                    status=response.status_code,
                 )
             yield from response.iter_lines()
             return
