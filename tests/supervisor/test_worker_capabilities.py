@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import subprocess
 import sys
 import threading
 from collections.abc import Iterator
@@ -2078,3 +2079,17 @@ def test_network_fetch_loopback_is_allowed_in_its_own_words(
         "reason": "capability.allow.network_loopback",
         "detail": "localhost" if "localhost" in origin_url else "127.0.0.1",
     }
+
+
+def test_es_f2_repo_search_never_reads_through_an_out_of_tree_symlink(
+    repo: Path, tmp_path: Path
+) -> None:
+    """ES-F2 (B126): `repo.search "BEGIN"` read a tracked symlink to a key."""
+    secret = tmp_path / "outside-key"
+    secret.write_text("value = CANARY-SEARCH\n", encoding="utf-8")
+    (repo / "key.txt").symlink_to(secret)
+    subprocess.run(["git", "-C", str(repo), "add", "key.txt"], check=True)
+    registry = CapabilityRegistry(repo, emit=lambda t, p: None)
+    result = registry.invoke("repo.search", {"query": "value", "max_matches": 5})
+    assert "CANARY-SEARCH" not in (result.output or "")
+    assert "existing.py:1:value = 0" in (result.output or "")

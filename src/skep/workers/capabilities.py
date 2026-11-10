@@ -110,6 +110,30 @@ CAPABILITY_REASON_PREFIX = "capability."
 CAPABILITY_REASON_TERMS = frozenset({"allow", "require_approval", "deny"})
 
 
+def tracked_file_readable(workspace: Path, path: Path) -> bool:
+    """ES-F2 (B126): may a tracked file's content be read without a capability
+    check (the planning snapshot, SKEP.md, ``repo.search``)?
+
+    ``is_file``/``read_text`` follow symlinks, so a tracked
+    ``deploy_key.txt -> ~/.ssh/id_rsa`` reached the provider in the first plan
+    call — before any tool ran or any card showed — and stayed in the audit
+    trail. Only regular files whose realpath stays inside the worktree (and
+    outside its ``.git``) are read. ``.env`` files never are.
+    ponytail: the dotenv check mirrors PR #56's ``secret_floor._is_dotenv``;
+    call ``secret_floor_reason`` here once both are on main.
+    """
+    if path.name == ".env" or path.name.startswith(".env."):
+        return False
+    try:
+        root = workspace.resolve()
+        real = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return (
+        real.is_relative_to(root) and ".git" not in real.relative_to(root).parts and real.is_file()
+    )
+
+
 @dataclass(frozen=True)
 class CapabilityDecision:
     verdict: CapabilityVerdict
@@ -1087,7 +1111,10 @@ class CapabilityRegistry:
         for relative in self._tracked_files():
             path = self._workspace / relative
             try:
-                if not path.is_file() or path.stat().st_size > 1_000_000:
+                if (
+                    not tracked_file_readable(self._workspace, path)
+                    or path.stat().st_size > 1_000_000
+                ):
                     continue
                 lines = path.read_text(encoding="utf-8").splitlines()
             except (OSError, UnicodeDecodeError):

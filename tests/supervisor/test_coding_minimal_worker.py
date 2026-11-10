@@ -5589,3 +5589,30 @@ def test_real_verify_gate_only_the_pinned_verify_command_fast_paths(repo: Path) 
         {"argv": shlex.split(pin), "purpose": "verify"}
     )
     assert unpinned.verdict == "require_approval"
+
+
+def test_es_f2_snapshot_never_follows_a_symlink_out_of_the_worktree(tmp_path: Path) -> None:
+    """ES-F2 (B126, I5 I12): a tracked `deploy_key.txt -> ~/.ssh/id_rsa` went to
+    the provider in the first plan call, before any tool or card, and stayed
+    in the audit trail. Out-of-tree symlinks (and .env files) are listed by
+    name only; their content never reaches the prompt."""
+    import subprocess
+
+    outside = tmp_path / "home" / ".ssh"
+    outside.mkdir(parents=True)
+    (outside / "id_rsa").write_text("CANARY-SNAPSHOT-KEY", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (repo / "deploy_key.txt").symlink_to(outside / "id_rsa")
+    (repo / ".env").write_text("TOKEN=CANARY-DOTENV", encoding="utf-8")
+    (repo / "inner.txt").symlink_to(repo / "calc.py")  # in-tree link: fine
+    (repo / "SKEP.md").symlink_to(outside / "id_rsa")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+
+    user = _plan_messages(workspace=repo, instructions="x")[1]["content"]
+    assert "CANARY-SNAPSHOT-KEY" not in user
+    assert "CANARY-DOTENV" not in user
+    assert "- deploy_key.txt" in user  # still listed by name
+    assert "--- inner.txt ---\ndef add" in user

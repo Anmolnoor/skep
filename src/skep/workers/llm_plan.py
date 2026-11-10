@@ -26,7 +26,7 @@ from skep.supervisor.serve.llm import (
 )
 from skep.supervisor.store import RunStore
 from skep.worker_contract import MemoryContextEntry
-from skep.workers.capabilities import builtin_tool_manifest
+from skep.workers.capabilities import builtin_tool_manifest, tracked_file_readable
 
 
 class LlmPlanError(Exception):
@@ -493,7 +493,7 @@ _BRIEFING_MAX_CHARS = 4_000
 def _briefing_block(workspace: Path) -> str:
     path = workspace / _BRIEFING_FILENAME
     try:
-        if not path.is_file():
+        if not tracked_file_readable(workspace, path):
             return ""
         text = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
@@ -514,7 +514,7 @@ def _repository_snapshot(workspace: Path) -> str:
     for relative in files[:40]:
         path = workspace / relative
         try:
-            if not path.is_file() or path.stat().st_size > 8_000:
+            if not tracked_file_readable(workspace, path) or path.stat().st_size > 8_000:
                 continue
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
