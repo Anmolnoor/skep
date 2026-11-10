@@ -238,11 +238,11 @@ def test_the_baseline_is_the_enforced_template_layer(config: SupervisorConfig, r
         # unset passes through: a knob the baseline does not set is untouched.
         mode = resolve_stack(layers).knobs["default_execution_mode"]
         assert mode.value == "workspace" and mode.enforced_by is None
-        # The rules ride the same slot: the Queen-side stack answers from them.
+        # The rules ride the same slot: the Queen-side stack answers from them —
+        # all but the worker shell rules, which never reach the host lane (ES-F3).
         operator = resolve_operator_policy(store)
-        assert operator.decision("shell", "run", "uv run pytest -q").rule_id == (
-            "shell-uv-run-pytest"
-        )
+        assert operator.decision("network", "fetch", "example.com").rule_id == "net-fetch-gated"
+        assert operator.decision("shell", "run", "uv run pytest -q").rule_id == "default-deny"
         assert operator.fail_closed == {}
     finally:
         store.close()
@@ -504,7 +504,8 @@ def test_the_floor_wins_over_an_approved_baseline_that_reaches_for_it(
          "rule_id": "shell-everything"}
     )  # fmt: skip
     pb.write_lock(config.home, pb._load_layer(wide), approved_by="op")
-    assert _decide(config, scope="shell", action="run", value="make")["verdict"] == "allow"
+    # ES-F3: a baseline's shell rules bind workers, not the Queen's host lane.
+    assert _decide(config, scope="shell", action="run", value="make")["verdict"] == "deny"
     for command, key in (
         ("git push origin main", "floor.worker-git-hard-denies"),
         ("sudo make install", "floor.never-grantable-prefixes"),

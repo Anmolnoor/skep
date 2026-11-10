@@ -252,7 +252,7 @@ def test_every_face_takes_the_chain(
 ) -> None:
     """ADR 0050: policy_decide and policy_why take delegation_chain on the
     CLI, REST and (why) the chat tool."""
-    ask = ["shell", "run", "uv sync"]
+    ask = ["shell", "run", "uv sync", "--repo", str(repo)]  # ES-F3: the run policy's rule
     decide = ["--home", str(config.home.parent), "policy", "decide", *ask]
     assert main([*decide, "--delegated-by", "queen@operator", "--delegated-by", "m@builder"]) == 0
     row = json.loads(capsys.readouterr().out)
@@ -261,7 +261,7 @@ def test_every_face_takes_the_chain(
     with serve_client(config) as client:
         decided = client.post(
             "/api/policy/decide",
-            json={"scope": "shell", "action": "run", "value": "uv sync"}
+            json={"scope": "shell", "action": "run", "value": "uv sync", "repo": str(repo)}
             | {"delegation_chain": ["queen@operator"]},
         ).json()
         assert (decided["delegation_chain"], decided["rule_id"]) == (
