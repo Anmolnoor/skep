@@ -2,9 +2,10 @@
 
 ``skep tick`` is cron-shaped, and cron does not translate into a container.
 The ticker is the same ``run_due`` call on a timer thread owned by the serve
-process: killable on shutdown, never two ticks concurrently (one thread, one
-sequential loop), and it re-reads its interval every cycle so a policy edit
-takes effect without a restart.
+process: killable on shutdown, never two schedule passes concurrently, and it
+re-reads its interval every cycle so a policy edit takes effect without a
+restart. ES B27: the ticker thread itself only expires cards; the schedule
+pass (model turns, scripts, worker runs) runs on its own thread.
 """
 
 from __future__ import annotations
@@ -76,6 +77,8 @@ class Ticker(threading.Thread):
         self._provider_ok: dict[str, bool] = {}
         # first-run L1: pids last seen blocked, for once-per-transition pushes.
         self._presence_blocked: set[int] = set()
+        # ES B27: the in-flight schedule pass (see run()).
+        self._pass: threading.Thread | None = None
 
     def _interval(self) -> float:
         value = self._store.get_setting(TICKER_INTERVAL_SECONDS)
@@ -249,72 +252,85 @@ class Ticker(threading.Thread):
         # sets the event, so shutdown never waits out a full interval.
         while not self._stop_event.wait(self._interval()):
             try:
-                # v54-F1: stale-card sweep before schedules; a broken sweep
-                # must not break ticking.
+                # v54-F1: stale-card sweep. ES B27: it is the ONLY job on this
+                # thread — I6's timeout default must not wait on a model turn,
+                # a script or a worker run, so everything else rides the
+                # schedule pass below.
                 self._expire_cards()
             except Exception:
                 logger.exception("card timeout sweep failed")
-            try:
-                # v59-F6: provider health rides the tick (throttled inside).
-                self._probe_provider_health()
-            except Exception:
-                logger.exception("provider health sweep failed")
-            try:
-                self._push_presence_blocked()
-            except Exception:
-                logger.exception("agent presence sweep failed")
-            try:
-                # v71-F5: observations expire on the tick — the fluid memory
-                # lane earns its no-proposal write by never outliving its TTL.
-                from ..memory import OBSERVATION_TTL_DAYS
-
-                expired = self._store.expire_observations(ttl_days=OBSERVATION_TTL_DAYS)
-                if expired:
-                    logger.info("expired %d observation(s)", len(expired))
-            except Exception:
-                logger.exception("observation TTL sweep failed")
-            try:
-                # v72-F4: the harvest — observation-shaped chat lines and run
-                # terminals feed the lane the TTL sweep above empties.
-                from ..observe import harvest_observations
-
-                for harvested in harvest_observations(self._store):
-                    logger.info("harvested observation: %s", harvested)
-            except Exception:
-                logger.exception("observation harvest sweep failed")
-            try:
-                # v107-F1: preserved worktrees (failed/unconfirmed runs) are
-                # collected once their TTL passes — kept trees are a warm
-                # workspace and diagnosis evidence, never tenure.
-                from ..dispatch import sweep_expired_preserved_worktrees
-
-                swept = sweep_expired_preserved_worktrees(self._store, self._holder.current)
-                if swept:
-                    logger.info("swept %d expired preserved worktree(s)", swept)
-            except Exception:
-                logger.exception("preserved worktree TTL sweep failed")
-            try:
-                results = run_due(
-                    store=self._store,
-                    config=self._holder.current,
-                    notify=self._notify,
-                    prompt_turn=self._prompt_turn(),
+            # ES B27: at most one schedule pass in flight; a slow one makes the
+            # next tick skip it, never queue behind it. Each job inside has its
+            # own ceiling: scripts SCRIPT_TIMEOUT_SECONDS, prompt turns
+            # PROMPT_TICK_TIMEOUT_SECONDS, worker runs their budget's wall clock.
+            if self._pass is None or not self._pass.is_alive():
+                self._pass = threading.Thread(
+                    target=self._schedule_pass, name="serve-schedules", daemon=True
                 )
-            except Exception:  # one broken tick must never kill the daemon
-                logger.exception("scheduler tick failed")
-                continue
-            for result in results:
-                logger.info("tick ran %r: %s (%s)", result.name, result.task_id, result.state)
-            try:
-                # v53-F1: the conversation-skill observer rides the tick —
-                # opt-in (checked inside), heuristic-only, never in the
-                # request path. A broken sweep must not break ticking.
-                from ..observe import observe_conversations
+                self._pass.start()
 
-                for draft in observe_conversations(self._store):
-                    logger.info("observer proposed skill draft %r", draft)
-            except Exception:
-                logger.exception("conversation-skill sweep failed")
+    def _schedule_pass(self) -> None:
+        try:
+            # v59-F6: provider health rides the tick (throttled inside).
+            self._probe_provider_health()
+        except Exception:
+            logger.exception("provider health sweep failed")
+        try:
+            self._push_presence_blocked()
+        except Exception:
+            logger.exception("agent presence sweep failed")
+        try:
+            # v71-F5: observations expire on the tick — the fluid memory
+            # lane earns its no-proposal write by never outliving its TTL.
+            from ..memory import OBSERVATION_TTL_DAYS
+
+            expired = self._store.expire_observations(ttl_days=OBSERVATION_TTL_DAYS)
+            if expired:
+                logger.info("expired %d observation(s)", len(expired))
+        except Exception:
+            logger.exception("observation TTL sweep failed")
+        try:
+            # v72-F4: the harvest — observation-shaped chat lines and run
+            # terminals feed the lane the TTL sweep above empties.
+            from ..observe import harvest_observations
+
+            for harvested in harvest_observations(self._store):
+                logger.info("harvested observation: %s", harvested)
+        except Exception:
+            logger.exception("observation harvest sweep failed")
+        try:
+            # v107-F1: preserved worktrees (failed/unconfirmed runs) are
+            # collected once their TTL passes — kept trees are a warm
+            # workspace and diagnosis evidence, never tenure.
+            from ..dispatch import sweep_expired_preserved_worktrees
+
+            swept = sweep_expired_preserved_worktrees(self._store, self._holder.current)
+            if swept:
+                logger.info("swept %d expired preserved worktree(s)", swept)
+        except Exception:
+            logger.exception("preserved worktree TTL sweep failed")
+        try:
+            results = run_due(
+                store=self._store,
+                config=self._holder.current,
+                notify=self._notify,
+                prompt_turn=self._prompt_turn(),
+            )
+        except Exception:  # one broken tick must never kill the daemon
+            logger.exception("scheduler tick failed")
+            return
+        for result in results:
+            logger.info("tick ran %r: %s (%s)", result.name, result.task_id, result.state)
+        try:
+            # v53-F1: the conversation-skill observer rides the tick —
+            # opt-in (checked inside), heuristic-only, never in the
+            # request path. A broken sweep must not break ticking.
+            from ..observe import observe_conversations
+
+            for draft in observe_conversations(self._store):
+                logger.info("observer proposed skill draft %r", draft)
+        except Exception:
+            logger.exception("conversation-skill sweep failed")
 
     def stop(self) -> None:
         self._stop_event.set()

@@ -2051,6 +2051,14 @@ class ChatEngine:
         )
 
 
+# ES B27: a scheduled turn's TOTAL budget. The provider timeout is per read,
+# so a trickling stream never trips it; this deadline is checked between
+# streamed events. ponytail: ceiling = this + one silent provider read (300s)
+# for a stream that sends nothing at all — the turn runs off the ticker
+# thread, so even that never holds up card expiry.
+PROMPT_TICK_TIMEOUT_SECONDS: float = 300.0
+
+
 def run_scheduled_prompt(
     store: RunStore,
     holder: ConfigHolder,
@@ -2083,18 +2091,28 @@ def run_scheduled_prompt(
         prompt = f"[Context from schedule {schedule.chain!r}]:\n{chained}\n\n{prompt}"
     store.add_chat_message(chat_id, role="user", content=f"[schedule {schedule.name!r}] {prompt}")
     parts: list[str] = []
+    deadline = time.monotonic() + PROMPT_TICK_TIMEOUT_SECONDS
+    events = engine.turn_events(
+        chat_id,
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        protocol=protocol,
+        read_only=True,
+        unattended=True,
+    )
     try:
-        for event, data in engine.turn_events(
-            chat_id,
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            protocol=protocol,
-            read_only=True,
-            unattended=True,
-        ):
+        for event, data in events:
             if event is None and isinstance(data.get("content"), str):
                 parts.append(str(data["content"]))
+            if time.monotonic() > deadline:
+                close = getattr(events, "close", None)
+                if close is not None:
+                    close()  # a generator: closes the provider stream too
+                return (
+                    f"prompt tick timed out after {PROMPT_TICK_TIMEOUT_SECONDS:g}s",
+                    False,
+                )
     except Exception as exc:  # one broken turn must not break the tick
         return (f"prompt tick failed mid-turn: {exc}", False)
     reply = "".join(parts).strip()

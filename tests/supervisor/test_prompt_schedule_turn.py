@@ -162,3 +162,35 @@ def test_propose_schedule_prompt_caste_needs_a_chat_and_instructions(
         assert stored.worker_kind == "prompt" and stored.chat_id == chat.chat_id
     finally:
         store.close()
+
+
+def test_a_trickling_prompt_turn_hits_its_total_deadline(
+    config: SupervisorConfig, ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES B27: the provider timeout is per READ, so a stream that trickles a
+    token every few seconds never times out. A scheduled turn gets a TOTAL
+    deadline, checked between streamed events."""
+    import time
+
+    from skep.supervisor.serve import chat as chat_mod
+
+    def _trickle(
+        self: object, *_args: object, **_kwargs: object
+    ) -> Iterator[tuple[None, dict[str, str]]]:
+        while True:
+            time.sleep(0.05)
+            yield (None, {"content": "."})
+
+    monkeypatch.setattr(chat_mod.ChatEngine, "turn_events", _trickle)
+    monkeypatch.setattr(chat_mod, "PROMPT_TICK_TIMEOUT_SECONDS", 0.3)
+    store, holder, runner = _engine_parts(config, ollama)
+    try:
+        chat = store.create_chat(title="briefing", model=None)
+        started = time.monotonic()
+        reply, ok = run_scheduled_prompt(
+            store, holder, runner, config.home, _schedule(chat.chat_id), None
+        )
+        assert time.monotonic() - started < 3
+        assert ok is False and "timed out after 0.3s" in reply
+    finally:
+        store.close()
