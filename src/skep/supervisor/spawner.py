@@ -206,9 +206,13 @@ def spawn_worker(
             proxy_port=proxy_port,
             unix_socket_path=network_proxy_unix_path if proxy_port is not None else None,
             backend=backend,
+            skep_home=config.home.parent,
         )
         argv = sandbox.wrap_command(argv, profile_path, backend=backend)
     env = build_worker_env(task.permissions.env_allowlist, baseline=config.env_baseline)
+    # Needed: the builtin worker reads its provider profile, LLM key and
+    # plugin shelf from here (llm_plan.py, capabilities.py). The control-plane
+    # secrets under it are hidden by the profile (ES-F4), not by omission.
     env["SKEP_HOME"] = str(config.home.parent)
     if extra_env:
         # Supervisor-injected, non-secret config (v39-F4: the routed provider's

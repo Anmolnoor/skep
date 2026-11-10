@@ -98,6 +98,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # v111-F1: before anything reads the process env — engine auth rides it.
     loaded_env = load_serve_env(args.home.expanduser().resolve() / SERVE_ENV_FILE)
     config = build_config(args.home, args.worker_cmd, auto_approve=args.auto_approve)
+    # ES-F4 (B05): the sandbox profiles this daemon writes deny this port on
+    # loopback (Seatbelt); workers never inherit it (G2 env allowlist).
+    os.environ["SKEP_SERVE_PORT"] = str(args.port)
     # v26-F3: channel confirm-pointers name the UI the operator actually runs.
     app = create_app(config, web_ui_url=f"http://{args.host}:{args.port}/")
     banner = f"skep serve: http://{args.host}:{args.port}  (home: {config.home})"

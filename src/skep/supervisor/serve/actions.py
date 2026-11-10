@@ -3170,6 +3170,7 @@ def diagnose_run(
                 workspace=workspace,
                 extra_writable=git_metadata_writable_roots(workspace),
                 network=sandbox.DENY_ALL_NETWORK,
+                skep_home=config.home.parent,
             )
         except sandbox.SandboxUnavailableError as exc:
             # ES-F1 (B47): the kept tree is the worker's output — never run

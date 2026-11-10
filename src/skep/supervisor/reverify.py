@@ -225,6 +225,7 @@ def reverify(
                     workspace=worktree,
                     extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
                     network=sandbox.ALLOW_ALL_NETWORK,
+                    skep_home=config.home.parent,
                 )
             prime_code, _prime_tail = _run_command(
                 "uv sync",
@@ -253,6 +254,7 @@ def reverify(
                 workspace=worktree,
                 extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
                 network=sandbox.DENY_ALL_NETWORK,
+                skep_home=config.home.parent,
             )
         applied = subprocess.run(
             ["git", "-C", str(worktree), "apply", str(patch_path)],

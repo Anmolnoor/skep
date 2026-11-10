@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..sandbox import DENY_ALL_NETWORK, availability, wrap_command, write_profile
+from ..spawner import build_worker_env
 
 FAST_LANE_TIMEOUT_SECS = 10
 FAST_LANE_OUTPUT_CAP = 10_000
@@ -70,6 +71,10 @@ def run_code_fast(language: str, code: str) -> dict[str, Any] | None:
             "sandbox_backend": probe.backend,
             "code_sha256": hashlib.sha256(code.encode()).hexdigest(),
         }
+        # ES-F4: the worker env rule (G2), not the daemon's own environment —
+        # which carries every key serve.env loaded. TMPDIR stays inside the
+        # wall (ES-F5: shared temp roots are no longer writable).
+        env = {**build_worker_env(()), "TMPDIR": str(workspace)}
         try:
             proc = subprocess.run(
                 wrap_command(argv, profile),
@@ -77,6 +82,7 @@ def run_code_fast(language: str, code: str) -> dict[str, Any] | None:
                 text=True,
                 timeout=FAST_LANE_TIMEOUT_SECS,
                 cwd=str(workspace),
+                env=env,
                 check=False,
             )
         except subprocess.TimeoutExpired:

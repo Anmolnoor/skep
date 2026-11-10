@@ -13,9 +13,11 @@ enforceable Linux proxy namespace path.
 
 Strength of the boundary (stated honestly): the sandbox physically enforces
 (1) no outbound network for deny-all runs and (2) no writes outside the
-workspace/results/temp boundary. Reads are left unrestricted so the
-Python/git/test toolchain keeps working; read confinement is deliberately out of
-scope (env-secret exposure is already closed by the G2 env allowlist).
+workspace/results/temp boundary. Reads are left open so the Python/git/test
+toolchain keeps working — except the secret floor (ES-F4, V3): the operator's
+credential dirs and skep's own serve-token/serve.env/``*-secret`` files are
+hidden on every backend (``secret_paths``). Env secrets are closed by the G2
+env allowlist.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 BUBBLEWRAP = "bwrap"
@@ -327,6 +330,51 @@ def default_writable_roots() -> tuple[Path, ...]:
     return tuple(seen.values())
 
 
+# ES-F4 (B05, V3 sandbox half): paths no worker may read, whatever its
+# backend. The operator's credential dirs, plus skep's own control-plane
+# secrets: serve-token (the whole REST API), serve.env (engine auth), and the
+# channel/mail ``*-secret`` files. ``llm-secret*`` is deliberately NOT here:
+# the builtin worker authenticates to its LLM with it (llm_plan.py) until V6
+# moves the credential into the proxy. Checked when the profile is built, so
+# a secret file created mid-run is not covered.
+_HOME_SECRET_PATHS = (
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".config/gh",
+    ".netrc",
+    ".git-credentials",
+    ".docker/config.json",
+    ".kube",
+)
+
+
+def secret_paths(skep_home: Path | None = None) -> list[Path]:
+    """The existing secret-floor paths to hide from a worker (resolved)."""
+    home = Path.home()
+    if skep_home is None:
+        skep_home = Path(os.environ.get("SKEP_HOME") or home / ".skep")
+    supervisor = skep_home / "supervisor"
+    candidates = [home / rel for rel in _HOME_SECRET_PATHS]
+    candidates += [skep_home / "serve.env", supervisor / "serve-token"]
+    if supervisor.is_dir():
+        candidates += sorted(p for p in supervisor.glob("*-secret") if p.name != "llm-secret")
+    return [path.resolve() for path in candidates if path.exists()]
+
+
+def _serve_ports() -> set[int]:
+    """Where serve may listen: the default, the CLI's $SKEP_SERVE_URL, and the
+    port a running ``skep serve`` exported for its own dispatches."""
+    ports = {8765}
+    url_port = urlparse(os.environ.get("SKEP_SERVE_URL", "")).port
+    if url_port:
+        ports.add(url_port)
+    raw = os.environ.get("SKEP_SERVE_PORT", "")
+    if raw.isdigit():
+        ports.add(int(raw))
+    return ports
+
+
 # v115-F9: loopback is not egress. The project's own tests start servers on
 # 127.0.0.1 and talk to them; with loopback denied, skep's own suite lost 210
 # tests inside the wall on its first self-maintenance run. The wall still
@@ -388,6 +436,7 @@ def _bubblewrap_args(
     network: NetworkPolicy,
     proxy_port: int | None,
     unix_socket_path: str | None = None,
+    read_denied: Iterable[Path] = (),
 ) -> list[str]:
     # v28-F3: a domain list is now enforceable on Linux. Keep --unshare-net
     # (the deny-all pin Linux already trusts — the netns has NO route out),
@@ -413,6 +462,12 @@ def _bubblewrap_args(
     for root in writable_roots:
         path = str(Path(root))
         args.extend(["--bind", path, path])
+    for denied in read_denied:
+        # ES-F4: after the writable binds, so a mask wins inside one too.
+        # /tmp and /run are fresh tmpfs here: their host paths do not exist.
+        if denied.parts[1:2] in (("tmp",), ("run",)):
+            continue
+        args.extend(_mask_args(denied, dev_null=["--ro-bind", "/dev/null", str(denied)]))
     if network.is_domain_list:
         assert unix_socket_path is not None and proxy_port is not None
         args.extend(["--bind", unix_socket_path, SANDBOX_PROXY_SOCKET])
@@ -433,8 +488,17 @@ def _bubblewrap_args(
     return args
 
 
+def _mask_args(path: Path, *, dev_null: list[str]) -> list[str]:
+    """An empty tmpfs over a secret directory, /dev/null over a secret file."""
+    return ["--tmpfs", str(path)] if path.is_dir() else dev_null
+
+
 def _podman_args(
-    *, writable_roots: Iterable[Path], network: NetworkPolicy, rootfs: Path
+    *,
+    writable_roots: Iterable[Path],
+    network: NetworkPolicy,
+    rootfs: Path,
+    read_denied: Iterable[Path] = (),
 ) -> list[str]:
     """v44-F7: the container equivalent of the bwrap invocation.
 
@@ -459,6 +523,8 @@ def _podman_args(
     args.extend(["--tmpfs", "/tmp"])
     for root in roots:
         args.extend(["-v", f"{root}:{root}"])
+    for denied in read_denied:  # ES-F4: /home rides in read-only; hide these
+        args.extend(_mask_args(denied, dev_null=["-v", f"/dev/null:{denied}:ro"]))
     if roots:
         # Popen(cwd=workspace) only moves the podman CLIENT; the container's
         # workdir needs pinning explicitly (workspace is always the first root).
@@ -516,6 +582,7 @@ def build_profile(
     network: NetworkPolicy = DENY_ALL_NETWORK,
     proxy_port: int | None = None,
     unix_socket_path: str | None = None,
+    read_denied: Iterable[Path] = (),
 ) -> str:
     """Return the SBPL text confining writes to ``writable_roots`` and gating network.
 
@@ -539,6 +606,14 @@ def build_profile(
         lines.append(f"(allow file-write* {subpaths})")
     dev_nodes = " ".join(f'(literal "{node}")' for node in _DEV_WRITE_NODES)
     lines.append(f"(allow file-write* {dev_nodes})")
+    # ES-F4 (B05): last match wins, so these follow every allow above. The
+    # loopback allow (v115-F9) keeps a worker's own test servers reachable;
+    # serve's port is the one listener on this host it must never dial.
+    for port in sorted(_serve_ports()):
+        lines.append(f'(deny network-outbound (remote ip "localhost:{port}"))')
+    for denied in read_denied:
+        kind = "subpath" if denied.is_dir() else "literal"
+        lines.append(f'(deny file-read* ({kind} "{_sbpl_quote(denied)}"))')
     return "\n".join(lines) + "\n"
 
 
@@ -551,6 +626,7 @@ def write_profile(
     proxy_port: int | None = None,
     unix_socket_path: str | None = None,
     backend: str | None = None,
+    skep_home: Path | None = None,
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -560,6 +636,7 @@ def write_profile(
     unconfined fallback recorded as ``sandbox``.
     """
     probe = require_usable(backend)
+    read_denied = secret_paths(skep_home)
     if probe.backend == PODMAN:
         return _write_argv_profile(
             profile_path,
@@ -567,6 +644,7 @@ def write_profile(
                 writable_roots=[workspace, *extra_writable],
                 network=network,
                 rootfs=_podman_rootfs_skeleton(profile_path.parent),
+                read_denied=read_denied,
             ),
             header=_PODMAN_HEADER,
         )
@@ -579,6 +657,7 @@ def write_profile(
                 network=network,
                 proxy_port=proxy_port,
                 unix_socket_path=unix_socket_path,
+                read_denied=read_denied,
             ),
         )
     writable_roots = [workspace, *extra_writable, *default_writable_roots()]
@@ -589,6 +668,7 @@ def write_profile(
             network=network,
             proxy_port=proxy_port,
             unix_socket_path=unix_socket_path,
+            read_denied=read_denied,
         )
     )
     return profile_path
