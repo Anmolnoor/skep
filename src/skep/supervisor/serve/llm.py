@@ -603,18 +603,26 @@ def _call_arguments_json(function: dict[str, Any]) -> str:
     return json.dumps(arguments or {}, separators=(",", ":"))
 
 
-def _openai_wire_message(message: dict[str, Any]) -> dict[str, Any]:
+def _openai_wire_message(
+    message: dict[str, Any], index: int, unanswered: list[str]
+) -> dict[str, Any]:
     """Ollama-shaped history row → /v1/chat/completions message.
 
     History stores tool calls Ollama-native (``arguments`` a dict, no
     ``type``); chat/completions 400s on that ("arguments of type string"),
     which broke every preset chat after its first tool call. New dicts only —
     the stored rows stay Ollama-native for the other protocols.
+
+    ES-F3: native ollama stores calls with no id, and chat/completions needs
+    one on every call and a ``tool_call_id`` on every result. Id-less calls
+    get a synthesized id queued in ``unanswered``; id-less results take them
+    in order — the anthropic FIFO rule for pre-id rows, where results follow
+    their call in emission order.
     """
     role = message.get("role")
     if role == "assistant" and message.get("tool_calls"):
         calls = []
-        for call in message["tool_calls"]:
+        for position, call in enumerate(message["tool_calls"]):
             function = call.get("function") or {}
             wire: dict[str, Any] = {
                 "type": "function",
@@ -623,13 +631,17 @@ def _openai_wire_message(message: dict[str, Any]) -> dict[str, Any]:
                     "arguments": _call_arguments_json(function),
                 },
             }
-            if call.get("id"):
-                wire["id"] = call["id"]
+            wire["id"] = call.get("id") or f"call_skep_{index}_{position}"
+            if not call.get("id"):
+                unanswered.append(wire["id"])
             calls.append(wire)
         return {**message, "tool_calls": calls}
     if role == "tool":
         # tool_name is Ollama-native; chat/completions pairs by tool_call_id.
-        return {k: v for k, v in message.items() if k != "tool_name"}
+        result = {k: v for k, v in message.items() if k != "tool_name"}
+        if not result.get("tool_call_id") and unanswered:
+            result["tool_call_id"] = unanswered.pop(0)
+        return result
     return _openai_image_message(message)
 
 
@@ -642,7 +654,8 @@ def _openai_chat_stream(
     tools: list[dict[str, Any]] | None,
     timeout: float,
 ) -> Iterator[dict[str, Any]]:
-    messages = [_openai_wire_message(message) for message in messages]
+    unanswered: list[str] = []
+    messages = [_openai_wire_message(m, i, unanswered) for i, m in enumerate(messages)]
     body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
     if tools:
         body["tools"] = tools

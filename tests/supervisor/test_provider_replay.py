@@ -76,3 +76,35 @@ def test_tool_history_replays_on_every_protocol(config: SupervisorConfig, provid
     events = sse_events(client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm").text)
     assert events[-1] == ("done", {"state": "complete"})
     assert len(provider.chat_bodies()) == 4
+
+
+def test_ollama_native_history_replays_after_switching_to_openai_compat(
+    config: SupervisorConfig,
+) -> None:
+    """Native ollama stores its calls with no id; chat/completions requires
+    one on every call and a matching tool_call_id on every result."""
+    ollama, openai = FakeOllama().start(), FakeOpenAI().start()
+    try:
+        client = serve_client(config)
+        native = {"base_url": ollama.base_url, "default_model": "m", "protocol": "ollama"}
+        client.put("/api/llm/config", json=native)
+        chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+        ollama.script_tool_call("list_runs", {"limit": 5})
+        ollama.script_tool_call("list_runs", {"limit": 6})
+        ollama.script_reply("none")
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "runs?"})
+
+        compat = {**native, "base_url": openai.base_url, "protocol": "openai-compat"}
+        client.put("/api/llm/config", json=compat)
+        openai.script_reply("still none")
+        events = sse_events(
+            client.post(f"/api/chats/{chat_id}/messages", json={"content": "again"}).text
+        )
+        assert events[-1] == ("done", {"state": "complete"})
+        sent = openai.chat_bodies()[0]["messages"]
+        calls = [m["tool_calls"][0]["id"] for m in sent if m.get("tool_calls")]
+        results = [m["tool_call_id"] for m in sent if m["role"] == "tool"]
+        assert len(set(calls)) == 2 and results == calls
+    finally:
+        ollama.stop()
+        openai.stop()
