@@ -1758,7 +1758,7 @@ class ChatEngine:
                             self.sleep(self.get_run_repeat_delay_seconds)
                         try:
                             result = execute_read_tool(
-                                name, args, store=self.store, holder=self.holder
+                                name, args, store=self.store, holder=self.holder, chat_id=chat_id
                             )
                         except HTTPException as exc:
                             result = {"error": str(exc.detail)}

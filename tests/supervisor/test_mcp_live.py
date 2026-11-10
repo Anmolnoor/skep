@@ -483,3 +483,33 @@ def test_b09_destructive_name_cards_in_a_roleless_chat(
     assert "target_account_purge" not in calls
     (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
     assert action["status"] == "proposed"
+
+
+def test_b122_list_mcp_tools_shows_the_role_chats_own_verdict(
+    config: SupervisorConfig,
+    ollama: FakeOllama,
+    fake_runner: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """ES (B122): in a role chat every MCP call cards (role mcp-gated), but
+    list_mcp_tools computed its policy column WITHOUT the role and said
+    `allow` — the Queen was told a call would run that then carded."""
+    _seed_server(config)
+    client, _ = chat_client(config, ollama)
+    chat_id = client.post("/api/chats", json={"role": "assistant"}).json()["chat_id"]
+    ollama.script_tool_call("list_mcp_tools", {"server_id": "issues"})
+    ollama.script_reply("listed")
+    response = client.post(f"/api/chats/{chat_id}/messages", json={"content": "what tools?"})
+    tool_event = next(
+        line for line in response.text.splitlines() if "list_issues" in line and "policy" in line
+    )
+    view = json.loads(tool_event.removeprefix("data: "))["result"]["tools"]
+    listed = next(entry for entry in view if entry["name"] == "list_issues")
+    assert listed["policy"] == "require_approval"
+
+
+def test_b122_promote_tool_description_names_seed_tools() -> None:
+    """ES (B122): the description said "a landed forged plugin", so the
+    model refused to promote a shipped seed tool until told otherwise."""
+    from skep.supervisor.serve.tools import tool_description
+
+    assert "seed" in tool_description("promote_tool")

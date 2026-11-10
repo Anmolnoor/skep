@@ -712,30 +712,19 @@ def test_run_schedule_now_is_carded_and_marks_due(
     client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm")
     assert next_run_at("ritual") <= now_ts()  # due: the next tick dispatches it
 
-    # A disabled schedule refuses cleanly and stays un-due.
-    ollama.script_tool_call("run_schedule_now", {"name": "paused"})
-    client.post(f"/api/chats/{chat_id}/messages", json={"content": "run paused now"})
-    proposed = [
-        a
-        for a in client.get(f"/api/chats/{chat_id}").json()["actions"]
-        if a["status"] == "proposed"
-    ]
-    ollama.script_reply("noted")
-    confirm = client.post(f"/api/chats/{chat_id}/actions/{proposed[0]['action_id']}/confirm")
-    assert confirm.status_code == 200
+    # ES (B122): a disabled or unknown schedule is refused WITHOUT a card —
+    # a card that can only fail teaches the operator to click blindly.
+    for name in ("paused", "ghost"):
+        ollama.script_tool_call("run_schedule_now", {"name": name})
+        ollama.script_reply("noted")
+        reply = client.post(f"/api/chats/{chat_id}/messages", json={"content": f"run {name}"})
+        assert "set_schedule_enabled" in reply.text or "no schedule named" in reply.text
+        assert not [
+            a
+            for a in client.get(f"/api/chats/{chat_id}").json()["actions"]
+            if a["status"] == "proposed"
+        ]
     assert next_run_at("paused") == far_future
-
-    # Unknown name degrades to a clean tool error on the card too.
-    ollama.script_tool_call("run_schedule_now", {"name": "ghost"})
-    client.post(f"/api/chats/{chat_id}/messages", json={"content": "run ghost now"})
-    proposed = [
-        a
-        for a in client.get(f"/api/chats/{chat_id}").json()["actions"]
-        if a["status"] == "proposed"
-    ]
-    ollama.script_reply("noted")
-    confirm = client.post(f"/api/chats/{chat_id}/actions/{proposed[0]['action_id']}/confirm")
-    assert confirm.status_code == 200
 
 
 def test_schedule_delete_and_disable_are_carded_crud(
