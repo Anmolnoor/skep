@@ -43,6 +43,7 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {"limit": {"type": "integer"}, "mailbox": {"type": "string"}},
         },
+        "annotations": {"readOnlyHint": True},  # B09: reads must say so
     },
     {
         "name": "read_message",
@@ -55,6 +56,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {"uid": {"type": "string"}, "mailbox": {"type": "string"}},
             "required": ["uid"],
         },
+        "annotations": {"readOnlyHint": True},  # B09: reads must say so
     },
     {
         "name": "send_message",

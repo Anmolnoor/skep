@@ -47,8 +47,13 @@ def fake_runner(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, An
         if method == "tools/list":
             return {
                 "tools": [
-                    {"name": "list_issues", "description": "read the issues"},
+                    {
+                        "name": "list_issues",
+                        "description": "read the issues",
+                        "annotations": {"readOnlyHint": True},
+                    },
                     {"name": "frobnicate_gizmo", "description": "who knows"},
+                    {"name": "read_inbox", "annotations": {"readOnlyHint": True}},
                 ]
             }
         if method == "tools/call":
@@ -457,3 +462,24 @@ def test_unregister_mcp_server_is_carded_and_removes_the_config(
             remove_mcp_server(store, "ghost")
     finally:
         store.close()
+
+
+def test_b09_destructive_name_cards_in_a_roleless_chat(
+    config: SupervisorConfig,
+    ollama: FakeOllama,
+    fake_runner: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """ES-F (B09, P0, live repro f3-30): `target_account_purge` contains
+    "get" and ran on the host with no card. It must card."""
+    _seed_server(config)
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_call(
+        "call_mcp_tool",
+        {"server_id": "issues", "tool": "target_account_purge", "arguments": {"account": "acme"}},
+    )
+    ollama.script_reply("asked")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "purge acme"})
+    calls = [params.get("name") for method, params in fake_runner if method == "tools/call"]
+    assert "target_account_purge" not in calls
+    (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
+    assert action["status"] == "proposed"

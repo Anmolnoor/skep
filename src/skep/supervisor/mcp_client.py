@@ -14,7 +14,7 @@ module only discovers and calls; authorization lives in the capability engine.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -66,6 +66,9 @@ class MCPTool:
     name: str
     description: str
     input_schema: dict[str, object] = field(default_factory=dict)
+    # ES (B09): the server's ``annotations.readOnlyHint`` — True only when the
+    # server says so; None = not looked up yet (a bare name from a call).
+    read_only: bool | None = None
 
     @property
     def capability_id(self) -> str:
@@ -81,9 +84,14 @@ class MCPCallResult:
 
 # Keyword heuristics for classifying an MCP tool's risk (highest wins). A tool
 # the heuristic can't place is "unknown" — which FAILS CLOSED (v39-F1): it
-# needs an approval like any risky class, because auto-allowing a name we
-# could not even classify is how a live MCP server would slip a side effect
-# past the gate. Only read-shaped names keep the v17 auto-allow ergonomic.
+# needs an approval like any risky class.
+#
+# ES (B09, P0): keywords match whole name TOKENS, never substrings — "get"
+# inside tar*get*/bud*get*/for*get* once made `target_account_purge` a read
+# that ran on the host with no card. And "read" is affirmative: the server
+# must mark the tool ``readOnlyHint`` AND its LEADING verb must be a read
+# verb. `query`/`fetch` are deliberately not read verbs (`run_query`, a fetch
+# egresses); anything else asks until the operator runs allow_mcp_tool.
 _MCP_EXTERNAL_KEYWORDS = ("send", "post", "email", "notify", "publish", "deploy", "sms", "exec")
 _MCP_NETWORK_KEYWORDS = ("http", "url", "fetch", "download", "browse", "web", "request")
 _MCP_WRITE_KEYWORDS = (
@@ -97,7 +105,16 @@ _MCP_WRITE_KEYWORDS = (
     "set",
     "put",
 )
-_MCP_READ_KEYWORDS = ("read", "list", "get", "search", "query", "describe", "status", "show")
+_MCP_READ_VERBS = ("get", "list", "read", "search", "describe", "show", "find")
+
+
+def _name_tokens(name: str) -> list[str]:
+    """``getUser`` / ``get_user`` / ``get-user`` → ``["get", "user"]``."""
+    import re
+
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    return [token for token in re.split(r"[^a-z0-9]+", spaced.lower()) if token]
+
 
 # v71-F2: a browse-bound server's page-STATE reads. Deliberately tight — a
 # name matching none of these is an act (fail closed): navigation is an
@@ -113,21 +130,23 @@ def classify_browse_action(tool_name: str) -> str:
 
 
 def classify_mcp_risk(tool: MCPTool) -> str:
-    """Classify an MCP tool into a capability risk class from its name.
+    """Classify an MCP tool into a capability risk class.
 
-    Priority external_side_effect > network > write > read > unknown. An
-    unknown tool requires approval (fail closed); a project may grant the
-    ``unknown`` risk explicitly — a visible policy act, never a default.
+    ``read`` only for a server-marked read-only tool whose leading verb is a
+    read verb (B09). Otherwise external_side_effect > network > write >
+    unknown by whole name token. Every non-read class requires approval
+    (fail closed); a project may grant a risk explicitly — a visible act.
     """
-    name = tool.name.lower()
-    if any(keyword in name for keyword in _MCP_EXTERNAL_KEYWORDS):
-        return "external_side_effect"
-    if any(keyword in name for keyword in _MCP_NETWORK_KEYWORDS):
-        return "network"
-    if any(keyword in name for keyword in _MCP_WRITE_KEYWORDS):
-        return "write"
-    if any(keyword in name for keyword in _MCP_READ_KEYWORDS):
+    tokens = _name_tokens(tool.name)
+    if tool.read_only is True and tokens and tokens[0] in _MCP_READ_VERBS:
         return "read"
+    for risk, keywords in (
+        ("external_side_effect", _MCP_EXTERNAL_KEYWORDS),
+        ("network", _MCP_NETWORK_KEYWORDS),
+        ("write", _MCP_WRITE_KEYWORDS),
+    ):
+        if any(token in keywords for token in tokens):
+            return risk
     return "unknown"
 
 
@@ -222,12 +241,15 @@ class MCPClient:
             if not name:
                 continue
             schema = entry.get("inputSchema")
+            annotations = entry.get("annotations")
             tools.append(
                 MCPTool(
                     server_id=self._config.server_id,
                     name=name,
                     description=str(entry.get("description") or ""),
                     input_schema=dict(schema) if isinstance(schema, dict) else {},
+                    read_only=isinstance(annotations, dict)
+                    and annotations.get("readOnlyHint") is True,
                 )
             )
         return tools
@@ -453,6 +475,29 @@ def runner_for_config(config: MCPServerConfig) -> MCPRunner:
     return run
 
 
+def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:
+    """B09: a bare tool name from a call carries no ``readOnlyHint``; ask the
+    server's own tools/list. Only a read-verb name can become a read, so only
+    those pay the lookup; any failure leaves the tool not-read-only (asks).
+
+    ponytail: one live tools/list per read-verb decision — cache per server
+    if MCP call volume makes the extra round trip matter.
+    """
+    if tool.read_only is not None:
+        return tool
+    tokens = _name_tokens(tool.name)
+    read_only = False
+    config = load_mcp_servers(store).get(tool.server_id)
+    # A browse server classifies by its own page-state list (v71-F2).
+    if config is not None and config.scope != "browse" and tokens and tokens[0] in _MCP_READ_VERBS:
+        try:
+            listed = MCPClient(config, runner=runner_for_config(config)).list_tools()
+        except Exception:  # an unreachable server cannot vouch for a read
+            listed = []
+        read_only = any(entry.name == tool.name and entry.read_only for entry in listed)
+    return replace(tool, read_only=read_only)
+
+
 def mcp_tool_scope_action(store: RunStore, tool: MCPTool) -> tuple[Scope, str]:
     """The (scope, action) one MCP tool call decides under (v41-F3).
 
@@ -464,6 +509,7 @@ def mcp_tool_scope_action(store: RunStore, tool: MCPTool) -> tuple[Scope, str]:
     server = load_mcp_servers(store).get(tool.server_id)
     scope = server.scope if server is not None else "mcp"
     if scope == "email":
+        tool = with_server_hints(store, tool)
         return "email", ("read" if classify_mcp_risk(tool) == "read" else "send")
     if scope == "browse":
         return "browse", classify_browse_action(tool.name)
@@ -476,6 +522,7 @@ def mcp_scope_decision(
     """R1 (ADR 0055 D3): the chat's role layer tightens the lane below."""
     from .roles import tighten_autonomy
 
+    tool = with_server_hints(store, tool)
     lane = _mcp_scope_lane(store, tool)
     scope, action = mcp_tool_scope_action(store, tool)
     value = f"{tool.server_id}:{tool.name}"

@@ -302,8 +302,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "list_mcp_servers",
         "Registered MCP servers (id, transport, command/url). MCP tools are "
-        "policy-gated: read-shaped tools run free, everything else needs a "
-        "confirmation or a learned allow rule.",
+        "policy-gated: a read (server-marked read-only AND named get_/list_/"
+        "read_/search_/describe_/show_/find_) runs free, everything else needs "
+        "a confirmation or a learned allow rule.",
         {},
     ),
     _tool(
@@ -748,7 +749,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "stdio servers need a command argv; http servers need a url (an MCP "
         "Streamable HTTP endpoint, usually ending in /mcp; legacy /sse-style "
         "HTTP+SSE servers are not supported). "
-        "scope='email' binds a mail server: its read-shaped tools decide as "
+        "scope='email' binds a mail server: its reads (see list_mcp_servers) decide as "
         "email/read (flow freely), everything else as email/send (cards). "
         "scope='browse' binds a browser server (e.g. command "
         "['npx','@playwright/mcp@latest']): page-state reads like snapshot/"
@@ -1223,7 +1224,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "call_mcp_tool",
-        "Call one tool on a registered MCP server. Read-shaped tools and "
+        "Call one tool on a registered MCP server. Reads (server-marked "
+        "read-only, read-verb name) and "
         "tools covered by an allow rule run immediately; anything else "
         "becomes a confirmation card; a policy deny rule refuses outright.",
         {
