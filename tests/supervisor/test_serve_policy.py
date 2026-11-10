@@ -1022,21 +1022,20 @@ def test_maintain_phase_lands_on_one_integration_branch_and_freezes_main(
     assert _wait_applied_branch(client, run1["task_id"]) == "skep/maintain"
     tip_after_one = git(repo, "rev-parse", "skep/maintain").stdout.strip()
 
-    # A second run's identical patch cannot append onto the diverged branch;
-    # v81-F2: the failed auto-apply is DENIED with the failure on record —
-    # approving again would fail identically, so a pending row would lie (I8).
+    # A second run verified on main cannot append onto the diverged branch.
+    # ES-F3 (B131): the auto lane never lands past the commit G10 verified,
+    # so it blocks before applying — named on the run's trail, no approval
+    # row (a pending one would fail identically; a denied one reads as policy).
     run2 = _run_to_terminal(client, repo, "Fix the bug. MODE:happy")
     assert run2["state"] == "completed"
     assert _wait_applied_branch(client, run2["task_id"]) is None
-    pending = client.get("/api/approvals").json()["approvals"]
-    assert not any(a["run"]["task_id"] == run2["task_id"] for a in pending)
     store = RunStore(config.db_path)
     try:
-        failed = [a for a in store.approvals_for(str(run2["task_id"]))]
+        assert store.approvals_for(str(run2["task_id"])) == []
+        trail = [d or "" for _, d, _ in store.transitions_for(str(run2["task_id"]))]
     finally:
         store.close()
-    assert failed and failed[0].status == "denied"
-    assert (failed[0].resolution_note or "").startswith("apply failed:")
+    assert any("land it by hand" in detail for detail in trail)
 
     # The integration branch was not corrupted, there are no per-task branches,
     # and main never advanced.

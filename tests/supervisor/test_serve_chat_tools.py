@@ -1040,6 +1040,8 @@ def test_get_run_tool_reports_patch_artifact_without_claiming_apply(
         # did (I8). The pin moved with the change.
         "detail": "re-ran clean: all exit 0 [command from the worker's own verify step]",
         "created_at": detail["reverification"]["created_at"],
+        # ES-F3: the commit G10 verified on — what landing builds on.
+        "base_commit": detail["reverification"]["base_commit"],
     }
     assert any(artifact["kind"] == "patch" for artifact in detail["artifacts"])
     assert detail["transitions"][0]["detail"] == {

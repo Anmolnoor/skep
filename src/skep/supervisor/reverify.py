@@ -28,9 +28,16 @@ from pathlib import Path
 from skep.worker_contract import Event, EventType
 
 from . import sandbox
+from .apply import resolve_commit
 from .config import SupervisorConfig
 from .store import RunStore
-from .worktree import TREE_LOCK, create_worktree, git_metadata_writable_roots, remove_worktree
+from .worktree import (
+    TREE_LOCK,
+    _resolve_ref,
+    create_worktree,
+    git_metadata_writable_roots,
+    remove_worktree,
+)
 
 # pytest/usage exit codes: 0 pass, 1..4 real failure, 5 no-tests; 127 = command
 # not found (the supervisor lacks the worker's toolchain — can't re-verify here).
@@ -381,9 +388,14 @@ def reverify_run(
     uv_cache_dir = project_cache_root(store, config, repo) / "uv"
     uv_cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # ES-F3 (B131, I2): pin the commit BEFORE re-verifying, and verify on that
+    # commit — a name like `main` can move between this run and the landing,
+    # and the landing must build on exactly the tree that was confirmed.
+    base_commit = resolve_commit(repo, f"{_resolve_ref(repo, ref) if ref else 'HEAD'}^{{commit}}")
+
     outcome = reverify(
         repo=repo,
-        ref=ref,
+        ref=base_commit or ref,
         patch_path=patch_path,
         commands=commands,
         config=config,
@@ -419,5 +431,6 @@ def reverify_run(
         commands=outcome.commands,
         exit_codes=outcome.exit_codes,
         detail=outcome.detail,
+        base_commit=base_commit if outcome.exit_codes else None,
     )
     return outcome

@@ -35,8 +35,8 @@ from skep.worker_contract import (
 
 from ..apply import (
     RefreshError,
-    apply_patch_on_branch,
     default_branch,
+    land_patch,
     refresh_clone,
     repo_default_branch,
     resolve_commit,
@@ -511,6 +511,10 @@ def reverification_warning(reverify: Any) -> str | None:
         return None
     if reverify.outcome == "not_applicable":
         return None
+    if reverify.outcome == "passed" and reverify.worker_outcome == "passed":
+        # ES-F3 (B131): both passed yet unconfirmed only after a landing past
+        # the verified commit (store.unconfirm_reverification) — say that.
+        return f"the landed tree is not the one re-verification confirmed: {reverify.detail}"
     if not reverify.exit_codes:
         return (
             "the supervisor could not re-verify this run "
@@ -3127,7 +3131,7 @@ def apply_patch(
             raise HTTPException(status_code=400, detail=error)
     else:
         target = f"skep/{task_id}"
-    failure = apply_patch_on_branch(repo, target, patch, task_id=task_id, actor=actor)
+    failure = land_patch(store, repo, target, patch, task_id=task_id, actor=actor)
     if failure is not None:
         # v81-F3: name the advance instead of shrugging "the repo may have moved".
         base = run.get("base_commit")

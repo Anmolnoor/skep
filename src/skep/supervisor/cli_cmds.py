@@ -24,7 +24,7 @@ from typing import Any
 
 from skep.worker_contract import ApprovalVerdict, Budget, CodingWorkerTask, Permissions, TaskState
 
-from .apply import apply_patch_on_branch, validate_landing_branch
+from .apply import land_patch, validate_landing_branch
 from .autonomy import (
     approval_decision_for_action,
     project_policy_dispatch_match,
@@ -1341,8 +1341,8 @@ def cmd_review(args: argparse.Namespace) -> int:
                 )
         else:
             branch = f"skep/{record.task_id}"
-        failure = apply_patch_on_branch(
-            Path(record.repo), branch, patch_path, task_id=record.task_id, actor=actor
+        failure = land_patch(
+            store, Path(record.repo), branch, patch_path, task_id=record.task_id, actor=actor
         )
         if failure is not None:
             return _err(
