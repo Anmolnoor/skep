@@ -2090,6 +2090,22 @@ def baseline_alarm(holder: ConfigHolder, store: RunStore) -> dict[str, str]:
     return baseline_guard(store)
 
 
+def _refuse_worker_writable_layer(path: Path, home: Path) -> None:
+    """ES-F2 (B51): a baseline layer file must come from somewhere no worker
+    writes — a sandboxed worker once re-locked serve's baseline with a layer
+    it wrote into its own worktree. Refused: anything under the supervisor
+    home (its worktrees, results, policy dir) and any legacy workspace-mode
+    worktree (``<repo parent>/.skep/worktrees``)."""
+    parts = path.parts
+    legacy = any(parts[i : i + 2] == (".skep", "worktrees") for i in range(len(parts)))
+    if legacy or path.is_relative_to(home.resolve()):
+        raise ValueError(
+            f"refusing to lock a layer from {path}: it is under a worker-writable root "
+            "(a run worktree or the skep home). Copy it somewhere only you write, read "
+            "it, and approve that copy — or approve a shipped --template"
+        )
+
+
 def baseline_preview(
     home: Path,
     *,
@@ -2117,6 +2133,7 @@ def baseline_preview(
     elif template:
         layer = load_policy_template(template)
     elif file:
+        _refuse_worker_writable_layer(Path(file).expanduser().resolve(), home)
         try:
             layer = PolicyTemplate.model_validate_json(Path(file).expanduser().read_text("utf-8"))
         except OSError as exc:
@@ -2148,12 +2165,23 @@ def approve_policy_baseline(
     One verb on three faces (ADR 0050): ``skep policy approve``, ``POST
     /api/policy/baseline/approve`` and the chat card. ``expect_sha256`` is
     the CLI's guard that what it showed is what gets locked."""
+    layer_override = layer
     layer, view = baseline_preview(
         home, template=template, file=file, reapprove=reapprove, layer=layer
     )
     if expect_sha256 is not None and view["sha256"] != expect_sha256:
         raise ValueError("the baseline changed since it was shown — run approve again")
-    row = write_baseline_lock(home, layer, approved_by=approved_by)
+    if layer_override is not None:
+        source = f"onboard:{layer.template}"
+    elif template:
+        source = f"template:{template}"
+    elif file:
+        source = f"file:{Path(file).expanduser().resolve()}"
+    else:
+        source = "baseline.json (in place)"
+    row = write_baseline_lock(
+        home, layer, approved_by=approved_by, source=source, changes=view["diff"]
+    )
     return {"approved": row, "diff": view["diff"], "table": view["table"]}
 
 
@@ -2368,11 +2396,12 @@ def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> d
             "trust_root": resolved.trust_root,
             # THE allowlist the worker will see, post trust-root logic.
             "shell_allowlist": [list(c) for c in resolved.permissions.shell_allowlist],
-            # v64-F2: verify steps bypass the allowlist entirely; without this
-            # note the Queen burns approval rounds granting pytest for nothing.
+            # v64-F2 / ES-F3: only the pinned verify_command bypasses the
+            # allowlist; a verify LABEL is no grant (B06).
             "shell_verify_note": (
-                "verify-purpose worker commands are always auto-allowed "
-                "(shell_verify); the allowlist applies only to non-verify steps"
+                "only the project's pinned verify_command is auto-allowed "
+                "(shell_verify); every other command, verify-labelled or not, "
+                "needs this allowlist or an approval"
             ),
             "network": list(resolved.permissions.network),
             "allow_git_mutation": resolved.permissions.allow_git_mutation,
@@ -3256,7 +3285,7 @@ def resume_crashed_run(
     the operator's confirmed card is the only trigger (I6)."""
     from skep.worker_contract import RESUME_CHECKPOINT_STATE_KEY
 
-    from ..dispatch import _resume_workspace, _worktrees_root, salvaged_checkpoint_version
+    from ..dispatch import _resume_workspace, salvaged_checkpoint_version
     from ..worker_state import resume_worker_state_from_audit
 
     record = store.get_run(task_id)
@@ -3294,9 +3323,7 @@ def resume_crashed_run(
         permissions = permissions.model_copy(update={"network": merged_network})
     repo = Path(record.repo)
     execution_mode = str(record.execution_mode or "sandbox")
-    preserved = _resume_workspace(
-        store, repo, _worktrees_root(config, repo, execution_mode), task_id
-    )
+    preserved = _resume_workspace(store, repo, config.worktrees_root, task_id)
     # Honest fate check (I8): the cursor only holds in the preserved tree.
     state = resume_worker_state_from_audit(config.audit_dir, task_id)
     cursor = None

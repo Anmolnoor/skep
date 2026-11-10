@@ -2804,3 +2804,41 @@ def test_every_parser_group_is_in_the_cli_reference() -> None:
     doc = (Path(__file__).parents[2] / "docs" / "cli-reference.md").read_text()
     missing = [group for group in groups if f"skep {group}" not in doc]
     assert not missing, f"CLI groups absent from docs/cli-reference.md: {missing}"
+
+
+def test_cli_run_honours_the_stored_sandbox_backend(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F7 (B57, fedora-p1-08): after `skep onboard --sandbox podman`, serve
+    ran podman and `skep run` built its config without the setting — the two
+    faces ran different sandboxes for the same home."""
+    home = tmp_path / "home"
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting("sandbox_backend", "podman")
+    finally:
+        store.close()
+    seen: list[str] = []
+
+    def fake_run_task(*args: object, **kwargs: object) -> object:
+        seen.append(kwargs["config"].sandbox_backend)  # type: ignore[attr-defined]
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli_cmds, "run_task", fake_run_task)
+    with pytest.raises(SystemExit):
+        _run_cli(home, "run", str(repo), "Fix the bug.", "--execution-mode", "sandbox")
+    assert seen == ["podman"]
+
+
+def test_cli_run_network_help_says_what_an_omitted_flag_does(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ES-F7 (B60): the help said an omitted --network denies all egress; on
+    builder/operator homes it applies the baseline's default_network and
+    starts the proxy (the path that made B05 reachable by default)."""
+    with pytest.raises(SystemExit):
+        main(["run", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "omit to deny all outbound" not in out
+    assert "default_network applies" in out and "--minimal denies all" in out

@@ -56,7 +56,7 @@ from .config import SupervisorConfig
 from .contracts_io import mint_task, read_event_log, read_result, write_task_file
 from .ingest import IngestOutcome, ingest_run
 from .monitor import MonitorVerdict, synthesize_terminal, watch_worker
-from .netproxy import FilteringProxy
+from .netproxy import FilteringProxy, control_plane_ports
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
 from .providers import ProviderProfile
 from .reverify import reverify_run
@@ -153,12 +153,6 @@ def _decision_payload(decision: AutonomyDecision | AutoApplyDecision) -> Autonom
     )
 
 
-def _worktrees_root(config: SupervisorConfig, repo: Path, execution_mode: str) -> Path:
-    if execution_mode == "workspace":
-        return repo.parent / ".skep" / "worktrees"
-    return config.worktrees_root
-
-
 def _keep_worktree_names(store: RunStore) -> set[str]:
     """In-flight worktrees plus preserved pending-gate worktrees (durable, so
     preserved trees survive sweeps by later runs and supervisor restarts).
@@ -211,12 +205,16 @@ def salvaged_checkpoint_version(config: SupervisorConfig, task_id: str) -> int:
 def _resume_workspace(
     store: RunStore, repo: Path, worktrees_root: Path, resume_of: str
 ) -> Path | None:
-    """The suspended run's preserved worktree, when intact and safe to reuse."""
+    """The suspended run's preserved worktree, when intact and safe to reuse.
+
+    ES-F4 (B07) migration: workspace-mode runs recorded before the move kept
+    their worktree at ``<repo parent>/.skep/worktrees`` — still reusable."""
     record = store.get_run(resume_of)
     if record is None or not record.workspace:
         return None
     workspace = Path(record.workspace)
-    if workspace.parent != worktrees_root or not is_linked_worktree(repo, workspace):
+    roots = (worktrees_root, repo.parent / ".skep" / "worktrees")
+    if workspace.parent not in roots or not is_linked_worktree(repo, workspace):
         return None
     return workspace
 
@@ -345,7 +343,10 @@ def run_task(
     proxy: FilteringProxy | None = None
     proxy_socket_dir: str | None = None
     active_names: tuple[str, ...] = ()
-    worktrees_root = _worktrees_root(config, repo, execution_mode)
+    # ES-F4 (B07): every mode's worktrees live under the active SKEP_HOME.
+    # Workspace mode used `<repo parent>/.skep/worktrees` — the real ~/.skep
+    # for a repo in $HOME, and outside the run's SKEP_HOME always.
+    worktrees_root = config.worktrees_root
     # v55-F2 (ADR 0035): a managed clone fetches before the baseline resolves —
     # the "is it on the latest code?" step. Managed clones only; workon dirs
     # are the operator's own. Offline dispatch keeps working from the clone.
@@ -645,7 +646,13 @@ def run_task(
                 proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
                 proxy_unix_path = str(Path(proxy_socket_dir) / "p.sock")
             try:
-                proxy = FilteringProxy(domains, unix_socket_path=proxy_unix_path).start()
+                # ES-F6 (B05): loopback stays open for the project's own test
+                # servers, never for skep serve's port (the control plane).
+                proxy = FilteringProxy(
+                    domains,
+                    unix_socket_path=proxy_unix_path,
+                    denied_loopback_ports=control_plane_ports(config.home),
+                ).start()
             except OSError as exc:
                 return finish_before_worker(
                     reason="proxy_start_failed",

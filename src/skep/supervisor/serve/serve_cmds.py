@@ -92,17 +92,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
     from ..cli_cmds import build_config
-    from ..sandbox import SERVE_PORT_FILE
+    from ..netproxy import record_serve_port
     from .app import create_app
     from .auth import ensure_token
 
     # v111-F1: before anything reads the process env — engine auth rides it.
     loaded_env = load_serve_env(args.home.expanduser().resolve() / SERVE_ENV_FILE)
     config = build_config(args.home, args.worker_cmd, auto_approve=args.auto_approve)
-    # ES-F4 (B05): every Seatbelt profile written for this home — serve's own
-    # dispatches and a CLI `skep run` alike — denies this port on loopback.
-    config.home.mkdir(parents=True, exist_ok=True)
-    (config.home / SERVE_PORT_FILE).write_text(f"{args.port}\n", encoding="utf-8")
     # v26-F3: channel confirm-pointers name the UI the operator actually runs.
     app = create_app(config, web_ui_url=f"http://{args.host}:{args.port}/")
     banner = f"skep serve: http://{args.host}:{args.port}  (home: {config.home})"
@@ -116,6 +112,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"  access token: {ensure_token(config.home)}", flush=True)
     log_path = config.home.parent / SERVE_LOG_FILE
     write_boot_banner(log_path, banner)
+    # ES-F6 (B05) + #58 ES-F4: every run's proxy and every Seatbelt profile for
+    # this home refuse this port on loopback (both read <home>/serve-port).
+    record_serve_port(config.home, args.port)
     uvicorn.run(
         app,
         host=args.host,

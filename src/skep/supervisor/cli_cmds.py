@@ -748,6 +748,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
     store = RunStore(config.db_path)
+    # ES-F7 (B57): run the sandbox backend the home chose, as serve does
+    # (ConfigHolder overlays the same setting). Only this key: an explicit
+    # --worker-cmd still outranks a stored one here.
+    from .serve.settings import SANDBOX_BACKEND, apply_settings
+
+    config = apply_settings(config, {SANDBOX_BACKEND: store.get_setting(SANDBOX_BACKEND)})
     auto_apply_verified_patch: bool | None = None
     project_context = None
     resolved_policy: ResolvedRunPolicy | None = None
@@ -3008,8 +3014,12 @@ def register_supervisor_commands(
         action="append",
         default=None,
         metavar="DOMAIN",
-        help="domain the worker may reach, e.g. pypi.org (repeatable, D1); "
-        "omit to deny all outbound. Enforced by a loopback filtering proxy.",
+        help="domain the worker may reach, e.g. pypi.org (repeatable, D1). Omitted, "
+        "the policy's default_network applies: the builder and operator baselines "
+        "allow their package-registry hosts (and start the filtering proxy); the "
+        "assistant baseline and a bare home allow none. A coding worker's LLM "
+        "provider host is always added; --minimal denies all. A concrete list is "
+        "enforced by a loopback filtering proxy.",
     )
     run.add_argument(
         "--execution-mode",

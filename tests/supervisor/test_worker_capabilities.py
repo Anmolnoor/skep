@@ -323,8 +323,10 @@ def test_shell_run_heartbeats_while_the_command_runs(
 
     monkeypatch.setattr(capabilities_module, "_EXEC_HEARTBEAT_SECONDS", 0.05)
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
     argv = [sys.executable, "-c", "import time; time.sleep(0.4)"]
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path, emit=lambda t, p: events.append((t, p)), verify_command=shlex.join(argv)
+    )
 
     result = registry.invoke("shell.run", {"argv": argv, "purpose": "verify"})
 
@@ -485,8 +487,10 @@ def test_read_plugin_cannot_mutate_workspace_even_if_manifest_claims_read(tmp_pa
 
 def test_shell_run_records_command_events(tmp_path: Path) -> None:
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
     argv = [sys.executable, "-c", "print('ok')"]
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path, emit=lambda t, p: events.append((t, p)), verify_command=shlex.join(argv)
+    )
 
     result = registry.invoke("shell.run", {"argv": argv, "purpose": "verify"})
 
@@ -516,7 +520,11 @@ def test_shell_run_records_command_events(tmp_path: Path) -> None:
 
 def test_shell_run_accepts_verify_command_string(tmp_path: Path) -> None:
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path,
+        emit=lambda t, p: events.append((t, p)),
+        verify_command=f"{shlex.quote(sys.executable)} -c \"print('ok')\"",
+    )
 
     result = registry.invoke(
         "shell.run",
@@ -545,8 +553,10 @@ def test_shell_run_accepts_verify_command_string(tmp_path: Path) -> None:
 
 def test_shell_run_reports_missing_verify_command_without_crashing(tmp_path: Path) -> None:
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
     argv = ["definitely-missing-skep-command", "--version"]
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path, emit=lambda t, p: events.append((t, p)), verify_command=shlex.join(argv)
+    )
 
     result = registry.invoke("shell.run", {"argv": argv, "purpose": "verify"})
 
@@ -580,7 +590,11 @@ def test_shell_run_uses_worker_interpreter_for_python_verify(
 ) -> None:
     monkeypatch.setenv("PATH", "")
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path,
+        emit=lambda t, p: events.append((t, p)),
+        verify_command="python -c \"print('ok')\"",
+    )
 
     result = registry.invoke(
         "shell.run",
@@ -619,6 +633,7 @@ def test_shell_run_rebuilds_child_environment_from_allowlist(
         tmp_path,
         emit=lambda _t, _p: None,
         env_allowlist=("ALLOWED_PROVIDER_KEY",),
+        shell_allowlist=[(sys.executable, "-c")],  # ES-F3: verify label is no grant
     )
 
     result = registry.invoke(
@@ -649,7 +664,9 @@ def test_proxy_environment_passes_only_when_network_allowlist_exists(
 ) -> None:
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
 
-    blocked = CapabilityRegistry(tmp_path, emit=lambda _t, _p: None).invoke(
+    blocked = CapabilityRegistry(
+        tmp_path, emit=lambda _t, _p: None, shell_allowlist=[(sys.executable, "-c")]
+    ).invoke(
         "shell.run",
         {
             "argv": [sys.executable, "-c", "import os; print(os.environ.get('HTTP_PROXY', ''))"],
@@ -660,6 +677,7 @@ def test_proxy_environment_passes_only_when_network_allowlist_exists(
         tmp_path,
         emit=lambda _t, _p: None,
         network_allowlist=("example.com",),
+        shell_allowlist=[(sys.executable, "-c")],
     ).invoke(
         "shell.run",
         {
@@ -1878,6 +1896,7 @@ def test_shell_run_strips_proxy_environment_when_task_network_is_denied(
         emit=lambda _t, _p: None,
         env_allowlist=(),
         network_allowlist=(),
+        shell_allowlist=[(sys.executable, "-c")],  # ES-F3: verify label is no grant
     )
 
     result = registry.invoke(
@@ -1910,6 +1929,7 @@ def test_shell_run_preserves_proxy_environment_when_task_network_is_allowed(
         emit=lambda _t, _p: None,
         env_allowlist=(),
         network_allowlist=("example.com",),
+        shell_allowlist=[(sys.executable, "-c")],  # ES-F3: verify label is no grant
     )
 
     result = registry.invoke(

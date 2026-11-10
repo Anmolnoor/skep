@@ -1338,11 +1338,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "allow_shell_command",
         "PROPOSE adding ONE command prefix to the persistent shell allowlist "
-        "(requires user confirmation), e.g. 'npm install'. Worker VERIFY "
-        "commands (purpose 'verify': pytest, python running the tests) NEVER "
-        "need this — they are always auto-allowed (shell_verify); the "
-        "allowlist governs only non-verify steps, so do not propose grants "
-        "for a task's verification. git push, pull, "
+        "(requires user confirmation), e.g. 'npm install'. A worker VERIFY "
+        "step skips the allowlist ONLY when it is exactly the project's "
+        "pinned verify_command (shell_verify; project setup infers the pin) — "
+        "any other command labelled verify is gated like every step, so a "
+        "test runner a project keeps verifying with may need one prefix here; "
+        "pinning verify_command is the better fix. git push, pull, "
         "fetch, add, and commit can NEVER be allowlisted — no allowlist, grant, "
         "or override exists, so never propose one: refreshing a registered repo "
         "from its remote is refresh_repo (supervisor-side), and landing "

@@ -727,16 +727,18 @@ def test_an_unreadable_wrapper_payload_fails_closed() -> None:
 
 
 def test_python_dash_c_keeps_the_verify_fast_path() -> None:
-    """A python -c payload is Python, not shell — never decomposed, so the
-    fast-path behavior for real verify commands is unchanged."""
+    """A python -c payload is Python, not shell — never decomposed, so a
+    pinned verify command keeps the fast-path (ES-F3: only when pinned)."""
     from skep.workers.runtime_plugins import ShellExecPlugin
 
+    argv = ["python3", "-c", "print('git push')"]
     decision = ShellExecPlugin().decision(
         purpose="verify",
-        argv=["python3", "-c", "print('git push')"],
+        argv=argv,
         command="python3 -c \"print('git push')\"",
         approved_shell_commands=[],
         shell_allowlist=[],
+        pinned_verify=[tuple(argv)],
     )
     assert decision.verdict == "allow"
     assert decision.reason == "capability.allow.shell_verify"

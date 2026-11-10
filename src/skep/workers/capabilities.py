@@ -422,8 +422,17 @@ class CapabilityRegistry:
         approved_network_hosts: Sequence[str] = (),
         approved_plugin_risks: Mapping[str, str] | None = None,
         command_timeout_seconds: float | None = None,
+        verify_command: str = "",
     ) -> None:
         self._workspace = workspace.resolve()
+        # ES-F3 (B06): the project's pinned verify_command — with the
+        # worker code's own constant verifies (pin_code_verify), the only
+        # argvs the verify fast-path allows. Empty = no pin = no fast-path.
+        self._pinned_verify: set[tuple[str, ...]] = (
+            {_normalized_shell_argv(shlex.split(verify_command))}
+            if verify_command.strip()
+            else set()
+        )
         self._emit = emit
         self._instructions = instructions
         # v115-F6: the per-command cap follows the task's wall-clock budget. A
@@ -693,6 +702,12 @@ class CapabilityRegistry:
         argv, purpose, command = self._shell_policy_inputs(arguments)
         return self._shell_decision(purpose=purpose, argv=argv, command=command)
 
+    def pin_code_verify(self, argv: Sequence[str]) -> None:
+        """ES-F3: pin a verify argv the worker's own CODE chose as a constant
+        (the no-model hello-world path). Never call it with plan/model input —
+        a model-chosen verify is exactly what the pin exists to refuse."""
+        self._pinned_verify.add(_normalized_shell_argv(argv))
+
     def _shell_decision(
         self, *, purpose: str, argv: Sequence[str], command: str
     ) -> CapabilityDecision:
@@ -714,6 +729,7 @@ class CapabilityRegistry:
                 command=command,
                 approved_shell_commands=self._approved_shell_commands,
                 shell_allowlist=self._shell_allowlist,
+                pinned_verify=self._pinned_verify,
             )
         )
         assert shell is not None

@@ -2340,21 +2340,21 @@ def test_effective_policy_tool_surfaces_silent_gaps(repo: Path, tmp_path: Path) 
     assert view["shell_allowlist"] == []
     assert "NOT applied" in view["shell_allowlist_note"]
     assert view["landing"] == "landing approval gate"
-    # v64-F2: the view teaches that verify steps bypass the allowlist.
+    # v64-F2 / ES-F3: the view teaches that only the pinned verify bypasses it.
     assert "shell_verify" in view["shell_verify_note"]
-    assert "non-verify" in view["shell_verify_note"]
+    assert "pinned verify_command" in view["shell_verify_note"]
 
 
 def test_allow_shell_command_description_teaches_shell_verify() -> None:
     """v64-F2: the Queen burned four approval rounds granting pytest — the
-    description must say verify commands never gate; descriptions are
-    load-bearing for the small model."""
+    description must say which verify skips the gate (ES-F3: only the pinned
+    verify_command); descriptions are load-bearing for the small model."""
     from skep.supervisor.serve.tools import TOOL_SPECS
 
     spec = next(s for s in TOOL_SPECS if s["function"]["name"] == "allow_shell_command")
     description = spec["function"]["description"]
     assert "shell_verify" in description
-    assert "NEVER need this" in description
+    assert "pinned verify_command" in description
     # The old example was 'python3 -m pytest' — the exact command that never
     # needs the grant; it must not be the description's example.
     assert "pytest'" not in description

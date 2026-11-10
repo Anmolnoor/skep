@@ -1447,7 +1447,10 @@ def test_ask_execution_policy_requires_explicit_mode(repo: Path, config: Supervi
     assert detail["state"] == "completed"
     run = client.get(f"/api/runs/{task_id}").json()["run"]
     assert run["execution_mode"] == "workspace"
-    assert Path(run["workspace"]).parent == repo.parent / ".skep" / "worktrees"
+    # ES-F4 (B07): under the active SKEP_HOME like sandbox mode — never
+    # `<repo parent>/.skep/worktrees` (the real ~/.skep for a repo in $HOME).
+    assert Path(run["workspace"]).parent == config.worktrees_root
+    assert not (repo.parent / ".skep").exists()
 
 
 def test_workspace_execution_must_match_trusted_root(
