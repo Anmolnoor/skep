@@ -68,7 +68,9 @@ def test_seatbelt_profile_denies_secret_reads_and_the_serve_port(
     fake_homes: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _home, skep_home = fake_homes
-    monkeypatch.setenv("SKEP_SERVE_PORT", "8771")
+    # Mac finding F: a CLI `skep run` has no serve env; the port serve
+    # recorded under its home is what the profile denies.
+    (skep_home / "supervisor" / sandbox.SERVE_PORT_FILE).write_text("8771\n", encoding="utf-8")
     monkeypatch.setenv("SKEP_SERVE_URL", "http://127.0.0.1:8772")
     for network, port in (
         (sandbox.DENY_ALL_NETWORK, None),
@@ -80,6 +82,7 @@ def test_seatbelt_profile_denies_secret_reads_and_the_serve_port(
             network=network,
             proxy_port=port,
             read_denied=sandbox.secret_paths(skep_home),
+            skep_home=skep_home,
         )
         lines = text.splitlines()
         assert f'(deny file-read* (literal "{skep_home / "supervisor" / "serve-token"}"))' in lines
@@ -228,3 +231,26 @@ def test_spawner_hands_the_profile_this_runs_skep_home(
         config, task, tmp_path / "t.json", tmp_path / "o.json", log_path=tmp_path / "w.log"
     )
     assert seen["skep_home"] == tmp_path / "skep"
+
+
+def test_serve_records_its_port_for_cli_runs_on_the_same_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mac finding F: a CLI-dispatched worker reached serve because only
+    serve's own process knew the port. serve now records it under its home,
+    and a profile built for that home (no serve env at all) denies it."""
+    import argparse
+
+    import uvicorn
+
+    from skep.supervisor.serve import serve_cmds
+
+    monkeypatch.delenv("SKEP_SERVE_URL", raising=False)
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **kw: None)
+    home = tmp_path / "skep"
+    args = argparse.Namespace(
+        home=home, worker_cmd=None, auto_approve=False, host="127.0.0.1", port=9187
+    )
+    assert serve_cmds.cmd_serve(args) == 0
+    text = sandbox.build_profile(writable_roots=[tmp_path / "ws"], skep_home=home)
+    assert '(deny network-outbound (remote ip "localhost:9187"))' in text

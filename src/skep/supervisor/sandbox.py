@@ -372,14 +372,22 @@ def secret_paths(skep_home: Path) -> list[Path]:
     return [path.resolve() for path in candidates if path.exists()]
 
 
-def _serve_ports() -> set[int]:
+# ``skep serve`` records its port here (under ``<home>/supervisor``) so every
+# profile written for that home denies it — a CLI ``skep run`` included, which
+# never sees serve's environment (Mac finding F). A stale file only denies a
+# port nothing listens on.
+SERVE_PORT_FILE = "serve-port"
+
+
+def _serve_ports(skep_home: Path | None) -> set[int]:
     """Where serve may listen: the default, the CLI's $SKEP_SERVE_URL, and the
-    port a running ``skep serve`` exported for its own dispatches."""
+    port ``skep serve`` recorded under this home."""
     ports = {8765}
     url_port = urlparse(os.environ.get("SKEP_SERVE_URL", "")).port
     if url_port:
         ports.add(url_port)
-    raw = os.environ.get("SKEP_SERVE_PORT", "")
+    port_file = skep_home / "supervisor" / SERVE_PORT_FILE if skep_home else None
+    raw = port_file.read_text(encoding="utf-8").strip() if port_file and port_file.is_file() else ""
     if raw.isdigit():
         ports.add(int(raw))
     return ports
@@ -609,6 +617,7 @@ def build_profile(
     proxy_port: int | None = None,
     unix_socket_path: str | None = None,
     read_denied: Iterable[Path] = (),
+    skep_home: Path | None = None,
 ) -> str:
     """Return the SBPL text confining writes to ``writable_roots`` and gating network.
 
@@ -635,7 +644,7 @@ def build_profile(
     # ES-F4 (B05): last match wins, so these follow every allow above. The
     # loopback allow (v115-F9) keeps a worker's own test servers reachable;
     # serve's port is the one listener on this host it must never dial.
-    for port in sorted(_serve_ports()):
+    for port in sorted(_serve_ports(skep_home)):
         lines.append(f'(deny network-outbound (remote ip "localhost:{port}"))')
     for denied in read_denied:
         kind = "subpath" if denied.is_dir() else "literal"
@@ -710,6 +719,7 @@ def write_profile(
             proxy_port=proxy_port,
             unix_socket_path=unix_socket_path,
             read_denied=read_denied,
+            skep_home=skep_home,
         )
     )
     return profile_path

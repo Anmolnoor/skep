@@ -40,7 +40,9 @@ readable: the builtin worker authenticates to its model with it.
 
 On Linux the worker also gets its own PID and IPC namespaces and an empty
 `/run` (no host D-Bus or systemd sockets). On macOS the profile allows
-loopback (a worker's own test servers) except serve's port.
+loopback (a worker's own test servers) except serve's port: 8765,
+`$SKEP_SERVE_URL`'s port, and the port `skep serve` records in
+`supervisor/serve-port` under the same home, so a CLI `skep run` denies it too.
 
 ## Network Modes
 
