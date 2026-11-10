@@ -125,6 +125,11 @@ class FakeOllama:
         chunks.append({"error": error})
         self.chat_scripts.append(chunks)
 
+    def script_refusal(self, status: int, error: str) -> None:
+        """ES-F12: answer the next /api/chat in script order with a non-200
+        and ollama's ``{"error"}`` body — a refusal of one exact request."""
+        self.chat_scripts.append([{"__status__": status, "body": {"error": error}}])
+
     def chat_bodies(self) -> list[dict[str, Any]]:
         """The parsed bodies of every POST /api/chat received, in order."""
         return [r["body"] for r in self.requests if r["path"] == "/api/chat"]
@@ -228,6 +233,10 @@ class FakeOllama:
                         self._send(500, b'{"error": "no scripted reply left"}')
                         return
                     chunks = fake.chat_scripts.pop(0)
+                    if chunks and "__status__" in chunks[0]:
+                        refusal = chunks[0]
+                        self._send(refusal["__status__"], json.dumps(refusal["body"]).encode())
+                        return
                     payload = "".join(json.dumps(c) + "\n" for c in chunks).encode()
                     self._send(200, payload, content_type="application/x-ndjson")
                 else:
