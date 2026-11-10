@@ -465,3 +465,48 @@ def test_a_live_worktree_is_not_a_dead_reference(tmp_path: Path) -> None:
     assert (
         references_dead_worktree(["git", "-C", f"{tmp_path}/.skep/worktrees/x/", "status"]) is True
     )
+
+
+# ES-F1 (B124, I4): a bare `git` or a launcher-only entry allowlists everything
+# behind it — `["timeout"]` covered `timeout 30 git push` on es-integration-2.
+@pytest.mark.parametrize(
+    "prefix",
+    [["git"], ["/usr/bin/git"], ["timeout"], ["timeout", "30"], ["env"], ["nice", "-n", "5"]],
+)
+def test_es_f1_launcher_only_and_bare_git_entries_are_refused(prefix: list[str]) -> None:
+    from skep.supervisor.shell_prefixes import worker_allowlist_reason
+
+    assert worker_allowlist_reason(prefix) is not None
+    # A stored one is swept on read, not grandfathered.
+    assert filter_forbidden_shell_commands([prefix])[0] == []
+
+
+def test_es_f1_put_policy_refuses_bare_git() -> None:
+    # The PUT /api/policy and project-setup validators raise 400/ValueError on it.
+    from skep.supervisor.projects import _dangerous_shell_prefix_reason as project_reason
+    from skep.supervisor.serve.actions import _dangerous_shell_prefix_reason
+
+    for prefix in (["git"], ["timeout"]):
+        assert _dangerous_shell_prefix_reason(prefix) is not None
+        assert project_reason(prefix) is not None
+
+
+def test_es_f1_a_launcher_with_its_command_stays_grantable() -> None:
+    assert dangerous_prefix_reason(["timeout", "30", "pytest"]) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/usr/bin/git push",
+        "git -c protocol.version=2 push",
+        "timeout 5 git push",
+        "nice git fetch",
+        "git send-pack ../o.git main",
+        "git -c alias.p=push p",
+    ],
+)
+def test_es_f1_queen_floor_shares_the_normalization(command: str) -> None:
+    from skep.supervisor.shell_prefixes import queen_command_line_refusal
+
+    assert queen_command_line_refusal(command) is not None

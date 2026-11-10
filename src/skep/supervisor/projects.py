@@ -9,7 +9,7 @@ from typing import Any
 from skep.worker_contract import KNOWN_PLUGIN_RISKS
 
 from .policy_registry import registry_keys
-from .shell_prefixes import dangerous_prefix_reason
+from .shell_prefixes import worker_allowlist_reason
 from .store import RunStore
 
 PROJECT_STRATEGIES = frozenset({"public_free", "trusted_local_dev", "trusted_local_ops"})
@@ -126,7 +126,7 @@ def validate_allowed_plugin_risks(value: object, *, field: str) -> list[str]:
 def _dangerous_shell_prefix_reason(prefix: list[str]) -> str | None:
     # Thin wrapper over the shared guard (v19-F4 dedup); this copy's callers
     # raise ValueError.
-    return dangerous_prefix_reason(prefix)
+    return worker_allowlist_reason(prefix)
 
 
 def _require_shell_command_prefixes(value: object, *, field: str) -> list[list[str]]:

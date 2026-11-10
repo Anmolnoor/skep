@@ -20,7 +20,13 @@ from skep.supervisor.shell_prefixes import (
     argv_segments,
     catastrophic_command_line_reason,
     catastrophic_command_reason,
+    git_core_argv,
+    is_branch_switch_command,
     is_history_rewrite_command,
+    is_ref_rewrite_command,
+    is_remote_git_command,
+    is_unknown_git_subcommand,
+    is_worker_commit_command,
 )
 from skep.worker_contract import (
     RESUME_CHECKPOINT_ARTIFACT_NAME,
@@ -420,19 +426,6 @@ def _flag_variant_of(argv: Sequence[str], entries: Sequence[Sequence[str]]) -> S
     return None
 
 
-def _strip_git_chdir(argv: Sequence[str]) -> list[str]:
-    """Drop a leading ``-C <path>`` pair from a git argv for prefix matching.
-
-    The model sometimes emits ``git -C /abs/worktree checkout main``; the
-    supervisor-managed git guards (v19-F5 branch ops, v19-F3 remote ops) must
-    see through the chdir flag to the real subcommand.
-    """
-    tokens = list(argv)
-    if len(tokens) >= 3 and tokens[0] == "git" and tokens[1] == "-C":
-        return [tokens[0], *tokens[3:]]
-    return tokens
-
-
 # Git subcommands that only read repository state and therefore cannot smuggle a
 # mutation through the verify fast-path (v20-F1).
 _READONLY_GIT_SUBCOMMANDS = frozenset(
@@ -447,7 +440,7 @@ def is_git_mutation_argv(argv: Sequence[str]) -> bool:
     take the shell verify fast-path — it has to fall through to the
     allowlist/grant/approval path like any other mutation. Read-only git
     commands (status/diff/log/...) and non-git commands stay eligible for the
-    fast-path. Callers pass an argv already run through ``_strip_git_chdir``.
+    fast-path. Callers pass an argv already run through ``git_core_argv``.
     """
     if not argv or argv[0] != "git":
         return False
@@ -462,19 +455,16 @@ def _git_floor_decision(segment: Sequence[str]) -> RuntimePolicyDecision | None:
     lines, `bash -c` payloads); sudo/doas is peeled first so it cannot launder
     what follows.
     """
-    stripped = list(segment)
-    while stripped and stripped[0] in {"sudo", "doas"}:
-        stripped = stripped[1:]
-    stripped = _strip_git_chdir(stripped)
+    # ES-F1 (B124): any spelling of git (`/usr/bin/git`, `-c k=v`,
+    # `--git-dir=`) reads as `git <subcommand>`; launchers (`sudo -u x`,
+    # `timeout 5`) were already peeled into segments of their own.
+    stripped = git_core_argv(segment)
     # v19-F5: branch/HEAD switching is managed by the supervisor, which lands
     # changes as a patch. Deny checkout/switch (the ``git checkout -- <path>``
     # file-restore form stays legal) with a teaching message. This fires
     # before the verify fast-path and the allowlist/grant checks so no plan
     # or grant can switch the worktree's branch.
-    if (
-        _argv_matches_prefix(stripped, [("git", "checkout"), ("git", "switch")])
-        and "--" not in stripped
-    ):
+    if is_branch_switch_command(stripped) or is_ref_rewrite_command(stripped):
         return RuntimePolicyDecision(
             verdict="deny",
             reason="capability.deny.git_branch_ops_managed_by_supervisor",
@@ -483,7 +473,7 @@ def _git_floor_decision(segment: Sequence[str]) -> RuntimePolicyDecision | None:
     # v19-F3: remote git operations bypass the patch -> approval -> branch
     # pipeline. Deny push/pull/fetch outright, before the allowlist/grant
     # checks, so no resume grant or policy prefix can enable a push.
-    if _argv_matches_prefix(stripped, [("git", "push"), ("git", "pull"), ("git", "fetch")]):
+    if is_remote_git_command(stripped):
         return RuntimePolicyDecision(
             verdict="deny",
             reason="capability.deny.remote_git_managed_by_supervisor",
@@ -520,7 +510,7 @@ def _git_floor_decision(segment: Sequence[str]) -> RuntimePolicyDecision | None:
     # stored prefix or resume grant can re-enable it. The explicit-intent
     # ``git.stage``/``git.commit`` capability path (requested_actions) does
     # not go through shell.run and is unaffected.
-    if _argv_matches_prefix(stripped, [("git", "add"), ("git", "commit")]):
+    if is_worker_commit_command(stripped):
         return RuntimePolicyDecision(
             verdict="deny",
             reason="capability.deny.git_commit_managed_by_supervisor",
@@ -594,6 +584,19 @@ class ShellExecPlugin:
             denied = _git_floor_decision(segment)
             if denied is not None:
                 return denied
+            # ES-F1 (B124): an alias can be anything (`-c alias.p=push p`), so
+            # only an exact allowlist entry — the operator's own words — runs one.
+            if is_unknown_git_subcommand(segment) and tuple(argv) not in {
+                tuple(entry) for entry in shell_allowlist
+            }:
+                return RuntimePolicyDecision(
+                    verdict="deny",
+                    reason="capability.deny.git_alias_not_allowlisted",
+                    detail=(
+                        f"'{' '.join(segment)}' is not a builtin git command (an alias "
+                        "can run anything, including push); spell out the git command"
+                    ),
+                )
             catastrophic = catastrophic_command_reason(segment)
             if catastrophic is not None:
                 return RuntimePolicyDecision(
@@ -616,7 +619,7 @@ class ShellExecPlugin:
         if (
             purpose == "verify"
             and tuple(argv) in {tuple(pin) for pin in pinned_verify}
-            and not any(is_git_mutation_argv(_strip_git_chdir(segment)) for segment in segments)
+            and not any(is_git_mutation_argv(git_core_argv(segment)) for segment in segments)
         ):
             return RuntimePolicyDecision(
                 verdict="allow",

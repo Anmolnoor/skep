@@ -115,6 +115,7 @@ from ..shell_prefixes import (
     is_worker_commit_command,
     normalize_remembered_command,
     queen_command_line_refusal,
+    worker_allowlist_reason,
 )
 from ..store import RunStore
 from ..worktree import TREE_LOCK
@@ -2661,7 +2662,7 @@ def _require_shell_command_prefixes(value: Any, *, field: str) -> list[list[str]
 def _dangerous_shell_prefix_reason(prefix: list[str]) -> str | None:
     # Thin wrapper over the shared guard (v19-F4 dedup); callers keep their
     # own exception type (HTTPException here, ValueError in projects.py).
-    return dangerous_prefix_reason(prefix)
+    return worker_allowlist_reason(prefix)
 
 
 def shell_command_from_approval_reason(reason: object) -> list[str] | None:
