@@ -39,6 +39,7 @@ from . import (
     channel_confirmation_decision,
     identity_allowlisted,
     resolve_channel_secret,
+    user_allowlisted,
 )
 from . import (
     discord as discord_adapter,
@@ -593,8 +594,13 @@ def add_slack_routes(
         if action is None or action.status != "proposed":
             _deliver(bot_token, channel_id, _text_blocks("skep: that card is gone or resolved."))
             return
+        user = payload.get("user")
         decision = slack_adapter.handle_button(
-            action_id=click, action_class=action.tool, identity=identity, config=config
+            action_id=click,
+            action_class=action.tool,
+            identity=identity,
+            config=config,
+            user_id=str(user.get("id") or "") if isinstance(user, dict) else "",
         )
         if not decision.allowed:
             _deliver(
@@ -870,6 +876,13 @@ def _discord_action_payload(
                     if isinstance(component, dict) and "custom_id" in component:
                         component["custom_id"] = f"{component['custom_id']}:{action_id}"
     return payload
+
+
+def _interaction_user(data: dict[str, Any]) -> str:
+    """The invoking user's id: ``member.user`` in a guild, ``user`` in a DM."""
+    member = data.get("member")
+    user = member.get("user") if isinstance(member, dict) else data.get("user")
+    return str(user.get("id") or "") if isinstance(user, dict) else ""
 
 
 def _spawn_daemon_thread(work: Callable[[], None]) -> None:
@@ -1215,7 +1228,9 @@ class DiscordGateway(threading.Thread):
             session_key=f"{discord_adapter.CHANNEL}:{thread_id}",
         )
 
-    def _resolve_verdict(self, action_id: str, *, confirm: bool, identity: ChannelIdentity) -> str:
+    def _resolve_verdict(
+        self, action_id: str, *, confirm: bool, identity: ChannelIdentity, user_id: str
+    ) -> str:
         """Resolve a pending card through the shared gate; returns the reply text.
         Mirrors the Slack ``_resolve_button`` flow — one posture, two transports."""
         action = self._store.get_chat_action(action_id) if action_id else None
@@ -1234,6 +1249,9 @@ class DiscordGateway(threading.Thread):
                 f"{discord_adapter.CHANNEL}:{identity.identity_id}"
             )
             identity_ok = binding is not None and binding.chat_id == action.chat_id
+        # ES (B114): the room is not the operator — the person must be listed
+        # too, for buttons, reactions and /skep verdicts alike.
+        identity_ok = identity_ok and user_allowlisted(user_id, config)
         decision = channel_confirmation_decision(
             action_class=action.tool,
             channel_can_confirm=config.channel_can_confirm,
@@ -1304,7 +1322,9 @@ class DiscordGateway(threading.Thread):
             interaction_token=interaction_token,
             channel_id=str(data.get("channel_id") or ""),
             token=token,
-            resolve=lambda: self._resolve_verdict(action_id, confirm=confirm, identity=identity),
+            resolve=lambda: self._resolve_verdict(
+                action_id, confirm=confirm, identity=identity, user_id=_interaction_user(data)
+            ),
         )
 
     def _defer_and_finish(
@@ -1344,7 +1364,7 @@ class DiscordGateway(threading.Thread):
     def _slash_admitted(self, data: dict[str, Any], config: ChannelConfig) -> bool:
         """Admission first, fail closed — the same rules ``normalize_inbound``
         applies to messages: channel allow-listed OR session-bound, and
-        ``allowed_users`` (when set) must list the invoker."""
+        ``allowed_users`` must list the invoker (B114: empty = nobody)."""
         channel_id = str(data.get("channel_id") or "")
         if not channel_id:
             return False
@@ -1354,13 +1374,7 @@ class DiscordGateway(threading.Thread):
         )
         if not (identity_allowlisted(identity, config.allowed_identities) or session_bound):
             return False
-        if config.allowed_users:
-            member = data.get("member")
-            user = member.get("user") if isinstance(member, dict) else data.get("user")
-            author_id = str(user.get("id") or "") if isinstance(user, dict) else ""
-            if author_id not in set(config.allowed_users):
-                return False
-        return True
+        return user_allowlisted(_interaction_user(data), config)
 
     def _handle_slash_command(
         self, data: dict[str, Any], config: ChannelConfig, token: str
@@ -1388,7 +1402,9 @@ class DiscordGateway(threading.Thread):
                 interaction_token=str(data.get("token") or ""),
                 channel_id=channel_id,
                 token=token,
-                resolve=lambda: self._slash_verdict(channel_id, confirm=sub == "approve"),
+                resolve=lambda: self._slash_verdict(
+                    channel_id, confirm=sub == "approve", user_id=_interaction_user(data)
+                ),
             )
             return
         if sub == "status":
@@ -1427,7 +1443,7 @@ class DiscordGateway(threading.Thread):
             lines.append(line)
         return "\n".join(lines)
 
-    def _slash_verdict(self, channel_id: str, *, confirm: bool) -> str:
+    def _slash_verdict(self, channel_id: str, *, confirm: bool, user_id: str) -> str:
         """The typed command IS the decision, asked once (I7): resolve the
         bound chat's single pending card through the EXACT gate the ✅ button
         uses (``_resolve_verdict`` → ``channel_confirmation_decision``) — no id
@@ -1439,7 +1455,9 @@ class DiscordGateway(threading.Thread):
         if not pending:
             return "skep: no card is waiting in this conversation."
         identity = ChannelIdentity(channel=discord_adapter.CHANNEL, identity_id=channel_id)
-        return self._resolve_verdict(pending[0].action_id, confirm=confirm, identity=identity)
+        return self._resolve_verdict(
+            pending[0].action_id, confirm=confirm, identity=identity, user_id=user_id
+        )
 
     def _handle_reaction(self, data: dict[str, Any], config: ChannelConfig, token: str) -> None:
         emoji = data.get("emoji")
@@ -1476,5 +1494,10 @@ class DiscordGateway(threading.Thread):
                 f"Review it in the web UI: {self._web_ui_url}",
             )
             return
-        text = self._resolve_verdict(action.action_id, confirm=reaction == "✅", identity=identity)
+        text = self._resolve_verdict(
+            action.action_id,
+            confirm=reaction == "✅",
+            identity=identity,
+            user_id=str(data.get("user_id") or ""),
+        )
         self._deliver(token, channel_id, text)

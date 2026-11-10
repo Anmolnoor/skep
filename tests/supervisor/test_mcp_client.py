@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 import httpx
@@ -205,3 +205,30 @@ def test_http_runner_transport_errors_are_honest(
     _patch_http(monkeypatch, legacy)
     with pytest.raises(MCPError, match="no JSON-RPC response"):
         runner_for_config(_http_config())("tools/call", {"name": "t"})
+
+
+def test_b112_keep_alive_stream_hits_a_total_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ES (B112, lane F3 f3-33): the 30 s httpx timeout is per read, so an SSE
+    stream of keep-alives held a Queen turn > 10 min and blocked shutdown.
+    The whole exchange now has one total deadline."""
+    import time
+
+    def forever() -> Iterator[bytes]:
+        while True:
+            time.sleep(0.02)
+            yield b": keep-alive\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("method") == "initialize":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
+        if "id" not in body:
+            return httpx.Response(202)
+        return httpx.Response(200, content=forever(), headers={"content-type": "text/event-stream"})
+
+    _patch_http(monkeypatch, handler)
+    monkeypatch.setattr("skep.supervisor.mcp_client.MCP_CALL_DEADLINE_SECONDS", 0.3)
+    started = time.monotonic()
+    with pytest.raises(MCPError, match="deadline"):
+        runner_for_config(_http_config())("tools/call", {"name": "get_report"})
+    assert time.monotonic() - started < 5

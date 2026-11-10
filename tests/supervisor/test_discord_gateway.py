@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from skep.supervisor import SupervisorConfig
 
 from .conftest import serve_client
@@ -21,8 +23,10 @@ READY = json.dumps({"op": 0, "t": "READY", "s": 1, "d": {"session_id": "sess-1"}
 RECONNECT = json.dumps({"op": 7})
 
 
-def _message_create(channel_id: str, content: str, *, seq: int = 2, bot: bool = False) -> str:
-    author: dict[str, object] = {"id": "u1"}
+def _message_create(
+    channel_id: str, content: str, *, seq: int = 2, bot: bool = False, author_id: str = "u1"
+) -> str:
+    author: dict[str, object] = {"id": author_id}
     if bot:
         author["bot"] = True
     return json.dumps(
@@ -174,6 +178,7 @@ def _enable_discord(config: SupervisorConfig, ollama: object, *, can_confirm: bo
             "enabled": True,
             "channel_can_confirm": can_confirm,
             "allowed_identities": ["42"],
+            "allowed_users": ["u1"],
             "secret": "discord-bot-token",
         },
     )
@@ -266,7 +271,7 @@ def test_discord_unknown_identity_fails_closed_and_bots_are_ignored(
             harness.script(
                 HELLO,
                 READY,
-                _message_create("99", "let me in"),  # stranger
+                _message_create("99", "let me in", author_id="u-stranger"),  # stranger
                 _message_create("42", "echo", bot=True),  # our own bot
             )
             assert harness.gateway.session_once() is True
@@ -351,6 +356,7 @@ def test_discord_button_confirm_is_gated_by_the_v16_allowlist(
                         "id": "i-1",
                         "token": "itok-1",
                         "channel_id": "42",
+                        "member": {"user": {"id": "u1"}},
                         "data": {"custom_id": f"confirm:{action_id}"},
                     },
                 }
@@ -407,6 +413,7 @@ def test_discord_button_confirms_a_low_risk_dispatch(
                         "id": "i-2",
                         "token": "itok-2",
                         "channel_id": "42",
+                        "member": {"user": {"id": "u1"}},
                         "data": {"custom_id": f"confirm:{action_id}"},
                     },
                 }
@@ -469,6 +476,7 @@ def test_discord_button_from_a_session_bound_thread_confirms_its_own_card(
                         "id": "i-3",
                         "token": "itok-3",
                         "channel_id": "t-900",  # NOT in allowed_identities
+                        "member": {"user": {"id": "u1"}},
                         "data": {"custom_id": f"confirm:{action_id}"},
                     },
                 }
@@ -524,6 +532,7 @@ def test_discord_button_from_a_foreign_thread_stays_gated(
                             "id": interaction_id,
                             "token": f"tok-{interaction_id}",
                             "channel_id": channel_id,
+                            "member": {"user": {"id": "u1"}},
                             "data": {"custom_id": f"confirm:{action_id}"},
                         },
                     }
@@ -539,7 +548,11 @@ def test_discord_button_from_a_foreign_thread_stays_gated(
         ollama.stop()
 
 
-def test_discord_reaction_confirms_the_waiting_card(repo: object, config: SupervisorConfig) -> None:
+@pytest.mark.parametrize(("user_id", "status"), [("u1", "confirmed"), ("u-stranger", "proposed")])
+def test_discord_reaction_confirms_the_waiting_card(
+    repo: object, config: SupervisorConfig, user_id: str, status: str
+) -> None:
+    """ES (B114): only a listed PERSON's reaction resolves the card."""
     from skep.supervisor import RunStore
 
     from .fake_ollama import FakeOllama
@@ -572,14 +585,13 @@ def test_discord_reaction_confirms_the_waiting_card(repo: object, config: Superv
                     "op": 0,
                     "t": "MESSAGE_REACTION_ADD",
                     "s": 2,
-                    "d": {"channel_id": "42", "emoji": {"name": "✅"}},
+                    "d": {"channel_id": "42", "user_id": user_id, "emoji": {"name": "✅"}},
                 }
             )
             harness.script(HELLO, READY, reaction)
             assert harness.gateway.session_once() is True
             resolved = harness.store.get_chat_action(action_id)
-            assert resolved is not None and resolved.status == "confirmed"
-            assert any("on it" in str(p) for _, _, p in harness.sent)
+            assert resolved is not None and resolved.status == status
         finally:
             harness.close()
     finally:
@@ -1198,6 +1210,7 @@ def test_button_click_is_acked_before_the_verdict_runs(
                     "id": "i-9",
                     "token": "itok-9",
                     "channel_id": "42",
+                    "member": {"user": {"id": "u1"}},
                     "data": {"custom_id": f"confirm:{action_id}"},
                 },
             }
@@ -1246,6 +1259,7 @@ def test_followup_failure_falls_back_to_a_channel_message(
                     "id": "i-10",
                     "token": "itok-10",
                     "channel_id": "42",
+                    "member": {"user": {"id": "u1"}},
                     "data": {"custom_id": f"deny:{action_id}"},
                 },
             }

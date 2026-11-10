@@ -48,6 +48,7 @@ def observer_enabled(store: RunStore) -> bool:
 OBSERVATION_CHAT_CURSOR = "observation_harvest_chat_cursor"
 OBSERVATION_RUN_CURSOR = "observation_harvest_run_cursor"
 HARVEST_CAP = 8
+_OPERATOR_CHAT_SOURCES = frozenset({"web", "terminal"})  # the faces only the operator types into
 _OBSERVATION_CONTENT_CAP = 500
 _RUN_TERMINAL_STATES = frozenset(
     {"completed", "failed", "rejected", "worker_timeout", "worker_crashed"}
@@ -83,13 +84,19 @@ def _harvest_chat_lines(store: RunStore) -> list[str]:
         if len(created) >= HARVEST_CAP:
             break  # cursor stays before this row; the next sweep resumes here
         cursor = message.id
-        if message.role not in ("user", "assistant"):
+        # ES (B113): only the operator's own typed lines. An assistant row may
+        # be a webhook delivery, script output or the model's words; a channel
+        # chat's user row is any channel member — none may write memory that
+        # every chat then reads as approved (I5/I6).
+        if message.role != "user":
             continue
         text = message.content.strip()
         if not text:
             continue
         chat = store.get_chat(message.chat_id)
-        project_id = None if chat is None else chat.project_id
+        if chat is None or chat.source not in _OPERATOR_CHAT_SOURCES:
+            continue
+        project_id = chat.project_id
         if classify_memory_class(text, has_project=project_id is not None) != "observation":
             continue
         store.add_memory_item(

@@ -52,6 +52,7 @@ def build_status(
             + _stale_store_advisories(home)
             + _model_truth_advisories(home)
             + _baseline_advisories(home)
+            + _channel_user_advisories(home)
         )
         payload["stale_pending"] = stale_pending
         return payload
@@ -82,6 +83,7 @@ def build_status(
         + _stale_store_advisories(home)
         + _model_truth_advisories(home)
         + _baseline_advisories(home)
+        + _channel_user_advisories(home)
     )
     payload["stale_pending"] = stale_pending
     return payload
@@ -214,6 +216,29 @@ def _auto_approve_advisories(home: Path) -> list[str]:
     finally:
         store.close()
     return [_AUTO_APPROVE_DEPRECATION] if enabled else []
+
+
+def _channel_user_advisories(home: Path) -> list[str]:
+    """ES (B114): an enabled channel with no ``allowed_users`` admits nobody —
+    channels authorize a PERSON now, so say why it went quiet."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        configs = store.list_channel_configs()
+    finally:
+        store.close()
+    return [
+        f"channel {config.channel} is enabled with no allowed_users — it ignores every "
+        "message and button (fail closed). List the people who may drive skep: "
+        f'PUT /api/channels/{config.channel} {{"allowed_users": ["<user id>"]}} '
+        "or the web UI's channel panel."
+        for config in configs
+        if config.enabled and not config.allowed_users
+    ]
 
 
 # v111-F5: store files from retired layouts. Each migration left its sqlite

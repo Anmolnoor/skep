@@ -302,8 +302,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "list_mcp_servers",
         "Registered MCP servers (id, transport, command/url). MCP tools are "
-        "policy-gated: read-shaped tools run free, everything else needs a "
-        "confirmation or a learned allow rule.",
+        "policy-gated: a read (server-marked read-only AND named get_/list_/"
+        "read_/search_/describe_/show_/find_) runs free, everything else needs "
+        "a confirmation or a learned allow rule.",
         {},
     ),
     _tool(
@@ -748,7 +749,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "stdio servers need a command argv; http servers need a url (an MCP "
         "Streamable HTTP endpoint, usually ending in /mcp; legacy /sse-style "
         "HTTP+SSE servers are not supported). "
-        "scope='email' binds a mail server: its read-shaped tools decide as "
+        "scope='email' binds a mail server: its reads (see list_mcp_servers) decide as "
         "email/read (flow freely), everything else as email/send (cards). "
         "scope='browse' binds a browser server (e.g. command "
         "['npx','@playwright/mcp@latest']): page-state reads like snapshot/"
@@ -1156,13 +1157,16 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "promote_tool",
-        "PROPOSE promoting a landed forged plugin to ACTIVE (requires user "
-        "confirmation). On confirm: a sandboxed NO-network trial must list "
+        "PROPOSE promoting a forged plugin to ACTIVE (requires user "
+        "confirmation): a landed forge_tool plugin, OR a shipped seed tool "
+        "(list_plugins shows provenance 'seed' — no authoring run or landing "
+        "needed). On confirm: a sandboxed NO-network trial must list "
         "the server's tools and pass its zero-argument self_test; only then "
-        "is the landed source installed and registered as a stdio MCP server "
-        "whose tools call_mcp_tool can reach. A suspended plugin reactivates "
-        "the same way. Fails honestly (and stays demoted) if the authoring "
-        "run has not landed or the trial fails.",
+        "is the source installed and registered as a stdio MCP server "
+        "whose tools call_mcp_tool can reach (every call runs sandboxed). A "
+        "suspended plugin reactivates the same way. Fails honestly (and stays "
+        "demoted) if a forged plugin's authoring run has not landed or the "
+        "trial fails.",
         {"plugin_id": {"type": "string", "description": "from list_plugins"}},
         ["plugin_id"],
     ),
@@ -1229,7 +1233,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "call_mcp_tool",
-        "Call one tool on a registered MCP server. Read-shaped tools and "
+        "Call one tool on a registered MCP server. Reads (server-marked "
+        "read-only, read-verb name) and "
         "tools covered by an allow rule run immediately; anything else "
         "becomes a confirmation card; a policy deny rule refuses outright.",
         {
@@ -2884,7 +2889,12 @@ def _get_run_guidance(
 
 
 def execute_read_tool(
-    name: str, args: dict[str, Any], *, store: RunStore, holder: ConfigHolder
+    name: str,
+    args: dict[str, Any],
+    *,
+    store: RunStore,
+    holder: ConfigHolder,
+    chat_id: str | None = None,
 ) -> Any:
     if name == DESCRIBE_TOOL_NAME:
         # v74-F3: on-demand schema fetch. The chat engine persists the
@@ -2974,8 +2984,11 @@ def execute_read_tool(
         from ..mcp_client import classify_browse_action
 
         views = []
+        # ES (B122): the policy column is the verdict a call from THIS chat
+        # gets — the role layer included.
+        role = _chat_role(store, holder, chat_id)
         for tool in tools:
-            decision = mcp_scope_decision(store, tool)
+            decision = mcp_scope_decision(store, tool, role=role)
             views.append(
                 {
                     "name": tool.name,
@@ -5157,6 +5170,20 @@ def mutation_execution_decision(
         role = _chat_role(store, holder, chat_id)
     except ValueError as exc:
         return AutonomyDecision(verdict="deny", reason="role.deny.unloadable", detail=str(exc))
+    if name == "run_schedule_now":
+        # ES (B122): a disabled/unknown schedule can only fail on confirm —
+        # refuse now, without a card, and tell the model why.
+        schedule = store.get_schedule(str(args.get("name") or ""))
+        if schedule is None or not schedule.enabled:
+            return AutonomyDecision(
+                verdict="deny",
+                reason="schedule.deny.not_runnable",
+                detail=(
+                    f"no schedule named {args.get('name')!r} — list_schedules shows them"
+                    if schedule is None
+                    else f"schedule {schedule.name!r} is disabled — set_schedule_enabled first"
+                ),
+            )
     if name == "call_mcp_tool":
         # v40-F10: the resolved mcp scope decides — allow runs inside the
         # turn, require_approval cards, deny refuses without a card.

@@ -24,6 +24,7 @@ from . import (
     channel_confirmation_decision,
     identity_allowlisted,
     render_confirm_card,
+    user_allowlisted,
 )
 
 CHANNEL = "telegram"
@@ -44,6 +45,14 @@ def normalize_inbound(update: dict[str, object], config: ChannelConfig) -> Norma
             None,
             "channel.reject.identity_not_allowlisted",
             audit={"channel": CHANNEL, "identity": chat_id},
+        )
+    sender = message.get("from")
+    from_id = str(sender.get("id") or "") if isinstance(sender, dict) else ""
+    if not user_allowlisted(from_id, config):
+        return NormalizedInbound(
+            None,
+            "channel.reject.user_not_allowlisted",
+            audit={"channel": CHANNEL, "identity": chat_id, "user": from_id},
         )
     return NormalizedInbound(
         ChannelMessage(
@@ -126,18 +135,13 @@ def handle_callback(
     config: ChannelConfig,
 ) -> ChannelConfirmationDecision:
     """The shared fail-closed gate for a button press — ``slack.handle_button``'s
-    twin. BOTH the chat the card lives in AND the pressing user must be
-    allow-listed: in the operator's DM they are the same id, so existing
-    configs work unchanged; an unlisted group member fails closed."""
+    twin. The chat the card lives in must be allow-listed AND the pressing
+    user must be in ``allowed_users`` (B114); an unlisted member fails closed."""
     if click not in {"confirm", "deny"}:
         return ChannelConfirmationDecision(False, "channel.confirm.denied.unknown_action")
-    both_listed = all(
-        identity_allowlisted(
-            ChannelIdentity(channel=CHANNEL, identity_id=candidate),
-            config.allowed_identities,
-        )
-        for candidate in (chat_id, from_id)
-    )
+    both_listed = identity_allowlisted(
+        ChannelIdentity(channel=CHANNEL, identity_id=chat_id), config.allowed_identities
+    ) and user_allowlisted(from_id, config)
     return channel_confirmation_decision(
         action_class=action_class,
         channel_can_confirm=config.channel_can_confirm,

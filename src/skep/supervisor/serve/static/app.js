@@ -5940,10 +5940,11 @@ async function renderChannelsTab(panel) {
     if (requireMention) requireMention.checked = !!channel.require_mention;
     const autoThread = name === "discord" ? el("input", { type: "checkbox" }) : null;
     if (autoThread) autoThread.checked = !!channel.auto_thread;
-    const users = name === "discord" ? el("input", {
+    // ES (B114): every channel authorizes a PERSON — empty admits nobody.
+    const users = el("input", {
       value: (channel.allowed_users || []).join(", "),
-      placeholder: "allow-listed user ids, comma-separated (empty = any user in an allowed channel)",
-    }) : null;
+      placeholder: "user ids who may drive skep, comma-separated (empty = nobody)",
+    });
     const saveChannel = el("button", { class: "primary" }, "Save channel");
     saveChannel.addEventListener("click", async () => {
       saveChannel.disabled = true;
@@ -5956,7 +5957,7 @@ async function renderChannelsTab(panel) {
         };
         if (requireMention) body.require_mention = requireMention.checked;
         if (autoThread) body.auto_thread = autoThread.checked;
-        if (users) body.allowed_users = users.value.split(",").map(s => s.trim()).filter(Boolean);
+        body.allowed_users = users.value.split(",").map(s => s.trim()).filter(Boolean);
         if (secret.value.trim()) body.secret = secret.value.trim();
         if (signingSecret && signingSecret.value.trim()) {
           body.signing_secret = signingSecret.value.trim();
@@ -5989,8 +5990,8 @@ async function renderChannelsTab(panel) {
           requireMention, " require @mention in servers"),
         el("label", { title: "each routed mention opens a thread; the conversation continues there" },
           autoThread, " auto-thread per mention")) : null,
-      users ? el("div", { class: "row" },
-        el("div", { class: "field grow" }, el("label", {}, "allowed users"), users)) : null,
+      el("div", { class: "row" },
+        el("div", { class: "field grow" }, el("label", {}, "allowed users"), users)),
       el("div", { class: "row" },
         el("div", { class: "field grow" }, el("label", {}, "bot token (write-only)"), secret),
         signingSecret
