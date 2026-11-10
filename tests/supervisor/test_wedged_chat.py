@@ -210,3 +210,52 @@ def test_a_non_size_400_names_the_body_and_never_shrinks(
     line = _no_shrink(config, chat_id)
     assert "refused the request" in line
     assert "Value looks like object" in line
+
+
+def test_a_provider_or_model_change_clears_the_ceiling(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F13 (B86): a ceiling measures ONE provider+model, and nothing ever
+    cleared it — a later halving could only lower it (lane M1-21)."""
+    client = configured_client(config, ollama)
+    pinned = client.post("/api/chats", json={}).json()["chat_id"]
+    default = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+
+    def ceilings() -> tuple[int | None, int | None]:
+        chats = (store.get_chat(pinned), store.get_chat(default))
+        return tuple(c.provider_ceiling_chars if c else None for c in chats)  # type: ignore[return-value]
+
+    def measure() -> None:
+        for chat_id in (pinned, default):
+            store.set_chat_provider_ceiling(chat_id, 9000)
+
+    try:
+        store.set_chat_model(pinned, "big-model")
+        measure()
+        # Re-saving the same values (the settings form sends them all) keeps it.
+        client.put("/api/llm/config", json={"base_url": ollama.base_url, "default_model": "qwen3"})
+        store.set_chat_model(pinned, "big-model")
+        assert ceilings() == (9000, 9000)
+        # A new default model only re-measures the chats that use the default.
+        client.put("/api/llm/config", json={"default_model": "other"})
+        assert ceilings() == (9000, None)
+        measure()
+        store.set_chat_model(pinned, None)
+        assert ceilings() == (None, 9000)
+        measure()
+        # A new provider (URL or protocol) re-measures every chat.
+        client.put("/api/llm/config", json={"protocol": "openai-compat"})
+        assert ceilings() == (None, None)
+        measure()
+        client.put("/api/llm/config", json={"base_url": "http://127.0.0.1:1"})
+        assert ceilings() == (None, None)
+    finally:
+        store.close()
+
+
+def test_the_store_knows_the_provider_setting_keys() -> None:
+    from skep.supervisor.serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL
+    from skep.supervisor.store import _PROVIDER_SETTINGS
+
+    assert {LLM_BASE_URL, LLM_PROTOCOL, LLM_DEFAULT_MODEL} == _PROVIDER_SETTINGS
