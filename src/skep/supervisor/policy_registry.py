@@ -450,6 +450,17 @@ _FLOOR_KEYS: tuple[PolicyKey, ...] = (
         "allowlist write and filtered on every read",
     ),
     PolicyKey(
+        name="floor.secret-reads",
+        system="floor",
+        kind="rule",
+        type="rule",
+        default="deny",
+        layers=(),
+        invariant="I5",
+        doc="credential files (~/.ssh, ~/.aws, .env, skep's own tokens …) are never "
+        "read by the Queen or a worker, by requested path or realpath (ES-F1)",
+    ),
+    PolicyKey(
         name="floor.outbound-content",
         system="floor",
         kind="rule",

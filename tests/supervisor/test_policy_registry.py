@@ -92,10 +92,11 @@ def test_every_scope_action_has_a_rule_entry() -> None:
 
 def test_the_floor_is_listed_and_not_configurable() -> None:
     floor = registry_keys(system="floor")
-    assert len(floor) == 3
+    assert len(floor) == 4
     for key in floor:
         assert key.layers == (), key.name
-        assert key.invariant in ("I4", "I6"), key.name
+        # ES-F1: the secret floor is I5's — no layer may carry a read of it.
+        assert key.invariant in ("I4", "I5", "I6"), key.name
 
 
 def test_registry_view_is_plain_json(tmp_path: Path) -> None:

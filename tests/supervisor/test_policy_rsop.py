@@ -101,6 +101,7 @@ def test_rsop_renders_unresolved_as_unresolved(repo: Path, config: SupervisorCon
     assert view["floor"] == [
         "floor.worker-git-hard-denies",
         "floor.never-grantable-prefixes",
+        "floor.secret-reads",
         "floor.outbound-content",
     ]
 

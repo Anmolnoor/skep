@@ -209,9 +209,17 @@ def _enforcing_sandbox() -> Iterator[None]:
         yield
 
 
+def _rule_view(rule: Any) -> dict[str, Any]:
+    # ES-F4/F5: ``exact`` and ``layer`` show only where they are set.
+    return {
+        key: value for key, value in asdict(rule).items() if key not in ("exact", "layer") or value
+    }
+
+
 def _scopes_view(resolved: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return {
-        scope: [asdict(rule) for rule in policy.rules] for scope, policy in sorted(resolved.items())
+        scope: [_rule_view(rule) for rule in policy.rules]
+        for scope, policy in sorted(resolved.items())
     }
 
 

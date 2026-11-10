@@ -23,6 +23,7 @@ from ..autonomy import AutonomyDecision
 from ..policy_resolver import resolve_operator_policy
 from ..policy_schema import DEFAULT_DENY_RULE_ID
 from ..roles import Role, tighten_autonomy
+from ..secret_floor import secret_floor_reason
 from ..store import RunStore
 from .registry import repos_root
 from .settings import ConfigHolder
@@ -80,6 +81,16 @@ def _queen_filesystem_lane(
     except OSError as exc:
         return AutonomyDecision(
             verdict="deny", reason="filesystem.deny.unresolvable_path", detail=f"{path}: {exc}"
+        )
+    # ES-F1 (V3): the secret floor sits above every layer, grant and card —
+    # judged on the requested path and its realpath, before any rule is read.
+    secret = secret_floor_reason(path, skep_home=holder.current.home)
+    if secret is not None:
+        return AutonomyDecision(
+            verdict="deny",
+            reason="filesystem.deny.secret_floor",
+            detail=secret,
+            decided_by="floor/floor.secret-reads",
         )
     # v52-F3: the standing operator policy decides — the global document's
     # rules keep their effect, composed with the Queen-only operator overlay.
@@ -288,8 +299,12 @@ def search_files_result(
     path: str,
     target: str = "content",
     file_glob: str | None = None,
+    skep_home: Path | None = None,
 ) -> dict[str, Any]:
-    """ripgrep under one directory: content matches (``rg -n``) or file names."""
+    """ripgrep under one directory: content matches (``rg -n``) or file names.
+
+    ES-F1: hits in secret-floor files are dropped and the result's ``note``
+    says so — the search still answers, it just never quotes a credential."""
     root = Path(path).expanduser().resolve()
     if not root.exists():
         return {"error": f"no such path: {root}"}
@@ -299,7 +314,8 @@ def search_files_result(
             argv += ["--glob", file_glob]
         argv.append(str(root))
     else:
-        argv = ["rg", "--line-number", "--no-heading", "--max-count", "10"]
+        # --null: a NUL after each path, so the floor filter splits it exactly.
+        argv = ["rg", "--null", "--line-number", "--no-heading", "--max-count", "10"]
         if file_glob:
             argv += ["--glob", file_glob]
         argv += ["-e", pattern, str(root)]
@@ -318,9 +334,27 @@ def search_files_result(
 
         wanted = pattern if any(ch in pattern for ch in "*?[") else f"*{pattern}*"
         hits = [hit for hit in hits if fnmatch(Path(hit).name, wanted)]
-    return {
+    found = len(hits)
+    if target == "files":
+        hits = [hit for hit in hits if secret_floor_reason(hit, skep_home=skep_home) is None]
+    else:
+        kept: list[str] = []
+        for hit in hits:
+            name, sep, rest = hit.partition("\0")
+            if sep and secret_floor_reason(name, skep_home=skep_home) is not None:
+                continue
+            kept.append(f"{name}:{rest}" if sep else hit)
+        hits = kept
+    skipped = found - len(hits)
+    result: dict[str, Any] = {
         "path": str(root),
         "target": target,
         "matches": hits[:MAX_SEARCH_HITS],
         "truncated": len(hits) > MAX_SEARCH_HITS,
     }
+    if skipped:
+        result["note"] = (
+            f"{skipped} hit(s) in credential files were left out — the secret floor "
+            "(.env files, ~/.ssh and friends, skep's own tokens) is never searched or read"
+        )
+    return result

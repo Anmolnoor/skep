@@ -126,11 +126,14 @@ def test_golden_parity_with_the_template_as_the_baseline(name: str, tmp_path: Pa
         project["run_policy"]["_provenance"].pop("policy_engine_v2_scopes", None)
     assert v1 == v2, f"{name}: engine v2 answers differently with the template as baseline"
     # The template's rules ARE the operator's base (the operator overlay adds
-    # only its own `net:search`), and its knobs are the run's.
+    # only its own `net:search`) — minus its worker shell rules, which never
+    # reach the Queen's host lane (ES-F3) — and its knobs are the run's.
     operator_ids = {
         rule["rule_id"] for rules in v1["operator"]["scopes"].values() for rule in rules
     }
-    assert operator_ids - {"net:search"} == {rule.rule_id for rule in template.rules}
+    assert operator_ids - {"net:search"} == {
+        rule.rule_id for rule in template.rules if rule.scope != "shell"
+    }
     # (the strategy's own registry hosts merge in beside the template's)
     assert set(template.settings["default_network"]) <= set(
         v1["project-app"]["resolved"]["network_resolved"]
@@ -220,33 +223,43 @@ def test_the_b3_demo_sequence_holds_under_builder(
 ) -> None:
     """(d) Through `policy_decide`, the one entry the hook, the governor and
     the REST face share: `pnpm test` allow · `rm -rf build` ask · `git push`
-    deny — and the hook renders those three words. O5: a fresh home asks
+    deny — and the hook renders those three words. ES-F3: in the agent's
+    repo the run policy decides; with no repo the Queen's host lane answers,
+    and the template's worker toolchain does not reach it. O5: a fresh home asks
     (``no_baseline``) until the baseline is approved, so the demo approves it."""
     home = tmp_path / "home"
     assert main(["--home", str(home), "setup", "--template", "builder"]) == 0
     assert main(["--home", str(home), "policy", "approve", "--template", "builder", "--yes"]) == 0
     capsys.readouterr()
     store, holder = _parts(home)
+    repo = tmp_path / "app"
+    repo.mkdir()
+    shell: dict[str, Any] = {"scope": "shell", "action": "run", "repo": str(repo)}
+    store.set_setting("default_execution_mode", "sandbox")  # what onboard picks
     try:
-        ran = policy_decide(holder, store, scope="shell", action="run", value="pnpm test")
-        asked = policy_decide(holder, store, scope="shell", action="run", value="rm -rf build")
-        denied = policy_decide(
-            holder, store, scope="shell", action="run", value="git push origin main"
-        )
+        # The hook and the governor pass the agent's cwd: the run policy decides.
+        ran = policy_decide(holder, store, value="pnpm test", **shell)
+        asked = policy_decide(holder, store, value="rm -rf build", **shell)
+        denied = policy_decide(holder, store, value="git push origin main", **shell)
+        # ES-F3 (B03): with no repo the operator document answers — the
+        # Queen's host lane, which the template's worker shell rules never reach.
+        host = policy_decide(holder, store, scope="shell", action="run", value="pnpm test")
     finally:
         store.close()
-    assert (ran["verdict"], ran["rule_id"]) == ("allow", "shell-pnpm-test")
-    assert (asked["verdict"], asked["rule_id"]) == ("require_approval", "shell-learnable")
+    # The run policy compiles the template's toolchain into `shell:<prefix>`.
+    assert (ran["source"], ran["verdict"], ran["rule_id"]) == ("run", "allow", "shell:pnpm test")
+    assert asked["verdict"] in ("require_approval", "deny")
     assert (denied["verdict"], denied["rule_id"]) == ("deny", "floor.worker-git-hard-denies")
+    assert (host["source"], host["verdict"]) == ("operator", "deny")
     decisions = [
         hook_output(record)["hookSpecificOutput"]["permissionDecision"]
-        for record in (ran, asked, denied)
+        for record in (ran, asked, denied, host)
     ]
-    assert decisions == ["allow", "ask", "deny"]
-    # The rule names explain prints are the ones the decisions carry.
-    explained = {row["rule_id"] for row in explain_view("builder")["rules"]}
+    assert decisions == ["allow", "ask", "deny", "ask"]
+    # The command explain prints is the one the decision carries.
+    explained = {row["pattern"] for row in explain_view("builder")["rules"]}
     floor = {row["rule_id"] for row in explain_view("builder")["floor"]}
-    assert {ran["rule_id"], asked["rule_id"]} <= explained
+    assert "pnpm test" in explained
     assert denied["rule_id"] in floor
 
 
@@ -313,7 +326,8 @@ def test_assistant_character_no_shell_personal_tools_flow_repo_writes_denied() -
     assert decide(resolved, "filesystem", "write", "/notes/today.md").verdict == (
         "require_approval"
     )
-    assert decide(resolved, "filesystem", "read", "/notes/today.md").verdict == "allow"
+    # ES-F2 (V4): no template rule for reads — the operator-roots fallback decides.
+    assert decide(resolved, "filesystem", "read", "/notes/today.md").rule_id == "default-deny"
     assert decide(resolved, "mcp", "call", "calendar:list_events").verdict == "allow"
     assert decide(resolved, "mcp", "call", "notes:append").verdict == "allow"
     assert decide(resolved, "mcp", "call", "srv:tool").verdict == "require_approval"

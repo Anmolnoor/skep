@@ -45,12 +45,6 @@
     "filesystem": [
       {
         "verdict": "allow",
-        "rule_id": "fs-read",
-        "action": "read",
-        "pattern": "*"
-      },
-      {
-        "verdict": "allow",
         "rule_id": "fs-workspace",
         "action": "write",
         "pattern": "workspace"

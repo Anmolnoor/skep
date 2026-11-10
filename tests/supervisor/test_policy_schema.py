@@ -141,12 +141,17 @@ def test_learned_lift_auto_allows_after_resolution() -> None:
     )
     gated = decide(resolve(base), "shell", "run", "cargo build --release", template="t")
     assert gated.verdict == "require_approval"
-    learned = LearnedRule(rule_id="cargo", action="run", pattern="cargo build", scope="shell")
+    learned = LearnedRule(
+        rule_id="cargo", action="run", pattern="cargo build --release", scope="shell"
+    )
     lifted = decide(
         resolve(base, learned=(learned,)), "shell", "run", "cargo build --release", template="t"
     )
     assert lifted.verdict == "allow"
     assert lifted.decided_by == "t/cargo"
+    # ES-F4 (B04): the exact command line, not a prefix of a wider one.
+    wider = decide(resolve(base, learned=(learned,)), "shell", "run", "cargo build --release -j9")
+    assert wider.verdict == "require_approval"
 
 
 def test_unknown_scope_and_action_are_rejected_at_parse() -> None:

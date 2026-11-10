@@ -121,8 +121,8 @@ def test_cli_role_list_show_use(tmp_path: Path, capsys: pytest.CaptureFixture[st
 
 
 def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> None:
-    """D3: a role is a policy context inside the chat too. Under the builder
-    baseline `uv sync` runs in-turn for a chat with no role; the same call in
+    """D3: a role is a policy context inside the chat too. With a standing
+    Queen grant `uv sync` runs in-turn for a chat with no role; the same call in
     an operator chat cards (role:operator asks), and the floor still denies."""
     from skep.supervisor import policy_baseline as pb
     from skep.supervisor.policy_templates import load_policy_template
@@ -134,6 +134,13 @@ def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> 
     store = RunStore(config.db_path)
     try:
         holder = ConfigHolder(config, store)
+        # ES-F3: the builder's worker shell rules no longer reach the Queen's
+        # host lane — the standing allow here is the operator's own grant.
+        from skep.supervisor.serve.actions import remember_action_for_session
+
+        remember_action_for_session(
+            store, tool="run_shell", args={"command": "uv sync"}, actor="op", tier="always"
+        )
         plain = store.create_chat(title="plain", model=None).chat_id
         ops = store.create_chat(title="ops", model=None, role="operator").chat_id
         args = {"command": "uv sync"}

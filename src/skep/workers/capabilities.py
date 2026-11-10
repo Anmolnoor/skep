@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from skep.supervisor.netproxy import domain_allowed, is_loopback_host
+from skep.supervisor.secret_floor import secret_floor_reason
 from skep.supervisor.spawner import build_worker_env
 from skep.worker_contract import BOOKKEEPING_DIRS, PATCH_EXCLUDE_PATHSPECS, EventType
 from skep.workers.html_text import html_to_text
@@ -531,6 +532,19 @@ class CapabilityRegistry:
             ) from exc
         return resolved, relative.as_posix()
 
+    def _readable_path(self, path: object) -> tuple[Path, str]:
+        """ES-F1 (V3): ``_workspace_path`` plus the secret floor — a ``.env``
+        in the workspace is a credential, judged by requested path and
+        realpath (a symlink to it is still it). No grant lifts this."""
+        target, relative = self._workspace_path(path)
+        requested = Path(str(path))
+        if not requested.is_absolute():
+            requested = self._workspace / requested
+        reason = secret_floor_reason(requested)
+        if reason is not None:
+            raise CapabilityDenied(f"secret floor: {reason}")
+        return target, relative
+
     def _workspace_path_from_existing_suffix(self, candidate: Path) -> tuple[Path, str] | None:
         parts = [part for part in candidate.parts if part not in {"", candidate.anchor}]
         for index in range(len(parts)):
@@ -844,7 +858,7 @@ class CapabilityRegistry:
         return url, parsed.hostname
 
     def _filesystem_read(self, arguments: Mapping[str, Any]) -> CapabilityResult:
-        target, relative = self._workspace_path(arguments.get("path"))
+        target, relative = self._readable_path(arguments.get("path"))
         max_bytes = arguments.get("max_bytes", 65536)
         if not isinstance(max_bytes, int) or max_bytes <= 0:
             raise CapabilityDenied("max_bytes must be a positive integer")
@@ -875,7 +889,7 @@ class CapabilityRegistry:
         )
 
     def _filesystem_read_chunk(self, arguments: Mapping[str, Any]) -> CapabilityResult:
-        target, relative = self._workspace_path(arguments.get("path"))
+        target, relative = self._readable_path(arguments.get("path"))
         offset = arguments.get("offset", 0)
         max_bytes = arguments.get("max_bytes", 65536)
         if not isinstance(offset, int) or offset < 0:
@@ -1070,6 +1084,8 @@ class CapabilityRegistry:
         matches: list[str] = []
         for relative in self._tracked_files():
             path = self._workspace / relative
+            if secret_floor_reason(path) is not None:
+                continue  # ES-F1: never quote a credential file
             try:
                 if not path.is_file() or path.stat().st_size > 1_000_000:
                     continue
@@ -1457,6 +1473,9 @@ class CapabilityRegistry:
             raise CapabilityDenied("rev must be a non-empty string")
         if rev.startswith("-"):
             raise CapabilityDenied("rev must not be an option")
+        _, sep, inner = rev.partition(":")
+        if sep and inner and (reason := secret_floor_reason(self._workspace / inner)):
+            raise CapabilityDenied(f"secret floor: {reason}")
         return self._git_read("git.show", ["show", "--no-ext-diff", rev], f"GIT_SHOW {rev}")
 
     def _git_log(self, arguments: Mapping[str, Any]) -> CapabilityResult:

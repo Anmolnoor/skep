@@ -1074,7 +1074,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "operator's roots (registered repos, workon'd projects, the skep home) "
         "read immediately; any other path becomes a confirmation card naming "
         "the exact resolved path. Explicit filesystem policy rules win either "
-        "way — a deny refuses outright. BRANCH-AWARE: landed work lives on "
+        "way — a deny refuses outright. Until a policy baseline is approved "
+        "(or while it fails to verify) every read cards. Credential files (~/.ssh, ~/.aws, "
+        ".env, skep's own tokens) are never readable — refused, no card. "
+        "BRANCH-AWARE: landed work lives on "
         "skep/ branches while the clone stays on its default checkout — pass "
         "ref to read a file from any branch/commit; with no ref, a miss falls "
         "back to the project's landing branch automatically (the result's "
@@ -1094,7 +1097,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "search_files",
         "Search file CONTENTS (ripgrep regex) or list matching FILE NAMES "
         "under one directory. Same governance as read_file: operator roots "
-        "run immediately, other paths card, filesystem deny rules refuse.",
+        "run immediately, other paths card, filesystem deny rules refuse. "
+        "Hits in credential files are left out (the result's note says so).",
         {
             "pattern": {
                 "type": "string",
@@ -4084,6 +4088,7 @@ def _execute_mutation(
                 path=str(args["path"]),
                 target=str(args.get("target") or "content"),
                 file_glob=None if args.get("file_glob") is None else str(args["file_glob"]),
+                skep_home=holder.current.home,
             ),
             "decided_by": last_guard.decided_by,
         }
