@@ -101,10 +101,16 @@ def write_lock(
     *,
     approved_by: str,
     schema_version: int | None = None,
+    source: str | None = None,
+    changes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Approve ``layer``: write the file (``0444``), the lock and the ledger
     row. Returns the row. ``schema_version`` is for tests that stand in for
-    an older skep's lock."""
+    an older skep's lock.
+
+    ES-F2 (B51): ``source`` names where the layer came from, and a re-lock
+    that changes the content records ``relocked_from`` (the old sha256) and
+    its ``changes`` — the change event ``baseline_status`` keeps showing."""
     from .. import __version__
 
     version = layer.schema_version if schema_version is None else schema_version
@@ -117,6 +123,12 @@ def write_lock(
         "skep_version": __version__,
         "schema_version": version,
     }
+    if source is not None:
+        row["source"] = source
+    previous = [r for r in _ledger(home) if r.get("kind") == "baseline_approved"]
+    if previous and previous[-1].get("sha256") != row["sha256"]:
+        row["relocked_from"] = previous[-1].get("sha256")
+        row["changes"] = list(changes or [])
     path = baseline_path(home)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -349,13 +361,19 @@ def baseline_status(home: Path) -> dict[str, Any]:
     """The state on every face: ``skep policy baseline status``, ``GET
     /api/policy/baseline`` and the chat ``policy_explain baseline``."""
     state = verify(home)
-    view: dict[str, Any] = {"state": "none", "diff": [], "tampered_since": None}
+    view: dict[str, Any] = {"state": "none", "diff": [], "tampered_since": None, "relock": None}
     if isinstance(state, Ok):
         view.update(
             state="ok" if state.schema_from is None else "reapprove",
             **{k: state.lock.get(k) for k in ("sha256", "template", "approved_by", "approved_at")},
             schema_version=state.lock.get("schema_version"),
         )
+        if state.lock.get("relocked_from"):
+            # ES-F2: a content-changing re-lock never reads clean.
+            view["relock"] = {
+                k: state.lock.get(k)
+                for k in ("source", "approved_by", "approved_at", "relocked_from", "changes")
+            }
         if state.schema_from is not None:
             view["diff"] = [
                 f"schema_version {state.schema_from} -> {state.layer.schema_version}; "
@@ -376,5 +394,19 @@ def status_line(home: Path) -> str:
     suffix = " (schema changed: re-approve)" if view["state"] == "reapprove" else ""
     return (
         f"baseline: {view['template']} approved {view['approved_at']} "
-        f"sha256 {view['sha256'][:12]}{suffix}"
+        f"sha256 {view['sha256'][:12]}{suffix}{relock_note(view['relock'])}"
+    )
+
+
+def relock_note(relock: dict[str, Any] | None) -> str:
+    """ES-F2: the change event, as a suffix — empty when the last approval
+    changed nothing (a first lock or an identical re-lock)."""
+    if not relock:
+        return ""
+    changes = list(relock.get("changes") or [])
+    shown = "; ".join(changes[:3]) + (f"; +{len(changes) - 3} more" if len(changes) > 3 else "")
+    return (
+        f" — RE-LOCKED from {relock.get('source') or 'an unrecorded source'} by "
+        f"{relock.get('approved_by')} (was sha256 {str(relock.get('relocked_from'))[:12]}): "
+        f"{shown or 'content changed'}"
     )

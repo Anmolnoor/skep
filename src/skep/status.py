@@ -281,15 +281,22 @@ NO_BASELINE_WARNING = (
 def _baseline_advisories(home: Path) -> list[str]:
     """first-run O5 (ADR 0056 D2): a home the zero state does not bind (it
     predates the baseline) keeps deciding as before — say so in one line."""
+    from .supervisor.policy_baseline import NoBaseline, baseline_status, relock_note, verify
+
+    if not isinstance(verify(home / "supervisor"), NoBaseline):
+        # ES-F2 (B51): a re-lock from a non-shipped layer (a file, or
+        # baseline.json edited in place) is a change event doctor names.
+        relock = baseline_status(home / "supervisor")["relock"]
+        source = str((relock or {}).get("source") or "")
+        if relock and not source.startswith(("template:", "onboard:")):
+            return [f"baseline re-locked {relock.get('approved_at')}{relock_note(relock)}"]
+        return []
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
         return []  # opening a store here would create (and seed) a fresh home
-    from .supervisor.policy_baseline import NoBaseline, verify
     from .supervisor.policy_layers import zero_state_home
     from .supervisor.store import RunStore
 
-    if not isinstance(verify(home / "supervisor"), NoBaseline):
-        return []
     store = RunStore(db_path)
     try:
         return [] if zero_state_home(store) else [NO_BASELINE_WARNING]
