@@ -264,19 +264,23 @@ def _podman_availability() -> SandboxAvailability:
     if binary is None:
         return SandboxAvailability(False, "missing_binary", "podman was not found on PATH")
     with tempfile.TemporaryDirectory(prefix="skep-podman-probe-") as tmp:
-        rootfs = _podman_rootfs_skeleton(Path(tmp))
+        # ES-F7 (B53): a real round trip through a writable mount, with the
+        # exact argv workers get. Running /usr/bin/true with nothing mounted
+        # said "usable" on SELinux hosts where the worker could not even read
+        # its own worktree.
+        work = Path(tmp) / "work"
+        work.mkdir()
+        (work / "probe-in").write_text("skep\n", encoding="utf-8")
         argv = [
             binary,
-            "run",
-            "--rm",
-            "--rootfs",
-            "--env-host",
-            "--network=none",
-            *_podman_ro_bind_args(),
-            "--tmpfs",
-            "/tmp",
-            f"{rootfs}:O",
-            "/usr/bin/true",
+            *_podman_args(
+                writable_roots=[work],
+                network=DENY_ALL_NETWORK,
+                rootfs=_podman_rootfs_skeleton(Path(tmp)),
+            ),
+            "/bin/sh",
+            "-c",
+            "cat probe-in > probe-out",
         ]
         try:
             proc = subprocess.run(
@@ -288,9 +292,19 @@ def _podman_availability() -> SandboxAvailability:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return SandboxAvailability(False, "probe_failed", str(exc), backend=PODMAN)
+        round_trip = (work / "probe-out").is_file() and (
+            (work / "probe-out").read_text(encoding="utf-8") == "skep\n"
+        )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()
         return SandboxAvailability(False, "probe_rejected", detail, backend=PODMAN)
+    if not round_trip:
+        return SandboxAvailability(
+            False,
+            "probe_rejected",
+            "the container started but could not read and write its workspace mount",
+            backend=PODMAN,
+        )
     return SandboxAvailability(True, backend=PODMAN)
 
 
@@ -515,7 +529,13 @@ def _podman_args(
             "deny-all / allow-all, or the native backend."
         )
     roots = [Path(root) for root in writable_roots]
-    args = ["run", "--rm", "--rootfs", "--env-host"]
+    # ES-F7 (B53): on SELinux-enforcing hosts container_t cannot read
+    # user_home_t, so the worker could not read its worktree, task file or
+    # skep's venv. label=disable is the narrowest setting that works: ``:z``
+    # relabels host files permanently (the repo's objects/, the results dir)
+    # and still leaves /home unreadable. The wall is then the mount layout,
+    # namespaces and the secret masks — the same wall as bubblewrap.
+    args = ["run", "--rm", "--rootfs", "--env-host", "--security-opt", "label=disable"]
     if network.is_deny_all:
         args.append("--network=none")
     args.extend(_podman_ro_bind_args())
