@@ -55,11 +55,9 @@ def test_fast_lane_network_is_dead() -> None:
 
 @_live
 def test_fast_lane_writes_outside_workspace_fail(tmp_path: Path) -> None:
-    # pytest's tmp_path lives under tempfile.gettempdir(), which the macOS
-    # profile deliberately allows (default_writable_roots — the toolchain's
-    # temp roots), so a target there tests the wrong wall. Aim outside every
-    # temp root; the directory exists only so the write could succeed if the
-    # sandbox ever let it through.
+    # Aim outside every temp root (bwrap's /tmp is a private tmpfs, so a
+    # target there tests the wrong wall); the directory exists only so the
+    # write could succeed if the sandbox ever let it through.
     outside = Path.home() / ".cache" / f"skep-fastlane-escape-{os.getpid()}"
     outside.mkdir(parents=True, exist_ok=True)
     target = outside / "escape.txt"

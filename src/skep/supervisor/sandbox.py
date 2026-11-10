@@ -309,27 +309,6 @@ def available() -> bool:
     return availability().usable
 
 
-def default_writable_roots() -> tuple[Path, ...]:
-    """The macOS temp roots the worker toolchain legitimately writes to.
-
-    Both the symlink form (``/tmp`` → ``/private/tmp``, ``/var/folders`` →
-    ``/private/var/folders``) and the resolved form are included; Seatbelt
-    matches the real (resolved) path, but listing both is harmless and explicit.
-    """
-    candidates = [
-        Path("/tmp"),
-        Path("/private/tmp"),
-        Path("/var/folders"),
-        Path("/private/var/folders"),
-        Path(tempfile.gettempdir()),
-        Path(tempfile.gettempdir()).resolve(),
-    ]
-    seen: dict[str, Path] = {}
-    for path in candidates:
-        seen.setdefault(str(path), path)
-    return tuple(seen.values())
-
-
 # ES-F4 (B05, V3 sandbox half): paths no worker may read, whatever its
 # backend. The operator's credential dirs, plus skep's own control-plane
 # secrets: serve-token (the whole REST API), serve.env (engine auth), and the
@@ -349,11 +328,27 @@ _HOME_SECRET_PATHS = (
 )
 
 
+def _skep_home(skep_home: Path | None) -> Path:
+    return skep_home or Path(os.environ.get("SKEP_HOME") or Path.home() / ".skep")
+
+
+def _refuse_home_inside(skep_home: Path | None, writable_roots: Iterable[Path]) -> None:
+    """ES-F5 (B46): a skep home under a worker-writable root hands the worker
+    the store, the baseline and the token — refuse the run, name the fix."""
+    home = _skep_home(skep_home).resolve()
+    for root in writable_roots:
+        if home.is_relative_to(Path(root).resolve()):
+            raise SandboxUnavailableError(
+                f"the skep home {home} lies inside the worker-writable root {root}: a "
+                "sandboxed worker could rewrite the store, baseline and serve token. "
+                "Move the home (SKEP_HOME / --home) out of that directory."
+            )
+
+
 def secret_paths(skep_home: Path | None = None) -> list[Path]:
     """The existing secret-floor paths to hide from a worker (resolved)."""
     home = Path.home()
-    if skep_home is None:
-        skep_home = Path(os.environ.get("SKEP_HOME") or home / ".skep")
+    skep_home = _skep_home(skep_home)
     supervisor = skep_home / "supervisor"
     candidates = [home / rel for rel in _HOME_SECRET_PATHS]
     candidates += [skep_home / "serve.env", supervisor / "serve-token"]
@@ -636,6 +631,7 @@ def write_profile(
     unconfined fallback recorded as ``sandbox``.
     """
     probe = require_usable(backend)
+    _refuse_home_inside(skep_home, [workspace, *extra_writable])
     read_denied = secret_paths(skep_home)
     if probe.backend == PODMAN:
         return _write_argv_profile(
@@ -660,7 +656,11 @@ def write_profile(
                 read_denied=read_denied,
             ),
         )
-    writable_roots = [workspace, *extra_writable, *default_writable_roots()]
+    # ES-F5 (B11): no blanket /tmp, /private/tmp, /var/folders roots — they
+    # were shared by every run (run B read run A's files) and held any
+    # SKEP_HOME placed under $TMPDIR. Each run's TMPDIR is already private,
+    # inside its workspace (dispatch/reverify/diagnose/fast lane set it).
+    writable_roots = [workspace, *extra_writable]
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(
         build_profile(
