@@ -251,11 +251,11 @@ def test_run_status_review_approve_full_loop(
     finally:
         store.close()
 
-    # Approving twice fails loudly: the branch already exists.
+    # Approving twice fails loudly: the task already landed (ES-F4).
     code = _run_cli(home, "review", task_id, "--approve", "--actor", "tester")
     captured = capsys.readouterr()
     assert code == 2
-    assert "already exists" in captured.err
+    assert f"already landed on skep/{task_id}" in captured.err
 
 
 def test_review_approve_lands_on_named_branch(
@@ -2842,3 +2842,18 @@ def test_cli_run_network_help_says_what_an_omitted_flag_does(
     out = " ".join(capsys.readouterr().out.split())
     assert "omit to deny all outbound" not in out
     assert "default_network applies" in out and "--minimal denies all" in out
+
+
+def test_es_f4_cli_refuses_a_second_landing(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ES-F4 (B128): `skep review --approve --branch other` on a landed task."""
+    home = tmp_path / "home"
+    args = ("Fix the bug. MODE:happy", "--execution-mode", "workspace")
+    assert _run_cli(home, "run", str(repo), *args, "--worker-cmd", _worker_cmd(), "--quiet") == 0
+    task_id = _only_task_id(home)
+    assert _run_cli(home, "review", task_id, "--approve") == 0
+    capsys.readouterr()
+    assert _run_cli(home, "review", task_id, "--approve", "--branch", "other") != 0
+    assert "already landed on" in capsys.readouterr().err
+    assert not git(repo, "branch", "--list", "other").stdout.strip()

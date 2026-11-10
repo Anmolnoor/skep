@@ -384,3 +384,56 @@ def test_a_blocked_auto_apply_writes_its_reason_to_the_audit_trail(
         assert "verify_command" in blocked[VERIFIED_PATCH_RULE.name]
     finally:
         store.close()
+
+
+def test_es_f3_auto_apply_never_appends_past_the_verified_commit(repo: Path) -> None:
+    """ES-F3 (B131, I2): no human reads a warning on the auto lane, so a
+    target branch past the commit G10 verified blocks it — named, on the
+    run's trail — instead of landing an unverified tree."""
+    import json
+
+    from skep.supervisor import mint_task
+    from skep.supervisor.policy import VERIFIED_PATCH_RULE, maybe_auto_approve
+
+    verified = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "commit", "-q", "--allow-empty", "-m", "maintain moved")
+    git(repo, "branch", "skep/maintain", "HEAD")
+    store = RunStore(repo.parent / "s.sqlite3")
+    try:
+        task = mint_task(workspace=repo.parent / "ws", instructions="maintain tick")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "completed", None)
+        store.record_reverification(
+            task.task_id,
+            outcome="passed",
+            worker_outcome="passed",
+            confirmed=True,
+            commands=["true"],
+            exit_codes=[0],
+            detail="re-ran clean",
+            base_commit=verified,
+        )
+        patch = repo.parent / "a.patch"
+        patch.write_text(
+            "diff --git a/n.py b/n.py\nnew file mode 100644\n"
+            "--- /dev/null\n+++ b/n.py\n@@ -0,0 +1 @@\n+y\n"
+        )
+        store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+        approved = maybe_auto_approve(
+            store=store,
+            rules=(dataclasses.replace(VERIFIED_PATCH_RULE, require_pinned_verify=False),),
+            repo=repo,
+            task_id=task.task_id,
+            verification_outcome="passed",
+            risk_flags=(),
+            branch="skep/maintain",
+        )
+        assert approved is None
+        blocked = next(
+            json.loads(detail)["auto_apply_blocked"]
+            for _, detail, _ in store.transitions_for(task.task_id)
+            if detail and "auto_apply_blocked" in detail
+        )
+        assert "land it by hand" in next(iter(blocked.values()))
+    finally:
+        store.close()

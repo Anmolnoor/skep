@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
-from .apply import apply_patch_on_branch, patch_paths
+from .apply import apply_patch_on_branch, moved_past_verified_base, patch_paths
 from .store import RunStore
 
 
@@ -209,7 +209,30 @@ def maybe_auto_approve(
     # two columns during the transition.
     decided_by = f"auto/{rule.name}"
     target_branch = branch or f"skep/{task_id}"
-    failure = apply_patch_on_branch(repo, target_branch, patch_path, task_id=task_id, actor=actor)
+    verified_base = store.verified_base(task_id)
+    moved = moved_past_verified_base(repo, target_branch, verified_base)
+    if moved is not None and verified_base is not None:
+        # ES-F3 (B131, I2): no human reads a warning on this lane, so it never
+        # appends past the commit G10 verified — the run waits for a hand land.
+        import json as json_module
+
+        store.transition(
+            task_id,
+            "completed",
+            json_module.dumps(
+                {
+                    "auto_apply_blocked": {
+                        rule.name: f"{target_branch} is at {moved[:12]}, past the commit "
+                        f"re-verified ({verified_base[:12]}); land it by hand"
+                    }
+                },
+                ensure_ascii=True,
+            ),
+        )
+        return None
+    failure = apply_patch_on_branch(
+        repo, target_branch, patch_path, task_id=task_id, actor=actor, verified_base=verified_base
+    )
     review_id = store.enqueue_approval(
         task_id, action="apply_patch", reason=note, decided_by=decided_by
     )

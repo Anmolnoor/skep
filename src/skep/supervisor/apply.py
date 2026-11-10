@@ -12,8 +12,12 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .worktree import TREE_LOCK
+
+if TYPE_CHECKING:
+    from .store import RunStore
 
 # A conservative git-ref slug for operator-chosen landing branches (v20-F5):
 # must start alphanumeric; allow letters, digits, ``._/-``. The stricter checks
@@ -155,6 +159,17 @@ def validate_landing_branch(repo: Path, branch: str) -> str | None:
         return f"invalid branch name: {branch!r} (use a slug like 'sci-cal' or 'feature/foo')"
     if _git(repo, "check-ref-format", "--branch", name).returncode != 0:
         return f"invalid branch name: {branch!r}"
+    # ES-F4 (B127): `refs/heads/main` is a legal NEW branch to git
+    # (refs/heads/refs/heads/main) — and the run then reported applied_branch
+    # `refs/heads/main`, which reads as "landed on main". A first component
+    # naming a ref namespace or a remote makes every short name ambiguous.
+    first = name.split("/", 1)[0].casefold()
+    remotes = {r.casefold() for r in _git(repo, "remote").stdout.split()}
+    if "/" in name and (first in {"refs", "heads", "tags", "remotes"} or first in remotes):
+        return (
+            f"branch {branch!r} starts with a ref namespace or remote name ({first!r}), "
+            "which makes the landed ref ambiguous; use a plain name like 'feature/foo'"
+        )
     # v81-F1: guard the repo's REAL default (what runs spawn from), not the
     # operator's current checkout — a clone parked on skep/maintain must not
     # block landing there.
@@ -212,7 +227,13 @@ def patch_paths(repo: Path, patch_path: Path) -> tuple[str, ...]:
 
 
 def apply_patch_on_branch(
-    repo: Path, branch: str, patch_path: Path, *, task_id: str, actor: str
+    repo: Path,
+    branch: str,
+    patch_path: Path,
+    *,
+    task_id: str,
+    actor: str,
+    verified_base: str | None = None,
 ) -> str | None:
     """Apply the patch on a fresh branch via a temp worktree; never touches main.
 
@@ -220,6 +241,11 @@ def apply_patch_on_branch(
     ``Approved-by: <actor>`` trailer — ``<actor>`` is a username for a human or
     ``auto:<rule>`` for an auto-approval (D3), so the audit trail names what
     granted the autonomy.
+
+    ``verified_base`` (ES-F3, B131) is the commit a CONFIRMED G10 re-verify
+    applied this patch to. A new branch is built on exactly it — never on a
+    default tip that moved since, which landed an unverified tree under a
+    "confirmed" label. (Appending to an existing branch: ``land_patch``.)
     """
     branch_exists = _git(repo, "rev-parse", "--verify", f"refs/heads/{branch}").returncode == 0
     if branch_exists and branch == f"skep/{task_id}":
@@ -232,7 +258,7 @@ def apply_patch_on_branch(
         # one is built detached from the repo default (v81-F3 — not HEAD: a
         # clone parked on another branch must not become the landing base) and
         # only named once its commit exists, below.
-        start_point = repo_default_branch(repo) or "HEAD"
+        start_point = verified_base or repo_default_branch(repo) or "HEAD"
         with TREE_LOCK:  # never beside a sibling's teardown (worktree.py)
             added = (
                 _git(repo, "worktree", "add", str(apply_dir), branch)
@@ -278,3 +304,45 @@ def apply_patch_on_branch(
     if _git(repo, "rev-parse", "--verify", f"refs/heads/{branch}").returncode != 0:
         return f"branch {branch} missing after apply; aborting"
     return None
+
+
+def moved_past_verified_base(repo: Path, branch: str, verified_base: str | None) -> str | None:
+    """The tip of an EXISTING ``branch`` that is not the commit G10 verified
+    the patch on (ES-F3), else None. Appending there lands a tree no one
+    re-verified: the v24-F1 follow-up and grouped-PR stacks do it on purpose."""
+    tip = resolve_commit(repo, f"refs/heads/{branch}")
+    return tip if verified_base is not None and tip is not None and tip != verified_base else None
+
+
+def land_patch(
+    store: RunStore, repo: Path, branch: str, patch_path: Path, *, task_id: str, actor: str
+) -> str | None:
+    """``apply_patch_on_branch`` on the commit G10 verified (ES-F3, B131).
+
+    An append past that commit still lands (a human asked for the stack), but
+    the record stops calling the run confirmed — every landing surface then
+    says the landed tree was never re-verified, instead of "confirmed"."""
+    # ES-F4 (B128, I1): one approved patch lands once — a Queen loop or a
+    # double-click landed one task on 7 branches. A follow-up is a new task.
+    landed = next(
+        (
+            a.landing_branch or f"skep/{task_id}"
+            for a in store.approvals_for(task_id)
+            if a.action == "apply_patch" and a.status == "approved"
+        ),
+        None,
+    )
+    if landed is not None:
+        return f"this task already landed on {landed}; a task lands once — dispatch a follow-up"
+    verified_base = store.verified_base(task_id)
+    moved = moved_past_verified_base(repo, branch, verified_base)
+    failure = apply_patch_on_branch(
+        repo, branch, patch_path, task_id=task_id, actor=actor, verified_base=verified_base
+    )
+    if failure is None and moved is not None and verified_base is not None:
+        store.unconfirm_reverification(
+            task_id,
+            f"landed on {branch} at {moved[:12]}, past the commit re-verified "
+            f"({verified_base[:12]}) — the landed tree was never re-verified",
+        )
+    return failure

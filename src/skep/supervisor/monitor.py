@@ -54,6 +54,20 @@ def kill_process_tree(process: subprocess.Popen[bytes]) -> None:
     process.wait()
 
 
+def kill_session(pid: int) -> None:
+    """SIGKILL everything in the session ``pid`` leads (ES-F5/ES-F9, B10 B133).
+
+    A worker spawns with ``start_new_session``, so its pid is the session id
+    and the process-group id. ``killpg`` reaches its group; ``pkill -s`` also
+    reaches commands it put in their own group (ES-F9) — none may outlive it.
+    The kernel never reuses a pid while a session or group of that id lives.
+    """
+    with contextlib.suppress(OSError):
+        os.killpg(pid, signal.SIGKILL)
+    with contextlib.suppress(OSError):
+        subprocess.run(["pkill", "-KILL", "-s", str(pid)], capture_output=True, check=False)
+
+
 def synthesize_terminal(
     *,
     task_id: str,
@@ -146,6 +160,11 @@ def watch_worker(
             break
         sleep(poll_seconds)
 
+    # ES-F9 (B133, Q3): the worker is gone — so is everything it started, breach
+    # or not (a crashed worker left `sleep 330` running with PPID 1).
+    # ponytail: the pid was just reaped; reuse needs a full pid-space wrap
+    # inside this window AND a stranger leading a session with that number.
+    kill_session(process.pid)
     events = read_event_log(events_path)
     worker_reported_terminal = bool(events) and events[-1].type is EventType.TASK_TERMINAL
     next_seq = (events[-1].seq + 1) if events else 1

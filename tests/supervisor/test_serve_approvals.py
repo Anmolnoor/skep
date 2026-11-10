@@ -18,7 +18,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from skep.profile import run_personal_setup
-from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor import RunStore, SupervisorConfig, run_task
 from skep.supervisor.apply import validate_landing_branch
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.github import PullRequestResult
@@ -1295,3 +1295,88 @@ def test_decider_is_the_authenticated_principal_not_the_body(
     assert approval is not None
     assert approval.resolved_by == "operator"
     assert "worker-x" in str(approval.resolution_note)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "refs/heads/main",
+        "heads/main",
+        "refs/tags/v1",
+        "remotes/origin/x",
+        "Refs/Heads/x",
+        "origin/x",
+    ],
+)
+def test_es_f4_ref_namespace_spellings_are_not_landing_branches(repo: Path, name: str) -> None:
+    """ES-F4 (B127, I1 I8): git accepted `refs/heads/main` as a NEW branch
+    (refs/heads/refs/heads/main), and the run reported applied_branch
+    `refs/heads/main` — which reads as "landed on main"."""
+    git(repo, "remote", "add", "origin", str(repo))
+    error = validate_landing_branch(repo, name)
+    assert error is not None and "ref namespace" in error, name
+
+
+def test_es_f4_a_landed_task_lands_once(repo: Path, config: SupervisorConfig) -> None:
+    """ES-F4 (B128, I1): one completed task landed 7 times on 7 branches."""
+    from skep.supervisor.serve import actions
+
+    outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
+    store = RunStore(config.db_path)
+    try:
+        first = actions.land_run(store, actions.require_run(store, outcome.record.task_id), "t")
+        with pytest.raises(HTTPException) as again:
+            actions.land_run(
+                store, actions.require_run(store, outcome.record.task_id), "t", branch="again"
+            )
+    finally:
+        store.close()
+    assert again.value.status_code == 409
+    assert f"already landed on {first['branch']}" in str(again.value.detail)
+    assert not git(repo, "branch", "--list", "again").stdout.strip()
+
+
+def test_es_f8_cli_approve_of_a_batch_card_grants_every_command(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F8 (B130, I5; ADR 0050 parity): `skep review --approve` of a card
+    "for 3 commands" granted only the first — three approvals, three resumes
+    (lane M2-19) — and skipped the v86-F1 session tier REST writes."""
+    from skep.supervisor import cli_cmds, mint_task
+    from skep.supervisor.contracts_io import write_task_file
+    from skep.supervisor.serve.settings import SESSION_ALLOWED_SHELL_COMMANDS
+
+    config = build_config(tmp_path / "home", None)
+    config.home.mkdir(parents=True, exist_ok=True)
+    batch = [["mkdir", "-p", "docs"], ["mv", "a.txt", "docs/a.txt"], ["wc", "-l", "big.txt"]]
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=repo, instructions="rename")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "pending_approval")
+        write_task_file(task, config.audit_dir / task.task_id / "task.json")
+        store.enqueue_approval(
+            task.task_id,
+            action="shell.run",
+            reason="shell.run requires approval for 3 commands: mkdir -p docs",
+            commands=batch,
+        )
+        seen: dict[str, object] = {}
+
+        class _Stop(Exception):
+            pass
+
+        def fake_run_task(*args: object, **kwargs: object) -> object:
+            seen.update(kwargs)
+            raise _Stop
+
+        monkeypatch.setattr(cli_cmds, "run_task", fake_run_task)
+        record = store.get_run(task.task_id)
+        assert record is not None
+        with pytest.raises(_Stop):
+            cli_cmds._resume_pending_approval(config, store, record, "tester")
+        verdict = seen["approval_verdict"]
+        assert [list(c) for c in verdict.commands] == batch  # type: ignore[attr-defined]
+        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) == batch
+    finally:
+        store.close()

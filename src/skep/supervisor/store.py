@@ -592,6 +592,8 @@ class ReverifyRecord:
     exit_codes: list[int]
     detail: str
     created_at: str
+    # ES-F3 (B131): the commit G10 applied the patch to — landing builds on it.
+    base_commit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -882,6 +884,12 @@ class RunStore:
         column check. v3.5 adds the template binding to ``schedules``; v4 adds
         ``provenance`` to ``templates`` (an existing v3.5 DB has the table already)."""
         schedule_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(schedules)")}
+        reverify_columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(reverifications)")
+        }
+        if "base_commit" not in reverify_columns:
+            # ES-F3 (B131): the commit G10 verified on; NULL for older rows.
+            self._conn.execute("ALTER TABLE reverifications ADD COLUMN base_commit TEXT")
         if "template_name" not in schedule_columns:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN template_name TEXT")
         if "params_json" not in schedule_columns:
@@ -1317,11 +1325,12 @@ class RunStore:
         commands: list[str],
         exit_codes: list[int],
         detail: str,
+        base_commit: str | None = None,
     ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO reverifications (task_id, outcome, worker_outcome,"
-            " confirmed, commands_json, exit_codes_json, detail, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " confirmed, commands_json, exit_codes_json, detail, created_at, base_commit)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id,
                 outcome,
@@ -1331,15 +1340,34 @@ class RunStore:
                 json.dumps(exit_codes),
                 detail,
                 _now(),
+                base_commit,
             ),
         )
         self._conn.commit()
 
     @_locked
+    def unconfirm_reverification(self, task_id: str, note: str) -> None:
+        """ES-F3 (B131): the patch landed past the commit G10 verified it on —
+        the landed tree is not the confirmed one, so the row stops saying so."""
+        self._conn.execute(
+            "UPDATE reverifications SET confirmed = 0, detail = detail || ' — ' || ?"
+            " WHERE task_id = ?",
+            (note, task_id),
+        )
+        self._conn.commit()
+
+    def verified_base(self, task_id: str) -> str | None:
+        """The commit a CONFIRMED re-verify ran on (ES-F3) — what landing
+        must build on — or None when nothing was confirmed."""
+        record = self.reverification_for(task_id)
+        return record.base_commit if record is not None and record.confirmed else None
+
+    @_locked
     def reverification_for(self, task_id: str) -> ReverifyRecord | None:
         row = self._conn.execute(
             "SELECT task_id, outcome, worker_outcome, confirmed, commands_json,"
-            " exit_codes_json, detail, created_at FROM reverifications WHERE task_id = ?",
+            " exit_codes_json, detail, created_at, base_commit FROM reverifications"
+            " WHERE task_id = ?",
             (task_id,),
         ).fetchone()
         if row is None:
@@ -1353,6 +1381,7 @@ class RunStore:
             exit_codes=list(json.loads(row[5])),
             detail=row[6],
             created_at=row[7],
+            base_commit=row[8],
         )
 
     # -- usage accounting (G8: cost is answerable) ----------------------------

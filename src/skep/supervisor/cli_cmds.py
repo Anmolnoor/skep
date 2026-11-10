@@ -24,7 +24,7 @@ from typing import Any
 
 from skep.worker_contract import ApprovalVerdict, Budget, CodingWorkerTask, Permissions, TaskState
 
-from .apply import apply_patch_on_branch, validate_landing_branch
+from .apply import land_patch, validate_landing_branch
 from .autonomy import (
     approval_decision_for_action,
     project_policy_dispatch_match,
@@ -1341,8 +1341,8 @@ def cmd_review(args: argparse.Namespace) -> int:
                 )
         else:
             branch = f"skep/{record.task_id}"
-        failure = apply_patch_on_branch(
-            Path(record.repo), branch, patch_path, task_id=record.task_id, actor=actor
+        failure = land_patch(
+            store, Path(record.repo), branch, patch_path, task_id=record.task_id, actor=actor
         )
         if failure is not None:
             return _err(
@@ -1527,6 +1527,18 @@ def _resume_pending_approval(
             events=store.events_for(record.task_id),
         )
     )
+    # ES-F8 (B130; ADR 0050 parity with resume_past_gate): a batch card grants
+    # EVERY command it listed (v19-F1) — the CLI granted only the first, so a
+    # "for 3 commands" card cost three approvals and three resumes — and a
+    # plain approve holds for the serve session like the REST face (v86-F1).
+    approval_commands = store.approval_commands(review_id)
+    session_kept: list[list[str]] = []
+    if not remembered and approval_commands:
+        from .serve.actions import remember_commands_for_session
+
+        session_kept = remember_commands_for_session(
+            store, [list(command) for command in approval_commands]
+        )
     verdict = ApprovalVerdict(
         approved=True,
         actor=actor,
@@ -1534,6 +1546,7 @@ def _resume_pending_approval(
         reason=approval_reason or "approved via review --approve (Q8 resume)",
         action=approval_action,
         decision=None if decision is None else decision.to_payload(),
+        commands=approval_commands,
     )
     print(f"resuming task {record.task_id} with approval by {actor} ...")
     outcome = run_task(
@@ -1562,7 +1575,8 @@ def _resume_pending_approval(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})",
+        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})"
+        + ("; approval held for this serve session" if session_kept else ""),
         remembered=remembered,
     )
     # v115-F1: the parent is superseded by its successor, as resume_past_gate

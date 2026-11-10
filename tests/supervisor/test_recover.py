@@ -190,3 +190,60 @@ def test_recovery_leaves_terminal_and_pending_approval_runs_alone(
         assert pending is not None and pending.state == "pending_approval"
     finally:
         store.close()
+
+
+def _gone(pid: int, seconds: float = 5.0) -> bool:
+    import os
+    import time
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_es_f5_recovery_kills_a_live_worker_before_marking_it_crashed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """ES-F5 (B10, I1 I12): serve died, the detached worker lived on past its
+    budget, recovery marked it crashed and deleted the worktree it was still
+    writing; its late result was never ingested and its `sleep 330` grandchild
+    leaked (lane M2-35). A live worker is killed with its whole session first."""
+    import subprocess
+    import sys
+
+    store = RunStore(config.db_path)
+    try:
+        task_id, _workspace = _strand_run(store, config, repo)
+        grandchild_file = tmp_path / "grandchild.pid"
+        worker = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess, sys, time; "
+                "p = subprocess.Popen(['sleep', '61']); "
+                "open(sys.argv[1], 'w').write(str(p.pid)); time.sleep(60)",
+                str(grandchild_file),
+                f"--task={task_id}",
+            ],
+            start_new_session=True,
+        )
+        while not grandchild_file.is_file() or not grandchild_file.read_text():
+            pass
+        grandchild = int(grandchild_file.read_text())
+        store.transition(task_id, "running", f"pid {worker.pid}")
+
+        recover_interrupted_runs(store, config)
+
+        assert worker.wait(timeout=5) != 0
+        assert _gone(grandchild)
+        record = store.get_run(task_id)
+        assert record is not None and record.state == "worker_crashed"
+        details = " ".join(d or "" for _, d, _ in store.transitions_for(task_id))
+        assert f"pid {worker.pid}" in details and "killed" in details
+    finally:
+        store.close()

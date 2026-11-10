@@ -7,6 +7,7 @@ therefore can never be allowlisted, remembered, or persisted into a policy.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
 from collections.abc import Sequence
@@ -14,7 +15,89 @@ from collections.abc import Sequence
 # v19-F3: git subcommands the worker denies outright. The supervisor lands
 # changes as a patch after approval, so a worker has no business reaching a
 # remote — these can never be allowlisted or remembered.
-REMOTE_GIT_SUBCOMMANDS: frozenset[str] = frozenset({"push", "pull", "fetch"})
+# ES-F1 (B124): the plumbing that does the same transfer (`send-pack` pushed
+# on es-integration-2) and the transport helpers (`remote-ext` runs a command).
+REMOTE_GIT_SUBCOMMANDS: frozenset[str] = frozenset(
+    {"push", "pull", "fetch", "send-pack", "receive-pack", "fetch-pack", "http-push", "http-fetch"}
+)
+_REMOTE_MUTATING_VERBS = frozenset(
+    {"add", "set-url", "set-head", "set-branches", "remove", "rm", "rename", "update", "prune"}
+)
+
+# ES-F1 (B124): `git --list-cmds=main` (2.56). A subcommand outside it is an
+# alias — `git -c alias.p=push p` or one in the operator's own gitconfig — and
+# an alias can be anything, so the floor cannot read it; it runs only when
+# allowlisted exactly (worker) and never from chat (Queen).
+_GIT_BUILTINS = frozenset(
+    """
+    add am annotate apply archive backfill bisect blame branch bundle cat-file
+    check-attr check-ignore check-mailmap check-ref-format checkout checkout-index
+    cherry cherry-pick clean clone column commit commit-graph commit-tree config
+    count-objects credential describe diagnose diff diff-files diff-index diff-pairs
+    diff-tree difftool fast-export fast-import fetch fetch-pack filter-branch
+    fmt-merge-msg for-each-ref for-each-repo format-patch fsck gc get-tar-commit-id
+    grep hash-object help history hook http-fetch http-push index-pack init
+    interpret-trailers last-modified log ls-files ls-remote ls-tree mailinfo
+    mailsplit maintenance merge merge-base merge-file merge-index merge-tree
+    mergetool mktag mktree multi-pack-index mv name-rev notes pack-objects pack-refs
+    patch-id prune prune-packed pull push range-diff read-tree rebase receive-pack
+    reflog refs remote repack replace replay repo request-pull rerere reset restore
+    rev-list rev-parse revert rm send-pack shortlog show show-branch show-index
+    show-ref sparse-checkout stage stash status stripspace submodule switch
+    symbolic-ref tag unpack-file unpack-objects update-index update-ref
+    update-server-info upload-pack var verify-commit verify-pack verify-tag version
+    whatchanged worktree write-tree
+    """.split()  # noqa: SIM905 — a 170-line list literal reads worse
+)
+# Git's global options that take a SEPARATE operand (`-c k=v`, `--git-dir d`).
+_GIT_GLOBAL_OPTIONS_WITH_OPERAND = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source"}
+)
+
+# ES-F1 (B124): programs that exec the rest of their argv. Value: (options that
+# take a separate operand, positionals before the command) — enough to say
+# whether an allowlist entry names a command at all (`["timeout", "30"]` does
+# not). The floor itself does not trust this table: it judges every suffix.
+_LAUNCHERS: dict[str, tuple[frozenset[str], int]] = {
+    "env": (frozenset({"-u", "--unset", "-C", "--chdir"}), 0),
+    "nice": (frozenset({"-n", "--adjustment"}), 0),
+    "timeout": (frozenset({"-s", "--signal", "-k", "--kill-after"}), 1),
+    "command": (frozenset(), 0),
+    "exec": (frozenset({"-a"}), 0),
+    "nohup": (frozenset(), 0),
+    "setsid": (frozenset(), 0),
+    "time": (frozenset({"-f", "--format", "-o", "--output"}), 0),
+    "stdbuf": (frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}), 0),
+    "xargs": (
+        frozenset({"-a", "-d", "-E", "-I", "-J", "-L", "-n", "-P", "-R", "-s", "-S"}),
+        0,
+    ),
+    "sudo": (frozenset({"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T"}), 0),
+    "doas": (frozenset({"-u", "-C"}), 0),
+    "ionice": (frozenset({"-c", "-n", "-p", "-P", "-u"}), 0),
+    "chrt": (frozenset(), 1),
+    "taskset": (frozenset(), 1),
+    "flock": (frozenset({"-w", "-E"}), 1),
+    "unbuffer": (frozenset(), 0),
+    "caffeinate": (frozenset({"-w", "-t"}), 0),
+}
+
+
+def launched_command(argv: Sequence[str]) -> list[str]:
+    """What a launcher argv execs (``timeout -s KILL 5 git push`` → ``git
+    push``); ``[]`` when it names no command. Non-launchers return as-is."""
+    tokens = list(argv)
+    if not tokens or posixpath.basename(tokens[0]) not in _LAUNCHERS:
+        return tokens
+    operand_flags, positionals = _LAUNCHERS[posixpath.basename(tokens[0])]
+    index = 1
+    while index < len(tokens) and (tokens[index].startswith("-") or "=" in tokens[index]):
+        if tokens[index] == "--":
+            index += 1
+            break
+        index += 2 if tokens[index] in operand_flags else 1
+    return launched_command(tokens[index + positionals :])
+
 
 _BROAD_INTERPRETERS: frozenset[str] = frozenset({"bash", "sh", "zsh", "fish", "python", "python3"})
 
@@ -50,17 +133,75 @@ _OPS_MUTATING_COMMANDS: frozenset[str] = frozenset(
 
 
 def strip_git_chdir(argv: Sequence[str]) -> list[str]:
-    """Drop a leading ``-C <path>`` pair from a git argv for matching."""
+    """Drop a leading ``-C <path>`` pair from a git argv (remembering only —
+    the guards read ``git_core_argv``)."""
     tokens = list(argv)
     if len(tokens) >= 3 and tokens[0] == "git" and tokens[1] == "-C":
         return [tokens[0], *tokens[3:]]
     return tokens
 
 
+def git_core_argv(argv: Sequence[str]) -> list[str]:
+    """``["git", <subcommand>, ...]`` for any spelling of a git command.
+
+    ES-F1 (B124): the guards keyed on ``argv[0] == "git"`` and ``argv[1]``, so
+    ``/usr/bin/git push``, ``git -c k=v push`` and ``git --git-dir=.git push``
+    all walked past them. The program is basenamed and every global option is
+    skipped. Non-git argvs return unchanged."""
+    tokens = [str(token) for token in argv]
+    if not tokens or posixpath.basename(tokens[0]) != "git":
+        return tokens
+    index = 1
+    while index < len(tokens) and tokens[index].startswith("-"):
+        index += 2 if tokens[index] in _GIT_GLOBAL_OPTIONS_WITH_OPERAND else 1
+    return ["git", *tokens[index:]]
+
+
+def is_unknown_git_subcommand(argv: Sequence[str]) -> bool:
+    """True for a git argv whose subcommand is not a builtin (an alias, or
+    none at all — ``xargs git`` takes it from stdin). ES-F1 (B124)."""
+    core = git_core_argv(argv)
+    if not core or core[0] != "git":
+        return False
+    if len(core) == 1:
+        return not any(token in {"--version", "--help"} for token in argv)
+    return core[1] not in _GIT_BUILTINS
+
+
 def is_remote_git_command(argv: Sequence[str]) -> bool:
-    """True for ``git push``/``git pull``/``git fetch`` (with optional ``-C``)."""
-    stripped = strip_git_chdir(argv)
-    return len(stripped) >= 2 and stripped[0] == "git" and stripped[1] in REMOTE_GIT_SUBCOMMANDS
+    """True for ``git push``/``pull``/``fetch`` and their plumbing, any spelling,
+    plus ``git remote`` writes (ES-F1)."""
+    stripped = git_core_argv(argv)
+    if len(stripped) < 2 or stripped[0] != "git":
+        return False
+    if stripped[1] in REMOTE_GIT_SUBCOMMANDS or stripped[1].startswith("remote-"):
+        return True
+    return stripped[1] == "remote" and any(t in _REMOTE_MUTATING_VERBS for t in stripped[2:])
+
+
+def is_ref_rewrite_command(argv: Sequence[str]) -> bool:
+    """True for git commands that move or delete refs the clone shares with the
+    worktree: ``update-ref``, ``symbolic-ref`` writes, ``branch -f/-d/-m/-c``,
+    ``worktree`` (but ``list``). ES-F1 (B124): ``git update-ref refs/heads/main``
+    in a workspace run moved the operator's main."""
+    stripped = git_core_argv(argv)
+    if len(stripped) < 2 or stripped[0] != "git":
+        return False
+    rest = stripped[2:]
+    if stripped[1] == "update-ref":
+        return True
+    if stripped[1] == "symbolic-ref":
+        operands = [t for t in rest if not t.startswith("-")]
+        return len(operands) >= 2 or any(t in {"-d", "--delete"} for t in rest)
+    if stripped[1] == "worktree":
+        return rest[:1] != ["list"]
+    if stripped[1] == "branch":
+        return any(
+            t in {"--force", "--delete", "--move", "--copy"}
+            or (t.startswith("-") and not t.startswith("--") and set(t[1:]) & set("fdDmMcC"))
+            for t in rest
+        )
+    return False
 
 
 def is_branch_switch_command(argv: Sequence[str]) -> bool:
@@ -69,7 +210,7 @@ def is_branch_switch_command(argv: Sequence[str]) -> bool:
     Excludes the ``git checkout -- <path>`` file-restore form. These are
     hard-denied by the worker (v19-F5) so any stored allowlist entry is dead.
     """
-    stripped = strip_git_chdir(argv)
+    stripped = git_core_argv(argv)
     if len(stripped) < 2 or stripped[0] != "git" or stripped[1] not in {"checkout", "switch"}:
         return False
     return "--" not in stripped
@@ -98,7 +239,7 @@ def is_history_rewrite_command(argv: Sequence[str]) -> bool:
     why the deny message can name a real alternative instead of just saying no
     (I9).
     """
-    stripped = strip_git_chdir(argv)
+    stripped = git_core_argv(argv)
     if len(stripped) < 2 or stripped[0] != "git":
         return False
     if stripped[1] in {"merge", "rebase", "cherry-pick", "revert"}:
@@ -116,7 +257,7 @@ def is_worker_commit_command(argv: Sequence[str]) -> bool:
     Staging/committing is the landing approval's job; the worker hard-denies
     these, so a stored allowlist entry is dead and must never be persisted.
     """
-    stripped = strip_git_chdir(argv)
+    stripped = git_core_argv(argv)
     return len(stripped) >= 2 and stripped[0] == "git" and stripped[1] in {"add", "commit"}
 
 
@@ -367,12 +508,17 @@ _MAX_UNWRAP_DEPTH = 4
 def _strip_env_prefix(tokens: list[str]) -> list[str]:
     """Drop a leading ``env`` and its assignments/flags — `env A=1 git push`
     executes `git push`."""
-    if not tokens or tokens[0] != "env":
+    if not tokens or posixpath.basename(tokens[0]) != "env":
         return tokens
     rest = tokens[1:]
     while rest and (rest[0].startswith("-") or "=" in rest[0]):
+        # ES-F1 (B124): -S/--split-string's operand IS the command line.
+        if rest[0] in {"-S", "--split-string"} and len(rest) > 1:
+            rest = [*shlex.split(rest[1]), *rest[2:]]
+        elif rest[0].startswith("--split-string="):
+            rest = [*shlex.split(rest[0].partition("=")[2]), *rest[1:]]
         # -u/--unset and -C/--chdir consume an operand; assignments stand alone.
-        if rest[0] in {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"} and len(rest) > 1:
+        elif rest[0] in {"-u", "--unset", "-C", "--chdir"} and len(rest) > 1:
             rest = rest[2:]
         else:
             rest = rest[1:]
@@ -384,10 +530,28 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
     payload of a ``bash -c``-style wrapper (whose operand is a whole shell
     line). ``python -c`` payloads are Python, not shell — never decomposed.
     None when a wrapper payload cannot be tokenized."""
-    tokens = _strip_env_prefix([str(token) for token in argv])
+    tokens = [str(token) for token in argv]
+    try:
+        tokens = _strip_env_prefix(tokens)
+    except ValueError:  # an unbalanced `env -S` payload
+        return None
     if not tokens:
         return []
     result = [tokens]
+    # `command -v/-V x` looks x up; it launches nothing.
+    lookup = posixpath.basename(tokens[0]) == "command" and tokens[1:2] in (["-v"], ["-V"])
+    if posixpath.basename(tokens[0]) in _LAUNCHERS and not lookup:
+        # ES-F1 (B124): `timeout 20 git push` runs `git push`. Every suffix that
+        # starts at a non-option token is judged as a command of its own, so a
+        # launcher option this module does not know cannot hide one.
+        if _depth >= _MAX_UNWRAP_DEPTH:
+            return None
+        for index in range(1, len(tokens)):
+            if not tokens[index].startswith("-"):
+                nested = _unwrap_argv(tokens[index:], _depth + 1)
+                if nested is None:
+                    return None
+                result.extend(nested)
     if tokens[0] in _WRAPPER_SHELLS:
         payload: str | None = None
         for index, token in enumerate(tokens[1:], start=1):
@@ -507,6 +671,8 @@ def hard_denied_segment_reason(entry: Sequence[str]) -> str | None:
             return "it hides a branch switch; a run picks its ref at dispatch"
         if is_history_rewrite_command(stripped):
             return "it hides a history rewrite (merge/rebase/cherry-pick/revert/reset --hard)"
+        if is_ref_rewrite_command(stripped):
+            return "it hides a ref move (update-ref/symbolic-ref/branch -f/-d/worktree)"
         if is_outbound_content_prefix(stripped):
             return "it hides an outbound post/send, which always runs carded (ADR 0044)"
         # v109-F10: a wrapped machine-wrecker (`bash -c 'rm -rf /'`) joins the
@@ -517,9 +683,32 @@ def hard_denied_segment_reason(entry: Sequence[str]) -> str | None:
     return None
 
 
+def _launcher_only_reason(prefix: Sequence[str]) -> str | None:
+    """ES-F1 (B124): a launcher with no command (``timeout``, ``env``,
+    ``nice -n 5``) allowlists everything behind it — ``["timeout"]`` covered
+    ``timeout 30 git push`` on es-integration-2."""
+    if prefix and posixpath.basename(prefix[0]) in _LAUNCHERS and not launched_command(prefix):
+        return (
+            f"shell command prefix {list(prefix)!r} names a launcher but no command, "
+            "so it would allowlist every command behind it; include the command "
+            "(e.g. 'timeout 60 pytest')"
+        )
+    return None
+
+
+def worker_allowlist_reason(prefix: list[str]) -> str | None:
+    """``dangerous_prefix_reason`` plus the worker-allowlist-only refusal of a
+    bare ``git`` (ES-F1, B124: PUT /api/policy accepted ``["git"]`` and a
+    workspace run pushed through it). A Queen ``run_repo`` rule may still be
+    bare ``git`` — the Queen floor normalizes before any rule is read."""
+    if len(prefix) == 1 and posixpath.basename(prefix[0]) == "git":
+        return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
+    return dangerous_prefix_reason(prefix)
+
+
 def dangerous_prefix_reason(prefix: list[str]) -> str | None:
     """Why ``prefix`` must not be persisted as an allowlist entry, else None."""
-    if prefix and prefix[0] in {"sudo", "doas"}:
+    if prefix and posixpath.basename(prefix[0]) in {"sudo", "doas"}:
         # v49-F2: privilege escalation would also launder every deny below
         # (they all key on argv[0] — 'sudo git push' must not slip through).
         return "privilege escalation cannot be allowlisted"
@@ -543,6 +732,9 @@ def dangerous_prefix_reason(prefix: list[str]) -> str | None:
         return "git add/commit cannot be allowlisted; the landing approval is the commit (v22-F2)"
     if is_ops_mutating_command(prefix):
         return "ops-mutating commands are approve-once only and can never be remembered"
+    launcher_only = _launcher_only_reason(prefix)
+    if launcher_only is not None:
+        return launcher_only
     if len(prefix) == 1 and prefix[0] in _BROAD_INTERPRETERS:
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
     if (
@@ -569,7 +761,7 @@ def queen_shell_refusal(argv: Sequence[str]) -> str | None:
     own hands (I4's spirit: no chat lane may become the git-writing path
     the workers are denied), plus privilege escalation. This list may only
     ever grow."""
-    if argv and argv[0] in {"sudo", "doas"}:
+    if argv and posixpath.basename(argv[0]) in {"sudo", "doas"}:
         return "privilege escalation never runs from chat (it would also launder every guard below)"
     # v109-F10: catastrophic commands (single argv here; compound decomposition
     # is a separate fix) never run from chat either, operator or not.
@@ -594,6 +786,14 @@ def queen_shell_refusal(argv: Sequence[str]) -> str | None:
             "shell — use merge_branch, which is carded, refuses the default branch, "
             "and aborts cleanly on conflict instead of leaving a half-merged tree"
         )
+    if is_ref_rewrite_command(argv):
+        return (
+            "moving or deleting refs never runs from chat as raw shell — use "
+            "create_branch/delete_branch, which are carded"
+        )
+    if is_unknown_git_subcommand(argv):
+        # ES-F1 (B124): an alias in the operator's gitconfig can be `push`.
+        return "git aliases never run from chat — spell out the builtin git command"
     return None
 
 
@@ -658,6 +858,10 @@ def filter_forbidden_shell_commands(
             or is_branch_switch_command(argv)
             or is_worker_commit_command(argv)
             or is_history_rewrite_command(argv)
+            or is_ref_rewrite_command(argv)
+            # ES-F1 (B124): a stored bare `git`/`timeout` covered `git push`.
+            or _launcher_only_reason(argv) is not None
+            or (len(argv) == 1 and posixpath.basename(argv[0]) == "git")
             or references_dead_worktree(argv)
             # v84-F4: a pre-v84 stored outbound grant (e.g. bare `xurl`) would
             # keep auto-allowing posts — swept, not grandfathered.
