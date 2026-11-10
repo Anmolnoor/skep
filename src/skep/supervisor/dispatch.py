@@ -23,9 +23,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -55,7 +58,7 @@ from .autonomy import AutonomyDecision, AutonomyVerdict
 from .config import SupervisorConfig
 from .contracts_io import mint_task, read_event_log, read_result, write_task_file
 from .ingest import IngestOutcome, ingest_run
-from .monitor import MonitorVerdict, synthesize_terminal, watch_worker
+from .monitor import MonitorVerdict, kill_session, synthesize_terminal, watch_worker
 from .netproxy import FilteringProxy, control_plane_ports
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
 from .providers import ProviderProfile
@@ -896,6 +899,28 @@ def dispatch_parallel(
             run_store.close()
 
 
+def _live_worker_pid(run_store: RunStore, task_id: str) -> int | None:
+    """The recorded worker pid when that process is still THIS run's worker.
+
+    ES-F5 (B10): a pid outlives a reboot as a number only — it is ours when
+    its command line still names this task (the worker argv carries the task
+    file path); a zombie's or a stranger's does not."""
+    pid = next(
+        (
+            int(detail.split()[1])
+            for state, detail, _ in reversed(run_store.transitions_for(task_id))
+            if state == "running" and detail and re.fullmatch(r"pid \d+", detail)
+        ),
+        None,
+    )
+    if pid is None:
+        return None
+    probe = subprocess.run(
+        ["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True, check=False
+    )
+    return pid if task_id in probe.stdout else None
+
+
 # v59-F10: the states a supervisor death can strand a run in. pending_approval
 # is NOT here — it is a legitimate persistent state (worktree kept for resume).
 _INTERRUPTED_STATES = ("created", "dispatched", "running")
@@ -921,6 +946,23 @@ def recover_interrupted_runs(
     recovered: list[str] = []
     for record in run_store.runs_with_states(_INTERRUPTED_STATES):
         task_id = record.task_id
+        # ES-F5 (B10, I1 I12): the detached worker may still be alive — with no
+        # babysitter, no budget, and the proxy gone. Kill its whole session
+        # BEFORE reading its evidence or touching its worktree: nothing may
+        # write there once recovery decides. (Re-adopting would need a monitor
+        # for a non-child; the kill is the smaller honest answer.)
+        live_pid = _live_worker_pid(run_store, task_id)
+        if live_pid is not None:
+            kill_session(live_pid)
+            deadline = time.monotonic() + 5.0
+            while _live_worker_pid(run_store, task_id) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            run_store.transition(
+                task_id,
+                record.state,
+                f"supervisor restart: worker pid {live_pid} was still running "
+                "unsupervised; killed with its session",
+            )
         task = _task_from_audit(config, task_id)
         workspace = Path(record.workspace) if record.workspace else None
         if task is None or workspace is None:

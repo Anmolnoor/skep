@@ -54,6 +54,20 @@ def kill_process_tree(process: subprocess.Popen[bytes]) -> None:
     process.wait()
 
 
+def kill_session(pid: int) -> None:
+    """SIGKILL everything in the session ``pid`` leads (ES-F5/ES-F9, B10 B133).
+
+    A worker spawns with ``start_new_session``, so its pid is the session id
+    and the process-group id. ``killpg`` reaches its group; ``pkill -s`` also
+    reaches commands it put in their own group (ES-F9) — none may outlive it.
+    The kernel never reuses a pid while a session or group of that id lives.
+    """
+    with contextlib.suppress(OSError):
+        os.killpg(pid, signal.SIGKILL)
+    with contextlib.suppress(OSError):
+        subprocess.run(["pkill", "-KILL", "-s", str(pid)], capture_output=True, check=False)
+
+
 def synthesize_terminal(
     *,
     task_id: str,
