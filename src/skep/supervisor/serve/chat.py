@@ -164,10 +164,38 @@ def _transient_provider_error(exc: OllamaError) -> bool:
 
 def _provider_rejected_request(exc: OllamaError) -> bool:
     """v73-F1: a non-transient 4xx — the provider REFUSED this request, so an
-    identical retry is pointless but a SMALLER one may pass (the field-test
-    chat wedged behind a size-correlated 400 while fresh chats worked)."""
+    identical retry is pointless."""
     status = getattr(exc, "status", None)
     return status is not None and 400 <= status < 500 and status not in _TRANSIENT_STATUSES
+
+
+# The size words the providers use: ollama.com/fakes "request too large",
+# anthropic "prompt is too long", openai/vLLM "maximum context length",
+# gemini/ollama "exceeds".
+_TOO_LARGE_RE = re.compile(r"too (large|long|big)|context (length|window|size|limit)|exceed")
+
+
+def _request_too_large(exc: OllamaError) -> bool:
+    """ES-F12 (B85): a refusal a SMALLER request may pass — a 413, or a 4xx
+    whose body says so. v73-F1 halved on every 4xx: a bad key (401) or bad
+    arguments (400) drew a [replay halved…] row, an "outgrown" line, and a
+    permanent ceiling when the halved retry happened to pass."""
+    if getattr(exc, "status", None) == 413:
+        return True
+    return _provider_rejected_request(exc) and bool(_TOO_LARGE_RE.search(str(exc).lower()))
+
+
+def _provider_failure_line(exc: OllamaError, *, shrunk: bool) -> str:
+    """v62-F1: the honest line a turn ends on when nothing arrived."""
+    if getattr(exc, "status", None) in (401, 403):
+        return f"the provider rejected the API key ({exc}) — check the API key in Settings."
+    if _provider_rejected_request(exc) and not _request_too_large(exc):
+        return f"the provider refused the request ({exc})."
+    line = (
+        f"the provider dropped before any reply arrived ({exc}) — "
+        "the tool results above stand; ask again to continue."
+    )
+    return line + _OUTGROWN_LINE if shrunk and _request_too_large(exc) else line
 
 
 # v73-F1: the honest teaching line when even the halved retry was refused.
@@ -367,6 +395,40 @@ _NARROW_HINTS = {
 }
 
 
+def _trim_longest_text(data: dict[str, Any], cap: int) -> None:
+    """ES-F11 (B83): trim the longest string (nested dicts included) to its
+    head plus a marker saying how much was cut. read_file's payload is one
+    big ``content`` string — a card-confirmed read nests it under ``result``
+    — so the whole-key drop below deleted it and a default 200-line read
+    replayed with no content at all."""
+    slot: tuple[dict[str, Any], str] | None = None
+    longest = 0
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        for key, value in node.items():
+            if isinstance(value, dict):
+                stack.append(value)
+            elif (
+                isinstance(value, str)
+                and len(value) > longest
+                and (node is not data or key != "note")
+            ):
+                slot, longest = (node, key), len(value)
+    if slot is None:
+        return
+    node, key = slot
+    original: str = node[key]
+    keep = len(original)
+    over = len(json.dumps(data, ensure_ascii=True)) - cap
+    while over > 0 and keep > 0:
+        keep = max(0, keep - over - 64)
+        node[key] = (
+            f"{original[:keep]}… [{len(original) - keep} chars cut; the rest is in the transcript]"
+        )
+        over = len(json.dumps(data, ensure_ascii=True)) - cap
+
+
 def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
     """v73-F7: cap an over-budget replayed tool result at a VALID-JSON boundary.
 
@@ -399,6 +461,7 @@ def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
         if not lists:
             break
         max(lists, key=weight).pop()
+    _trim_longest_text(data, cap)
     droppable = sorted(
         (key for key in data if key not in ("truncated", "note")),
         key=lambda key: weight(data[key]),
@@ -892,6 +955,38 @@ def _call_args(call: dict[str, Any]) -> dict[str, Any]:
     return dict(arguments) if isinstance(arguments, dict) else {}
 
 
+def _malformed_args(call: dict[str, Any]) -> str | None:
+    """ES-F8 (B35): the raw text of arguments that are not a JSON object.
+
+    ``_call_args`` tolerates the JSON-string variant, but turned a garbled
+    string into ``{}`` — the call ran with no arguments and the model never
+    learned why. Malformed text is now answered with an error row instead."""
+    arguments = call.get("function", {}).get("arguments")
+    if not isinstance(arguments, str) or not arguments.strip():
+        return None
+    try:
+        return None if isinstance(json.loads(arguments), dict) else arguments
+    except json.JSONDecodeError:
+        return arguments
+
+
+def _replayable_call(call: dict[str, Any]) -> dict[str, Any]:
+    """ES-F10 (B84): a stored call replays with object arguments — ``{}``
+    when they are not a JSON object. Resent verbatim, ES-F8's garbled string
+    drew a 400 from ollama.com on both protocols on every later turn: one bad
+    call wedged the chat. The raw text stays in the stored row and in the
+    error row that answered the call, which is what the model needs to read."""
+    arguments = call.get("function", {}).get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            arguments = None
+    if not isinstance(arguments, dict):
+        arguments = {}
+    return {**call, "function": {**call.get("function", {}), "arguments": arguments}}
+
+
 class ChatCreate(BaseModel):
     title: str | None = None
     model: str | None = None  # None = follow the configured default
@@ -1106,7 +1201,7 @@ class ChatEngine:
                     {
                         "role": "assistant",
                         "content": record.content,
-                        "tool_calls": record.tool_calls,
+                        "tool_calls": [_replayable_call(c) for c in record.tool_calls],
                     }
                 )
             elif record.role == "user" and record.attachments:
@@ -1408,7 +1503,7 @@ class ChatEngine:
                         shrink_budget is None
                         and not parts
                         and not tool_calls
-                        and _provider_rejected_request(exc)
+                        and _request_too_large(exc)
                     ):
                         # v73-F1: the provider refused the request outright —
                         # an identical retry is pointless, but a SMALLER one
@@ -1438,12 +1533,7 @@ class ChatEngine:
                         # collected, the old path left only a transient error
                         # toast — on reload the chat just ended mid-tools (field
                         # test 2026-07-19: three "hung" turns in a row).
-                        line = (
-                            f"the provider dropped before any reply arrived ({exc}) — "
-                            "the tool results above stand; ask again to continue."
-                        )
-                        if shrink_budget is not None and _provider_rejected_request(exc):
-                            line += _OUTGROWN_LINE
+                        line = _provider_failure_line(exc, shrunk=shrink_budget is not None)
                         yield (None, {"content": line})
                         self.store.add_chat_message(chat_id, role="assistant", content=line)
                     yield ("error", {"detail": str(exc)})
@@ -1509,6 +1599,25 @@ class ChatEngine:
                 # v106-F4 (v101-F15): the model's own call id rides every row
                 # this call produces — position stops being the only link.
                 call_id = str(call.get("id") or "") or None
+                malformed = _malformed_args(call)
+                if malformed is not None:
+                    bad_args: dict[str, Any] = {
+                        "ok": False,
+                        "error": (
+                            f"the arguments for {name} were not a JSON object: "
+                            f"{malformed[:200]} — call it again with valid JSON arguments"
+                        ),
+                    }
+                    previous_read_tool = None
+                    self.store.add_chat_message(
+                        chat_id,
+                        role="tool",
+                        tool_name=name,
+                        tool_call_id=call_id,
+                        content=json.dumps(bad_args, ensure_ascii=True),
+                    )
+                    yield ("tool", {"tool": name, "result": bad_args})
+                    continue
                 if name == CLARIFY_TOOL_NAME:
                     # v51-F7: a turn-ENDING prompt — the third interaction
                     # type (not a read, not a card). The question lands as a
@@ -1883,7 +1992,7 @@ class ChatEngine:
                         # the turn with only a toast).
                         break
             except OllamaError as exc:
-                if shrink_budget is None and not parts and _provider_rejected_request(exc):
+                if shrink_budget is None and not parts and _request_too_large(exc):
                     # v73-F1: same shrink-and-retry as the main loop.
                     shrink_budget = self._effective_budget(chat_id) // 2
                     self.store.add_chat_message(
@@ -1904,12 +2013,7 @@ class ChatEngine:
                     )
                 else:
                     # v62-F1: same silent-death branch as the main loop.
-                    line = (
-                        f"the provider dropped before any reply arrived ({exc}) — "
-                        "the tool results above stand; ask again to continue."
-                    )
-                    if shrink_budget is not None and _provider_rejected_request(exc):
-                        line += _OUTGROWN_LINE
+                    line = _provider_failure_line(exc, shrunk=shrink_budget is not None)
                     yield (None, {"content": line})
                     self.store.add_chat_message(chat_id, role="assistant", content=line)
                 yield ("error", {"detail": str(exc)})

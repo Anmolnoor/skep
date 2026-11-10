@@ -128,3 +128,15 @@ def test_cli_preset_flow(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     out = capsys.readouterr().out
     assert "registered zai" in out
     assert "CLOUD" in out  # the egress truth prints at register time (I8)
+
+
+def test_ollama_cloud_preset_speaks_native_ollama() -> None:
+    """ES-F4 (B28): ollama.com's own /api/chat, not its openai-compat shim —
+    the native shape is the one chat history is stored in, so replay needs
+    no translation. Still a cloud egress, never mistaken for a local daemon."""
+    preset = PROVIDER_PRESETS["ollama-cloud"]
+    assert preset.protocol == "ollama"
+    profile = validate_provider_profile(profile_from_preset("ollama-cloud"))
+    assert profile.cost_class == "paid"
+    assert profile.allowed_network_hosts == ("ollama.com",)
+    assert preset_egress_note(preset, "https://ollama.com").startswith("CLOUD")

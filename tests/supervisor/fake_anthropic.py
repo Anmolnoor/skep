@@ -12,6 +12,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from tests.supervisor.strict_wire import anthropic_errors, check
+
 
 class FakeAnthropic:
     def __init__(self, *, api_key: str | None = None, models: list[str] | None = None) -> None:
@@ -19,6 +21,8 @@ class FakeAnthropic:
         self.models = models if models is not None else ["claude-sonnet-5", "claude-haiku-4-5"]
         self.chat_scripts: list[list[dict[str, Any]]] = []
         self.requests: list[dict[str, Any]] = []
+        # ES-F1 (B43): refuse what the real API refuses (strict_wire).
+        self.strict = True
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -138,6 +142,18 @@ class FakeAnthropic:
                 if not self._authorized():
                     self._send(401, b'{"error": "unauthorized"}')
                 elif self.path == "/v1/messages":
+                    problem = fake.strict and check("anthropic", anthropic_errors(body))
+                    if problem:
+                        self._send(
+                            400,
+                            json.dumps(
+                                {
+                                    "type": "error",
+                                    "error": {"type": "invalid_request_error", "message": problem},
+                                }
+                            ).encode(),
+                        )
+                        return
                     if not fake.chat_scripts:
                         self._send(500, b'{"error": "no scripted reply left"}')
                         return

@@ -170,6 +170,45 @@ def test_read_tool_budget_allows_final_answer_from_last_result(
     assert bodies[-1]["messages"][-2]["role"] == "tool"
 
 
+def test_split_tool_calls_and_native_thinking_both_land(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F5: ollama streams each call of a burst in its own chunk and its
+    reasoning in the native thinking field — every call runs, and the
+    thinking streams as thinking, not as the reply."""
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_calls(("list_runs", {"limit": 1}), ("list_runs", {"limit": 2}))
+    ollama.script_reply("both checked", thinking="weighing the runs")
+
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "runs?"}).text
+    )
+
+    assert len([d for name, d in events if name == "tool"]) == 2
+    assert ("thinking", {"thinking": "weighing the runs"}) in events
+    assert "".join(d["content"] for name, d in events if name is None) == "both checked"
+    assert events[-1] == ("done", {"state": "complete"})
+
+
+def test_mid_stream_ollama_error_ends_the_turn_honestly(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F6 (B24): an {"error"} line mid-stream is an error with the
+    provider's words — never an empty round answered by a stall nudge."""
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_call("list_runs", {"limit": 1})
+    ollama.script_stream_error("model runner has unexpectedly stopped", after="Checking")
+
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "runs?"}).text
+    )
+
+    assert events[-1] == ("error", {"detail": "model runner has unexpectedly stopped"})
+    assert len(ollama.chat_bodies()) == 2  # no nudged third round
+    stored = client.get(f"/api/chats/{chat_id}").json()["messages"]
+    assert stored[-1]["content"] == "Checking"  # the half-reply is kept
+
+
 def test_reasoning_only_stall_mid_tools_is_nudged_back_into_action(
     config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
@@ -337,9 +376,10 @@ def test_provider_drop_mid_turn_persists_an_honest_line(
     assert events[-1][0] == "error"
     final = client.get(f"/api/chats/{chat_id}").json()["messages"][-1]
     assert final["role"] == "assistant"
-    assert "the provider dropped before any reply arrived" in final["content"]
+    # ES-F12 (B85): a 401 says what to fix, not "dropped" or "too big".
+    assert "check the API key" in final["content"]
     # The live stream carried the same line — reload and stream agree.
-    assert any(name is None and "provider dropped" in d["content"] for name, d in events)
+    assert any(name is None and "check the API key" in d["content"] for name, d in events)
 
 
 def test_inline_think_markup_never_reaches_the_visible_reply(
@@ -481,6 +521,35 @@ def test_malformed_tool_args_feed_back_and_the_turn_continues(
     assert events[-1] == ("done", {"state": "complete"})
     streamed = "".join(d.get("content", "") for name, d in events if name is None)
     assert "here is what I know instead" in streamed
+
+
+def test_malformed_tool_call_json_is_a_tool_error_not_an_empty_call(
+    config: SupervisorConfig, openai: FakeOpenAI
+) -> None:
+    """ES-F8 (B35): arguments that are not a JSON object used to become {} —
+    the call then ran with no arguments and the model never learned why.
+    Now the model reads an error row quoting what it sent, and goes on."""
+    client, chat_id = openai_chat_client(config, openai)
+    openai.script_tool_call("list_runs", '{"limit": 5')  # truncated JSON
+    openai.script_reply("let me retry that properly")
+
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "runs?"}).text
+    )
+
+    tool_rows = [d for name, d in events if name == "tool"]
+    assert len(tool_rows) == 1
+    assert tool_rows[0]["result"]["ok"] is False
+    assert "not a JSON object" in tool_rows[0]["result"]["error"]
+    assert '{"limit": 5' in tool_rows[0]["result"]["error"]
+    assert events[-1] == ("done", {"state": "complete"})
+    # ES-F10 (B84): the replay sends a valid empty object (the garbled text
+    # drew a 400 on every later turn); the raw text rides the error row.
+    replayed = openai.chat_bodies()[1]["messages"]
+    call = next(m for m in replayed if m.get("tool_calls"))["tool_calls"][0]
+    assert call["function"]["arguments"] == "{}"
+    result = next(m for m in replayed if m["role"] == "tool")
+    assert '{\\"limit\\": 5' in result["content"]
 
 
 # ---------- v67-F3 (R12b): read-only side questions (/btw) ----------

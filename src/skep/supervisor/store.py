@@ -59,6 +59,11 @@ def _created_transition_detail(task: CodingWorkerTask) -> str | None:
     return json.dumps(detail, ensure_ascii=True)
 
 
+# ES-F13 (B86): the settings that pick the chat provider (serve/llm.py's
+# LLM_BASE_URL, LLM_PROTOCOL, LLM_DEFAULT_MODEL — store cannot import serve).
+_PROVIDER_SETTINGS = frozenset({"llm_base_url", "llm_protocol", "llm_default_model"})
+
+
 def _locked[F: Callable[..., Any]](method: F) -> F:
     """Serialize a RunStore method on its connection lock (G4 single writer).
 
@@ -2334,9 +2339,21 @@ class RunStore:
 
     @_locked
     def set_setting(self, key: str, value: Any) -> None:
+        encoded = json.dumps(value, ensure_ascii=True)
+        if key in _PROVIDER_SETTINGS:
+            # ES-F13 (B86): a provider ceiling measured ONE provider+model —
+            # a new one re-measures (every writer of these keys lands here).
+            row = self._conn.execute(
+                "SELECT value_json FROM settings WHERE key = ?", (key,)
+            ).fetchone()
+            if row is None or row[0] != encoded:
+                self._conn.execute(
+                    "UPDATE chats SET provider_ceiling_chars = NULL"
+                    + (" WHERE model IS NULL" if key == "llm_default_model" else "")
+                )
         self._conn.execute(
             "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
-            (key, json.dumps(value, ensure_ascii=True), _now()),
+            (key, encoded, _now()),
         )
         self._conn.commit()
 
@@ -3648,8 +3665,11 @@ class RunStore:
     @_locked
     def set_chat_model(self, chat_id: str, model: str | None) -> bool:
         """v72-F1: per-chat model override; None falls back to the saved default."""
+        # ES-F13 (B86): a different model re-measures the provider ceiling.
         cursor = self._conn.execute(
-            "UPDATE chats SET model = ? WHERE chat_id = ?", (model, chat_id)
+            "UPDATE chats SET provider_ceiling_chars = CASE WHEN model IS ?"
+            " THEN provider_ceiling_chars END, model = ? WHERE chat_id = ?",
+            (model, model, chat_id),
         )
         self._conn.commit()
         return cursor.rowcount > 0
