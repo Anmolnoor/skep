@@ -204,7 +204,16 @@ BUILTIN_CAPABILITIES: tuple[CapabilitySpec, ...] = (
         "Restore tracked files in git; requires approval.",
         "git-mutating",
     ),
-    CapabilitySpec("git.commit", "Create a git commit; requires approval.", "git-mutating"),
+    CapabilitySpec(
+        "git.commit",
+        # ES-F3: the repo's refs/ are read-only inside the sandbox, so on macOS
+        # git prints this lock error after every commit and still exits 0.
+        "Create a git commit; requires approval. Exit 0 means the commit "
+        'succeeded, even if git also prints "error: Unable to create '
+        "'…/packed-refs.lock': Operation not permitted\" — the sandbox keeps "
+        "the repo's refs read-only and that message is expected.",
+        "git-mutating",
+    ),
     CapabilitySpec("network.fetch", "Fetch an allowlisted HTTP(S) URL.", "network"),
     CapabilitySpec(
         "network.read",

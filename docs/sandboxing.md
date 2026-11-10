@@ -25,7 +25,10 @@ writable roots back as writable:
 - the results/audit output directory
 - the worktree's own git metadata and the repo's `objects/` — enough for
   `git add`/`git commit`; the repo's `hooks/`, `config` and `refs/` stay
-  read-only, and skep's own host-side git runs with hooks and fsmonitor off
+  read-only, and skep's own host-side git runs with hooks and fsmonitor off.
+  On macOS a worker's `git commit` therefore prints `error: Unable to create
+  '<repo>/.git/packed-refs.lock': Operation not permitted` and exits 0: the
+  commit succeeded, and the message is expected.
 - any explicit extra writable roots from supervisor configuration
 
 Shared temp dirs (`/tmp`, `/var/folders`) are not writable, and a run whose
