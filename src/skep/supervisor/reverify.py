@@ -30,7 +30,13 @@ from skep.worker_contract import Event, EventType
 from . import sandbox
 from .config import SupervisorConfig
 from .store import RunStore
-from .worktree import TREE_LOCK, create_worktree, git_metadata_writable_roots, remove_worktree
+from .worktree import (
+    TREE_LOCK,
+    create_worktree,
+    git_metadata_readable_roots,
+    git_metadata_writable_roots,
+    remove_worktree,
+)
 
 # pytest/usage exit codes: 0 pass, 1..4 real failure, 5 no-tests; 127 = command
 # not found (the supervisor lacks the worker's toolchain — can't re-verify here).
@@ -224,6 +230,7 @@ def reverify(
                     prime_profile,
                     workspace=worktree,
                     extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
+                    extra_readable=git_metadata_readable_roots(worktree),
                     network=sandbox.ALLOW_ALL_NETWORK,
                     skep_home=config.home.parent,
                 )
@@ -253,6 +260,7 @@ def reverify(
                 profile_path,
                 workspace=worktree,
                 extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
+                extra_readable=git_metadata_readable_roots(worktree),
                 network=sandbox.DENY_ALL_NETWORK,
                 skep_home=config.home.parent,
             )

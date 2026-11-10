@@ -101,16 +101,35 @@ def git_metadata_writable_roots(workspace: Path) -> tuple[Path, ...]:
     fetch or push (v19-F3). Cost, stated: ``git stash`` (refs/stash) fails.
     A non-linked checkout (git dir == common dir) gets ``objects/`` only.
     """
-    proc = _git(workspace, "rev-parse", "--git-dir", "--git-common-dir")
-    if proc.returncode != 0:
+    dirs = _git_dirs(workspace)
+    if dirs is None:
         return ()
-    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-    if len(lines) < 2:
-        return ()
-    git_dir = _resolve_git_path(workspace, lines[0])
-    common_dir = _resolve_git_path(workspace, lines[1])
+    git_dir, common_dir = dirs
     objects = common_dir / "objects"
     return (objects,) if git_dir == common_dir else (git_dir, objects)
+
+
+def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
+    """The shared common dir a linked worktree's git must READ (HEAD, config, refs).
+
+    Reads are open on every backend except where a fresh tmpfs hides the host
+    (bwrap and podman mount one on /tmp): a repo there kept only the writable
+    binds above, so the worker's own ``git diff`` died and its patch was never
+    written. The sandbox binds these read-only, beneath the writable roots.
+    """
+    dirs = _git_dirs(workspace)
+    return () if dirs is None or dirs[0] == dirs[1] else (dirs[1],)
+
+
+def _git_dirs(workspace: Path) -> tuple[Path, Path] | None:
+    """(git dir, common dir) of ``workspace``, or None outside a git checkout."""
+    proc = _git(workspace, "rev-parse", "--git-dir", "--git-common-dir")
+    if proc.returncode != 0:
+        return None
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    return _resolve_git_path(workspace, lines[0]), _resolve_git_path(workspace, lines[1])
 
 
 def is_linked_worktree(repo: Path, path: Path) -> bool:

@@ -3145,7 +3145,7 @@ def diagnose_run(
     card is the trigger (I6), and nothing here can land or push (I1/I4).
     """
     from .. import sandbox
-    from ..worktree import git_metadata_writable_roots
+    from ..worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
     record = store.get_run(task_id)
     if record is None:
@@ -3169,6 +3169,7 @@ def diagnose_run(
                 profile,
                 workspace=workspace,
                 extra_writable=git_metadata_writable_roots(workspace),
+                extra_readable=git_metadata_readable_roots(workspace),
                 network=sandbox.DENY_ALL_NETWORK,
                 skep_home=config.home.parent,
             )

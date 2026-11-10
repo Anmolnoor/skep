@@ -450,6 +450,7 @@ def _bubblewrap_args(
     proxy_port: int | None,
     unix_socket_path: str | None = None,
     read_denied: Iterable[Path] = (),
+    readable_roots: Iterable[Path] = (),
 ) -> list[str]:
     # v28-F3: a domain list is now enforceable on Linux. Keep --unshare-net
     # (the deny-all pin Linux already trusts — the netns has NO route out),
@@ -466,12 +467,18 @@ def _bubblewrap_args(
     args = [*_BUBBLEWRAP_BASE_ARGS, *_run_rebinds()]
     if network.is_deny_all or network.is_domain_list:
         args.append("--unshare-net")
+    writable_roots = list(writable_roots)
+    readable_roots = list(readable_roots)
     tmp_mountpoints: dict[str, None] = {}
-    for root in writable_roots:
+    for root in [*readable_roots, *writable_roots]:
         for mountpoint in _tmp_mountpoints_for_bind(Path(root)):
             tmp_mountpoints.setdefault(mountpoint, None)
     for mountpoint in tmp_mountpoints:
         args.extend(["--dir", mountpoint])
+    for root in readable_roots:
+        # Before the writable binds, so those land on top (git's objects/
+        # inside a read-only common dir).
+        args.extend(["--ro-bind", str(root), str(root)])
     for root in writable_roots:
         path = str(Path(root))
         args.extend(["--bind", path, path])
@@ -512,6 +519,7 @@ def _podman_args(
     network: NetworkPolicy,
     rootfs: Path,
     read_denied: Iterable[Path] = (),
+    readable_roots: Iterable[Path] = (),
 ) -> list[str]:
     """v44-F7: the container equivalent of the bwrap invocation.
 
@@ -540,6 +548,8 @@ def _podman_args(
         args.append("--network=none")
     args.extend(_podman_ro_bind_args())
     args.extend(["--tmpfs", "/tmp"])
+    for root in readable_roots:
+        args.extend(["-v", f"{root}:{root}:ro"])
     for root in roots:
         args.extend(["-v", f"{root}:{root}"])
     for denied in read_denied:  # ES-F4: /home rides in read-only; hide these
@@ -641,6 +651,7 @@ def write_profile(
     *,
     workspace: Path,
     extra_writable: Iterable[Path] = (),
+    extra_readable: Iterable[Path] = (),
     network: NetworkPolicy = DENY_ALL_NETWORK,
     proxy_port: int | None = None,
     unix_socket_path: str | None = None,
@@ -653,6 +664,9 @@ def write_profile(
     cannot be applied here. Every sandboxed launch writes its profile first, so
     this is the chokepoint: no wall, no profile, no run — never a quiet
     unconfined fallback recorded as ``sandbox``.
+
+    ``extra_readable`` is bound read-only where a backend hides the host
+    (bwrap/podman's tmpfs /tmp); Seatbelt leaves reads open and ignores it.
     """
     probe = require_usable(backend)
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
@@ -665,6 +679,7 @@ def write_profile(
                 network=network,
                 rootfs=_podman_rootfs_skeleton(profile_path.parent),
                 read_denied=read_denied,
+                readable_roots=extra_readable,
             ),
             header=_PODMAN_HEADER,
         )
@@ -678,6 +693,7 @@ def write_profile(
                 proxy_port=proxy_port,
                 unix_socket_path=unix_socket_path,
                 read_denied=read_denied,
+                readable_roots=extra_readable,
             ),
         )
     # ES-F5 (B11): no blanket /tmp, /private/tmp, /var/folders roots — they

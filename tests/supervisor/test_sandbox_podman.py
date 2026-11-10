@@ -193,3 +193,14 @@ def test_podman_smoke_runs_a_real_container_with_no_network(tmp_path: Path) -> N
     assert "from-host" in proc.stdout
     assert (workspace / "out.txt").read_text(encoding="utf-8") == "out\n"
     assert "eth0" not in proc.stdout  # no interfaces beyond loopback
+
+
+def test_podman_args_bind_readable_roots_read_only_before_writable(tmp_path: Path) -> None:
+    common, objects = tmp_path / ".git", tmp_path / ".git" / "objects"
+    args = _podman_args(
+        writable_roots=[tmp_path / "ws", objects],
+        network=DENY_ALL_NETWORK,
+        rootfs=tmp_path / "r",
+        readable_roots=[common],
+    )
+    assert args.index(f"{common}:{common}:ro") < args.index(f"{objects}:{objects}")

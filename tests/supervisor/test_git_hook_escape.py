@@ -15,8 +15,10 @@ supervisor process runs carries ``core.hooksPath=/dev/null`` and
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,7 @@ from skep.supervisor.apply import apply_patch_on_branch
 from skep.supervisor.reverify import reverify
 from skep.supervisor.worktree import (
     create_worktree,
+    git_metadata_readable_roots,
     git_metadata_writable_roots,
     harden_git_env,
     remove_worktree,
@@ -117,6 +120,9 @@ def test_worker_git_write_roots_exclude_hooks_and_config(
         roots = git_metadata_writable_roots(wt)
         assert roots == ((common / "worktrees" / "task-roots"), common / "objects")
         assert common not in roots
+        assert git_metadata_readable_roots(wt) == (common,)
+        assert git_metadata_readable_roots(repo) == ()  # non-linked: .git is in the tree
+        assert git_metadata_readable_roots(wt.parent) == ()  # not a checkout
     finally:
         remove_worktree(repo, wt)
 
@@ -159,3 +165,49 @@ def test_a_real_sandboxed_worker_can_commit_but_not_plant_hooks(
         assert "fsmonitor" not in (common / "config").read_text(encoding="utf-8")
     finally:
         remove_worktree(repo, wt)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or sandbox.availability().backend != "bubblewrap",
+    reason="real bubblewrap proof (runs where bwrap is the backend)",
+)
+def test_a_sandboxed_worker_in_a_repo_under_tmp_still_sees_git(tmp_path: Path) -> None:
+    """CI smoke regression: bwrap mounts a fresh tmpfs on /tmp, so a repo there
+    kept only the bound ``objects/`` and per-worktree gitdir — no HEAD, config
+    or refs — and the worker's ``git diff`` (its patch) failed. The common dir
+    must ride in read-only, under the narrow writable binds."""
+    base = Path(tempfile.mkdtemp(prefix="skep-gitwall-", dir="/tmp"))
+    try:
+        repo = base / "repo"
+        repo.mkdir()
+        git(repo, "init", "-q", "-b", "main")
+        (repo / "a.txt").write_text("a\n", encoding="utf-8")
+        git(repo, "add", "a.txt")
+        git(repo, "commit", "-qm", "init")
+        wt = create_worktree(repo, base / "worktrees", "task-tmp")
+        profile = sandbox.write_profile(
+            tmp_path / "p.profile",
+            workspace=wt,
+            extra_writable=git_metadata_writable_roots(wt),
+            extra_readable=git_metadata_readable_roots(wt),
+            network=sandbox.DENY_ALL_NETWORK,
+            skep_home=tmp_path / "skep-home",
+        )
+        script = (
+            "echo b > a.txt && git diff --quiet; echo DIFF=$?; "
+            "git -c user.email=s@l -c user.name=s commit --no-gpg-sign -qam w && echo COMMITTED; "
+            f"echo evil > {repo}/.git/hooks/post-checkout && echo HOOK-PLANTED; true"
+        )
+        proc = subprocess.run(
+            sandbox.wrap_command(["/bin/sh", "-c", script], profile),
+            cwd=wt,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        assert "DIFF=1\n" in proc.stdout, proc.stdout + proc.stderr  # 1 = has changes
+        assert "COMMITTED" in proc.stdout, proc.stderr
+        assert "HOOK-PLANTED" not in proc.stdout
+    finally:
+        shutil.rmtree(base, ignore_errors=True)

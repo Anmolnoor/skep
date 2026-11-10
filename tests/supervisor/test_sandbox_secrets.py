@@ -216,6 +216,7 @@ def test_spawner_hands_the_profile_this_runs_skep_home(
     monkeypatch.setattr(sandbox, "write_profile", lambda path, **kw: seen.update(kw) or path)
     monkeypatch.setattr(sandbox, "wrap_command", lambda argv, profile, backend=None: argv)
     monkeypatch.setattr(spawner, "git_metadata_writable_roots", lambda _ws: ())
+    monkeypatch.setattr(spawner, "git_metadata_readable_roots", lambda _ws: ())
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("P", (), {"pid": 1})())
     workspace = tmp_path / "ws"
     workspace.mkdir()

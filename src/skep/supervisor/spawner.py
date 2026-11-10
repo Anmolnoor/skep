@@ -19,7 +19,7 @@ from skep.worker_contract import CodingWorkerTask
 
 from . import sandbox
 from .config import SupervisorConfig
-from .worktree import git_metadata_writable_roots
+from .worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
 logger = logging.getLogger("skep.spawner")
 
@@ -202,6 +202,7 @@ def spawn_worker(
             log_path.parent / "sandbox.profile.sb",
             workspace=workspace,
             extra_writable=writable,
+            extra_readable=git_metadata_readable_roots(workspace),
             network=network,
             proxy_port=proxy_port,
             unix_socket_path=network_proxy_unix_path if proxy_port is not None else None,
