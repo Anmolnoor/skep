@@ -64,8 +64,18 @@ def kill_session(pid: int) -> None:
     """
     with contextlib.suppress(OSError):
         os.killpg(pid, signal.SIGKILL)
-    with contextlib.suppress(OSError):
-        subprocess.run(["pkill", "-KILL", "-s", str(pid)], capture_output=True, check=False)
+    # Commands in their own group: match by session id ourselves. `pkill -s`
+    # finds them on Linux but not on macOS once the leader has exited (CI on
+    # #64), and getsid() answers the same on both.
+    # ponytail: one `ps` + a getsid per process — fine at kill time, not a loop.
+    listing = subprocess.run(
+        ["ps", "-A", "-o", "pid="], capture_output=True, text=True, check=False
+    )
+    for token in listing.stdout.split():
+        member = int(token)
+        with contextlib.suppress(OSError):
+            if member != os.getpid() and os.getsid(member) == pid:
+                os.kill(member, signal.SIGKILL)
 
 
 def synthesize_terminal(
