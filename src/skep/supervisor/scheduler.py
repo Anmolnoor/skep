@@ -34,6 +34,9 @@ from .templates import WorkflowTemplate, instantiate
 logger = logging.getLogger("skep.scheduler")
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# ES B110: the longest interval a schedule may have. `99999999999999d` was
+# accepted and overflowed datetime at tick time; a year is a sane ceiling.
+MAX_INTERVAL_SECONDS = 366 * 86400
 
 # v44-F4: the agent-less cron lane (Hermes `--no-agent --script`).
 SCRIPT_TIMEOUT_SECONDS = 120
@@ -94,6 +97,8 @@ def parse_interval(spec: str) -> int:
         raise ValueError(f"invalid interval {spec!r}: use e.g. 30s, 5m, 2h, 1d") from exc
     if amount <= 0:
         raise ValueError(f"interval must be positive, got {spec!r}")
+    if amount * factor > MAX_INTERVAL_SECONDS:
+        raise ValueError(f"interval must be at most 366d, got {spec!r}")
     return amount * factor
 
 
@@ -423,6 +428,19 @@ def run_due(
     for schedule in store.due_schedules(moment):
         task_id: str | None
         try:
+            # ES B110: computed BEFORE the side effect, inside the try — a row
+            # whose interval no clock can hold (stored before the cap) raised
+            # here after its note had posted, outside the try, and killed the
+            # whole tick every second.
+            next_at = next_run_after(moment, schedule.interval_seconds)
+        except (OverflowError, ValueError) as exc:
+            state = f"dispatch_error: interval {schedule.interval_seconds}s is unusable ({exc})"
+            store.set_schedule_enabled(schedule.name, enabled=False)
+            store.set_schedule_disabled_reason(schedule.name, f"auto-disabled: {state}")
+            store.record_schedule_outcome(schedule.name, task_id=None, state=state)
+            results.append(TickResult(name=schedule.name, task_id=None, state=state))
+            continue
+        try:
             blocked_state: str | None = None
             # v53-F5: a chained schedule reads its source's last output as
             # labeled CONTEXT — never as new instructions.
@@ -685,58 +703,67 @@ def run_due(
                 task_id, state = None, blocked_state
         except Exception as exc:  # a broken schedule must not abort the rest of the tick
             task_id, state = None, f"dispatch_error: {exc}"
-        store.mark_schedule_ran(
-            schedule.name,
-            ran_at=moment,
-            next_run_at=next_run_after(moment, schedule.interval_seconds),
-            task_id=task_id,
-            state=state,
-        )
-        # v14: record the tick outcome for schedule health (success rate,
-        # consecutive failures, last failure reason).
-        store.record_schedule_outcome(schedule.name, task_id=task_id, state=state)
-        # v72-F3 (R5): a scheduled worker run's terminal state pushes through
-        # the SAME vocabulary as chat-dispatched runs — the scheduler bypasses
-        # the RunPool notify funnel, so a failing nightly run was silent.
-        if task_id is not None:
-            from .serve.run_status import run_terminal_text
+        # ES B110: the bookkeeping stays inside this schedule's own try too —
+        # one schedule's failure must never end the tick for the rest.
+        try:
+            store.mark_schedule_ran(
+                schedule.name,
+                ran_at=moment,
+                next_run_at=next_at,
+                task_id=task_id,
+                state=state,
+            )
+            # v14: record the tick outcome for schedule health (success rate,
+            # consecutive failures, last failure reason).
+            store.record_schedule_outcome(schedule.name, task_id=task_id, state=state)
+            # v72-F3 (R5): a scheduled worker run's terminal state pushes through
+            # the SAME vocabulary as chat-dispatched runs — the scheduler bypasses
+            # the RunPool notify funnel, so a failing nightly run was silent.
+            if task_id is not None:
+                from .serve.run_status import run_terminal_text
 
-            notice = run_terminal_text(store, task_id, audit_dir=config.audit_dir)
-            if notice is not None:
-                terminal_text, terminal_kind = notice
+                notice = run_terminal_text(store, task_id, audit_dir=config.audit_dir)
+                if notice is not None:
+                    terminal_text, terminal_kind = notice
+                    _deliver_tick_text(
+                        store,
+                        schedule,
+                        f"[{schedule.name}] {terminal_text}",
+                        notify,
+                        kind=terminal_kind,
+                    )
+            # v14 Step 2: a schedule that keeps failing (e.g. a persistent policy
+            # block) is auto-disabled rather than retried every interval forever —
+            # it advances and records health, but stops hot-looping on a broken
+            # config until an operator fixes and re-enables it.
+            health = store.schedule_health(schedule.name)
+            if (
+                health is not None
+                and health.consecutive_failures >= MAX_SCHEDULE_CONSECUTIVE_FAILURES
+            ):
+                store.set_schedule_enabled(schedule.name, enabled=False)
+                reason = (
+                    f"auto-disabled after {health.consecutive_failures} "
+                    f"consecutive failures: {state}"
+                )
+                store.set_schedule_disabled_reason(schedule.name, reason)
+                # v72-F3 (R5): the auto-disable reaches the operator where they
+                # are, with the call to action — digest-only was "waiting to be
+                # asked".
                 _deliver_tick_text(
                     store,
                     schedule,
-                    f"[{schedule.name}] {terminal_text}",
+                    f"schedule {schedule.name!r} {reason} — fix the cause, then "
+                    "set_schedule_enabled to resume",
                     notify,
-                    kind=terminal_kind,
                 )
-        # v14 Step 2: a schedule that keeps failing (e.g. a persistent policy
-        # block) is auto-disabled rather than retried every interval forever —
-        # it advances and records health, but stops hot-looping on a broken
-        # config until an operator fixes and re-enables it.
-        health = store.schedule_health(schedule.name)
-        if health is not None and health.consecutive_failures >= MAX_SCHEDULE_CONSECUTIVE_FAILURES:
-            store.set_schedule_enabled(schedule.name, enabled=False)
-            reason = (
-                f"auto-disabled after {health.consecutive_failures} consecutive failures: {state}"
-            )
-            store.set_schedule_disabled_reason(schedule.name, reason)
-            # v72-F3 (R5): the auto-disable reaches the operator where they
-            # are, with the call to action — digest-only was "waiting to be
-            # asked".
-            _deliver_tick_text(
-                store,
-                schedule,
-                f"schedule {schedule.name!r} {reason} — fix the cause, then "
-                "set_schedule_enabled to resume",
-                notify,
-            )
-        if schedule.once:
-            # v44-F2: one-shot means ONE fire, success or not — retrying a
-            # failed one-shot every interval forever would be worse than the
-            # failure. The disabled row + reason is the record of what happened.
-            store.set_schedule_enabled(schedule.name, enabled=False)
-            store.set_schedule_disabled_reason(schedule.name, f"one-shot: fired ({state})")
+            if schedule.once:
+                # v44-F2: one-shot means ONE fire, success or not — retrying a
+                # failed one-shot every interval forever would be worse than the
+                # failure. The disabled row + reason is the record of what happened.
+                store.set_schedule_enabled(schedule.name, enabled=False)
+                store.set_schedule_disabled_reason(schedule.name, f"one-shot: fired ({state})")
+        except Exception:
+            logger.exception("schedule %r: recording its tick failed", schedule.name)
         results.append(TickResult(name=schedule.name, task_id=task_id, state=state))
     return results
