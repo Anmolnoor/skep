@@ -245,7 +245,9 @@ def test_sandbox_profile_allows_git_worktree_metadata(
         common_dir = _git_path(workspace, "--git-common-dir")
         profile = (log_path.parent / "sandbox.profile.sb").read_text()
         assert f'(subpath "{git_dir}")' in profile
-        assert f'(subpath "{common_dir}")' in profile
+        # ES-F3 (B45): only objects/ of the shared dir; hooks/config/refs stay read-only.
+        assert f'(subpath "{common_dir / "objects"}")' in profile
+        assert f'(subpath "{common_dir}")' not in profile
     finally:
         remove_worktree(repo, workspace)
 
