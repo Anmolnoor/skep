@@ -106,6 +106,7 @@ from ..roles import (
     tighten,
     within_delegator,
 )
+from ..secret_floor import secret_floor_reason
 from ..shell_prefixes import (
     command_line_segments,
     dangerous_prefix_reason,
@@ -1861,7 +1862,9 @@ def _check_scope_action(scope: str, action: str) -> None:
         raise ValueError(f"scope {scope!r} has no action {action!r}; known: {known}")
 
 
-def _floor_verdict(scope: str, value: str) -> dict[str, Any] | None:
+def _floor_verdict(
+    scope: str, value: str, *, action: str = "", home: Path | None = None
+) -> dict[str, Any] | None:
     """I4: the floor sits ABOVE every document, so it is consulted before
     ``decide()`` ever runs (F1 of the P3 review: the hook answered `ask` for
     `git push`, the one command it exists to refuse). For a shell value the
@@ -1869,7 +1872,15 @@ def _floor_verdict(scope: str, value: str) -> dict[str, Any] | None:
     applied to the Queen's hands, privilege escalation, the catastrophic
     commands) over every segment of the raw command line, and the verdict
     names the registry's floor key — so RSoP, the why-query and the hook all
-    say the same thing. Not a rule: nothing in any layer can lift it."""
+    say the same thing. Not a rule: nothing in any layer can lift it.
+
+    ES-F1 (V3): a filesystem read of a credential file is the secret floor."""
+    if scope == "filesystem" and action == "read":
+        secret = secret_floor_reason(value, skep_home=home)
+        if secret is None:
+            return None
+        key = "floor.secret-reads"
+        return {"verdict": "deny", "rule_id": key, "decided_by": f"floor/{key}", "reason": secret}
     if scope != "shell":
         return None
     reason = queen_command_line_refusal(value)
@@ -1981,7 +1992,7 @@ def _decision_record(
     if chain:
         record["delegation_chain"] = [hop.entry for hop in chain]
     decision: dict[str, Any] | None = None
-    floor = _floor_verdict(scope, value)
+    floor = _floor_verdict(scope, value, action=action, home=holder.current.home)
     if floor is not None:
         decision = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
         record["source"] = "floor"
@@ -2278,7 +2289,7 @@ def policy_why(
         "value": value,
         "baseline": status_line(holder.current.home),
     }
-    floor = _floor_verdict(scope, value)
+    floor = _floor_verdict(scope, value, action=action, home=holder.current.home)
     if floor is not None:
         # The floor binds workers AND the Queen (v83-F9): one answer, twice.
         verdict = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}

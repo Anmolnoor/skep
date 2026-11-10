@@ -279,6 +279,12 @@ _FLOOR_ROWS: dict[str, tuple[str, str, str]] = {
         "run",
         "sudo, remote git, machine-wrecking rm, broad interpreters, posting prefixes",
     ),
+    "floor.secret-reads": (
+        "filesystem",
+        "read",
+        "~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials "
+        "~/.docker/config.json ~/.kube, any .env / .env.*, skep's own secrets",
+    ),
     "floor.outbound-content": ("*", "*", "a post, send or publish — the card shows the payload"),
 }
 
