@@ -3265,7 +3265,7 @@ def resume_crashed_run(
     the operator's confirmed card is the only trigger (I6)."""
     from skep.worker_contract import RESUME_CHECKPOINT_STATE_KEY
 
-    from ..dispatch import _resume_workspace, _worktrees_root, salvaged_checkpoint_version
+    from ..dispatch import _resume_workspace, salvaged_checkpoint_version
     from ..worker_state import resume_worker_state_from_audit
 
     record = store.get_run(task_id)
@@ -3303,9 +3303,7 @@ def resume_crashed_run(
         permissions = permissions.model_copy(update={"network": merged_network})
     repo = Path(record.repo)
     execution_mode = str(record.execution_mode or "sandbox")
-    preserved = _resume_workspace(
-        store, repo, _worktrees_root(config, repo, execution_mode), task_id
-    )
+    preserved = _resume_workspace(store, repo, config.worktrees_root, task_id)
     # Honest fate check (I8): the cursor only holds in the preserved tree.
     state = resume_worker_state_from_audit(config.audit_dir, task_id)
     cursor = None

@@ -143,6 +143,8 @@ def test_whole_system_smoke_serves_dispatches_reverifies_and_applies_patch(
         applied = client.get(f"/api/runs/{task_id}", headers=headers).json()
         assert applied["applied_branch"] == branch
         assert [approval["status"] for approval in applied["approvals"]] == ["approved"]
-        assert applied["approvals"][0]["resolved_by"] == "operator"  # ES-F1: the principal, not the body
+        assert (
+            applied["approvals"][0]["resolved_by"] == "operator"
+        )  # ES-F1: the principal, not the body
 
-    _assert_no_extra_worktrees(repo, repo.parent / ".skep" / "worktrees")
+    _assert_no_extra_worktrees(repo, config.worktrees_root)  # ES-F4: under SKEP_HOME
