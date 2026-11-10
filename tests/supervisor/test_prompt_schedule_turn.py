@@ -194,3 +194,45 @@ def test_a_trickling_prompt_turn_hits_its_total_deadline(
         assert ok is False and "timed out after 0.3s" in reply
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("add_note", {"content": "sched-was-here"}),
+        ("add_task", {"title": "sched-task"}),
+    ],
+)
+def test_prompt_turn_writes_nothing_to_the_store(
+    config: SupervisorConfig, ollama: FakeOllama, tool: str, args: dict[str, str]
+) -> None:
+    """ES B121: add_note / add_task ran in a scheduled turn — a turn fed by a
+    chained script's output could write notes and tasks with nobody watching.
+    Digests deliver through the tick itself, not through these tools."""
+    store, holder, runner = _engine_parts(config, ollama)
+    try:
+        chat = store.create_chat(title="briefing", model=None)
+        ollama.script_tool_call(tool, args)
+        ollama.script_reply("done")
+        run_scheduled_prompt(store, holder, runner, config.home, _schedule(chat.chat_id), None)
+        assert store.list_notes() == [] and store.list_tasks() == []
+        (row,) = [m.content for m in store.chat_messages(chat.chat_id) if m.role == "tool"]
+        assert "unattended" in row and "schedule tick" in row and "never write" in row
+    finally:
+        store.close()
+
+
+def test_prompt_turn_mutation_refusal_names_the_real_reason(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES B121: the refusal in a scheduled turn said "/btw side question"."""
+    store, holder, runner = _engine_parts(config, ollama)
+    try:
+        chat = store.create_chat(title="briefing", model=None)
+        ollama.script_tool_call("dispatch_run", {"repo": "demo", "instructions": "x"})
+        ollama.script_reply("done")
+        run_scheduled_prompt(store, holder, runner, config.home, _schedule(chat.chat_id), None)
+        (row,) = [m.content for m in store.chat_messages(chat.chat_id) if m.role == "tool"]
+        assert "/btw" not in row and "scheduled turn" in row and "nobody" in row
+    finally:
+        store.close()

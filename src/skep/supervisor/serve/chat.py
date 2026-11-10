@@ -67,7 +67,9 @@ from .tools import (
     TOOL_INDEX_BLOCK,
     TOOL_SPECS,
     UNATTENDED_BLOCKED_READ_TOOLS,
+    UNATTENDED_BLOCKED_STORE_WRITES,
     UNATTENDED_READ_REFUSAL,
+    UNATTENDED_WRITE_REFUSAL,
     advertised_tool_specs,
     execute_mutation,
     execute_read_tool,
@@ -1562,7 +1564,12 @@ class ChatEngine:
                         refusal: dict[str, Any] = {
                             "ok": False,
                             "error": (
-                                f"read-only turn: {name} is a mutation and a /btw "
+                                # ES B121: a scheduled turn said "/btw" here.
+                                f"scheduled turn: {name} is a mutation and nobody "
+                                "is watching to confirm a card — report what you "
+                                "would do; the user can ask for it in a live chat"
+                                if unattended
+                                else f"read-only turn: {name} is a mutation and a /btw "
                                 "side question cannot propose or execute one — "
                                 "answer from reads; the user can ask outside /btw "
                                 "to make this happen"
@@ -1730,6 +1737,10 @@ class ChatEngine:
                     if unattended and name in UNATTENDED_BLOCKED_READ_TOOLS:
                         # v83-F5 (ADR 0042): store reads only, unattended.
                         result = {"error": f"{name} {UNATTENDED_READ_REFUSAL}"}
+                        previous_read_tool = name
+                    elif unattended and name in UNATTENDED_BLOCKED_STORE_WRITES:
+                        # ES B121: ...and no store writes either.
+                        result = {"error": f"{name} {UNATTENDED_WRITE_REFUSAL}"}
                         previous_read_tool = name
                     elif call_key in nudged_keys:
                         # v79-F5: already nudged this turn — refuse without
