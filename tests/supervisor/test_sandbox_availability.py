@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -46,10 +47,16 @@ def test_seatbelt_probe_applies_the_real_profile_shape(monkeypatch: pytest.Monke
         seen.append(argv)
         return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
 
+    def no_temp_dir() -> str:
+        raise FileNotFoundError("No usable temporary directory found")
+
     monkeypatch.setattr(Path, "exists", lambda _path: True)
     monkeypatch.setattr(subprocess, "run", fake_run)
+    # Mac finding D: the probe runs /usr/bin/true and needs no writable root;
+    # with no usable temp dir it raised instead of reporting probe_rejected.
+    monkeypatch.setattr(tempfile, "gettempdir", no_temp_dir)
     assert sandbox._seatbelt_availability().usable is True
     profile = seen[0][seen[0].index("-p") + 1]
     assert "(deny network*)" in profile
     assert "(deny file-write*)" in profile
-    assert "(allow file-write* (subpath" in profile
+    assert "(allow file-write* (subpath" not in profile

@@ -125,7 +125,9 @@ def _seatbelt_availability() -> SandboxAvailability:
     # ES-F6 (B48): probe with the shape workers get. Under a parent sandbox
     # "(allow default)" alone applies while a profile carrying deny rules
     # dies (rc=71) — the probe said usable and every worker crashed instead.
-    profile = build_profile(writable_roots=[Path(tempfile.gettempdir())])
+    # No writable root: /usr/bin/true needs none, and a host with no usable
+    # temp dir must still get probe_rejected, not a FileNotFoundError.
+    profile = build_profile(writable_roots=[])
     try:
         proc = subprocess.run(
             [SANDBOX_EXEC, "-p", profile, "/usr/bin/true"],
