@@ -126,13 +126,14 @@ def test_golden_parity_with_the_template_as_the_baseline(name: str, tmp_path: Pa
         project["run_policy"]["_provenance"].pop("policy_engine_v2_scopes", None)
     assert v1 == v2, f"{name}: engine v2 answers differently with the template as baseline"
     # The template's rules ARE the operator's base (the operator overlay adds
-    # only its own `net:search`) — minus its worker shell rules, which never
-    # reach the Queen's host lane (ES-F3) — and its knobs are the run's.
+    # only its own `net:search`) — minus its worker shell allows, which never
+    # reach the Queen's host lane (ES-F3; its shell asks/denies do, ES-F7) —
+    # and its knobs are the run's.
     operator_ids = {
         rule["rule_id"] for rules in v1["operator"]["scopes"].values() for rule in rules
     }
     assert operator_ids - {"net:search"} == {
-        rule.rule_id for rule in template.rules if rule.scope != "shell"
+        rule.rule_id for rule in template.rules if rule.scope != "shell" or rule.verdict != "allow"
     }
     # (the strategy's own registry hosts merge in beside the template's)
     assert set(template.settings["default_network"]) <= set(
@@ -242,7 +243,8 @@ def test_the_b3_demo_sequence_holds_under_builder(
         asked = policy_decide(holder, store, value="rm -rf build", **shell)
         denied = policy_decide(holder, store, value="git push origin main", **shell)
         # ES-F3 (B03): with no repo the operator document answers — the
-        # Queen's host lane, which the template's worker shell rules never reach.
+        # Queen's host lane, which the template's worker shell allows never
+        # reach; its `*` ask still does (ES-F7).
         host = policy_decide(holder, store, scope="shell", action="run", value="pnpm test")
     finally:
         store.close()
@@ -250,7 +252,11 @@ def test_the_b3_demo_sequence_holds_under_builder(
     assert (ran["source"], ran["verdict"], ran["rule_id"]) == ("run", "allow", "shell:pnpm test")
     assert asked["verdict"] in ("require_approval", "deny")
     assert (denied["verdict"], denied["rule_id"]) == ("deny", "floor.worker-git-hard-denies")
-    assert (host["source"], host["verdict"]) == ("operator", "deny")
+    assert (host["source"], host["verdict"], host["rule_id"]) == (
+        "operator",
+        "require_approval",
+        "shell-learnable",
+    )
     decisions = [
         hook_output(record)["hookSpecificOutput"]["permissionDecision"]
         for record in (ran, asked, denied, host)

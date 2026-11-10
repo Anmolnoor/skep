@@ -153,12 +153,16 @@ def template_layer(home: Path) -> Layer | None:
 
 def queen_template_layer(home: Path) -> Layer | None:
     """ES-F3 (V5, B03): the baseline as the Queen's host lane composes it —
-    without its ``shell`` rules, which bind workers in a sandboxed worktree
-    and never the operator's host. Knobs and every other scope ride as-is."""
+    without its ``shell`` ALLOWS, which trust workers in a sandboxed worktree
+    and never the operator's host. ES-F7 (B72): its shell denies and asks
+    still bind the Queen. Knobs and every other scope ride as-is."""
     layer = template_layer(home)
     if layer is None:
         return None
-    return replace(layer, rules=tuple(rule for rule in layer.rules if rule.scope != "shell"))
+    return replace(
+        layer,
+        rules=tuple(r for r in layer.rules if r.scope != "shell" or r.verdict != "allow"),
+    )
 
 
 def zero_state_home(store: RunStore) -> bool:

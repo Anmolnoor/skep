@@ -871,7 +871,7 @@ class ResolvedOperatorPolicy:
     Not a run policy: no repo, no caste, no Permissions/Budget — the Queen is
     a persistent in-process agent, not a contract-governed worker. The
     resolution composes the stored GLOBAL document (templates + learned
-    rules keep their effect — except a template's worker shell rules, ES-F3)
+    rules keep their effect — except a template's worker shell allows, ES-F3)
     with the operator document overlay (Queen-only rules workers never
     read); deny wins ties across both.
     """
@@ -901,13 +901,18 @@ class ResolvedOperatorPolicy:
 def queen_global_document(document: PolicyDocument) -> PolicyDocument:
     """ES-F3 (V5, B03): the global document as the Queen's host lane sees it.
 
-    Its ``shell`` scope rules are a template's (``skep setup --template``
-    writes them) and were written for sandboxed workers in a disposable
-    worktree — npm/uv/pytest on the operator's host is a different promise.
-    Learned rules stay: those are grants the operator gave the Queen. Queen
-    shell rules live in the operator document (``set_operator_policy``)."""
+    Its ``shell`` allows are a template's (``skep setup --template`` writes
+    them) and were written for sandboxed workers in a disposable worktree —
+    npm/uv/pytest on the operator's host is a different promise. ES-F7
+    (B72): only the allows leave; a shell deny or ask there still binds the
+    Queen. Learned rules stay: those are grants the operator gave the Queen."""
     return document.model_copy(
-        update={"scopes": [s for s in document.scopes if s.scope != "shell"]}
+        update={
+            "scopes": [
+                s.model_copy(update={"allow": []}) if s.scope == "shell" else s
+                for s in document.scopes
+            ]
+        }
     )
 
 

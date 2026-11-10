@@ -68,9 +68,11 @@ def test_same_action_two_roles_different_verdicts_and_the_ledger_says_which(
             ), where
         else:
             # ES-F3 (B03): the builder's worker toolchain never reaches the
-            # Queen's host lane, so no role finds an allow there to keep.
-            assert {builder["verdict"], none["verdict"], operator["verdict"]} == {"deny"}
-            assert none["rule_id"] == "default-deny"
+            # Queen's host lane, so no role finds an allow there to keep; the
+            # template's `*` ask does (ES-F7).
+            verdicts = {builder["verdict"], none["verdict"], operator["verdict"]}
+            assert verdicts == {"require_approval"}
+            assert none["rule_id"] == "shell-learnable"
         assert (builder["role"], operator["role"], "role" in none) == ("builder", "operator", False)
     rows = [
         json.loads(line)
@@ -110,7 +112,7 @@ def test_done_criterion_4_policy_why_names_the_role_layer(
     assert "role:operator sits under the baseline and only tightens" in view["role"]["note"]
     assert view["run"]["decided_by"] == "role:operator/shell-gated"
     # ES-F3: the Queen's lane has no toolchain allow for the role to tighten.
-    assert view["operator"]["verdict"] == "deny"
+    assert view["operator"]["verdict"] == "require_approval"
     assert main([*why, "--role", "builder"]) == 0
     view = json.loads(capsys.readouterr().out)
     assert view["role"]["layer"] == "role:builder" and view["run"]["verdict"] == "allow"

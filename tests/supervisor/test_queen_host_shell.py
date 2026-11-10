@@ -103,3 +103,70 @@ def test_operator_rules_and_learned_grants_still_reach_the_queen(
     finally:
         store.close()
     assert decision is not None and decision.verdict == "allow"
+
+
+def _builder_plus(extra: list[dict[str, str]]) -> dict[str, object]:
+    layer = load_policy_template("builder").model_dump(mode="json")
+    layer["rules"] = [*layer["rules"], *extra]
+    return layer
+
+
+NO_CURL = {"scope": "shell", "verdict": "deny", "action": "run", "pattern": "curl",
+           "rule_id": "no-curl"}  # fmt: skip
+ASK_MAKE = {"scope": "shell", "verdict": "require_approval", "action": "run",
+            "pattern": "make deploy", "rule_id": "ask-make-deploy"}  # fmt: skip
+
+
+def test_a_baseline_shell_deny_still_binds_the_queen(
+    builder_home: SupervisorConfig, tmp_path: Path
+) -> None:
+    """ES-F7 (B72): ES-F3 dropped every baseline shell rule from the host
+    lane, denies included — a custom baseline's `curl` deny was ignored. Only
+    the template's worker ALLOWS stay out; its denies and asks still bind."""
+    from skep.supervisor.policy_resolver import resolve_operator_policy
+
+    layer = pb._load_layer(_builder_plus([NO_CURL, ASK_MAKE]))
+    pb.write_lock(builder_home.home, layer, approved_by="op")
+    store = RunStore(builder_home.db_path)
+    try:
+        holder = ConfigHolder(builder_home, store)
+        decision = queen_shell_decision(
+            store, holder, command="curl -sI https://example.com", cwd=str(tmp_path)
+        )
+        assert decision is not None
+        assert (decision.verdict, decision.decided_by) == ("deny", "template:builder/no-curl")
+        ask = resolve_operator_policy(store).decision("shell", "run", "make deploy now")
+        assert (ask.verdict, ask.decided_by) == (
+            "require_approval",
+            "template:builder/ask-make-deploy",
+        )
+        # The worker allows still stay out of the host lane.
+        assert (
+            queen_shell_decision(store, holder, command="npm install x", cwd=str(tmp_path)) is None
+        )
+    finally:
+        store.close()
+
+
+def test_a_global_document_shell_deny_still_binds_the_queen(
+    builder_home: SupervisorConfig, tmp_path: Path
+) -> None:
+    """ES-F7 (B72), the global-document half: `skep setup --template` writes
+    the same rules there, and queen_global_document stripped its denies too."""
+    from skep.supervisor.policy_schema import PolicyRule
+
+    document = load_policy_template("builder").document()
+    for scope in document.scopes:
+        if scope.scope == "shell":
+            scope.deny.append(PolicyRule(rule_id="no-wget", action="run", pattern="wget"))
+    store = RunStore(builder_home.db_path)
+    try:
+        store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, document.model_dump_json())
+        holder = ConfigHolder(builder_home, store)
+        decision = queen_shell_decision(
+            store, holder, command="wget https://example.com", cwd=str(tmp_path)
+        )
+        assert decision is not None and decision.verdict == "deny", decision
+        assert queen_shell_decision(store, holder, command="uv sync", cwd=str(tmp_path)) is None
+    finally:
+        store.close()

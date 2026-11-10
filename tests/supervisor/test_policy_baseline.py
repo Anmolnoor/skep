@@ -239,10 +239,11 @@ def test_the_baseline_is_the_enforced_template_layer(config: SupervisorConfig, r
         mode = resolve_stack(layers).knobs["default_execution_mode"]
         assert mode.value == "workspace" and mode.enforced_by is None
         # The rules ride the same slot: the Queen-side stack answers from them —
-        # all but the worker shell rules, which never reach the host lane (ES-F3).
+        # all but the worker shell allows, which never reach the host lane
+        # (ES-F3); the template's `*` shell ask still does (ES-F7).
         operator = resolve_operator_policy(store)
         assert operator.decision("network", "fetch", "example.com").rule_id == "net-fetch-gated"
-        assert operator.decision("shell", "run", "uv run pytest -q").rule_id == "default-deny"
+        assert operator.decision("shell", "run", "uv run pytest -q").rule_id == "shell-learnable"
         assert operator.fail_closed == {}
     finally:
         store.close()

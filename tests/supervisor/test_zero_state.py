@@ -123,8 +123,9 @@ def test_a_fresh_home_asks_on_every_path_until_a_baseline_is_approved(
     assert (ran["verdict"], ran["rule_id"]) == ("allow", "shell:pnpm test")
     assert rm["verdict"] != "allow"
     assert (push["verdict"], push["rule_id"]) == ("deny", "floor.worker-git-hard-denies")
-    # ES-F3 (B03): with no repo the Queen's host lane answers — no toolchain allow.
-    assert _decide(home, "pnpm test")["verdict"] == "deny"
+    # ES-F3 (B03): with no repo the Queen's host lane answers — no toolchain
+    # allow, only the template's `*` ask (ES-F7).
+    assert _decide(home, "pnpm test")["verdict"] == "require_approval"
     assert _decide(home, "pnpm test", repo)["verdict"] == "allow"
     assert _hook(home, repo, "pnpm test", monkeypatch)["permissionDecision"] == "allow"
     before = len(_ledger(home))
