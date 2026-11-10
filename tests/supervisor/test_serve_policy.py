@@ -1022,10 +1022,10 @@ def test_maintain_phase_lands_on_one_integration_branch_and_freezes_main(
     assert _wait_applied_branch(client, run1["task_id"]) == "skep/maintain"
     tip_after_one = git(repo, "rev-parse", "skep/maintain").stdout.strip()
 
-    # A second run verified on main cannot append onto the diverged branch.
-    # ES-F3 (B131): the auto lane never lands past the commit G10 verified,
-    # so it blocks before applying — named on the run's trail, no approval
-    # row (a pending one would fail identically; a denied one reads as policy).
+    # A second run of the same fix conflicts with the integration branch it
+    # now starts from (ES-F6); its re-verify cannot confirm, so the auto lane
+    # blocks — named on the run's trail, no approval row (ES-F3: a pending one
+    # would fail identically; a denied one reads as policy).
     run2 = _run_to_terminal(client, repo, "Fix the bug. MODE:happy")
     assert run2["state"] == "completed"
     assert _wait_applied_branch(client, run2["task_id"]) is None
@@ -1035,7 +1035,7 @@ def test_maintain_phase_lands_on_one_integration_branch_and_freezes_main(
         trail = [d or "" for _, d, _ in store.transitions_for(str(run2["task_id"]))]
     finally:
         store.close()
-    assert any("land it by hand" in detail for detail in trail)
+    assert any("auto_apply_blocked" in detail for detail in trail)
 
     # The integration branch was not corrupted, there are no per-task branches,
     # and main never advanced.
@@ -1748,3 +1748,46 @@ def test_an_unknown_caste_is_refused_by_name_not_run_as_coding(
     detail = refused.json()["detail"]
     assert "archivist" in detail
     assert "researcher" in detail and "reviewer" in detail  # names what IS valid
+
+
+def test_es_f6_maintain_workers_start_from_the_integration_branch(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F6 (B132, I1 I8): maintain workers based on main never saw what
+    skep/maintain had accumulated — the second nearby task conflicted and was
+    recorded `denied`. A run with no explicit ref starts from the project's
+    integration branch once it exists, so the second task builds on the first."""
+    (repo / "other.py").write_text("value = 0\n")
+    git(repo, "add", "other.py")
+    git(repo, "commit", "-qm", "second file")
+    seeded = RunStore(config.db_path)
+    try:
+        seeded.add_project_policy(
+            project_id="acc",
+            name="trusted repo",
+            strategy="trusted_local_dev",
+            phase="maintain",
+            policy={
+                "default_execution_mode": "workspace",
+                "verify_command": 'grep -q "value = 1" existing.py',
+            },
+        )
+        seeded.add_project_binding(
+            project_id="acc", binding_kind="repo_path", binding_value=str(repo)
+        )
+    finally:
+        seeded.close()
+    client = _client(config)
+    run1 = _run_to_terminal(client, repo, "Fix the bug. MODE:happy")
+    assert _wait_applied_branch(client, run1["task_id"]) == "skep/maintain"
+    # Run 2's pin only passes on a base that already has run 1's fix.
+    run2 = _run_to_terminal(client, repo, "Fix more. MODE:happy FILE:other.py")
+    assert _wait_applied_branch(client, run2["task_id"]) == "skep/maintain"
+    store = RunStore(config.db_path)
+    try:
+        assert store.get_run(str(run2["task_id"])).ref == "skep/maintain"  # type: ignore[union-attr]
+    finally:
+        store.close()
+    shown = git(repo, "show", "skep/maintain:other.py").stdout
+    assert shown == "value = 1\n"
+    assert git(repo, "show", "skep/maintain:existing.py").stdout == "value = 1\n"

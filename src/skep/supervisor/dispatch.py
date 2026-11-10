@@ -359,6 +359,7 @@ def run_task(
     # the operator's checkout happens to sit on — otherwise a stray `git
     # checkout` silently changes what every future run sees. Detached HEAD
     # (default_branch → None) keeps the old HEAD behavior.
+    caller_chose_ref = ref is not None
     if ref is None:
         ref = repo_default_branch(repo)
     # v88-F4 (I2): resolve the project's pinned verification command HERE, not
@@ -441,6 +442,18 @@ def run_task(
             # here, beside the verify pin, so every face lands the same way.
             raw_branch = project_policy.get("auto_apply_branch")
             auto_apply_branch = raw_branch if isinstance(raw_branch, str) else None
+    # ES-F6 (B132, I1): the auto lane accumulates on ONE integration branch
+    # (v30), so a run that will land there must START there — based on main it
+    # never sees the branch's earlier landings, and the second nearby task
+    # conflicts. Only when the caller named no ref and the branch exists.
+    if (
+        not caller_chose_ref
+        and auto_apply_branch
+        and resolve_commit(repo, f"refs/heads/{auto_apply_branch}") is not None
+        and auto_apply_decision(config.auto_approval_rules, auto_apply_verified_patch).verdict
+        == "allow"
+    ):
+        ref = auto_apply_branch
     try:
         landing_decision = auto_apply_decision(
             config.auto_approval_rules, auto_apply_verified_patch
