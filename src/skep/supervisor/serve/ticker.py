@@ -343,7 +343,17 @@ class Ticker(threading.Thread):
         except Exception:
             logger.exception("conversation-skill sweep failed")
 
-    def stop(self) -> None:
+    def halt(self) -> None:
+        """ES B119: stop ticking now, without waiting — safe from a signal
+        handler. ES B120: no script outlives its supervisor."""
         self._stop_event.set()
-        kill_running_scripts()  # ES B120: no script outlives its supervisor
+        kill_running_scripts()
+
+    def stop(self) -> None:
+        self.halt()
         self.join(timeout=5.0)
+        # ES B119: the store closes right after this — give an in-flight pass
+        # a bounded chance to finish (scripts were just killed; a prompt turn
+        # is bounded by PROMPT_TICK_TIMEOUT_SECONDS, which we do not wait out).
+        if self._pass is not None:
+            self._pass.join(timeout=5.0)

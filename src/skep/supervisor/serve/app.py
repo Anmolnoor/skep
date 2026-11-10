@@ -336,7 +336,7 @@ def create_app(
     channels_on = start_ticker if start_channels is None else start_channels
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(started: FastAPI) -> AsyncIterator[None]:
         # v19-F10: truncate the WAL on startup so it does not grow unbounded.
         run_store.checkpoint()
         # v59-F10: reap runs stranded by a previous supervisor death — a valid
@@ -432,6 +432,8 @@ def create_app(
         except Exception:
             logging.getLogger("skep.serve").exception("seed-skill sync failed")
         ticker = Ticker(holder, run_store, runner=runner) if start_ticker else None
+        # ES B119: serve_cmds' signal handler halts it before the drain.
+        started.state.ticker = ticker
         if ticker is not None:
             ticker.start()
         poller = (
