@@ -494,3 +494,23 @@ def test_es_f1_command_v_git_is_a_lookup_not_a_launch() -> None:
 def test_a_worker_floor_reads_the_program_however_it_is_cased(argv: list[str]) -> None:
     decision = _decide(argv)
     assert decision.verdict == "deny", argv  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["find", ".", "-exec", "git", "push", ";"],
+        ["git", "submodule", "foreach", "git push"],
+        ["git", "bisect", "run", "git", "push"],
+        ["busybox", "sh", "-c", "git push"],
+        ["parallel", "git push", ":::", "a"],
+        ["watch", "git push"],
+        ["script", "-q", "/dev/null", "git", "push"],
+        ["git", "clone", "https://example.com/r.git"],
+        ["git", "ls-remote", "origin"],
+        ["git", "submodule", "update", "--init"],
+    ],
+)
+def test_a_worker_cannot_exec_a_push_through_another_program(argv: list[str]) -> None:
+    decision = _decide(argv)
+    assert decision.verdict == "deny", argv  # type: ignore[attr-defined]

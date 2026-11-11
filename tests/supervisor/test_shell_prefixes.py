@@ -596,3 +596,85 @@ def test_subcommands_are_not_folded() -> None:
     assert git_core_argv(["GIT", "PUSH"]) == ["git", "PUSH"]
     assert not is_remote_git_command(["GIT", "PUSH"])
     assert is_unknown_git_subcommand(["GIT", "PUSH"])  # so the Queen refuses it as an alias
+
+
+# PR #64 review: programs that exec another command, and git builtins that
+# reach a remote, walked past the git floor. No stock allowlist holds them,
+# but the floor holds regardless of what an operator allowlists or approves.
+EXEC_THROUGH_PUSHES = [
+    "find . -exec git push \;",
+    "find . -execdir git push {} +",
+    "find . -ok git push \;",
+    "find . -okdir git push \;",
+    "find . -name x -exec sh -c 'git push' \;",
+    "git submodule foreach 'git push'",
+    "git submodule foreach --recursive git push origin",
+    "git -C sub submodule --quiet foreach 'cd x && git push'",
+    "git bisect run git push",
+    "git bisect run sh -c 'git push'",
+    "git difftool -x 'git push'",
+    "git difftool --extcmd='git push'",
+    "busybox sh -c 'git push'",
+    "parallel git push ::: a",
+    "parallel 'git push' ::: a",
+    "parallel -j 2 'git push {}' ::: origin",
+    "watch git push",
+    "watch -n 5 'git push'",
+    "script -q /dev/null git push",
+    "script -q -c 'git push' /dev/null",
+    # git builtins that reach a remote (I4: never push, pull, fetch).
+    "git clone https://example.com/r.git",
+    "git clone ../other copy",
+    "git ls-remote origin",
+    "git submodule update --init",
+    "git submodule --quiet update",
+    "git submodule add https://example.com/y.git y",
+    "git archive --remote=origin HEAD",
+    "git request-pull v1 origin",
+    "git maintenance run --task=prefetch",
+    "git maintenance start",
+]
+
+
+@pytest.mark.parametrize("command", EXEC_THROUGH_PUSHES)
+def test_commands_that_exec_a_push_are_on_the_floor(command: str) -> None:
+    import shlex
+
+    from skep.supervisor.shell_prefixes import (
+        hard_denied_segment_reason,
+        queen_command_line_refusal,
+    )
+
+    assert queen_command_line_refusal(command) is not None, command
+    assert hard_denied_segment_reason(shlex.split(command)) is not None, command
+    assert dangerous_prefix_reason(shlex.split(command)) is not None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find . -name '*.py' -exec grep -n TODO {} +",
+        "find . -name git -type d",
+        "git submodule status",
+        "git submodule sync",
+        "git submodule foreach 'git status'",
+        "git bisect run pytest -q",
+        "git difftool --tool-help",
+        "busybox ls",
+        "parallel echo ::: a b",
+        "watch -n 5 df -h",
+        "script -q /dev/null pytest",
+        "git archive HEAD -o out.tar",
+        "git maintenance run --task=gc",
+    ],
+)
+def test_exec_through_forms_that_run_nothing_denied_stay_open(command: str) -> None:
+    import shlex
+
+    from skep.supervisor.shell_prefixes import (
+        hard_denied_segment_reason,
+        queen_command_line_refusal,
+    )
+
+    assert queen_command_line_refusal(command) is None, command
+    assert hard_denied_segment_reason(shlex.split(command)) is None, command

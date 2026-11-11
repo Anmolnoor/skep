@@ -17,8 +17,23 @@ from collections.abc import Sequence
 # remote — these can never be allowlisted or remembered.
 # ES-F1 (B124): the plumbing that does the same transfer (`send-pack` pushed
 # on es-integration-2) and the transport helpers (`remote-ext` runs a command).
+# PR #64 review: `clone` fetches a whole repo, `ls-remote` and `request-pull`
+# dial one — I4 says a worker never reaches a remote (register_repo is the
+# governed clone).
 REMOTE_GIT_SUBCOMMANDS: frozenset[str] = frozenset(
-    {"push", "pull", "fetch", "send-pack", "receive-pack", "fetch-pack", "http-push", "http-fetch"}
+    {
+        "push",
+        "pull",
+        "fetch",
+        "send-pack",
+        "receive-pack",
+        "fetch-pack",
+        "http-push",
+        "http-fetch",
+        "clone",
+        "ls-remote",
+        "request-pull",
+    }
 )
 _REMOTE_MUTATING_VERBS = frozenset(
     {"add", "set-url", "set-head", "set-branches", "remove", "rm", "rename", "update", "prune"}
@@ -93,7 +108,18 @@ _LAUNCHERS: dict[str, tuple[frozenset[str], int]] = {
     "flock": (frozenset({"-w", "-E"}), 1),
     "unbuffer": (frozenset(), 0),
     "caffeinate": (frozenset({"-w", "-t"}), 0),
+    # PR #64 review: `busybox sh -c 'git push'` runs the applet named next.
+    "busybox": (frozenset(), 0),
+    "watch": (frozenset({"-n", "--interval", "-q", "--equexit"}), 0),
+    "parallel": (frozenset({"-j", "--jobs", "-S", "--sshlogin", "-a", "--arg-file"}), 0),
+    "script": (frozenset({"-c", "--command", "-F", "-t", "-T", "-I", "-O", "-B", "-E"}), 1),
 }
+# Launchers that hand the rest of their argv to `sh -c`, joined by spaces
+# (`watch 'git push'`, `parallel 'git push' ::: a`, Linux `script -c`): each
+# suffix is also judged as a shell line.
+_SHELL_LAUNCHERS = frozenset({"watch", "parallel", "script"})
+# find's actions that exec the argv after them.
+_FIND_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 
 
 def launched_command(argv: Sequence[str]) -> list[str]:
@@ -187,9 +213,17 @@ def is_remote_git_command(argv: Sequence[str]) -> bool:
     stripped = git_core_argv(argv)
     if len(stripped) < 2 or stripped[0] != "git":
         return False
-    if stripped[1] in REMOTE_GIT_SUBCOMMANDS or stripped[1].startswith("remote-"):
+    subcommand, rest = stripped[1], stripped[2:]
+    if subcommand in REMOTE_GIT_SUBCOMMANDS or subcommand.startswith("remote-"):
         return True
-    return stripped[1] == "remote" and any(t in _REMOTE_MUTATING_VERBS for t in stripped[2:])
+    verbs = [t for t in rest if not t.startswith("-")]
+    if subcommand == "submodule":  # update and add fetch the submodule's remote
+        return verbs[:1] in (["update"], ["add"])
+    if subcommand == "archive":
+        return any(t.startswith("--remote") for t in rest)
+    if subcommand == "maintenance":  # start schedules an hourly prefetch
+        return verbs[:1] in (["start"], ["register"]) or any("prefetch" in t for t in rest)
+    return subcommand == "remote" and any(t in _REMOTE_MUTATING_VERBS for t in rest)
 
 
 def is_ref_rewrite_command(argv: Sequence[str]) -> bool:
@@ -540,11 +574,39 @@ def _strip_env_prefix(tokens: list[str]) -> list[str]:
     return rest
 
 
+def _git_exec_lines(core: Sequence[str]) -> list[str]:
+    """The shell lines a git argv (``git_core_argv`` form) runs for itself:
+    ``submodule foreach <cmd>``, ``bisect run <cmd>``, ``difftool -x <cmd>``.
+    Git runs each through the shell, its words joined by spaces."""
+    rest = list(core[2:])
+    verbs = [t for t in rest if not t.startswith("-")]
+    if core[1:2] == ["submodule"] and verbs[:1] == ["foreach"]:
+        payload = rest[rest.index("foreach") + 1 :]
+        while payload and payload[0].startswith("-"):  # --recursive, --quiet
+            payload = payload[1:]
+        return [" ".join(payload)]
+    if core[1:2] == ["bisect"] and rest[:1] == ["run"]:
+        return [" ".join(rest[1:])]
+    if core[1:2] == ["difftool"]:
+        return [
+            token.partition("=")[2] if token.startswith("--extcmd=") else nxt
+            for token, nxt in zip(rest, [*rest[1:], ""], strict=True)
+            if token in {"-x", "--extcmd"} or token.startswith("--extcmd=")
+        ]
+    return []
+
+
 def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None:
     """The argvs one exec-style argv would run: itself, plus the decomposed
     payload of a ``bash -c``-style wrapper (whose operand is a whole shell
-    line). ``python -c`` payloads are Python, not shell — never decomposed.
-    None when a wrapper payload cannot be tokenized."""
+    line), every suffix behind a launcher, ``find -exec``'s command and the
+    commands git runs for itself (``submodule foreach``, ``bisect run``).
+    None when a payload cannot be tokenized.
+
+    Interpreter payloads (``python -c``, ``perl -e``, ``awk 'BEGIN{system()}'``)
+    and git config or env values that name a command (``-c diff.external=``,
+    ``GIT_EXTERNAL_DIFF=``) are code, not shell lines: this cannot read them.
+    The sandbox is the wall there; the floor is a sign on it."""
     tokens = [str(token) for token in argv]
     if tokens and _ASSIGNMENT_RE.match(tokens[0]):
         # `A=1 git push` runs git: judge what follows the assignments too,
@@ -574,6 +636,30 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
                 if nested is None:
                     return None
                 result.extend(nested)
+                if program in _SHELL_LAUNCHERS:
+                    nested = command_line_segments(" ".join(tokens[index:]), _depth + 1)
+                    if nested is None:
+                        return None
+                    result.extend(nested)
+    exec_argvs: list[list[str]] = []
+    if program == "find":
+        exec_argvs = [
+            tokens[index + 1 :] for index, t in enumerate(tokens) if t in _FIND_EXEC_ACTIONS
+        ]
+    core = git_core_argv(tokens)
+    lines = _git_exec_lines(core) if core[:1] == ["git"] else []
+    if core[:3] == ["git", "bisect", "run"]:
+        exec_argvs.append(core[3:])  # judged as an argv too, not only space-joined
+    for exec_argv in exec_argvs:
+        nested = _unwrap_argv(exec_argv, _depth + 1)
+        if nested is None:
+            return None
+        result.extend(nested)
+    for line in lines:
+        nested = command_line_segments(line, _depth + 1)
+        if nested is None:
+            return None
+        result.extend(nested)
     if program in _WRAPPER_SHELLS:
         payload: str | None = None
         for index, token in enumerate(tokens[1:], start=1):
