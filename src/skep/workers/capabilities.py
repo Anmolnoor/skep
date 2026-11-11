@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from skep.supervisor.netproxy import domain_allowed, is_loopback_host
-from skep.supervisor.secret_floor import secret_floor_reason
+from skep.supervisor.secret_floor import is_dotenv, secret_floor_reason
 from skep.supervisor.spawner import build_worker_env
 from skep.worker_contract import BOOKKEEPING_DIRS, PATCH_EXCLUDE_PATHSPECS, EventType
 from skep.workers.html_text import html_to_text
@@ -150,11 +150,9 @@ def tracked_file_readable(workspace: Path, path: Path) -> bool:
     ``deploy_key.txt -> ~/.ssh/id_rsa`` reached the provider in the first plan
     call — before any tool ran or any card showed — and stayed in the audit
     trail. Only regular files whose realpath stays inside the worktree (and
-    outside its ``.git``) are read. ``.env`` files never are.
-    ponytail: the dotenv check mirrors PR #56's ``secret_floor._is_dotenv``;
-    call ``secret_floor_reason`` here once both are on main.
+    outside its ``.git``) are read. ``.env`` files (any case) never are.
     """
-    if path.name == ".env" or path.name.startswith(".env."):
+    if is_dotenv(path.name):
         return False
     try:
         root = workspace.resolve()

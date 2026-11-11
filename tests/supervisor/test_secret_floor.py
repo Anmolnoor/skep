@@ -327,3 +327,46 @@ def test_ordinary_commands_still_reach_the_card(
         assert queen_shell_decision(store, holder, command=command, cwd=str(fake_home)) is None, (
             command
         )
+
+
+def test_a_secret_spelled_in_another_case_is_still_the_secret(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    """APFS and NTFS fold case: ``~/.SSH/id_rsa`` opens ``~/.ssh/id_rsa``. The
+    floor folds case on every OS — over-blocking ``.SSH`` on Linux is harmless,
+    and one code path is the point. Judged on the verdict, never on whether
+    this OS happens to open the other spelling."""
+    from skep.supervisor.secret_floor import shell_secret_floor_reason
+    from skep.workers.capabilities import tracked_file_readable
+
+    skep_home = tmp_path / "skep" / "supervisor"
+    for path in (
+        "~/.SSH/id_rsa",
+        "~/.Ssh",
+        "~/.AWS/credentials",
+        "~/.Config/GH/hosts.yml",
+        fake_home / ".NETRC",
+        tmp_path / "proj" / ".ENV",
+        tmp_path / "proj" / ".Env",
+        tmp_path / "proj" / ".ENV.Local",
+        skep_home / "SERVE-TOKEN",
+        skep_home / "LLM-Secret-openai",
+        skep_home / "Mail-SECRET",
+        skep_home.parent / "Serve.ENV",
+        str(skep_home).upper() + "/serve-token",
+    ):
+        assert secret_floor_reason(path, skep_home=skep_home), path
+    for command in ("cat ~/.SSH/id_rsa", "head ~/.Aws/credentials", "cat proj/.ENV"):
+        assert shell_secret_floor_reason(command, cwd=str(tmp_path), skep_home=skep_home), command
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws" / ".ENV").write_text("TOKEN=CANARY\n")
+    assert tracked_file_readable(tmp_path / "ws", tmp_path / "ws" / ".ENV") is False
+    registry = CapabilityRegistry(tmp_path / "ws", emit=lambda _t, _p: None)
+    with pytest.raises(CapabilityDenied, match="secret floor"):
+        registry.invoke("filesystem.read", {"path": ".ENV"})
+    (tmp_path / "ws" / "home").mkdir()
+    (tmp_path / "ws" / "home" / "SERVE-TOKEN").write_text("CANARY\n")
+    found = search_files_result(
+        "CANARY", path=str(tmp_path / "ws"), skep_home=tmp_path / "ws" / "home"
+    )
+    assert found["matches"] == [] and "secret floor" in found["note"]

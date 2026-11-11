@@ -4,7 +4,10 @@ Credential files are never readable by the Queen or a worker. Like the git
 floor (I4) this sits ABOVE every policy layer: it is not a rule, so no
 template, learned rule, session grant or confirmed card can lift it. Both
 the requested path and its realpath are judged, so a symlink cannot launder
-a secret into an allowed directory.
+a secret into an allowed directory. Case is folded on every OS: APFS and
+NTFS open ``~/.SSH/id_rsa`` as ``~/.ssh/id_rsa``, and ``resolve()`` does not
+normalize case, so a case-sensitive compare was a bypass (over-blocking
+``.SSH`` on Linux is harmless and keeps one code path).
 
 Policy half only. The sandbox half (tmpfs/deny over these paths, so a
 worker's own ``cat ~/.ssh/id_rsa`` fails too) is the sandbox round's (B05).
@@ -37,7 +40,12 @@ SKEP_SECRET_NAMES: tuple[str, ...] = ("serve-token", "llm-secret*", "*-secret")
 SERVE_ENV = "serve.env"
 
 
-def _is_dotenv(name: str) -> bool:
+def _fold(path: Path) -> Path:
+    return Path(str(path).casefold())
+
+
+def is_dotenv(name: str) -> bool:
+    name = name.casefold()
     return name == ".env" or name.startswith(".env.")
 
 
@@ -46,15 +54,17 @@ def _under(path: Path, root: Path) -> bool:
 
 
 def _reason(path: Path, user_homes: tuple[Path, ...], skep_homes: tuple[Path, ...]) -> str | None:
-    if _is_dotenv(path.name):
+    folded = _fold(path)
+    if is_dotenv(folded.name):
         return f"{path} is a .env file"
     for home in user_homes:
         for rel in HOME_SECRETS:
-            if _under(path, home / rel):
+            if _under(folded, _fold(home / rel)):
                 return f"{path} is under ~/{rel}"
     for home in skep_homes:
-        if path == home.parent / SERVE_ENV or (
-            _under(path, home) and any(fnmatch(path.name, pat) for pat in SKEP_SECRET_NAMES)
+        if folded == _fold(home.parent / SERVE_ENV) or (
+            _under(folded, _fold(home))
+            and any(fnmatch(folded.name, pat) for pat in SKEP_SECRET_NAMES)
         ):
             return f"{path} is one of skep's own secrets"
     return None
