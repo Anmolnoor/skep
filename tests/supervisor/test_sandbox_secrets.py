@@ -258,3 +258,24 @@ def test_serve_records_its_port_for_cli_runs_on_the_same_home(
     assert serve_cmds.cmd_serve(args) == 0
     text = sandbox.build_profile(writable_roots=[tmp_path / "ws"], skep_home=home)
     assert '(deny network-outbound (remote ip "localhost:9187"))' in text
+
+
+def test_the_sandbox_masks_the_policy_floor_minus_what_engines_and_installs_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #64 review: the sandbox masks every HOME_SECRETS path except the
+    declared exemptions — engine logins (claude_code's keychain/credential
+    file, codex's auth.json) and ~/.npmrc for `npm install` — which stay on
+    the policy floor. A new policy entry is masked unless exempted on purpose."""
+    from skep.supervisor.secret_floor import HOME_SECRETS
+
+    home = tmp_path / "fakehome"
+    for rel in HOME_SECRETS:
+        (home / rel).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    masked = set(sandbox.secret_paths(tmp_path / "skep"))
+    readable = {".npmrc", ".claude/.credentials.json", ".codex/auth.json", "Library/Keychains"}
+    assert set(sandbox.SANDBOX_READABLE_SECRETS) == readable
+    assert readable < set(HOME_SECRETS)
+    assert masked == {(home / rel).resolve() for rel in HOME_SECRETS if rel not in readable}
+    assert (home / ".secrets").resolve() in masked

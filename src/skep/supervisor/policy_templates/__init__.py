@@ -290,7 +290,10 @@ _FLOOR_ROWS: dict[str, tuple[str, str, str]] = {
         "filesystem",
         "read",
         "~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials "
-        "~/.docker/config.json ~/.kube, any .env / .env.*, skep's own secrets",
+        "~/.docker/config.json ~/.kube ~/.secrets ~/.config/gcloud ~/.azure ~/.npmrc "
+        "~/.pypirc ~/.claude/.credentials.json ~/.codex/auth.json ~/Library/Keychains "
+        "~/.vault-token ~/.terraform.d/credentials.tfrc.json ~/.config/op, "
+        "any .env / .env.* (any case), skep's own secrets",
     ),
     "floor.outbound-content": ("*", "*", "a post, send or publish — the card shows the payload"),
 }

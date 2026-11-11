@@ -34,6 +34,8 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .secret_floor import HOME_SECRETS
+
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 BUBBLEWRAP = "bwrap"
 PODMAN = "podman"
@@ -336,16 +338,19 @@ def available() -> bool:
 # the builtin worker authenticates to its LLM with it (llm_plan.py) until V6
 # moves the credential into the proxy. Checked when the profile is built, so
 # a secret file created mid-run is not covered.
-_HOME_SECRET_PATHS = (
-    ".ssh",
-    ".aws",
-    ".gnupg",
-    ".config/gh",
-    ".netrc",
-    ".git-credentials",
-    ".docker/config.json",
-    ".kube",
-)
+# The policy floor's list (secret_floor.HOME_SECRETS) minus the files a
+# sandboxed process legitimately reads: they stay on the POLICY floor (no Queen
+# or worker read tool returns them) but are not masked here, because masking
+# would break an engine or a stock install. ponytail: claude_code/codex config
+# dirs are redirected per run (v106-F1), so their login files are probably
+# unread in here — mask them once an engine run on each OS proves it.
+SANDBOX_READABLE_SECRETS: dict[str, str] = {
+    ".npmrc": "npm install reads registry auth from it",
+    ".claude/.credentials.json": "claude_code's file login (v94-F3)",
+    ".codex/auth.json": "codex's file login",
+    "Library/Keychains": "claude_code authenticates through the macOS keychain (v94-F3)",
+}
+_HOME_SECRET_PATHS = tuple(rel for rel in HOME_SECRETS if rel not in SANDBOX_READABLE_SECRETS)
 
 
 def _refuse_home_inside(skep_home: Path, writable_roots: Iterable[Path]) -> None:

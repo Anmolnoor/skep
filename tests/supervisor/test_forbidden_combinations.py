@@ -39,6 +39,8 @@ HOME_SECRETS = (
     ".git-credentials",
     ".docker/config.json",
     ".kube/config",
+    ".secrets/gmail-app-password",
+    ".config/gcloud/credentials.db",
 )
 SKEP_SECRETS = ("serve-token", "llm-secret", "llm-secret-openai", "telegram-secret", "mail-secret")
 INSTALLS = (

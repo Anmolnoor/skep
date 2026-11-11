@@ -10,7 +10,9 @@ normalize case, so a case-sensitive compare was a bypass (over-blocking
 ``.SSH`` on Linux is harmless and keeps one code path).
 
 Policy half only. The sandbox half (tmpfs/deny over these paths, so a
-worker's own ``cat ~/.ssh/id_rsa`` fails too) is the sandbox round's (B05).
+worker's own ``cat ~/.ssh/id_rsa`` fails too) is ``sandbox.secret_paths``: it
+masks HOME_SECRETS minus ``sandbox.SANDBOX_READABLE_SECRETS`` (engine logins
+and ``~/.npmrc``), which stay on this floor.
 """
 
 from __future__ import annotations
@@ -31,6 +33,18 @@ HOME_SECRETS: tuple[str, ...] = (
     ".git-credentials",
     ".docker/config.json",
     ".kube",
+    # PR #64 review: the common stores the first list missed.
+    ".secrets",
+    ".config/gcloud",
+    ".azure",
+    ".npmrc",
+    ".pypirc",
+    ".claude/.credentials.json",
+    ".codex/auth.json",
+    "Library/Keychains",
+    ".vault-token",
+    ".terraform.d/credentials.tfrc.json",
+    ".config/op",
 )
 # skep's own secrets, by file name, anywhere under the skep (supervisor) home:
 # serve-token (auth.py), llm-secret / llm-secret-<id> (llm.py), and every

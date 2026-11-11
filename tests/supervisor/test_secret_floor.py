@@ -370,3 +370,38 @@ def test_a_secret_spelled_in_another_case_is_still_the_secret(
         "CANARY", path=str(tmp_path / "ws"), skep_home=tmp_path / "ws" / "home"
     )
     assert found["matches"] == [] and "secret floor" in found["note"]
+
+
+# PR #64 review: common credential stores the first list missed — the
+# operator keeps a mail app password in ~/.secrets.
+MORE_HOME_SECRETS = (
+    ".secrets/gmail-app-password",
+    ".config/gcloud/application_default_credentials.json",
+    ".azure/msal_token_cache.json",
+    ".npmrc",
+    ".pypirc",
+    ".claude/.credentials.json",
+    ".codex/auth.json",
+    "Library/Keychains/login.keychain-db",
+    ".vault-token",
+    ".terraform.d/credentials.tfrc.json",
+    ".config/op/config",
+)
+
+
+@pytest.mark.parametrize("rel", MORE_HOME_SECRETS)
+def test_common_credential_stores_are_on_the_floor(
+    store: RunStore, holder: ConfigHolder, fake_home: Path, rel: str
+) -> None:
+    from skep.supervisor.secret_floor import shell_secret_floor_reason
+
+    assert secret_floor_reason(fake_home / rel), rel
+    assert secret_floor_reason(f"~/{rel}"), rel
+    assert shell_secret_floor_reason(f"cat ~/{rel}", cwd=str(fake_home)), rel
+    decision = queen_filesystem_decision(store, holder, action="read", path=f"~/{rel}")
+    assert (decision.verdict, decision.reason) == ("deny", "filesystem.deny.secret_floor"), rel
+
+
+def test_the_widened_floor_spares_the_neighbours(fake_home: Path) -> None:
+    for rel in (".claude/skills/x/SKILL.md", ".codex/config.toml", ".config/opencode/x", "secrets"):
+        assert secret_floor_reason(fake_home / rel) is None, rel

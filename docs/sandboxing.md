@@ -37,9 +37,14 @@ skep home lies inside a writable root is refused.
 This blocks writes outside the workspace/results boundary. Reads are open so
 the toolchain works, except the secret floor, which is hidden on every
 backend: `~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials
-~/.docker/config.json ~/.kube` and the skep home's `serve.env`,
-`supervisor/serve-token` and `supervisor/*-secret`. `llm-secret*` stays
-readable: the builtin worker authenticates to its model with it.
+~/.docker/config.json ~/.kube ~/.secrets ~/.config/gcloud ~/.azure ~/.pypirc
+~/.vault-token ~/.terraform.d/credentials.tfrc.json ~/.config/op` and the skep
+home's `serve.env`, `supervisor/serve-token` and `supervisor/*-secret`.
+`llm-secret*` stays readable: the builtin worker authenticates to its model
+with it. So do `~/.npmrc` (npm install), `~/.claude/.credentials.json`,
+`~/.codex/auth.json` and `~/Library/Keychains` (engine logins): the sandbox
+leaves them readable, while the policy floor still refuses every Queen and
+worker read tool on them (`sandbox.SANDBOX_READABLE_SECRETS`).
 
 On Linux the worker also gets its own PID and IPC namespaces and an empty
 `/run` (no host D-Bus or systemd sockets). On macOS the profile allows
