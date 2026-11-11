@@ -477,3 +477,20 @@ def test_es_f1_normal_commands_still_reach_the_allowlist(argv: list[str]) -> Non
 def test_es_f1_command_v_git_is_a_lookup_not_a_launch() -> None:
     decision = _decide_with_grants(["command", "-v", "git"])
     assert decision.verdict == "require_approval"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["GIT", "push"],
+        ["/usr/bin/Git", "fetch"],
+        ["TIMEOUT", "5", "git", "push"],
+        ["BASH", "-c", "git push"],
+        ["/bin/bash", "-c", "git push"],
+        ["sh", "-c", "A=1 git push"],
+        ["RM", "-rf", "/"],
+    ],
+)
+def test_a_worker_floor_reads_the_program_however_it_is_cased(argv: list[str]) -> None:
+    decision = _decide(argv)
+    assert decision.verdict == "deny", argv  # type: ignore[attr-defined]

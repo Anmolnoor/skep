@@ -54,6 +54,19 @@ _GIT_GLOBAL_OPTIONS_WITH_OPERAND = frozenset(
     {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source"}
 )
 
+
+def program_name(token: str) -> str:
+    """The program a command word runs, as every guard below compares it:
+    basenamed (``/usr/bin/git``) and casefolded. APFS and NTFS run ``GIT
+    push`` as git, and each guard keyed on its own spelling of argv[0], so
+    case walked past all of them (PR #64 review). Subcommands are never
+    folded: git itself refuses ``PUSH``."""
+    return posixpath.basename(str(token)).casefold()
+
+
+# `A=1 git push`: the shell runs git with A in its environment.
+_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
 # ES-F1 (B124): programs that exec the rest of their argv. Value: (options that
 # take a separate operand, positionals before the command) — enough to say
 # whether an allowlist entry names a command at all (`["timeout", "30"]` does
@@ -87,9 +100,9 @@ def launched_command(argv: Sequence[str]) -> list[str]:
     """What a launcher argv execs (``timeout -s KILL 5 git push`` → ``git
     push``); ``[]`` when it names no command. Non-launchers return as-is."""
     tokens = list(argv)
-    if not tokens or posixpath.basename(tokens[0]) not in _LAUNCHERS:
+    if not tokens or program_name(tokens[0]) not in _LAUNCHERS:
         return tokens
-    operand_flags, positionals = _LAUNCHERS[posixpath.basename(tokens[0])]
+    operand_flags, positionals = _LAUNCHERS[program_name(tokens[0])]
     index = 1
     while index < len(tokens) and (tokens[index].startswith("-") or "=" in tokens[index]):
         if tokens[index] == "--":
@@ -149,7 +162,7 @@ def git_core_argv(argv: Sequence[str]) -> list[str]:
     all walked past them. The program is basenamed and every global option is
     skipped. Non-git argvs return unchanged."""
     tokens = [str(token) for token in argv]
-    if not tokens or posixpath.basename(tokens[0]) != "git":
+    if not tokens or program_name(tokens[0]) != "git":
         return tokens
     index = 1
     while index < len(tokens) and tokens[index].startswith("-"):
@@ -272,6 +285,8 @@ def is_outbound_content_prefix(argv: Sequence[str]) -> bool:
     grantable — reads are cheap, mutations card.
     """
     tokens = tuple(argv)
+    if tokens:
+        tokens = (program_name(tokens[0]), *tokens[1:])
     for outbound in OUTBOUND_CONTENT_PREFIXES:
         overlap = min(len(tokens), len(outbound))
         if overlap and tokens[:overlap] == outbound[:overlap]:
@@ -315,7 +330,7 @@ def is_ops_mutating_command(argv: Sequence[str]) -> bool:
     --vacuum) that must be approve-once only, never remembered (v15)."""
     if not argv:
         return False
-    head = argv[0]
+    head = program_name(argv[0])
     if head in _OPS_MUTATING_COMMANDS:
         return True
     return head == "journalctl" and any(token.startswith("--vacuum") for token in argv[1:])
@@ -445,7 +460,7 @@ def catastrophic_command_reason(argv: Sequence[str]) -> str | None:
     """
     if not argv:
         return None
-    head = argv[0].rsplit("/", 1)[-1]  # `/sbin/reboot` is still reboot
+    head = program_name(argv[0])  # `/sbin/reboot` is still reboot
     if head in {"rm", "rmdir"}:
         if "--no-preserve-root" in argv[1:]:
             return CATASTROPHIC_REFUSALS["rm_roots"]
@@ -508,7 +523,7 @@ _MAX_UNWRAP_DEPTH = 4
 def _strip_env_prefix(tokens: list[str]) -> list[str]:
     """Drop a leading ``env`` and its assignments/flags — `env A=1 git push`
     executes `git push`."""
-    if not tokens or posixpath.basename(tokens[0]) != "env":
+    if not tokens or program_name(tokens[0]) != "env":
         return tokens
     rest = tokens[1:]
     while rest and (rest[0].startswith("-") or "=" in rest[0]):
@@ -531,6 +546,12 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
     line). ``python -c`` payloads are Python, not shell — never decomposed.
     None when a wrapper payload cannot be tokenized."""
     tokens = [str(token) for token in argv]
+    if tokens and _ASSIGNMENT_RE.match(tokens[0]):
+        # `A=1 git push` runs git: judge what follows the assignments too,
+        # keeping the segment itself for callers that read its tokens.
+        index = next((i for i, t in enumerate(tokens) if not _ASSIGNMENT_RE.match(t)), len(tokens))
+        nested = _unwrap_argv(tokens[index:], _depth)
+        return None if nested is None else [tokens, *nested]
     try:
         tokens = _strip_env_prefix(tokens)
     except ValueError:  # an unbalanced `env -S` payload
@@ -539,8 +560,9 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
         return []
     result = [tokens]
     # `command -v/-V x` looks x up; it launches nothing.
-    lookup = posixpath.basename(tokens[0]) == "command" and tokens[1:2] in (["-v"], ["-V"])
-    if posixpath.basename(tokens[0]) in _LAUNCHERS and not lookup:
+    program = program_name(tokens[0])
+    lookup = program == "command" and tokens[1:2] in (["-v"], ["-V"])
+    if program in _LAUNCHERS and not lookup:
         # ES-F1 (B124): `timeout 20 git push` runs `git push`. Every suffix that
         # starts at a non-option token is judged as a command of its own, so a
         # launcher option this module does not know cannot hide one.
@@ -552,7 +574,7 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
                 if nested is None:
                     return None
                 result.extend(nested)
-    if tokens[0] in _WRAPPER_SHELLS:
+    if program in _WRAPPER_SHELLS:
         payload: str | None = None
         for index, token in enumerate(tokens[1:], start=1):
             if not token.startswith("-"):
@@ -659,7 +681,7 @@ def hard_denied_segment_reason(entry: Sequence[str]) -> str | None:
         return "the command wraps a payload that cannot be statically judged"
     for segment in segments:
         stripped = segment
-        while stripped and stripped[0] in {"sudo", "doas"}:
+        while stripped and program_name(stripped[0]) in {"sudo", "doas"}:
             stripped = stripped[1:]
         if len(stripped) < len(segment):
             return "privilege escalation cannot be allowlisted"
@@ -687,7 +709,7 @@ def _launcher_only_reason(prefix: Sequence[str]) -> str | None:
     """ES-F1 (B124): a launcher with no command (``timeout``, ``env``,
     ``nice -n 5``) allowlists everything behind it — ``["timeout"]`` covered
     ``timeout 30 git push`` on es-integration-2."""
-    if prefix and posixpath.basename(prefix[0]) in _LAUNCHERS and not launched_command(prefix):
+    if prefix and program_name(prefix[0]) in _LAUNCHERS and not launched_command(prefix):
         return (
             f"shell command prefix {list(prefix)!r} names a launcher but no command, "
             "so it would allowlist every command behind it; include the command "
@@ -701,14 +723,15 @@ def worker_allowlist_reason(prefix: list[str]) -> str | None:
     bare ``git`` (ES-F1, B124: PUT /api/policy accepted ``["git"]`` and a
     workspace run pushed through it). A Queen ``run_repo`` rule may still be
     bare ``git`` — the Queen floor normalizes before any rule is read."""
-    if len(prefix) == 1 and posixpath.basename(prefix[0]) == "git":
+    if len(prefix) == 1 and program_name(prefix[0]) == "git":
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
     return dangerous_prefix_reason(prefix)
 
 
 def dangerous_prefix_reason(prefix: list[str]) -> str | None:
     """Why ``prefix`` must not be persisted as an allowlist entry, else None."""
-    if prefix and posixpath.basename(prefix[0]) in {"sudo", "doas"}:
+    canon = [program_name(prefix[0]), *prefix[1:]] if prefix else []
+    if canon and canon[0] in {"sudo", "doas"}:
         # v49-F2: privilege escalation would also launder every deny below
         # (they all key on argv[0] — 'sudo git push' must not slip through).
         return "privilege escalation cannot be allowlisted"
@@ -735,17 +758,17 @@ def dangerous_prefix_reason(prefix: list[str]) -> str | None:
     launcher_only = _launcher_only_reason(prefix)
     if launcher_only is not None:
         return launcher_only
-    if len(prefix) == 1 and prefix[0] in _BROAD_INTERPRETERS:
+    if len(canon) == 1 and canon[0] in _BROAD_INTERPRETERS:
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
     if (
-        len(prefix) <= 2
-        and prefix[0] in {"bash", "sh", "zsh", "fish"}
-        and prefix[1:] in (["-c"], ["-lc"])
+        len(canon) <= 2
+        and canon[0] in {"bash", "sh", "zsh", "fish"}
+        and canon[1:] in (["-c"], ["-lc"])
     ):
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
-    if len(prefix) <= 2 and prefix[0] in {"python", "python3"} and prefix[1:] == ["-c"]:
+    if len(canon) <= 2 and canon[0] in {"python", "python3"} and canon[1:] == ["-c"]:
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
-    if prefix in (["npm", "run"], ["uv", "run"]):
+    if canon in (["npm", "run"], ["uv", "run"]):
         return f"shell command prefix {prefix!r} is too broad{_TOO_BROAD_TEACH}"
     hidden = hard_denied_segment_reason(prefix)
     if hidden is not None:
@@ -761,7 +784,7 @@ def queen_shell_refusal(argv: Sequence[str]) -> str | None:
     own hands (I4's spirit: no chat lane may become the git-writing path
     the workers are denied), plus privilege escalation. This list may only
     ever grow."""
-    if argv and posixpath.basename(argv[0]) in {"sudo", "doas"}:
+    if argv and program_name(argv[0]) in {"sudo", "doas"}:
         return "privilege escalation never runs from chat (it would also launder every guard below)"
     # v109-F10: catastrophic commands (single argv here; compound decomposition
     # is a separate fix) never run from chat either, operator or not.
@@ -861,7 +884,7 @@ def filter_forbidden_shell_commands(
             or is_ref_rewrite_command(argv)
             # ES-F1 (B124): a stored bare `git`/`timeout` covered `git push`.
             or _launcher_only_reason(argv) is not None
-            or (len(argv) == 1 and posixpath.basename(argv[0]) == "git")
+            or (len(argv) == 1 and program_name(argv[0]) == "git")
             or references_dead_worktree(argv)
             # v84-F4: a pre-v84 stored outbound grant (e.g. bare `xurl`) would
             # keep auto-allowing posts — swept, not grandfathered.
