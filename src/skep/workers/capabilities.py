@@ -466,6 +466,7 @@ class CapabilityRegistry:
         env_allowlist: Sequence[str] = (),
         env_baseline: Sequence[str] = ("PATH", "HOME"),
         network_allowlist: Sequence[str] = (),
+        provider_hosts: Sequence[str] = (),
         shell_allowlist: Sequence[Sequence[str]] = (),
         approved_shell_commands: Sequence[Sequence[str]] = (),
         plugin_tools: Sequence[PluginToolSpec] = (),
@@ -499,10 +500,14 @@ class CapabilityRegistry:
         self._child_env = _child_process_env(
             env_allowlist=tuple(str(name) for name in env_allowlist),
             env_baseline=tuple(str(name) for name in env_baseline),
-            network_allowlist=tuple(str(host) for host in network_allowlist),
+            network_allowlist=tuple(str(host) for host in (*network_allowlist, *provider_hosts)),
         )
         self._diff_baseline = self._resolve_diff_baseline()
         self._network_allowlist = tuple(network_allowlist)
+        # ADR 0059 D3: the provider endpoint is egress the run has, never a
+        # host grant — it only keeps "no allowlist at all" (which cards)
+        # from describing a run that does reach the network.
+        self._has_egress = bool(network_allowlist or provider_hosts)
         self._approved_network_hosts = tuple(approved_network_hosts)
         self._shell_allowlist = tuple(_normalized_shell_argv(prefix) for prefix in shell_allowlist)
         self._approved_shell_commands = tuple(
@@ -801,7 +806,7 @@ class CapabilityRegistry:
         )
         if guard is not None:
             return guard
-        if spec.risk == "network" and not self._network_allowlist:
+        if spec.risk == "network" and not self._has_egress:
             return CapabilityDecision(
                 verdict="deny",
                 reason="capability.deny.plugin_network_task_allowlist_missing",
@@ -899,7 +904,7 @@ class CapabilityRegistry:
                 reason="capability.allow.network_loopback",
                 detail=hostname,
             )
-        if not self._network_allowlist:
+        if not self._has_egress:
             return CapabilityDecision(
                 verdict="require_approval",
                 reason="capability.require_approval.network_allowlist_missing",

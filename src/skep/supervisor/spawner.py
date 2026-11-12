@@ -130,12 +130,14 @@ def _proxy_env(port: int, *, loopback_direct: bool = True) -> dict[str, str]:
 def effective_network_domains(task: CodingWorkerTask) -> tuple[str, ...]:
     """Return the worker's effective network grant for this run.
 
-    Normal runs use the task's declared network allowlist directly. A resumed
+    Normal runs use the task's egress — its network allowlist plus its
+    ``provider_hosts`` (ADR 0059 D3), so a provider-only run gets one filtered
+    pipe to its provider instead of deny-all. A resumed
     approved ``network.fetch`` is the one case where the worker must regain a
     narrow host grant that was intentionally absent from ``permissions.network``
     on the suspended run: the approval decision names the allowed host.
     """
-    domains = tuple(task.permissions.network)
+    domains = tuple(task.permissions.egress())
     if domains:
         return domains
     verdict = task.approval_verdict

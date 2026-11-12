@@ -204,13 +204,14 @@ def request_edit_plan(
     workspace: Path,
     instructions: str,
     network_allowlist: Sequence[str],
+    provider_hosts: Sequence[str] = (),
     tool_manifest: Sequence[Mapping[str, str]] | None = None,
     repair_context: tuple[str, str] | None = None,
     memory: Sequence[MemoryContextEntry] = (),
     usage_tally: ProviderUsageTally | None = None,
 ) -> LlmWorkerPlan:
     endpoint = _endpoint(provider.profile)
-    _ensure_network_allowed(endpoint, network_allowlist)
+    _ensure_network_allowed(endpoint, network_allowlist, provider_hosts)
     messages = _messages(
         workspace=workspace,
         instructions=instructions,
@@ -286,14 +287,29 @@ def _api_key(provider: WorkerProvider) -> str | None:
     return value
 
 
-def _ensure_network_allowed(endpoint: str, allowlist: Sequence[str]) -> None:
+def _ensure_network_allowed(
+    endpoint: str, allowlist: Sequence[str], provider_hosts: Sequence[str] = ()
+) -> None:
+    """ADR 0059 D3: the endpoint must be one of the task's ``provider_hosts``
+    (``host:port``, filled by the supervisor) or — a task persisted before
+    contract 0.3.6 — in its network allowlist."""
     parsed = urllib.parse.urlparse(endpoint)
     host = parsed.hostname or ""
-    allowed = tuple(allowlist)
-    if not allowed:
-        raise LlmPlanError("real LLM provider calls require a task network allowlist")
-    if not domain_allowed(host, allowed):
-        raise LlmPlanError(f"provider host {host!r} is not in the task network allowlist")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if domain_allowed(host, tuple(provider_hosts), port=port) or domain_allowed(
+        host, tuple(allowlist)
+    ):
+        return
+    if not allowlist and not provider_hosts:
+        raise LlmPlanError(
+            "real LLM provider calls require a provider host or a task network allowlist; "
+            "this task has neither — configure the provider (`skep doctor` shows it)"
+        )
+    entry = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    raise LlmPlanError(
+        f"provider host {entry!r} is not in the task network allowlist or its provider "
+        f"hosts ({', '.join(provider_hosts) or 'none'})"
+    )
 
 
 def _provider_chunks(

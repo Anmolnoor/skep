@@ -47,8 +47,9 @@ _RULES: tuple[tuple[tuple[str, ...], str], ...] = (
         "is exit-code based as of v19-F6.",
     ),
     (
-        ("provider calls require a task network allowlist",),
-        "No network allowlist was set for this run; configure the provider or pass a network list.",
+        ("provider calls require a ",),
+        "No LLM provider reached this run: configure the provider (Settings → Provider, "
+        "`skep doctor`) and re-dispatch — skep adds its host to every run that needs it.",
     ),
     (
         ("exit 128", "fatal:"),

@@ -287,8 +287,11 @@ def _resolve_provider_routing(
     domains = set(effective_network_domains(task))
 
     def host_granted(profile: ProviderProfile) -> bool:
-        host = urlparse(profile.base_url).hostname or ""
-        return "*" in domains or host in domains
+        url = urlparse(profile.base_url)
+        host = url.hostname or ""
+        port = url.port or (443 if url.scheme == "https" else 80)
+        # ADR 0059 D3: the provider rides provider_hosts as host:port.
+        return "*" in domains or host in domains or f"{host}:{port}" in domains
 
     allow_remote = any(p.cost_class != "local" and host_granted(p) for p in profiles)
     decision = resolve_routed_provider(
@@ -389,7 +392,7 @@ def run_task(
         # "sandbox". Refuse before any run record or worktree exists.
         backend = resolve_sandbox_backend(
             config,
-            NetworkPolicy(allow=tuple(permissions.network)) if permissions else DENY_ALL_NETWORK,
+            NetworkPolicy(allow=tuple(permissions.egress())) if permissions else DENY_ALL_NETWORK,
         )
         probe = sandbox_availability(backend)
         if not probe.usable:
