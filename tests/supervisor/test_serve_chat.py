@@ -341,9 +341,12 @@ def test_the_continuation_may_propose_but_never_execute(
         _CONTINUED.discard(task_id)
         before = {r.task_id for r in store.recent_runs(50)}
 
-        # The model tries to dispatch the follow-up itself.
+        # The model tries to dispatch the follow-up itself. (P4-2: with the
+        # mode this home's policy requires — a dispatch the policy refuses
+        # outright is answered at proposal, never carded.)
         ollama.script_tool_call(
-            "dispatch_run", {"repo": str(repo), "instructions": "the next step"}
+            "dispatch_run",
+            {"repo": str(repo), "instructions": "the next step", "execution_mode": "sandbox"},
         )
         ollama.script_reply("proposed the follow-up")
         holder = ConfigHolder(config, store)

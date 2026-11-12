@@ -396,6 +396,16 @@ def high_tier_decision(high: str, allowed: Any) -> Any:
     )
 
 
+def manifest_refusal(manifest: dict[str, Any]) -> Any:
+    """P4-2: the refusal a dispatch gets when its manifest cannot compile
+    because the policy refuses it — the model reads why and can correct it."""
+    from ..autonomy import AutonomyDecision
+
+    return AutonomyDecision(
+        verdict="deny", reason="dispatch.deny.policy_refuses", detail=str(manifest["error"])
+    )
+
+
 def card_taken(store: RunStore, action_id: str) -> HTTPException:
     """ES-F1: the 409 for a request that lost the race for a card — it names
     what won, so a Deny that arrived mid-confirm never reads as a refusal."""
@@ -1896,6 +1906,15 @@ class ChatEngine:
                         and decision.verdict != "deny"
                         else None
                     )
+                    if (
+                        manifest is not None
+                        and manifest.get("refused")
+                        and decision is not None
+                        and not decision.allows_execution()
+                    ):
+                        # P4-2 (D6): a dispatch the policy refuses outright is
+                        # answered now — a card for it could never succeed.
+                        decision = manifest_refusal(manifest)
                     high = high_tier(
                         name,
                         args,

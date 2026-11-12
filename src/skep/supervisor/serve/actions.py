@@ -4458,7 +4458,8 @@ def dispatch_manifest(
     roots, engine, mode, verify pin, the chain and the chat's taint. The
     dispatch card shows it and records it; approving the card answers the
     listed asks for that run (``submit_run(preanswered=)``). ``{"error"}``
-    when it cannot be compiled — the dispatch then fails the same way."""
+    when it cannot be compiled — the dispatch then fails the same way;
+    ``"refused": True`` when the policy refuses it outright."""
     try:
         resolve_caste(caste)
         if is_git_url(repo):
@@ -4489,7 +4490,13 @@ def dispatch_manifest(
             delegation_chain=delegation_chain,
             deferred_asks=deferred_asks,
         )
-    except (HTTPException, ValueError, PolicyResolutionError, OSError) as exc:
+    except PolicyResolutionError as exc:
+        # The policy itself refuses this dispatch (an execution_mode it
+        # requires, a tampered baseline, an untrusted root…): no git init or
+        # confirm changes that, so the card could never succeed — the chat
+        # answers it at proposal.
+        return {"error": str(exc), "refused": True}
+    except (HTTPException, ValueError, OSError) as exc:
         detail = exc.detail if isinstance(exc, HTTPException) else exc
         return {"error": str(detail)}
     from ..provider_hosts import provider_hosts_for
