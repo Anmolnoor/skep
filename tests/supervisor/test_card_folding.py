@@ -297,3 +297,46 @@ def test_a_restart_mid_fold_marks_every_item_interrupted(live: Any) -> None:
     assert env.store.interrupt_executing_chat_actions() == 1
     rows = _tool_rows(env, chat, "read_url")
     assert len(rows) == 2 and all(row.get("interrupted") for row in rows)
+
+
+def test_a_folded_card_lists_every_item_in_full() -> None:
+    """Two pages of one host whose URLs share their first 160 characters: the
+    card listed both as the same truncated line, so one approval covered a
+    query the operator could not read. Every item is listed whole."""
+    from skep.supervisor.serve.cards import card_summary
+
+    base = "https://unknown.example/collect?data=" + "a" * 200
+    one, two = {"url": base + "-one"}, {"url": base + "-two"}
+    card = card_summary("read_url", one, "d", recorded={"items": [{"args": two}]})
+    assert card["items"] == [f"read_url — {base}-one", f"read_url — {base}-two"]
+
+
+def test_a_fold_a_messenger_cannot_show_in_full_needs_the_web_ui(live: Any) -> None:
+    """A messenger renders a card with hard length limits (Discord: 25
+    fields, 1024 characters each). A fold too long to list in full is
+    web-UI-only there, and the server refuses a channel confirm of it — a
+    reaction or ``/skep approve`` must never approve items nobody could see.
+    A short fold stays confirmable from a channel."""
+    from skep.supervisor.serve.channels import card_notes, render_confirm_card
+
+    env = live("builder")
+    long_urls = tuple(f"https://unknown.example/{n}?q=" + "x" * 300 for n in range(20))
+    chat = env.chat()
+    env.ollama.script_tool_calls(*_fetch_calls(long_urls))
+    (card,) = cards(env.turn(chat, "read them all"))
+    view = render_confirm_card("read_url", (), card["card"])
+    assert view.web_ui_only
+    assert any("open the skep web UI" in note for note in card_notes(card["card"]))
+    assert sum(len(note) for note in view.notes) < 1000
+    with pytest.raises(HTTPException) as refused:
+        env.verdict(chat, card["action_id"], confirm=True, actor="channel:discord:42")
+    assert refused.value.status_code == 403 and "web UI" in str(refused.value.detail)
+    env.verdict(chat, card["action_id"], confirm=False, actor="channel:discord:42")  # deny is fine
+
+    short = env.chat()
+    env.ollama.script_tool_calls(*_fetch_calls((A1, A2)))
+    (small,) = cards(env.turn(short, "read two"))
+    assert not render_confirm_card("read_url", (), small["card"]).web_ui_only
+    env.ollama.script_reply("read")
+    env.verdict(short, small["action_id"], confirm=True, actor="channel:discord:42")
+    assert env.store.get_chat_action(small["action_id"]).status == "confirmed"

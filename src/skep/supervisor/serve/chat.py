@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from ..roles import Role
 from ..policy_write import PolicyWriteRejected
 from . import actions
-from .cards import card_summary, fold_subject, high_tier, recorded_card
+from .cards import card_summary, fold_subject, headline, high_tier, recorded_card
 from .jobs import Dispatcher
 from .llm import (
     _TRANSIENT_STATUSES,
@@ -2453,6 +2453,20 @@ class ChatEngine:
                 detail=f"this card is HIGH risk ({high}), so it needs the web UI or the "
                 "CLI: open skep and confirm it there" + (f". {line}" if line else ""),
             )
+        if confirm and actor.startswith("channel:"):
+            from .channels import fold_fits_a_messenger
+
+            lines = [
+                headline(action.tool, item["args"], limit=None) for item in action.fold_items()
+            ]
+            if len(lines) > 1 and not fold_fits_a_messenger(lines):
+                # P4-2: a messenger could not list every item whole — no
+                # reaction or /skep approve approves what nobody could read.
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"this card folds {len(lines)} items, too many or too long for a "
+                    "messenger to show in full: open the skep web UI to read and confirm them",
+                )
         folded = [item["args"] for item in action.fold_items()]  # P4-2: every item
         named = keep is not None
         if keep is None:

@@ -232,8 +232,9 @@ def _render_value(value: Any) -> str:
     return str(value)
 
 
-def headline(tool: str, args: dict[str, Any]) -> str:
-    """One line: the verb and the thing it acts on, verbatim."""
+def headline(tool: str, args: dict[str, Any], *, limit: int | None = 160) -> str:
+    """One line: the verb and the thing it acts on, verbatim. ``limit`` None:
+    never shortened (a folded card's items — each is what one approval runs)."""
     # v106-F5 (v101-F16): a PR verb names WHICH PR. "close_pr — repo" made two
     # cards in one batch indistinguishable, and the first subject key (repo)
     # swallowed the number that mattered. One branch, not a per-tool table —
@@ -258,8 +259,8 @@ def headline(tool: str, args: dict[str, Any]) -> str:
         rendered = _render_value(value).strip().replace("\n", " ")
         if not rendered:
             continue
-        if len(rendered) > 160:
-            rendered = f"{rendered[:157]}…"
+        if limit is not None and len(rendered) > limit:
+            rendered = f"{rendered[: limit - 3]}…"
         return f"{tool} — {rendered}"
     return tool
 
@@ -532,7 +533,7 @@ def card_summary(
         if facts is not None:
             summary["schedule"] = facts
     if len(folded) > 1:
-        summary["items"] = [headline(tool, item) for item in folded]
+        summary["items"] = [headline(tool, item, limit=None) for item in folded]
         summary["headline"] = f"{summary['headline']} (+{len(folded) - 1} more)"
     if taint_line:
         summary["taint"] = taint_line
