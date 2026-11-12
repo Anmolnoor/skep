@@ -54,6 +54,7 @@ def build_status(
             + _baseline_advisories(home)
             + _policy_v3_advisories(home)
             + _legacy_host_advisories(home)
+            + _policy_migration_advisories(home)
             + _channel_user_advisories(home)
         )
         payload["stale_pending"] = stale_pending
@@ -87,6 +88,7 @@ def build_status(
         + _baseline_advisories(home)
         + _policy_v3_advisories(home)
         + _legacy_host_advisories(home)
+        + _policy_migration_advisories(home)
         + _channel_user_advisories(home)
     )
     payload["stale_pending"] = stale_pending
@@ -402,6 +404,24 @@ def _legacy_host_advisories(home: Path) -> list[str]:
         f"{', '.join(hosts)} — revoke on the Policies page (DELETE /api/policy/rules/<id>); "
         "a new read_url keep covers one URL directory"
     ]
+
+
+def _policy_migration_advisories(home: Path) -> list[str]:
+    """ADR 0059 P3-5: ``skep policy migrate --dry-run``'s one line — logged
+    decisions that decide differently now, §5.4 combinations the home already
+    holds, the B31 upgrade. Silent when there is none."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.policy_write import holder_for, migration_line, migration_report
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        line = migration_line(migration_report(holder_for(store), store))
+    finally:
+        store.close()
+    return [] if line is None else [line]
 
 
 def _browse_advisories(home: Path) -> list[str]:

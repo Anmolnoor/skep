@@ -437,3 +437,56 @@ def replay_line(summary: Mapping[str, Any]) -> str:
         why = ", ".join(f"{n} {reason}" for reason, n in sorted(skipped.items()))
         head += f" — {sum(skipped.values())} not replayable ({why})"
     return head
+
+
+# -- migrate --dry-run, doctor, onboard --check --------------------------------
+
+
+def migration_report(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
+    """``skep policy migrate --dry-run`` (and doctor's one line): the home's
+    decision log replayed under the stack decide() uses today — what decides
+    differently from when each row was logged — the §5.4 combinations the
+    home already holds (decide() still binds them; a write cannot add one),
+    and B31: an upgraded home whose baseline composes in scopes it did not
+    under the engine-v2 switch. Reads only."""
+    from .policy_baseline import Ok, verify
+    from .policy_layers import store_home
+    from .policy_resolver import engine_v2_scopes
+    from .policy_schema import SCOPES
+
+    stack = load_stack(holder, store)
+    summary = replay_decisions(read_log(holder.current.audit_dir), stack)
+    b31 = None
+    missing = [s for s in SCOPES if s not in set(engine_v2_scopes(store))]
+    if missing and isinstance(verify(store_home(store)), Ok):
+        b31 = (
+            f"B31: this home predates the engine-v2 scope switch — its approved baseline now "
+            f"composes in {len(missing)} scope(s) it did not before ({', '.join(missing)})"
+        )
+    return {
+        "replay": summary,
+        "replay_line": replay_line(summary),
+        "held": [f.message for f in findings(stack)],
+        "b31": b31,
+    }
+
+
+def migration_line(report: Mapping[str, Any]) -> str | None:
+    """The report in one line, or None when there is nothing to say."""
+    flips = sum(report["replay"]["flips"].values())
+    parts = []
+    if flips:
+        parts.append(
+            f"{flips} of the last {report['replay']['rows']} logged decisions decide "
+            "differently now"
+        )
+    if report["held"]:
+        parts.append(
+            f"{len(report['held'])} §5.4 forbidden combination(s) already held (decide() "
+            "still binds them; no policy write can add one)"
+        )
+    if report["b31"]:
+        parts.append(report["b31"])
+    if not parts:
+        return None
+    return "policy v3: " + "; ".join(parts) + " — `skep policy migrate --dry-run` lists them"

@@ -24,6 +24,7 @@ from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.config import SupervisorConfig
 from skep.supervisor.policy_schema import (
     POLICY_DOCUMENT_SETTINGS_KEY,
+    SCOPES,
     LearnedRule,
     PolicyDocument,
     document_from_settings,
@@ -525,6 +526,91 @@ def test_b38_a_grant_the_new_template_denies_is_dropped_with_a_line(home: Home) 
         "dropped grant 'shell:run:curl -sI https://example.com': it lands inside deny "
         "global/no-curl" in lines
     )
+
+
+# -- migrate --dry-run, approve --diff, doctor, B31, B82 --
+
+
+def _files(root: Path) -> dict[str, bytes]:
+    """Every file under the home but the sqlite store itself (opening a store
+    runs its idempotent schema check and WAL bookkeeping)."""
+    return {
+        str(p): p.read_bytes()
+        for p in root.rglob("*")
+        if p.is_file() and "supervisor.sqlite3" not in p.name
+    }
+
+
+def test_migrate_dry_run_prints_every_flip_and_writes_nothing(
+    home: Home, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home.log(_row("shell", "run", "ls -la", "require_approval", "default/unmatched"))
+    _keep(home, "ls -la")  # since that row was logged, a grant answers it
+    settings, files = home.store.all_settings(), _files(home.root)
+    capsys.readouterr()
+    assert main(["--home", str(home.root), "policy", "migrate", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "nothing is written" in out
+    assert "now allows 1 past asks:" in out
+    assert "shell.run `ls -la` (default/unmatched → grant:global/shell:run:ls -la)" in out
+    assert home.store.all_settings() == settings
+    assert _files(home.root) == files
+    assert main(["--home", str(home.root), "policy", "migrate"]) == 2  # no write mode exists
+
+
+def test_doctor_and_onboard_check_print_the_same_one_line(home: Home) -> None:
+    from skep.status import build_status
+
+    assert not [a for a in build_status(home.root)["advisories"] if "policy v3:" in a]
+    home.log(_row("shell", "run", "ls -la", "require_approval", "default/unmatched"))
+    _keep(home, "ls -la")
+    (line,) = [a for a in build_status(home.root)["advisories"] if "policy v3:" in a]
+    assert line.startswith("policy v3: 1 of the last 1 logged decisions decide differently now")
+    assert line.endswith("`skep policy migrate --dry-run` lists them")
+
+
+def test_b31_an_upgraded_home_whose_baseline_now_composes_says_so(home: Home) -> None:
+    home.store.set_setting("policy_engine_v2_scopes", ["shell"])  # an upgraded home
+    home.lock("builder")
+    report = policy_write.migration_report(home.holder, home.store)
+    assert report["b31"] is not None and "filesystem" in report["b31"]
+    line = policy_write.migration_line(report)
+    assert line is not None and "B31: this home predates the engine-v2 scope switch" in line
+    home.store.set_setting("policy_engine_v2_scopes", list(SCOPES))
+    assert policy_write.migration_report(home.holder, home.store)["b31"] is None
+
+
+def test_an_already_held_combination_is_listed_not_refused(home: Home) -> None:
+    document = PolicyDocument.model_validate(
+        {"learned": [{"rule_id": "fs:all", "scope": "filesystem", "action": "read",
+                      "pattern": "*", "provenance": "allow-always:op"}]}
+    )  # fmt: skip
+    home.store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, document.model_dump_json())
+    held = policy_write.migration_report(home.holder, home.store)["held"]
+    assert any("§5.4 check 1" in h for h in held) and any("§5.4 check 2" in h for h in held)
+    _keep(home, "ls -la")  # the next write still lands
+
+
+def test_reapprove_diff_shows_the_replay_before_it_relocks(
+    home: Home, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    approve = ["--home", str(home.root), "policy", "approve"]
+    assert main([*approve, "--template", "builder", "--yes"]) == 0
+    home.log(_row("network", "search", "ddgs", "allow", "template:builder/net-search"))
+    capsys.readouterr()
+    assert main([*approve, "--reapprove", "--diff", "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "what this layer changes:" in out and "replay of the last 1 decisions" in out
+    layer = load_policy_template("builder").model_dump(mode="json")
+    layer["template"] = "custom"
+    layer["rules"].append({"scope": "filesystem", "verdict": "allow", "action": "read",
+                           "pattern": f"{tmp_path}/data/*", "rule_id": "data-read"})  # fmt: skip
+    path = tmp_path / "layer.json"
+    path.write_text(json.dumps(layer))
+    before = home.snapshot()
+    assert main([*approve, "--file", str(path), "--reapprove", "--diff", "--yes"]) == 2
+    assert "template:custom/data-read" in capsys.readouterr().err
+    assert home.snapshot() == before
 
 
 def test_b82_put_policy_keeps_card_timeout_and_names_unknown_keys(config: SupervisorConfig) -> None:
