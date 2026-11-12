@@ -408,3 +408,24 @@ def test_queen_rest_and_cli_agree_on_a_grant_and_its_near_miss(
         cli = json.loads(capsys.readouterr().out)
         assert (queen.verdict, queen.decided_by) == (rest["verdict"], rest["decided_by"])
         assert (cli["verdict"], cli["decided_by"]) == (rest["verdict"], rest["decided_by"])
+
+
+def test_an_exact_grant_never_covers_a_line_sh_reads_as_other_commands(home: Any) -> None:
+    """``/bin/sh -c`` reads an unquoted newline as ``;`` and ``#`` as a comment
+    only at the start of a word. The segmenter read a newline as a space and
+    ``--fast#x`` as ``--fast``, so a kept ``echo git push origin main`` ran
+    ``echo`` then ``git push`` with no card."""
+    from skep.supervisor.policy_schema import backgrounds, shell_segments
+    from skep.supervisor.shell_prefixes import queen_command_line_refusal
+
+    h = home("builder")
+    h.keep("run_shell", command="echo git push origin main")
+    h.keep("run_shell", command=GRANTED)
+    for line in ("echo\ngit push origin main", "echo git\npush origin main", GRANTED + "#x"):
+        assert not h.decide("run_shell", command=line).startswith("allow"), line
+    assert h.decide("run_shell", command=GRANTED + " # a note").startswith("allow grant:")
+    assert h.decide("run_shell", command="echo 'git\npush'").startswith("require_approval")
+    assert shell_segments("ls\nmake # x; rm\n'a\nb'") == ["ls", "make", "'a\nb'"]
+    assert shell_segments("ls \\\n-la") == ["ls -la"]
+    assert backgrounds("npm run dev &\nls")
+    assert queen_command_line_refusal("ls\ngit push origin main") is not None

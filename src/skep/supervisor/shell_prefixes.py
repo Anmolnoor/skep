@@ -683,14 +683,49 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
     return result
 
 
+def sh_command_list(line: str) -> str:
+    """``line`` with what ``sh`` reads between its words made explicit for
+    shlex: an unquoted newline becomes ``;`` (it ends a command), a ``#``
+    that starts a word drops the rest of its line (a comment), and a
+    backslash-newline joins two lines. shlex reads a newline as a space and a
+    ``#`` inside a word as a comment, so ``echo\\ngit push`` looked like one
+    echo and ``--fast#x`` like ``--fast`` to an exact grant."""
+    out: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote == "'":
+            quote = "" if ch == "'" else quote
+        elif ch == "\\" and i + 1 < len(line):
+            if line[i + 1] != "\n":
+                out.append(line[i : i + 2])
+            i += 2
+            continue
+        elif quote == '"':
+            quote = "" if ch == '"' else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "\n":
+            ch = " ; "
+        elif ch == "#" and (not out or out[-1][-1:] in " \t;&|()<>"):
+            end = line.find("\n", i)
+            i = len(line) if end < 0 else end
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def command_line_segments(command: str, _depth: int = 0) -> list[list[str]] | None:
     """Split a raw shell line into the argvs it would execute, or None when it
     cannot be judged (unbalanced quotes, backtick substitution, or wrappers
     nested past ``_MAX_UNWRAP_DEPTH``)."""
     if _depth >= _MAX_UNWRAP_DEPTH:
         return None
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer = shlex.shlex(sh_command_list(command), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""  # sh_command_list dropped the comments sh drops
     try:
         tokens = list(lexer)
     except ValueError:
