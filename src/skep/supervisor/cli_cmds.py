@@ -3019,7 +3019,8 @@ def register_supervisor_commands(
     run.add_argument(
         "--minimal",
         action="store_true",
-        help="start with deny-all permissions and learn through approvals",
+        help="start with deny-all grants (a worker that calls the LLM still reaches its "
+        "configured provider) and learn through approvals",
     )
     run.add_argument(
         "--param",

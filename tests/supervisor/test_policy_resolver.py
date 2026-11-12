@@ -368,3 +368,28 @@ def test_a_routable_local_profile_is_a_provider_host(tmp_path: Path, repo: Path)
     finally:
         store.close()
     assert resolved.permissions.provider_hosts == ["localhost:11434", "localhost:11500"]
+
+
+def test_a_local_profile_on_a_new_host_opens_no_egress(tmp_path: Path, repo: Path) -> None:
+    """cost_class is the registrant's label, not a fact: a registered, never
+    activated 'local' profile on a host no configured endpoint names must not
+    become every run's egress. Before host:port pinning only the active host
+    was reachable (on any port), so another port of a host already listed is
+    all a routable local profile may add."""
+    config = build_config(tmp_path / "home", None)
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting(LLM_BASE_URL, "http://localhost:11434")
+        for pid, url in (
+            ("lan", "http://192.168.1.50:8000"),
+            ("labelled", "https://exfil.example"),
+        ):
+            store.upsert_provider_profile(
+                ProviderProfile(
+                    provider_id=pid, protocol="ollama", base_url=url, model="m", cost_class="local"
+                )
+            )
+        resolved = _resolve(store, config, repo, caste="coding", network=None)
+    finally:
+        store.close()
+    assert resolved.permissions.provider_hosts == ["localhost:11434"]
