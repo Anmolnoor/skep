@@ -299,6 +299,15 @@ function tierNote(card) {
     ". It holds once, and only the web UI or the CLI can confirm it.");
 }
 
+// P4-2 (ADR 0059 D6): a folded card lists every call one approval covers —
+// exactly what the server recorded; nothing beyond this list runs.
+function foldItems(card) {
+  if (!card || !Array.isArray(card.items) || card.items.length < 2) return null;
+  return el("div", { class: "card-items" },
+    el("p", { class: "note" }, `${card.items.length} items, one approval covers exactly these:`),
+    el("ul", {}, ...card.items.map((item) => el("li", { class: "mono" }, String(item)))));
+}
+
 // P4-1 (ADR 0059 D5): a run dispatched from a tainted chat says so on its card.
 function taintChip(decision) {
   const bits = decision?.constraints?.chat_taint;
@@ -3047,6 +3056,7 @@ async function viewChat(main, chatId) {
     return [
       tierNote(card),
       el("p", { class: "card-headline mono" }, card.headline || d.tool),
+      foldItems(card),
       card.purpose ? el("p", { class: "card-purpose" }, card.purpose) : null,
       card.risk
         ? el("p", { class: "card-risk" },

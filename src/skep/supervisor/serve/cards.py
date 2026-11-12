@@ -22,8 +22,10 @@ something the engine would not is worse than no card.
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
+import urllib.parse
 from typing import Any
 
 from ..shell_prefixes import (
@@ -362,6 +364,35 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
     return None
 
 
+def fold_subject(tool: str, args: Any, decided_by: str | None) -> str | None:
+    """P4-2 (ADR 0059 D6): when two cards are one question — ``(tool, scope,
+    matcher subject)`` plus the rule that asked, so a folded card's why-line
+    is true of every item. None: this call never folds (when in doubt).
+
+    - ``read_url``: the origin (scheme, host, port). Several pages of one host
+      in a round are one card; another host, port or scheme is another card.
+      A URL carrying credentials never folds.
+    - ``search_web`` (a taint ask): the search lane itself — every query of a
+      round asks the same thing ("may this chat send text out?").
+    - everything else: never (a command, a path, a dispatch is its own
+      question; identical calls are already deduplicated)."""
+    safe: dict[str, Any] = args if isinstance(args, dict) else {}
+    if tool == "search_web":
+        return json.dumps([tool, "network.search", "ddgs", decided_by])
+    if tool != "read_url":
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(str(safe.get("url") or ""))
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or "@" in parsed.netloc:
+        return None
+    port = port or (443 if parsed.scheme == "https" else 80)
+    origin = f"{parsed.scheme}://{parsed.hostname}:{port}"
+    return json.dumps([tool, "network.fetch", origin, decided_by])
+
+
 def card_summary(
     tool: str,
     args: Any,
@@ -389,7 +420,9 @@ def card_summary(
         high = high_tier(tool, safe_args, taint=taint, store=store)
     elif high is None and _doubly_tainted(taint):
         high = _TRIFECTA
-
+    # P4-2: a folded card is every call it answers — the confirm acts on
+    # exactly these (the server's record), never on one more.
+    folded = [safe_args] + [item.get("args") or {} for item in (recorded or {}).get("items") or []]
     summary: dict[str, Any] = {"headline": headline(tool, safe_args)}
     why = purpose(description)
     if why is not None:
@@ -406,10 +439,15 @@ def card_summary(
     if tool in REMEMBERABLE_TOOLS:
         # P3-4 (ADR 0059 D4): the keep choices the server will honour — the
         # card never offers a lifetime the confirm would refuse (B32).
-        summary["keep"] = keep_options(tool, safe_args, taint, high=high is not None)
-        covers = keep_covers(tool, safe_args)
-        if covers is not None:
-            summary["keep_covers"] = covers  # what "session"/"always" would allow
+        offered = [keep_options(tool, item, taint, high=high is not None) for item in folded]
+        summary["keep"] = [keep for keep in offered[0] if all(keep in o for o in offered)]
+        covers = [found for item in folded if (found := keep_covers(tool, item)) is not None]
+        if covers:
+            # what "session"/"always" would allow — for every item of a fold
+            summary["keep_covers"] = "; ".join(dict.fromkeys(covers))
+    if len(folded) > 1:
+        summary["items"] = [headline(tool, item) for item in folded]
+        summary["headline"] = f"{summary['headline']} (+{len(folded) - 1} more)"
     if taint_line:
         summary["taint"] = taint_line
     if high is not None:

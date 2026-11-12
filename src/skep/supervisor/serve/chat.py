@@ -45,7 +45,7 @@ from ..store import ChatActionRecord, RunStore
 if TYPE_CHECKING:
     from ..roles import Role
 from . import actions
-from .cards import card_summary, high_tier
+from .cards import card_summary, fold_subject, high_tier
 from .jobs import Dispatcher
 from .llm import (
     _TRANSIENT_STATUSES,
@@ -1768,8 +1768,11 @@ class ChatEngine:
                 continue
             paused = False
             # P4-1: one taint card per tool per round — a burst of N searches
-            # from one request asks once; the rest wait on that card.
+            # from one request asks once; the rest wait on that card (or, P4-2,
+            # join it as items when they are the same question).
             taint_carded: set[str] = set()
+            round_folds: dict[str, str] = {}  # P4-2: fold subject → card id
+            round_cards: list[dict[str, Any]] = []
             for call in tool_calls:
                 name = str(call.get("function", {}).get("name") or "")
                 args = _call_args(call)
@@ -1881,6 +1884,35 @@ class ChatEngine:
                     taint_ask = decision is not None and (decision.decided_by or "").startswith(
                         "taint/"
                     )
+                    # P4-2 (ADR 0059 D6): a HIGH action always cards — no
+                    # auto-dispatch, grant or rule runs it unasked. Not a
+                    # decide() verdict: the allow is recorded, the card asks.
+                    high = high_tier(
+                        name, args, taint=self.store.get_chat_taint(chat_id), store=self.store
+                    )
+                    if high is not None and decision is not None and decision.allows_execution():
+                        decision = high_tier_decision(high, decision)
+                    # P4-2: a card this round already opened for the same
+                    # subject takes this call as one more item (never a HIGH
+                    # one, never unattended). Folds live for ONE round: the
+                    # card is shown when the round closes, and nothing can
+                    # confirm it before (the chat's turn lock) — so no item
+                    # ever joins a card the operator has already seen.
+                    fold_key = (
+                        fold_subject(name, args, decision.decided_by)
+                        if high is None
+                        and not unattended
+                        and decision is not None
+                        and decision.verdict != "deny"
+                        and not decision.allows_execution()
+                        else None
+                    )
+                    head = round_folds.get(fold_key) if fold_key else None
+                    if head is not None:
+                        joined = self._join_fold(chat_id, head, name, args, call_id)
+                        if joined is not None:
+                            yield ("tool", {"tool": name, "result": joined})
+                        continue
                     if taint_ask and (unattended or name in taint_carded):
                         # P4-1: an unattended turn refuses a taint ask (nobody is
                         # watching to answer it); a second one this round waits.
@@ -1935,14 +1967,6 @@ class ChatEngine:
                             {"tool": name, "decision": asdict(decision), "result": payload},
                         )
                         continue
-                    # P4-2 (ADR 0059 D6): a HIGH action always cards — no
-                    # auto-dispatch, grant or rule runs it unasked. Not a
-                    # decide() verdict: the allow is recorded, the card asks.
-                    high = high_tier(
-                        name, args, taint=self.store.get_chat_taint(chat_id), store=self.store
-                    )
-                    if high is not None and decision is not None and decision.allows_execution():
-                        decision = high_tier_decision(high, decision)
                     # ES-F3 (B08): an unattended turn never executes — it
                     # fires whether or not anyone is watching, so even a
                     # policy-allowed mutation becomes a card a human pulls.
@@ -2053,6 +2077,8 @@ class ChatEngine:
                         ),
                         card=None if high is None else {"tier": "high", "high": high},
                     )
+                    if fold_key:
+                        round_folds[fold_key] = action_id
                     action_event: dict[str, Any] = {
                         "action_id": action_id,
                         "tool": name,
@@ -2062,13 +2088,11 @@ class ChatEngine:
                         # v90-F2: and the three lines a human reads first; the
                         # description moves behind the details disclosure.
                         "description": tool_description(name),
-                        "card": self._card(
-                            chat_id, name, args, action=self.store.get_chat_action(action_id)
-                        ),
                     }
                     if decision is not None:
                         action_event["decision"] = asdict(decision)
-                    yield ("action", action_event)
+                    # P4-2: shown when the round closes, with every item.
+                    round_cards.append(action_event)
                     paused = True
                     continue
                 ran = False  # P4-1: only a read that executed brings anything in
@@ -2176,6 +2200,12 @@ class ChatEngine:
                 # old notes/tasks whitelist left get_run/list_runs/... rendering
                 # as empty expanders until a page reload (history always had it).
                 yield ("tool", {"tool": name, "result": result})
+            for action_event in round_cards:
+                # P4-2: the card as the server recorded it — every folded item.
+                record = self.store.get_chat_action(str(action_event["action_id"]))
+                tool = str(action_event["tool"])
+                card = self._card(chat_id, tool, action_event["args"], action=record)
+                yield ("action", {**action_event, "card": card})
             if paused:
                 # The turn waits for the human; verdict endpoints resume it.
                 yield ("done", {"state": "awaiting_confirmation"})
@@ -2342,12 +2372,27 @@ class ChatEngine:
                 detail=f"this card is HIGH risk ({high}), so it needs the web UI or the "
                 "CLI: open skep and confirm it there" + (f". {line}" if line else ""),
             )
+        folded = [item["args"] for item in action.fold_items()]  # P4-2: every item
         if keep is None:
-            keep = actions.default_keep(action.tool, action.args, taint, high=high is not None)
+            defaults = {
+                actions.default_keep(action.tool, item, taint, high=high is not None)
+                for item in folded
+            }
+            keep = defaults.pop() if len(defaults) == 1 else "once"
         # B32: a keep this card cannot honour is refused BEFORE it runs, never
         # executed with a false "remembered" (the card offers only what holds).
-        refused = actions.keep_refusal(
-            action.tool, action.args, keep, taint, store=self.store, high=high is not None
+        refused = next(
+            (
+                why
+                for item in folded
+                if (
+                    why := actions.keep_refusal(
+                        action.tool, item, keep, taint, store=self.store, high=high is not None
+                    )
+                )
+                is not None
+            ),
+            None,
         )
         if refused is not None:
             raise HTTPException(status_code=400, detail=f"keep={keep!r} refused: {refused}")
@@ -2385,68 +2430,116 @@ class ChatEngine:
         # the result lived only on the action row and in the transcript, so API
         # consumers watching the confirm stream saw a continuation with no
         # outcome (GAP-2, black-box field test).
-        verdict: ChatEvent = ("tool", {"tool": action.tool, "result": payload})
+        verdicts: list[ChatEvent] = [
+            ("tool", {"tool": action.tool, "result": item})
+            for item in payload.get("items", [payload])
+        ]  # P4-2: one per folded item
         if more_pending:
             # Other cards still open — the model resumes after the last verdict.
             lock.release()
-            return iter([verdict, ("done", {"state": "awaiting_confirmation"})])
+            return iter([*verdicts, ("done", {"state": "awaiting_confirmation"})])
         return held_turn(
             lock,
             chain(
-                [verdict],
+                verdicts,
                 self.turn_events(
                     chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
                 ),
             ),
         )
 
+    def _join_fold(
+        self, chat_id: str, head: str, name: str, args: dict[str, Any], call_id: str | None
+    ) -> dict[str, Any] | None:
+        """P4-2: this call joins card ``head`` as one more item — or, when the
+        card already lists exactly it, the model gets the duplicate answer
+        (the row is written here; nothing runs twice)."""
+        record = self.store.get_chat_action(head)
+        key = _canonical_args(args)
+        if record is not None and any(
+            _canonical_args(item["args"]) == key for item in record.fold_items()
+        ):
+            payload = duplicate_proposal_result(head)
+            self.store.add_chat_message(
+                chat_id, role="tool", tool_name=name, tool_call_id=call_id,
+                content=json.dumps(payload, ensure_ascii=True),
+            )  # fmt: skip
+            return payload
+        self.store.fold_into_chat_action(head, args=args, tool_call_id=call_id)
+        return None
+
+    def _execute_item(
+        self, chat_id: str, tool: str, args: dict[str, Any], *, actor: str, keep: str
+    ) -> dict[str, Any]:
+        """Run one confirmed call (a card's own, or one folded item)."""
+        try:
+            result = execute_mutation(
+                tool,
+                args,
+                store=self.store,
+                holder=self.holder,
+                runner=self.runner,
+                actor=actor,
+                chat_id=chat_id,
+            )
+            payload: dict[str, Any] = {"ok": True, "result": result}
+            # v90-F3: a plain approve holds for the serve session. The grant
+            # is a session-provenance rule on the SAME learned list the
+            # always-tier writes to, so resolve() composes it unchanged and
+            # LearnedRuleRejected still bars denied space (I5, I6 — the
+            # operator's own verdict creates it, never the model's).
+            grant = (
+                None
+                if keep == "once"
+                else actions.remember_action_for_session(
+                    self.store,
+                    tool=tool,
+                    args=args,
+                    actor=actor,
+                    tier=keep,
+                    chat_id=chat_id,
+                )
+            )
+            if grant is not None:
+                payload["grant"] = grant
+        except HTTPException as exc:
+            payload = {"ok": False, "error": str(exc.detail)}
+        except (KeyError, ValueError, TypeError) as exc:
+            payload = {"ok": False, "error": f"bad arguments: {exc}"}
+        return payload
+
     def _record_verdict(
         self, chat_id: str, action: ChatActionRecord, *, confirm: bool, actor: str, keep: str
     ) -> dict[str, Any]:
-        """Claim, execute (or deny) and record one card; the tool row's payload."""
+        """Claim, execute (or deny) and record one card; the tool row's payload.
+
+        P4-2: a folded card is resolved whole by the one claim (PR #61) — every
+        item it recorded runs once, in order, and gets its own tool row; a
+        fold's payload is ``{"ok", "items": [...]}``."""
         action_id = action.action_id
+        items = action.fold_items()
         if confirm:
             # ES-F1 (B15 B16 B97): claim first — only the winner executes; a
             # second confirm, a Deny or the timeout sweep now lose with a 409.
             if not self.store.claim_chat_action(action_id):
                 raise card_taken(self.store, action_id)
+            payloads: list[dict[str, Any]] = []
             try:
-                result = execute_mutation(
-                    action.tool,
-                    action.args,
-                    store=self.store,
-                    holder=self.holder,
-                    runner=self.runner,
-                    actor=actor,
-                    chat_id=chat_id,
-                )
-                payload: dict[str, Any] = {"ok": True, "result": result}
-                # v90-F3: a plain approve holds for the serve session. The grant
-                # is a session-provenance rule on the SAME learned list the
-                # always-tier writes to, so resolve() composes it unchanged and
-                # LearnedRuleRejected still bars denied space (I5, I6 — the
-                # operator's own verdict creates it, never the model's).
-                grant = (
-                    None
-                    if keep == "once"
-                    else actions.remember_action_for_session(
-                        self.store,
-                        tool=action.tool,
-                        args=action.args,
-                        actor=actor,
-                        tier=keep,
-                        chat_id=chat_id,
+                for item in items:
+                    payloads.append(
+                        self._execute_item(
+                            chat_id, action.tool, item["args"], actor=actor, keep=keep
+                        )
                     )
-                )
-                if grant is not None:
-                    payload["grant"] = grant
-            except HTTPException as exc:
-                payload = {"ok": False, "error": str(exc.detail)}
-            except (KeyError, ValueError, TypeError) as exc:
-                payload = {"ok": False, "error": f"bad arguments: {exc}"}
             except BaseException:
-                self.store.unclaim_chat_action(action_id)
-                raise
+                if not payloads:  # nothing ran: hand the card back, as always
+                    self.store.unclaim_chat_action(action_id)
+                raise  # something ran: it stays claimed (restart marks it interrupted)
+            payload = (
+                payloads[0]
+                if len(payloads) == 1
+                else {"ok": all(p["ok"] for p in payloads), "items": payloads}
+            )
             self.store.resolve_chat_action(
                 action_id, status=executed_status(payload), result=payload, claimed=True
             )
@@ -2456,23 +2549,25 @@ class ChatEngine:
                 self.store.resolve_chat_action(action_id, status="denied", result=payload)
             except ValueError:
                 raise card_taken(self.store, action_id) from None
-        row_id = self.store.add_chat_message(
-            chat_id,
-            role="tool",
-            tool_name=action.tool,
-            # v106-F4 (v101-F15): the id recorded at card time comes back on
-            # the result row — this write fires when the OPERATOR clicks, so
-            # with two cards open the rows land in resolution order and
-            # position no longer names the call (the inverted-verdicts field
-            # test, msg 4874-4877).
-            tool_call_id=action.tool_call_id,
-            content=json.dumps(payload, ensure_ascii=True),
-        )
-        if confirm and payload["ok"]:  # P4-1: what the confirmed tool brought in
-            record_tool_taint(
-                self.store, self.holder, chat_id, action.tool, action.args,
-                payload["result"], row_id,
-            )  # fmt: skip
+            payloads = [payload] * len(items)
+        for item, item_payload in zip(items, payloads, strict=True):
+            row_id = self.store.add_chat_message(
+                chat_id,
+                role="tool",
+                tool_name=action.tool,
+                # v106-F4 (v101-F15): the id recorded at card time comes back on
+                # the result row — this write fires when the OPERATOR clicks, so
+                # with two cards open the rows land in resolution order and
+                # position no longer names the call (the inverted-verdicts field
+                # test, msg 4874-4877).
+                tool_call_id=item["tool_call_id"],
+                content=json.dumps(item_payload, ensure_ascii=True),
+            )
+            if confirm and item_payload["ok"]:  # P4-1: what the confirmed tool brought in
+                record_tool_taint(
+                    self.store, self.holder, chat_id, action.tool, item["args"],
+                    item_payload["result"], row_id,
+                )  # fmt: skip
         return payload
 
     def _card(

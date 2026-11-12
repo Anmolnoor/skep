@@ -4315,22 +4315,23 @@ class RunStore:
             "may not have taken effect; check its effect before proposing it again",
         }
         rows = self._conn.execute(
-            "SELECT action_id, chat_id, tool, tool_call_id FROM chat_actions"
-            " WHERE status = 'executing'"
+            f"SELECT {self._ACTION_COLS} FROM chat_actions WHERE status = 'executing'"
         ).fetchall()
-        for action_id, chat_id, tool, tool_call_id in rows:
+        for row in rows:
+            action = self._row_to_action(row)
             self._conn.execute(
                 "UPDATE chat_actions SET status = 'interrupted', result_json = ?,"
                 " resolved_at = ? WHERE action_id = ?",
-                (json.dumps(payload, ensure_ascii=True), _now(), action_id),
+                (json.dumps(payload, ensure_ascii=True), _now(), action.action_id),
             )
-            self.add_chat_message(
-                str(chat_id),
-                role="tool",
-                tool_name=str(tool),
-                tool_call_id=None if tool_call_id is None else str(tool_call_id),
-                content=json.dumps(payload, ensure_ascii=True),
-            )
+            for item in action.fold_items():  # P4-2: every item of a folded card
+                self.add_chat_message(
+                    action.chat_id,
+                    role="tool",
+                    tool_name=action.tool,
+                    tool_call_id=item.get("tool_call_id"),
+                    content=json.dumps(payload, ensure_ascii=True),
+                )
         self._conn.commit()
         return len(rows)
 

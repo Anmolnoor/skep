@@ -292,3 +292,13 @@ test("tierNote: a HIGH card says so in words, not only by colour", () => {
   assert.equal(note.textContent,
     "HIGH risk: it changes standing policy. It holds once, and only the web UI or the CLI can confirm it.");
 });
+
+test("foldItems: a folded card lists every item; a plain card lists none", () => {
+  const app = loadApp();
+  assert.equal(app.foldItems({ headline: "x" }), null);
+  assert.equal(app.foldItems({ items: ["only one"] }), null);
+  const node = app.foldItems({ items: ["read_url — https://a.example/1", "read_url — https://a.example/2"] });
+  assert.deepEqual(node.querySelectorAll("li").map(li => li.textContent),
+    ["read_url — https://a.example/1", "read_url — https://a.example/2"]);
+  assert.equal(texts(node, "note")[0], "2 items, one approval covers exactly these:");
+});

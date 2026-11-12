@@ -257,7 +257,8 @@ def test_run_shell_output_sets_private_and_search_web_then_asks(
     live: Callable[[str], Live],
 ) -> None:
     """Operator decision #3: ANY run_shell output — even ``echo`` — sets
-    ``private``; one search card follows per request."""
+    ``private``; one search card follows per request (P4-2: the second
+    search is an item of that card, not a waiting refusal)."""
     env = live("builder")
     chat = env.chat()
     env.ollama.script_tool_call(
@@ -269,8 +270,7 @@ def test_run_shell_output_sets_private_and_search_web_then_asks(
     assert env.store.get_chat_taint(chat).private is not None
     cards = [d for e, d in events if e == "action"]
     assert [c["tool"] for c in cards] == ["search_web"]  # one card, not two
-    waiting = [d for e, d in events if e == "tool" and d["tool"] == "search_web"]
-    assert "already waiting" in waiting[0]["result"]["error"]
+    assert cards[0]["card"]["items"] == ["search_web — a", "search_web — b"]
     assert env.searched == []
 
 
