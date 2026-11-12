@@ -386,6 +386,24 @@ MORE_HOME_SECRETS = (
     ".vault-token",
     ".terraform.d/credentials.tfrc.json",
     ".config/op/config",
+    # B125: what a sandboxed worker could still read after #64.
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".claude.json",
+    ".password-store/x.gpg",
+    ".bashrc",
+    ".bash_profile",
+    ".profile",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".bash_history",
+    ".zsh_history",
+    ".python_history",
+    ".node_repl_history",
+    ".psql_history",
+    ".mysql_history",
+    ".sqlite_history",
 )
 
 
@@ -403,5 +421,12 @@ def test_common_credential_stores_are_on_the_floor(
 
 
 def test_the_widened_floor_spares_the_neighbours(fake_home: Path) -> None:
-    for rel in (".claude/skills/x/SKILL.md", ".codex/config.toml", ".config/opencode/x", "secrets"):
+    for rel in (
+        ".claude/skills/x/SKILL.md",
+        ".codex/config.toml",
+        ".config/opencode/x",
+        "secrets",
+        ".cargo/config.toml",
+        ".claude.json.backup-not",
+    ):
         assert secret_floor_reason(fake_home / rel) is None, rel

@@ -18,6 +18,7 @@ from pathlib import Path
 from skep.worker_contract import CodingWorkerTask
 
 from . import sandbox
+from .castes import CASTES
 from .config import SupervisorConfig
 from .worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
@@ -208,6 +209,11 @@ def spawn_worker(
             unix_socket_path=network_proxy_unix_path if proxy_port is not None else None,
             backend=backend,
             skep_home=config.home.parent,
+            # B125: only skep's own LLM-calling workers read the LLM key; an
+            # external engine (worker_argv) authenticates from its env, and an
+            # unregistered caste falls back to the coding worker.
+            worker_llm_key=worker_argv is None
+            and getattr(CASTES.get(task.worker_kind), "needs_provider", True),
         )
         argv = sandbox.wrap_command(argv, profile_path, backend=backend)
     env = build_worker_env(task.permissions.env_allowlist, baseline=config.env_baseline)

@@ -6,8 +6,9 @@ file readable, so a sandboxed worker read ``serve-token`` and, on the Mac,
 POSTed ``/api/approvals/{id}/approve`` over loopback (the profile allowed
 ``localhost:*``) — it approved its own card and a commit landed (mac-p1).
 
-``llm-secret*`` stays readable on purpose: the builtin worker authenticates
-to its LLM with it until V6 moves the credential into the proxy.
+``llm-secret`` and the active profile's ``llm-secret-<id>`` stay readable
+for an LLM-calling worker only (B125): the builtin worker authenticates to its
+LLM with them until V6 moves the credential into the proxy.
 """
 
 from __future__ import annotations
@@ -52,7 +53,9 @@ def test_secret_paths_cover_the_floor_and_skip_the_worker_llm_key(
 ) -> None:
     home, skep_home = fake_homes
     sup = skep_home / "supervisor"
-    assert set(sandbox.secret_paths(skep_home)) == {
+    (sup / "audit" / "t-other").mkdir(parents=True)
+    (sup / "chat-attachments").mkdir()
+    floor = {
         home / ".ssh",
         home / ".aws",
         home / ".config" / "gh",
@@ -61,7 +64,92 @@ def test_secret_paths_cover_the_floor_and_skip_the_worker_llm_key(
         sup / "serve-token",
         sup / "mail-secret",
         sup / "discord-secret",
+        sup / "audit",
+        sup / "chat-attachments",
     }
+    # B125: a run that does not call the LLM (every non-worker profile, a
+    # non-provider caste) sees no LLM key at all...
+    assert set(sandbox.secret_paths(skep_home)) == floor | {
+        sup / "llm-secret",
+        sup / "llm-secret-p1",
+    }
+    # ...and the builtin worker keeps the legacy key; another profile's key
+    # stays hidden (no active profile here).
+    assert set(sandbox.secret_paths(skep_home, worker_llm_key=True)) == floor | {
+        sup / "llm-secret-p1"
+    }
+
+
+def test_the_worker_reads_only_the_active_profiles_llm_key(
+    fake_homes: tuple[Path, Path],
+) -> None:
+    """B125: v108-F4's worker reads llm-secret-<active id>; every other
+    profile's key is masked."""
+    from skep.supervisor import RunStore
+    from skep.supervisor.providers import ProviderProfile
+
+    _home, skep_home = fake_homes
+    sup = skep_home / "supervisor"
+    (sup / "llm-secret-p2").write_text("CANARY p2\n", encoding="utf-8")
+    store = RunStore(sup / "supervisor.sqlite3")
+    try:
+        for pid in ("p1", "p2"):
+            store.upsert_provider_profile(
+                ProviderProfile(
+                    provider_id=pid,
+                    protocol="ollama",
+                    base_url=f"http://{pid}.example",
+                    model="m",
+                )
+            )
+        store.set_active_provider("p2")
+    finally:
+        store.close()
+    masked = set(sandbox.secret_paths(skep_home, worker_llm_key=True))
+    assert sup / "llm-secret-p1" in masked
+    assert sup / "llm-secret-p2" not in masked
+    assert sup / "llm-secret" not in masked
+
+
+@pytest.mark.parametrize(
+    ("worker_kind", "needs_key"),
+    [("coding", True), ("document", True), ("script", False), ("audit", False)],
+)
+def test_the_spawner_unmasks_the_llm_key_only_for_castes_that_call_the_llm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, worker_kind: str, needs_key: bool
+) -> None:
+    from skep.supervisor import SupervisorConfig, spawner
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        sandbox, "require_usable", lambda backend=None: sandbox.SandboxAvailability(True)
+    )
+    monkeypatch.setattr(sandbox, "write_profile", lambda path, **kw: seen.update(kw) or path)
+    monkeypatch.setattr(sandbox, "wrap_command", lambda argv, profile, backend=None: argv)
+    monkeypatch.setattr(spawner, "git_metadata_writable_roots", lambda _ws: ())
+    monkeypatch.setattr(spawner, "git_metadata_readable_roots", lambda _ws: ())
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("P", (), {"pid": 1})())
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config = SupervisorConfig(home=tmp_path / "skep" / "supervisor", worker_command=("w",))
+    task = mint_task(
+        workspace=workspace, instructions="x", budget=DEFAULT_BUDGET, worker_kind=worker_kind
+    )
+    spawner.spawn_worker(
+        config, task, tmp_path / "t.json", tmp_path / "o.json", log_path=tmp_path / "w.log"
+    )
+    assert seen["worker_llm_key"] is needs_key
+    # An external engine authenticates from its env, never skep's key.
+    spawner.spawn_worker(
+        config,
+        task,
+        tmp_path / "t.json",
+        tmp_path / "o.json",
+        log_path=tmp_path / "w.log",
+        worker_argv=("claude-adapter",),
+    )
+    assert seen["worker_llm_key"] is False
 
 
 def test_seatbelt_profile_denies_secret_reads_and_the_serve_port(
@@ -87,7 +175,8 @@ def test_seatbelt_profile_denies_secret_reads_and_the_serve_port(
         lines = text.splitlines()
         assert f'(deny file-read* (literal "{skep_home / "supervisor" / "serve-token"}"))' in lines
         assert f'(deny file-read* (subpath "{Path.home() / ".ssh"}"))' in lines
-        assert "llm-secret" not in text
+        # B125: a profile that is not an LLM worker's hides the LLM key too.
+        assert f'(deny file-read* (literal "{skep_home / "supervisor" / "llm-secret"}"))' in lines
         for serve_port in ("8765", "8771", "8772"):
             deny = f'(deny network-outbound (remote ip "localhost:{serve_port}"))'
             # Last match wins in SBPL: the deny must follow every loopback allow.
@@ -150,11 +239,19 @@ def test_a_real_sandboxed_worker_cannot_read_the_canaries(
     home, skep_home = fake_homes
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    profile = sandbox.write_profile(
-        tmp_path / "p.profile", workspace=workspace, skep_home=skep_home
-    )
     sup = skep_home / "supervisor"
+    (home / ".zsh_history").write_text("CANARY history\n", encoding="utf-8")
+    (home / ".claude.json").write_text("CANARY claude.json\n", encoding="utf-8")
+    (sup / "audit" / "t-other").mkdir(parents=True)
+    (sup / "audit" / "t-other" / "worker.log").write_text("CANARY audit\n", encoding="utf-8")
+    profile = sandbox.write_profile(
+        tmp_path / "p.profile", workspace=workspace, skep_home=skep_home, worker_llm_key=True
+    )
     targets = [
+        home / ".zsh_history",
+        home / ".claude.json",
+        sup / "audit" / "t-other" / "worker.log",
+        sup / "llm-secret-p1",
         home / ".ssh" / "id_rsa",
         home / ".aws" / "credentials",
         home / ".netrc",

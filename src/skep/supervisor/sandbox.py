@@ -30,11 +30,12 @@ import sys
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .secret_floor import HOME_SECRETS
+from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 BUBBLEWRAP = "bwrap"
@@ -333,17 +334,14 @@ def available() -> bool:
 
 # ES-F4 (B05, V3 sandbox half): paths no worker may read, whatever its
 # backend. The operator's credential dirs, plus skep's own control-plane
-# secrets: serve-token (the whole REST API), serve.env (engine auth), and the
-# channel/mail ``*-secret`` files. ``llm-secret*`` is deliberately NOT here:
-# the builtin worker authenticates to its LLM with it (llm_plan.py) until V6
-# moves the credential into the proxy. Checked when the profile is built, so
-# a secret file created mid-run is not covered.
-# The policy floor's list (secret_floor.HOME_SECRETS) minus the files a
-# sandboxed process legitimately reads: they stay on the POLICY floor (no Queen
-# or worker read tool returns them) but are not masked here, because masking
-# would break an engine or a stock install. ponytail: claude_code/codex config
-# dirs are redirected per run (v106-F1), so their login files are probably
-# unread in here — mask them once an engine run on each OS proves it.
+# secrets: serve-token (the whole REST API), serve.env (engine auth), every
+# ``*-secret`` and ``llm-secret*`` file (secret_floor.SKEP_SECRET_NAMES), the
+# other runs' audit trails and the chat attachments (B125). One carve-out:
+# a worker whose caste calls the LLM reads ``llm-secret`` and the ACTIVE
+# profile's ``llm-secret-<id>`` (llm_plan.py) until V6 moves the credential
+# into the proxy. The store (supervisor.sqlite3) stays readable: that same
+# worker reads its provider settings from it. Checked when the profile is
+# built, so a secret file created mid-run is not covered.
 SANDBOX_READABLE_SECRETS: dict[str, str] = {
     ".npmrc": "npm install reads registry auth from it",
     ".claude/.credentials.json": "claude_code's file login (v94-F3)",
@@ -366,15 +364,39 @@ def _refuse_home_inside(skep_home: Path, writable_roots: Iterable[Path]) -> None
             )
 
 
-def secret_paths(skep_home: Path) -> list[Path]:
-    """The existing secret-floor paths to hide from a worker (resolved)."""
+def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]:
+    """The existing secret-floor paths to hide from a worker (resolved).
+
+    ``skep_home`` is the TOP-LEVEL home (``~/.skep``), not the supervisor
+    dir secret_floor takes (B148)."""
     home = Path.home()
     supervisor = skep_home / "supervisor"
     candidates = [home / rel for rel in _HOME_SECRET_PATHS]
-    candidates += [skep_home / "serve.env", supervisor / "serve-token"]
+    candidates += [skep_home / SERVE_ENV, supervisor / "audit", supervisor / "chat-attachments"]
+    readable = {"llm-secret", *_active_llm_key_names(supervisor)} if worker_llm_key else set()
     if supervisor.is_dir():
-        candidates += sorted(p for p in supervisor.glob("*-secret") if p.name != "llm-secret")
+        candidates += sorted(
+            p
+            for p in supervisor.iterdir()
+            if p.name not in readable and any(fnmatch(p.name, pat) for pat in SKEP_SECRET_NAMES)
+        )
     return [path.resolve() for path in candidates if path.exists()]
+
+
+def _active_llm_key_names(supervisor: Path) -> set[str]:
+    """The active provider profile's key file name (v108-F4), if any."""
+    db_path = supervisor / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return set()
+    from .serve.llm import provider_secret_path
+    from .store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        active = store.active_provider_profile()
+    finally:
+        store.close()
+    return {provider_secret_path(supervisor, active.provider_id).name} if active else set()
 
 
 # ``skep serve`` records its port here (under ``<home>/supervisor``) so every
@@ -668,6 +690,7 @@ def write_profile(
     unix_socket_path: str | None = None,
     backend: str | None = None,
     skep_home: Path,
+    worker_llm_key: bool = False,
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -682,10 +705,13 @@ def write_profile(
 
     ``extra_readable`` is bound read-only where a backend hides the host
     (bwrap/podman's tmpfs /tmp); Seatbelt leaves reads open and ignores it.
+
+    ``worker_llm_key`` leaves the worker's own LLM key readable (B125): only
+    a worker whose caste calls the LLM passes it.
     """
     probe = require_usable(backend)
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
-    read_denied = secret_paths(skep_home)
+    read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
     if probe.backend == PODMAN:
         return _write_argv_profile(
             profile_path,
