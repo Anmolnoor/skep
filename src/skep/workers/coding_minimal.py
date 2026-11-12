@@ -40,6 +40,7 @@ from skep.worker_contract import (
 )
 
 from .capabilities import (
+    DELEGATED_ASK_REASON,
     CapabilityApprovalRequired,
     CapabilityDecision,
     CapabilityDenied,
@@ -759,6 +760,9 @@ def _execute(
         approved_plugin_risks=approved_plugin_risks,
         command_timeout_seconds=task.budget.wall_clock_seconds,
         verify_command=task.verify_command,
+        network_ask=task.permissions.network_ask,
+        shell_ask=task.permissions.shell_ask,
+        delegation=getattr(task.dispatch_decision, "delegation", None),
     )
     # ES-F3: the injected default verify is a code constant, not model input.
     capabilities.pin_code_verify(DEFAULT_VERIFY_ARGV)
@@ -1936,7 +1940,18 @@ def _apply_llm_tool_plan(
         blocked_commands = [argv for argv, _, _ in blocked_shell_steps]
         first_command = blocked_shell_steps[0][1]
         first_decision = blocked_shell_steps[0][2]
-        if len(blocked_shell_steps) == 1:
+        asked = next(
+            (cmd for _, cmd, found in blocked_shell_steps if found.reason == DELEGATED_ASK_REASON),
+            None,
+        )
+        if asked is not None:
+            # V7: the card names the chain; the one approval covers the rest.
+            reason = capabilities.delegated_ask_text("shell.run", asked) + (
+                f" (this approval covers {len(blocked_shell_steps)} commands)"
+                if len(blocked_shell_steps) > 1
+                else ""
+            )
+        elif len(blocked_shell_steps) == 1:
             reason = f"shell.run requires approval for command: {first_command}"
         else:
             reason = (

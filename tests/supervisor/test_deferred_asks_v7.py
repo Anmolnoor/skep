@@ -24,7 +24,13 @@ from skep.supervisor.serve.channels import ChannelConfig
 from skep.supervisor.serve.chat import CHAT_ACTOR
 from skep.supervisor.serve.settings import FRESH_HOME_SEEDED_AT, ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation
+from skep.supervisor.spawner import effective_network_domains
 from skep.worker_contract import CodingWorkerTask, Permissions
+from skep.workers.capabilities import (
+    DELEGATED_ASK_REASON,
+    CapabilityApprovalRequired,
+    CapabilityRegistry,
+)
 
 from .conftest import predating_home
 from .test_role_policy import _home
@@ -405,3 +411,102 @@ def test_a_chat_dispatch_defers_only_where_a_human_can_answer(
     perms = runner.submitted["permissions"]
     assert perms.network_ask == (["example.com"] if asked else [])
     assert "example.com" not in perms.network
+
+
+# --- the worker: an ask cards, naming the chain -----------------------------
+
+CHAIN = {"chain": ["queen@builder"], "role": None}
+
+
+def _registry(tmp_path: Path, **kw: Any) -> CapabilityRegistry:
+    return CapabilityRegistry(
+        tmp_path,
+        emit=lambda _t, _p: None,
+        network_allowlist=("pypi.org",),
+        provider_hosts=("ollama.com:443",),
+        delegation=CHAIN,
+        **kw,
+    )
+
+
+def test_the_worker_cards_an_asked_host_naming_the_chain(tmp_path: Path) -> None:
+    """Not a flat deny for a host missing from a non-empty list: the same
+    require_approval gate network_allowlist_missing uses."""
+    registry = _registry(tmp_path, network_ask=("example.com",))
+    decision = registry.decision_for("network.fetch", {"url": "https://example.com/x"})
+    assert (decision.verdict, decision.reason, decision.detail) == (
+        "require_approval",
+        DELEGATED_ASK_REASON,
+        "example.com",
+    )
+    with pytest.raises(CapabilityApprovalRequired) as raised:
+        registry.invoke("network.fetch", {"url": "https://example.com/x"})
+    assert raised.value.reason == (
+        "worker asks network.connect example.com — delegated by queen@builder, "
+        "which would itself ask; approve once for this run, or deny"
+    )
+    # a host nobody asked about is still a flat deny
+    assert registry.decision_for("network.fetch", {"url": "https://other.org"}).verdict == "deny"
+
+
+def test_an_approved_ask_reaches_only_that_host(tmp_path: Path) -> None:
+    registry = _registry(
+        tmp_path, network_ask=("example.com",), approved_network_hosts=("example.com",)
+    )
+    assert registry.decision_for("network.fetch", {"url": "https://example.com"}).allows_execution()
+    assert registry.decision_for("network.fetch", {"url": "https://other.org"}).verdict == "deny"
+
+
+def test_the_worker_cards_an_asked_prefix_and_the_floor_still_denies(tmp_path: Path) -> None:
+    registry = _registry(tmp_path, shell_ask=(["make"],), shell_allowlist=(["git", "status"],))
+    decision = registry.decision_for("shell.run", {"argv": ["make", "build"]})
+    assert (decision.verdict, decision.reason, decision.detail) == (
+        "require_approval",
+        DELEGATED_ASK_REASON,
+        "make build",
+    )
+    with pytest.raises(CapabilityApprovalRequired) as raised:
+        registry.invoke("shell.run", {"argv": ["make", "build"]})
+    assert "worker asks shell.run make build — delegated by queen@builder" in raised.value.reason
+    # an ask never lifts a deny: the git floor still refuses
+    registry = _registry(tmp_path, shell_ask=(["git"],))
+    assert registry.decision_for("shell.run", {"argv": ["git", "push"]}).verdict == "deny"
+    # an ordinary unlisted command keeps its ordinary gate
+    assert registry.decision_for("shell.run", {"argv": ["ls"]}).reason != DELEGATED_ASK_REASON
+
+
+def test_the_proxy_admits_an_approved_ask_and_nothing_else(tmp_path: Path) -> None:
+    """In the sandbox the filtering proxy is the wall: an approved asked host
+    joins the run's egress; an approved host nobody asked about does not."""
+
+    def task(ask: list[str], host: str) -> CodingWorkerTask:
+        return CodingWorkerTask.model_validate(
+            {
+                "contract_version": "0.3.7",
+                "task_id": "t",
+                "trace_id": "tr",
+                "worker_kind": "coding",
+                "workspace": str(tmp_path),
+                "instructions": "x",
+                "permissions": _perms(network=["pypi.org"], network_ask=ask).model_dump(),
+                "budget": {
+                    "wall_clock_seconds": 60,
+                    "max_iterations": 1,
+                    "max_actions": 1,
+                    "max_provider_calls": 0,
+                },
+                "approval_verdict": {
+                    "approved": True,
+                    "actor": "op",
+                    "ts": "2026-11-12T00:00:00Z",
+                    "action": "network.fetch",
+                    "decision": {"verdict": "require_approval", "reason": "r", "detail": host},
+                },
+            }
+        )
+
+    assert effective_network_domains(task(["example.com"], "example.com")) == (
+        "pypi.org",
+        "example.com",
+    )
+    assert effective_network_domains(task([], "example.com")) == ("pypi.org",)
