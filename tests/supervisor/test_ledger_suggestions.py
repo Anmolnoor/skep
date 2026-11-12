@@ -172,11 +172,11 @@ def test_the_nth_approval_carries_the_nudge(repo: Path, config: SupervisorConfig
     store = RunStore(config.db_path)
     try:
         review_ids = _seed_approvals(store, repo, count=3)
-        suggestion = actions.remember_suggestion_for_review(store, review_ids[-1])
+        suggestion = actions.remember_suggestion_for_review(store, review_ids[-1], config)
         assert suggestion is not None and "approval #3" in suggestion
         # Below the threshold there is no nudge.
         other = _seed_approvals(store, repo, count=1, resource="pytest -q")
-        assert actions.remember_suggestion_for_review(store, other[0]) is None
+        assert actions.remember_suggestion_for_review(store, other[0], config) is None
     finally:
         store.close()
 

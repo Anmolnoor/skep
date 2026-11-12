@@ -1133,20 +1133,26 @@ def _shell_command_from_approval_reason(reason: object) -> list[str] | None:
 
 
 def _remember_for_repo(
-    store: RunStore, config: SupervisorConfig, repo: Path, argv: list[str]
+    store: RunStore, config: SupervisorConfig, repo: Path, argv: list[str], task_id: str
 ) -> str:
     """v114-F2: the ONE writer every face shares (ADR 0050) — the bound
     project's overlay first, global only when unbound — returning the tier it
     wrote. The CLI used to append to the global setting on its own, so a
     `--allow-command` on a project-bound run widened every repo and cleared
     nothing for the project whose list shadows the global one."""
-    from .serve.actions import persist_remembered_command
+    from .serve.actions import _a_delegated_ask, persist_remembered_command
     from .serve.settings import ConfigHolder
     from .shell_prefixes import dangerous_prefix_reason, normalize_remembered_command
 
     guard_reason = dangerous_prefix_reason(argv)
     if guard_reason is not None:
         raise ValueError(guard_reason)
+    if _a_delegated_ask(config, task_id, commands=[argv]):
+        # V7: the REST/chat Allow & remember answers 409 here (ADR 0050 parity).
+        raise ValueError(
+            "this is a delegated ask (the dispatching chain would itself ask): it can "
+            "only be approved once, for this run — approve it, or deny"
+        )
     return persist_remembered_command(
         store, ConfigHolder(config, store), repo, normalize_remembered_command(argv)
     )
@@ -1303,7 +1309,7 @@ def cmd_review(args: argparse.Namespace) -> int:
                     next_command=f"skep review {record.task_id}  # inspect the evidence",
                 )
             try:
-                tier = _remember_for_repo(store, config, Path(record.repo), argv)
+                tier = _remember_for_repo(store, config, Path(record.repo), argv, record.task_id)
             except ValueError as exc:
                 return _err(
                     f"this command cannot be remembered: {exc}",
@@ -1492,7 +1498,9 @@ def _prompt_inline_approval(
                     print("approval left pending")
                     return None
                 try:
-                    tier = _remember_for_repo(run_store, config, Path(record.repo), argv)
+                    tier = _remember_for_repo(
+                        run_store, config, Path(record.repo), argv, record.task_id
+                    )
                 except ValueError as exc:
                     print(f"approval cannot be remembered: {exc}")
                     print("approval left pending")
@@ -1565,10 +1573,16 @@ def _resume_pending_approval(
     approval_commands = store.approval_commands(review_id)
     session_kept: list[list[str]] = []
     if not remembered and approval_commands:
-        from .serve.actions import remember_commands_for_session
+        from .serve.actions import _asked, remember_commands_for_session
 
+        # V7: never a delegated ask — that approval is this run's alone (B39).
         session_kept = remember_commands_for_session(
-            store, [list(command) for command in approval_commands]
+            store,
+            [
+                list(command)
+                for command in approval_commands
+                if not _asked(command, original.permissions)
+            ],
         )
     verdict = ApprovalVerdict(
         approved=True,

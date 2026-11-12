@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, replace
@@ -56,6 +57,7 @@ from ..config import SupervisorConfig
 from ..contracts_io import read_event_log
 from ..ids import mint_uuid7
 from ..memory import MemoryError, MemoryProposal, MemorySource
+from ..netproxy import domain_allowed
 from ..policy_baseline import NO_BASELINE_REASON, NoBaseline
 from ..policy_baseline import current_layer as current_baseline_layer
 from ..policy_baseline import layer_diff as baseline_layer_diff
@@ -3394,9 +3396,33 @@ def _deferred_asks(config: SupervisorConfig, task_id: str) -> Permissions | None
 
 
 def _asked(command: Sequence[str], permissions: Permissions | None) -> bool:
-    """Is ``command`` under one of the run's ``shell_ask`` prefixes?"""
+    """Is ``command`` under one of the run's ``shell_ask`` prefixes? Read as
+    the worker spells it: its capability layer runs (and cards) a ``python``
+    argv as its own interpreter (``_normalized_shell_argv``)."""
+
+    def spelled(argv: Sequence[str]) -> list[str]:
+        # ponytail: the worker is spawned with this interpreter; a worker on
+        # another one would card a path this does not map back.
+        return [sys.executable, *argv[1:]] if argv and argv[0] == "python" else list(argv)
+
     asks = [] if permissions is None else permissions.shell_ask
-    return any(list(command[: len(prefix)]) == prefix for prefix in asks)
+    held = spelled(command)
+    return any(held[: len(prefix)] == spelled(prefix) for prefix in asks)
+
+
+def _a_delegated_ask(
+    config: SupervisorConfig,
+    task_id: str,
+    *,
+    commands: Sequence[Sequence[str]] = (),
+    host: str = "",
+) -> bool:
+    """Does the run's own envelope name any of these as a deferred ask?"""
+    permissions = _deferred_asks(config, task_id)
+    return any(_asked(command, permissions) for command in commands) or bool(
+        # the worker's own matcher: case-insensitive, a trailing dot ignored
+        permissions is not None and host and domain_allowed(host, tuple(permissions.network_ask))
+    )
 
 
 def _refuse_remembering_an_ask(
@@ -3409,10 +3435,7 @@ def _refuse_remembering_an_ask(
     """ADR 0059 D3 (V7): a deferred delegated ask is approve-once for THIS
     run — "Allow & remember" would turn the chain's ask into a standing
     grant for every run of the project (and the chain asks again anyway)."""
-    permissions = _deferred_asks(config, task_id)
-    if any(_asked(command, permissions) for command in commands) or (
-        permissions is not None and host and host in permissions.network_ask
-    ):
+    if _a_delegated_ask(config, task_id, commands=commands, host=host):
         raise HTTPException(
             status_code=409,
             detail=(
@@ -3769,11 +3792,25 @@ def ledger_remember_suggestions(store: RunStore, repo: str | None = None) -> lis
     return suggestions
 
 
-def remember_suggestion_for_review(store: RunStore, review_id: str) -> str | None:
+def remember_suggestion_for_review(
+    store: RunStore, review_id: str, config: SupervisorConfig
+) -> str | None:
     """The one-line nudge an approve response carries when its key just hit
-    the suggestion threshold (the F6 hint pattern: inform, never block)."""
+    the suggestion threshold (the F6 hint pattern: inform, never block).
+    Never for a delegated ask (V7): Allow & remember refuses one, and the
+    chain asks again whatever the project remembers."""
     entry = store.ledger_entry_for_review(review_id)
     if entry is None or entry.remembered:
+        return None
+    if entry.action == "shell.run":
+        try:  # the resource is parsed from the worker's card text
+            command = shlex.split(entry.resource)
+        except ValueError:
+            command = entry.resource.split()
+        asked = _a_delegated_ask(config, entry.task_id, commands=[command])
+    else:
+        asked = _a_delegated_ask(config, entry.task_id, host=entry.resource)
+    if asked:
         return None
     for candidate in store.ledger_remember_candidates():
         if (candidate["action"], candidate["resource"], candidate["repo"]) == (
@@ -4446,11 +4483,11 @@ def _within_delegation(
     host is a flat deny at the worker; a dropped prefix meets the worker's
     ordinary not-allowlisted gate. A grant is kept only where its row,
     held to the chain, still says ``allow`` (§5.4 check 5: no allow the
-    delegator lacks). That also covers B147 — on a zero-state home every row
-    reads ``ask baseline/no_baseline``, the delegator's too, so nothing
-    compared "stricter" and the worker kept allows its delegator would ask
-    about — and an explicit ``network`` host the run policy has no rule for
-    (its row is deny), which the worker used to keep.
+    delegator lacks). That also covers an explicit ``network`` host the run
+    policy has no rule for, which the worker used to keep. B147 is NOT closed
+    here: on a zero-state home every row reads ``ask baseline/no_baseline``,
+    the delegator's too, and the worker keeps those grants as it always has
+    (see ``kept``).
 
     R3 (ADR 0055 D5): the worker's own ``role`` decides beside the chain —
     a grant its role layer made stricter is narrowed the same way, recorded
@@ -4475,7 +4512,11 @@ def _within_delegation(
     def kept(scope: str, action: str, value: str, *, askable: bool) -> bool | None:
         """True: kept as a grant. None: a deferred ask. False: dropped."""
         row = row_for(scope, action, value)
-        if row["verdict"] == "allow":
+        if row["verdict"] == "allow" or row["rule_id"] == NO_BASELINE_REASON:
+            # B147 stays open: on a zero-state home every row, the delegator's
+            # too, is the same baseline placeholder, so nothing is stricter and
+            # the grant is kept as before. Asking here strands a sandboxed
+            # `uv sync`: the proxy cannot card a subprocess for a registry host.
             return True
         ask = deferred_asks and askable and row["verdict"] == "require_approval"
         row = {**row, "delegated": "ask" if ask else "dropped"}

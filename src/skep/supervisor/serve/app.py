@@ -930,7 +930,7 @@ def create_app(
             resumed_id = resume_past_gate(run_store, holder.current, runner, run, review_id, actor)
             resumed = {"action": "resumed", "resumed_as": resumed_id}
             # v109-F8: the Nth identical approval says so (a hint, never a block).
-            suggestion = remember_suggestion_for_review(run_store, review_id)
+            suggestion = remember_suggestion_for_review(run_store, review_id, holder.current)
             if suggestion is not None:
                 resumed["suggestion"] = suggestion
             return resumed
