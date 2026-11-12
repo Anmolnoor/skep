@@ -1,8 +1,10 @@
 """ADR 0059 P3-3: read_url, search_web, call_mcp_tool and the browser tools
 decide through ``policy_v3.decide()``. Nothing they decide is more permissive
 than before, except (a) a human-approved learned grant answering a role's
-catch-all ask, and (b) a baseline, template or operator-overlay rule that
-names the host or tool now applying where the lane used to ignore it."""
+catch-all ask, and (b) a baseline or template rule that names the host or
+tool now applying where the lane used to ignore it. An operator-overlay
+fetch allow is not one of them: it does not let read_url run (operator
+decision, P3-3)."""
 
 from __future__ import annotations
 
@@ -72,8 +74,8 @@ def _allowed_kind(grant: str, old_by: str, new_by: str) -> str | None:
         return "looser:grant"
     if granted and old_by == "baseline/no_baseline":
         return "looser:b101"  # P3-4: on a home with no baseline a human's grant applies
-    if new_by == "global/overlay-fetch":
-        return "looser:overlay"
+    if new_by == "global/overlay-fetch":  # never a grant this round (operator decision)
+        raise AssertionError(f"an overlay fetch allow granted: {new_by}")
     if new_by.endswith(NAMED_ALLOWS) or any(new_by.startswith(n) for n in NAMED_ALLOWS):
         return "looser:named-allow"
     return None
@@ -341,6 +343,76 @@ def test_b56_a_session_fetch_grant_in_a_role_chat_runs_the_url_with_no_second_ca
     # ask still binds the baseline's docs.python.org allow.
     assert fetched[-1]["hops"] == "FFFF"
     assert decide("https://other.example/").verdict == "require_approval"
+
+
+def test_read_only_is_a_fact_only_about_an_mcp_call_an_email_read_or_a_browse_read(
+    net: Callable[..., Any],
+) -> None:
+    """REST and the CLI take ``read_only`` from the caller. It means something
+    only for the requests the Queen classifies (an MCP call, an email read, a
+    browse read); for anything else it must not turn an unmatched request
+    into ``default/read-only`` allow."""
+    _paths, store, holder, _fetched = net("legacy")
+    for scope, action, value in (
+        ("shell", "run", "make deploy"),
+        ("network", "fetch", "unknown.example"),
+        ("network", "connect", "unknown.example"),
+        ("email", "send", "mail:send_message"),
+        ("browse", "act", "browser:browser_click"),
+        ("filesystem", "read", "/srv/data/notes.txt"),
+    ):
+        answer = policy_decide(holder, store, scope=scope, action=action, value=value,
+                               read_only=True)  # fmt: skip
+        assert answer["decided_by"] != "default/read-only", (scope, action, answer)
+    for scope, action, value in (
+        ("mcp", "call", "plain:get_page"),
+        ("email", "read", "mail:list_messages"),
+        ("browse", "read", "browser:browser_snapshot"),
+    ):
+        answer = policy_decide(holder, store, scope=scope, action=action, value=value,
+                               read_only=True)  # fmt: skip
+        assert answer["decided_by"] == "default/read-only", (scope, action, answer)
+
+
+@pytest.mark.parametrize("kind", ["legacy", "builder"])
+def test_an_operator_overlay_fetch_allow_does_not_let_read_url_run(
+    kind: str, net: Callable[..., Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Operator decision (P3-3): before this round read_url never read the
+    overlay, and set_operator_policy called its network rules audit. An
+    overlay fetch allow is recorded and `policy why` names it, but read_url
+    still cards — on the Queen, REST and the CLI alike, in every role. An
+    overlay fetch deny binds: refused, no card, nothing fetched."""
+    from skep.supervisor.serve.actions import policy_why, set_operator_policy_rule
+
+    paths, store, holder, fetched = net(kind)
+    set_operator_policy_rule(store, scope="network", action="fetch", pattern="written.example",
+                             verdict="allow")  # fmt: skip
+    set_operator_policy_rule(store, scope="network", action="fetch", pattern="refused.example",
+                             verdict="deny")  # fmt: skip
+    for role in ROLES:
+        chat = store.create_chat(title="c", model=None, role=role).chat_id
+        flags = ["--role", role] if role else []
+        for host, verdict in (("written.example", "require_approval"),
+                              ("overlay.example", "require_approval"),
+                              ("refused.example", "deny")):  # fmt: skip
+            queen = _fetch(store, holder, f"https://{host}/p?q=1", chat)
+            assert queen.verdict == verdict, (role, host, queen)
+            rest = policy_decide(holder, store, scope="network", action="fetch", value=host,
+                                 role=role)  # fmt: skip
+            assert (rest["verdict"], rest["decided_by"]) == (queen.verdict, queen.decided_by)
+            cli = _cli(paths["personal"], capsys, "decide", "network", "fetch", host, *flags)
+            assert (cli["verdict"], cli["decided_by"]) == (queen.verdict, queen.decided_by)
+    before = len(fetched)
+    with pytest.raises(ValueError, match="denied by policy"):
+        _execute(store, holder, "read_url", {"url": "https://refused.example/"})
+    assert len(fetched) == before
+    why = policy_why(holder, store, "", "network", "fetch", "written.example")
+    assert why["operator"]["verdict"] == "require_approval"
+    assert "op:network:fetch:written.example" in why["overlay_fetch_allow"]
+    assert "overlay_fetch_allow" not in policy_why(
+        holder, store, "", "network", "fetch", "unknown.example"
+    )
 
 
 @pytest.mark.parametrize("kind", ["legacy", "builder", "stale-global"])

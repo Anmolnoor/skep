@@ -98,6 +98,9 @@ SCOPE_ACTIONS = UNMATCHED_VERDICT
 UNMATCHED = f"default/{UNMATCHED_RULE_ID}"
 OPERATOR_ROOT = "operator-root"  # the generated rule an operator root becomes
 READ_ONLY = "read-only"  # the default a read-only request answers where nothing matched
+# The requests ``read_only`` is a fact about (the Queen classifies only these);
+# for any other request a caller's ``read_only`` is ignored.
+READ_ONLY_REQUESTS = frozenset({("mcp", "call"), ("email", "read"), ("browse", "read")})
 GRANT_LAYERS = ("grant:session", "grant:global")
 # The Queen-side lanes by definition: search is the keyless discovery, fetch
 # read_url. The Queen asks with no repo anyway; this keeps the hook's
@@ -241,9 +244,17 @@ def operator_lane(
     if template is not None:
         setup = tighten_only(setup)
     learned = [rule for rule in (*base.learned, *operator.learned) if applies(rule, chat_id=chat)]
+    # P3-3 operator decision: an overlay ``network fetch`` allow is recorded
+    # (``policy why`` shows it) but does not yet let read_url run — before
+    # P3-3 read_url never read the overlay. Its fetch denies and asks bind.
+    overlay = tuple(
+        r
+        for r in _document_rules(operator)
+        if (r.scope, r.verdict, r.action) != ("network", "allow", "fetch")
+    )
     layers = [
         Layer("global", "global", rules=_document_rules(setup)),
-        Layer("global", "global", rules=_document_rules(operator)),
+        Layer("global", "global", rules=overlay),
     ]
     if template is not None:
         layers.append(template)
@@ -517,6 +528,7 @@ def decide(
     B09), an email read, a browse page-state read. Only then does a template
     allow grant an ``mcp.call``, and only then does an unmatched request
     answer ``default/read-only`` allow instead of ``default/unmatched``.
+    For any other request (``READ_ONLY_REQUESTS``) it is ignored.
 
     ``url`` (P3-4, B74) is the URL a ``network.fetch`` reads; only it can
     match a ``url_prefix`` grant (the value stays the host every other rule
@@ -529,6 +541,7 @@ def decide(
         url = url or req.value
         req = Request(req.scope, req.action, urlsplit(req.value).hostname or "")
     scope, action, value = req
+    read_only = read_only and (scope, action) in READ_ONLY_REQUESTS
     floor = floor_verdict(scope, value, action=action, home=stack.home, cwd=stack.cwd)
     if floor is not None:
         return Verdict(

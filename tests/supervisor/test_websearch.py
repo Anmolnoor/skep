@@ -218,8 +218,8 @@ def test_read_url_is_carded_and_fetches_nothing_until_confirmed(
         }
         assert fetches == ["https://docs.python.org/3/"]
 
-        # An explicit standing fetch allow is credited by its rule id instead
-        # (P3-3: the fetch decision, not a connect rule, names it).
+        # P3-3 operator decision: an operator-overlay fetch allow does not
+        # grant read_url yet, so the card stays the gate and is credited.
         store.set_setting(
             OPERATOR_POLICY_SETTINGS_KEY,
             PolicyDocument.model_validate(
@@ -248,7 +248,7 @@ def test_read_url_is_carded_and_fetches_nothing_until_confirmed(
             runner=None,  # type: ignore[arg-type]
             actor="tester",
         )
-        assert credited["decided_by"] == "global/net:python-docs"
+        assert credited["decided_by"] == "operator-card"
     finally:
         store.close()
 
