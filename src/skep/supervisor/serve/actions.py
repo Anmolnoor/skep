@@ -5280,10 +5280,10 @@ def _grant_subjects(tool: str, args: dict[str, Any]) -> list[tuple[str, str, str
     from ..shell_prefixes import is_outbound_content_prefix, queen_command_line_refusal
 
     if tool not in REMEMBERABLE_TOOLS:
-        return (
-            f"{tool} has no standing grant: only read_url, run_shell and start_process "
-            "approvals can be kept, so this card is approve-once"
-        )
+        from .tools import ALWAYS_CARDS
+
+        why = ALWAYS_CARDS.get(tool, "only read_url, run_shell and start_process approvals keep")
+        return f"{tool} has no standing grant ({why}), so this card is approve-once"
     if tool == "read_url":
         prefix = url_prefix_of(str(args.get("url") or ""))
         if prefix is None:

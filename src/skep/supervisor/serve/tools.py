@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, get_args
@@ -2210,6 +2210,93 @@ def tool_description(name: str) -> str:
 
 READ_TOOL_NAMES = {t["function"]["name"] for t in READ_TOOL_SPECS}
 MUTATING_TOOL_NAMES = {t["function"]["name"] for t in MUTATING_TOOL_SPECS}
+
+
+def _url_host(args: dict[str, Any]) -> str:
+    import urllib.parse
+
+    return urllib.parse.urlparse(str(args.get("url") or "")).hostname or ""
+
+
+def _workspace(_args: dict[str, Any]) -> str:
+    return "workspace"
+
+
+# P3-6 (ADR 0059 D7, B32): the one map of what governs each Queen tool. A
+# tool here is decided by ``policy_v3.decide()`` on ``(scope, action,
+# value(args))`` (stop_process names a proc_id: its lane decides the command
+# that started it; the dispatchers: the workspace write every worker makes,
+# decided through the chat's delegation chain). Every other mutating tool is
+# in ALWAYS_CARDS, with why no rule or keep can govern it — the reason a refused keep shows. A test
+# fails on a mutating tool in neither (test_tool_surface_v3).
+TOOL_SCOPES: dict[str, tuple[str, str, Callable[[dict[str, Any]], str]]] = {
+    "read_file": ("filesystem", "read", lambda args: str(args.get("path") or "")),
+    "search_files": ("filesystem", "read", lambda args: str(args.get("path") or "")),
+    "run_shell": ("shell", "run", lambda args: str(args.get("command") or "")),
+    "start_process": ("shell", "run_background", lambda args: str(args.get("command") or "")),
+    "stop_process": ("shell", "run_background", lambda args: str(args.get("proc_id") or "")),
+    "read_url": ("network", "fetch", _url_host),
+    "search_web": ("network", "search", lambda _args: "ddgs"),
+    "call_mcp_tool": (
+        "mcp",
+        "call",
+        lambda args: f"{args.get('server_id') or ''}:{args.get('tool') or ''}",
+    ),
+    **{
+        tool: ("filesystem", "write", _workspace)
+        for tool in (
+            "dispatch_run",
+            "quick_edit",
+            "run_code",
+            "batch_dispatch",
+            "start_research",
+            "forge_tool",
+        )
+    },
+}
+_ALWAYS_CARD_GROUPS: dict[str, tuple[str, ...]] = {
+    "it changes standing policy, and a human reads every policy write": (
+        "allow_command_review", "allow_env_bootstrap", "allow_fetch_domain", "allow_mcp_tool",
+        "allow_shell_command", "apply_policy_preset", "approve_policy_baseline",
+        "attach_policy_group", "copy_project_policy", "delete_policy_group",
+        "detach_policy_group", "revoke_policy_rule", "set_operator_policy", "set_policy",
+        "set_policy_group", "set_role",
+    ),
+    "it acts on a run's approval or landing, which only a human decides": (
+        "approve_review", "deny_review", "land_run", "resume_run", "diagnose_run",
+    ),
+    "it moves a branch or a pull request": (
+        "close_pr", "create_branch", "delete_branch", "merge_branch", "merge_pr", "open_pr",
+        "push_baseline", "push_branch",
+    ),
+    "it changes which repos and projects skep manages": (
+        "register_repo", "unregister_repo", "refresh_repo", "setup_project", "workon",
+    ),
+    "it changes what runs unattended": (
+        "propose_schedule", "delete_schedule", "set_schedule_enabled", "run_schedule_now",
+    ),
+    "it edits your notes, tasks or memory, which no policy scope covers": (
+        "delete_note", "delete_task", "set_task_due", "sync_notes", "forget_memory",
+        "approve_memory_proposal", "reject_memory_proposal",
+    ),
+    "it never cards: it files an inert proposal, and approving that is the gate": ("remember",),
+    "it changes what the Queen can run or load": (
+        "create_skill", "patch_skill", "delete_skill", "set_skill_observer",
+        "promote_skill_pack", "suspend_skill_pack", "promote_tool", "suspend_tool",
+    ),
+    "it changes which servers the Queen reaches": (
+        "register_mcp_server", "unregister_mcp_server", "setup_browser",
+    ),
+    "it changes skep's own settings, which no policy scope covers": (
+        "add_provider", "remove_provider", "use_provider", "set_assistant_model", "set_persona",
+        "set_personality", "set_tts_provider", "set_run_completion_notify",
+    ),
+    "it acts on another person in a channel": ("discord_delete_message", "discord_timeout_member"),
+    "it opens analyst chats, which no policy scope covers": ("delegate_analysis",),
+}  # fmt: skip
+ALWAYS_CARDS: dict[str, str] = {
+    tool: reason for reason, tools in _ALWAYS_CARD_GROUPS.items() for tool in tools
+}
 
 # v83-F5 (ADR 0042): read tools with NETWORK egress, refused in unattended
 # (scheduled) turns. Nobody is watching a scheduled turn, so it reads the
