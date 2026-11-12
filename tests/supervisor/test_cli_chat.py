@@ -1347,3 +1347,40 @@ def test_oneshot_yes_never_preconfirms_a_policy_card(
     out = capsys.readouterr().out
     assert "policy card" in out and "/approve" in out
     assert ["uv", "tree"] not in client.get("/api/policy").json()["allowed_shell_commands"]
+
+
+def test_deck_deny_of_a_gate_card_denies_its_review(
+    config: SupervisorConfig,
+    client: TestClient,
+    ollama: FakeOllama,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ES-F5 (B98): a gate mirror resolves on the commands endpoints, whose
+    Deny denies the REVIEW (v87-F2). The terminal sent it to /actions, which
+    dismissed the card and left the run stuck in pending_approval."""
+    from skep.supervisor import RunStore
+    from skep.supervisor.serve import chat as chat_module
+
+    ran: list[tuple[str, dict[str, Any]]] = []
+
+    def execute(tool: str, args: dict[str, Any], **_: Any) -> dict[str, str]:
+        ran.append((tool, args))
+        return {"action": "denied"}
+
+    monkeypatch.setattr(chat_module, "execute_mutation", execute)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        gate = store.add_chat_action(
+            chat_id, tool="approve_review", args={"review_id": "r-1"}, source="gate"
+        )
+    finally:
+        store.close()
+
+    script_input(monkeypatch, [f"/deny {gate}"])
+    assert run_chat(home=config.home, url="http://unused", client=client, continue_latest=True) == 0
+
+    assert ran == [("deny_review", {"review_id": "r-1"})]
+    (resolved,) = _chat_actions(client)
+    assert resolved["status"] == "denied"

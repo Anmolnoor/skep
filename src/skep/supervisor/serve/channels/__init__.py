@@ -84,6 +84,14 @@ def identity_allowlisted(identity: ChannelIdentity, allowlist: Sequence[str]) ->
     return identity.identity_id in set(allowlist)
 
 
+def user_allowlisted(user_id: str, config: ChannelConfig) -> bool:
+    """ES (B114): authority belongs to a PERSON, not a room. Every channel
+    checks the author of every message and verdict against
+    ``allowed_users``; an empty list admits nobody (fail closed — a channel
+    id names everyone in it). ``skep doctor`` warns on an empty list."""
+    return bool(user_id) and user_id in set(config.allowed_users)
+
+
 def channel_confirmation_decision(
     *,
     action_class: str,
@@ -167,9 +175,9 @@ class ChannelConfig:
     # require_mention: guild messages in an allow-listed channel need a bot
     # @mention (threads skep created and DMs are exempt). auto_thread: a routed
     # guild mention spawns a thread and the conversation moves there.
-    # allowed_users: when non-empty, the AUTHOR must also be listed (fail
-    # closed) — and a DM from a listed user is admitted without its channel id
-    # being pre-allowlisted (you can't know a DM channel id in advance).
+    # allowed_users: the AUTHOR must be listed, on every channel (ES/B114:
+    # empty = nobody; fail closed) — and a Discord DM from a listed user is
+    # admitted without its channel id being pre-allowlisted.
     require_mention: bool = False
     auto_thread: bool = False
     allowed_users: tuple[str, ...] = ()

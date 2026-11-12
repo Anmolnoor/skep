@@ -21,6 +21,7 @@ from . import (
     channel_confirmation_decision,
     identity_allowlisted,
     render_confirm_card,
+    user_allowlisted,
 )
 
 CHANNEL = "slack"
@@ -39,6 +40,13 @@ def normalize_inbound(event: dict[str, object], config: ChannelConfig) -> Normal
             None,
             "channel.reject.identity_not_allowlisted",
             audit={"channel": CHANNEL, "identity": channel_id},
+        )
+    user_id = str(payload.get("user") or "")
+    if not user_allowlisted(user_id, config):
+        return NormalizedInbound(
+            None,
+            "channel.reject.user_not_allowlisted",
+            audit={"channel": CHANNEL, "identity": channel_id, "user": user_id},
         )
     return NormalizedInbound(
         ChannelMessage(
@@ -92,13 +100,16 @@ def handle_button(
     action_class: str,
     identity: ChannelIdentity,
     config: ChannelConfig,
+    user_id: str,
 ) -> ChannelConfirmationDecision:
+    """The channel AND the person who pressed must be listed (B114)."""
     if action_id not in {"confirm", "deny"}:
         return ChannelConfirmationDecision(False, "channel.confirm.denied.unknown_action")
     return channel_confirmation_decision(
         action_class=action_class,
         channel_can_confirm=config.channel_can_confirm,
-        identity_allowlisted=identity_allowlisted(identity, config.allowed_identities),
+        identity_allowlisted=identity_allowlisted(identity, config.allowed_identities)
+        and user_allowlisted(user_id, config),
     )
 
 

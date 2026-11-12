@@ -6,6 +6,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -62,6 +63,65 @@ from .conftest import git, wait_terminal
 from .fake_ollama import FakeOllama
 from .fake_openai import FakeOpenAI
 from .test_serve_chat import sse_events
+
+# ES-F3 (B06): a `purpose: verify` label no longer auto-allows a command —
+# only the project's pinned verify_command (or an allowlisted prefix) does.
+# These tests exercise worker planning/landing, not that gate (pinned in
+# test_runtime_plugins and test_unpinned_verify_step_takes_the_approval_path
+# below), so they run as if the project pinned each plan's verify: in-process
+# registries treat the verify step as the pin, and subprocess runs carry the
+# narrow test-runner prefixes an onboarded builder home allowlists.
+VERIFY_PREFIXES = [
+    [sys.executable, name]
+    for name in (
+        "generated.py",
+        "hello.py",
+        "existing.py",
+        "counted.py",
+        "plain.py",
+        "repaired.py",
+        "nope.txt",
+    )
+] + [
+    [sys.executable, "-m", "pytest"],
+    [sys.executable, "-c", "print('ok')"],
+    [sys.executable, "-c", "import missing_module_pytest"],
+    [
+        sys.executable,
+        "-c",
+        "from pathlib import Path; import sys; sys.stdout.write(Path('existing.py').read_text())",
+    ],
+    ["test", "-f"],
+    ["grep", "-q"],
+]
+
+
+@pytest.fixture(autouse=True)
+def _verify_steps_are_the_pin(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if request.node.name.startswith("test_real_verify_gate"):
+        return
+    from skep.supervisor import contracts_io, dispatch
+    from skep.workers import runtime_plugins
+
+    decide = runtime_plugins.ShellExecPlugin.decision
+
+    def pinned(self: Any, *, purpose: str, argv: Any, pinned_verify: Any = (), **kw: Any) -> Any:
+        pins = [tuple(argv)] if purpose == "verify" else pinned_verify
+        return decide(self, purpose=purpose, argv=argv, pinned_verify=pins, **kw)
+
+    monkeypatch.setattr(runtime_plugins.ShellExecPlugin, "decision", pinned)
+    mint = contracts_io.mint_task
+
+    def mint_with_verify_prefixes(**kwargs: Any) -> Any:
+        permissions = kwargs.get("permissions") or contracts_io.DEFAULT_PERMISSIONS
+        allowlist = [list(p) for p in permissions.shell_allowlist]
+        allowlist += [p for p in VERIFY_PREFIXES if p not in allowlist]
+        kwargs["permissions"] = permissions.model_copy(update={"shell_allowlist": allowlist})
+        return mint(**kwargs)
+
+    monkeypatch.setattr(dispatch, "mint_task", mint_with_verify_prefixes)
 
 
 def _no_leftovers(repo: Path, worktrees_root: Path) -> None:
@@ -5507,3 +5567,52 @@ def test_tool_plan_narrative_summary_becomes_an_intent_line(
     assert plan_created.payload["intent"] == NARRATIVE_SUMMARY
     assert len(plan_created.payload["steps"][0]) <= 170
     _no_leftovers(repo, config.worktrees_root)
+
+
+def test_real_verify_gate_only_the_pinned_verify_command_fast_paths(repo: Path) -> None:
+    """ES-F3 (B06): the registry fast-paths exactly the task's pinned
+    verify_command; any other argv the worker labels verify — here a sqlite3
+    write like the one that forged an approval row — asks for approval."""
+    pin = f"{sys.executable} -m pytest -q"
+    task = mint_task(workspace=repo, instructions="verify", verify_command=pin)
+    stream = _EventStream(
+        repo / ".events" / f"{task.task_id}.ndjson", task_id=task.task_id, trace_id=task.trace_id
+    )
+    capabilities = CapabilityRegistry(repo, emit=stream.emit, verify_command=task.verify_command)
+    pinned = capabilities.shell_decision_preview({"argv": shlex.split(pin), "purpose": "verify"})
+    assert (pinned.verdict, pinned.reason) == ("allow", "capability.allow.shell_verify")
+    forged = capabilities.shell_decision_preview(
+        {"argv": ["sqlite3", "s.db", "INSERT INTO approvals VALUES (1)"], "purpose": "verify"}
+    )
+    assert forged.verdict == "require_approval"
+    unpinned = CapabilityRegistry(repo, emit=stream.emit).shell_decision_preview(
+        {"argv": shlex.split(pin), "purpose": "verify"}
+    )
+    assert unpinned.verdict == "require_approval"
+
+
+def test_es_f2_snapshot_never_follows_a_symlink_out_of_the_worktree(tmp_path: Path) -> None:
+    """ES-F2 (B126, I5 I12): a tracked `deploy_key.txt -> ~/.ssh/id_rsa` went to
+    the provider in the first plan call, before any tool or card, and stayed
+    in the audit trail. Out-of-tree symlinks (and .env files) are listed by
+    name only; their content never reaches the prompt."""
+    import subprocess
+
+    outside = tmp_path / "home" / ".ssh"
+    outside.mkdir(parents=True)
+    (outside / "id_rsa").write_text("CANARY-SNAPSHOT-KEY", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (repo / "deploy_key.txt").symlink_to(outside / "id_rsa")
+    (repo / ".env").write_text("TOKEN=CANARY-DOTENV", encoding="utf-8")
+    (repo / "inner.txt").symlink_to(repo / "calc.py")  # in-tree link: fine
+    (repo / "SKEP.md").symlink_to(outside / "id_rsa")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+
+    user = _plan_messages(workspace=repo, instructions="x")[1]["content"]
+    assert "CANARY-SNAPSHOT-KEY" not in user
+    assert "CANARY-DOTENV" not in user
+    assert "- deploy_key.txt" in user  # still listed by name
+    assert "--- inner.txt ---\ndef add" in user

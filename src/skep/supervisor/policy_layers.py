@@ -18,6 +18,7 @@ proves parity against v1 on the committed golden seed.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ from .policy_resolver import (
     _under_root,
     engine_v2_scopes,
     managed_repos_root,
+    queen_global_document,
 )
 from .policy_schema import (
     OPERATOR_POLICY_SETTINGS_KEY,
@@ -149,6 +151,20 @@ def template_layer(home: Path) -> Layer | None:
     return state.enforced_layer() if isinstance(state, Ok) else None
 
 
+def queen_template_layer(home: Path) -> Layer | None:
+    """ES-F3 (V5, B03): the baseline as the Queen's host lane composes it —
+    without its ``shell`` ALLOWS, which trust workers in a sandboxed worktree
+    and never the operator's host. ES-F7 (B72): its shell denies and asks
+    still bind the Queen. Knobs and every other scope ride as-is."""
+    layer = template_layer(home)
+    if layer is None:
+        return None
+    return replace(
+        layer,
+        rules=tuple(r for r in layer.rules if r.scope != "shell" or r.verdict != "allow"),
+    )
+
+
 def zero_state_home(store: RunStore) -> bool:
     """first-run O5 (ADR 0056 D2): does this home answer ``no_baseline`` while
     nothing is approved? Yes for a home the store seeded itself (the
@@ -195,10 +211,10 @@ def operator_layers(store: RunStore) -> list[Layer]:
     )
     operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
     return document_layers(
-        base,
+        queen_global_document(base),
         (operator,),
         labels=("policy_document", "operator_policy_document"),
-        template=template_layer(store_home(store)),
+        template=queen_template_layer(store_home(store)),
     )
 
 
@@ -216,6 +232,7 @@ __all__ = [
     "flatten",
     "layers_for_repo",
     "operator_layers",
+    "queen_template_layer",
     "store_home",
     "template_layer",
     "zero_state_home",

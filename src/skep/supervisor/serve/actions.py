@@ -35,8 +35,8 @@ from skep.worker_contract import (
 
 from ..apply import (
     RefreshError,
-    apply_patch_on_branch,
     default_branch,
+    land_patch,
     refresh_clone,
     repo_default_branch,
     resolve_commit,
@@ -106,6 +106,7 @@ from ..roles import (
     tighten,
     within_delegator,
 )
+from ..secret_floor import secret_floor_reason
 from ..shell_prefixes import (
     command_line_segments,
     dangerous_prefix_reason,
@@ -115,6 +116,7 @@ from ..shell_prefixes import (
     is_worker_commit_command,
     normalize_remembered_command,
     queen_command_line_refusal,
+    worker_allowlist_reason,
 )
 from ..store import RunStore
 from ..worktree import TREE_LOCK
@@ -510,6 +512,10 @@ def reverification_warning(reverify: Any) -> str | None:
         return None
     if reverify.outcome == "not_applicable":
         return None
+    if reverify.outcome == "passed" and reverify.worker_outcome == "passed":
+        # ES-F3 (B131): both passed yet unconfirmed only after a landing past
+        # the verified commit (store.unconfirm_reverification) — say that.
+        return f"the landed tree is not the one re-verification confirmed: {reverify.detail}"
     if not reverify.exit_codes:
         return (
             "the supervisor could not re-verify this run "
@@ -1472,19 +1478,16 @@ def land_run(
             detail="run is waiting on a mid-run gate; approve that review first "
             "(approve_review resumes it), then land the completed run",
         )
-    pending = [a for a in store.approvals_for(task_id) if a.status == "pending"]
-    if pending:
-        review_id = pending[0].review_id
-    else:
-        if patch_path(store, task_id) is None:
-            raise HTTPException(
-                status_code=409, detail="nothing to land: this run produced no patch"
-            )
-        review_id = store.enqueue_approval(
-            task_id,
-            action="apply_patch",
-            reason=landing_reason(str(run.get("instructions") or ""), branch),
-        )
+    # ES-F4 (B17): pending-or-new in one store call — concurrent lands share
+    # one review, and apply_patch's claim lets exactly one of them land it.
+    review_id = store.pending_or_enqueue_approval(
+        task_id,
+        action="apply_patch",
+        reason=landing_reason(str(run.get("instructions") or ""), branch),
+        create=patch_path(store, task_id) is not None,
+    )
+    if review_id is None:
+        raise HTTPException(status_code=409, detail="nothing to land: this run produced no patch")
     landed = apply_patch(store, run, review_id, actor, note, branch=branch)
     result: dict[str, Any] = {"action": "applied", "branch": landed}
     # v109-F3: the Aug 3 model re-proposed land_run a minute after this very
@@ -1861,7 +1864,9 @@ def _check_scope_action(scope: str, action: str) -> None:
         raise ValueError(f"scope {scope!r} has no action {action!r}; known: {known}")
 
 
-def _floor_verdict(scope: str, value: str) -> dict[str, Any] | None:
+def _floor_verdict(
+    scope: str, value: str, *, action: str = "", home: Path | None = None
+) -> dict[str, Any] | None:
     """I4: the floor sits ABOVE every document, so it is consulted before
     ``decide()`` ever runs (F1 of the P3 review: the hook answered `ask` for
     `git push`, the one command it exists to refuse). For a shell value the
@@ -1869,7 +1874,15 @@ def _floor_verdict(scope: str, value: str) -> dict[str, Any] | None:
     applied to the Queen's hands, privilege escalation, the catastrophic
     commands) over every segment of the raw command line, and the verdict
     names the registry's floor key — so RSoP, the why-query and the hook all
-    say the same thing. Not a rule: nothing in any layer can lift it."""
+    say the same thing. Not a rule: nothing in any layer can lift it.
+
+    ES-F1 (V3): a filesystem read of a credential file is the secret floor."""
+    if scope == "filesystem" and action == "read":
+        secret = secret_floor_reason(value, skep_home=home)
+        if secret is None:
+            return None
+        key = "floor.secret-reads"
+        return {"verdict": "deny", "rule_id": key, "decided_by": f"floor/{key}", "reason": secret}
     if scope != "shell":
         return None
     reason = queen_command_line_refusal(value)
@@ -1981,7 +1994,7 @@ def _decision_record(
     if chain:
         record["delegation_chain"] = [hop.entry for hop in chain]
     decision: dict[str, Any] | None = None
-    floor = _floor_verdict(scope, value)
+    floor = _floor_verdict(scope, value, action=action, home=holder.current.home)
     if floor is not None:
         decision = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
         record["source"] = "floor"
@@ -2079,6 +2092,22 @@ def baseline_alarm(holder: ConfigHolder, store: RunStore) -> dict[str, str]:
     return baseline_guard(store)
 
 
+def _refuse_worker_writable_layer(path: Path, home: Path) -> None:
+    """ES-F2 (B51): a baseline layer file must come from somewhere no worker
+    writes — a sandboxed worker once re-locked serve's baseline with a layer
+    it wrote into its own worktree. Refused: anything under the supervisor
+    home (its worktrees, results, policy dir) and any legacy workspace-mode
+    worktree (``<repo parent>/.skep/worktrees``)."""
+    parts = path.parts
+    legacy = any(parts[i : i + 2] == (".skep", "worktrees") for i in range(len(parts)))
+    if legacy or path.is_relative_to(home.resolve()):
+        raise ValueError(
+            f"refusing to lock a layer from {path}: it is under a worker-writable root "
+            "(a run worktree or the skep home). Copy it somewhere only you write, read "
+            "it, and approve that copy — or approve a shipped --template"
+        )
+
+
 def baseline_preview(
     home: Path,
     *,
@@ -2106,6 +2135,7 @@ def baseline_preview(
     elif template:
         layer = load_policy_template(template)
     elif file:
+        _refuse_worker_writable_layer(Path(file).expanduser().resolve(), home)
         try:
             layer = PolicyTemplate.model_validate_json(Path(file).expanduser().read_text("utf-8"))
         except OSError as exc:
@@ -2137,12 +2167,23 @@ def approve_policy_baseline(
     One verb on three faces (ADR 0050): ``skep policy approve``, ``POST
     /api/policy/baseline/approve`` and the chat card. ``expect_sha256`` is
     the CLI's guard that what it showed is what gets locked."""
+    layer_override = layer
     layer, view = baseline_preview(
         home, template=template, file=file, reapprove=reapprove, layer=layer
     )
     if expect_sha256 is not None and view["sha256"] != expect_sha256:
         raise ValueError("the baseline changed since it was shown — run approve again")
-    row = write_baseline_lock(home, layer, approved_by=approved_by)
+    if layer_override is not None:
+        source = f"onboard:{layer.template}"
+    elif template:
+        source = f"template:{template}"
+    elif file:
+        source = f"file:{Path(file).expanduser().resolve()}"
+    else:
+        source = "baseline.json (in place)"
+    row = write_baseline_lock(
+        home, layer, approved_by=approved_by, source=source, changes=view["diff"]
+    )
     return {"approved": row, "diff": view["diff"], "table": view["table"]}
 
 
@@ -2278,7 +2319,7 @@ def policy_why(
         "value": value,
         "baseline": status_line(holder.current.home),
     }
-    floor = _floor_verdict(scope, value)
+    floor = _floor_verdict(scope, value, action=action, home=holder.current.home)
     if floor is not None:
         # The floor binds workers AND the Queen (v83-F9): one answer, twice.
         verdict = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
@@ -2305,7 +2346,9 @@ def policy_why(
                 asdict(rule)
                 for rule in (scope_policy.rules if scope_policy else ())
                 if rule.action == action
-                and any(pattern_matches(scope, rule.pattern, part) for part in parts)
+                and any(
+                    pattern_matches(scope, rule.pattern, part, exact=rule.exact) for part in parts
+                )
             ],
         }
     if baseline_guard(store).get(scope) == NO_BASELINE_REASON:
@@ -2355,11 +2398,12 @@ def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> d
             "trust_root": resolved.trust_root,
             # THE allowlist the worker will see, post trust-root logic.
             "shell_allowlist": [list(c) for c in resolved.permissions.shell_allowlist],
-            # v64-F2: verify steps bypass the allowlist entirely; without this
-            # note the Queen burns approval rounds granting pytest for nothing.
+            # v64-F2 / ES-F3: only the pinned verify_command bypasses the
+            # allowlist; a verify LABEL is no grant (B06).
             "shell_verify_note": (
-                "verify-purpose worker commands are always auto-allowed "
-                "(shell_verify); the allowlist applies only to non-verify steps"
+                "only the project's pinned verify_command is auto-allowed "
+                "(shell_verify); every other command, verify-labelled or not, "
+                "needs this allowlist or an approval"
             ),
             "network": list(resolved.permissions.network),
             "allow_git_mutation": resolved.permissions.allow_git_mutation,
@@ -2632,7 +2676,7 @@ def _require_shell_command_prefixes(value: Any, *, field: str) -> list[list[str]
 def _dangerous_shell_prefix_reason(prefix: list[str]) -> str | None:
     # Thin wrapper over the shared guard (v19-F4 dedup); callers keep their
     # own exception type (HTTPException here, ValueError in projects.py).
-    return dangerous_prefix_reason(prefix)
+    return worker_allowlist_reason(prefix)
 
 
 def shell_command_from_approval_reason(reason: object) -> list[str] | None:
@@ -3097,7 +3141,16 @@ def apply_patch(
             raise HTTPException(status_code=400, detail=error)
     else:
         target = f"skep/{task_id}"
-    failure = apply_patch_on_branch(repo, target, patch, task_id=task_id, actor=actor)
+    # ES-F4 (B17): claim the review before git runs — two approves of one
+    # landing each applied, and the loser's failure denied (or 500'd on) a
+    # review that had just landed, telling the operator to re-run it.
+    if not store.claim_approval(review_id):
+        raise landing_taken(store, review_id)
+    try:
+        failure = land_patch(store, repo, target, patch, task_id=task_id, actor=actor)
+    except BaseException:
+        store.unclaim_approval(review_id)
+        raise
     if failure is not None:
         # v81-F3: name the advance instead of shrugging "the repo may have moved".
         base = run.get("base_commit")
@@ -3113,11 +3166,29 @@ def apply_patch(
         # v81-F2: a failed land must not linger as an untouched pending gate —
         # deny it with the failure note; a retry (land_run) enqueues afresh.
         store.resolve_approval(
-            review_id, approved=False, actor=actor, note=f"apply failed: {failure}"
+            review_id, approved=False, actor=actor, note=f"apply failed: {failure}", claimed=True
         )
         raise HTTPException(status_code=409, detail=failure)
-    store.resolve_approval(review_id, approved=True, actor=actor, note=note, landing_branch=target)
+    store.resolve_approval(
+        review_id, approved=True, actor=actor, note=note, landing_branch=target, claimed=True
+    )
     return target
+
+
+def landing_taken(store: RunStore, review_id: str) -> HTTPException:
+    """ES-F4: the 409 for an approve that lost the landing race — it names
+    what won instead of a git error about a branch that already exists."""
+    approval = store.get_approval(review_id)
+    status = approval.status if approval is not None else "gone"
+    if status == "applying":
+        detail = (
+            "this landing is already being applied by another request — its result is the verdict"
+        )
+    elif approval is not None and status == "approved":
+        detail = f"already landed on {approval.landing_branch or 'its branch'}"
+    else:
+        detail = f"approval {review_id!r} already {status}"
+    return HTTPException(status_code=409, detail=detail)
 
 
 # v107-F2: diagnose_run bounds — generous enough for one test file, capped
@@ -3145,7 +3216,7 @@ def diagnose_run(
     card is the trigger (I6), and nothing here can land or push (I1/I4).
     """
     from .. import sandbox
-    from ..worktree import git_metadata_writable_roots
+    from ..worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
     record = store.get_run(task_id)
     if record is None:
@@ -3162,14 +3233,21 @@ def diagnose_run(
         DIAGNOSE_MAX_TIMEOUT_SECONDS,
     )
     argv: list[str] = ["/bin/sh", "-c", command]
-    if config.sandbox and sandbox.available():
+    if config.sandbox:
         profile = config.audit_dir / task_id / "diagnose.profile.sb"
-        sandbox.write_profile(
-            profile,
-            workspace=workspace,
-            extra_writable=git_metadata_writable_roots(workspace),
-            network=sandbox.DENY_ALL_NETWORK,
-        )
+        try:
+            sandbox.write_profile(
+                profile,
+                workspace=workspace,
+                extra_writable=git_metadata_writable_roots(workspace),
+                extra_readable=git_metadata_readable_roots(workspace),
+                network=sandbox.DENY_ALL_NETWORK,
+                skep_home=config.home.parent,
+            )
+        except sandbox.SandboxUnavailableError as exc:
+            # ES-F1 (B47): the kept tree is the worker's output — never run
+            # it on the bare host because the wall happens to be missing.
+            raise ValueError(str(exc)) from exc
         argv = sandbox.wrap_command(argv, profile)
     env = {name: os.environ[name] for name in ("PATH", "HOME") if name in os.environ}
     # F3's lesson applied here too: TMPDIR must live inside the wall.
@@ -3236,7 +3314,7 @@ def resume_crashed_run(
     the operator's confirmed card is the only trigger (I6)."""
     from skep.worker_contract import RESUME_CHECKPOINT_STATE_KEY
 
-    from ..dispatch import _resume_workspace, _worktrees_root, salvaged_checkpoint_version
+    from ..dispatch import _resume_workspace, salvaged_checkpoint_version
     from ..worker_state import resume_worker_state_from_audit
 
     record = store.get_run(task_id)
@@ -3274,9 +3352,7 @@ def resume_crashed_run(
         permissions = permissions.model_copy(update={"network": merged_network})
     repo = Path(record.repo)
     execution_mode = str(record.execution_mode or "sandbox")
-    preserved = _resume_workspace(
-        store, repo, _worktrees_root(config, repo, execution_mode), task_id
-    )
+    preserved = _resume_workspace(store, repo, config.worktrees_root, task_id)
     # Honest fate check (I8): the cursor only holds in the preserved tree.
     state = resume_worker_state_from_audit(config.audit_dir, task_id)
     cursor = None

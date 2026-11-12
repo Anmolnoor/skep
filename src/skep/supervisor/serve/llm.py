@@ -486,6 +486,22 @@ _STREAM_ATTEMPTS = 3
 _RETRY_DELAY_SECONDS = 0.5
 
 
+def _error_detail(response: httpx.Response) -> str:
+    """ES-F7: the provider's own words from an error body — ollama's
+    ``{"error": "..."}``, the OpenAI/Anthropic ``{"error": {"message"}}``,
+    Bedrock's ``{"message"}`` — capped; plain text when it is not JSON."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text.strip()[:300]
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    if isinstance(error, dict):
+        error = error.get("message")
+    return str(error or payload.get("message") or "")[:300]
+
+
 def _open_stream_lines(
     url: str,
     base_url: str,
@@ -504,11 +520,23 @@ def _open_stream_lines(
         ) as response:
             if response.status_code != 200:
                 response.read()
-                if response.status_code in _TRANSIENT_STATUSES and attempt < _STREAM_ATTEMPTS:
+                detail = _error_detail(response)
+                # ES-F7 (B36): a 404 that names a missing model is the model
+                # name, not a v48-F1 flake — retrying only hides it.
+                lowered = detail.lower()
+                missing_model = (
+                    response.status_code == 404 and "model" in lowered and "not found" in lowered
+                )
+                if (
+                    response.status_code in _TRANSIENT_STATUSES
+                    and attempt < _STREAM_ATTEMPTS
+                    and not missing_model
+                ):
                     time.sleep(_RETRY_DELAY_SECONDS * attempt)
                     continue
                 raise OllamaError(
-                    f"{response.status_code} from {base_url}", status=response.status_code
+                    f"{response.status_code} from {base_url}" + (f": {detail}" if detail else ""),
+                    status=response.status_code,
                 )
             yield from response.iter_lines()
             return
@@ -538,7 +566,14 @@ def _ollama_chat_stream(
             timeout=timeout,
         ):
             if line.strip():
-                yield json.loads(line)
+                chunk = json.loads(line)
+                if isinstance(chunk, dict) and chunk.get("error"):
+                    # ES-F6 (B24): a failure after the 200 arrives as an
+                    # {"error"} line; passed through, it read as an empty
+                    # round and drew a stall nudge instead of the provider's
+                    # own words (I8).
+                    raise OllamaError(str(chunk["error"]))
+                yield chunk
     except (httpx.HTTPError, json.JSONDecodeError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
 
@@ -547,12 +582,16 @@ def _final_openai_tool_calls(calls: dict[int, dict[str, str]]) -> list[dict[str,
     normalized: list[dict[str, Any]] = []
     for index in sorted(calls):
         call = calls[index]
+        arguments: Any = call["arguments"]
         try:
-            arguments = json.loads(call["arguments"] or "{}")
+            parsed = json.loads(arguments or "{}")
         except json.JSONDecodeError:
-            arguments = {}
-        if not isinstance(arguments, dict):
-            arguments = {}
+            parsed = None
+        # ES-F8 (B35): text that is not a JSON object stays the raw string —
+        # flattening it to {} ran the call with no arguments, silently. The
+        # chat answers a string with an error row the model can act on.
+        if isinstance(parsed, dict):
+            arguments = parsed
         final: dict[str, Any] = {"function": {"name": call["name"], "arguments": arguments}}
         # v106-F4 (v101-F15): the provider's call id survives normalization —
         # it is the only durable link between a call and its result once
@@ -595,6 +634,56 @@ def _openai_image_message(message: dict[str, Any]) -> dict[str, Any]:
     return {"role": "user", "content": parts}
 
 
+def _call_arguments_json(function: dict[str, Any]) -> str:
+    """History rows carry parsed arguments; the wire wants a JSON string."""
+    arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        return arguments or "{}"
+    return json.dumps(arguments or {}, separators=(",", ":"))
+
+
+def _openai_wire_message(
+    message: dict[str, Any], index: int, unanswered: list[str]
+) -> dict[str, Any]:
+    """Ollama-shaped history row → /v1/chat/completions message.
+
+    History stores tool calls Ollama-native (``arguments`` a dict, no
+    ``type``); chat/completions 400s on that ("arguments of type string"),
+    which broke every preset chat after its first tool call. New dicts only —
+    the stored rows stay Ollama-native for the other protocols.
+
+    ES-F3: native ollama stores calls with no id, and chat/completions needs
+    one on every call and a ``tool_call_id`` on every result. Id-less calls
+    get a synthesized id queued in ``unanswered``; id-less results take them
+    in order — the anthropic FIFO rule for pre-id rows, where results follow
+    their call in emission order.
+    """
+    role = message.get("role")
+    if role == "assistant" and message.get("tool_calls"):
+        calls = []
+        for position, call in enumerate(message["tool_calls"]):
+            function = call.get("function") or {}
+            wire: dict[str, Any] = {
+                "type": "function",
+                "function": {
+                    "name": str(function.get("name") or ""),
+                    "arguments": _call_arguments_json(function),
+                },
+            }
+            wire["id"] = call.get("id") or f"call_skep_{index}_{position}"
+            if not call.get("id"):
+                unanswered.append(wire["id"])
+            calls.append(wire)
+        return {**message, "tool_calls": calls}
+    if role == "tool":
+        # tool_name is Ollama-native; chat/completions pairs by tool_call_id.
+        result = {k: v for k, v in message.items() if k != "tool_name"}
+        if not result.get("tool_call_id") and unanswered:
+            result["tool_call_id"] = unanswered.pop(0)
+        return result
+    return _openai_image_message(message)
+
+
 def _openai_chat_stream(
     base_url: str,
     api_key: str | None,
@@ -604,7 +693,8 @@ def _openai_chat_stream(
     tools: list[dict[str, Any]] | None,
     timeout: float,
 ) -> Iterator[dict[str, Any]]:
-    messages = [_openai_image_message(message) for message in messages]
+    unanswered: list[str] = []
+    messages = [_openai_wire_message(m, i, unanswered) for i, m in enumerate(messages)]
     body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
     if tools:
         body["tools"] = tools
@@ -624,6 +714,13 @@ def _openai_chat_stream(
             if data == "[DONE]":
                 break
             payload = json.loads(data)
+            error = payload.get("error")
+            if error:
+                # ES-F14 (B90): the ES-F6 rule for openai-compat — a failure
+                # after the 200 rides the stream; skipped, a partial reply
+                # read as complete and an error-only one as a stall (I8).
+                detail = error.get("message") if isinstance(error, dict) else None
+                raise OllamaError(str(detail or error))
             for choice in payload.get("choices", []):
                 delta = choice.get("delta") or {}
                 thinking = _openai_delta_thinking(delta)

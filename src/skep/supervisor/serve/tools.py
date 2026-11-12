@@ -302,8 +302,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "list_mcp_servers",
         "Registered MCP servers (id, transport, command/url). MCP tools are "
-        "policy-gated: read-shaped tools run free, everything else needs a "
-        "confirmation or a learned allow rule.",
+        "policy-gated: a read (server-marked read-only AND named get_/list_/"
+        "read_/search_/describe_/show_/find_) runs free, everything else needs "
+        "a confirmation or a learned allow rule.",
         {},
     ),
     _tool(
@@ -748,7 +749,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "stdio servers need a command argv; http servers need a url (an MCP "
         "Streamable HTTP endpoint, usually ending in /mcp; legacy /sse-style "
         "HTTP+SSE servers are not supported). "
-        "scope='email' binds a mail server: its read-shaped tools decide as "
+        "scope='email' binds a mail server: its reads (see list_mcp_servers) decide as "
         "email/read (flow freely), everything else as email/send (cards). "
         "scope='browse' binds a browser server (e.g. command "
         "['npx','@playwright/mcp@latest']): page-state reads like snapshot/"
@@ -801,7 +802,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "registered repo REFUSES (a shell there edits files with no patch "
         "card; use quick_edit or dispatch_run) — and git "
         "push/pull/fetch/commit/checkout and sudo never run from chat and "
-        "can never be granted. Output captured and bounded; 60s cap. For "
+        "can never be granted. A command naming a credential file (~/.ssh, "
+        "~/.aws, .env, skep's own tokens) refuses, no card — like read_file. "
+        "Output captured and bounded; 60s cap. For "
         "something that must keep running, propose start_process instead.",
         {
             "command": {"type": "string", "description": "the exact command, verbatim"},
@@ -1074,7 +1077,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "operator's roots (registered repos, workon'd projects, the skep home) "
         "read immediately; any other path becomes a confirmation card naming "
         "the exact resolved path. Explicit filesystem policy rules win either "
-        "way — a deny refuses outright. BRANCH-AWARE: landed work lives on "
+        "way — a deny refuses outright. Until a policy baseline is approved "
+        "(or while it fails to verify) every read cards. Credential files (~/.ssh, ~/.aws, "
+        ".env, skep's own tokens) are never readable — refused, no card. "
+        "BRANCH-AWARE: landed work lives on "
         "skep/ branches while the clone stays on its default checkout — pass "
         "ref to read a file from any branch/commit; with no ref, a miss falls "
         "back to the project's landing branch automatically (the result's "
@@ -1094,7 +1100,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "search_files",
         "Search file CONTENTS (ripgrep regex) or list matching FILE NAMES "
         "under one directory. Same governance as read_file: operator roots "
-        "run immediately, other paths card, filesystem deny rules refuse.",
+        "run immediately, other paths card, filesystem deny rules refuse. "
+        "Hits in credential files are left out (the result's note says so).",
         {
             "pattern": {
                 "type": "string",
@@ -1150,13 +1157,16 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "promote_tool",
-        "PROPOSE promoting a landed forged plugin to ACTIVE (requires user "
-        "confirmation). On confirm: a sandboxed NO-network trial must list "
+        "PROPOSE promoting a forged plugin to ACTIVE (requires user "
+        "confirmation): a landed forge_tool plugin, OR a shipped seed tool "
+        "(list_plugins shows provenance 'seed' — no authoring run or landing "
+        "needed). On confirm: a sandboxed NO-network trial must list "
         "the server's tools and pass its zero-argument self_test; only then "
-        "is the landed source installed and registered as a stdio MCP server "
-        "whose tools call_mcp_tool can reach. A suspended plugin reactivates "
-        "the same way. Fails honestly (and stays demoted) if the authoring "
-        "run has not landed or the trial fails.",
+        "is the source installed and registered as a stdio MCP server "
+        "whose tools call_mcp_tool can reach (every call runs sandboxed). A "
+        "suspended plugin reactivates the same way. Fails honestly (and stays "
+        "demoted) if a forged plugin's authoring run has not landed or the "
+        "trial fails.",
         {"plugin_id": {"type": "string", "description": "from list_plugins"}},
         ["plugin_id"],
     ),
@@ -1223,7 +1233,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "call_mcp_tool",
-        "Call one tool on a registered MCP server. Read-shaped tools and "
+        "Call one tool on a registered MCP server. Reads (server-marked "
+        "read-only, read-verb name) and "
         "tools covered by an allow rule run immediately; anything else "
         "becomes a confirmation card; a policy deny rule refuses outright.",
         {
@@ -1332,11 +1343,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "allow_shell_command",
         "PROPOSE adding ONE command prefix to the persistent shell allowlist "
-        "(requires user confirmation), e.g. 'npm install'. Worker VERIFY "
-        "commands (purpose 'verify': pytest, python running the tests) NEVER "
-        "need this — they are always auto-allowed (shell_verify); the "
-        "allowlist governs only non-verify steps, so do not propose grants "
-        "for a task's verification. git push, pull, "
+        "(requires user confirmation), e.g. 'npm install'. A worker VERIFY "
+        "step skips the allowlist ONLY when it is exactly the project's "
+        "pinned verify_command (shell_verify; project setup infers the pin) — "
+        "any other command labelled verify is gated like every step, so a "
+        "test runner a project keeps verifying with may need one prefix here; "
+        "pinning verify_command is the better fix. git push, pull, "
         "fetch, add, and commit can NEVER be allowlisted — no allowlist, grant, "
         "or override exists, so never propose one: refreshing a registered repo "
         "from its remote is refresh_repo (supervisor-side), and landing "
@@ -2183,6 +2195,18 @@ UNATTENDED_READ_REFUSAL = (
     "turns read the store only (runs, approvals, chats, notes, memory). "
     "Do web reads in a live chat instead."
 )
+# ES B121: the store writes that ride READ_TOOL_SPECS (they never card), so
+# read_only alone let a scheduled turn — possibly fed a chained script's
+# output — write notes and tasks unattended. Digests and note ticks deliver
+# through the tick itself, never through these tools.
+UNATTENDED_BLOCKED_STORE_WRITES: frozenset[str] = frozenset(
+    {"add_note", "add_task", "complete_task", "reopen_task"}
+)
+UNATTENDED_WRITE_REFUSAL = (
+    "does not run unattended — this turn (a schedule tick or a run-finished "
+    "follow-up) fires whether or not anyone is watching, so it may read the "
+    "store but never write to it. Put what you would note in your reply."
+)
 
 # -- v74-F3: progressive tool disclosure --------------------------------------
 # The R4 round made every description a mini-manual; the manual is right, the
@@ -2708,6 +2732,7 @@ def _queen_shell_lane(
     repo cwds refuse flat (daemons do not belong in checkouts)."""
     from ..policy_resolver import resolve_operator_policy
     from ..policy_schema import DEFAULT_DENY_RULE_ID
+    from ..secret_floor import shell_secret_floor_reason
     from ..shell_prefixes import queen_command_line_refusal
 
     if not command.strip():
@@ -2722,6 +2747,16 @@ def _queen_shell_lane(
             reason="shell.deny.queen_guard",
             detail=reason,
             decided_by="queen-shell-guard",
+        )
+    # ES-F8 (B73): the secret floor, like read_file's — a line naming a
+    # credential path refuses before any rule, grant or card is consulted.
+    secret = shell_secret_floor_reason(command, cwd=cwd, skep_home=holder.current.home)
+    if secret is not None:
+        return AutonomyDecision(
+            verdict="deny",
+            reason="shell.deny.secret_floor",
+            detail=secret,
+            decided_by="floor/floor.secret-reads",
         )
     policy = resolve_operator_policy(store)
     repo = _cwd_registered_repo(store, holder, cwd)
@@ -2866,7 +2901,12 @@ def _get_run_guidance(
 
 
 def execute_read_tool(
-    name: str, args: dict[str, Any], *, store: RunStore, holder: ConfigHolder
+    name: str,
+    args: dict[str, Any],
+    *,
+    store: RunStore,
+    holder: ConfigHolder,
+    chat_id: str | None = None,
 ) -> Any:
     if name == DESCRIBE_TOOL_NAME:
         # v74-F3: on-demand schema fetch. The chat engine persists the
@@ -2950,14 +2990,19 @@ def execute_read_tool(
         if config is None:
             return {"error": f"no MCP server {server_id!r}; register_mcp_server first"}
         try:
-            tools = MCPClient(config, runner=runner_for_config(config)).list_tools()
+            tools = MCPClient(
+                config, runner=runner_for_config(config, skep_home=holder.current.home.parent)
+            ).list_tools()
         except MCPError as exc:
             return {"error": str(exc)}
         from ..mcp_client import classify_browse_action
 
         views = []
+        # ES (B122): the policy column is the verdict a call from THIS chat
+        # gets — the role layer included.
+        role = _chat_role(store, holder, chat_id)
         for tool in tools:
-            decision = mcp_scope_decision(store, tool)
+            decision = mcp_scope_decision(store, tool, role=role)
             views.append(
                 {
                     "name": tool.name,
@@ -3785,7 +3830,8 @@ def _execute_mutation(
         }
         try:
             handshake = MCPClient(
-                browser_config, runner=runner_for_config(browser_config)
+                browser_config,
+                runner=runner_for_config(browser_config, skep_home=holder.current.home.parent),
             ).list_tools()
             result_view["tools"] = [tool.name for tool in handshake]
         except MCPError as exc:
@@ -4014,7 +4060,7 @@ def _execute_mutation(
         if fast_requested:
             from .fastlane import run_code_fast
 
-            fast = run_code_fast(language, str(args["code"]))
+            fast = run_code_fast(language, str(args["code"]), skep_home=holder.current.home.parent)
             if fast is not None:
                 return fast
         # v106-F7: the caller may raise the wall clock up to the ceiling —
@@ -4084,6 +4130,7 @@ def _execute_mutation(
                 path=str(args["path"]),
                 target=str(args.get("target") or "content"),
                 file_glob=None if args.get("file_glob") is None else str(args["file_glob"]),
+                skep_home=holder.current.home,
             ),
             "decided_by": last_guard.decided_by,
         }
@@ -4366,7 +4413,10 @@ def _execute_mutation(
         if last_guard.verdict == "deny":
             raise ValueError(f"denied by policy: {last_guard.decided_by or last_guard.reason}")
         try:
-            client = MCPClient(server_config, runner=runner_for_config(server_config))
+            client = MCPClient(
+                server_config,
+                runner=runner_for_config(server_config, skep_home=holder.current.home.parent),
+            )
             call = client.call_tool(tool_name, _object_arg(args, "arguments"))
         except MCPError as exc:
             raise ValueError(str(exc)) from exc
@@ -5138,6 +5188,20 @@ def mutation_execution_decision(
         role = _chat_role(store, holder, chat_id)
     except ValueError as exc:
         return AutonomyDecision(verdict="deny", reason="role.deny.unloadable", detail=str(exc))
+    if name == "run_schedule_now":
+        # ES (B122): a disabled/unknown schedule can only fail on confirm —
+        # refuse now, without a card, and tell the model why.
+        schedule = store.get_schedule(str(args.get("name") or ""))
+        if schedule is None or not schedule.enabled:
+            return AutonomyDecision(
+                verdict="deny",
+                reason="schedule.deny.not_runnable",
+                detail=(
+                    f"no schedule named {args.get('name')!r} — list_schedules shows them"
+                    if schedule is None
+                    else f"schedule {schedule.name!r} is disabled — set_schedule_enabled first"
+                ),
+            )
     if name == "call_mcp_tool":
         # v40-F10: the resolved mcp scope decides — allow runs inside the
         # turn, require_approval cards, deny refuses without a card.

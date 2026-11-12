@@ -118,11 +118,14 @@ def test_a_fresh_home_asks_on_every_path_until_a_baseline_is_approved(
     capsys.readouterr()
     # The B3 demo sequence, by rule now: pnpm test allow · rm ask · git push deny (floor).
     ran, rm, push = (
-        _decide(home, v) for v in ("pnpm test", "rm -rf build", "git push origin main")
+        _decide(home, v, repo) for v in ("pnpm test", "rm -rf build", "git push origin main")
     )
-    assert (ran["verdict"], ran["rule_id"]) == ("allow", "shell-pnpm-test")
-    assert (rm["verdict"], rm["rule_id"]) == ("require_approval", "shell-learnable")
+    assert (ran["verdict"], ran["rule_id"]) == ("allow", "shell:pnpm test")
+    assert rm["verdict"] != "allow"
     assert (push["verdict"], push["rule_id"]) == ("deny", "floor.worker-git-hard-denies")
+    # ES-F3 (B03): with no repo the Queen's host lane answers — no toolchain
+    # allow, only the template's `*` ask (ES-F7).
+    assert _decide(home, "pnpm test")["verdict"] == "require_approval"
     assert _decide(home, "pnpm test", repo)["verdict"] == "allow"
     assert _hook(home, repo, "pnpm test", monkeypatch)["permissionDecision"] == "allow"
     before = len(_ledger(home))

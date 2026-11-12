@@ -319,6 +319,10 @@ def resolve_stack(layers: Sequence[Layer]) -> ResolvedStack:
                         rule_id=rule.rule_id,
                         action=rule.action,
                         pattern=rule.pattern,
+                        exact=rule.learned and rule.scope == "shell",
+                        # ES-F5 (B34): a baseline rule names the baseline in
+                        # every verdict, not the document decide() is given.
+                        layer=layer.label if layer.name == "template" else None,
                     ),
                     layer.label,
                 )

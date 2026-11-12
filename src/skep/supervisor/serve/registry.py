@@ -18,7 +18,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ...profile import load_profile, profile_path, run_personal_setup
@@ -34,7 +34,14 @@ from ..projects import (
     project_to_dict,
     validate_project_definition,
 )
-from ..scheduler import make_schedule, make_template_schedule, parse_interval, validate_chain
+from ..scheduler import (
+    make_schedule,
+    make_template_schedule,
+    next_run_after,
+    now_ts,
+    parse_interval,
+    validate_chain,
+)
 from ..skill_cmds import SkillError, approve, propose, reject, run_candidate_test
 from ..store import RunStore
 from ..template_suggestion import TemplateSuggestion, suggest_template
@@ -45,6 +52,7 @@ from ..templates import (
     template_to_dict,
     validate_template,
 )
+from .auth import annotate_claim, principal
 from .settings import ConfigHolder
 
 _SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -85,7 +93,7 @@ class OpsRunRequest(BaseModel):
     node_id: str
     capability: str
     arguments: dict[str, Any] = Field(default_factory=dict)
-    actor: str = "operator"
+    actor: str | None = None  # ES-F1: ignored; the principal is recorded
 
 
 class NodeRequest(BaseModel):
@@ -151,7 +159,7 @@ class SkillTestRequest(BaseModel):
 
 
 class SkillDecision(BaseModel):
-    actor: str = "operator"
+    actor: str | None = None  # ES-F1: a claim, annotation only
     note: str | None = None
     as_name: str | None = None
 
@@ -861,6 +869,13 @@ def _carry_forward_existing(
     return {**stored.policy, **base_policy}, [*bindings, *kept]
 
 
+def _first_slot(every: str) -> str:
+    """ES B99: a SEEDED schedule first fires one interval from now. Nobody
+    asked for it — `/workon` dispatched an unasked coding run ~1 s after
+    setup when seeds were eligible on the next tick."""
+    return next_run_after(now_ts(), parse_interval(every))
+
+
 def setup_project_record(
     *,
     run_store: RunStore,
@@ -985,6 +1000,7 @@ def setup_project_record(
                             repo=schedule_repo,
                             interval_seconds=parse_interval(schedule_seed.every),
                             enabled=schedule_seed.enabled,
+                            start_at=_first_slot(schedule_seed.every),
                         )
                     else:
                         assert schedule_seed.instructions is not None
@@ -994,6 +1010,7 @@ def setup_project_record(
                             instructions=schedule_seed.instructions,
                             interval_seconds=parse_interval(schedule_seed.every),
                             enabled=schedule_seed.enabled,
+                            start_at=_first_slot(schedule_seed.every),
                         )
                     run_store.add_schedule(schedule)
                     seeded_schedules.append(_schedule_view(run_store, schedule))
@@ -1011,6 +1028,7 @@ def setup_project_record(
                         repo=schedule_repo,
                         instructions=project_schedule_seed.instructions,
                         interval_seconds=parse_interval(project_schedule_seed.every),
+                        start_at=_first_slot(project_schedule_seed.every),
                     )
                     run_store.add_schedule(schedule)
                     seeded_schedules.append(_schedule_view(run_store, schedule))
@@ -1411,7 +1429,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
         }
 
     @app.post("/api/ops/run")
-    def ops_run(body: OpsRunRequest) -> dict[str, Any]:
+    def ops_run(body: OpsRunRequest, request: Request) -> dict[str, Any]:
         from ...workers.ops_executor import OpsExecutionError, execute_ops
         from ..policy_resolver import resolve_ops_decision
 
@@ -1441,7 +1459,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
             "output": result.output,
             "error": result.error,
             "evidence": result.evidence,
-            "actor": body.actor,
+            "actor": principal(request),
         }
 
     @app.post("/api/schedules", status_code=201)
@@ -1464,18 +1482,18 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                 )
             try:
                 validate_chain(run_store, name=body.name, chain=body.chain)
+                schedule = make_schedule(
+                    name=body.name,
+                    repo="",
+                    instructions=body.instructions,
+                    interval_seconds=interval,
+                    worker_kind=body.caste,
+                    once=body.once,
+                    start_at=body.start_at,
+                    chain=body.chain,
+                )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            schedule = make_schedule(
-                name=body.name,
-                repo="",
-                instructions=body.instructions,
-                interval_seconds=interval,
-                worker_kind=body.caste,
-                once=body.once,
-                start_at=body.start_at,
-                chain=body.chain,
-            )
             run_store.add_schedule(schedule)
             return _schedule_view(run_store, schedule)
         if body.repo is None:
@@ -1661,19 +1679,28 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
         return {"candidate": _candidate_view(candidate), "passed": result.passed}
 
     @app.post("/api/skills/{name}/approve")
-    def approve_skill(name: str, body: SkillDecision) -> dict[str, Any]:
+    def approve_skill(name: str, body: SkillDecision, request: Request) -> dict[str, Any]:
         try:
             candidate, target = approve(
-                run_store, name, actor=body.actor, note=body.note, registry_name=body.as_name
+                run_store,
+                name,
+                actor=principal(request),
+                note=annotate_claim(body.note, body.actor),
+                registry_name=body.as_name,
             )
         except SkillError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"candidate": _candidate_view(candidate), "template": target}
 
     @app.post("/api/skills/{name}/reject")
-    def reject_skill(name: str, body: SkillDecision) -> dict[str, Any]:
+    def reject_skill(name: str, body: SkillDecision, request: Request) -> dict[str, Any]:
         try:
-            candidate = reject(run_store, name, actor=body.actor, note=body.note)
+            candidate = reject(
+                run_store,
+                name,
+                actor=principal(request),
+                note=annotate_claim(body.note, body.actor),
+            )
         except SkillError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"candidate": _candidate_view(candidate)}

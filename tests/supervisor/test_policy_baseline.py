@@ -238,11 +238,12 @@ def test_the_baseline_is_the_enforced_template_layer(config: SupervisorConfig, r
         # unset passes through: a knob the baseline does not set is untouched.
         mode = resolve_stack(layers).knobs["default_execution_mode"]
         assert mode.value == "workspace" and mode.enforced_by is None
-        # The rules ride the same slot: the Queen-side stack answers from them.
+        # The rules ride the same slot: the Queen-side stack answers from them —
+        # all but the worker shell allows, which never reach the host lane
+        # (ES-F3); the template's `*` shell ask still does (ES-F7).
         operator = resolve_operator_policy(store)
-        assert operator.decision("shell", "run", "uv run pytest -q").rule_id == (
-            "shell-uv-run-pytest"
-        )
+        assert operator.decision("network", "fetch", "example.com").rule_id == "net-fetch-gated"
+        assert operator.decision("shell", "run", "uv run pytest -q").rule_id == "shell-learnable"
         assert operator.fail_closed == {}
     finally:
         store.close()
@@ -364,7 +365,7 @@ def test_rest_reads_and_approves_the_baseline(config: SupervisorConfig) -> None:
     bad = client.post("/api/policy/baseline/approve", json={"template": "warp"})
     assert bad.status_code == 400 and "no policy template" in bad.json()["detail"]
     ok = client.post("/api/policy/baseline/approve", json={"template": "operator"})
-    assert ok.status_code == 200 and ok.json()["approved"]["approved_by"] == "api"
+    assert ok.status_code == 200 and ok.json()["approved"]["approved_by"] == "operator"
     view = client.get("/api/policy/baseline").json()
     assert view["state"] == "ok" and view["template"] == "operator"
     assert view["line"].startswith("baseline: operator approved ")
@@ -504,7 +505,8 @@ def test_the_floor_wins_over_an_approved_baseline_that_reaches_for_it(
          "rule_id": "shell-everything"}
     )  # fmt: skip
     pb.write_lock(config.home, pb._load_layer(wide), approved_by="op")
-    assert _decide(config, scope="shell", action="run", value="make")["verdict"] == "allow"
+    # ES-F3: a baseline's shell rules bind workers, not the Queen's host lane.
+    assert _decide(config, scope="shell", action="run", value="make")["verdict"] == "deny"
     for command, key in (
         ("git push origin main", "floor.worker-git-hard-denies"),
         ("sudo make install", "floor.never-grantable-prefixes"),
@@ -646,3 +648,48 @@ def test_the_rest_face_of_approve_refuses_what_argparse_cannot_see(tmp_path: Pat
     pb.baseline_path(home).unlink()
     with pytest.raises(ValueError, match=r"no baseline\.json to re-approve"):
         baseline_preview(home, reapprove=True)
+
+
+def test_a_relock_from_a_worker_writable_file_is_refused_and_a_relock_reads_as_a_change(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ES-F2 (B51, fedora-p1-05/-09): a worker wrote an allow-everything layer
+    into its worktree and re-locked it through the approve verb; the status
+    read clean afterwards. A layer file under a worker-writable root is now
+    refused on every face, and a re-lock that changes content is a recorded
+    change event the status line and doctor name — never a clean read."""
+    from skep.status import _baseline_advisories
+
+    skep_home = tmp_path / "skephome"
+    base = ["--home", str(skep_home), "policy"]
+    home = build_config(skep_home, None).home
+    assert main([*base, "approve", "--template", "builder", "--yes"]) == 0
+    evil = load_policy_template("builder").model_dump(mode="json")
+    evil["settings"]["default_network"] = ["*"]
+    for writable in (
+        home / "worktrees" / "01abc" / "evil.json",  # sandbox-mode worktree
+        tmp_path / ".skep" / "worktrees" / "01abc" / "evil.json",  # legacy workspace mode
+    ):
+        writable.parent.mkdir(parents=True)
+        writable.write_text(json.dumps(evil))
+        capsys.readouterr()
+        rc = main([*base, "approve", "--file", str(writable), "--reapprove", "--yes"])
+        assert rc != 0
+        assert "worker-writable" in capsys.readouterr().err
+    assert pb.baseline_status(home)["relock"] is None
+
+    outside = tmp_path / "operator" / "layer.json"
+    outside.parent.mkdir()
+    outside.write_text(json.dumps(evil))
+    assert main([*base, "approve", "--file", str(outside), "--reapprove", "--yes"]) == 0
+    capsys.readouterr()
+    row = _approvals(home)[-1]
+    assert row["source"] == f"file:{outside.resolve()}"
+    assert row["changes"] and "default_network" in row["changes"][0]
+    view = pb.baseline_status(home)
+    assert view["state"] == "ok" and view["relock"]["source"] == row["source"]
+    assert main([*base, "baseline", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "RE-LOCKED" in out and "default_network" in out
+    advisories = _baseline_advisories(skep_home)
+    assert any("re-locked" in line and str(outside.resolve()) in line for line in advisories)

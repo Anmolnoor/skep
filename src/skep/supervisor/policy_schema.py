@@ -162,6 +162,14 @@ class ResolvedRule:
     rule_id: str
     action: str
     pattern: str
+    # ES-F4 (V8, B04): a learned shell grant covers the exact command line
+    # the operator approved, not every line that starts with it. Deliberate
+    # prefix rules (operator document, templates, run allowlists) stay False.
+    exact: bool = False
+    # ES-F5 (B34): the layer that stated a rule when it is not the document
+    # ``decide()`` is labelled by — the approved baseline (``template:<name>``).
+    # None keeps the document label, so v1 and v2 answer alike.
+    layer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -238,8 +246,9 @@ def shell_segments(value: str) -> list[str] | None:
     return [" ".join(seg) for seg in found] or [value]
 
 
-def pattern_matches(scope: str, pattern: str, value: str) -> bool:
-    """Does ``pattern`` cover ``value`` under this scope's matcher?"""
+def pattern_matches(scope: str, pattern: str, value: str, *, exact: bool = False) -> bool:
+    """Does ``pattern`` cover ``value`` under this scope's matcher?
+    ``exact`` (learned shell grants, ES-F4): the whole argv, not a prefix."""
     if pattern == "*":
         return True
     if scope == "network":
@@ -247,6 +256,8 @@ def pattern_matches(scope: str, pattern: str, value: str) -> bool:
     if scope == "shell":
         want = _shell_tokens(pattern)
         got = _shell_tokens(value)
+        if exact:
+            return got == want
         return len(got) >= len(want) and got[: len(want)] == want
     # coding / filesystem / mcp / email: glob over paths and tool names.
     return fnmatch(value, pattern)
@@ -320,7 +331,11 @@ def resolve(
         vet_learned_rule(rule, rules[rule.scope])
         rules[rule.scope].append(
             ResolvedRule(
-                verdict="allow", rule_id=rule.rule_id, action=rule.action, pattern=rule.pattern
+                verdict="allow",
+                rule_id=rule.rule_id,
+                action=rule.action,
+                pattern=rule.pattern,
+                exact=rule.scope == "shell",
             )
         )
     result = {
@@ -388,7 +403,7 @@ def decide(
     matches = [
         rule
         for rule in (scope_policy.rules if scope_policy else ())
-        if rule.action == action and pattern_matches(scope, rule.pattern, value)
+        if rule.action == action and pattern_matches(scope, rule.pattern, value, exact=rule.exact)
     ]
     if not matches:
         return PolicyDecision(
@@ -404,7 +419,7 @@ def decide(
     return PolicyDecision(
         verdict=winner.verdict,
         rule_id=winner.rule_id,
-        decided_by=f"{label}/{winner.rule_id}",
+        decided_by=f"{winner.layer or label}/{winner.rule_id}",
         scope=scope,
         action=action,
     )

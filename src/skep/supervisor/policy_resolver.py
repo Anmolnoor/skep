@@ -871,8 +871,9 @@ class ResolvedOperatorPolicy:
     Not a run policy: no repo, no caste, no Permissions/Budget — the Queen is
     a persistent in-process agent, not a contract-governed worker. The
     resolution composes the stored GLOBAL document (templates + learned
-    rules keep their effect) with the operator document overlay (Queen-only
-    rules workers never read); deny wins ties across both.
+    rules keep their effect — except a template's worker shell allows, ES-F3)
+    with the operator document overlay (Queen-only rules workers never
+    read); deny wins ties across both.
     """
 
     template: str | None
@@ -897,6 +898,24 @@ class ResolvedOperatorPolicy:
         )
 
 
+def queen_global_document(document: PolicyDocument) -> PolicyDocument:
+    """ES-F3 (V5, B03): the global document as the Queen's host lane sees it.
+
+    Its ``shell`` allows are a template's (``skep setup --template`` writes
+    them) and were written for sandboxed workers in a disposable worktree —
+    npm/uv/pytest on the operator's host is a different promise. ES-F7
+    (B72): only the allows leave; a shell deny or ask there still binds the
+    Queen. Learned rules stay: those are grants the operator gave the Queen."""
+    return document.model_copy(
+        update={
+            "scopes": [
+                s.model_copy(update={"allow": []}) if s.scope == "shell" else s
+                for s in document.scopes
+            ]
+        }
+    )
+
+
 def resolve_operator_policy(store: RunStore) -> ResolvedOperatorPolicy:
     """Load and compose the Queen's standing policy.
 
@@ -908,15 +927,15 @@ def resolve_operator_policy(store: RunStore) -> ResolvedOperatorPolicy:
         document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
     )
     operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
-    from .policy_layers import baseline_guard, store_home, template_layer
+    from .policy_layers import baseline_guard, queen_template_layer, store_home
 
     return ResolvedOperatorPolicy(
         template=base.template or operator.template,
         resolved_scopes=resolve(
-            base,
+            queen_global_document(base),
             overlays=(operator,),
             v2_scopes=engine_v2_scopes(store),
-            template=template_layer(store_home(store)),
+            template=queen_template_layer(store_home(store)),
         ),
         fail_closed=baseline_guard(store),
     )

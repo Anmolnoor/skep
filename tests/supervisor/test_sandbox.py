@@ -266,6 +266,7 @@ def test_network_allowlist_enforced_end_to_end(tmp_path: Path, origin_port: int)
         profile = sandbox.write_profile(
             tmp_path / "allow.sb",
             workspace=workspace,
+            skep_home=tmp_path / "skep-home",
             network=sandbox.NetworkPolicy(allow=("localhost",)),
             proxy_port=allow_proxy.port,
         )
@@ -284,6 +285,7 @@ def test_network_allowlist_enforced_end_to_end(tmp_path: Path, origin_port: int)
         profile = sandbox.write_profile(
             tmp_path / "deny.sb",
             workspace=workspace,
+            skep_home=tmp_path / "skep-home",
             network=sandbox.NetworkPolicy(allow=("pypi.org",)),
             proxy_port=deny_proxy.port,
         )

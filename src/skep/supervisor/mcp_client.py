@@ -14,10 +14,13 @@ module only discovers and calls; authorization lives in the capability engine.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import subprocess
+    from pathlib import Path
+
     from .autonomy import AutonomyDecision
     from .policy_schema import Scope
     from .roles import Role
@@ -66,6 +69,9 @@ class MCPTool:
     name: str
     description: str
     input_schema: dict[str, object] = field(default_factory=dict)
+    # ES (B09): the server's ``annotations.readOnlyHint`` — True only when the
+    # server says so; None = not looked up yet (a bare name from a call).
+    read_only: bool | None = None
 
     @property
     def capability_id(self) -> str:
@@ -81,9 +87,14 @@ class MCPCallResult:
 
 # Keyword heuristics for classifying an MCP tool's risk (highest wins). A tool
 # the heuristic can't place is "unknown" — which FAILS CLOSED (v39-F1): it
-# needs an approval like any risky class, because auto-allowing a name we
-# could not even classify is how a live MCP server would slip a side effect
-# past the gate. Only read-shaped names keep the v17 auto-allow ergonomic.
+# needs an approval like any risky class.
+#
+# ES (B09, P0): keywords match whole name TOKENS, never substrings — "get"
+# inside tar*get*/bud*get*/for*get* once made `target_account_purge` a read
+# that ran on the host with no card. And "read" is affirmative: the server
+# must mark the tool ``readOnlyHint`` AND its LEADING verb must be a read
+# verb. `query`/`fetch` are deliberately not read verbs (`run_query`, a fetch
+# egresses); anything else asks until the operator runs allow_mcp_tool.
 _MCP_EXTERNAL_KEYWORDS = ("send", "post", "email", "notify", "publish", "deploy", "sms", "exec")
 _MCP_NETWORK_KEYWORDS = ("http", "url", "fetch", "download", "browse", "web", "request")
 _MCP_WRITE_KEYWORDS = (
@@ -97,7 +108,16 @@ _MCP_WRITE_KEYWORDS = (
     "set",
     "put",
 )
-_MCP_READ_KEYWORDS = ("read", "list", "get", "search", "query", "describe", "status", "show")
+_MCP_READ_VERBS = ("get", "list", "read", "search", "describe", "show", "find")
+
+
+def _name_tokens(name: str) -> list[str]:
+    """``getUser`` / ``get_user`` / ``get-user`` → ``["get", "user"]``."""
+    import re
+
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    return [token for token in re.split(r"[^a-z0-9]+", spaced.lower()) if token]
+
 
 # v71-F2: a browse-bound server's page-STATE reads. Deliberately tight — a
 # name matching none of these is an act (fail closed): navigation is an
@@ -113,21 +133,23 @@ def classify_browse_action(tool_name: str) -> str:
 
 
 def classify_mcp_risk(tool: MCPTool) -> str:
-    """Classify an MCP tool into a capability risk class from its name.
+    """Classify an MCP tool into a capability risk class.
 
-    Priority external_side_effect > network > write > read > unknown. An
-    unknown tool requires approval (fail closed); a project may grant the
-    ``unknown`` risk explicitly — a visible policy act, never a default.
+    ``read`` only for a server-marked read-only tool whose leading verb is a
+    read verb (B09). Otherwise external_side_effect > network > write >
+    unknown by whole name token. Every non-read class requires approval
+    (fail closed); a project may grant a risk explicitly — a visible act.
     """
-    name = tool.name.lower()
-    if any(keyword in name for keyword in _MCP_EXTERNAL_KEYWORDS):
-        return "external_side_effect"
-    if any(keyword in name for keyword in _MCP_NETWORK_KEYWORDS):
-        return "network"
-    if any(keyword in name for keyword in _MCP_WRITE_KEYWORDS):
-        return "write"
-    if any(keyword in name for keyword in _MCP_READ_KEYWORDS):
+    tokens = _name_tokens(tool.name)
+    if tool.read_only is True and tokens and tokens[0] in _MCP_READ_VERBS:
         return "read"
+    for risk, keywords in (
+        ("external_side_effect", _MCP_EXTERNAL_KEYWORDS),
+        ("network", _MCP_NETWORK_KEYWORDS),
+        ("write", _MCP_WRITE_KEYWORDS),
+    ):
+        if any(token in keywords for token in tokens):
+            return risk
     return "unknown"
 
 
@@ -222,12 +244,15 @@ class MCPClient:
             if not name:
                 continue
             schema = entry.get("inputSchema")
+            annotations = entry.get("annotations")
             tools.append(
                 MCPTool(
                     server_id=self._config.server_id,
                     name=name,
                     description=str(entry.get("description") or ""),
                     input_schema=dict(schema) if isinstance(schema, dict) else {},
+                    read_only=isinstance(annotations, dict)
+                    and annotations.get("readOnlyHint") is True,
                 )
             )
         return tools
@@ -243,6 +268,11 @@ class MCPClient:
 
 
 # -- v40-F10 (v36-F6): the engine goes live ---------------------------------
+
+# ES (B112): ONE total deadline per MCP exchange. httpx's timeout is per
+# read, so a server streaming SSE keep-alives never trips it — a Queen turn
+# hung > 10 min and held serve's shutdown (lane F3 f3-33).
+MCP_CALL_DEADLINE_SECONDS: float = 30
 
 # Registered servers persist as a settings key (JSON-in-settings, the house
 # storage pattern — no new table).
@@ -318,7 +348,7 @@ def _jsonrpc_result(message: Mapping[str, object]) -> Mapping[str, object]:
     return result if isinstance(result, Mapping) else {}
 
 
-def runner_for_config(config: MCPServerConfig) -> MCPRunner:
+def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None) -> MCPRunner:
     """A one-shot JSON-RPC runner per transport (tests monkeypatch this seam).
 
     ponytail: one-shot per call (initialize -> request -> done) — a persistent
@@ -337,10 +367,15 @@ def runner_for_config(config: MCPServerConfig) -> MCPRunner:
         url = config.url or ""
 
         def run_http(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+            import time
+
             # The spec requires both accept types; official SDK servers 406 without.
             headers = {"Accept": "application/json, text/event-stream"}
+            budget = MCP_CALL_DEADLINE_SECONDS
+            deadline = time.monotonic() + budget
             try:
-                with httpx.Client(timeout=30) as client:
+                # The per-read timeout bounds silence; the deadline bounds a trickle.
+                with httpx.Client(timeout=budget) as client:
                     with client.stream(
                         "POST",
                         url,
@@ -393,6 +428,8 @@ def runner_for_config(config: MCPServerConfig) -> MCPRunner:
                             # Parse incrementally and stop at our response — a
                             # keep-alive stream must not run out the clock.
                             for line in response.iter_lines():
+                                if time.monotonic() > deadline:
+                                    raise MCPError(f"http MCP call passed its {budget:g}s deadline")
                                 if not line.startswith("data:"):
                                     continue
                                 try:
@@ -431,13 +468,16 @@ def runner_for_config(config: MCPServerConfig) -> MCPRunner:
             {"jsonrpc": "2.0", "id": 2, "method": method, "params": dict(params)},
         ]
         payload = "".join(json.dumps(r) + "\n" for r in requests)
-        proc = subprocess.run(
-            list(config.command),
-            input=payload,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        if not config.server_id.startswith(FORGED_SERVER_PREFIX):
+            proc = subprocess.run(
+                list(config.command),
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        else:
+            proc = _run_forged_sandboxed(config, payload, skep_home)
         for line in proc.stdout.splitlines():
             line = line.strip()
             if not line:
@@ -453,6 +493,86 @@ def runner_for_config(config: MCPServerConfig) -> MCPRunner:
     return run
 
 
+# ES (B115): promote_tool registers every activated forged/seed tool as
+# ``forge-<plugin_id>``; those servers never run on the bare host.
+FORGED_SERVER_PREFIX = "forge-"
+
+
+def _run_forged_sandboxed(
+    config: MCPServerConfig, payload: str, skep_home: Path | None
+) -> subprocess.CompletedProcess[str]:
+    """Run one call of an activated forged tool inside the sandbox its trial
+    used: writes confined to a throwaway workspace, a scrubbed env (serve.env
+    keys never reach it), no backend → refuse (fail closed, I12). Network
+    stays open — an ACTIVE plugin may use it (plugin_can_run); the trial's
+    no-network shape is the gate before activation, not after.
+
+    ponytail: allow-all egress — a per-tool domain allowlist through the
+    FilteringProxy is the upgrade path once tools declare their hosts.
+    """
+    import os
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from . import sandbox
+
+    probe = sandbox.availability()
+    if not probe.usable:
+        raise MCPError(
+            f"forged tool {config.server_id!r} runs only inside the sandbox, and no "
+            f"sandbox backend is usable here ({probe.reason})"
+        )
+    if skep_home is None:
+        # The profile hides THIS home's secrets; guessing it is how #58's fast
+        # lane leaked (Mac finding A). No home, no run (fail closed, I12).
+        raise MCPError(f"forged tool {config.server_id!r} needs its skep home to run sandboxed")
+    with tempfile.TemporaryDirectory(prefix="skep-forged-") as tmp:
+        workspace = Path(tmp)
+        profile = sandbox.write_profile(
+            workspace / "sandbox.profile",
+            workspace=workspace,
+            network=sandbox.ALLOW_ALL_NETWORK,
+            skep_home=skep_home,
+        )
+        env = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
+        env.update(HOME=str(workspace), TMPDIR=str(workspace))
+        return subprocess.run(
+            sandbox.wrap_command(list(config.command), profile),
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=workspace,
+            env=env,
+        )
+
+
+def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:
+    """B09: a bare tool name from a call carries no ``readOnlyHint``; ask the
+    server's own tools/list. Only a read-verb name can become a read, so only
+    those pay the lookup; any failure leaves the tool not-read-only (asks).
+
+    ponytail: one live tools/list per read-verb decision — cache per server
+    if MCP call volume makes the extra round trip matter.
+    """
+    if tool.read_only is not None:
+        return tool
+    tokens = _name_tokens(tool.name)
+    read_only = False
+    config = load_mcp_servers(store).get(tool.server_id)
+    # A browse server classifies by its own page-state list (v71-F2).
+    if config is not None and config.scope != "browse" and tokens and tokens[0] in _MCP_READ_VERBS:
+        try:
+            listed = MCPClient(
+                config, runner=runner_for_config(config, skep_home=store.db_path.parent.parent)
+            ).list_tools()
+        except Exception:  # an unreachable server cannot vouch for a read
+            listed = []
+        read_only = any(entry.name == tool.name and entry.read_only for entry in listed)
+    return replace(tool, read_only=read_only)
+
+
 def mcp_tool_scope_action(store: RunStore, tool: MCPTool) -> tuple[Scope, str]:
     """The (scope, action) one MCP tool call decides under (v41-F3).
 
@@ -464,6 +584,7 @@ def mcp_tool_scope_action(store: RunStore, tool: MCPTool) -> tuple[Scope, str]:
     server = load_mcp_servers(store).get(tool.server_id)
     scope = server.scope if server is not None else "mcp"
     if scope == "email":
+        tool = with_server_hints(store, tool)
         return "email", ("read" if classify_mcp_risk(tool) == "read" else "send")
     if scope == "browse":
         return "browse", classify_browse_action(tool.name)
@@ -476,6 +597,7 @@ def mcp_scope_decision(
     """R1 (ADR 0055 D3): the chat's role layer tightens the lane below."""
     from .roles import tighten_autonomy
 
+    tool = with_server_hints(store, tool)
     lane = _mcp_scope_lane(store, tool)
     scope, action = mcp_tool_scope_action(store, tool)
     value = f"{tool.server_id}:{tool.name}"

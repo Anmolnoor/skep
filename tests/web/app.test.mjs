@@ -188,3 +188,28 @@ test("allow_with_constraints ran too — the receipt follows allows_execution()"
   });
   assert.equal(texts(node, "card-kicker")[0], "Ran without asking — you approved this already");
 });
+
+// ---------- ES-F1: a card's verdict follows its real status ----------
+
+test("cardVerdict: failed and interrupted never read as approved, executing never as denied", () => {
+  const app = loadApp();
+  const verdict = action => [...app.cardVerdict(action)];
+  assert.deepEqual(verdict({ status: "confirmed" }), ["✓ Approved", "confirm"]);
+  assert.deepEqual(verdict({ status: "executing" }), ["… Running — confirmed elsewhere", "confirm"]);
+  assert.deepEqual(verdict({ status: "failed", result: { ok: false, error: "no such run" } }),
+    ["✗ Failed — no such run", "deny"]);
+  assert.deepEqual(verdict({ status: "interrupted", result: { note: "serve stopped" } }),
+    ["⚠ Interrupted — serve stopped", "deny"]);
+  assert.deepEqual(verdict({ status: "superseded", result: null }),
+    ["✗ Superseded — replaced by a newer card", "deny"]);
+  assert.deepEqual(verdict({ status: "denied" }), ["✗ Denied", "deny"]);
+});
+
+// ---------- ES-F5 (B98): a gate mirror resolves on the commands endpoints ----------
+
+test("resolvesOnCommands: operator commands and gate mirrors, never a model card", () => {
+  const app = loadApp();
+  assert.equal(app.resolvesOnCommands({ source: "operator" }), true);
+  assert.equal(app.resolvesOnCommands({ source: "gate" }), true);
+  assert.equal(app.resolvesOnCommands({ source: "assistant" }), false);
+});

@@ -24,7 +24,7 @@ from typing import Any
 
 from skep.worker_contract import ApprovalVerdict, Budget, CodingWorkerTask, Permissions, TaskState
 
-from .apply import apply_patch_on_branch, validate_landing_branch
+from .apply import land_patch, validate_landing_branch
 from .autonomy import (
     approval_decision_for_action,
     project_policy_dispatch_match,
@@ -748,6 +748,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
     store = RunStore(config.db_path)
+    # ES-F7 (B57): run the sandbox backend the home chose, as serve does
+    # (ConfigHolder overlays the same setting). Only this key: an explicit
+    # --worker-cmd still outranks a stored one here.
+    from .serve.settings import SANDBOX_BACKEND, apply_settings
+
+    config = apply_settings(config, {SANDBOX_BACKEND: store.get_setting(SANDBOX_BACKEND)})
     auto_apply_verified_patch: bool | None = None
     project_context = None
     resolved_policy: ResolvedRunPolicy | None = None
@@ -1335,8 +1341,8 @@ def cmd_review(args: argparse.Namespace) -> int:
                 )
         else:
             branch = f"skep/{record.task_id}"
-        failure = apply_patch_on_branch(
-            Path(record.repo), branch, patch_path, task_id=record.task_id, actor=actor
+        failure = land_patch(
+            store, Path(record.repo), branch, patch_path, task_id=record.task_id, actor=actor
         )
         if failure is not None:
             return _err(
@@ -1402,10 +1408,12 @@ def open_pr_for_branch(
 
 
 def _pending_or_new(store: RunStore, record: RunRecord, *, reason: str) -> str:
-    pending = [a for a in store.approvals_for(record.task_id) if a.status == "pending"]
-    if pending:
-        return pending[0].review_id
-    return store.enqueue_approval(record.task_id, action="apply_patch", reason=reason)
+    # ES-F4: one locked store call, the same pending-or-new the serve uses.
+    review_id = store.pending_or_enqueue_approval(
+        record.task_id, action="apply_patch", reason=reason
+    )
+    assert review_id is not None  # create=True always mints
+    return review_id
 
 
 def _prompt_inline_approval(
@@ -1521,6 +1529,18 @@ def _resume_pending_approval(
             events=store.events_for(record.task_id),
         )
     )
+    # ES-F8 (B130; ADR 0050 parity with resume_past_gate): a batch card grants
+    # EVERY command it listed (v19-F1) — the CLI granted only the first, so a
+    # "for 3 commands" card cost three approvals and three resumes — and a
+    # plain approve holds for the serve session like the REST face (v86-F1).
+    approval_commands = store.approval_commands(review_id)
+    session_kept: list[list[str]] = []
+    if not remembered and approval_commands:
+        from .serve.actions import remember_commands_for_session
+
+        session_kept = remember_commands_for_session(
+            store, [list(command) for command in approval_commands]
+        )
     verdict = ApprovalVerdict(
         approved=True,
         actor=actor,
@@ -1528,6 +1548,7 @@ def _resume_pending_approval(
         reason=approval_reason or "approved via review --approve (Q8 resume)",
         action=approval_action,
         decision=None if decision is None else decision.to_payload(),
+        commands=approval_commands,
     )
     print(f"resuming task {record.task_id} with approval by {actor} ...")
     outcome = run_task(
@@ -1556,7 +1577,8 @@ def _resume_pending_approval(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})",
+        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})"
+        + ("; approval held for this serve session" if session_kept else ""),
         remembered=remembered,
     )
     # v115-F1: the parent is superseded by its successor, as resume_past_gate
@@ -3008,8 +3030,12 @@ def register_supervisor_commands(
         action="append",
         default=None,
         metavar="DOMAIN",
-        help="domain the worker may reach, e.g. pypi.org (repeatable, D1); "
-        "omit to deny all outbound. Enforced by a loopback filtering proxy.",
+        help="domain the worker may reach, e.g. pypi.org (repeatable, D1). Omitted, "
+        "the policy's default_network applies: the builder and operator baselines "
+        "allow their package-registry hosts (and start the filtering proxy); the "
+        "assistant baseline and a bare home allow none. A coding worker's LLM "
+        "provider host is always added; --minimal denies all. A concrete list is "
+        "enforced by a loopback filtering proxy.",
     )
     run.add_argument(
         "--execution-mode",

@@ -23,9 +23,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -55,13 +58,14 @@ from .autonomy import AutonomyDecision, AutonomyVerdict
 from .config import SupervisorConfig
 from .contracts_io import mint_task, read_event_log, read_result, write_task_file
 from .ingest import IngestOutcome, ingest_run
-from .monitor import MonitorVerdict, synthesize_terminal, watch_worker
-from .netproxy import FilteringProxy
+from .monitor import MonitorVerdict, kill_session, synthesize_terminal, watch_worker
+from .netproxy import FilteringProxy, control_plane_ports
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
 from .providers import ProviderProfile
 from .reverify import reverify_run
+from .sandbox import DENY_ALL_NETWORK, NetworkPolicy, SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
-from .spawner import effective_network_domains, spawn_worker
+from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
 from .store import RunStore
 from .worker_state import (
     prior_task_from_audit,
@@ -152,12 +156,6 @@ def _decision_payload(decision: AutonomyDecision | AutoApplyDecision) -> Autonom
     )
 
 
-def _worktrees_root(config: SupervisorConfig, repo: Path, execution_mode: str) -> Path:
-    if execution_mode == "workspace":
-        return repo.parent / ".skep" / "worktrees"
-    return config.worktrees_root
-
-
 def _keep_worktree_names(store: RunStore) -> set[str]:
     """In-flight worktrees plus preserved pending-gate worktrees (durable, so
     preserved trees survive sweeps by later runs and supervisor restarts).
@@ -210,12 +208,16 @@ def salvaged_checkpoint_version(config: SupervisorConfig, task_id: str) -> int:
 def _resume_workspace(
     store: RunStore, repo: Path, worktrees_root: Path, resume_of: str
 ) -> Path | None:
-    """The suspended run's preserved worktree, when intact and safe to reuse."""
+    """The suspended run's preserved worktree, when intact and safe to reuse.
+
+    ES-F4 (B07) migration: workspace-mode runs recorded before the move kept
+    their worktree at ``<repo parent>/.skep/worktrees`` — still reusable."""
     record = store.get_run(resume_of)
     if record is None or not record.workspace:
         return None
     workspace = Path(record.workspace)
-    if workspace.parent != worktrees_root or not is_linked_worktree(repo, workspace):
+    roots = (worktrees_root, repo.parent / ".skep" / "worktrees")
+    if workspace.parent not in roots or not is_linked_worktree(repo, workspace):
         return None
     return workspace
 
@@ -242,6 +244,9 @@ def _toolchain_env(workspace: Path, engine: CodingEngine, cache_root: Path) -> d
     env = {
         "npm_config_cache": str(cache_root / "npm"),
         "UV_CACHE_DIR": str(cache_root / "uv"),
+        # Mac finding B: clang -fmodules and swiftc ignore TMPDIR and write
+        # their module cache under /var/folders — outside the Seatbelt wall.
+        "CLANG_MODULE_CACHE_PATH": str(cache_root / "clang"),
     }
     # v107-F3: TMPDIR lives inside the wall too. Unset, Python and every
     # tool fall back to /tmp — which any NESTED bwrap the run spawns (skep's
@@ -341,7 +346,10 @@ def run_task(
     proxy: FilteringProxy | None = None
     proxy_socket_dir: str | None = None
     active_names: tuple[str, ...] = ()
-    worktrees_root = _worktrees_root(config, repo, execution_mode)
+    # ES-F4 (B07): every mode's worktrees live under the active SKEP_HOME.
+    # Workspace mode used `<repo parent>/.skep/worktrees` — the real ~/.skep
+    # for a repo in $HOME, and outside the run's SKEP_HOME always.
+    worktrees_root = config.worktrees_root
     # v55-F2 (ADR 0035): a managed clone fetches before the baseline resolves —
     # the "is it on the latest code?" step. Managed clones only; workon dirs
     # are the operator's own. Offline dispatch keeps working from the clone.
@@ -355,6 +363,7 @@ def run_task(
     # the operator's checkout happens to sit on — otherwise a stray `git
     # checkout` silently changes what every future run sees. Detached HEAD
     # (default_branch → None) keeps the old HEAD behavior.
+    caller_chose_ref = ref is not None
     if ref is None:
         ref = repo_default_branch(repo)
     # v88-F4 (I2): resolve the project's pinned verification command HERE, not
@@ -373,24 +382,34 @@ def run_task(
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
     worker_argv = engine.argv if (worker_kind == "coding" and engine.external) else None
+    if execution_mode == "sandbox" and config.sandbox:
+        # ES-F1 (B47, I12): every sandbox-mode run, not only external engines
+        # (v94-F4) — the builtin worker and run_code's script caste took the
+        # spawner's silent unsandboxed fallback while the record said
+        # "sandbox". Refuse before any run record or worktree exists.
+        backend = resolve_sandbox_backend(
+            config,
+            NetworkPolicy(allow=tuple(permissions.network)) if permissions else DENY_ALL_NETWORK,
+        )
+        probe = sandbox_availability(backend)
+        if not probe.usable:
+            raise ValueError(
+                "execution mode 'sandbox' needs a usable sandbox backend and this host "
+                f"has none ({probe.reason}: {probe.detail}) — skep never runs it "
+                "unconfined; fix the backend (`skep doctor`), or dispatch the builtin "
+                "worker with execution mode 'workspace'"
+            )
     if worker_argv is not None:
         # v94-F4: an external agent's commands never pass the capability layer —
         # the sandbox is its ONLY wall (ADR 0047). The resolver coerces the mode
         # on the policy path; this chokepoint covers every other caller (resume,
-        # explicit flags) and the spawner's silent unsandboxed fallback, failing
-        # closed before any run record or worktree exists.
+        # explicit flags), failing closed before any run record or worktree
+        # exists (the sandbox-availability half is ES-F1's guard above).
         if execution_mode != "sandbox":
             raise ValueError(
                 f"coding_engine {engine.name!r} is an external agent confined by "
                 "the sandbox, not the capability layer — it never runs in "
                 f"{execution_mode!r} mode; dispatch it with execution mode 'sandbox'"
-            )
-        if not sandbox_availability().usable:
-            raise ValueError(
-                f"coding_engine {engine.name!r} requires a usable sandbox and this "
-                "host has none — running it unsandboxed would put an unconfined "
-                "agent on the host; fix the sandbox backend (`skep doctor`) or "
-                "switch the project to the builtin engine"
             )
         # v116-F1: a present binary with a way to log in, BEFORE any run
         # record exists. Three claude_code runs died in 1.2 s ("Not logged
@@ -437,6 +456,18 @@ def run_task(
             # here, beside the verify pin, so every face lands the same way.
             raw_branch = project_policy.get("auto_apply_branch")
             auto_apply_branch = raw_branch if isinstance(raw_branch, str) else None
+    # ES-F6 (B132, I1): the auto lane accumulates on ONE integration branch
+    # (v30), so a run that will land there must START there — based on main it
+    # never sees the branch's earlier landings, and the second nearby task
+    # conflicts. Only when the caller named no ref and the branch exists.
+    if (
+        not caller_chose_ref
+        and auto_apply_branch
+        and resolve_commit(repo, f"refs/heads/{auto_apply_branch}") is not None
+        and auto_apply_decision(config.auto_approval_rules, auto_apply_verified_patch).verdict
+        == "allow"
+    ):
+        ref = auto_apply_branch
     try:
         landing_decision = auto_apply_decision(
             config.auto_approval_rules, auto_apply_verified_patch
@@ -631,7 +662,13 @@ def run_task(
                 proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
                 proxy_unix_path = str(Path(proxy_socket_dir) / "p.sock")
             try:
-                proxy = FilteringProxy(domains, unix_socket_path=proxy_unix_path).start()
+                # ES-F6 (B05): loopback stays open for the project's own test
+                # servers, never for skep serve's port (the control plane).
+                proxy = FilteringProxy(
+                    domains,
+                    unix_socket_path=proxy_unix_path,
+                    denied_loopback_ports=control_plane_ports(config.home),
+                ).start()
             except OSError as exc:
                 return finish_before_worker(
                     reason="proxy_start_failed",
@@ -686,6 +723,11 @@ def run_task(
                 # must outlive the worktree), so the wall needs a door for it.
                 extra_writable=(cache_root,),
             )
+        except SandboxUnavailableError as exc:
+            # ES-F1 backstop: the up-front check passed but the backend the
+            # spawner resolved (e.g. podman → native for a resumed host grant)
+            # is unusable. Never retried unconfined.
+            return finish_before_worker(reason="sandbox_unavailable", summary=str(exc))
         except OSError as exc:
             return finish_before_worker(
                 reason="spawn_failed",
@@ -889,6 +931,28 @@ def dispatch_parallel(
             run_store.close()
 
 
+def _live_worker_pid(run_store: RunStore, task_id: str) -> int | None:
+    """The recorded worker pid when that process is still THIS run's worker.
+
+    ES-F5 (B10): a pid outlives a reboot as a number only — it is ours when
+    its command line still names this task (the worker argv carries the task
+    file path); a zombie's or a stranger's does not."""
+    pid = next(
+        (
+            int(detail.split()[1])
+            for state, detail, _ in reversed(run_store.transitions_for(task_id))
+            if state == "running" and detail and re.fullmatch(r"pid \d+", detail)
+        ),
+        None,
+    )
+    if pid is None:
+        return None
+    probe = subprocess.run(
+        ["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True, check=False
+    )
+    return pid if task_id in probe.stdout else None
+
+
 # v59-F10: the states a supervisor death can strand a run in. pending_approval
 # is NOT here — it is a legitimate persistent state (worktree kept for resume).
 _INTERRUPTED_STATES = ("created", "dispatched", "running")
@@ -914,6 +978,23 @@ def recover_interrupted_runs(
     recovered: list[str] = []
     for record in run_store.runs_with_states(_INTERRUPTED_STATES):
         task_id = record.task_id
+        # ES-F5 (B10, I1 I12): the detached worker may still be alive — with no
+        # babysitter, no budget, and the proxy gone. Kill its whole session
+        # BEFORE reading its evidence or touching its worktree: nothing may
+        # write there once recovery decides. (Re-adopting would need a monitor
+        # for a non-child; the kill is the smaller honest answer.)
+        live_pid = _live_worker_pid(run_store, task_id)
+        if live_pid is not None:
+            kill_session(live_pid)
+            deadline = time.monotonic() + 5.0
+            while _live_worker_pid(run_store, task_id) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            run_store.transition(
+                task_id,
+                record.state,
+                f"supervisor restart: worker pid {live_pid} was still running "
+                "unsupervised; killed with its session",
+            )
         task = _task_from_audit(config, task_id)
         workspace = Path(record.workspace) if record.workspace else None
         if task is None or workspace is None:

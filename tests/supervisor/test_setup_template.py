@@ -10,7 +10,6 @@ never regress the v19-F1 batch-gate economy."""
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -31,7 +30,9 @@ from .conftest import serve_client as _client
 from .conftest import wait_terminal as _wait_terminal
 from .fake_openai import FakeOpenAI
 
-_VERIFY = [sys.executable, "-c", "import os; assert os.path.exists('README.md')"]
+# ES-F3: a verify label is no grant — under builder, the economy holds for a
+# verify the template allowlists (its test runners and read-only git).
+_VERIFY = ["git", "status", "--porcelain"]
 
 
 def _run_cli(home: Path, *argv: str) -> int:

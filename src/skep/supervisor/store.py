@@ -59,6 +59,11 @@ def _created_transition_detail(task: CodingWorkerTask) -> str | None:
     return json.dumps(detail, ensure_ascii=True)
 
 
+# ES-F13 (B86): the settings that pick the chat provider (serve/llm.py's
+# LLM_BASE_URL, LLM_PROTOCOL, LLM_DEFAULT_MODEL — store cannot import serve).
+_PROVIDER_SETTINGS = frozenset({"llm_base_url", "llm_protocol", "llm_default_model"})
+
+
 def _locked[F: Callable[..., Any]](method: F) -> F:
     """Serialize a RunStore method on its connection lock (G4 single writer).
 
@@ -587,6 +592,8 @@ class ReverifyRecord:
     exit_codes: list[int]
     detail: str
     created_at: str
+    # ES-F3 (B131): the commit G10 applied the patch to — landing builds on it.
+    base_commit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -697,7 +704,9 @@ class ChatActionRecord:
     chat_id: str
     tool: str
     args: dict[str, Any]
-    status: str  # 'proposed' | 'confirmed' | 'denied' | 'superseded' (v63-F2)
+    # 'proposed' | 'executing' (claimed, ES-F1) | 'confirmed' | 'failed' | 'denied'
+    # | 'superseded' (v63-F2) | 'interrupted' (serve died mid-execute)
+    status: str
     result: Any | None
     created_at: str
     resolved_at: str | None
@@ -877,6 +886,12 @@ class RunStore:
         column check. v3.5 adds the template binding to ``schedules``; v4 adds
         ``provenance`` to ``templates`` (an existing v3.5 DB has the table already)."""
         schedule_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(schedules)")}
+        reverify_columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(reverifications)")
+        }
+        if "base_commit" not in reverify_columns:
+            # ES-F3 (B131): the commit G10 verified on; NULL for older rows.
+            self._conn.execute("ALTER TABLE reverifications ADD COLUMN base_commit TEXT")
         if "template_name" not in schedule_columns:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN template_name TEXT")
         if "params_json" not in schedule_columns:
@@ -1312,11 +1327,12 @@ class RunStore:
         commands: list[str],
         exit_codes: list[int],
         detail: str,
+        base_commit: str | None = None,
     ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO reverifications (task_id, outcome, worker_outcome,"
-            " confirmed, commands_json, exit_codes_json, detail, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " confirmed, commands_json, exit_codes_json, detail, created_at, base_commit)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id,
                 outcome,
@@ -1326,15 +1342,34 @@ class RunStore:
                 json.dumps(exit_codes),
                 detail,
                 _now(),
+                base_commit,
             ),
         )
         self._conn.commit()
 
     @_locked
+    def unconfirm_reverification(self, task_id: str, note: str) -> None:
+        """ES-F3 (B131): the patch landed past the commit G10 verified it on —
+        the landed tree is not the confirmed one, so the row stops saying so."""
+        self._conn.execute(
+            "UPDATE reverifications SET confirmed = 0, detail = detail || ' — ' || ?"
+            " WHERE task_id = ?",
+            (note, task_id),
+        )
+        self._conn.commit()
+
+    def verified_base(self, task_id: str) -> str | None:
+        """The commit a CONFIRMED re-verify ran on (ES-F3) — what landing
+        must build on — or None when nothing was confirmed."""
+        record = self.reverification_for(task_id)
+        return record.base_commit if record is not None and record.confirmed else None
+
+    @_locked
     def reverification_for(self, task_id: str) -> ReverifyRecord | None:
         row = self._conn.execute(
             "SELECT task_id, outcome, worker_outcome, confirmed, commands_json,"
-            " exit_codes_json, detail, created_at FROM reverifications WHERE task_id = ?",
+            " exit_codes_json, detail, created_at, base_commit FROM reverifications"
+            " WHERE task_id = ?",
             (task_id,),
         ).fetchone()
         if row is None:
@@ -1348,6 +1383,7 @@ class RunStore:
             exit_codes=list(json.loads(row[5])),
             detail=row[6],
             created_at=row[7],
+            base_commit=row[8],
         )
 
     # -- usage accounting (G8: cost is answerable) ----------------------------
@@ -1418,6 +1454,67 @@ class RunStore:
         return review_id
 
     @_locked
+    def pending_or_enqueue_approval(
+        self, task_id: str, *, action: str, reason: str, create: bool = True
+    ) -> str | None:
+        """ES-F4 (B17): the task's open review — pending, or mid-landing — or
+        a new one, in ONE locked call. Read-then-enqueue as two calls let
+        three concurrent lands mint two reviews for one patch, and the
+        second's failed apply left a phantom 'denied' in the ledger.
+        ``create=False`` (nothing to land) returns None instead of minting."""
+        row = self._conn.execute(
+            "SELECT review_id FROM approvals WHERE task_id = ?"
+            " AND status IN ('pending', 'applying') ORDER BY requested_at LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is not None:
+            return str(row[0])
+        if not create:
+            return None
+        return self.enqueue_approval(task_id, action=action, reason=reason)
+
+    @_locked
+    def claim_approval(self, review_id: str) -> bool:
+        """ES-F4 (B17): pending → applying in ONE conditional UPDATE — the
+        card claim (ES-F1) for landings. Only the winner runs git."""
+        cursor = self._conn.execute(
+            "UPDATE approvals SET status = 'applying' WHERE review_id = ? AND status = 'pending'",
+            (review_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
+    def unclaim_approval(self, review_id: str) -> None:
+        """An apply that blew up unexpectedly hands the review back, pending."""
+        self._conn.execute(
+            "UPDATE approvals SET status = 'pending' WHERE review_id = ? AND status = 'applying'",
+            (review_id,),
+        )
+        self._conn.commit()
+
+    @_locked
+    def interrupt_applying_approvals(self) -> int:
+        """ES-F4 restart safety: a review still 'applying' at serve start was
+        claimed by a process that died mid-git. Whether a commit landed is
+        unknown, so it ends 'denied' with a note saying so — never quietly
+        pending again, where a retry could stack a second commit (I8)."""
+        rows = self._conn.execute(
+            "SELECT review_id FROM approvals WHERE status = 'applying'"
+        ).fetchall()
+        for (review_id,) in rows:
+            self.resolve_approval(
+                str(review_id),
+                approved=False,
+                actor="skep-serve-restart",
+                note="interrupted: skep serve stopped while this landing was being "
+                "applied — check the repo for this task's skep/ branch or commit "
+                "before landing it again",
+                claimed=True,
+            )
+        return len(rows)
+
+    @_locked
     def approval_commands(self, review_id: str) -> list[list[str]] | None:
         """The batch-approval command list stored with an approval (v19-F1)."""
         row = self._conn.execute(
@@ -1447,19 +1544,22 @@ class RunStore:
         note: str | None = None,
         remembered: bool = False,
         landing_branch: str | None = None,
+        claimed: bool = False,
     ) -> None:
         """Record the verdict with actor + timestamp; resolution is final.
 
         v30: ``landing_branch`` records where an apply_patch approval actually
         landed (default skep/<task_id>, a named branch, or an integration
         branch) so the applied-branch view is accurate for every landing path.
+        ES-F4: a ``claimed`` landing resolves from 'applying' (only its
+        claimer holds it there); everything else from 'pending'.
         """
         row = self._conn.execute(
             "SELECT status FROM approvals WHERE review_id = ?", (review_id,)
         ).fetchone()
         if row is None:
             raise KeyError(f"no approval {review_id!r}")
-        if row[0] != "pending":
+        if row[0] != ("applying" if claimed else "pending"):
             raise ValueError(f"approval {review_id!r} already resolved as {row[0]!r}")
         resolved_at = _now()
         self._conn.execute(
@@ -2334,9 +2434,21 @@ class RunStore:
 
     @_locked
     def set_setting(self, key: str, value: Any) -> None:
+        encoded = json.dumps(value, ensure_ascii=True)
+        if key in _PROVIDER_SETTINGS:
+            # ES-F13 (B86): a provider ceiling measured ONE provider+model —
+            # a new one re-measures (every writer of these keys lands here).
+            row = self._conn.execute(
+                "SELECT value_json FROM settings WHERE key = ?", (key,)
+            ).fetchone()
+            if row is None or row[0] != encoded:
+                self._conn.execute(
+                    "UPDATE chats SET provider_ceiling_chars = NULL"
+                    + (" WHERE model IS NULL" if key == "llm_default_model" else "")
+                )
         self._conn.execute(
             "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
-            (key, json.dumps(value, ensure_ascii=True), _now()),
+            (key, encoded, _now()),
         )
         self._conn.commit()
 
@@ -3648,8 +3760,11 @@ class RunStore:
     @_locked
     def set_chat_model(self, chat_id: str, model: str | None) -> bool:
         """v72-F1: per-chat model override; None falls back to the saved default."""
+        # ES-F13 (B86): a different model re-measures the provider ceiling.
         cursor = self._conn.execute(
-            "UPDATE chats SET model = ? WHERE chat_id = ?", (model, chat_id)
+            "UPDATE chats SET provider_ceiling_chars = CASE WHEN model IS ?"
+            " THEN provider_ceiling_chars END, model = ? WHERE chat_id = ?",
+            (model, model, chat_id),
         )
         self._conn.commit()
         return cursor.rowcount > 0
@@ -3975,33 +4090,96 @@ class RunStore:
         return str(row[0]) if row is not None else None
 
     @_locked
-    def resolve_chat_action(self, action_id: str, *, status: str, result: Any) -> None:
+    def claim_chat_action(self, action_id: str) -> bool:
+        """ES-F1 (B15 B16 B97): proposed → executing in ONE conditional UPDATE.
+
+        Exactly one caller wins, and only the winner executes the card. A
+        second confirm, a Deny, or the timeout sweep arriving while it runs
+        finds the card no longer 'proposed' and loses — before this, each
+        checked the status, then acted, and two confirms both executed.
+        A conditional UPDATE, not the store lock, so a second connection on
+        the same file loses the same way."""
+        cursor = self._conn.execute(
+            "UPDATE chat_actions SET status = 'executing'"
+            " WHERE action_id = ? AND status = 'proposed'",
+            (action_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
+    def unclaim_chat_action(self, action_id: str) -> None:
+        """v54-F2 kept under ES-F1: an executor that blew up unexpectedly hands
+        the card back as 'proposed' — buttons return, as they always did."""
+        self._conn.execute(
+            "UPDATE chat_actions SET status = 'proposed'"
+            " WHERE action_id = ? AND status = 'executing'",
+            (action_id,),
+        )
+        self._conn.commit()
+
+    @_locked
+    def resolve_chat_action(
+        self, action_id: str, *, status: str, result: Any, claimed: bool = False
+    ) -> None:
         """Record the verdict; like approvals, resolution is final.
 
-        v63-F2, the one exception: confirming an approve_review/land_run card
-        executes resolve_approval, whose reconciliation supersedes cards for
-        that decision — including the card mid-confirm (both executors gate on
-        'proposed' BEFORE executing, so no other path arrives here on a
-        superseded row). The executed verdict is the truer record; every
-        other transition stays final. v87-F2 widens the exception to 'denied'
-        for the same reason: a gate mirror's Deny executes deny_review, whose
-        reconciliation supersedes the very card mid-deny.
+        ES-F1: a ``claimed`` card resolves from 'executing' (only its claimer
+        holds it there); anything else resolves from 'proposed'. One
+        conditional UPDATE either way, so a sweep or a Deny that lost the
+        race gets ValueError instead of overwriting the executed verdict.
+        (The v63-F2/v87-F2 superseded→confirmed exception is gone: the
+        reconciliation only supersedes 'proposed' cards, and a card being
+        executed is 'executing'.)
         """
+        expected = "executing" if claimed else "proposed"
+        cursor = self._conn.execute(
+            "UPDATE chat_actions SET status = ?, result_json = ?, resolved_at = ?"
+            " WHERE action_id = ? AND status = ?",
+            (status, json.dumps(result, ensure_ascii=True), _now(), action_id, expected),
+        )
+        self._conn.commit()
+        if cursor.rowcount == 1:
+            return
         row = self._conn.execute(
             "SELECT status FROM chat_actions WHERE action_id = ?", (action_id,)
         ).fetchone()
         if row is None:
             raise KeyError(f"no chat action {action_id!r}")
-        if row[0] != "proposed" and not (
-            row[0] == "superseded" and status in ("confirmed", "denied")
-        ):
-            raise ValueError(f"chat action {action_id!r} already resolved as {row[0]!r}")
-        self._conn.execute(
-            "UPDATE chat_actions SET status = ?, result_json = ?, resolved_at = ?"
-            " WHERE action_id = ?",
-            (status, json.dumps(result, ensure_ascii=True), _now(), action_id),
-        )
+        raise ValueError(f"chat action {action_id!r} already resolved as {row[0]!r}")
+
+    @_locked
+    def interrupt_executing_chat_actions(self) -> int:
+        """ES-F1 restart safety: a card still 'executing' at serve start was
+        claimed by a process that died before its verdict. Whether the
+        mutation took effect is unknown, so it is never re-run or reopened
+        (either could double it); it ends 'interrupted' with a tool row the
+        model reads, saying exactly that (I8). Returns how many."""
+        payload = {
+            "ok": False,
+            "interrupted": True,
+            "note": "skep serve stopped while this card was executing — it may or "
+            "may not have taken effect; check its effect before proposing it again",
+        }
+        rows = self._conn.execute(
+            "SELECT action_id, chat_id, tool, tool_call_id FROM chat_actions"
+            " WHERE status = 'executing'"
+        ).fetchall()
+        for action_id, chat_id, tool, tool_call_id in rows:
+            self._conn.execute(
+                "UPDATE chat_actions SET status = 'interrupted', result_json = ?,"
+                " resolved_at = ? WHERE action_id = ?",
+                (json.dumps(payload, ensure_ascii=True), _now(), action_id),
+            )
+            self.add_chat_message(
+                str(chat_id),
+                role="tool",
+                tool_name=str(tool),
+                tool_call_id=None if tool_call_id is None else str(tool_call_id),
+                content=json.dumps(payload, ensure_ascii=True),
+            )
         self._conn.commit()
+        return len(rows)
 
     @staticmethod
     def _row_to_chat_message(row: Any) -> ChatMessageRecord:

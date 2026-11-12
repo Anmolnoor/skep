@@ -160,7 +160,12 @@ _PRESETS: tuple[ProviderPreset, ...] = (
         "NOUS_API_KEY",
         auth_note=_PASTE_TOKEN + " (or a portal API key)",
     ),
-    _p("ollama-cloud", "Ollama Cloud", "https://ollama.com", "glm-5.2", "OLLAMA_API_KEY"),
+    # ES-F4 (B28): native /api/chat, not ollama.com's openai-compat shim —
+    # chat history is stored in the native shape, so replay needs no
+    # translation (the compat path 400'd after the first tool call).
+    ProviderPreset(
+        "ollama-cloud", "Ollama Cloud", "ollama", "https://ollama.com", "glm-5.2", "OLLAMA_API_KEY"
+    ),
     _p(
         "google-gemini",
         "Google Gemini (OpenAI-compatible)",

@@ -66,6 +66,7 @@ def _run_in_sandbox(
         profile = sandbox.write_profile(
             work / "sandbox.profile",
             workspace=work,
+            skep_home=Path("/nonexistent/skep-home"),
             network=network,
             proxy_port=proxy.port if network.is_domain_list else None,
             unix_socket_path=proxy.unix_socket_path if network.is_domain_list else None,

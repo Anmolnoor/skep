@@ -2295,6 +2295,27 @@ function projectIdForRepo(repo) {
 
 // ---------- Chat (v6: the Queen's own model) ----------
 
+// v110-F2 + ES-F1: the verdict a drawn card shows once its action left
+// 'proposed' — [label, verb]. A failed or interrupted card never reads as
+// approved, and an executing one (claimed by another tab or a messenger)
+// never reads as denied.
+function cardVerdict(action) {
+  const note = (action.result && (action.result.error || action.result.note)) || "";
+  switch (action.status) {
+    case "confirmed": return ["✓ Approved", "confirm"];
+    case "executing": return ["… Running — confirmed elsewhere", "confirm"];
+    case "failed": return [`✗ Failed — ${note || "the action did not complete"}`, "deny"];
+    case "interrupted": return [`⚠ Interrupted — ${note || "serve stopped mid-run"}`, "deny"];
+    case "superseded": return [`✗ Superseded — ${note || "replaced by a newer card"}`, "deny"];
+    default: return ["✗ Denied", "deny"];
+  }
+}
+
+// v25-F1 + ES-F5 (B98): operator commands AND gate mirrors resolve on the
+// commands endpoints — a gate's Deny denies the review there; on /actions it
+// was dismissed and the run sat in pending_approval with no card.
+function resolvesOnCommands(card) { return card.source !== "assistant"; }
+
 async function viewChat(main, chatId) {
   let activeChatId = chatId || null;
   // R1 (ADR 0055 D3): the role picker's choices; a broken custom role file
@@ -3142,11 +3163,7 @@ async function viewChat(main, chatId) {
         // buttons: a live Approve on a dead action can only 409, which reads
         // as "approval is broken" (the Aug 9 five-close_pr field test).
         if (drawn && !drawn.classList.contains("resolved")) {
-          const label = action.status === "confirmed" ? "✓ Approved"
-            : action.status === "superseded"
-              ? `✗ Superseded — ${(action.result && action.result.note) || "replaced by a newer card"}`
-              : "✗ Denied";
-          resolveCardUI(drawn, label, action.status === "confirmed" ? "confirm" : "deny");
+          resolveCardUI(drawn, ...cardVerdict(action));
         }
         continue;
       }
@@ -3177,7 +3194,7 @@ async function viewChat(main, chatId) {
     const card = (detail.actions || []).find(
       a => a.action_id === id && a.status === "proposed");
     if (!card) return false;
-    if (card.source === "operator") {
+    if (resolvesOnCommands(card)) {
       const result = await api("POST", `/api/chats/${activeChatId}/commands/${id}/${verb}`);
       commandResult(verb === "confirm" ? `${card.tool}: result` : `${card.tool}: canceled`, result);
     } else {
@@ -5940,10 +5957,11 @@ async function renderChannelsTab(panel) {
     if (requireMention) requireMention.checked = !!channel.require_mention;
     const autoThread = name === "discord" ? el("input", { type: "checkbox" }) : null;
     if (autoThread) autoThread.checked = !!channel.auto_thread;
-    const users = name === "discord" ? el("input", {
+    // ES (B114): every channel authorizes a PERSON — empty admits nobody.
+    const users = el("input", {
       value: (channel.allowed_users || []).join(", "),
-      placeholder: "allow-listed user ids, comma-separated (empty = any user in an allowed channel)",
-    }) : null;
+      placeholder: "user ids who may drive skep, comma-separated (empty = nobody)",
+    });
     const saveChannel = el("button", { class: "primary" }, "Save channel");
     saveChannel.addEventListener("click", async () => {
       saveChannel.disabled = true;
@@ -5956,7 +5974,7 @@ async function renderChannelsTab(panel) {
         };
         if (requireMention) body.require_mention = requireMention.checked;
         if (autoThread) body.auto_thread = autoThread.checked;
-        if (users) body.allowed_users = users.value.split(",").map(s => s.trim()).filter(Boolean);
+        body.allowed_users = users.value.split(",").map(s => s.trim()).filter(Boolean);
         if (secret.value.trim()) body.secret = secret.value.trim();
         if (signingSecret && signingSecret.value.trim()) {
           body.signing_secret = signingSecret.value.trim();
@@ -5989,8 +6007,8 @@ async function renderChannelsTab(panel) {
           requireMention, " require @mention in servers"),
         el("label", { title: "each routed mention opens a thread; the conversation continues there" },
           autoThread, " auto-thread per mention")) : null,
-      users ? el("div", { class: "row" },
-        el("div", { class: "field grow" }, el("label", {}, "allowed users"), users)) : null,
+      el("div", { class: "row" },
+        el("div", { class: "field grow" }, el("label", {}, "allowed users"), users)),
       el("div", { class: "row" },
         el("div", { class: "field grow" }, el("label", {}, "bot token (write-only)"), secret),
         signingSecret

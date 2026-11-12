@@ -35,6 +35,7 @@ import httpx
 from .llm import (
     _B64_MIME_PREFIXES,
     OllamaError,
+    _call_arguments_json,
     _final_openai_tool_calls,
     _headers,
     _open_stream_lines,
@@ -56,14 +57,6 @@ def _responses_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]
             }
         )
     return converted
-
-
-def _call_arguments_json(function: dict[str, Any]) -> str:
-    """History rows carry parsed arguments; the wire wants a JSON string."""
-    arguments = function.get("arguments")
-    if isinstance(arguments, str):
-        return arguments or "{}"
-    return json.dumps(arguments or {}, separators=(",", ":"))
 
 
 def _responses_payload(

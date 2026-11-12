@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import stat
 from collections.abc import Iterator
+from typing import Any
 
+import httpx
 import pytest
 
 from skep.status import build_status
@@ -223,6 +225,58 @@ def test_openai_compat_chat_stream_normalizes_reasoning_content(
     assert chunks[1] == {"message": {"role": "assistant", "content": "done"}}
 
 
+def test_openai_compat_replays_stored_tool_calls_in_the_openai_shape(
+    openai: FakeOpenAI,
+) -> None:
+    """History stores tool calls Ollama-native (arguments a dict, no type);
+    /v1/chat/completions 400s on that ("arguments of type string"), which
+    broke every preset chat after its first tool call."""
+    openai.script_reply("ok")
+    stored_call: dict[str, Any] = {
+        "id": "call_1",
+        "function": {"name": "list_tasks", "arguments": {"n": 2}},
+    }
+    # A call already holding a JSON string passes through unchanged.
+    string_call = {"id": "call_2", "function": {"name": "list_notes", "arguments": '{"q":"x"}'}}
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": "wake up friend"},
+        {"role": "assistant", "content": "", "tool_calls": [stored_call, string_call]},
+        {
+            "role": "tool",
+            "tool_name": "list_tasks",
+            "tool_call_id": "call_1",
+            "content": '{"tasks":[]}',
+        },
+        # ES-F2: the strict fake refuses an unanswered call, as the real API
+        # does — every call in the burst gets its result.
+        {"role": "tool", "tool_name": "list_notes", "tool_call_id": "call_2", "content": "[]"},
+    ]
+
+    list(
+        chat_stream(
+            openai.base_url, "sk-fake", model="m", messages=messages, protocol="openai-compat"
+        )
+    )
+
+    sent = openai.chat_bodies()[0]["messages"]
+    assert sent[1]["tool_calls"] == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "list_tasks", "arguments": '{"n":2}'},
+        },
+        {
+            "id": "call_2",
+            "type": "function",
+            "function": {"name": "list_notes", "arguments": '{"q":"x"}'},
+        },
+    ]
+    assert sent[2] == {"role": "tool", "tool_call_id": "call_1", "content": '{"tasks":[]}'}
+    # The stored history is untouched — the conversion is wire-only.
+    assert stored_call["function"]["arguments"] == {"n": 2}
+    assert messages[2]["tool_name"] == "list_tasks"
+
+
 def test_chat_stream_retries_a_transient_404(
     ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -246,6 +300,114 @@ def test_chat_stream_retries_a_transient_404(
     text = "".join(c["message"].get("content", "") for c in chunks)
     assert text == "survived the flake"
     assert len(ollama.chat_bodies()) == 2
+
+
+def test_chat_stream_retries_a_rate_limit(
+    ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F5: a 429 (Retry-After attached, as a rate limit sends it) is
+    transient — the same request goes again."""
+    from skep.supervisor.serve import llm
+
+    monkeypatch.setattr(llm, "_RETRY_DELAY_SECONDS", 0.0)
+    ollama.fail_statuses.append(429)
+    ollama.script_reply("after the wait")
+
+    chunks = list(
+        chat_stream(
+            ollama.base_url, "sk-fake", model="fake", messages=[{"role": "user", "content": "hi"}]
+        )
+    )
+
+    assert "".join(c["message"].get("content", "") for c in chunks) == "after the wait"
+    assert len(ollama.chat_bodies()) == 2
+
+
+def test_mid_stream_ollama_error_raises_with_the_providers_words(ollama: FakeOllama) -> None:
+    """ES-F6 (B24): ollama reports a failure that starts after the 200 as an
+    {"error"} line in the stream. It used to pass through as a chunk with no
+    message — an empty round the chat then nudged as a stall."""
+    from skep.supervisor.serve.llm import OllamaError
+
+    ollama.script_stream_error("model runner has unexpectedly stopped", after="Work")
+
+    stream = chat_stream(
+        ollama.base_url, "sk-fake", model="fake", messages=[{"role": "user", "content": "hi"}]
+    )
+    assert next(stream)["message"]["content"] == "Work"
+    with pytest.raises(OllamaError, match="model runner has unexpectedly stopped"):
+        next(stream)
+
+
+@pytest.mark.parametrize("after", ["Hel", ""])
+def test_mid_stream_openai_error_raises_with_the_providers_words(
+    openai: FakeOpenAI, after: str
+) -> None:
+    """ES-F14 (B90): the ES-F6 fix for openai-compat. The error line was
+    skipped (only ``choices`` was read): a partial reply came back as a
+    complete one, an error-only stream as an empty round (lane M1-40)."""
+    from skep.supervisor.serve.llm import OllamaError
+
+    openai.script_stream_error("upstream model crashed", after=after)
+    stream = chat_stream(
+        openai.base_url,
+        "sk-fake",
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],
+        protocol="openai-compat",
+    )
+    if after:
+        assert next(stream)["message"]["content"] == after
+    with pytest.raises(OllamaError, match="upstream model crashed"):
+        next(stream)
+
+
+def test_a_missing_model_fails_fast_with_the_providers_words(
+    ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F7 (B36): a typo'd or unpulled model draws ollama's own 404. It was
+    retried as a v48-F1 flake, three times, and surfaced as a bare "404 from
+    <url>" — the one line that says what is wrong never reached anyone."""
+    from skep.supervisor.serve import llm
+    from skep.supervisor.serve.llm import OllamaError
+
+    monkeypatch.setattr(llm, "_RETRY_DELAY_SECONDS", 0.0)
+    ollama.missing_models.add("qwen3:typo")
+
+    with pytest.raises(OllamaError) as err:
+        list(
+            chat_stream(
+                ollama.base_url,
+                "sk-fake",
+                model="qwen3:typo",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        )
+
+    assert str(err.value) == (
+        f'404 from {ollama.base_url}: model "qwen3:typo" not found, try pulling it first'
+    )
+    assert err.value.status == 404
+    assert len(ollama.chat_bodies()) == 1
+
+
+@pytest.mark.parametrize(
+    ("response", "detail"),
+    [
+        (httpx.Response(404, text="404 page not found\n"), "404 page not found"),
+        (httpx.Response(400, json={"error": {"message": "bad tool_call"}}), "bad tool_call"),
+        (httpx.Response(400, json={"message": "ValidationException"}), "ValidationException"),
+        (httpx.Response(500, json=["odd"]), ""),
+        (httpx.Response(429, json={"error": "x" * 400}), "x" * 300),
+    ],
+)
+def test_error_detail_reads_every_providers_error_body(
+    response: httpx.Response, detail: str
+) -> None:
+    """ES-F7: ollama, OpenAI/Anthropic, Bedrock and non-JSON bodies, capped."""
+    from skep.supervisor.serve.llm import _error_detail
+
+    assert _error_detail(response) == detail
 
 
 def test_chat_stream_gives_up_after_exhausting_retries(

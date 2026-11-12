@@ -47,15 +47,20 @@ def fake_runner(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, An
         if method == "tools/list":
             return {
                 "tools": [
-                    {"name": "list_issues", "description": "read the issues"},
+                    {
+                        "name": "list_issues",
+                        "description": "read the issues",
+                        "annotations": {"readOnlyHint": True},
+                    },
                     {"name": "frobnicate_gizmo", "description": "who knows"},
+                    {"name": "read_inbox", "annotations": {"readOnlyHint": True}},
                 ]
             }
         if method == "tools/call":
             return {"content": f"ran {params.get('name')}"}
         return {}
 
-    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", lambda config: runner)
+    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", lambda config, **_: runner)
     return calls
 
 
@@ -457,3 +462,54 @@ def test_unregister_mcp_server_is_carded_and_removes_the_config(
             remove_mcp_server(store, "ghost")
     finally:
         store.close()
+
+
+def test_b09_destructive_name_cards_in_a_roleless_chat(
+    config: SupervisorConfig,
+    ollama: FakeOllama,
+    fake_runner: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """ES-F (B09, P0, live repro f3-30): `target_account_purge` contains
+    "get" and ran on the host with no card. It must card."""
+    _seed_server(config)
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_call(
+        "call_mcp_tool",
+        {"server_id": "issues", "tool": "target_account_purge", "arguments": {"account": "acme"}},
+    )
+    ollama.script_reply("asked")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "purge acme"})
+    calls = [params.get("name") for method, params in fake_runner if method == "tools/call"]
+    assert "target_account_purge" not in calls
+    (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
+    assert action["status"] == "proposed"
+
+
+def test_b122_list_mcp_tools_shows_the_role_chats_own_verdict(
+    config: SupervisorConfig,
+    ollama: FakeOllama,
+    fake_runner: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """ES (B122): in a role chat every MCP call cards (role mcp-gated), but
+    list_mcp_tools computed its policy column WITHOUT the role and said
+    `allow` — the Queen was told a call would run that then carded."""
+    _seed_server(config)
+    client, _ = chat_client(config, ollama)
+    chat_id = client.post("/api/chats", json={"role": "assistant"}).json()["chat_id"]
+    ollama.script_tool_call("list_mcp_tools", {"server_id": "issues"})
+    ollama.script_reply("listed")
+    response = client.post(f"/api/chats/{chat_id}/messages", json={"content": "what tools?"})
+    tool_event = next(
+        line for line in response.text.splitlines() if "list_issues" in line and "policy" in line
+    )
+    view = json.loads(tool_event.removeprefix("data: "))["result"]["tools"]
+    listed = next(entry for entry in view if entry["name"] == "list_issues")
+    assert listed["policy"] == "require_approval"
+
+
+def test_b122_promote_tool_description_names_seed_tools() -> None:
+    """ES (B122): the description said "a landed forged plugin", so the
+    model refused to promote a shipped seed tool until told otherwise."""
+    from skep.supervisor.serve.tools import tool_description
+
+    assert "seed" in tool_description("promote_tool")

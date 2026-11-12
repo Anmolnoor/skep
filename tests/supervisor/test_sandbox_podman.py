@@ -79,6 +79,7 @@ def test_write_profile_and_wrap_command_roundtrip_podman(
     profile = sandbox.write_profile(
         tmp_path / "sandbox.profile.sb",
         workspace=tmp_path / "ws",
+        skep_home=tmp_path / "skep-home",
         network=DENY_ALL_NETWORK,
         backend="podman",
     )
@@ -133,6 +134,37 @@ def test_policy_face_validates_and_persists_sandbox_backend(tmp_path: Path) -> N
     assert updated.status_code == 200 and updated.json()["sandbox_backend"] == "podman"
 
 
+def test_podman_args_disable_selinux_labelling_rather_than_relabel(tmp_path: Path) -> None:
+    """ES-F7 (B53): under SELinux enforcing, container_t cannot read
+    user_home_t, so the worker could not read its own worktree, task file or
+    skep's venv. ``:z`` would relabel host files for good and still leave
+    /home (the venv, the worker) unreadable; label=disable relabels nothing."""
+    args = _podman_args(writable_roots=[tmp_path], network=DENY_ALL_NETWORK, rootfs=tmp_path)
+    i = args.index("--security-opt")
+    assert args[i + 1] == "label=disable"
+    assert not any(arg.endswith((":z", ":Z")) for arg in args)
+
+
+def test_podman_probe_needs_a_real_round_trip_through_a_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A container that starts but cannot read its mounts is unusable — the
+    old probe ran /usr/bin/true with nothing mounted and said usable."""
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(argv)  # exits 0 but never copies the probe file
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sandbox, "_podman_binary", lambda: "/usr/bin/podman")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    probe = sandbox._podman_availability()
+    assert probe.usable is False
+    assert probe.reason == "probe_rejected"
+    assert "mount" in str(probe.detail)
+    assert "label=disable" in seen[0]  # the probe runs the real argv shape
+
+
 _PODMAN_LIVE = sandbox.availability("podman")
 
 
@@ -147,13 +179,30 @@ def test_podman_smoke_runs_a_real_container_with_no_network(tmp_path: Path) -> N
     profile = sandbox.write_profile(
         tmp_path / "sandbox.profile.sb",
         workspace=workspace,
+        skep_home=tmp_path / "skep-home",
         network=DENY_ALL_NETWORK,
         backend="podman",
     )
+    (workspace / "in.txt").write_text("from-host\n", encoding="utf-8")
     argv = sandbox.wrap_command(
-        ["/bin/sh", "-c", "echo sandboxed-ok && ls /sys/class/net"], profile, backend="podman"
+        ["/bin/sh", "-c", "cat in.txt && echo out > out.txt && ls /sys/class/net"],
+        profile,
+        backend="podman",
     )
     proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
-    assert "sandboxed-ok" in proc.stdout
+    # ES-F7: the worker can actually read and write its worktree.
+    assert "from-host" in proc.stdout
+    assert (workspace / "out.txt").read_text(encoding="utf-8") == "out\n"
     assert "eth0" not in proc.stdout  # no interfaces beyond loopback
+
+
+def test_podman_args_bind_readable_roots_read_only_before_writable(tmp_path: Path) -> None:
+    common, objects = tmp_path / ".git", tmp_path / ".git" / "objects"
+    args = _podman_args(
+        writable_roots=[tmp_path / "ws", objects],
+        network=DENY_ALL_NETWORK,
+        rootfs=tmp_path / "r",
+        readable_roots=[common],
+    )
+    assert args.index(f"{common}:{common}:ro") < args.index(f"{objects}:{objects}")

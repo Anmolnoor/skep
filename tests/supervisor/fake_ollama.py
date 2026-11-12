@@ -14,6 +14,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from tests.supervisor.strict_wire import check, ollama_chat_errors
+
 
 class FakeOllama:
     def __init__(self, *, api_key: str | None = None, models: list[str] | None = None) -> None:
@@ -27,11 +29,18 @@ class FakeOllama:
         # v73-F1: the provider's own request wall — /api/chat bodies larger
         # than this many bytes draw a 400, like ollama.com in the field.
         self.reject_over_bytes: int | None = None
+        # ES-F12 (B85): what that 400 says — the classifier reads the body.
+        self.reject_body = '{"error": "request too large"}'
         # v74-F2: what POST /api/show reports per model (the real daemon keys
         # context length under the model's ARCHITECTURE prefix). Models not
         # listed here draw a 404, like an older daemon or unknown model.
         self.show_context_lengths: dict[str, int] = {}
+        # ES-F5: model names /api/chat answers with ollama's own 404 — what a
+        # typo or an unpulled model draws from the daemon and ollama.com.
+        self.missing_models: set[str] = set()
         self.requests: list[dict[str, Any]] = []
+        # ES-F1 (B43): refuse what the real API refuses (strict_wire).
+        self.strict = True
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -47,10 +56,21 @@ class FakeOllama:
         self._server.shutdown()
         self._server.server_close()
 
-    def script_reply(self, text: str, *, model: str = "fake") -> None:
-        """Queue a plain streamed text reply, split into word chunks."""
+    def script_reply(self, text: str, *, model: str = "fake", thinking: str | None = None) -> None:
+        """Queue a plain streamed text reply, split into word chunks; with
+        ``thinking``, a reasoning chunk leads (ES-F5: the native field)."""
         words = text.split(" ")
-        chunks: list[dict[str, Any]] = [
+        chunks: list[dict[str, Any]] = (
+            [
+                {
+                    "model": model,
+                    "message": {"role": "assistant", "content": "", "thinking": thinking},
+                }
+            ]
+            if thinking
+            else []
+        )
+        chunks += [
             {"model": model, "message": {"role": "assistant", "content": w if i == 0 else f" {w}"}}
             for i, w in enumerate(words)
         ]
@@ -77,6 +97,39 @@ class FakeOllama:
             ]
         )
 
+    def script_tool_calls(self, *calls: tuple[str, dict[str, Any]], model: str = "fake") -> None:
+        """ES-F5: several calls in one reply, each streamed in its own chunk —
+        the client must collect them across chunks, not keep only the last."""
+        chunks: list[dict[str, Any]] = [
+            {
+                "model": model,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"function": {"name": name, "arguments": arguments}}],
+                },
+            }
+            for name, arguments in calls
+        ]
+        chunks.append(
+            {"model": model, "message": {"role": "assistant", "content": ""}, "done": True}
+        )
+        self.chat_scripts.append(chunks)
+
+    def script_stream_error(self, error: str, *, after: str = "", model: str = "fake") -> None:
+        """ES-F5: ollama reports a failure that starts after the 200 as an
+        ``{"error": ...}`` line inside the stream — the status stays 200."""
+        chunks: list[dict[str, Any]] = []
+        if after:
+            chunks.append({"model": model, "message": {"role": "assistant", "content": after}})
+        chunks.append({"error": error})
+        self.chat_scripts.append(chunks)
+
+    def script_refusal(self, status: int, error: str) -> None:
+        """ES-F12: answer the next /api/chat in script order with a non-200
+        and ollama's ``{"error"}`` body — a refusal of one exact request."""
+        self.chat_scripts.append([{"__status__": status, "body": {"error": error}}])
+
     def chat_bodies(self) -> list[dict[str, Any]]:
         """The parsed bodies of every POST /api/chat received, in order."""
         return [r["body"] for r in self.requests if r["path"] == "/api/chat"]
@@ -100,10 +153,16 @@ class FakeOllama:
                 return self.headers.get("Authorization") == f"Bearer {fake.api_key}"
 
             def _send(
-                self, status: int, body: bytes, content_type: str = "application/json"
+                self,
+                status: int,
+                body: bytes,
+                content_type: str = "application/json",
+                headers: dict[str, str] | None = None,
             ) -> None:
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -153,15 +212,31 @@ class FakeOllama:
                     self._send(200, json.dumps(shown).encode())
                 elif self.path == "/api/chat":
                     if fake.fail_statuses:
-                        self._send(fake.fail_statuses.pop(0), b'{"error": "transient"}')
+                        status = fake.fail_statuses.pop(0)
+                        # ES-F5: a rate limit says when to come back.
+                        retry = {"Retry-After": "1"} if status == 429 else None
+                        self._send(status, b'{"error": "transient"}', headers=retry)
                         return
                     if fake.reject_over_bytes is not None and len(raw) > fake.reject_over_bytes:
-                        self._send(400, b'{"error": "request too large"}')
+                        self._send(400, fake.reject_body.encode())
+                        return
+                    problem = fake.strict and check("ollama", ollama_chat_errors(body))
+                    if problem:
+                        self._send(400, json.dumps({"error": problem}).encode())
+                        return
+                    model = str((body or {}).get("model") or "")
+                    if model in fake.missing_models:
+                        missing = f'model "{model}" not found, try pulling it first'
+                        self._send(404, json.dumps({"error": missing}).encode())
                         return
                     if not fake.chat_scripts:
                         self._send(500, b'{"error": "no scripted reply left"}')
                         return
                     chunks = fake.chat_scripts.pop(0)
+                    if chunks and "__status__" in chunks[0]:
+                        refusal = chunks[0]
+                        self._send(refusal["__status__"], json.dumps(refusal["body"]).encode())
+                        return
                     payload = "".join(json.dumps(c) + "\n" for c in chunks).encode()
                     self._send(200, payload, content_type="application/x-ndjson")
                 else:

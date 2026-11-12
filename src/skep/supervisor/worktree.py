@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableMapping
 from pathlib import Path
 
 # v89-F1: the orphan sweep and worktree creation are multi-step sequences over
@@ -35,6 +36,38 @@ from pathlib import Path
 TREE_LOCK = threading.RLock()
 
 
+# ES-F3 (B45): config every git this process (and its children) runs carries,
+# through git's GIT_CONFIG_COUNT environment — it outranks every config file,
+# including a repo config a worker managed to write. Supervisor-side git runs
+# against repos whose git dir a worker shared (worktree add/remove, landing,
+# re-verify, the Queen's reads), so hooks and fsmonitor are code it must
+# never run. One process-wide setting instead of a flag at each of the ~40
+# call sites: a new call site is covered without remembering to be.
+_GIT_HARDENING = (("core.hooksPath", "/dev/null"), ("core.fsmonitor", "false"))
+
+
+def harden_git_env(environ: MutableMapping[str, str] = os.environ) -> None:
+    """Append the hardening pairs to ``environ``'s git config entries (idempotent)."""
+    raw = environ.get("GIT_CONFIG_COUNT", "0")
+    count = int(raw) if raw.isdigit() else 0
+    pairs = [
+        (environ.get(f"GIT_CONFIG_KEY_{i}"), environ.get(f"GIT_CONFIG_VALUE_{i}"))
+        for i in range(count)
+    ]
+    if pairs[-len(_GIT_HARDENING) :] == list(_GIT_HARDENING):
+        return
+    for key, value in _GIT_HARDENING:
+        environ[f"GIT_CONFIG_KEY_{count}"] = key
+        environ[f"GIT_CONFIG_VALUE_{count}"] = value
+        count += 1
+    environ["GIT_CONFIG_COUNT"] = str(count)
+
+
+# Import time, on purpose: every supervisor face (serve, the CLI, the scorecard)
+# imports this package before its first git call.
+harden_git_env()
+
+
 class WorktreeError(Exception):
     """A worktree operation failed; the message carries the git output."""
 
@@ -58,24 +91,45 @@ def _resolve_git_path(workspace: Path, raw: str) -> Path:
 def git_metadata_writable_roots(workspace: Path) -> tuple[Path, ...]:
     """Writable Git metadata roots needed by commands inside a linked worktree.
 
-    The whole common dir is included: fetch/push write objects, remote-tracking
-    refs, packed-refs, and FETCH_HEAD there, and denying any of them makes
-    otherwise-successful git commands report errors.
+    ES-F3 (B45): the per-worktree gitdir (HEAD, index, logs/HEAD) plus the
+    shared ``objects/`` — exactly what ``git add``/``git commit`` on the
+    detached worktree write. The rest of the common dir stays read-only:
+    ``hooks/`` and ``config`` are code the HOST's git runs (a planted hook
+    or ``core.fsmonitor`` executed unsandboxed on the next supervisor-side
+    git call), and ``refs/`` is the operator's branches (I1). The old "whole
+    common dir, for fetch/push" reason never applied: workers can never
+    fetch or push (v19-F3). Cost, stated: ``git stash`` (refs/stash) fails.
+    A non-linked checkout (git dir == common dir) gets ``objects/`` only.
     """
+    dirs = _git_dirs(workspace)
+    if dirs is None:
+        return ()
+    git_dir, common_dir = dirs
+    objects = common_dir / "objects"
+    return (objects,) if git_dir == common_dir else (git_dir, objects)
+
+
+def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
+    """The shared common dir a linked worktree's git must READ (HEAD, config, refs).
+
+    Reads are open on every backend except where a fresh tmpfs hides the host
+    (bwrap and podman mount one on /tmp): a repo there kept only the writable
+    binds above, so the worker's own ``git diff`` died and its patch was never
+    written. The sandbox binds these read-only, beneath the writable roots.
+    """
+    dirs = _git_dirs(workspace)
+    return () if dirs is None or dirs[0] == dirs[1] else (dirs[1],)
+
+
+def _git_dirs(workspace: Path) -> tuple[Path, Path] | None:
+    """(git dir, common dir) of ``workspace``, or None outside a git checkout."""
     proc = _git(workspace, "rev-parse", "--git-dir", "--git-common-dir")
     if proc.returncode != 0:
-        return ()
+        return None
     lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     if len(lines) < 2:
-        return ()
-    git_dir = _resolve_git_path(workspace, lines[0])
-    common_dir = _resolve_git_path(workspace, lines[1])
-    roots = [git_dir, common_dir]
-    deduped: list[Path] = []
-    for root in roots:
-        if root not in deduped:
-            deduped.append(root)
-    return tuple(deduped)
+        return None
+    return _resolve_git_path(workspace, lines[0]), _resolve_git_path(workspace, lines[1])
 
 
 def is_linked_worktree(repo: Path, path: Path) -> bool:

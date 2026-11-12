@@ -440,7 +440,8 @@ def test_reverify_env_carries_a_worktree_local_tmpdir(repo: Path, config: Superv
             ref=None,
             config=config,
             verify_command=(
-                'sh -c \'case "$TMPDIR" in *".reverify-tmp") exit 0;; *) exit 7;; esac\''
+                'sh -c \'case "$TMPDIR" in *".reverify-tmp") ;; *) exit 7;; esac; '
+                'case "$CLANG_MODULE_CACHE_PATH" in "$TMPDIR"/*) exit 0;; *) exit 8;; esac\''
             ),
         )
         record = store.reverification_for(happy.record.task_id)
@@ -543,3 +544,41 @@ def test_a_lockfile_patch_that_cannot_be_primed_is_unavailable_not_passed(
     assert "no wheel for dep 2.0" in outcome.detail
     lines = log.read_text(encoding="utf-8").splitlines()
     assert [line.split()[0] for line in lines] == ["sync", "sync"]  # the verify never ran
+
+
+def test_es_f3_landing_builds_on_the_exact_base_g10_verified(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F3 (B131, I1 I2): main moved after a confirmed re-verify, and the
+    landing built on the NEW tip — a NameError landed labelled "confirmed".
+    The re-verify pins the commit it ran on; landing builds on exactly it."""
+
+    from skep.supervisor.serve import actions
+
+    outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
+    verified_on = git(repo, "rev-parse", "main").stdout.strip()
+    (repo / "moved.py").write_text("x = 1\n")
+    git(repo, "add", "moved.py")
+    git(repo, "commit", "-qm", "main moved after re-verify")
+    task_id = outcome.record.task_id
+
+    store = RunStore(config.db_path)
+    try:
+        record = store.reverification_for(task_id)
+        assert record is not None and record.confirmed
+        assert record.base_commit == verified_on
+        landed = actions.land_run(store, actions.require_run(store, task_id), "tester")
+        assert "warning" not in landed
+        # Appending past the verified commit (a grouped stack) still lands, but
+        # nothing calls the landed tree confirmed any more.
+        git(repo, "branch", "elsewhere", "main")
+        stacked = run_task(repo, "Fix the bug. MODE:happy", config=config).record.task_id
+        git(repo, "commit", "-q", "--allow-empty", "-m", "moved again")
+        git(repo, "branch", "-f", "elsewhere", "main")
+        out = actions.land_run(store, actions.require_run(store, stacked), "t", branch="elsewhere")
+        assert "never re-verified" in out["warning"]
+        assert store.reverification_for(stacked).confirmed is False  # type: ignore[union-attr]
+    finally:
+        store.close()
+    parent = git(repo, "rev-parse", f"{landed['branch']}^").stdout.strip()
+    assert parent == verified_on

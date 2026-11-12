@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..sandbox import DENY_ALL_NETWORK, availability, wrap_command, write_profile
+from ..spawner import build_worker_env
 
 FAST_LANE_TIMEOUT_SECS = 10
 FAST_LANE_OUTPUT_CAP = 10_000
@@ -42,7 +43,7 @@ def _capped(text: str) -> str:
     return text[:FAST_LANE_OUTPUT_CAP] + "\n… (truncated)"
 
 
-def run_code_fast(language: str, code: str) -> dict[str, Any] | None:
+def run_code_fast(language: str, code: str, *, skep_home: Path) -> dict[str, Any] | None:
     """Run a short python/shell script in the native sandbox, supervisor-side.
 
     Returns None when no native backend is usable — the caller's worker
@@ -59,6 +60,7 @@ def run_code_fast(language: str, code: str) -> dict[str, Any] | None:
             workspace / "sandbox.profile",
             workspace=workspace,
             network=DENY_ALL_NETWORK,
+            skep_home=skep_home,
         )
         argv = (
             [sys.executable, str(script_path)]
@@ -70,6 +72,15 @@ def run_code_fast(language: str, code: str) -> dict[str, Any] | None:
             "sandbox_backend": probe.backend,
             "code_sha256": hashlib.sha256(code.encode()).hexdigest(),
         }
+        # ES-F4: the worker env rule (G2), not the daemon's own environment —
+        # which carries every key serve.env loaded. TMPDIR stays inside the
+        # wall (ES-F5: shared temp roots are no longer writable).
+        # clang/swiftc ignore TMPDIR for their module cache (Mac finding B).
+        env = {
+            **build_worker_env(()),
+            "TMPDIR": str(workspace),
+            "CLANG_MODULE_CACHE_PATH": str(workspace / "clang"),
+        }
         try:
             proc = subprocess.run(
                 wrap_command(argv, profile),
@@ -77,6 +88,7 @@ def run_code_fast(language: str, code: str) -> dict[str, Any] | None:
                 text=True,
                 timeout=FAST_LANE_TIMEOUT_SECS,
                 cwd=str(workspace),
+                env=env,
                 check=False,
             )
         except subprocess.TimeoutExpired:

@@ -60,11 +60,19 @@ def test_same_action_two_roles_different_verdicts_and_the_ledger_says_which(
         builder = _decide(config, role="builder", **ask)
         operator = _decide(config, role="operator", **ask)
         none = _decide(config, **ask)
-        assert builder["verdict"] == none["verdict"] == "allow", where
-        assert (operator["verdict"], operator["decided_by"]) == (
-            "require_approval",
-            "role:operator/shell-gated",
-        ), where
+        if where:
+            assert builder["verdict"] == none["verdict"] == "allow", where
+            assert (operator["verdict"], operator["decided_by"]) == (
+                "require_approval",
+                "role:operator/shell-gated",
+            ), where
+        else:
+            # ES-F3 (B03): the builder's worker toolchain never reaches the
+            # Queen's host lane, so no role finds an allow there to keep; the
+            # template's `*` ask does (ES-F7).
+            verdicts = {builder["verdict"], none["verdict"], operator["verdict"]}
+            assert verdicts == {"require_approval"}
+            assert none["rule_id"] == "shell-learnable"
         assert (builder["role"], operator["role"], "role" in none) == ("builder", "operator", False)
     rows = [
         json.loads(line)
@@ -102,9 +110,9 @@ def test_done_criterion_4_policy_why_names_the_role_layer(
     assert view["role"]["layer"] == "role:operator"
     assert view["role"]["binds"] == "operator"
     assert "role:operator sits under the baseline and only tightens" in view["role"]["note"]
-    assert (
-        view["run"]["decided_by"] == view["operator"]["decided_by"] == "role:operator/shell-gated"
-    )
+    assert view["run"]["decided_by"] == "role:operator/shell-gated"
+    # ES-F3: the Queen's lane has no toolchain allow for the role to tighten.
+    assert view["operator"]["verdict"] == "require_approval"
     assert main([*why, "--role", "builder"]) == 0
     view = json.loads(capsys.readouterr().out)
     assert view["role"]["layer"] == "role:builder" and view["run"]["verdict"] == "allow"
@@ -120,7 +128,13 @@ def test_rest_and_chat_faces_take_the_role(
     with serve_client(config) as client:
         decided = client.post(
             "/api/policy/decide",
-            json={"scope": "shell", "action": "run", "value": "uv sync", "role": "operator"},
+            json={
+                "scope": "shell",
+                "action": "run",
+                "value": "uv sync",
+                "role": "operator",
+                "repo": str(repo),
+            },
         ).json()
         assert (decided["role"], decided["verdict"]) == ("operator", "require_approval")
         why = client.get(

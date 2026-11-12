@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -323,8 +326,10 @@ def test_shell_run_heartbeats_while_the_command_runs(
 
     monkeypatch.setattr(capabilities_module, "_EXEC_HEARTBEAT_SECONDS", 0.05)
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
     argv = [sys.executable, "-c", "import time; time.sleep(0.4)"]
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path, emit=lambda t, p: events.append((t, p)), verify_command=shlex.join(argv)
+    )
 
     result = registry.invoke("shell.run", {"argv": argv, "purpose": "verify"})
 
@@ -485,8 +490,10 @@ def test_read_plugin_cannot_mutate_workspace_even_if_manifest_claims_read(tmp_pa
 
 def test_shell_run_records_command_events(tmp_path: Path) -> None:
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
     argv = [sys.executable, "-c", "print('ok')"]
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path, emit=lambda t, p: events.append((t, p)), verify_command=shlex.join(argv)
+    )
 
     result = registry.invoke("shell.run", {"argv": argv, "purpose": "verify"})
 
@@ -516,7 +523,11 @@ def test_shell_run_records_command_events(tmp_path: Path) -> None:
 
 def test_shell_run_accepts_verify_command_string(tmp_path: Path) -> None:
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path,
+        emit=lambda t, p: events.append((t, p)),
+        verify_command=f"{shlex.quote(sys.executable)} -c \"print('ok')\"",
+    )
 
     result = registry.invoke(
         "shell.run",
@@ -545,8 +556,10 @@ def test_shell_run_accepts_verify_command_string(tmp_path: Path) -> None:
 
 def test_shell_run_reports_missing_verify_command_without_crashing(tmp_path: Path) -> None:
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
     argv = ["definitely-missing-skep-command", "--version"]
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path, emit=lambda t, p: events.append((t, p)), verify_command=shlex.join(argv)
+    )
 
     result = registry.invoke("shell.run", {"argv": argv, "purpose": "verify"})
 
@@ -580,7 +593,11 @@ def test_shell_run_uses_worker_interpreter_for_python_verify(
 ) -> None:
     monkeypatch.setenv("PATH", "")
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path,
+        emit=lambda t, p: events.append((t, p)),
+        verify_command="python -c \"print('ok')\"",
+    )
 
     result = registry.invoke(
         "shell.run",
@@ -619,6 +636,7 @@ def test_shell_run_rebuilds_child_environment_from_allowlist(
         tmp_path,
         emit=lambda _t, _p: None,
         env_allowlist=("ALLOWED_PROVIDER_KEY",),
+        shell_allowlist=[(sys.executable, "-c")],  # ES-F3: verify label is no grant
     )
 
     result = registry.invoke(
@@ -649,7 +667,9 @@ def test_proxy_environment_passes_only_when_network_allowlist_exists(
 ) -> None:
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
 
-    blocked = CapabilityRegistry(tmp_path, emit=lambda _t, _p: None).invoke(
+    blocked = CapabilityRegistry(
+        tmp_path, emit=lambda _t, _p: None, shell_allowlist=[(sys.executable, "-c")]
+    ).invoke(
         "shell.run",
         {
             "argv": [sys.executable, "-c", "import os; print(os.environ.get('HTTP_PROXY', ''))"],
@@ -660,6 +680,7 @@ def test_proxy_environment_passes_only_when_network_allowlist_exists(
         tmp_path,
         emit=lambda _t, _p: None,
         network_allowlist=("example.com",),
+        shell_allowlist=[(sys.executable, "-c")],
     ).invoke(
         "shell.run",
         {
@@ -1878,6 +1899,7 @@ def test_shell_run_strips_proxy_environment_when_task_network_is_denied(
         emit=lambda _t, _p: None,
         env_allowlist=(),
         network_allowlist=(),
+        shell_allowlist=[(sys.executable, "-c")],  # ES-F3: verify label is no grant
     )
 
     result = registry.invoke(
@@ -1910,6 +1932,7 @@ def test_shell_run_preserves_proxy_environment_when_task_network_is_allowed(
         emit=lambda _t, _p: None,
         env_allowlist=(),
         network_allowlist=("example.com",),
+        shell_allowlist=[(sys.executable, "-c")],  # ES-F3: verify label is no grant
     )
 
     result = registry.invoke(
@@ -2058,3 +2081,48 @@ def test_network_fetch_loopback_is_allowed_in_its_own_words(
         "reason": "capability.allow.network_loopback",
         "detail": "localhost" if "localhost" in origin_url else "127.0.0.1",
     }
+
+
+def test_es_f2_repo_search_never_reads_through_an_out_of_tree_symlink(
+    repo: Path, tmp_path: Path
+) -> None:
+    """ES-F2 (B126): `repo.search "BEGIN"` read a tracked symlink to a key."""
+    secret = tmp_path / "outside-key"
+    secret.write_text("value = CANARY-SEARCH\n", encoding="utf-8")
+    (repo / "key.txt").symlink_to(secret)
+    subprocess.run(["git", "-C", str(repo), "add", "key.txt"], check=True)
+    registry = CapabilityRegistry(repo, emit=lambda t, p: None)
+    result = registry.invoke("repo.search", {"query": "value", "max_matches": 5})
+    assert "CANARY-SEARCH" not in (result.output or "")
+    assert "existing.py:1:value = 0" in (result.output or "")
+
+
+def _pid_gone(pid: int, seconds: float = 5.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_es_f9_a_timed_out_command_takes_its_children_with_it(tmp_path: Path) -> None:
+    """ES-F9 (B133, I12): subprocess.run's timeout killed only the direct
+    child; `sh tests/verify.sh` → `sleep 330` kept running with PPID 1 after
+    the run ended (lane M2-25a)."""
+    script = (
+        "import subprocess, sys, time; "
+        "p = subprocess.Popen(['sleep', '61']); "
+        "open('gc.pid', 'w').write(str(p.pid)); time.sleep(30)"
+    )
+    registry = CapabilityRegistry(
+        tmp_path,
+        emit=lambda event_type, payload: None,
+        shell_allowlist=[[sys.executable]],
+        command_timeout_seconds=1,
+    )
+    result = registry.invoke("shell.run", {"argv": [sys.executable, "-c", script]})
+    assert result.exit_code == 124
+    assert _pid_gone(int((tmp_path / "gc.pid").read_text()))

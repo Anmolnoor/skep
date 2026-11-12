@@ -52,6 +52,7 @@ def build_status(
             + _stale_store_advisories(home)
             + _model_truth_advisories(home)
             + _baseline_advisories(home)
+            + _channel_user_advisories(home)
         )
         payload["stale_pending"] = stale_pending
         return payload
@@ -82,6 +83,7 @@ def build_status(
         + _stale_store_advisories(home)
         + _model_truth_advisories(home)
         + _baseline_advisories(home)
+        + _channel_user_advisories(home)
     )
     payload["stale_pending"] = stale_pending
     return payload
@@ -216,6 +218,29 @@ def _auto_approve_advisories(home: Path) -> list[str]:
     return [_AUTO_APPROVE_DEPRECATION] if enabled else []
 
 
+def _channel_user_advisories(home: Path) -> list[str]:
+    """ES (B114): an enabled channel with no ``allowed_users`` admits nobody —
+    channels authorize a PERSON now, so say why it went quiet."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        configs = store.list_channel_configs()
+    finally:
+        store.close()
+    return [
+        f"channel {config.channel} is enabled with no allowed_users — it ignores every "
+        "message and button (fail closed). List the people who may drive skep: "
+        f'PUT /api/channels/{config.channel} {{"allowed_users": ["<user id>"]}} '
+        "or the web UI's channel panel."
+        for config in configs
+        if config.enabled and not config.allowed_users
+    ]
+
+
 # v111-F5: store files from retired layouts. Each migration left its sqlite
 # behind silently; two independent investigations (doctor's own memory check
 # pre-F2, and the 2026-08-12 forensics session) opened a dead store first.
@@ -281,15 +306,22 @@ NO_BASELINE_WARNING = (
 def _baseline_advisories(home: Path) -> list[str]:
     """first-run O5 (ADR 0056 D2): a home the zero state does not bind (it
     predates the baseline) keeps deciding as before — say so in one line."""
+    from .supervisor.policy_baseline import NoBaseline, baseline_status, relock_note, verify
+
+    if not isinstance(verify(home / "supervisor"), NoBaseline):
+        # ES-F2 (B51): a re-lock from a non-shipped layer (a file, or
+        # baseline.json edited in place) is a change event doctor names.
+        relock = baseline_status(home / "supervisor")["relock"]
+        source = str((relock or {}).get("source") or "")
+        if relock and not source.startswith(("template:", "onboard:")):
+            return [f"baseline re-locked {relock.get('approved_at')}{relock_note(relock)}"]
+        return []
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
         return []  # opening a store here would create (and seed) a fresh home
-    from .supervisor.policy_baseline import NoBaseline, verify
     from .supervisor.policy_layers import zero_state_home
     from .supervisor.store import RunStore
 
-    if not isinstance(verify(home / "supervisor"), NoBaseline):
-        return []
     store = RunStore(db_path)
     try:
         return [] if zero_state_home(store) else [NO_BASELINE_WARNING]

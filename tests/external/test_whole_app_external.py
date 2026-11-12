@@ -217,4 +217,4 @@ def test_whole_app_live_llm_dispatch_reverify_and_approve(
 
     assert not (toy_repo / "hello.py").exists()
     assert _repo_head(toy_repo) == head_before
-    _assert_no_extra_worktrees(toy_repo, toy_repo.parent / ".skep" / "worktrees")
+    _assert_no_extra_worktrees(toy_repo, config.worktrees_root)  # ES-F4: under SKEP_HOME

@@ -16,6 +16,8 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -355,5 +357,155 @@ def test_loopback_passes_through_the_proxy_with_an_empty_allowlist(origin: int) 
         status, body = _fetch_via(proxy.port, f"http://127.0.0.1:{origin}/")
         assert status == 200 and body
         assert proxy.allowed_count == 1 and proxy.denied_count == 0
+    finally:
+        proxy.stop()
+
+
+def _raw(proxy_port: int, request: bytes) -> str:
+    """Send one raw request to the proxy; return its status line."""
+    with socket.create_connection(("127.0.0.1", proxy_port), timeout=5) as sock:
+        sock.sendall(request)
+        return sock.recv(4096).split(b"\r\n", 1)[0].decode("latin-1")
+
+
+def _resolver(addresses: dict[str, str]) -> netproxy.Resolver:
+    def fake(host: str, port: object, *args: object, **kwargs: object) -> list[tuple[Any, ...]]:
+        if host not in addresses:
+            raise socket.gaierror(host)
+        family = socket.AF_INET6 if ":" in addresses[host] else socket.AF_INET
+        return [(family, socket.SOCK_STREAM, 6, "", (addresses[host], port))]
+
+    return fake
+
+
+@pytest.mark.parametrize(
+    ("host", "resolved"),
+    [
+        ("rebind.example", "127.0.0.1"),  # an allowlisted name pointed at the host
+        ("lan.example", "10.0.0.5"),
+        ("metadata.example", "169.254.169.254"),
+        ("v6.example", "::1"),
+    ],
+)
+def test_an_allowlisted_name_resolving_to_a_local_address_is_refused(
+    host: str, resolved: str
+) -> None:
+    """ES-F6 (B54, fedora-p1-15): the proxy trusted DNS — `fedora` (the host's
+    own name) reached the host's listener. Resolve once, refuse a non-public
+    answer, and connect to the vetted IP (no rebinding window)."""
+    verdict = netproxy.admit_target(
+        host, 443, (host,), denied_ports=(), resolve=_resolver({host: resolved})
+    )
+    assert verdict[0] == 403 and "non-public" in verdict[1]
+    public = netproxy.admit_target(
+        host, 443, (host,), denied_ports=(), resolve=_resolver({host: "93.184.215.14"})
+    )
+    assert public == (200, "", [("93.184.215.14", 443)])
+
+
+@pytest.mark.parametrize("host", ["foo.localhost", "LOCALHOST.", "127.1"])
+def test_loopback_aliases_are_not_loopback_through_the_proxy(host: str) -> None:
+    """ES-F6 (B54): `foo.localhost` and `LOCALHOST.` reached serve. Loopback
+    is admitted only as `localhost` or a loopback IP literal."""
+    echo_port, srv = _echo_listener()
+    proxy = FilteringProxy(()).start()
+    try:
+        status = _raw(proxy.port, f"CONNECT {host}:{echo_port} HTTP/1.1\r\n\r\n".encode())
+        assert "403" in status
+    finally:
+        proxy.stop()
+        srv.close()
+
+
+def test_loopback_never_reaches_the_control_plane_port(origin: int) -> None:
+    """ES-F6 (B05/B54): loopback stays reachable for a project's own test
+    servers (v115-F9) — but never skep serve's port."""
+    proxy = FilteringProxy((), denied_loopback_ports=(origin,)).start()
+    try:
+        for target in (f"127.0.0.1:{origin}", f"localhost:{origin}", f"[::1]:{origin}"):
+            status = _raw(proxy.port, f"CONNECT {target} HTTP/1.1\r\n\r\n".encode())
+            assert "403" in status, target
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _fetch_via(proxy.port, f"http://example.com@127.0.0.1:{origin}/")
+        assert excinfo.value.code == 403
+    finally:
+        proxy.stop()
+
+
+def test_a_mismatched_host_header_or_malformed_port_is_a_400(origin: int) -> None:
+    """ES-F6 (B54 fronting, B58 crash): the Host header must name the target;
+    `CONNECT localhost:8771@x` crashed the handler instead of answering 400."""
+    proxy = FilteringProxy(()).start()
+    try:
+        fronted = _raw(
+            proxy.port,
+            f"GET http://127.0.0.1:{origin}/ HTTP/1.1\r\nHost: evil.example\r\n\r\n".encode(),
+        )
+        assert "400" in fronted
+        connect_fronted = _raw(
+            proxy.port,
+            f"CONNECT 127.0.0.1:{origin} HTTP/1.1\r\nHost: evil.example:443\r\n\r\n".encode(),
+        )
+        assert "400" in connect_fronted
+        for bad in ("localhost:8771@x", "localhost:99999", "localhost:"):
+            assert "400" in _raw(proxy.port, f"CONNECT {bad} HTTP/1.1\r\n\r\n".encode()), bad
+        # A matching Host header still goes through.
+        same = _raw(
+            proxy.port,
+            f"GET http://127.0.0.1:{origin}/ HTTP/1.1\r\nHost: 127.0.0.1:{origin}\r\n\r\n".encode(),
+        )
+        assert "200" in same
+    finally:
+        proxy.stop()
+
+
+def test_control_plane_ports_name_the_default_and_the_recorded_serve_port(
+    tmp_path: Path,
+) -> None:
+    """ES-F6: serve records the port it binds; every run's proxy refuses it."""
+    assert netproxy.control_plane_ports(tmp_path) == (8765,)
+    netproxy.record_serve_port(tmp_path, 8771)
+    assert netproxy.control_plane_ports(tmp_path) == (8765, 8771)
+    (tmp_path / netproxy.SERVE_PORT_FILE).write_text("junk")
+    assert netproxy.control_plane_ports(tmp_path) == (8765,)
+
+
+def test_skep_serve_records_the_port_it_binds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F6: `skep serve --port N` records N so dispatch's proxies refuse it."""
+    import argparse
+
+    import uvicorn
+
+    from skep.supervisor.serve.serve_cmds import cmd_serve
+
+    # cmd_serve runs uvicorn.Server via make_server (ES B119): stub the
+    # Server, or a real one binds the port and the test never returns.
+    monkeypatch.setattr(
+        uvicorn.Server, "run", lambda self, sockets=None: setattr(self, "started", True)
+    )
+    args = argparse.Namespace(
+        home=tmp_path, worker_cmd=None, auto_approve=False, host="127.0.0.1", port=8799
+    )
+    assert cmd_serve(args) == 0
+    assert 8799 in netproxy.control_plane_ports(tmp_path / "supervisor")
+
+
+def test_malformed_targets_and_unresolvable_names_answer_not_crash(origin: int) -> None:
+    """ES-F6 (B58): every malformed shape is a status line, never a traceback."""
+    assert netproxy.split_authority("[::1]:443") == ("::1", 443)
+    assert netproxy.split_authority("[::1") is None
+    assert netproxy.split_authority("::1:443") is None
+    gone = netproxy.admit_target(
+        "gone.example", 443, ("gone.example",), denied_ports=(), resolve=_resolver({})
+    )
+    assert gone[0] == 502
+    with pytest.raises(OSError):
+        netproxy._dial([("127.0.0.1", 1)])  # nothing listens on port 1
+    proxy = FilteringProxy(()).start()
+    try:
+        assert "400" in _raw(proxy.port, b"GET http://127.0.0.1:99999/ HTTP/1.1\r\n\r\n")
+        assert "400" in _raw(proxy.port, b"GET /relative HTTP/1.1\r\n\r\n")
     finally:
         proxy.stop()

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -20,6 +22,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from skep.supervisor.netproxy import domain_allowed, is_loopback_host
+from skep.supervisor.secret_floor import is_dotenv, secret_floor_reason
 from skep.supervisor.spawner import build_worker_env
 from skep.worker_contract import BOOKKEEPING_DIRS, PATCH_EXCLUDE_PATHSPECS, EventType
 from skep.workers.html_text import html_to_text
@@ -108,6 +111,57 @@ CapabilityVerdict = Literal["allow", "allow_with_constraints", "require_approval
 
 CAPABILITY_REASON_PREFIX = "capability."
 CAPABILITY_REASON_TERMS = frozenset({"allow", "require_approval", "deny"})
+
+
+def _run_in_own_group(
+    argv: Sequence[str], cwd: Path, env: Mapping[str, str], timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` whose timeout kills the command's whole group.
+
+    ES-F9 (B133): run's timeout kills only the direct child, so `sh verify.sh`
+    → `sleep 330` outlived the run with PPID 1. The command leads its own
+    process group (still inside the worker's session, so the supervisor's
+    session kill reaches it on a worker crash) and the group dies on timeout.
+    """
+    popen = subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=dict(env),
+        process_group=0,
+    )
+    try:
+        stdout, stderr = popen.communicate(timeout=float(timeout))
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(popen.pid, signal.SIGKILL)
+        popen.communicate()
+        raise
+    return subprocess.CompletedProcess(list(argv), popen.returncode, stdout, stderr)
+
+
+def tracked_file_readable(workspace: Path, path: Path) -> bool:
+    """ES-F2 (B126): may a tracked file's content be read without a capability
+    check (the planning snapshot, SKEP.md, ``repo.search``)?
+
+    ``is_file``/``read_text`` follow symlinks, so a tracked
+    ``deploy_key.txt -> ~/.ssh/id_rsa`` reached the provider in the first plan
+    call — before any tool ran or any card showed — and stayed in the audit
+    trail. Only regular files whose realpath stays inside the worktree (and
+    outside its ``.git``) are read. ``.env`` files (any case) never are.
+    """
+    if is_dotenv(path.name):
+        return False
+    try:
+        root = workspace.resolve()
+        real = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return (
+        real.is_relative_to(root) and ".git" not in real.relative_to(root).parts and real.is_file()
+    )
 
 
 @dataclass(frozen=True)
@@ -204,7 +258,16 @@ BUILTIN_CAPABILITIES: tuple[CapabilitySpec, ...] = (
         "Restore tracked files in git; requires approval.",
         "git-mutating",
     ),
-    CapabilitySpec("git.commit", "Create a git commit; requires approval.", "git-mutating"),
+    CapabilitySpec(
+        "git.commit",
+        # ES-F3: the repo's refs/ are read-only inside the sandbox, so on macOS
+        # git prints this lock error after every commit and still exits 0.
+        "Create a git commit; requires approval. Exit 0 means the commit "
+        'succeeded, even if git also prints "error: Unable to create '
+        "'…/packed-refs.lock': Operation not permitted\" — the sandbox keeps "
+        "the repo's refs read-only and that message is expected.",
+        "git-mutating",
+    ),
     CapabilitySpec("network.fetch", "Fetch an allowlisted HTTP(S) URL.", "network"),
     CapabilitySpec(
         "network.read",
@@ -412,8 +475,17 @@ class CapabilityRegistry:
         approved_network_hosts: Sequence[str] = (),
         approved_plugin_risks: Mapping[str, str] | None = None,
         command_timeout_seconds: float | None = None,
+        verify_command: str = "",
     ) -> None:
         self._workspace = workspace.resolve()
+        # ES-F3 (B06): the project's pinned verify_command — with the
+        # worker code's own constant verifies (pin_code_verify), the only
+        # argvs the verify fast-path allows. Empty = no pin = no fast-path.
+        self._pinned_verify: set[tuple[str, ...]] = (
+            {_normalized_shell_argv(shlex.split(verify_command))}
+            if verify_command.strip()
+            else set()
+        )
         self._emit = emit
         self._instructions = instructions
         # v115-F6: the per-command cap follows the task's wall-clock budget. A
@@ -530,6 +602,19 @@ class CapabilityRegistry:
                 "is unreachable by design"
             ) from exc
         return resolved, relative.as_posix()
+
+    def _readable_path(self, path: object) -> tuple[Path, str]:
+        """ES-F1 (V3): ``_workspace_path`` plus the secret floor — a ``.env``
+        in the workspace is a credential, judged by requested path and
+        realpath (a symlink to it is still it). No grant lifts this."""
+        target, relative = self._workspace_path(path)
+        requested = Path(str(path))
+        if not requested.is_absolute():
+            requested = self._workspace / requested
+        reason = secret_floor_reason(requested)
+        if reason is not None:
+            raise CapabilityDenied(f"secret floor: {reason}")
+        return target, relative
 
     def _workspace_path_from_existing_suffix(self, candidate: Path) -> tuple[Path, str] | None:
         parts = [part for part in candidate.parts if part not in {"", candidate.anchor}]
@@ -670,6 +755,12 @@ class CapabilityRegistry:
         argv, purpose, command = self._shell_policy_inputs(arguments)
         return self._shell_decision(purpose=purpose, argv=argv, command=command)
 
+    def pin_code_verify(self, argv: Sequence[str]) -> None:
+        """ES-F3: pin a verify argv the worker's own CODE chose as a constant
+        (the no-model hello-world path). Never call it with plan/model input —
+        a model-chosen verify is exactly what the pin exists to refuse."""
+        self._pinned_verify.add(_normalized_shell_argv(argv))
+
     def _shell_decision(
         self, *, purpose: str, argv: Sequence[str], command: str
     ) -> CapabilityDecision:
@@ -691,6 +782,7 @@ class CapabilityRegistry:
                 command=command,
                 approved_shell_commands=self._approved_shell_commands,
                 shell_allowlist=self._shell_allowlist,
+                pinned_verify=self._pinned_verify,
             )
         )
         assert shell is not None
@@ -844,7 +936,7 @@ class CapabilityRegistry:
         return url, parsed.hostname
 
     def _filesystem_read(self, arguments: Mapping[str, Any]) -> CapabilityResult:
-        target, relative = self._workspace_path(arguments.get("path"))
+        target, relative = self._readable_path(arguments.get("path"))
         max_bytes = arguments.get("max_bytes", 65536)
         if not isinstance(max_bytes, int) or max_bytes <= 0:
             raise CapabilityDenied("max_bytes must be a positive integer")
@@ -875,7 +967,7 @@ class CapabilityRegistry:
         )
 
     def _filesystem_read_chunk(self, arguments: Mapping[str, Any]) -> CapabilityResult:
-        target, relative = self._workspace_path(arguments.get("path"))
+        target, relative = self._readable_path(arguments.get("path"))
         offset = arguments.get("offset", 0)
         max_bytes = arguments.get("max_bytes", 65536)
         if not isinstance(offset, int) or offset < 0:
@@ -1070,8 +1162,13 @@ class CapabilityRegistry:
         matches: list[str] = []
         for relative in self._tracked_files():
             path = self._workspace / relative
+            if secret_floor_reason(path) is not None:
+                continue  # ES-F1: never quote a credential file
             try:
-                if not path.is_file() or path.stat().st_size > 1_000_000:
+                if (
+                    not tracked_file_readable(self._workspace, path)
+                    or path.stat().st_size > 1_000_000
+                ):
                     continue
                 lines = path.read_text(encoding="utf-8").splitlines()
             except (OSError, UnicodeDecodeError):
@@ -1310,15 +1407,7 @@ class CapabilityRegistry:
                 interval_seconds=_EXEC_HEARTBEAT_SECONDS,
                 emit_immediately=False,
             ):
-                proc = subprocess.run(
-                    argv,
-                    cwd=str(self._workspace),
-                    capture_output=True,
-                    text=True,
-                    timeout=float(timeout),
-                    check=False,
-                    env=self._child_env,
-                )
+                proc = _run_in_own_group(argv, self._workspace, self._child_env, timeout)
         except subprocess.TimeoutExpired:
             duration_ms = int((time.monotonic() - started) * 1000)
             error = (
@@ -1457,6 +1546,9 @@ class CapabilityRegistry:
             raise CapabilityDenied("rev must be a non-empty string")
         if rev.startswith("-"):
             raise CapabilityDenied("rev must not be an option")
+        _, sep, inner = rev.partition(":")
+        if sep and inner and (reason := secret_floor_reason(self._workspace / inner)):
+            raise CapabilityDenied(f"secret floor: {reason}")
         return self._git_read("git.show", ["show", "--no-ext-diff", rev], f"GIT_SHOW {rev}")
 
     def _git_log(self, arguments: Mapping[str, Any]) -> CapabilityResult:

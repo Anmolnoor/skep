@@ -18,7 +18,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from skep.profile import run_personal_setup
-from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor import RunStore, SupervisorConfig, run_task
 from skep.supervisor.apply import validate_landing_branch
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.github import PullRequestResult
@@ -243,7 +243,7 @@ def test_approving_a_suspended_run_resumes_it_past_the_gate(
     # The original's approval is resolved and linked to the resume it spawned.
     original = client.get(f"/api/runs/{task_id}").json()["approvals"][0]
     assert original["status"] == "approved"
-    assert original["resolved_by"] == "tester"
+    assert original["resolved_by"] == "operator"
     assert str(payload["resumed_as"]) in original["resolution_note"]
 
 
@@ -462,6 +462,7 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
         "-c",
         "from pathlib import Path; Path('generated.py').write_text(\"print('from shell')\\n\")",
     ]
+    verify_argv = [sys.executable, "generated.py"]
     worker_plan = json.dumps(
         {
             "summary": "created generated.py after shell approval",
@@ -489,6 +490,8 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
             json={
                 "trusted_workspace_roots": [str(tmp_path)],
                 "default_execution_mode": "workspace",
+                # ES-F3: the verify label is no grant; the operator allowlisted it.
+                "allowed_shell_commands": [verify_argv],
             },
         )
         server.script_reply(worker_plan)
@@ -523,7 +526,7 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
         }
         assert task["approval_verdict"] == {
             "approved": True,
-            "actor": "tester",
+            "actor": "operator",
             "ts": task["approval_verdict"]["ts"],
             "reason": f"shell.run requires approval for command: {shlex.join(write_argv)}",
             "action": "shell.run",
@@ -536,10 +539,13 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
             # v19-F1: the batch-approval command list is carried on the verdict.
             "commands": [write_argv],
         }
-        assert client.get("/api/policy").json()["allowed_shell_commands"] == [write_argv]
+        assert client.get("/api/policy").json()["allowed_shell_commands"] == [
+            verify_argv,
+            write_argv,
+        ]
         # The just-persisted allowlist reaches the immediate resume too, not
         # only future runs.
-        assert task["permissions"]["shell_allowlist"] == [write_argv]
+        assert task["permissions"]["shell_allowlist"] == [verify_argv, write_argv]
         commands = client.get(f"/api/runs/{payload['resumed_as']}").json()["commands"]
         assert [
             {
@@ -653,7 +659,9 @@ def test_approving_a_completed_run_applies_the_patch_on_a_branch(
             "review_id": review_id,
             "action": "apply_patch",
             "status": "approved",
-            "actor": "tester",
+            # ES-F1: the principal decides; the body's claim is a note only.
+            "actor": "operator",
+            "note": "[client-claimed actor: tester]",
             "branch": branch,
             "project_context": {
                 "project_id": "project-1",
@@ -789,6 +797,21 @@ def test_validate_landing_branch_rules(repo: Path) -> None:
     assert validate_landing_branch(repo, default) is not None
     # v24-F1: an existing non-default branch is a legal APPEND target now.
     assert validate_landing_branch(repo, "taken") is None
+
+
+def test_landing_branch_names_are_compared_casefolded(repo: Path) -> None:
+    """ES-F5 (B49): on APFS/NTFS `MAIN` and `main` are one ref file — landing
+    on `MAIN` moved refs/heads/main. Refused on every OS (repos move between
+    machines): the default casefolded, and any name that casefold-collides
+    with an existing branch that is not exactly it."""
+    default = git(repo, "symbolic-ref", "--short", "HEAD").stdout.strip()
+    git(repo, "branch", "Feature/Taken")
+    upper = validate_landing_branch(repo, default.upper())
+    assert upper is not None and "default branch" in upper
+    collide = validate_landing_branch(repo, "feature/taken")
+    assert collide is not None and "Feature/Taken" in collide
+    # The exact existing name is still the v24-F1 append target.
+    assert validate_landing_branch(repo, "Feature/Taken") is None
 
 
 def test_landing_guard_protects_repo_default_not_the_checkout(repo: Path) -> None:
@@ -1244,5 +1267,116 @@ def test_cli_resume_keeps_the_original_execution_mode(
         assert record is not None
         cli_cmds._resume_pending_approval(config, store, record, "tester")
         assert captured.get("execution_mode") == "workspace"
+    finally:
+        store.close()
+
+
+def test_decider_is_the_authenticated_principal_not_the_body(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F1 (B05/B51): a body-supplied ``actor`` is a claim, not an identity —
+    the ledger records the principal the serve token authenticates; the claim
+    survives only as a note annotation (I13)."""
+    client = _client(config)
+    task_id = _dispatch(client, repo, "Commit this. MODE:pending")
+    assert _wait_terminal(client, task_id)["state"] == "pending_approval"
+    review_id = client.get("/api/approvals").json()["approvals"][0]["review_id"]
+
+    denied = client.post(
+        f"/api/approvals/{review_id}/deny", json={"actor": "worker-x", "note": "nope"}
+    )
+    assert denied.status_code == 200
+
+    store = RunStore(config.db_path)
+    try:
+        approval = store.get_approval(review_id)
+    finally:
+        store.close()
+    assert approval is not None
+    assert approval.resolved_by == "operator"
+    assert "worker-x" in str(approval.resolution_note)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "refs/heads/main",
+        "heads/main",
+        "refs/tags/v1",
+        "remotes/origin/x",
+        "Refs/Heads/x",
+        "origin/x",
+    ],
+)
+def test_es_f4_ref_namespace_spellings_are_not_landing_branches(repo: Path, name: str) -> None:
+    """ES-F4 (B127, I1 I8): git accepted `refs/heads/main` as a NEW branch
+    (refs/heads/refs/heads/main), and the run reported applied_branch
+    `refs/heads/main` — which reads as "landed on main"."""
+    git(repo, "remote", "add", "origin", str(repo))
+    error = validate_landing_branch(repo, name)
+    assert error is not None and "ref namespace" in error, name
+
+
+def test_es_f4_a_landed_task_lands_once(repo: Path, config: SupervisorConfig) -> None:
+    """ES-F4 (B128, I1): one completed task landed 7 times on 7 branches."""
+    from skep.supervisor.serve import actions
+
+    outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
+    store = RunStore(config.db_path)
+    try:
+        first = actions.land_run(store, actions.require_run(store, outcome.record.task_id), "t")
+        with pytest.raises(HTTPException) as again:
+            actions.land_run(
+                store, actions.require_run(store, outcome.record.task_id), "t", branch="again"
+            )
+    finally:
+        store.close()
+    assert again.value.status_code == 409
+    assert f"already landed on {first['branch']}" in str(again.value.detail)
+    assert not git(repo, "branch", "--list", "again").stdout.strip()
+
+
+def test_es_f8_cli_approve_of_a_batch_card_grants_every_command(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F8 (B130, I5; ADR 0050 parity): `skep review --approve` of a card
+    "for 3 commands" granted only the first — three approvals, three resumes
+    (lane M2-19) — and skipped the v86-F1 session tier REST writes."""
+    from skep.supervisor import cli_cmds, mint_task
+    from skep.supervisor.contracts_io import write_task_file
+    from skep.supervisor.serve.settings import SESSION_ALLOWED_SHELL_COMMANDS
+
+    config = build_config(tmp_path / "home", None)
+    config.home.mkdir(parents=True, exist_ok=True)
+    batch = [["mkdir", "-p", "docs"], ["mv", "a.txt", "docs/a.txt"], ["wc", "-l", "big.txt"]]
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=repo, instructions="rename")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "pending_approval")
+        write_task_file(task, config.audit_dir / task.task_id / "task.json")
+        store.enqueue_approval(
+            task.task_id,
+            action="shell.run",
+            reason="shell.run requires approval for 3 commands: mkdir -p docs",
+            commands=batch,
+        )
+        seen: dict[str, object] = {}
+
+        class _Stop(Exception):
+            pass
+
+        def fake_run_task(*args: object, **kwargs: object) -> object:
+            seen.update(kwargs)
+            raise _Stop
+
+        monkeypatch.setattr(cli_cmds, "run_task", fake_run_task)
+        record = store.get_run(task.task_id)
+        assert record is not None
+        with pytest.raises(_Stop):
+            cli_cmds._resume_pending_approval(config, store, record, "tester")
+        verdict = seen["approval_verdict"]
+        assert [list(c) for c in verdict.commands] == batch  # type: ignore[attr-defined]
+        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) == batch
     finally:
         store.close()
