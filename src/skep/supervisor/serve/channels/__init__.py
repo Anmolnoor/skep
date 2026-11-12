@@ -128,10 +128,30 @@ class ConfirmCard:
     high: bool = False
 
 
-def card_notes(card: Mapping[str, Any] | None) -> tuple[str, ...]:
+# A messenger lists a folded card's items in full or not at all — Discord caps
+# a message at 25 fields of 1024 characters, Telegram at 4096 characters. A
+# fold past these limits is web-UI-only (and ``chat.verdict_events`` refuses
+# a channel confirm of it): no reaction may approve an item nobody could read.
+MESSENGER_FOLD_ITEMS = 15
+MESSENGER_FOLD_CHARS = 2500
+MESSENGER_ITEM_CHARS = 1000
+
+
+def fold_fits_a_messenger(items: Sequence[str]) -> bool:
+    """Can a messenger list every item of this fold, whole?"""
+    return (
+        len(items) <= MESSENGER_FOLD_ITEMS
+        and sum(len(item) for item in items) <= MESSENGER_FOLD_CHARS
+        and all(len(item) <= MESSENGER_ITEM_CHARS for item in items)
+    )
+
+
+def card_notes(card: Mapping[str, Any] | None, *, messenger: bool = True) -> tuple[str, ...]:
     """The lines a messenger shows from the server's card (``card_summary``):
     a HIGH card says it needs the web UI and why, then the taint line; a
-    folded card lists every item it would approve."""
+    folded card lists every item it would approve — on a messenger only when
+    it fits whole (``fold_fits_a_messenger``); the CLI (``messenger`` False)
+    always lists them."""
     if not card:
         return ()
     notes: list[str] = []
@@ -150,8 +170,15 @@ def card_notes(card: Mapping[str, Any] | None) -> tuple[str, ...]:
         notes.extend(schedule_lines(schedule))
     items = card.get("items")
     if isinstance(items, list) and len(items) > 1:
-        notes.append(f"{len(items)} items, one approval covers exactly these:")
-        notes.extend(f"- {item}" for item in items)
+        lines = [str(item) for item in items]
+        if messenger and not fold_fits_a_messenger(lines):
+            notes.append(
+                f"{len(items)} items, too many or too long to list here: open the skep "
+                "web UI to read every one and confirm them there."
+            )
+        else:
+            notes.append(f"{len(items)} items, one approval covers exactly these:")
+            notes.extend(f"- {line}" for line in lines)
     return tuple(notes)
 
 
@@ -224,10 +251,12 @@ def render_confirm_card(
 
     command_lines = tuple(_join([str(part) for part in command]) for command in commands)
     high = bool(card) and card.get("tier") == "high"  # type: ignore[union-attr]
+    items = [str(item) for item in ((card or {}).get("items") or [])]
+    too_long = len(items) > 1 and not fold_fits_a_messenger(items)
     return ConfirmCard(
         action_class=action_class,
         commands=command_lines,
-        web_ui_only=action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high,
+        web_ui_only=action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high or too_long,
         notes=card_notes(card),
         high=high,
     )

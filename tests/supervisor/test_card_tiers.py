@@ -61,6 +61,15 @@ HIGH_KINDS: list[tuple[str, str, dict[str, Any], str]] = [
     ("engine change", "dispatch_run",
      {"repo": "r", "instructions": "i", "engine": "claude_code"}, "none"),
     ("engine change", "setup_project", {"path": "/x", "engine": "codex"}, "none"),
+    # the same engine, network and group writes spelled through the overlay
+    ("policy write", "setup_project",
+     {"project_id": "p", "name": "p", "strategy": "trusted_local_dev",
+      "policy_overrides": {"coding_engine": "claude_code"}}, "none"),
+    ("policy write", "setup_project",
+     {"project_id": "p", "name": "p", "strategy": "trusted_local_dev",
+      "policy_overrides": {"default_network": ["*"]}}, "none"),
+    ("policy write", "setup_project",
+     {"project_id": "p", "name": "p", "strategy": "trusted_local_dev", "groups": ["g"]}, "none"),
     ("network *", "dispatch_run", {"repo": "r", "instructions": "i", "network": ["*"]}, "none"),
     ("network *", "batch_dispatch",
      {"tasks": [{"repo": "r", "instructions": "i", "network": ["*"]}]}, "none"),
@@ -81,6 +90,8 @@ MEDIUM_KINDS: list[tuple[str, dict[str, Any], str]] = [
      {"name": "n", "caste": "note", "instructions": "hi", "every": "1d"}, "none"),
     ("revoke_policy_rule", {"rule_id": "x"}, "none"),  # narrows: an ordinary card
     ("forge_tool", {"name": "t", "purpose": "p"}, "none"),  # lands as a patch first
+    ("setup_project", {"project_id": "p", "name": "p", "strategy": "trusted_local_dev",
+                       "policy_overrides": {}, "groups": []}, "none"),
 ]  # fmt: skip
 
 
@@ -383,3 +394,51 @@ def test_an_old_database_gains_card_json_and_its_cards_read_as_unrecorded(
         assert reopened.fold_into_chat_action("missing", args={}, tool_call_id=None) is False
     finally:
         reopened.close()
+
+
+def test_a_project_wide_network_is_high_for_every_dispatch_verb(
+    repo: Any, config: SupervisorConfig
+) -> None:
+    """A project whose default network is ``*`` and that auto-dispatches:
+    dispatch_run's manifest made its card HIGH, while quick_edit and
+    batch_dispatch — the same compile, the same run — ran unasked with every
+    host open. Each one now cards HIGH."""
+    from .test_serve_chat import sse_events
+    from .test_serve_chat_tools import chat_client
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        client, _ = chat_client(config, ollama)
+        created = client.post(
+            "/api/projects",
+            json={
+                "project_id": "star", "name": "Star", "strategy": "trusted_local_dev",
+                "phase": "build",
+                "policy": {"default_execution_mode": "workspace", "auto_dispatch_allowed": True,
+                           "default_network": ["*"]},
+                "bindings": [{"kind": "repo_path", "value": str(repo)}],
+            },
+        )  # fmt: skip
+        assert created.status_code == 201
+        for tool, args in (
+            ("dispatch_run", {"repo": str(repo), "instructions": "a"}),
+            ("quick_edit", {"repo": str(repo), "file": "hello.py", "instruction": "b"}),
+            ("batch_dispatch", {"tasks": [{"repo": str(repo), "instructions": "c"}]}),
+        ):
+            # A builder chat: a new chat with no role picked opens as assistant
+            # (P3-6), which cannot dispatch at all.
+            chat = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
+            ollama.script_tool_call(tool, args)
+            events = sse_events(
+                client.post(f"/api/chats/{chat}/messages", json={"content": "go"}).text
+            )
+            (card,) = [data for name, data in events if name == "action"]
+            assert card["decision"]["decided_by"] == "tier/high", tool
+            assert "any host" in card["card"]["high"], tool
+        store = RunStore(config.db_path)
+        try:
+            assert store.recent_runs(10) == []  # nothing ran unasked
+        finally:
+            store.close()
+    finally:
+        ollama.stop()

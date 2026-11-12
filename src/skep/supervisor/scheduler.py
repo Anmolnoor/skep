@@ -268,8 +268,11 @@ def next_fire_times(
     scheduler's own rules: the first is ``start_at`` (normalised) or the next
     tick, each later one ``next_run_after`` the previous. A tick that runs
     late pushes the rest later by as much (no catch-up storm). ``once`` fires
-    once. ValueError on a bad ``start_at``."""
-    times = [_start_slot(start_at) or now_ts()]
+    once. A ``start_at`` already past is due at once: the next tick fires it.
+    ValueError on a bad ``start_at``."""
+    now = now_ts()
+    start = _start_slot(start_at)
+    times = [start if start is not None and start > now else now]
     while not once and len(times) < count:
         times.append(next_run_after(times[-1], interval_seconds))
     return times

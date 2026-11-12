@@ -395,7 +395,7 @@ def _render_card(action: dict[str, Any]) -> None:
     from .supervisor.serve.channels import card_notes
 
     card = action.get("card")
-    for note in card_notes(card if isinstance(card, dict) else None):
+    for note in card_notes(card if isinstance(card, dict) else None, messenger=False):
         lines.append(f"  {note}")  # P4-2: HIGH and why, the taint, folded items
     _box(lines)
 
