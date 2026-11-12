@@ -125,7 +125,7 @@ rather than shipping.
 
 ## Worker Contract Stability
 
-The launch build ships worker contract 0.3.5. Check the exact package and
+The launch build ships worker contract 0.3.6. Check the exact package and
 contract versions with:
 
 ```sh
@@ -145,6 +145,16 @@ never emit — so the claude adapter's `>=0.1,<0.3` range still holds.
 Contract 0.2.2 (v13) added one optional, additive field — `memory` on the task
 envelope, a list of curated memory items the supervisor injects as *context, not
 authority*. Workers that ignore it behave exactly as before.
+
+Contract 0.3.6 (ADR 0059 D3, V6a) adds one optional, additive field —
+`provider_hosts` on `permissions`: skep's own LLM endpoint(s) as `host:port`,
+filled by the supervisor from its configured provider (or an external engine's
+own API host) and held apart from `network`, so the delegation narrowing never
+drops it. The egress proxy admits each entry on that one port only. A task
+persisted before 0.3.6 has no field (= `[]`) and still carries its provider
+host in `network`; first-party workers accept either. A worker that ignores the
+field and checks only `network` before calling the provider will refuse its
+own provider on a 0.3.6 task.
 
 Contract 0.3.5 (v101-F3) registers the `reviewer` caste — read-only diff
 review; nothing lands. An older worker rejects the name with the existing

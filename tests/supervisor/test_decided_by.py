@@ -39,7 +39,7 @@ def _approval_event(payload: dict[str, object]) -> Event:
 
 
 def test_contract_bump_is_additive_and_supported() -> None:
-    assert CONTRACT_VERSION == "0.3.5"
+    assert CONTRACT_VERSION == "0.3.6"
     assert check_supported(CONTRACT_VERSION, SUPPORTED_CONTRACT_RANGE) is None
     decision = AutonomyDecisionPayload.model_validate(
         {"verdict": "require_approval", "reason": "shell.gate", "decided_by": "t/rule-1"}
