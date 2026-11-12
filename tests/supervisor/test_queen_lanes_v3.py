@@ -403,3 +403,25 @@ def test_the_floor_answers_the_queen_when_the_policy_document_will_not_load(
         queen_shell_decision(store, holder, command="ls", cwd=fmt["outside"])
     with pytest.raises(ValueError):
         queen_filesystem_decision(store, holder, action="read", path=f"{fmt['repo']}/README.md")
+
+
+def test_the_grid_never_writes_its_canaries_into_the_real_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """build_home writes CANARY over credential paths under $HOME. Run from
+    a plain script with the operator's own HOME it overwrote a real gh login;
+    it now refuses before it writes anything. (The "real" home here is a temp
+    directory the test names as the account's home.)"""
+    import pwd
+    from types import SimpleNamespace
+
+    from . import queen_lane_grid
+
+    account_home = tmp_path / "account-home"
+    account_home.mkdir()
+    monkeypatch.setenv("HOME", str(account_home))
+    monkeypatch.setattr(pwd, "getpwuid", lambda _uid: SimpleNamespace(pw_dir=str(account_home)))
+    with pytest.raises(RuntimeError, match="real home"):
+        queen_lane_grid.build_home(tmp_path / "root", "builder")
+    assert list(account_home.iterdir()) == []
+    assert not (tmp_path / "root").exists()
