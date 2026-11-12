@@ -3191,6 +3191,22 @@ def landing_taken(store: RunStore, review_id: str) -> HTTPException:
     return HTTPException(status_code=409, detail=detail)
 
 
+def gate_taken(store: RunStore, review_id: str) -> HTTPException:
+    """B142: the 409 for a gate approve that lost the race — it names the
+    resume that won, so nobody approves the same gate again."""
+    approval = store.get_approval(review_id)
+    status = approval.status if approval is not None else "gone"
+    if status == "applying":
+        detail = (
+            "this gate is already being approved by another request — its resume is the verdict"
+        )
+    elif approval is not None and status == "approved":
+        detail = f"gate already approved: {approval.resolution_note or 'resumed'}"
+    else:
+        detail = f"approval {review_id!r} already {status}"
+    return HTTPException(status_code=409, detail=detail)
+
+
 # v107-F2: diagnose_run bounds — generous enough for one test file, capped
 # so a card can never grant an unbounded supervisor-side process.
 DIAGNOSE_DEFAULT_TIMEOUT_SECONDS = 120.0
@@ -3545,6 +3561,10 @@ def resume_past_gate(
         decision=None if decision is None else decision.to_payload(),
         commands=approval_commands,
     )
+    # B142: claim the gate before dispatching — check-then-act let two
+    # approves (web + a messenger button) each dispatch a resume.
+    if not store.claim_approval(review_id):
+        raise gate_taken(store, review_id)
     try:
         resumed_id = runner.submit(
             Path(str(run["repo"])),
@@ -3562,7 +3582,11 @@ def resume_past_gate(
             execution_mode=str(run.get("execution_mode") or "sandbox"),
         )
     except DispatchError as exc:
+        store.unclaim_approval(review_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except BaseException:
+        store.unclaim_approval(review_id)
+        raise
     store.resolve_approval(
         review_id,
         approved=True,
@@ -3570,6 +3594,7 @@ def resume_past_gate(
         note=f"resumed as {resumed_id} (dispatched)"
         + ("; approval held for this serve session" if session_kept else ""),
         remembered=remembered,
+        claimed=True,
     )
     # v19-F8: the old run is now superseded by its successor. Transition AFTER
     # runner.submit returns (its worktree is created/reused by then) and after

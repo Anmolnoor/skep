@@ -1500,16 +1500,21 @@ class RunStore:
         unknown, so it ends 'denied' with a note saying so — never quietly
         pending again, where a retry could stack a second commit (I8)."""
         rows = self._conn.execute(
-            "SELECT review_id FROM approvals WHERE status = 'applying'"
+            "SELECT review_id, action FROM approvals WHERE status = 'applying'"
         ).fetchall()
-        for (review_id,) in rows:
+        for review_id, action in rows:
             self.resolve_approval(
                 str(review_id),
                 approved=False,
                 actor="skep-serve-restart",
                 note="interrupted: skep serve stopped while this landing was being "
                 "applied — check the repo for this task's skep/ branch or commit "
-                "before landing it again",
+                "before landing it again"
+                if action == "apply_patch"
+                # B142: a mid-run gate is claimed while its resume dispatches.
+                else "interrupted: skep serve stopped while this gate's resume was "
+                "being dispatched — check list_runs for a run resumed from this "
+                "task before dispatching it again",
                 claimed=True,
             )
         return len(rows)
