@@ -144,7 +144,12 @@ def _doubly_tainted(taint: ChatTaint | None) -> bool:
 
 
 def high_tier(
-    tool: str, args: Any, *, taint: ChatTaint | None = None, store: RunStore | None = None
+    tool: str,
+    args: Any,
+    *,
+    taint: ChatTaint | None = None,
+    store: RunStore | None = None,
+    manifest: dict[str, Any] | None = None,
 ) -> str | None:
     """P4-2 (ADR 0059 D6): why this action is a HIGH card, or None.
 
@@ -152,7 +157,9 @@ def high_tier(
     confirm path re-asks it (``chat.verdict_events``). A HIGH card looks
     different, holds once, never folds, is never auto-allowed and is never
     confirmable from a messenger channel. Without ``store`` an MCP call
-    cannot be shown to be a read, so it is HIGH (fail closed)."""
+    cannot be shown to be a read, so it is HIGH (fail closed). A dispatch's
+    ``manifest`` (``actions.dispatch_manifest``) is HIGH when its run would
+    reach any host, whatever the call's own args said."""
     safe: dict[str, Any] = args if isinstance(args, dict) else {}
     if _doubly_tainted(taint):
         return _TRIFECTA
@@ -182,6 +189,8 @@ def high_tier(
         return "it activates a skill pack's scripts"
     if tool in _HIGH_POLICY_TOOLS:
         return "it changes standing policy"
+    if manifest is not None and "*" in (manifest.get("network") or []):
+        return "the run may reach any host on the internet (network '*')"
     if tool in _DISPATCH_TOOLS:
         tasks = safe.get("tasks") if tool == "batch_dispatch" else [safe]
         for task in tasks if isinstance(tasks, list) else []:
@@ -407,11 +416,18 @@ def schedule_facts(args: dict[str, Any], store: RunStore | None = None) -> dict[
 
 
 def recorded_card(
-    tool: str, args: dict[str, Any], high: str | None, store: RunStore
+    tool: str,
+    args: dict[str, Any],
+    high: str | None,
+    store: RunStore,
+    manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """What the server records on a card when it is proposed (P4-2): its
-    HIGH tier and, for a schedule, the facts the card shows."""
+    HIGH tier, a dispatch's manifest, and for a schedule the facts the card
+    shows."""
     record: dict[str, Any] = {} if high is None else {"tier": "high", "high": high}
+    if manifest is not None:
+        record["manifest"] = manifest
     if tool == "propose_schedule":
         facts = schedule_facts(args, store)
         if facts is not None:
@@ -500,6 +516,11 @@ def card_summary(
         if covers:
             # what "session"/"always" would allow — for every item of a fold
             summary["keep_covers"] = "; ".join(dict.fromkeys(covers))
+    manifest = (recorded or {}).get("manifest")
+    if manifest is not None:
+        # P4-2 (D6): what the run gets, as compiled when the card was shown —
+        # approving it answers the listed asks for that run.
+        summary["manifest"] = manifest
     if tool == "propose_schedule":
         # a pending card says what confirming NOW does; a resolved one what
         # the server recorded when it was proposed

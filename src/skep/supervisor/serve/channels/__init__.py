@@ -142,6 +142,9 @@ def card_notes(card: Mapping[str, Any] | None) -> tuple[str, ...]:
         )
     if card.get("taint"):
         notes.append(str(card["taint"]))
+    manifest = card.get("manifest")
+    if isinstance(manifest, Mapping):  # P4-2: what the dispatched run gets
+        notes.extend(manifest_lines(manifest))
     schedule = card.get("schedule")
     if isinstance(schedule, Mapping):  # P4-2: what a script schedule really does
         notes.extend(schedule_lines(schedule))
@@ -150,6 +153,40 @@ def card_notes(card: Mapping[str, Any] | None) -> tuple[str, ...]:
         notes.append(f"{len(items)} items, one approval covers exactly these:")
         notes.extend(f"- {item}" for item in items)
     return tuple(notes)
+
+
+def _hosts(values: Any) -> str:
+    return ", ".join(str(v) for v in values) if values else "none"
+
+
+def manifest_lines(manifest: Mapping[str, Any]) -> list[str]:
+    """A dispatch card's manifest as plain lines (``actions.dispatch_manifest``).
+    A long shell list is counted, with the first few named."""
+    if manifest.get("error"):
+        return [f"the run's envelope could not be compiled: {manifest['error']}"]
+    prefixes = [" ".join(map(str, p)) for p in manifest.get("shell_allowlist") or []]
+    shown = ", ".join(prefixes[:8]) + (f" (+{len(prefixes) - 8} more)" if len(prefixes) > 8 else "")
+    lines = [
+        f"hosts: {_hosts(manifest.get('network'))}",
+        f"model provider: {_hosts(manifest.get('provider_hosts'))}",
+        f"commands it may run: {shown or 'none'}",
+        f"may write: {_hosts(manifest.get('write'))}",
+        f"engine: {manifest.get('engine')} · mode: {manifest.get('execution_mode')}"
+        f" · verify: {manifest.get('verify_command') or 'the worker picks'}",
+    ]
+    asks = [
+        *(manifest.get("network_ask") or []),
+        *(" ".join(map(str, p)) for p in manifest.get("shell_ask") or []),
+    ]
+    if asks:
+        lines.append(
+            "approving this also approves, for this run only: " + ", ".join(map(str, asks))
+        )
+    if manifest.get("chain"):
+        lines.append("delegated by: " + " -> ".join(map(str, manifest["chain"])))
+    if manifest.get("taint"):
+        lines.append("from a chat that has: " + " + ".join(map(str, manifest["taint"])))
+    return lines
 
 
 def schedule_lines(facts: Mapping[str, Any]) -> list[str]:

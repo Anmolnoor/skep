@@ -74,6 +74,7 @@ from .tools import (
     UNATTENDED_READ_REFUSAL,
     UNATTENDED_WRITE_REFUSAL,
     advertised_tool_specs,
+    dispatch_manifest_for,
     execute_mutation,
     execute_read_tool,
     mutation_execution_decision,
@@ -1887,8 +1888,20 @@ class ChatEngine:
                     # P4-2 (ADR 0059 D6): a HIGH action always cards — no
                     # auto-dispatch, grant or rule runs it unasked. Not a
                     # decide() verdict: the allow is recorded, the card asks.
+                    # P4-2: a dispatch's manifest — what its run will get.
+                    manifest = (
+                        dispatch_manifest_for(self.store, self.holder, args, chat_id)
+                        if name == "dispatch_run"
+                        and decision is not None
+                        and decision.verdict != "deny"
+                        else None
+                    )
                     high = high_tier(
-                        name, args, taint=self.store.get_chat_taint(chat_id), store=self.store
+                        name,
+                        args,
+                        taint=self.store.get_chat_taint(chat_id),
+                        store=self.store,
+                        manifest=manifest,
                     )
                     if high is not None and decision is not None and decision.allows_execution():
                         decision = high_tier_decision(high, decision)
@@ -2075,7 +2088,7 @@ class ChatEngine:
                         decided_by=(
                             None if decision is None else decision.decided_by or decision.reason
                         ),
-                        card=recorded_card(name, args, high, self.store),
+                        card=recorded_card(name, args, high, self.store, manifest),
                     )
                     if fold_key:
                         round_folds[fold_key] = action_id
@@ -2361,7 +2374,11 @@ class ChatEngine:
         # P4-2 (ADR 0059 D6): the tier is asked again here, on every confirm
         # path — HIGH as recorded at proposal, or HIGH now.
         high = (action.card or {}).get("high") or high_tier(
-            action.tool, action.args, taint=taint, store=self.store
+            action.tool,
+            action.args,
+            taint=taint,
+            store=self.store,
+            manifest=(action.card or {}).get("manifest"),
         )
         if confirm and high is not None and actor.startswith("channel:"):
             # I6: a messenger account is not the operator's desk. Refused
@@ -2469,7 +2486,14 @@ class ChatEngine:
         return None
 
     def _execute_item(
-        self, chat_id: str, tool: str, args: dict[str, Any], *, actor: str, keep: str
+        self,
+        chat_id: str,
+        tool: str,
+        args: dict[str, Any],
+        *,
+        actor: str,
+        keep: str,
+        preanswered: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run one confirmed call (a card's own, or one folded item)."""
         try:
@@ -2481,6 +2505,7 @@ class ChatEngine:
                 runner=self.runner,
                 actor=actor,
                 chat_id=chat_id,
+                preanswered=preanswered,
             )
             payload: dict[str, Any] = {"ok": True, "result": result}
             # v90-F3: a plain approve holds for the serve session. The grant
@@ -2524,11 +2549,26 @@ class ChatEngine:
             if not self.store.claim_chat_action(action_id):
                 raise card_taken(self.store, action_id)
             payloads: list[dict[str, Any]] = []
+            # P4-2 (ADR 0059 D6): the operator approving a dispatch card at
+            # their desk answers the deferred asks its manifest LISTED, for
+            # that run. A messenger confirm never does (those asks stay
+            # asks for the web UI), nor does an auto-allowed dispatch.
+            manifest = (action.card or {}).get("manifest")
+            preanswered = (
+                manifest
+                if manifest and "error" not in manifest and not actor.startswith("channel:")
+                else None
+            )
             try:
                 for item in items:
                     payloads.append(
                         self._execute_item(
-                            chat_id, action.tool, item["args"], actor=actor, keep=keep
+                            chat_id,
+                            action.tool,
+                            item["args"],
+                            actor=actor,
+                            keep=keep,
+                            preanswered=preanswered,
                         )
                     )
             except BaseException:

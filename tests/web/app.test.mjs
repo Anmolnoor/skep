@@ -316,3 +316,20 @@ test("scheduleNode: a script schedule shows the server's facts and the sentence"
     assert.ok(text.includes(part), part);
   }
 });
+
+test("manifestNode: the dispatch card lists what the run gets and the asks it approves", () => {
+  const app = loadApp();
+  assert.equal(app.manifestNode({ headline: "x" }), null);
+  assert.ok(app.manifestNode({ manifest: { error: "no such repo" } }).textContent.includes("no such repo"));
+  const node = app.manifestNode({ manifest: {
+    network: ["pypi.org"], provider_hosts: ["ollama.com:443"], shell_allowlist: [["uv", "sync"]],
+    write: ["workspace"], engine: "builtin", execution_mode: "sandbox", verify_command: "uv run pytest",
+    network_ask: ["files.pythonhosted.org"], shell_ask: [["npm", "ci"]], chain: ["queen@builder"],
+    taint: ["private"] } });
+  const text = node.textContent;
+  for (const part of ["pypi.org", "ollama.com:443", "uv sync", "workspace", "builtin · sandbox",
+    "uv run pytest", "files.pythonhosted.org, npm ci", "queen@builder", "private"]) {
+    assert.ok(text.includes(part), part);
+  }
+  assert.ok(!app.manifestNode({ manifest: { network: [] } }).textContent.includes("this run only"));
+});
