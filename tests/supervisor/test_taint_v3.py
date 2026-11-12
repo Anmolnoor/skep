@@ -750,3 +750,25 @@ def test_a_dispatch_records_the_chats_taint_and_the_worker_is_unchanged(
 
 def clean_permissions(kw: dict[str, Any]) -> Any:
     return kw["permissions"].model_dump()
+
+
+def test_faces_with_no_chat_decide_as_before_beside_a_tainted_chat(
+    live: Callable[[str], Live],
+) -> None:
+    """REST, the CLI and the hook carry no chat, so no taint: beside a doubly
+    tainted chat they still answer the baseline's allow; the Queen in that
+    chat asks the same request."""
+    from skep.supervisor.policy_v3 import load_stack
+
+    env = live("builder")
+    chat = env.chat()
+    set_taint(env.store, chat, "both")
+    rest = actions.policy_decide(
+        env.holder, env.store, scope="network", action="search", value="ddgs"
+    )
+    assert (rest["verdict"], rest["decided_by"]) == ("allow", "template:builder/net-search")
+    assert load_stack(env.holder, env.store).taint is None
+    from skep.supervisor.serve.tools import search_web_verdict
+
+    queen = search_web_verdict(env.store, env.holder, chat)
+    assert (queen.verdict, queen.decided_by) == ("require_approval", "taint/trifecta")
