@@ -373,7 +373,7 @@ _RULE_DOCS: dict[tuple[str, str], str] = {
     ("filesystem", "write"): "workspace / trusted-root write",
     ("network", "connect"): "worker egress to a host",
     ("network", "search"): "the Queen's keyless web search",
-    ("network", "fetch"): "the Queen's read_url to a granted domain",
+    ("network", "fetch"): "the Queen's read_url of one host (allow: in-turn; ask: a card)",
     ("mcp", "call"): "a registered MCP server's tool",
     ("email", "read"): "an email-bound MCP server's read-shaped tools",
     ("email", "send"): "any email side effect",

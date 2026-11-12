@@ -28,7 +28,10 @@ Tools on a browse-bound server decide as `browse/read` or `browse/act`
 (v71-F2, mirroring the v41-F3 email precedent):
 
 - **read** — page-STATE reads: `snapshot`, `screenshot`, `console`,
-  `network_request`, `wait_for` shaped names. These run inside the turn.
+  `network_request`, `wait_for` shaped names. These run inside the turn
+  unless a policy rule asks for them: the builder and operator baselines
+  carry `browse-read-gated` (ask), the assistant baseline `browse-read`
+  (allow), and a chat's role tightens the same way (ADR 0059 P3-3).
 - **act** — everything else, navigation included: `navigate`, `click`,
   `type`, `fill`, `press`, `select`, `evaluate`, `tabs`, uploads. Each
   cards until you allow it. Navigation cards deliberately — it is an

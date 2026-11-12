@@ -303,8 +303,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         "list_mcp_servers",
         "Registered MCP servers (id, transport, command/url). MCP tools are "
         "policy-gated: a read (server-marked read-only AND named get_/list_/"
-        "read_/search_/describe_/show_/find_) runs free, everything else needs "
-        "a confirmation or a learned allow rule.",
+        "read_/search_/describe_/show_/find_) runs free unless a policy rule "
+        "asks; everything else needs a confirmation or an allow rule.",
         {},
     ),
     _tool(
@@ -751,11 +751,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "Streamable HTTP endpoint, usually ending in /mcp; legacy /sse-style "
         "HTTP+SSE servers are not supported). "
         "scope='email' binds a mail server: its reads (see list_mcp_servers) decide as "
-        "email/read (flow freely), everything else as email/send (cards). "
+        "email/read, everything else as email/send (cards). "
         "scope='browse' binds a browser server (e.g. command "
         "['npx','@playwright/mcp@latest']): page-state reads like snapshot/"
-        "screenshot/console flow freely; navigation, clicks, typing, and JS "
-        "card until the user allows them (allow_mcp_tool).",
+        "screenshot/console are browse/read; navigation, clicks, typing, and JS "
+        "card until the user allows them (allow_mcp_tool). Reads flow unless "
+        "the policy asks for them.",
         {
             "server_id": {"type": "string"},
             "transport": {"type": "string", "description": "stdio or http"},
@@ -773,9 +774,11 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "read_url",
         "PROPOSE reading ONE public web page as text (requires user confirmation "
         "— the card shows the exact URL; nothing is fetched until the user "
-        "confirms). EXCEPTION: a domain the user granted with allow_fetch_domain "
-        "reads inside the turn with no card (a cross-domain redirect still fails "
-        "closed) AND returns a 4x larger excerpt. Use after search_web when one "
+        "confirms). EXCEPTION: a host the policy allows (an allow_fetch_domain "
+        "grant, or a baseline or operator rule naming it) reads inside the turn "
+        "with no card (a redirect off it still fails closed) AND returns a 4x "
+        "larger excerpt; a host a rule denies is refused, no card. Use after "
+        "search_web when one "
         "page would answer directly; the reply is a bounded markdown excerpt "
         "(headings/links/lists kept; pass mode='text' for flat text) and a cut "
         "is marked, never silent. On an ungranted domain every call is one card "
@@ -823,7 +826,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "confirmation, once): the Playwright MCP server "
         "(npx @playwright/mcp@latest) under the 'browse' policy scope. "
         "After setup, page-STATE reads (snapshot, console, images) flow "
-        "free; every ACTING tool (navigate, click, type, press, JS) cards "
+        "free unless the policy asks (the builder and operator baselines "
+        "do); every ACTING tool (navigate, click, type, press, JS) cards "
         "until the user grants it by name with allow_mcp_tool — teach that "
         "ramp when the user starts browsing. Needs npx on the host; the "
         "result says if the handshake failed and why.",
@@ -1238,9 +1242,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "call_mcp_tool",
         "Call one tool on a registered MCP server. Reads (server-marked "
-        "read-only, read-verb name) and "
-        "tools covered by an allow rule run immediately; anything else "
-        "becomes a confirmation card; a policy deny rule refuses outright.",
+        "read-only, read-verb name) run immediately unless a policy rule asks; "
+        "a tool an allow rule names runs too (a baseline rule like calendar:* "
+        "covers only its reads); anything else becomes a confirmation card; a "
+        "policy deny rule refuses outright.",
         {
             "server_id": {"type": "string"},
             "tool": {"type": "string"},
@@ -1315,7 +1320,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE adding one rule to the QUEEN's standing operator policy "
         "(requires user confirmation) — the document governing Queen-side "
         "scoped tools: read_file/search_files paths, search_web/read_url "
-        "network audit, and run_shell/start_process shell lanes. NOT "
+        "network (fetch rules decide read_url), and run_shell/start_process "
+        "shell lanes. NOT "
         "set_policy: run/worker policy is untouched. verdict 'allow' or "
         "'deny'; deny wins ties; an allow never lifts a baseline deny or "
         "named ask; an allow reaching into denied space is "
