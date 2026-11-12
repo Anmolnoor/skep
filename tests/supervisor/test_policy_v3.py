@@ -660,6 +660,34 @@ def test_a_workers_session_tier_never_answers_a_roles_catch_all_ask(
         store.close()
 
 
+def test_a_fetch_grant_does_not_answer_a_roles_ask_until_read_url_moves(tmp_path: Path) -> None:
+    """P3-2 moved only the file and shell lanes. read_url still holds a
+    role's `net-fetch-gated *` ask over a fetch grant (fetch_grant_decision),
+    so REST says the same until P3-3 moves it — never allow where the Queen
+    itself cards (V1)."""
+    from skep.supervisor.serve.actions import remember_action_for_session
+    from skep.supervisor.serve.tools import fetch_grant_decision
+
+    home, _repo = build_home(tmp_path, "builder")
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    try:
+        assert remember_action_for_session(
+            store, tool="read_url", args={"url": "https://docs.example.org/x"}, actor="op",
+            tier="always",
+        )  # fmt: skip
+        holder = ConfigHolder(config, store)
+        for role in ("builder", "assistant", "operator"):
+            rest = policy_decide(holder, store, scope="network", action="fetch",
+                                 value="docs.example.org", role=role)  # fmt: skip
+            queen = fetch_grant_decision(store, "docs.example.org", role=SHIPPED_ROLES[role])
+            assert queen is not None
+            assert (rest["verdict"], rest["decided_by"]) == (queen.verdict, queen.decided_by)
+            assert rest["verdict"] == "require_approval", role
+    finally:
+        store.close()
+
+
 def test_decision_2_the_setup_document_only_tightens_under_a_locked_baseline(
     tmp_path: Path,
 ) -> None:
