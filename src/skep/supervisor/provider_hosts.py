@@ -44,7 +44,8 @@ def provider_hosts_for(
 
 def configured_provider_hosts(store: RunStore, home: Path) -> list[str]:
     """``host:port`` of every configured LLM endpoint (profile.json + sqlite
-    settings + the active registry profile + every local one routing may pick)."""
+    settings + the active registry profile + a local one routing may pick on a
+    host already listed)."""
     hosts: list[str] = []
     profile = profile_path(home)
     if profile.is_file():
@@ -76,10 +77,12 @@ def configured_provider_hosts(store: RunStore, home: Path) -> list[str]:
                 hosts.append(host)
     # run_task may route a run to any healthy LOCAL registry profile
     # (resolve_routed_provider). Host-only matching let one on another port
-    # of the same host through; host:port matching needs it listed.
+    # of a host already listed through; host:port matching needs it listed.
+    # Never a new host: "local" is the registrant's label, not a fact.
+    listed = {h.rpartition(":")[0] for h in hosts}
     for routable in store.list_provider_profiles():
         host = _url_host(routable.base_url) if routable.cost_class == "local" else None
-        if host is not None and host not in hosts:
+        if host is not None and host.rpartition(":")[0] in listed and host not in hosts:
             hosts.append(host)
     return hosts
 
