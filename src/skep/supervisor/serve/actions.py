@@ -3518,6 +3518,44 @@ def remember_commands_for_session(store: RunStore, commands: list[list[str]]) ->
     return added
 
 
+def _deferred_asks(config: SupervisorConfig, task_id: str) -> Permissions | None:
+    """The gated run's own envelope (the supervisor's audit copy) — where its
+    deferred asks (V7) live; None when it is gone."""
+    path = config.audit_dir / task_id / "task.json"
+    if not path.is_file():
+        return None
+    return CodingWorkerTask.model_validate_json(path.read_text()).permissions
+
+
+def _asked(command: Sequence[str], permissions: Permissions | None) -> bool:
+    """Is ``command`` under one of the run's ``shell_ask`` prefixes?"""
+    asks = [] if permissions is None else permissions.shell_ask
+    return any(list(command[: len(prefix)]) == prefix for prefix in asks)
+
+
+def _refuse_remembering_an_ask(
+    config: SupervisorConfig,
+    task_id: str,
+    *,
+    commands: Sequence[Sequence[str]] = (),
+    host: str = "",
+) -> None:
+    """ADR 0059 D3 (V7): a deferred delegated ask is approve-once for THIS
+    run — "Allow & remember" would turn the chain's ask into a standing
+    grant for every run of the project (and the chain asks again anyway)."""
+    permissions = _deferred_asks(config, task_id)
+    if any(_asked(command, permissions) for command in commands) or (
+        permissions is not None and host and host in permissions.network_ask
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this is a delegated ask (the dispatching chain would itself ask): it can "
+                "only be approved once, for this run — approve it, or deny"
+            ),
+        )
+
+
 def _delegation_of(task: CodingWorkerTask) -> dict[str, Any] | None:
     """The original dispatch's delegation record (R3), for a resume."""
     delegation = getattr(task.dispatch_decision, "delegation", None)
@@ -3576,10 +3614,14 @@ def resume_past_gate(
     approval_commands = store.approval_commands(review_id)
     # v86-F1: a plain approve also holds for the serve session (the operator's
     # explicit ask); "remember" already wrote the durable tier before this call.
+    # V7: never a deferred delegated ask — that approval is this run's alone
+    # (the verdict and the resume chain's worker_state carry it) and must not
+    # reach the session tier every repo's runs read (B39).
     session_kept: list[list[str]] = []
     if not remembered and approval_commands:
         session_kept = remember_commands_for_session(
-            store, [list(command) for command in approval_commands]
+            store,
+            [list(command) for command in approval_commands if not _asked(command, permissions)],
         )
     verdict = ApprovalVerdict(
         approved=True,
@@ -3761,6 +3803,7 @@ def allow_network_host_and_resume(
             status_code=409,
             detail=f"{host!r} is not a rememberable bare hostname; approve it once instead",
         )
+    _refuse_remembering_an_ask(holder.current, str(run["task_id"]), host=host)
     repo = Path(str(run["repo"]))
     _persist_remembered_network_host(store, holder, repo, host)
     return resume_past_gate(
@@ -3998,6 +4041,7 @@ def allow_shell_command_and_resume(
         guard_reason = dangerous_prefix_reason(command)
         if guard_reason is not None:
             raise HTTPException(status_code=409, detail=guard_reason)
+    _refuse_remembering_an_ask(holder.current, str(run["task_id"]), commands=normalized_commands)
     repo = Path(str(run["repo"]))
     # v19-F4: prefer the repo's bound project policy; fall back to global.
     for command in normalized_commands:

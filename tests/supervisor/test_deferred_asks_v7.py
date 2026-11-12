@@ -8,21 +8,41 @@ from __future__ import annotations
 
 import json
 import shlex
+import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 
+from skep.cli import main
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.autonomy import AutonomyDecision
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.dispatch import run_task
 from skep.supervisor.policy_schema import SCOPES
 from skep.supervisor.roles import parse_delegation_chain, resolve_role, role_covers
-from skep.supervisor.serve.actions import _within_delegation, policy_decide, submit_run
+from skep.supervisor.serve import actions
+from skep.supervisor.serve.actions import (
+    _within_delegation,
+    allow_network_host_and_resume,
+    allow_shell_command_and_resume,
+    pending_approval_or_409,
+    policy_decide,
+    require_run,
+    resume_crashed_run,
+    resume_past_gate,
+    submit_run,
+)
 from skep.supervisor.serve.channels import ChannelConfig
 from skep.supervisor.serve.chat import CHAT_ACTOR
-from skep.supervisor.serve.settings import FRESH_HOME_SEEDED_AT, ConfigHolder
+from skep.supervisor.serve.jobs import Dispatcher
+from skep.supervisor.serve.settings import (
+    FRESH_HOME_SEEDED_AT,
+    SESSION_ALLOWED_SHELL_COMMANDS,
+    ConfigHolder,
+)
 from skep.supervisor.serve.tools import execute_mutation
 from skep.supervisor.spawner import effective_network_domains
 from skep.worker_contract import CodingWorkerTask, Permissions
@@ -32,7 +52,8 @@ from skep.workers.capabilities import (
     CapabilityRegistry,
 )
 
-from .conftest import predating_home
+from .conftest import FAKE_WORKER, predating_home
+from .test_queen_delegates import _wait_run as wait_run
 from .test_role_policy import _home
 
 
@@ -510,3 +531,144 @@ def test_the_proxy_admits_an_approved_ask_and_nothing_else(tmp_path: Path) -> No
         "example.com",
     )
     assert effective_network_domains(task([], "example.com")) == ("pypi.org",)
+
+
+# --- the approval: this run only ------------------------------------------
+
+
+def _gated_delegated_run(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> tuple[SupervisorConfig, str]:
+    """A queen@builder run on an upgraded home whose project grants `make`
+    and example.com — both asks of the chain — stopped at a `make check`
+    gate (the fake worker crashes once, then its resume gates)."""
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        project = store.project_for_binding("repo_path", str(repo))
+        assert project is not None
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={**project.policy, "allowed_shell_commands": [["make"]]},
+        )
+    finally:
+        store.close()
+    worker = shlex.join([sys.executable, str(FAKE_WORKER)])
+    run = ["--home", str(tmp_path), "run", str(repo), "Go. MODE:crashgate", "--quiet"]
+    run += ["--execution-mode", "workspace", "--worker-cmd", worker]
+    assert main([*run, "--delegated-by", "queen@builder"]) != 0
+    capsys.readouterr()
+    config = replace(config, worker_command=(sys.executable, str(FAKE_WORKER)))
+    store = RunStore(config.db_path)
+    runner = Dispatcher(ConfigHolder(config, store), store)
+    try:
+        (crashed,) = store.recent_runs(1)
+        held = CodingWorkerTask.model_validate_json(
+            (config.audit_dir / crashed.task_id / "task.json").read_text()
+        ).permissions
+        assert held.shell_ask == [["make"]] and held.network_ask == ["example.com"]
+        successor = resume_crashed_run(store, config, runner, crashed.task_id, "tester")
+        gated = wait_run(store, successor["resumed_as"])
+        assert gated.state == "pending_approval"
+    finally:
+        runner.shutdown(wait=True)
+        store.close()
+    return config, gated.task_id
+
+
+def test_an_approved_ask_holds_for_that_run_and_no_other(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Bound to (task, capability, value): approve resumes THAT run with the
+    grant in its verdict; nothing reaches the session tier (B39), and a
+    second run of the same repo starts with no grant at all."""
+    config, task_id = _gated_delegated_run(tmp_path, repo, capsys)
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    runner = Dispatcher(holder, store)
+    try:
+        review_id = store.pending_approvals()[0].review_id
+        run = require_run(store, task_id)
+        resumed_id = resume_past_gate(store, config, runner, run, review_id, "tester")
+        assert wait_run(store, resumed_id).state == "completed"
+        resumed = CodingWorkerTask.model_validate_json(
+            (config.audit_dir / resumed_id / "task.json").read_text()
+        )
+        assert resumed.approval_verdict is not None
+        assert resumed.approval_verdict.commands == [["make", "check"]]
+        assert resumed.permissions.shell_ask == [["make"]]  # still an ask, not an allow
+        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) in (None, [])
+        second = submit_run(
+            holder,
+            runner,
+            store,
+            repo=str(repo),
+            instructions="again",
+            delegation_chain=["queen@builder"],
+            deferred_asks=True,
+        )
+        wait_run(store, second)
+        fresh = CodingWorkerTask.model_validate_json(
+            (config.audit_dir / second / "task.json").read_text()
+        )
+        assert fresh.approval_verdict is None and fresh.worker_state is None
+        assert fresh.permissions.shell_ask == [["make"]]
+        assert ["make"] not in fresh.permissions.shell_allowlist
+    finally:
+        runner.shutdown(wait=True)
+        store.close()
+
+
+def test_an_ask_cannot_be_remembered_and_deny_keeps_it_refused(
+    tmp_path: Path,
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow & remember (allow-command, allow-host) is refused for a deferred
+    ask — approve-once is the only keep; deny resolves the gate and the run
+    stays refused."""
+    config, task_id = _gated_delegated_run(tmp_path, repo, capsys)
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    runner = Dispatcher(holder, store)
+    try:
+        run = require_run(store, task_id)
+        approval = pending_approval_or_409(store, store.pending_approvals()[0].review_id)
+        with pytest.raises(HTTPException) as refused:
+            allow_shell_command_and_resume(
+                store, holder, runner, run, approval, str(approval["review_id"]), "tester"
+            )
+        assert refused.value.status_code == 409
+        assert "delegated ask" in str(refused.value.detail)
+        project = store.project_for_binding("repo_path", str(repo))
+        assert project is not None
+        assert project.policy["allowed_shell_commands"] == [["make"]]  # nothing persisted
+        monkeypatch.setattr(
+            actions,
+            "approval_decision_for_action",
+            lambda **_: AutonomyDecision(
+                verdict="require_approval", reason=DELEGATED_ASK_REASON, detail="example.com"
+            ),
+        )
+        with pytest.raises(HTTPException) as refused:
+            allow_network_host_and_resume(
+                store,
+                holder,
+                runner,
+                run,
+                {**approval, "action": "network.fetch"},
+                str(approval["review_id"]),
+                "tester",
+            )
+        assert refused.value.status_code == 409
+        assert project.policy["default_network"] == ["pypi.org", "example.com"]
+        store.resolve_approval(str(approval["review_id"]), approved=False, actor="tester")
+        assert store.pending_approvals() == []
+        assert require_run(store, task_id)["state"] != "completed"
+    finally:
+        runner.shutdown(wait=True)
+        store.close()

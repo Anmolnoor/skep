@@ -1503,7 +1503,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE allowing a pending review and remembering it (requires user "
         "confirmation): a shell approval persists the command into allowed policy, "
         "a network.fetch/network.read approval persists the blocked host into the "
-        "project's network allowlist; either way the gated run resumes.",
+        "project's network allowlist; either way the gated run resumes. A "
+        "delegated ask (its card says 'which would itself ask') is approve-once: "
+        "use approve_review.",
         {"review_id": {"type": "string"}},
         ["review_id"],
     ),
