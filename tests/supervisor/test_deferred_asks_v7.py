@@ -6,14 +6,28 @@ B22 card half, B147)."""
 
 from __future__ import annotations
 
+import json
+import shlex
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from skep.supervisor import SupervisorConfig
+from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.autonomy import AutonomyDecision
+from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.dispatch import run_task
+from skep.supervisor.policy_schema import SCOPES
+from skep.supervisor.roles import parse_delegation_chain, resolve_role, role_covers
+from skep.supervisor.serve.actions import _within_delegation, policy_decide, submit_run
+from skep.supervisor.serve.channels import ChannelConfig
+from skep.supervisor.serve.chat import CHAT_ACTOR
+from skep.supervisor.serve.settings import FRESH_HOME_SEEDED_AT, ConfigHolder
+from skep.supervisor.serve.tools import execute_mutation
 from skep.worker_contract import CodingWorkerTask, Permissions
+
+from .conftest import predating_home
+from .test_role_policy import _home
 
 
 def _perms(**kw: object) -> Permissions:
@@ -102,3 +116,292 @@ def test_run_task_keeps_asks_only_on_a_delegated_dispatch(
     )
     assert task.permissions.network_ask == (["example.com"] if delegated else [])
     assert task.permissions.shell_ask == ([["make"]] if delegated else [])
+
+
+# --- the narrowing: what was dropped becomes an ask, nothing else ----------
+
+
+@pytest.fixture
+def locked(tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> SupervisorConfig:
+    """A bound trusted_local_dev repo with the builder baseline locked."""
+    return _home(tmp_path, repo, capsys)
+
+
+def _zero_state(tmp_path: Path, repo: Path) -> SupervisorConfig:
+    """The same home before any baseline is approved: fresh_home_seeded_at
+    is set, so every engine-v2 decision answers ask baseline/no_baseline."""
+    config = build_config(tmp_path, None)
+    store = RunStore(config.db_path)
+    try:
+        assert store.get_setting(FRESH_HOME_SEEDED_AT) is not None
+        store.set_setting("policy_engine_v2_scopes", list(SCOPES))
+        store.set_setting("default_execution_mode", "workspace")
+        store.add_project_policy(
+            project_id="app", name="app", strategy="trusted_local_dev", phase="build", policy={}
+        )
+        store.add_project_binding(
+            project_id="app", binding_kind="repo_path", binding_value=str(repo)
+        )
+    finally:
+        store.close()
+    return config
+
+
+class _Runner:
+    def __init__(self) -> None:
+        self.submitted: dict[str, Any] = {}
+
+    def submit(self, repo: Path, instructions: str, **kwargs: Any) -> str:
+        self.submitted = kwargs
+        return "task-1"
+
+
+def _submit(config: SupervisorConfig, repo: Path, **kwargs: Any) -> dict[str, Any]:
+    store = RunStore(config.db_path)
+    runner = _Runner()
+    try:
+        submit_run(
+            ConfigHolder(config, store),
+            runner,  # type: ignore[arg-type]
+            store,
+            repo=str(repo),
+            instructions="fix hello.py",
+            **kwargs,
+        )
+    finally:
+        store.close()
+    return runner.submitted
+
+
+def _narrow(
+    config: SupervisorConfig,
+    repo: Path,
+    perms: Permissions,
+    *,
+    chain: list[str],
+    role: str | None = None,
+    deferred_asks: bool = True,
+) -> tuple[Permissions, str]:
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        narrowed, _delegation, note = _within_delegation(
+            holder,
+            store,
+            repo,
+            parse_delegation_chain(chain, config.home),
+            perms,
+            None if role is None else resolve_role(role, config.home),
+            deferred_asks=deferred_asks,
+        )
+    finally:
+        store.close()
+    return narrowed, note
+
+
+def _upgraded(tmp_path: Path, repo: Path) -> SupervisorConfig:
+    """An upgraded home: no baseline, not zero-state (B12's other trigger),
+    and the project grants example.com."""
+    config = build_config(tmp_path, None)
+    predating_home(config.db_path)
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting("policy_engine_v2_scopes", list(SCOPES))
+        store.set_setting("default_execution_mode", "workspace")
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"default_network": ["pypi.org", "example.com"]},
+        )
+        store.add_project_binding(
+            project_id="app", binding_kind="repo_path", binding_value=str(repo)
+        )
+    finally:
+        store.close()
+    return config
+
+
+def test_a_host_the_delegator_would_ask_about_becomes_a_deferred_ask(
+    tmp_path: Path, repo: Path
+) -> None:
+    """B12 residue: the project grants example.com, queen@builder would ask
+    network.connect example.com, so its worker gets an ask — not an allow
+    (§5.4 check 5), not a silent drop."""
+    config = _upgraded(tmp_path, repo)
+    submitted = _submit(config, repo, delegation_chain=["queen@builder"], deferred_asks=True)
+    perms = submitted["permissions"]
+    assert perms.network_ask == ["example.com"]
+    assert "example.com" not in perms.network
+    assert "pypi.org" in perms.network
+    detail = submitted["dispatch_decision"].detail or ""
+    assert "asks a human (this run only): network.connect example.com" in detail
+    assert "dropped" not in detail
+
+
+def test_a_prefix_the_delegator_would_ask_about_becomes_a_shell_ask(
+    locked: SupervisorConfig, repo: Path
+) -> None:
+    """queen@operator allows git status but asks `uv sync`."""
+    perms = _submit(locked, repo, delegation_chain=["queen@operator"], deferred_asks=True)[
+        "permissions"
+    ]
+    assert ["uv", "sync"] in perms.shell_ask
+    assert ["uv", "sync"] not in perms.shell_allowlist
+    assert ["git", "status"] in perms.shell_allowlist
+    assert ["git", "status"] not in perms.shell_ask
+
+
+def test_a_headless_dispatch_drops_the_ask_as_before(tmp_path: Path, repo: Path) -> None:
+    """No human to answer a card: the narrowed grant is a deny (I6)."""
+    submitted = _submit(_upgraded(tmp_path, repo), repo, delegation_chain=["queen@builder"])
+    perms = submitted["permissions"]
+    assert perms.network_ask == [] and perms.shell_ask == []
+    assert "example.com" not in perms.network
+    assert "dropped: network.connect example.com" in (submitted["dispatch_decision"].detail or "")
+
+
+def test_a_host_the_delegator_denies_stays_dropped(locked: SupervisorConfig, repo: Path) -> None:
+    """A delegator whose role holds nothing there is deny (decision #7) —
+    and a deny never becomes an ask."""
+    roles = locked.home.parent / "roles"
+    roles.mkdir(exist_ok=True)
+    (roles / "bare.json").write_text(json.dumps({"name": "bare"}))
+    narrowed, note = _narrow(
+        locked,
+        repo,
+        _perms(network=["example.com", "pypi.org"], shell_allowlist=[["uv", "sync"]]),
+        chain=["queen@bare"],
+    )
+    assert narrowed.network == [] and narrowed.network_ask == []
+    assert narrowed.shell_allowlist == [] and narrowed.shell_ask == []
+    assert "dropped: " in note and "asks a human" not in note
+
+
+def test_a_guarded_class_is_never_offered_as_an_ask(locked: SupervisorConfig, repo: Path) -> None:
+    """Wildcard hosts, remote git, outbound content, privilege escalation,
+    the bare launcher: none is askable, whatever the delegator says."""
+    guarded = [["git", "push"], ["sudo", "ls"], ["himalaya", "message", "send"], ["timeout"]]
+    narrowed, _ = _narrow(
+        locked,
+        repo,
+        _perms(network=["*", "*.example.com"], shell_allowlist=guarded),
+        chain=["queen@operator"],
+    )
+    assert narrowed.network_ask == []
+    assert narrowed.shell_ask == []
+    assert "*" not in narrowed.network and "*.example.com" not in narrowed.network
+
+
+# Grants the run policy issues on these homes (the narrowing judges what the
+# run policy granted; an explicit network host it never compiled is the
+# separate hole noted in the ES-F11 commit).
+HOSTS = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "example.com"]
+PREFIXES = [["git", "status"], ["uv", "sync"], ["pytest"], ["npm", "test"]]
+
+
+@pytest.mark.parametrize("state", ["locked", "zero", "upgraded"])
+@pytest.mark.parametrize(
+    ("chain", "role"),
+    [
+        (["queen@builder"], None),
+        (["queen@operator"], None),
+        (["queen@assistant"], None),
+        ([], "builder"),
+        ([], "operator"),
+        (["queen@builder"], "operator"),
+    ],
+)
+def test_a_child_never_holds_an_allow_its_delegator_lacks(
+    tmp_path: Path,
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    chain: list[str],
+    role: str | None,
+) -> None:
+    """ADR 0059 §5.4 check 5, counting ask as weaker than allow: every grant
+    the worker keeps is one each delegator (and its own role) allows; every
+    deferred ask is one they would ask about — never one they deny. On a
+    zero-state home (B147) the delegator asks everything, so nothing stays."""
+    config = {
+        "locked": lambda: _home(tmp_path, repo, capsys),
+        "zero": lambda: _zero_state(tmp_path, repo),
+        "upgraded": lambda: _upgraded(tmp_path, repo),
+    }[state]()
+    hosts = HOSTS if state == "upgraded" else HOSTS[:-1]
+    narrowed, _ = _narrow(
+        config, repo, _perms(network=hosts, shell_allowlist=PREFIXES), chain=chain, role=role
+    )
+    bounds = [entry.partition("@")[2] for entry in chain] + ([role] if role else [])
+
+    def verdicts(scope: str, action: str, value: str) -> set[str]:
+        store = RunStore(config.db_path)
+        try:
+            holder = ConfigHolder(config, store)
+            found = set()
+            for name in bounds:
+                bound = resolve_role(name, config.home)
+                covered = role_covers(bound, scope, action, value)
+                found.add(
+                    policy_decide(
+                        holder,
+                        store,
+                        scope=scope,
+                        action=action,
+                        value=value,
+                        repo=str(repo),
+                        role=name,
+                    )["verdict"]
+                    if covered or name == role
+                    else "deny"
+                )
+            return found
+        finally:
+            store.close()
+
+    for host in narrowed.network:
+        assert verdicts("network", "connect", host) == {"allow"}, host
+    for prefix in narrowed.shell_allowlist:
+        assert verdicts("shell", "run", shlex.join(prefix)) == {"allow"}, prefix
+    for host in narrowed.network_ask:
+        assert "deny" not in verdicts("network", "connect", host), host
+    for prefix in narrowed.shell_ask:
+        assert "deny" not in verdicts("shell", "run", shlex.join(prefix)), prefix
+    if state == "zero":
+        assert narrowed.network == [] and narrowed.shell_allowlist == []
+
+
+@pytest.mark.parametrize(
+    ("source", "can_confirm", "asked"),
+    [("web", None, True), ("telegram", True, True), ("telegram", False, False)],
+)
+def test_a_chat_dispatch_defers_only_where_a_human_can_answer(
+    tmp_path: Path, repo: Path, source: str, can_confirm: bool | None, asked: bool
+) -> None:
+    """A builder chat's dispatch_run: the web and a confirming channel card
+    the ask; a channel that cannot confirm drops it (I6: headless = deny)."""
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    runner = _Runner()
+    try:
+        if can_confirm is not None:
+            store.upsert_channel_config(
+                ChannelConfig(channel=source, enabled=True, channel_can_confirm=can_confirm)
+            )
+        chat = store.create_chat(title="c", model=None, source=source, role="builder")
+        execute_mutation(
+            "dispatch_run",
+            {"repo": str(repo), "instructions": "fix hello.py"},
+            store=store,
+            holder=ConfigHolder(config, store),
+            runner=runner,  # type: ignore[arg-type]
+            actor=CHAT_ACTOR,
+            chat_id=chat.chat_id,
+        )
+    finally:
+        store.close()
+    perms = runner.submitted["permissions"]
+    assert perms.network_ask == (["example.com"] if asked else [])
+    assert "example.com" not in perms.network

@@ -2587,6 +2587,19 @@ def _queen_chain(
     return [f"queen@{role.name}"] if role else []
 
 
+def _human_answers(store: RunStore, chat_id: str | None) -> bool:
+    """ADR 0059 D3 (V7): can a human answer the gate cards of a run this
+    chat dispatches? Not with no chat, nor in a messenger chat whose channel
+    cannot confirm (I6) — there a grant the chain makes an ask is dropped
+    (deny) instead of carding. Unattended turns never reach here: they card
+    every mutation, and a human confirming that card is present."""
+    chat = store.get_chat(chat_id) if chat_id else None
+    if chat is None:
+        return False
+    channel = store.get_channel_config(chat.source) if chat.source else None
+    return channel is None or channel.channel_can_confirm
+
+
 def fetch_grant_decision(
     store: RunStore, host: str, *, role: Role | None = None
 ) -> AutonomyDecision | None:
@@ -3867,6 +3880,7 @@ def _execute_mutation(
             caste="coding",
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            deferred_asks=_human_answers(store, chat_id),
         )
         return {
             "task_id": task_id,
@@ -3966,6 +3980,7 @@ def _execute_mutation(
                 tasks=entries,
                 delegation_chain=_queen_chain(store, holder, chat_id, actor),
                 dispatch_decision=decision,
+                deferred_asks=_human_answers(store, chat_id),
             )
         task_ids = [
             actions.submit_run(
@@ -3985,6 +4000,7 @@ def _execute_mutation(
                 dispatch_decision=decision,
                 delegation_chain=_queen_chain(store, holder, chat_id, actor),
                 role=None if entry.get("role") is None else str(entry["role"]),
+                deferred_asks=_human_answers(store, chat_id),
             )
             for entry in entries
         ]
@@ -4190,6 +4206,7 @@ def _execute_mutation(
             caste="coding",
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            deferred_asks=_human_answers(store, chat_id),
         )
         forge.save_plugin(
             store,
@@ -4783,6 +4800,7 @@ def _execute_mutation(
             dispatch_decision=decision,
             delegation_chain=chain,
             role=role,
+            deferred_asks=_human_answers(store, chat_id),
             protocol=None if args.get("protocol") is None else str(args["protocol"]),
             engine=None if args.get("engine") is None else str(args["engine"]),
         )

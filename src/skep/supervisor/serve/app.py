@@ -566,6 +566,8 @@ def create_app(
             engine=body.engine,
             role=body.role,
             delegation_chain=body.delegation_chain,
+            # V7: the operator's own face — its gate cards have a human.
+            deferred_asks=True,
         )
         response = {"task_id": task_id, "state": "dispatched"}
         if hint is not None:
@@ -584,6 +586,7 @@ def create_app(
             manager=body.manager,
             tasks=[task.model_dump(exclude_none=True) for task in body.tasks],
             delegation_chain=body.delegation_chain,
+            deferred_asks=True,
         )
 
     @app.get("/api/policy")

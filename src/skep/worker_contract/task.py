@@ -39,7 +39,7 @@ PATCH_EXCLUDE_PATHSPECS: tuple[str, ...] = tuple(f":!{d}" for d in BOOKKEEPING_D
 _PROVIDER_HOST_RE = re.compile(r"^(?:[A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\]):(\d{1,5})$")
 # ADR 0059 D3 (V7): a deferred ask names one bare host — never a wildcard,
 # scheme, port or path (ADR 0059 D4: `*` is never offered).
-_ASK_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+ASK_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class Permissions(BaseModel):
@@ -92,7 +92,7 @@ class Permissions(BaseModel):
     @classmethod
     def _validate_network_ask(cls, value: list[str]) -> list[str]:
         for entry in value:
-            if _ASK_HOST_RE.match(entry) is None:
+            if ASK_HOST_RE.match(entry) is None:
                 raise ValueError(f"network_ask entries must be bare hostnames; got {entry!r}")
         return value
 

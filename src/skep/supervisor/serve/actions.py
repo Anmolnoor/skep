@@ -32,6 +32,7 @@ from skep.worker_contract import (
     TaskIntent,
     TaskState,
 )
+from skep.worker_contract.task import ASK_HOST_RE
 
 from ..apply import (
     RefreshError,
@@ -4232,6 +4233,7 @@ def submit_run(
     delegation_chain: Sequence[str] = (),
     role: str | None = None,
     team: str | None = None,
+    deferred_asks: bool = False,
 ) -> str:
     """Resolve the repo, fill policy defaults (A5), and dispatch in background.
 
@@ -4245,7 +4247,12 @@ def submit_run(
     delegator's. A delegated or role-bearing dispatch writes one ``delegated``
     ledger row (``record_delegation``) and carries the chain on its dispatch
     decision, which every run card reads. ``team`` is set only by
-    ``submit_team``."""
+    ``submit_team``.
+
+    ADR 0059 D3 (V7): ``deferred_asks`` says a human can answer this run's
+    gate cards (REST, the CLI, a chat that can show a card). Only then does a
+    grant the chain makes an ask ride ``network_ask``/``shell_ask``; on every
+    other face (the default) it is dropped — a headless ask is a deny (I6)."""
     # v101-F10: F1 wrote a resolver that refuses an unknown caste by name, and
     # nothing called it — so an unknown caste reached the contract validator
     # deep in dispatch and surfaced as a 500 with no usable detail. Every
@@ -4313,6 +4320,7 @@ def submit_run(
         role=role,
         delegation_chain=delegation_chain,
         team=team,
+        deferred_asks=deferred_asks,
     )
     try:
         auto_apply_verified_patch = None
@@ -4419,6 +4427,7 @@ def delegate_permissions(
     role: str | None,
     delegation_chain: Sequence[str],
     team: str | None = None,
+    deferred_asks: bool = False,
 ) -> tuple[Permissions, dict[str, Any] | None, str | None]:
     """The worker's permissions held to its role and its chain, with the
     delegation record for the dispatch decision and the dispatch note — or
@@ -4427,7 +4436,9 @@ def delegate_permissions(
     chain, worker_role = delegation_inputs(holder, delegation_chain, role, team=team)
     if not chain and worker_role is None:
         return permissions, None, None
-    return _within_delegation(holder, store, repo, chain, permissions, worker_role, team)
+    return _within_delegation(
+        holder, store, repo, chain, permissions, worker_role, team, deferred_asks=deferred_asks
+    )
 
 
 def delegated_decision(
@@ -4507,17 +4518,32 @@ def _within_delegation(
     permissions: Permissions,
     role: Role | None = None,
     team: str | None = None,
+    *,
+    deferred_asks: bool = False,
 ) -> tuple[Permissions, dict[str, Any], str]:
     """R2 (ADR 0055 D4): a worker a bot dispatched gets no grant beyond its
     delegator. Every shell prefix and egress host the run policy granted is
     decided under the chain (``_decision_record``, I5); one beyond the
-    delegator is dropped — the worker then cards for it, so a human answers,
-    never the bot — and its ``exceeds_delegator`` row is recorded. Workspace
-    writes the delegator is denied refuse the dispatch outright: the worker
-    exists to write.
+    delegator leaves the grants and its ``exceeds_delegator`` row is
+    recorded. Workspace writes the delegator is denied refuse the dispatch
+    outright: the worker exists to write.
+
+    ADR 0059 D3 (V7): where the delegator would itself ASK, and a human can
+    answer (``deferred_asks``), the grant moves to ``network_ask`` /
+    ``shell_ask`` — the worker cards it naming the chain, approve-once for
+    that run. A deny, a headless dispatch, a wildcard host and a guarded
+    prefix (remote git, outbound content, dangerous) are dropped: a dropped
+    host is a flat deny at the worker; a dropped prefix meets the worker's
+    ordinary not-allowlisted gate. A grant is kept only where its row,
+    held to the chain, still says ``allow`` (§5.4 check 5: no allow the
+    delegator lacks). That also covers B147 — on a zero-state home every row
+    reads ``ask baseline/no_baseline``, the delegator's too, so nothing
+    compared "stricter" and the worker kept allows its delegator would ask
+    about — and an explicit ``network`` host the run policy has no rule for
+    (its row is deny), which the worker used to keep.
 
     R3 (ADR 0055 D5): the worker's own ``role`` decides beside the chain —
-    a grant its role layer made stricter is dropped the same way, recorded
+    a grant its role layer made stricter is narrowed the same way, recorded
     under that role. Returns the narrowed permissions, the delegation record
     for the dispatch decision, and the dispatch note."""
     # ponytail: a prefix is judged as written; a delegator rule narrower than
@@ -4547,13 +4573,18 @@ def _within_delegation(
             role is not None and str(row["decided_by"]).startswith(f"{role.label}/")
         )
 
-    def kept(scope: str, action: str, value: str) -> bool:
+    asks: list[dict[str, Any]] = []
+
+    def kept(scope: str, action: str, value: str, *, askable: bool) -> bool | None:
+        """True: kept as a grant. None: a deferred ask. False: dropped."""
         row = row_for(scope, action, value)
-        if not narrowed_by(row):
+        if row["verdict"] == "allow":
             return True
+        ask = deferred_asks and askable and row["verdict"] == "require_approval"
+        row = {**row, "delegated": "ask" if ask else "dropped"}
         _append_policy_ledger(holder.current.audit_dir, "decisions", row)
-        rows.append(row)
-        return False
+        (asks if ask else rows).append(row)
+        return None if ask else False
 
     entries = " → ".join(hop.entry for hop in chain)
     who = " · ".join(
@@ -4573,19 +4604,37 @@ def _within_delegation(
                     "may not; dispatch from a role that holds it, or as the operator"
                 ),
             )
+    shell = {
+        shlex.join(prefix): (
+            prefix,
+            kept(
+                "shell", "run", shlex.join(prefix), askable=worker_allowlist_reason(prefix) is None
+            ),
+        )
+        for prefix in permissions.shell_allowlist
+    }
+    network = {
+        host: kept("network", "connect", host, askable=ASK_HOST_RE.match(host) is not None)
+        for host in permissions.network
+    }
     narrowed = permissions.model_copy(
         update={
-            "shell_allowlist": [
-                prefix
-                for prefix in permissions.shell_allowlist
-                if kept("shell", "run", shlex.join(prefix))
-            ],
-            "network": [host for host in permissions.network if kept("network", "connect", host)],
+            "shell_allowlist": [prefix for prefix, held in shell.values() if held],
+            "shell_ask": [prefix for prefix, held in shell.values() if held is None],
+            "network": [host for host, held in network.items() if held],
+            "network_ask": [host for host, held in network.items() if held is None],
         }
     )
-    dropped = [f"{row['scope']}.{row['action']} {row['value']}" for row in rows]
+
+    def named(found: list[dict[str, Any]]) -> str:
+        return ", ".join(f"{row['scope']}.{row['action']} {row['value']}" for row in found)
+
     beyond = "the delegator" if chain else "the role"
-    note = who + (f"; beyond {beyond}, dropped: {', '.join(dropped)}" if dropped else "")
+    note = (
+        who
+        + (f"; beyond {beyond}, asks a human (this run only): {named(asks)}" if asks else "")
+        + (f"; beyond {beyond}, dropped: {named(rows)}" if rows else "")
+    )
     delegation = {
         "chain": [hop.entry for hop in chain],
         "role": None if role is None else role.name,
@@ -4606,6 +4655,7 @@ def submit_team(
     tasks: Sequence[dict[str, Any]],
     delegation_chain: Sequence[str] = (),
     dispatch_decision: AutonomyDecision | None = None,
+    deferred_asks: bool = False,
 ) -> dict[str, Any]:
     """R3 (ADR 0055 D5): a team run — v51's batch dispatch with a manager as
     the dispatcher. The manager is a hop, ``manager@<role>``, under whoever
@@ -4654,6 +4704,7 @@ def submit_team(
             delegation_chain=chain,
             role=str(task.get("role") or manager),
             team=team,
+            deferred_asks=deferred_asks,
         )
         for task in tasks
     ]

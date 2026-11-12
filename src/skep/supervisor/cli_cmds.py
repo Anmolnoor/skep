@@ -867,6 +867,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                     permissions,
                     role=args.role,
                     delegation_chain=args.delegated_by or [],
+                    # V7: the operator runs this — `skep review` answers a card.
+                    deferred_asks=True,
                 )
             except HTTPException as exc:
                 return _err(str(exc.detail), next_command="skep role list")
@@ -1018,6 +1020,7 @@ def cmd_team(args: argparse.Namespace) -> int:
                 manager=args.manager,
                 tasks=tasks,
                 delegation_chain=args.delegated_by or [],
+                deferred_asks=True,
             )
         except HTTPException as exc:
             return _err(str(exc.detail), next_command="skep role list")
