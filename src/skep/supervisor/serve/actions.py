@@ -75,6 +75,7 @@ from ..policy_resolver import (
     run_policy_for_repo,
 )
 from ..policy_schema import (
+    _VERDICT_RANK,
     OPERATOR_POLICY_SETTINGS_KEY,
     POLICY_DOCUMENT_SETTINGS_KEY,
     SCOPE_ACTIONS,
@@ -4387,10 +4388,15 @@ def _within_delegation(
 
     def narrowed_by(row: dict[str, Any]) -> bool:
         """The chain or the worker's role made this stricter than the run
-        policy that granted it."""
-        return row["rule_id"] == EXCEEDS_DELEGATOR or (
-            role is not None and str(row["decided_by"]).startswith(f"{role.label}/")
-        )
+        policy that granted it. A role rule only as strict as an unmatched
+        verdict names the role (D2's tie) but narrows nothing: the engine host
+        and a per-dispatch network list are unmatched in this stack."""
+        if row["rule_id"] == EXCEEDS_DELEGATOR:
+            return True
+        if role is None or not str(row["decided_by"]).startswith(f"{role.label}/"):
+            return False
+        base = decide_v3(Request(row["scope"], row["action"], row["value"]), stack=stack)
+        return _VERDICT_RANK[row["verdict"]] > _VERDICT_RANK[base.verdict]
 
     def kept(scope: str, action: str, value: str) -> bool:
         row = row_for(scope, action, value)

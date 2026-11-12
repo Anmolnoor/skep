@@ -488,3 +488,39 @@ def test_a_writer_that_loses_the_rotation_race_still_logs_its_line(
     policy_v3.log_decision(tmp_path, {"value": "ls"})
     assert log.with_name("decisions.jsonl.1").read_text() == '{"old": 1}\n'
     assert json.loads(log.read_text()) == {"value": "ls"}
+
+
+@pytest.mark.parametrize("role", ["builder", "operator"])
+def test_a_role_dispatch_keeps_the_engine_host_and_the_network_it_was_granted(
+    role: str, tmp_path: Path
+) -> None:
+    """The dispatch grants the engine's API host and a per-dispatch network
+    list; the stack `_within_delegation` judges them on resolves neither, so
+    they are unmatched there. A role's `*` ask winning that tie (D2's
+    labelling) is not the role narrowing the grant — before P3-1 they were
+    kept, and dropping api.anthropic.com leaves claude_code unable to work."""
+    from skep.supervisor.policy_resolver import resolve_run_policy
+    from skep.supervisor.serve.actions import delegate_permissions
+
+    home, repo = build_home(tmp_path, "builder")
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    store.add_project_policy(project_id="app", name="app", strategy="trusted_local_dev",
+                             phase="build", policy={"verify_command": "uv run pytest"})  # fmt: skip
+    try:
+        for engine, network in (("claude_code", None), (None, ["files.example"])):
+            resolved = resolve_run_policy(
+                store=store, config=config, repo=repo, caste="coding", network=network,
+                env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
+                max_actions=None, max_provider_calls=None, execution_mode=None,
+                binding_candidates=[], engine=engine,
+            )  # fmt: skip
+            granted = resolved.permissions.network
+            assert "api.anthropic.com" in granted or "files.example" in granted
+            narrowed, _, _ = delegate_permissions(
+                ConfigHolder(config, store), store, repo, resolved.permissions,
+                role=role, delegation_chain=(),
+            )  # fmt: skip
+            assert narrowed.network == granted, (engine, network)
+    finally:
+        store.close()
