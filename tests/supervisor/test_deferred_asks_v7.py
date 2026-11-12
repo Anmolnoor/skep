@@ -43,7 +43,7 @@ from skep.supervisor.serve.settings import (
     SESSION_ALLOWED_SHELL_COMMANDS,
     ConfigHolder,
 )
-from skep.supervisor.serve.tools import execute_mutation
+from skep.supervisor.serve.tools import execute_mutation, mutation_execution_decision
 from skep.supervisor.spawner import effective_network_domains
 from skep.worker_contract import CodingWorkerTask, Permissions
 from skep.workers.capabilities import (
@@ -672,3 +672,46 @@ def test_an_ask_cannot_be_remembered_and_deny_keeps_it_refused(
     finally:
         runner.shutdown(wait=True)
         store.close()
+
+
+# --- B22: the proposal consults the chain ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("dispatch_run", {"instructions": "fix hello.py"}),
+        ("dispatch_run", {"instructions": "fix", "execution_mode": "sandbox"}),
+        ("dispatch_run", {"instructions": "fix", "network": ["pypi.org"]}),
+        ("quick_edit", {"file": "hello.py", "instruction": "fix"}),
+        ("batch_dispatch", {"tasks": [{"instructions": "fix"}]}),
+    ],
+)
+def test_an_assistant_chat_is_refused_at_proposal_time(
+    locked: SupervisorConfig, repo: Path, tool: str, args: dict[str, Any]
+) -> None:
+    """f1-16: the assistant role denies workspace writes, so a worker it
+    dispatches could never write — deny now (no card), saying why, instead
+    of a card whose confirm 403s."""
+    if tool == "batch_dispatch":
+        args = {"tasks": [{**args["tasks"][0], "repo": str(repo)}]}
+    else:
+        args = {**args, "repo": str(repo)}
+    store = RunStore(locked.db_path)
+    try:
+        chat = store.create_chat(title="c", model=None, role="assistant")
+        decision = mutation_execution_decision(
+            tool, args, store=store, holder=ConfigHolder(locked, store), chat_id=chat.chat_id
+        )
+        builder = store.create_chat(title="b", model=None, role="builder")
+        allowed = mutation_execution_decision(
+            tool, args, store=store, holder=ConfigHolder(locked, store), chat_id=builder.chat_id
+        )
+    finally:
+        store.close()
+    assert decision is not None
+    assert (decision.verdict, decision.reason) == ("deny", "dispatch.deny.exceeds_delegator")
+    assert "delegated by queen@assistant: filesystem.write workspace exceeds the delegator" in (
+        decision.detail or ""
+    )
+    assert allowed is None or allowed.verdict != "deny"

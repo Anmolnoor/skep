@@ -4630,24 +4630,12 @@ def _within_delegation(
         (asks if ask else rows).append(row)
         return None if ask else False
 
-    entries = " → ".join(hop.entry for hop in chain)
-    who = " · ".join(
-        ([f"delegated by {entries}"] if chain else []) + ([f"role {role.name}"] if role else [])
+    who = _delegation_who(chain, role)
+    refusal = _delegated_write_refusal(
+        holder, store, repo, chain, permissions.write, role=role, team=team
     )
-    for path in permissions.write:
-        # An ask stays: the patch card is already the human's gate (I1).
-        row = row_for("filesystem", "write", path)
-        if narrowed_by(row) and row["verdict"] == "deny":
-            _append_policy_ledger(holder.current.audit_dir, "decisions", row)
-            beyond = "the delegator" if row["rule_id"] == EXCEEDS_DELEGATOR else "the role"
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"{who}: filesystem.write {path} exceeds {beyond} "
-                    f"({row['decided_by']}) — a worker it dispatches could write what it "
-                    "may not; dispatch from a role that holds it, or as the operator"
-                ),
-            )
+    if refusal is not None:
+        raise HTTPException(status_code=403, detail=refusal)
     shell = {
         shlex.join(prefix): (
             prefix,
@@ -4685,6 +4673,57 @@ def _within_delegation(
         "team": team,
     }
     return narrowed, delegation, note
+
+
+def _delegation_who(chain: Sequence[Delegator], role: Role | None) -> str:
+    entries = " → ".join(hop.entry for hop in chain)
+    return " · ".join(
+        ([f"delegated by {entries}"] if chain else []) + ([f"role {role.name}"] if role else [])
+    )
+
+
+def _delegated_write_refusal(
+    holder: ConfigHolder,
+    store: RunStore,
+    repo: Path,
+    chain: Sequence[Delegator],
+    write: Sequence[str],
+    *,
+    role: Role | None = None,
+    team: str | None = None,
+) -> str | None:
+    """Why a worker this chain (or role) dispatches may not write — the
+    workspace write its delegator is denied — recorded; None when it may.
+    ``_within_delegation`` refuses the dispatch with it (403) and
+    ``dispatch_run_decision`` refuses the proposal (B22: before a card)."""
+    for path in write:
+        # An ask stays: the patch card is already the human's gate (I1).
+        row = _decision_record(
+            holder,
+            store,
+            scope="filesystem",
+            action="write",
+            value=path,
+            repo=str(repo),
+            actor="dispatch",
+            ring="advisory",
+            role_record=role,
+            chain=chain,
+        )
+        narrowed = row["rule_id"] == EXCEEDS_DELEGATOR or (
+            role is not None and str(row["decided_by"]).startswith(f"{role.label}/")
+        )
+        if narrowed and row["verdict"] == "deny":
+            _append_policy_ledger(
+                holder.current.audit_dir, "decisions", {**row, "team": team} if team else row
+            )
+            beyond = "the delegator" if row["rule_id"] == EXCEEDS_DELEGATOR else "the role"
+            return (
+                f"{_delegation_who(chain, role)}: filesystem.write {path} exceeds {beyond} "
+                f"({row['decided_by']}) — a worker it dispatches could write what it "
+                "may not; dispatch from a role that holds it, or as the operator"
+            )
+    return None
 
 
 TEAM_CAP = 3  # v51's batch cap: a team is a batch with a manager
@@ -4791,6 +4830,72 @@ def dispatch_run_auto_allowed(
 
 
 def dispatch_run_decision(
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    repo: str,
+    caste: str = "coding",
+    network: list[str] | None = None,
+    env_allowlist: list[str] | None = None,
+    wall_clock_seconds: int | None = None,
+    max_iterations: int | None = None,
+    max_actions: int | None = None,
+    max_provider_calls: int | None = None,
+    execution_mode: str | None = None,
+    engine: str | None = None,
+    delegation_chain: Sequence[str] = (),
+) -> AutonomyDecision:
+    """The dispatch gate. ADR 0059 D3 (V7, B22): with the proposing chat's
+    ``delegation_chain`` it consults the chain first — a dispatch the
+    delegator could never make (its role denies the workspace write) is
+    refused at proposal time with the reason, never carded only to 403 on
+    confirm."""
+    decision = _dispatch_run_decision(
+        holder,
+        store,
+        repo=repo,
+        caste=caste,
+        network=network,
+        env_allowlist=env_allowlist,
+        wall_clock_seconds=wall_clock_seconds,
+        max_iterations=max_iterations,
+        max_actions=max_actions,
+        max_provider_calls=max_provider_calls,
+        execution_mode=execution_mode,
+        engine=engine,
+    )
+    if not delegation_chain or decision.verdict == "deny" or is_git_url(repo):
+        return decision
+    try:
+        chain = parse_delegation_chain(delegation_chain, holder.current.home)
+        resolved = resolve_repo_arg(repo, repos_root(holder), store)
+        write = resolve_run_policy(
+            store=store,
+            config=holder.current,
+            repo=resolved,
+            caste=caste,
+            network=network,
+            env_allowlist=env_allowlist,
+            wall_clock_seconds=wall_clock_seconds,
+            max_iterations=max_iterations,
+            max_actions=max_actions,
+            max_provider_calls=max_provider_calls,
+            # the write grant does not depend on the mode; an unset project
+            # mode ("ask") must not hide the refusal behind its own card
+            execution_mode=execution_mode or "workspace",
+            engine=engine,
+        ).permissions.write
+    except (ValueError, HTTPException, PolicyResolutionError):
+        return decision  # the dispatch itself answers with the honest error
+    refusal = _delegated_write_refusal(holder, store, resolved, chain, write)
+    if refusal is None:
+        return decision
+    return AutonomyDecision(
+        verdict="deny", reason="dispatch.deny.exceeds_delegator", detail=refusal
+    )
+
+
+def _dispatch_run_decision(
     holder: ConfigHolder,
     store: RunStore,
     *,

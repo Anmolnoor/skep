@@ -5211,6 +5211,9 @@ def mutation_execution_decision(
         role = _chat_role(store, holder, chat_id)
     except ValueError as exc:
         return AutonomyDecision(verdict="deny", reason="role.deny.unloadable", detail=str(exc))
+    # B22: the Queen's own hop (``_queen_chain``) — a dispatch its role can
+    # never delegate refuses here, before a card exists to confirm.
+    chain = [f"queen@{role.name}"] if role else []
     if name == "run_schedule_now":
         # ES (B122): a disabled/unknown schedule can only fail on confirm —
         # refuse now, without a card, and tell the model why.
@@ -5245,13 +5248,13 @@ def mutation_execution_decision(
         # script envelope (sandbox, deny-all egress, no landing path) is
         # strictly TIGHTER than what that posture already trusts.
         return actions.dispatch_run_decision(
-            holder, store, repo=str(args.get("repo") or ""), caste="script"
+            holder, store, repo=str(args.get("repo") or ""), caste="script", delegation_chain=chain
         )
     if name == "quick_edit":
         # v83-F10: a quick_edit IS a coding dispatch — same posture, same
         # gate as dispatch_run on this repo.
         return actions.dispatch_run_decision(
-            holder, store, repo=str(args.get("repo") or ""), caste="coding"
+            holder, store, repo=str(args.get("repo") or ""), caste="coding", delegation_chain=chain
         )
     if name == "batch_dispatch":
         # v51-F5: auto-resolve only when EVERY member matches its project's
@@ -5275,7 +5278,10 @@ def mutation_execution_decision(
                 # v98-F1: an explicit engine is an explicit run override, so
                 # this member gates the batch (actions.py explicit_run_overrides).
                 engine=(None if entry.get("engine") is None else str(entry["engine"])),
+                delegation_chain=chain,
             )
+            if member.verdict == "deny" and member.reason == "dispatch.deny.exceeds_delegator":
+                return member  # B22: a member the chain can never dispatch refuses the batch
             if not member.allows_execution():
                 return AutonomyDecision(
                     verdict="require_approval",
@@ -5373,4 +5379,5 @@ def mutation_execution_decision(
         max_actions=_optional_int(args, "max_actions"),
         max_provider_calls=_optional_int(args, "max_provider_calls"),
         engine=None if args.get("engine") is None else str(args["engine"]),
+        delegation_chain=chain,
     )
