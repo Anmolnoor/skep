@@ -23,6 +23,7 @@ from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.dispatch import run_task
 from skep.supervisor.policy_schema import SCOPES
 from skep.supervisor.roles import parse_delegation_chain, resolve_role, role_covers
+from skep.supervisor.scheduler import make_schedule, run_due
 from skep.supervisor.serve import actions
 from skep.supervisor.serve.actions import (
     _within_delegation,
@@ -43,7 +44,11 @@ from skep.supervisor.serve.settings import (
     SESSION_ALLOWED_SHELL_COMMANDS,
     ConfigHolder,
 )
-from skep.supervisor.serve.tools import execute_mutation, mutation_execution_decision
+from skep.supervisor.serve.tools import (
+    _human_answers,
+    execute_mutation,
+    mutation_execution_decision,
+)
 from skep.supervisor.spawner import effective_network_domains
 from skep.worker_contract import CodingWorkerTask, Permissions
 from skep.workers.capabilities import (
@@ -715,3 +720,68 @@ def test_an_assistant_chat_is_refused_at_proposal_time(
         decision.detail or ""
     )
     assert allowed is None or allowed.verdict != "deny"
+
+
+# --- headless faces: no deferred ask exists to hang ------------------------
+
+
+def test_a_scheduled_tick_dispatches_no_deferred_ask(tmp_path: Path, repo: Path) -> None:
+    """A task schedule carries no chain (nobody is watching), so nothing is
+    narrowed into an ask and no card can wait on a human; run_task would
+    clear one anyway (ES-F10)."""
+    config = _upgraded(tmp_path, repo)
+    seen: list[dict[str, Any]] = []
+
+    def capture(*_args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        raise RuntimeError("captured")
+
+    store = RunStore(config.db_path)
+    try:
+        project = store.project_for_binding("repo_path", str(repo))
+        assert project is not None
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={
+                **project.policy,
+                "auto_dispatch_allowed": True,
+                "default_execution_mode": "workspace",
+            },
+        )
+        store.add_schedule(
+            make_schedule(
+                name="nightly",
+                repo=str(repo),
+                instructions="tidy",
+                interval_seconds=60,
+                start_at="2026-06-11T00:00:00Z",
+            )
+        )
+        run_due(store=store, config=config, now="2026-06-11T09:00:00Z", dispatch=capture)
+    finally:
+        store.close()
+    (kwargs,) = seen
+    perms = kwargs["permissions"]
+    assert perms.network_ask == [] and perms.shell_ask == []
+    assert getattr(kwargs["dispatch_decision"], "delegation", None) is None
+
+
+def test_no_chat_or_a_channel_that_cannot_confirm_gets_no_deferred_ask(
+    tmp_path: Path, repo: Path
+) -> None:
+    """The headless chat faces (I6). A completion turn is unattended and
+    cards every mutation (ES-F3, B08 — covered there), so its dispatch only
+    happens on a human's confirm; a messenger chat whose channel cannot
+    confirm, or a dispatch with no chat, drops the ask instead."""
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        store.upsert_channel_config(ChannelConfig(channel="slack", channel_can_confirm=False))
+        chat = store.create_chat(title="c", model=None, source="slack", role="builder")
+        assert _human_answers(store, chat.chat_id) is False
+        assert _human_answers(store, None) is False
+    finally:
+        store.close()
