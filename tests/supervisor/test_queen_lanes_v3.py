@@ -222,6 +222,30 @@ def test_b01_upgraded_a_legacy_fs_read_baseline_cards_outside_the_roots(
     assert [r.rule_id for r in layer.rules if r.scope == "filesystem" and r.action == "read"] == []
 
 
+@pytest.mark.parametrize("pattern", ["{repo}/README.md", "*"])
+def test_an_explicit_ask_inside_an_operator_root_still_cards(
+    grid: Callable[..., Any], pattern: str
+) -> None:
+    """D1: the operator roots answer only where no explicit rule matched. A
+    baseline ask on a path inside a root — named, or the catch-all
+    `filesystem read *` — cards the read; the root never lifts it."""
+    from skep.supervisor import policy_baseline as pb
+
+    from .queen_lane_grid import _baseline
+
+    paths, fmt, store, holder = grid("legacy")
+    readme = f"{fmt['repo']}/README.md"
+    assert queen_filesystem_decision(store, holder, action="read", path=readme).verdict == "allow"
+    ask = {"scope": "filesystem", "verdict": "require_approval", "action": "read",
+           "pattern": pattern.format(**fmt), "rule_id": "ask-read"}  # fmt: skip
+    pb.write_lock(paths["skep"], _baseline("builder", ask), approved_by="op")
+    decision = queen_filesystem_decision(store, holder, action="read", path=readme)
+    assert (decision.verdict, decision.decided_by) == (
+        "require_approval",
+        "template:builder/ask-read",
+    )
+
+
 def _cli(home: Path, capsys: pytest.CaptureFixture[str], *argv: str) -> dict[str, Any]:
     capsys.readouterr()
     assert main(["--home", str(home), "policy", *argv]) == 0

@@ -19,7 +19,9 @@ any deny binds, then any named ask, then the most specific of the rest — so
 a catch-all ``*`` ask is a default an allow more specific than it answers.
 The role layer never grants, and its ``*`` ask is a default too: an allow a
 human granted (``grant:session`` / ``grant:global``) answers it (decision
-#1, B56); its denies and named asks bind. Under a locked baseline the
+#1, B56) — a grant on the operator lane (the Queen's exact argv, host or
+tool); never the worker session tier (a cross-repo prefix, B39). Its denies
+and named asks bind. Under a locked baseline the
 ``skep setup`` document only tightens: its allows leave the stack (decision
 #2, B30). Every verdict names its layer in one vocabulary (B79): ``floor/``,
 ``baseline/``, ``global/``, ``template:<name>/``, ``role:<name>/``,
@@ -510,7 +512,14 @@ def decide(
                 verdict = Verdict(
                     "allow", "default", READ_ONLY, f"default/{READ_ONLY}", "operator", note
                 )
-    granted = verdict.verdict == "allow" and verdict.layer in GRANT_LAYERS
+    # Only the operator lane's learned grants: exact argv / exact host / exact
+    # tool, human-approved. The run lane's ``grant:session`` is the worker
+    # session tier — a prefix held for every repo (B39) — and never answers a role.
+    granted = (
+        verdict.verdict == "allow"
+        and verdict.layer in GRANT_LAYERS
+        and verdict.source == "operator"
+    )
     if role is not None and not (granted and catch_all_asks_only(role, scope, action, value)):
         # Decision #1 (B56): a role's catch-all ask is a default a human's
         # grant answers; anything else the role says binds as before.

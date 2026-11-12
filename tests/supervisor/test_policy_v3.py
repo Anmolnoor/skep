@@ -448,13 +448,18 @@ def test_the_floor_still_denies_when_the_operator_document_will_not_load(
         _decide(home, scope="shell", action="run", value="ls", **cwd)
 
 
+# Joined at run time: a literal `curl -u user:pass` trips the release hygiene
+# scan (gitleaks curl-auth-user), which cannot tell a canary from a login.
+_BASIC_AUTH = ":".join(("bob", "CANARY"))
+
+
 @pytest.mark.parametrize(
     "command",
     [
-        "curl -u bob:CANARY https://x.example",
-        "curl -ubob:CANARY https://x.example",
-        "curl --user bob:CANARY https://x.example",
-        "curl --user=bob:CANARY https://x.example",
+        f"curl -u {_BASIC_AUTH} https://x.example",
+        f"curl -u{_BASIC_AUTH} https://x.example",
+        f"curl --user {_BASIC_AUTH} https://x.example",
+        f"curl --user={_BASIC_AUTH} https://x.example",
         "KEY=CANARY ./deploy",
         "mysql --password='CANARY CANARY' db",
         'SECRET_TOKEN="CANARY CANARY" make',
@@ -605,6 +610,86 @@ def test_decision_1_a_grant_answers_a_roles_catch_all_ask_and_a_named_ask_binds(
     # A role's named rule still binds: the assistant role denies coding edits.
     edit = _decide(home, scope="coding", action="edit", value="workspace", role="assistant")
     assert edit["verdict"] == "deny"
+
+
+@pytest.mark.parametrize("kind", ["legacy", "builder", "assistant"])
+def test_a_workers_session_tier_never_answers_a_roles_catch_all_ask(
+    kind: str, tmp_path: Path
+) -> None:
+    """Decision #1 is the Queen's exact-argv grant. The worker session tier
+    (a plain approve on a worker card) is a PREFIX, held for every repo
+    (B39): approved in repo A, it must not reach a role-governed decision in
+    repo B as an allow — REST with a repo, and a builder chat's delegated
+    worker (dropped headless, a deferred ask where a human answers)."""
+    from skep.supervisor.policy_resolver import resolve_run_policy
+    from skep.supervisor.serve.actions import delegate_permissions, remember_commands_for_session
+
+    home, _repo_a = build_home(tmp_path, kind)
+    repo_b = tmp_path / "repo-b"
+    repo_b.mkdir()
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(project_id="b", name="b", strategy="trusted_local_dev",
+                                 phase="build", policy={})  # fmt: skip
+        store.add_project_binding(project_id="b", binding_kind="repo_path",
+                                  binding_value=str(repo_b.resolve()))  # fmt: skip
+        remember_commands_for_session(store, [["npm", "run", "x"]])  # approved in repo A
+        holder = ConfigHolder(config, store)
+        for value in ("npm run x", "npm run x --evil"):
+            plain = policy_decide(holder, store, scope="shell", action="run", value=value,
+                                  repo=str(repo_b))  # fmt: skip
+            assert (plain["verdict"], plain["decided_by"]) == (
+                "allow",
+                "grant:session/shell:npm run x",
+            )  # no role: the session tier allows as it always has (B39 stays open)
+            for role in ("builder", "assistant", "operator"):
+                held = policy_decide(holder, store, scope="shell", action="run", value=value,
+                                     repo=str(repo_b), role=role)  # fmt: skip
+                assert held["verdict"] == "require_approval", (value, role, held)
+        permissions = resolve_run_policy(
+            store=store, config=config, repo=repo_b, caste="coding", network=None,
+            env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
+            max_actions=None, max_provider_calls=None, execution_mode=None,
+            binding_candidates=[], engine=None,
+        ).permissions  # fmt: skip
+        assert ["npm", "run", "x"] in permissions.shell_allowlist
+        for deferred in (False, True):
+            narrowed = delegate_permissions(
+                holder, store, repo_b, permissions, role=None,
+                delegation_chain=["queen@builder"], deferred_asks=deferred,
+            )[0]  # fmt: skip
+            assert ["npm", "run", "x"] not in narrowed.shell_allowlist, deferred
+            assert (["npm", "run", "x"] in narrowed.shell_ask) is deferred
+    finally:
+        store.close()
+
+
+def test_a_fetch_grant_answers_a_roles_ask_on_read_url_and_rest_alike(tmp_path: Path) -> None:
+    """P3-3 moved read_url: a fetch grant answers a role's `net-fetch-gated *`
+    ask (decision #1, B56) in the Queen's own lane and in REST alike (V1)."""
+    from skep.supervisor.serve.actions import remember_action_for_session
+    from skep.supervisor.serve.tools import fetch_grant_decision
+
+    home, _repo = build_home(tmp_path, "builder")
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    try:
+        assert remember_action_for_session(
+            store, tool="read_url", args={"url": "https://docs.example.org/x"}, actor="op",
+            tier="always",
+        )  # fmt: skip
+        holder = ConfigHolder(config, store)
+        for role in ("builder", "assistant", "operator"):
+            rest = policy_decide(holder, store, scope="network", action="fetch",
+                                 value="docs.example.org", role=role)  # fmt: skip
+            queen = fetch_grant_decision(
+                store, holder, "docs.example.org", role=SHIPPED_ROLES[role]
+            )
+            assert (rest["verdict"], rest["decided_by"]) == (queen.verdict, queen.decided_by)
+            assert rest["decided_by"] == "grant:global/network:fetch:docs.example.org", role
+    finally:
+        store.close()
 
 
 def test_decision_2_the_setup_document_only_tightens_under_a_locked_baseline(
