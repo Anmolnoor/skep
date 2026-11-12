@@ -94,6 +94,9 @@ SCOPE_ACTIONS = UNMATCHED_VERDICT
 UNMATCHED = f"default/{UNMATCHED_RULE_ID}"
 OPERATOR_ROOT = "operator-root"  # the generated rule an operator root becomes
 READ_ONLY = "read-only"  # the default a read-only request answers where nothing matched
+# The requests ``read_only`` is a fact about (the Queen classifies only these);
+# for any other request a caller's ``read_only`` is ignored.
+READ_ONLY_REQUESTS = frozenset({("mcp", "call"), ("email", "read"), ("browse", "read")})
 GRANT_LAYERS = ("grant:session", "grant:global")
 # The Queen-side lanes by definition: search is the keyless discovery, fetch
 # read_url. The Queen asks with no repo anyway; this keeps the hook's
@@ -488,8 +491,10 @@ def decide(
     tool reports itself read-only (``readOnlyHint`` and a leading read verb,
     B09), an email read, a browse page-state read. Only then does a template
     allow grant an ``mcp.call``, and only then does an unmatched request
-    answer ``default/read-only`` allow instead of ``default/unmatched``."""
+    answer ``default/read-only`` allow instead of ``default/unmatched``.
+    For any other request (``READ_ONLY_REQUESTS``) it is ignored."""
     scope, action, value = req
+    read_only = read_only and (scope, action) in READ_ONLY_REQUESTS
     floor = floor_verdict(scope, value, action=action, home=stack.home, cwd=stack.cwd)
     if floor is not None:
         return Verdict(

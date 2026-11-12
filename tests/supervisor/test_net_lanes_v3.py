@@ -340,6 +340,35 @@ def test_b56_a_session_fetch_grant_in_a_role_chat_runs_the_url_with_no_second_ca
     assert decide("https://other.example/").verdict == "require_approval"
 
 
+def test_read_only_is_a_fact_only_about_an_mcp_call_an_email_read_or_a_browse_read(
+    net: Callable[..., Any],
+) -> None:
+    """REST and the CLI take ``read_only`` from the caller. It means something
+    only for the requests the Queen classifies (an MCP call, an email read, a
+    browse read); for anything else it must not turn an unmatched request
+    into ``default/read-only`` allow."""
+    _paths, store, holder, _fetched = net("legacy")
+    for scope, action, value in (
+        ("shell", "run", "make deploy"),
+        ("network", "fetch", "unknown.example"),
+        ("network", "connect", "unknown.example"),
+        ("email", "send", "mail:send_message"),
+        ("browse", "act", "browser:browser_click"),
+        ("filesystem", "read", "/srv/data/notes.txt"),
+    ):
+        answer = policy_decide(holder, store, scope=scope, action=action, value=value,
+                               read_only=True)  # fmt: skip
+        assert answer["decided_by"] != "default/read-only", (scope, action, answer)
+    for scope, action, value in (
+        ("mcp", "call", "plain:get_page"),
+        ("email", "read", "mail:list_messages"),
+        ("browse", "read", "browser:browser_snapshot"),
+    ):
+        answer = policy_decide(holder, store, scope=scope, action=action, value=value,
+                               read_only=True)  # fmt: skip
+        assert answer["decided_by"] == "default/read-only", (scope, action, answer)
+
+
 @pytest.mark.parametrize("kind", ["legacy", "builder"])
 def test_an_operator_overlay_fetch_allow_does_not_let_read_url_run(
     kind: str, net: Callable[..., Any], capsys: pytest.CaptureFixture[str]
