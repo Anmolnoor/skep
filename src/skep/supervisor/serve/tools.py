@@ -4543,7 +4543,7 @@ def _execute_mutation(
             resumed_result: dict[str, Any] = {"action": "resumed", "resumed_as": resumed}
             # v109-F8: the Nth identical approval says so — the model relays
             # the nudge instead of silently re-approving forever.
-            suggestion = actions.remember_suggestion_for_review(store, review_id)
+            suggestion = actions.remember_suggestion_for_review(store, review_id, holder.current)
             if suggestion is not None:
                 resumed_result["suggestion"] = suggestion
             return resumed_result

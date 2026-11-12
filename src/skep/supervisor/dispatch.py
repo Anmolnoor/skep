@@ -502,6 +502,15 @@ def run_task(
         effective_worker_state = worker_state
         if effective_worker_state is None and resume_of is not None:
             effective_worker_state = resume_worker_state_from_audit(config.audit_dir, resume_of)
+        if resume_of is not None and effective_worker_state is not None:
+            # The checkpoint is the worker's own file: a grants key in it is
+            # not a grant (the proxy admits approved asked hosts from it, V7).
+            # Only the merge below, from the supervisor's audit copies, writes it.
+            effective_worker_state = {
+                key: value
+                for key, value in effective_worker_state.items()
+                if key != APPROVAL_GRANTS_STATE_KEY
+            }
         if resume_of is not None:
             # Carry every grant the chain has collected so far (prior grants +
             # the verdict the suspended run held) into the resumed envelope;

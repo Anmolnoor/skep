@@ -50,7 +50,12 @@ from skep.supervisor.serve.tools import (
     mutation_execution_decision,
 )
 from skep.supervisor.spawner import effective_network_domains
-from skep.worker_contract import CodingWorkerTask, Permissions
+from skep.worker_contract import (
+    APPROVAL_GRANTS_STATE_KEY,
+    RESUME_CHECKPOINT_ARTIFACT_NAME,
+    CodingWorkerTask,
+    Permissions,
+)
 from skep.workers.capabilities import (
     DELEGATED_ASK_REASON,
     CapabilityApprovalRequired,
@@ -59,6 +64,7 @@ from skep.workers.capabilities import (
 
 from .conftest import FAKE_WORKER, predating_home
 from .test_queen_delegates import _wait_run as wait_run
+from .test_resume import _shell_verdict
 from .test_role_policy import _home
 
 
@@ -355,8 +361,10 @@ def test_a_child_never_holds_an_allow_its_delegator_lacks(
 ) -> None:
     """ADR 0059 §5.4 check 5, counting ask as weaker than allow: every grant
     the worker keeps is one each delegator (and its own role) allows; every
-    deferred ask is one they would ask about — never one they deny. On a
-    zero-state home (B147) the delegator asks everything, so nothing stays."""
+    deferred ask is one they would ask about — never one they deny. A
+    zero-state home is the exception this round leaves open (B147): every
+    row there is the baseline placeholder, so the worker keeps its grants as
+    before — asking would strand a sandboxed install the proxy cannot card."""
     config = {
         "locked": lambda: _home(tmp_path, repo, capsys),
         "zero": lambda: _zero_state(tmp_path, repo),
@@ -393,6 +401,10 @@ def test_a_child_never_holds_an_allow_its_delegator_lacks(
         finally:
             store.close()
 
+    if state == "zero":
+        assert narrowed.network == hosts and narrowed.shell_allowlist == PREFIXES
+        assert narrowed.network_ask == [] and narrowed.shell_ask == []
+        return
     for host in narrowed.network:
         assert verdicts("network", "connect", host) == {"allow"}, host
     for prefix in narrowed.shell_allowlist:
@@ -401,8 +413,6 @@ def test_a_child_never_holds_an_allow_its_delegator_lacks(
         assert "deny" not in verdicts("network", "connect", host), host
     for prefix in narrowed.shell_ask:
         assert "deny" not in verdicts("shell", "run", shlex.join(prefix)), prefix
-    if state == "zero":
-        assert narrowed.network == [] and narrowed.shell_allowlist == []
 
 
 @pytest.mark.parametrize(
@@ -536,6 +546,50 @@ def test_the_proxy_admits_an_approved_ask_and_nothing_else(tmp_path: Path) -> No
         "example.com",
     )
     assert effective_network_domains(task([], "example.com")) == ("pypi.org",)
+
+
+def test_a_worker_written_checkpoint_grants_no_asked_host(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """The resume checkpoint is the worker's own file (its workspace's
+    .artifacts, copied to audit). An ``approval_grants`` key in it is not a
+    grant: on a first resume — approving an unrelated command — a host the
+    run only ASKS about must not join the proxy's egress."""
+    perms = _perms(
+        read=["workspace"], write=["workspace"], network=["pypi.org"], network_ask=["example.com"]
+    )
+
+    def delegated(reason: str) -> AutonomyDecision:
+        return AutonomyDecision(verdict="allow", reason=reason, delegation=CHAIN)
+
+    suspended = run_task(
+        repo,
+        "Commit this. MODE:pending",
+        config=config,
+        permissions=perms,
+        dispatch_decision=delegated("dispatch.allow.test"),
+        execution_mode="workspace",
+    )
+    assert suspended.record.state == "pending_approval"
+    checkpoint = config.audit_dir / suspended.record.task_id / RESUME_CHECKPOINT_ARTIFACT_NAME
+    forged = json.loads(checkpoint.read_text()) if checkpoint.is_file() else {}
+    forged[APPROVAL_GRANTS_STATE_KEY] = {"version": 1, "network_hosts": ["example.com"]}
+    checkpoint.write_text(json.dumps(forged))
+    resumed = run_task(
+        repo,
+        "Commit this. MODE:pending",
+        config=config,
+        permissions=perms,
+        resume_of=suspended.record.task_id,
+        approval_verdict=_shell_verdict("git add README.md"),
+        dispatch_decision=delegated("dispatch.allow.resume_after_approval"),
+        execution_mode="workspace",
+    )
+    task = CodingWorkerTask.model_validate_json(
+        (config.audit_dir / resumed.record.task_id / "task.json").read_text()
+    )
+    assert task.permissions.network_ask == ["example.com"]
+    assert "example.com" not in effective_network_domains(task)
 
 
 # --- the approval: this run only ------------------------------------------
@@ -676,6 +730,84 @@ def test_an_ask_cannot_be_remembered_and_deny_keeps_it_refused(
         assert require_run(store, task_id)["state"] != "completed"
     finally:
         runner.shutdown(wait=True)
+        store.close()
+
+
+def test_skep_review_keeps_a_delegated_ask_approve_once(
+    tmp_path: Path,
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI face (ADR 0050): `skep review --allow-command` refuses an ask
+    and persists nothing; `--approve` resumes without the session tier."""
+    config, task_id = _gated_delegated_run(tmp_path, repo, capsys)
+    worker = shlex.join([sys.executable, str(FAKE_WORKER)])
+    review = ["--home", str(tmp_path), "review", task_id, "--actor", "tester"]
+    assert main([*review, "--allow-command"]) != 0
+    assert "delegated ask" in capsys.readouterr().err
+    store = RunStore(config.db_path)
+    try:
+        project = store.project_for_binding("repo_path", str(repo))
+        assert project is not None
+        assert project.policy["allowed_shell_commands"] == [["make"]]  # nothing persisted
+        assert len(store.pending_approvals()) == 1
+    finally:
+        store.close()
+    monkeypatch.setenv("SKEP_WORKER_CMD", worker)
+    main([*review, "--approve"])
+    store = RunStore(config.db_path)
+    try:
+        assert store.pending_approvals() == []
+        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) in (None, [])
+    finally:
+        store.close()
+
+
+def test_the_supervisor_knows_an_ask_by_the_workers_own_spelling(
+    config: SupervisorConfig, task_payload: dict[str, Any]
+) -> None:
+    """The worker cards `python …` as `<its interpreter> …` and a URL's host
+    as written (`Example.COM.`): the session-tier skip and the 409 must
+    recognise both, or a plain approve reaches every repo's runs (B39) and
+    Allow & remember persists the ask."""
+    permissions = dict(task_payload["permissions"])
+    permissions.update(shell_ask=[["python", "-m", "pytest"]], network_ask=["example.com"])
+    task = {**task_payload, "task_id": "t-ask", "permissions": permissions}
+    (config.audit_dir / "t-ask").mkdir(parents=True)
+    (config.audit_dir / "t-ask" / "task.json").write_text(json.dumps(task))
+    held = actions._deferred_asks(config, "t-ask")
+    assert actions._asked([sys.executable, "-m", "pytest", "-q"], held)
+    for asked in ({"commands": [[sys.executable, "-m", "pytest", "-q"]]}, {"host": "Example.COM."}):
+        with pytest.raises(HTTPException) as refused:
+            actions._refuse_remembering_an_ask(config, "t-ask", **asked)
+        assert refused.value.status_code == 409
+    actions._refuse_remembering_an_ask(config, "t-ask", host="other.org")  # not an ask
+
+
+def test_a_delegated_ask_gets_no_allow_and_remember_nudge(
+    config: SupervisorConfig, repo: Path, task_payload: dict[str, Any]
+) -> None:
+    """The Nth approve of the same key says Allow & remember would stop the
+    asking — false for a delegated ask, which that button refuses (409)."""
+    from .test_ledger_suggestions import PIP, _seed_approvals
+
+    store = RunStore(config.db_path)
+    try:
+        review_ids = _seed_approvals(store, repo, count=3)
+        entry = store.ledger_entry_for_review(review_ids[-1])
+        assert entry is not None
+        assert actions.remember_suggestion_for_review(store, review_ids[-1], config) is not None
+        permissions = {**task_payload["permissions"], "shell_ask": [shlex.split(PIP)[:2]]}
+        (config.audit_dir / entry.task_id).mkdir(parents=True, exist_ok=True)
+        (config.audit_dir / entry.task_id / "task.json").write_text(
+            json.dumps({**task_payload, "task_id": entry.task_id, "permissions": permissions})
+        )
+        assert actions.remember_suggestion_for_review(store, review_ids[-1], config) is None
+        # a card text shlex cannot parse still answers (the approve already resumed)
+        unparsed = _seed_approvals(store, repo, count=3, resource="make 'x")
+        assert actions.remember_suggestion_for_review(store, unparsed[-1], config) is not None
+    finally:
         store.close()
 
 
