@@ -394,3 +394,49 @@ def test_an_old_database_gains_card_json_and_its_cards_read_as_unrecorded(
         assert reopened.fold_into_chat_action("missing", args={}, tool_call_id=None) is False
     finally:
         reopened.close()
+
+
+def test_a_project_wide_network_is_high_for_every_dispatch_verb(
+    repo: Any, config: SupervisorConfig
+) -> None:
+    """A project whose default network is ``*`` and that auto-dispatches:
+    dispatch_run's manifest made its card HIGH, while quick_edit and
+    batch_dispatch — the same compile, the same run — ran unasked with every
+    host open. Each one now cards HIGH."""
+    from .test_serve_chat import sse_events
+    from .test_serve_chat_tools import chat_client
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        client, _ = chat_client(config, ollama)
+        created = client.post(
+            "/api/projects",
+            json={
+                "project_id": "star", "name": "Star", "strategy": "trusted_local_dev",
+                "phase": "build",
+                "policy": {"default_execution_mode": "workspace", "auto_dispatch_allowed": True,
+                           "default_network": ["*"]},
+                "bindings": [{"kind": "repo_path", "value": str(repo)}],
+            },
+        )  # fmt: skip
+        assert created.status_code == 201
+        for tool, args in (
+            ("dispatch_run", {"repo": str(repo), "instructions": "a"}),
+            ("quick_edit", {"repo": str(repo), "file": "hello.py", "instruction": "b"}),
+            ("batch_dispatch", {"tasks": [{"repo": str(repo), "instructions": "c"}]}),
+        ):
+            chat = client.post("/api/chats", json={}).json()["chat_id"]
+            ollama.script_tool_call(tool, args)
+            events = sse_events(
+                client.post(f"/api/chats/{chat}/messages", json={"content": "go"}).text
+            )
+            (card,) = [data for name, data in events if name == "action"]
+            assert card["decision"]["decided_by"] == "tier/high", tool
+            assert "any host" in card["card"]["high"], tool
+        store = RunStore(config.db_path)
+        try:
+            assert store.recent_runs(10) == []  # nothing ran unasked
+        finally:
+            store.close()
+    finally:
+        ollama.stop()

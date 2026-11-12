@@ -1908,6 +1908,30 @@ class ChatEngine:
                         and decision.verdict != "deny"
                         else None
                     )
+                    # quick_edit and batch members compile the same envelope
+                    # as dispatch_run: a run that may reach any host (a
+                    # project's default network '*') is HIGH from them too.
+                    reach = None
+                    if (
+                        name in ("quick_edit", "batch_dispatch")
+                        and decision is not None
+                        and decision.verdict != "deny"
+                    ):
+                        members = args.get("tasks") if name == "batch_dispatch" else [args]
+                        reach = next(
+                            (
+                                compiled
+                                for member in (members if isinstance(members, list) else [])
+                                if isinstance(member, dict)
+                                and "*"
+                                in (
+                                    compiled := dispatch_manifest_for(
+                                        self.store, self.holder, member, chat_id
+                                    )
+                                ).get("network", [])
+                            ),
+                            None,
+                        )
                     if (
                         manifest is not None
                         and manifest.get("refused")
@@ -1922,7 +1946,7 @@ class ChatEngine:
                         args,
                         taint=self.store.get_chat_taint(chat_id),
                         store=self.store,
-                        manifest=manifest,
+                        manifest=manifest or reach,
                     )
                     if high is not None and decision is not None and decision.allows_execution():
                         decision = high_tier_decision(high, decision)
