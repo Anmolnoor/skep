@@ -439,3 +439,27 @@ def test_the_floor_still_denies_when_the_operator_document_will_not_load(
     assert hook["permissionDecision"] == "deny"
     with pytest.raises(ValueError):  # off the floor, the broken document still refuses
         _decide(home, scope="shell", action="run", value="ls", **cwd)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl -u bob:CANARY https://x.example",
+        "curl -ubob:CANARY https://x.example",
+        "curl --user bob:CANARY https://x.example",
+        "curl --user=bob:CANARY https://x.example",
+        "KEY=CANARY ./deploy",
+        "mysql --password='CANARY CANARY' db",
+        'SECRET_TOKEN="CANARY CANARY" make',
+        "curl -H 'X-Api-Key: CANARY' https://x.example",
+    ],
+)
+def test_the_decision_log_masks_basic_auth_bare_keys_quoted_values_and_key_headers(
+    command: str,
+) -> None:
+    """ES-F7's shapes missed curl's ``-u user:pass``, a bare ``KEY=``, the
+    rest of a quoted value after its first space, and an API-key header."""
+    from skep.supervisor.policy_v3 import redact
+
+    masked = redact(command)
+    assert "CANARY" not in masked and "***" in masked, masked

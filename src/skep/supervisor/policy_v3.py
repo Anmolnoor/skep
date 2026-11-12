@@ -377,11 +377,13 @@ _MASK = "***"
 # ponytail: the common inline-credential shapes only (UPPERCASE env assignments, auth
 # flags and headers, URL userinfo and query keys, well-known token prefixes);
 # add a shape when a field test logs one.
+_VALUE = r"(\"[^\"]*\"|'[^']*'|\S+)"  # a quoted value is masked whole
 _SECRET_SHAPES = (
-    re.compile(r"\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSW(?:OR)?D|API_?KEY|ACCESS_?KEY|AUTH)"
-               r"[A-Z0-9_]*=)(\S+)"),
-    re.compile(r"(?i)(--?(?:token|password|passwd|secret|api-?key|auth)(?:=|\s+))(\S+)"),
-    re.compile(r"(?i)(\bauthorization:\s*(?:bearer\s+|basic\s+|token\s+)?)([^\s'\"]+)"),
+    re.compile(r"\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSW(?:OR)?D|KEY|AUTH)[A-Z0-9_]*=)" + _VALUE),
+    re.compile(r"(?i)(--?(?:token|password|passwd|secret|api-?key|auth)(?:=|\s+))" + _VALUE),
+    re.compile(r"(?i)((?:^|\s)(?:-u\s*|--user[=\s]+)['\"]?[^\s:'\"]+:)([^\s'\"]+)"),
+    re.compile(r"(?i)(\b(?:authorization|x-api-key|api-key|private-token|x-auth-token):\s*"
+               r"(?:bearer\s+|basic\s+|token\s+)?)([^\s'\"]+)"),
     re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)([^@\s/]+)(?=@)"),
     re.compile(r"(?i)([?&](?:token|key|api_key|access_token|password|secret|sig|signature)=)"
                r"([^&\s'\"]+)"),
