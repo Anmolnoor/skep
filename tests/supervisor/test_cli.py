@@ -2919,6 +2919,18 @@ def test_cli_run_network_help_says_what_an_omitted_flag_does(
     assert "default_network applies" in out and "--minimal denies all" in out
 
 
+def test_cli_run_minimal_help_says_the_llm_still_reaches_its_provider(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR 0059 D3: run_task gives every run that calls the LLM its
+    provider_hosts, --minimal included — "deny-all" alone is no longer true."""
+    with pytest.raises(SystemExit):
+        main(["run", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "start with deny-all permissions and learn" not in out
+    assert "--minimal start with deny-all grants (a worker that calls the LLM" in out
+
+
 def test_es_f4_cli_refuses_a_second_landing(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
