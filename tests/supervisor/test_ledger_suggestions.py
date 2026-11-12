@@ -140,7 +140,9 @@ def test_remember_ledger_entry_persists_and_marks(repo: Path, config: Supervisor
         assert result["remembered"] is True
         project = store.project_for_binding("repo_path", str(repo))
         assert project is not None
-        assert PIP.split() in project.policy["allowed_shell_commands"]
+        # P3-4 (B18): a project grant, not the knob a baseline enforces.
+        assert "allowed_shell_commands" not in project.policy
+        assert actions.granted_commands(store, holder, repo) == [PIP.split()]
         # Every historical row now says so, and the suggestion is gone.
         assert all(entry.remembered for entry in store.ledger_for_repo(repo))
         assert actions.ledger_remember_suggestions(store) == []

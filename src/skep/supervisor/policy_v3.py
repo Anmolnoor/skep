@@ -40,8 +40,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from urllib.parse import urlsplit
 
-from .policy_baseline import BASELINE_TAMPERED, status_line
+from .policy_baseline import BASELINE_TAMPERED, NO_BASELINE_REASON, status_line
 from .policy_resolver import (
     TRUSTED_DEV_REGISTRY_HOSTS,
     PolicyResolutionError,
@@ -57,10 +58,13 @@ from .policy_schema import (
     PolicyDocument,
     ResolvedRule,
     ResolvedScopePolicy,
+    applies,
+    backgrounds,
     document_from_settings,
     is_session_rule,
+    matcher_of,
     operator_document_from_settings,
-    pattern_matches,
+    rule_matches,
     shell_segments,
     specificity,
 )
@@ -148,6 +152,9 @@ class Stack:
     # Learned rules the stack ignored because they land in a deny or the
     # floor (B23, §5.4 #6): named in the decision log, never honoured.
     ignored: tuple[str, ...] = ()
+    # P3-4 (B39): the Queen chat asking — its own session grants apply, no
+    # other chat's. None (REST, the CLI, the hook): no chat-bound grant does.
+    chat: str | None = None
 
 
 def floor_verdict(
@@ -204,7 +211,9 @@ def _relabel(
     }
 
 
-def operator_lane(store: RunStore) -> tuple[dict[str, ResolvedScopePolicy], tuple[str, ...]]:
+def operator_lane(
+    store: RunStore, *, chat: str | None = None
+) -> tuple[dict[str, ResolvedScopePolicy], tuple[str, ...]]:
     """The Queen's standing policy, rule for rule, each rule labelled: the
     global document and the operator overlay are ``global``, the approved
     baseline ``template:<name>``, a learned rule ``grant:session`` or
@@ -216,7 +225,10 @@ def operator_lane(store: RunStore) -> tuple[dict[str, ResolvedScopePolicy], tupl
     only tightens: its allows leave, its denies and asks stay (B30). The
     template's and the setup document's worker shell allows never reach the
     Queen's host (ES-F3, B03). A learned rule that lands in a deny or the
-    floor is ignored and named, not raised through every lane (B23)."""
+    floor is ignored and named, not raised through every lane (B23).
+
+    P3-4 (B39): a learned rule bound to a chat composes only for that chat; one
+    bound to a repo or project (a worker grant) never reaches the Queen."""
     from .policy_engine import Layer, LayerRule, _document_rules, resolve_stack
     from .policy_layers import queen_template_layer, store_home
     from .policy_resolver import queen_global_document
@@ -228,7 +240,7 @@ def operator_lane(store: RunStore) -> tuple[dict[str, ResolvedScopePolicy], tupl
     setup = queen_global_document(base)
     if template is not None:
         setup = tighten_only(setup)
-    learned = [*base.learned, *operator.learned]
+    learned = [rule for rule in (*base.learned, *operator.learned) if applies(rule, chat_id=chat)]
     layers = [
         Layer("global", "global", rules=_document_rules(setup)),
         Layer("global", "global", rules=_document_rules(operator)),
@@ -243,10 +255,14 @@ def operator_lane(store: RunStore) -> tuple[dict[str, ResolvedScopePolicy], tupl
             ]
             for rule in learned
         }
+        # no ``origin``: resolve_stack records a refusal instead of raising
         rules = tuple(
-            LayerRule(rule.scope, "allow", rule.rule_id, rule.action, rule.pattern, learned=True)
+            LayerRule(
+                rule.scope, "allow", rule.rule_id, rule.action, rule.pattern, learned=True,
+                matcher=matcher_of(rule),
+            )
             for rule in learned
-        )  # no ``origin``: resolve_stack records a refusal instead of raising
+        )  # fmt: skip
         layers.append(Layer("session", "learned", rules=rules))
     resolved = resolve_stack(layers)
 
@@ -316,7 +332,7 @@ def run_lane(
             argv = shlex.split(rule.pattern)
             if listed("allowed_shell_commands", argv):
                 return _knob_layer(provenance.get("allowed_shell_commands"), project)
-            return "grant:session" if listed("session_allowed_shell_commands", argv) else "dispatch"
+            return resolved.shell_grants.get(rule.pattern, "dispatch")  # P3-4: worker grants
         if rule.rule_id.startswith("net:"):
             if rule.pattern in (policy.get("default_network") or []):
                 return _knob_layer(provenance.get("default_network"), project)
@@ -330,7 +346,9 @@ def run_lane(
     return _relabel(resolved.resolved_scopes, label)
 
 
-def load_stack(holder: ConfigHolder, store: RunStore, *, repo: str | None = None) -> Stack:
+def load_stack(
+    holder: ConfigHolder, store: RunStore, *, repo: str | None = None, chat: str | None = None
+) -> Stack:
     """The stack for one request. With a repo, the run policy a dispatch
     there would run under; a repo that resolves to no run policy keeps the
     operator lane and says why (I8). An ambiguous repo name raises the
@@ -340,7 +358,7 @@ def load_stack(holder: ConfigHolder, store: RunStore, *, repo: str | None = None
     from .serve.fileio import operator_roots
 
     home = holder.current.home
-    operator, ignored = operator_lane(store)
+    operator, ignored = operator_lane(store, chat=chat)
     stack = Stack(
         home=home,
         cwd=repo,
@@ -349,6 +367,7 @@ def load_stack(holder: ConfigHolder, store: RunStore, *, repo: str | None = None
         operator=operator,
         roots=root_rules(operator_roots(store, holder)),
         ignored=ignored,
+        chat=chat,
     )
     if not repo:
         return stack
@@ -389,7 +408,11 @@ def _with(verdict: Verdict, held: dict[str, Any]) -> Verdict:
 
 
 def _hit(
-    scopes: dict[str, ResolvedScopePolicy], scope: str, action: str, value: str
+    scopes: dict[str, ResolvedScopePolicy],
+    scope: str,
+    action: str,
+    value: str,
+    url: str | None = None,
 ) -> ResolvedRule | None:
     """D2 for one simple value: inside one layer the most specific matching
     rule wins (deny wins ties); across layers any deny binds, then any named
@@ -398,7 +421,7 @@ def _hit(
     policy = scopes.get(scope)
     by_layer: dict[str | None, list[ResolvedRule]] = {}
     for rule in policy.rules if policy else ():
-        if rule.action == action and pattern_matches(scope, rule.pattern, value, exact=rule.exact):
+        if rule.action == action and rule_matches(rule, scope, value, url=url):
             by_layer.setdefault(rule.layer, []).append(rule)
 
     def best(rules: Sequence[ResolvedRule]) -> ResolvedRule:
@@ -433,23 +456,35 @@ def _granting(
 
 
 def _match(
-    scopes: dict[str, ResolvedScopePolicy], req: Request, source: str, note: str | None
+    scopes: dict[str, ResolvedScopePolicy],
+    req: Request,
+    source: str,
+    note: str | None,
+    url: str | None = None,
 ) -> Verdict:
     """The lane's answer. A chained shell line is decided one simple command
     at a time and the least favourable decides (B3-F7); a segment no rule
     matches is unmatched — never the explicit deny of a sibling segment.
     Among equal allows a non-grant segment names the verdict, so the verdict
-    is labelled ``grant:`` only when grants allow every segment."""
+    is labelled ``grant:`` only when grants allow every segment.
+
+    B21 (P3-4): in a line that sends a command to the background (a lone
+    ``&``) a ``run`` grant covers nothing — that segment needs a
+    ``run_background`` grant (a start_process keep), or it asks."""
     scope, action, value = req
     unmatched = Verdict(
         SCOPE_ACTIONS[(scope, action)], "default", UNMATCHED_RULE_ID, UNMATCHED, source, note
     )
     parts = [value]
+    background = False
     if scope == "shell" and action == "run":
         parts = shell_segments(value) or []  # opaque text matches nothing
+        background = backgrounds(value)
     found: list[Verdict] = []
     for part in parts:
-        hit = _hit(scopes, scope, action, part)
+        hit = _hit(scopes, scope, action, part, url)
+        if hit is not None and background and (hit.layer or "").startswith("grant:"):
+            hit = _hit(scopes, scope, "run_background", part)
         if hit is None:
             found.append(unmatched)
         else:
@@ -471,6 +506,7 @@ def decide(
     chain: Sequence[Delegator] = (),
     face: Face = "advisory",
     read_only: bool = False,
+    url: str | None = None,
 ) -> Verdict:
     """One decision (ADR 0059 D1). ``face="hard"`` is the governor's hard
     ring, which has no human hop: there a tampered baseline denies (O2);
@@ -480,7 +516,18 @@ def decide(
     tool reports itself read-only (``readOnlyHint`` and a leading read verb,
     B09), an email read, a browse page-state read. Only then does a template
     allow grant an ``mcp.call``, and only then does an unmatched request
-    answer ``default/read-only`` allow instead of ``default/unmatched``."""
+    answer ``default/read-only`` allow instead of ``default/unmatched``.
+
+    ``url`` (P3-4, B74) is the URL a ``network.fetch`` reads; only it can
+    match a ``url_prefix`` grant (the value stays the host every other rule
+    matches). On a home with no baseline a human's grant on the operator lane
+    applies (B101); everything else there still asks, and on a tampered
+    baseline nothing applies. REST and the CLI pass a whole URL as a
+    ``network`` value: it decides as its host, with the URL as ``url``, so
+    every face can ask what read_url asks (V1)."""
+    if req.scope == "network" and "://" in req.value:
+        url = url or req.value
+        req = Request(req.scope, req.action, urlsplit(req.value).hostname or "")
     scope, action, value = req
     floor = floor_verdict(scope, value, action=action, home=stack.home, cwd=stack.cwd)
     if floor is not None:
@@ -489,19 +536,28 @@ def decide(
             tuple(hop.entry for hop in chain),
         )  # fmt: skip
     reason = stack.guard.get(scope)
+    operator_only = (scope, action) in OPERATOR_LANES
+    on_operator = stack.run is None or operator_only
     if reason is not None:
         hard = face == "hard" and reason == BASELINE_TAMPERED
         verdict = Verdict(
             "deny" if hard else "require_approval", "baseline", reason, f"baseline/{reason}",
             "baseline", stack.baseline,
         )  # fmt: skip
+        if reason == NO_BASELINE_REASON and on_operator:
+            # B101: each grant is a human's explicit approval — it applies on
+            # a home with no baseline (still under every deny and named ask).
+            grant = _match(_granting(stack.operator, scope, read_only), req, "operator", None, url)
+            if grant.verdict == "allow" and grant.layer in GRANT_LAYERS:
+                verdict = replace(grant, note=stack.baseline)
     else:
-        operator_only = (scope, action) in OPERATOR_LANES
         note = None if operator_only else stack.run_note
-        if stack.run is not None and not operator_only:
+        if stack.run is not None and not on_operator:
             verdict = _match(_granting(stack.run, scope, read_only), req, "run", note)
         else:
-            verdict = _match(_granting(stack.operator, scope, read_only), req, "operator", note)
+            verdict = _match(
+                _granting(stack.operator, scope, read_only), req, "operator", note, url
+            )
             if verdict.layer == "default" and stack.roots:
                 roots = {"filesystem": ResolvedScopePolicy("filesystem", stack.roots)}
                 fallback = _match(roots, req, "operator", note)
@@ -512,9 +568,9 @@ def decide(
                 verdict = Verdict(
                     "allow", "default", READ_ONLY, f"default/{READ_ONLY}", "operator", note
                 )
-    # Only the operator lane's learned grants: exact argv / exact host / exact
-    # tool, human-approved. The run lane's ``grant:session`` is the worker
-    # session tier — a prefix held for every repo (B39) — and never answers a role.
+    # Only the operator lane's learned grants: exact argv / a URL directory /
+    # exact host / exact tool, human-approved. The run lane's ``grant:`` rules
+    # are worker grants — argv prefixes — and never answer a role.
     granted = (
         verdict.verdict == "allow"
         and verdict.layer in GRANT_LAYERS
@@ -528,7 +584,13 @@ def decide(
         *outer, delegator = chain
         bound = (
             decide(
-                req, stack=stack, role=delegator.role, chain=outer, face=face, read_only=read_only
+                req,
+                stack=stack,
+                role=delegator.role,
+                chain=outer,
+                face=face,
+                read_only=read_only,
+                url=url,
             )
             if role_covers(delegator.role, scope, action, value)
             else None
@@ -548,16 +610,19 @@ def queen_decide(
     role: Role | None = None,
     cwd: str | None = None,
     read_only: bool = False,
+    chat_id: str | None = None,
+    url: str | None = None,
 ) -> Verdict:
     """The Queen's own lanes: files and shell (P3-2), read_url, search_web,
     MCP and browse (P3-3). ``decide()`` over the stack with no repo — exactly
     what REST, the CLI and the hook answer for the same request and role with
     no repo — logged as actor ``queen`` (I13). ``cwd`` is where a shell line
-    runs (the secret floor resolves against it)."""
+    runs (the secret floor resolves against it); ``chat_id`` the chat asking,
+    whose own session grants apply (P3-4, B39); ``url`` what read_url reads."""
     from .serve.actions import _decision_row
 
-    stack = replace(load_stack(holder, store), cwd=cwd)
-    verdict = decide(req, stack=stack, role=role, read_only=read_only)
+    stack = replace(load_stack(holder, store, chat=chat_id), cwd=cwd)
+    verdict = decide(req, stack=stack, role=role, read_only=read_only, url=url)
     row = _decision_row(
         verdict, stack, actor="queen", repo=None, req=(req.scope, req.action, req.value), role=role
     )

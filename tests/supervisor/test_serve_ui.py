@@ -1857,6 +1857,7 @@ def test_the_ledger_nudge_has_a_face_on_the_approvals_view() -> None:
     assert "renderRememberSuggestions" in source
     assert "covering_group" in source
     assert "attach_group" in source
-    # The keep selector (v112-F1) rides only rememberable cards.
-    assert 'REMEMBERABLE_TOOLS = new Set(["read_url", "run_shell", "start_process"])' in source
+    # The keep selector (v112-F1) rides only cards the server says can keep a
+    # grant (P3-4: card.keep, tests/web pins keepSelect).
+    assert "keepSelect(d.card)" in source
     assert "card-keep" in source

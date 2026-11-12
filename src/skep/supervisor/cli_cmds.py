@@ -1135,9 +1135,9 @@ def _shell_command_from_approval_reason(reason: object) -> list[str] | None:
 def _remember_for_repo(
     store: RunStore, config: SupervisorConfig, repo: Path, argv: list[str], task_id: str
 ) -> str:
-    """v114-F2: the ONE writer every face shares (ADR 0050) — the bound
-    project's overlay first, global only when unbound — returning the tier it
-    wrote. The CLI used to append to the global setting on its own, so a
+    """v114-F2: the ONE writer every face shares (ADR 0050) — a project
+    grant (ADR 0059 D4, B18), bound to the repo when it has no project —
+    returning where it holds. The CLI used to append to the global setting on its own, so a
     `--allow-command` on a project-bound run widened every repo and cleared
     nothing for the project whose list shadows the global one."""
     from .serve.actions import _a_delegated_ask, persist_remembered_command
@@ -1583,6 +1583,7 @@ def _resume_pending_approval(
                 for command in approval_commands
                 if not _asked(command, original.permissions)
             ],
+            repo=record.repo,
         )
     verdict = ApprovalVerdict(
         approved=True,
@@ -1621,7 +1622,7 @@ def _resume_pending_approval(
         approved=True,
         actor=actor,
         note=f"resumed as {outcome.record.task_id} ({outcome.record.state})"
-        + ("; approval held for this serve session" if session_kept else ""),
+        + ("; approval held for this serve session, in this repo only" if session_kept else ""),
         remembered=remembered,
     )
     # v115-F1: the parent is superseded by its successor, as resume_past_gate

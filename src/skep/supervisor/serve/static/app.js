@@ -266,6 +266,20 @@ function whyLine(d) {
 // T3-2 (web twin of v115-F3): `decision` rides a denial too (v40-F10), and
 // the receipt said "ran without asking" on every refusal. The kicker follows
 // the verdict — the same set as AutonomyDecision.allows_execution().
+// v112-F1 → P3-4 (ADR 0059 D4): the server says which keep choices a card can
+// honour (card.keep); only a card with a real choice earns a keep selector —
+// everything else approves once, and the UI never offers a lifetime the
+// confirm would refuse (B32). A session keep holds in this chat only (B39).
+const KEEP_LABELS = { once: "once", session: "this chat, this session", always: "always" };
+
+function keepSelect(card) {
+  const keeps = (card && Array.isArray(card.keep)) ? card.keep : [];
+  if (keeps.length < 2) return null;
+  return el("select", { class: "card-keep", title: "How long this approval holds" },
+    ...keeps.map((k) => el("option",
+      k === "session" ? { value: k, selected: "" } : { value: k }, KEEP_LABELS[k] || k)));
+}
+
 function receiptNode(d) {
   const card = d.card || {};
   const decision = d.decision || {};
@@ -3020,21 +3034,12 @@ async function viewChat(main, chatId) {
     scrollBottom();
   };
 
-  // v112-F1: the tools whose approve can persist a grant (v90-F3's set) —
-  // only these cards earn a keep selector; everything else approves once.
-  const REMEMBERABLE_TOOLS = new Set(["read_url", "run_shell", "start_process"]);
-
   // A proposed mutation: the model never holds the trigger — you do.
   const actionCard = (d) => {
     const approve = el("button", { class: "primary" }, "Approve");
     const refuse = el("button", { class: "danger" }, "Deny");
     // v112-F1: the keep choice rides the confirm — session stays the default.
-    const keep = REMEMBERABLE_TOOLS.has(d.tool)
-      ? el("select", { class: "card-keep", title: "How long this approval holds" },
-          el("option", { value: "once" }, "once"),
-          el("option", { value: "session", selected: "" }, "this session"),
-          el("option", { value: "always" }, "always"))
-      : null;
+    const keep = keepSelect(d.card);
     // v81-F13: the id on the DOM lets reconcilers see which cards are drawn.
     const card = el("div", { class: "confirm-card", "data-action-id": d.action_id },
       ...cardBody(d),

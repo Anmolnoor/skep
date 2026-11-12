@@ -95,6 +95,20 @@ test("a grant-covered receipt says it ran, names the grant, and has no buttons",
   assert.equal(node.querySelectorAll("button").length, 0);
 });
 
+// ---------- P3-4: the keep selector offers only what the server honours ----------
+
+test("keepSelect: no choice, no selector; a grantable card offers the server's list", () => {
+  const app = loadApp();
+  assert.equal(app.keepSelect(undefined), null);
+  assert.equal(app.keepSelect({ headline: "set_personality" }), null);
+  assert.equal(app.keepSelect({ keep: ["once"] }), null); // a guarded line: approve-once
+  const select = app.keepSelect({ keep: ["once", "session", "always"] });
+  const options = select.querySelectorAll("option");
+  assert.deepEqual(options.map(o => o.getAttribute("value")), ["once", "session", "always"]);
+  assert.deepEqual(options.map(o => o.textContent), ["once", "this chat, this session", "always"]);
+  assert.equal(options[1].getAttribute("selected"), "");
+});
+
 // ---------- O3: the web onboard card ----------
 
 function onboardApp(onboard, calls = []) {

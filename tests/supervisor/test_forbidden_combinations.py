@@ -37,6 +37,7 @@ from .conftest import predating_home
 ROLES = (None, *SHIPPED_ROLES)
 ENGINES = {"v1": [], "v2": list(SCOPES)}
 GRANTS = ("none", "session", "always")
+CHAT = "chat-1"  # a session keep is bound to its chat (P3-4, B39)
 GRANTED_INSTALL = "npm install left-pad@1.3.0"  # the one install a human approved
 NETWORKED = (
     "curl https://x.example",
@@ -118,8 +119,9 @@ def stack(
         from skep.supervisor.serve.actions import remember_action_for_session
 
         assert remember_action_for_session(
-            store, tool="run_shell", args={"command": GRANTED_INSTALL}, actor="op", tier=grant
-        )
+            store, tool="run_shell", args={"command": GRANTED_INSTALL}, actor="op", tier=grant,
+            chat_id=CHAT,
+        )  # fmt: skip
         # A grant written before the floor existed, inside it: still a deny.
         document = template.document().model_dump(mode="json")
         document["learned"] = [
@@ -166,6 +168,7 @@ def test_no_queen_host_rule_installs_a_package_without_a_card(
             command=command,
             cwd=str(tmp_path),
             role=None if role is None else SHIPPED_ROLES[role],
+            chat_id=CHAT,  # the chat a session grant was kept in (P3-4)
         )
         assert decision is None or decision.verdict != "allow", (command, decision)
 
@@ -189,7 +192,7 @@ def test_a_learned_rule_inside_a_deny_is_ignored_never_honoured_never_raised(
     try:
         assert remember_action_for_session(
             store, tool="run_shell", args={"command": "curl https://x.example/y"}, actor="op",
-            tier=tier,
+            tier=tier, chat_id=CHAT,
         )  # fmt: skip
         layer = load_policy_template(template_name).model_dump(mode="json")
         layer["rules"] = [*layer["rules"], NO_CURL]
@@ -197,8 +200,9 @@ def test_a_learned_rule_inside_a_deny_is_ignored_never_honoured_never_raised(
         holder = ConfigHolder(config, store)
         chat_role = None if role is None else SHIPPED_ROLES[role]
         curl = queen_shell_decision(
-            store, holder, command="curl https://x.example/y", cwd=str(tmp_path), role=chat_role
-        )
+            store, holder, command="curl https://x.example/y", cwd=str(tmp_path), role=chat_role,
+            chat_id=CHAT,
+        )  # fmt: skip
         assert curl is not None
         assert (curl.verdict, curl.decided_by) == ("deny", f"template:{template_name}/no-curl")
         other = queen_shell_decision(store, holder, command="ls", cwd=str(tmp_path), role=chat_role)
@@ -210,7 +214,6 @@ def test_a_learned_rule_inside_a_deny_is_ignored_never_honoured_never_raised(
     finally:
         store.close()
     rows = (config.audit_dir / "policy" / "decisions.jsonl").read_text().splitlines()
-    assert (
-        "shell:run:curl https://x.example/y (deny/no-curl)"
-        in json.loads(rows[-1])["ignored_grants"]
-    )
+    bound = "@chat:" + CHAT if tier == "session" else ""
+    ignored = [json.loads(row).get("ignored_grants") or [] for row in rows]
+    assert any(f"shell:run:curl https://x.example/y{bound} (deny/no-curl)" in i for i in ignored)

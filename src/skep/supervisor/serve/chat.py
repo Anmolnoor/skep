@@ -1098,10 +1098,11 @@ class CommandRequest(BaseModel):
 
 
 class ActionConfirm(BaseModel):
-    """v112-F1: the operator's keep choice riding a card confirm. Absent body
-    (every pre-v112 caller) keeps the v90-F3 behavior: a session grant."""
+    """v112-F1: the operator's keep choice riding a card confirm. Absent
+    (every pre-v112 caller): a session grant where the card can keep one,
+    else once (P3-4, B32 — an explicit keep the card cannot honour is a 400)."""
 
-    keep: str = "session"
+    keep: str | None = None
 
 
 class ChatEngine:
@@ -2154,7 +2155,7 @@ class ChatEngine:
         *,
         confirm: bool,
         actor: str = CHAT_ACTOR,
-        keep: str = "session",
+        keep: str | None = None,
     ) -> Iterator[ChatEvent]:
         """Resolve one card, append its tool result, stream the continuation.
 
@@ -2168,11 +2169,19 @@ class ChatEngine:
         if action is None or action.chat_id != chat_id:
             raise HTTPException(status_code=404, detail=f"no action {action_id!r} in this chat")
         # v112-F1: the keep choice rides the confirm — "once" grants nothing,
-        # "session" is the v90-F3 default, "always" writes the durable tier.
-        if keep not in ("once", "session", "always"):
+        # "session" (bound to this chat) is the default where the card can keep
+        # a grant, "always" writes the durable tier.
+        if keep is not None and keep not in actions.KEEP_TIERS:
             raise HTTPException(
                 status_code=422, detail="keep must be one of 'once', 'session', 'always'"
             )
+        if keep is None:
+            keep = "session" if len(actions.keep_options(action.tool, action.args)) > 1 else "once"
+        # B32: a keep this card cannot honour is refused BEFORE it runs, never
+        # executed with a false "remembered" (the card offers only what holds).
+        refused = actions.keep_refusal(action.tool, action.args, keep)
+        if refused is not None:
+            raise HTTPException(status_code=400, detail=f"keep={keep!r} refused: {refused}")
         if action.source in ("operator", "gate"):
             # v25-F1: operator commands resolve on the commands endpoints — this
             # path appends tool results to the transcript and resumes the model,
@@ -2252,7 +2261,12 @@ class ChatEngine:
                     None
                     if keep == "once"
                     else actions.remember_action_for_session(
-                        self.store, tool=action.tool, args=action.args, actor=actor, tier=keep
+                        self.store,
+                        tool=action.tool,
+                        args=action.args,
+                        actor=actor,
+                        tier=keep,
+                        chat_id=chat_id,
                     )
                 )
                 if grant is not None:
@@ -2797,7 +2811,7 @@ def add_chat_routes(
         chat_id: str, action_id: str, body: ActionConfirm | None = None
     ) -> StreamingResponse:
         chat = _require_chat(chat_id)
-        keep = body.keep if body is not None else "session"
+        keep = body.keep if body is not None else None
         return StreamingResponse(
             _as_sse(engine.verdict_events(chat_id, chat, action_id, confirm=True, keep=keep)),
             media_type="text/event-stream",

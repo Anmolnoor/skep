@@ -565,7 +565,7 @@ def _lock(home: Path, name: str, *extra: dict[str, str]) -> None:
     pb.write_lock(build_config(home, None).home, pb._load_layer(layer), approved_by="op")
 
 
-def _grant(home: Path, command: str, tier: str = "session") -> None:
+def _grant(home: Path, command: str, tier: str = "always") -> None:
     from skep.supervisor.serve.actions import remember_action_for_session
 
     store = RunStore(build_config(home, None).db_path)
@@ -592,13 +592,13 @@ def test_decision_1_a_grant_answers_a_roles_catch_all_ask_and_a_named_ask_binds(
     than it (before, the most specific rule won and the grant ran)."""
     home, _repo = build_home(tmp_path, "legacy")
     _lock(home, "builder", ASK_MAKE)
-    _grant(home, "make build")
+    _grant(home, "make build")  # P3-4: REST has no chat, so an unbound (always) grant
     _grant(home, "make deploy now", tier="always")
     for role in (None, "builder", "assistant", "operator"):
         hit = _decide(home, scope="shell", action="run", value="make build", role=role)
         assert (hit["verdict"], hit["decided_by"]) == (
             "allow",
-            "grant:session/shell:run:make build",
+            "grant:global/shell:run:make build",
         )
         wider = _decide(home, scope="shell", action="run", value="make build --all", role=role)
         assert wider["verdict"] == "require_approval", (role, wider)
@@ -616,15 +616,15 @@ def test_decision_1_a_grant_answers_a_roles_catch_all_ask_and_a_named_ask_binds(
 def test_a_workers_session_tier_never_answers_a_roles_catch_all_ask(
     kind: str, tmp_path: Path
 ) -> None:
-    """Decision #1 is the Queen's exact-argv grant. The worker session tier
-    (a plain approve on a worker card) is a PREFIX, held for every repo
-    (B39): approved in repo A, it must not reach a role-governed decision in
-    repo B as an allow — REST with a repo, and a builder chat's delegated
-    worker (dropped headless, a deferred ask where a human answers)."""
+    """Decision #1 is the Queen's exact-argv grant. A worker session grant (a
+    plain approve on a worker card) is a PREFIX: it never answers a role's
+    catch-all ask — REST with a repo, and a builder chat's delegated worker
+    (dropped headless, a deferred ask where a human answers). P3-4 (B39):
+    and it holds only in the repo it was approved in."""
     from skep.supervisor.policy_resolver import resolve_run_policy
     from skep.supervisor.serve.actions import delegate_permissions, remember_commands_for_session
 
-    home, _repo_a = build_home(tmp_path, kind)
+    home, repo_a = build_home(tmp_path, kind)
     repo_b = tmp_path / "repo-b"
     repo_b.mkdir()
     config = build_config(home, None)
@@ -634,29 +634,34 @@ def test_a_workers_session_tier_never_answers_a_roles_catch_all_ask(
                                  phase="build", policy={})  # fmt: skip
         store.add_project_binding(project_id="b", binding_kind="repo_path",
                                   binding_value=str(repo_b.resolve()))  # fmt: skip
-        remember_commands_for_session(store, [["npm", "run", "x"]])  # approved in repo A
+        remember_commands_for_session(store, [["npm", "run", "x"]], repo=repo_a)
         holder = ConfigHolder(config, store)
+
+        def allowlist(repo: Path) -> list[list[str]]:
+            return resolve_run_policy(
+                store=store, config=config, repo=repo, caste="coding", network=None,
+                env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
+                max_actions=None, max_provider_calls=None, execution_mode="sandbox",
+                binding_candidates=[], engine=None,
+            ).permissions.shell_allowlist  # fmt: skip
+
+        assert ["npm", "run", "x"] not in allowlist(repo_b)  # B39: repo A's grant only
         for value in ("npm run x", "npm run x --evil"):
-            plain = policy_decide(holder, store, scope="shell", action="run", value=value,
+            other = policy_decide(holder, store, scope="shell", action="run", value=value,
                                   repo=str(repo_b))  # fmt: skip
-            assert (plain["verdict"], plain["decided_by"]) == (
-                "allow",
-                "grant:session/shell:npm run x",
-            )  # no role: the session tier allows as it always has (B39 stays open)
-            for role in ("builder", "assistant", "operator"):
-                held = policy_decide(holder, store, scope="shell", action="run", value=value,
-                                     repo=str(repo_b), role=role)  # fmt: skip
-                assert held["verdict"] == "require_approval", (value, role, held)
-        permissions = resolve_run_policy(
-            store=store, config=config, repo=repo_b, caste="coding", network=None,
+            assert other["verdict"] == "require_approval", (value, other)
+        resolved = resolve_run_policy(
+            store=store, config=config, repo=repo_a, caste="coding", network=None,
             env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
-            max_actions=None, max_provider_calls=None, execution_mode=None,
+            max_actions=None, max_provider_calls=None, execution_mode="sandbox",
             binding_candidates=[], engine=None,
-        ).permissions  # fmt: skip
+        )  # fmt: skip
+        permissions = resolved.permissions
         assert ["npm", "run", "x"] in permissions.shell_allowlist
+        assert resolved.shell_grants == {"npm run x": "grant:session"}
         for deferred in (False, True):
             narrowed = delegate_permissions(
-                holder, store, repo_b, permissions, role=None,
+                holder, store, repo_a, permissions, role=None,
                 delegation_chain=["queen@builder"], deferred_asks=deferred,
             )[0]  # fmt: skip
             assert ["npm", "run", "x"] not in narrowed.shell_allowlist, deferred
@@ -681,13 +686,21 @@ def test_a_fetch_grant_answers_a_roles_ask_on_read_url_and_rest_alike(tmp_path: 
         )  # fmt: skip
         holder = ConfigHolder(config, store)
         for role in ("builder", "assistant", "operator"):
-            rest = policy_decide(holder, store, scope="network", action="fetch",
-                                 value="docs.example.org", role=role)  # fmt: skip
-            queen = fetch_grant_decision(
-                store, holder, "docs.example.org", role=SHIPPED_ROLES[role]
-            )
-            assert (rest["verdict"], rest["decided_by"]) == (queen.verdict, queen.decided_by)
-            assert rest["decided_by"] == "grant:global/network:fetch:docs.example.org", role
+            # P3-4 (B74): the grant covers a URL directory, so every face asks
+            # with the URL (REST/CLI: a URL value decides as its host + URL).
+            for url in ("https://docs.example.org/y", "https://docs.example.org/z/w"):
+                rest = policy_decide(holder, store, scope="network", action="fetch",
+                                     value=url, role=role)  # fmt: skip
+                queen = fetch_grant_decision(
+                    store, holder, "docs.example.org", role=SHIPPED_ROLES[role], url=url
+                )
+                assert (rest["verdict"], rest["decided_by"]) == (queen.verdict, queen.decided_by)
+                assert rest["decided_by"] == (
+                    "grant:global/network:fetch:https://docs.example.org/"
+                ), role
+            near = policy_decide(holder, store, scope="network", action="fetch",
+                                 value="https://docs.example.org/y?d=1", role=role)  # fmt: skip
+            assert near["verdict"] == "require_approval"
     finally:
         store.close()
 

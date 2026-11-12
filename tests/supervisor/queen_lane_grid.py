@@ -53,6 +53,7 @@ HOMES = (
 ROLES: tuple[str | None, ...] = (None, "builder", "assistant", "operator")
 GRANTS = ("none", "session", "always")
 GRANTED = "python3 build.py --fast"  # the learned exact-argv grant
+GRID_CHAT = "grid-chat"  # P3-4: a session keep holds in the chat it was made in
 
 FILE_PROBES: tuple[tuple[str, str], ...] = (
     ("root-file", "{repo}/README.md"),
@@ -203,8 +204,9 @@ def rows(root: Path, kind: str) -> Iterator[tuple[str, str]]:
         try:
             if grant != "none":
                 remember_action_for_session(
-                    store, tool="run_shell", args={"command": GRANTED}, actor="op", tier=grant
-                )
+                    store, tool="run_shell", args={"command": GRANTED}, actor="op", tier=grant,
+                    chat_id=GRID_CHAT,
+                )  # fmt: skip
         finally:
             store.close()
         for role_name in ROLES:
@@ -236,6 +238,7 @@ def rows(root: Path, kind: str) -> Iterator[tuple[str, str]]:
                                 cwd=cwd,
                                 background=where.startswith("bg"),
                                 role=role,
+                                chat_id=GRID_CHAT,
                             )
                         )
                     except Exception as exc:  # the grid records it

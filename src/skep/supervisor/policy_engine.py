@@ -45,6 +45,8 @@ from .policy_schema import (
     ResolvedRule,
     ResolvedScopePolicy,
     Verdict,
+    applies,
+    matcher_of,
     patterns_intersect,
     shell_tokens,
 )
@@ -77,6 +79,7 @@ class LayerRule:
     pattern: str
     learned: bool = False
     origin: LearnedRule | None = None
+    matcher: str | None = None  # a learned rule's ``matcher_of`` (P3-4)
 
 
 @dataclass(frozen=True)
@@ -319,7 +322,10 @@ def resolve_stack(layers: Sequence[Layer]) -> ResolvedStack:
                         rule_id=rule.rule_id,
                         action=rule.action,
                         pattern=rule.pattern,
-                        exact=rule.learned and rule.scope == "shell",
+                        exact=rule.learned
+                        and (rule.matcher or ("exact_argv" if rule.scope == "shell" else ""))
+                        == "exact_argv",
+                        matcher="url_prefix" if rule.matcher == "url_prefix" else None,
                         # ES-F5 (B34): a baseline rule names the baseline in
                         # every verdict, not the document decide() is given.
                         layer=layer.label if layer.name == "template" else None,
@@ -365,8 +371,10 @@ def _learned_rules(rules: Sequence[LearnedRule]) -> tuple[LayerRule, ...]:
             pattern=rule.pattern,
             learned=True,
             origin=rule,
+            matcher=matcher_of(rule),
         )
         for rule in rules
+        if applies(rule)  # P3-4 (B39): a bound grant composes only where it is bound
     )
 
 

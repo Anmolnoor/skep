@@ -23,6 +23,7 @@ from skep.supervisor.autonomy import AutonomyDecision
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.dispatch import run_task
 from skep.supervisor.scheduler import make_schedule, make_template_schedule, run_due
+from skep.supervisor.serve import actions
 from skep.supervisor.serve.chat import MAX_TOOL_ROUNDS, _strip_inline_think
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
@@ -2042,8 +2043,13 @@ def test_confirmed_allow_command_review_persists_shell_command_and_resumes_pendi
             actor="chat-user",
         )
 
-        assert result == {"action": "allowed_command", "resumed_as": "resumed-1"}
-        assert store.get_setting("allowed_shell_commands") == [write_argv]
+        assert result == {
+            "action": "allowed_command",
+            "resumed_as": "resumed-1",
+            "remembered": f"repo:{repo.resolve()}",  # P3-4 (B18): where it holds
+        }
+        assert store.get_setting("allowed_shell_commands") is None
+        assert actions.granted_commands(store, holder, repo) == [write_argv]
         approval = store.get_approval(review_id)
         assert approval is not None
         assert approval.status == "approved"

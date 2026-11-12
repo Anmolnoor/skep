@@ -56,11 +56,11 @@ def flips(kind: str, root: Path) -> Counter[str]:
         old, new = _RANK[old_verdict], _RANK[new_verdict]
         if new < old:
             grant = key.split("|")[4]
-            answered = (
-                grant != "none"
-                and new_by.startswith(f"grant:{'session' if grant == 'session' else 'global'}/")
-                and old_by.endswith(CATCH_ALL_ASKS)
+            granted = grant != "none" and new_by.startswith(
+                f"grant:{'session' if grant == 'session' else 'global'}/"
             )
+            # P3-4 (B101): on a home with no baseline a human's grant applies.
+            answered = granted and (old_by.endswith(CATCH_ALL_ASKS) or kind == "zero")
             assert answered, f"more permissive: {key}: {FROZEN[key]} -> {shown}"
             seen["looser"] += 1
         elif new > old:
@@ -83,8 +83,9 @@ def test_no_queen_lane_verdict_is_more_permissive_than_before(
     monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
     monkeypatch.chdir(tmp_path)
     seen = flips(kind, tmp_path)
-    # Where the baseline guard answers every cell, no grant applies (B101 is P3-4).
-    assert bool(seen["looser"]) == (kind not in ("zero", "tampered")), seen
+    # A tampered baseline answers every cell: no grant applies there (P3-4:
+    # on a home with no baseline one does, B101).
+    assert bool(seen["looser"]) == (kind != "tampered"), seen
 
 
 # --- the regressions, one per ledger row ---------------------------------------------------
@@ -131,9 +132,14 @@ def test_b56_a_session_grant_in_a_builder_chat_runs_the_exact_command_with_no_se
         "template:builder/shell-learnable",
     )
     # What _record_verdict does on confirm with keep="session".
-    remember_action_for_session(store, tool="run_shell", args=args, actor="op", tier="session")
+    remember_action_for_session(
+        store, tool="run_shell", args=args, actor="op", tier="session", chat_id=chat
+    )
     again = decide()
-    assert (again.verdict, again.decided_by) == ("allow", f"grant:session/shell:run:{GRANTED}")
+    assert (again.verdict, again.decided_by) == (
+        "allow",
+        f"grant:session/shell:run:{GRANTED}@chat:{chat}",
+    )
     assert decide(command=GRANTED + " --upload").verdict == "require_approval"
     assert decide("start_process").verdict == "require_approval"
     assert decide(command="git push origin main").verdict == "deny"  # the floor, above grants
@@ -279,8 +285,10 @@ def test_the_queen_rest_cli_and_hook_give_one_verdict_and_one_label(
     comparison: a nonexistent path (a validity check) and a line that runs in
     or reaches a registered repo (``run_repo``, the Queen's repo pen)."""
     paths, fmt, store, holder = grid(kind)
+    # P3-4: REST, the CLI and the hook have no chat — an unbound grant is
+    # what every face sees alike.
     remember_action_for_session(
-        store, tool="run_shell", args={"command": GRANTED}, actor="op", tier="session"
+        store, tool="run_shell", args={"command": GRANTED}, actor="op", tier="always"
     )
     hook = {"allow": "allow", "require_approval": "ask", "deny": "deny"}
     for role in ROLES:

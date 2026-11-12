@@ -17,6 +17,8 @@ from skep.supervisor.autonomy import AutonomyDecision
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.ingest import IngestOutcome
 from skep.supervisor.scheduler import make_schedule, run_due
+from skep.supervisor.serve.actions import granted_commands
+from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.store import RunRecord
 from skep.worker_contract import (
     CONTRACT_VERSION,
@@ -662,7 +664,9 @@ def test_pending_shell_run_can_be_allowed_and_resumed(
 
     store = RunStore(config.db_path)
     try:
-        assert store.get_setting("allowed_shell_commands") == [write_argv]
+        # P3-4 (B18): a grant bound to the repo, never the global knob.
+        assert store.get_setting("allowed_shell_commands") is None
+        assert granted_commands(store, ConfigHolder(config, store), repo) == [write_argv]
         approvals = store.approvals_for(task.task_id)
         assert len(approvals) == 1
         assert approvals[0].status == "approved"
@@ -794,7 +798,8 @@ def test_inline_shell_approval_can_be_remembered(
 
     store = RunStore(config.db_path)
     try:
-        assert store.get_setting("allowed_shell_commands") == [write_argv]
+        assert store.get_setting("allowed_shell_commands") is None  # P3-4: a repo grant
+        assert granted_commands(store, ConfigHolder(config, store), repo) == [write_argv]
         approvals = store.approvals_for(task.task_id)
         assert [approval.status for approval in approvals] == ["approved"]
         ledger = store.ledger_for_repo(repo)

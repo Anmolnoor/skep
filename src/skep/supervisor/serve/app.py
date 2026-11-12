@@ -62,6 +62,7 @@ from .actions import (
     refresh_repo,
     remember_ledger_entry,
     remember_suggestion_for_review,
+    remembered_where,
     repo_state_view,
     require_run,
     resume_past_gate,
@@ -969,7 +970,12 @@ def create_app(
         resumed_id = allow_shell_command_and_resume(
             run_store, holder, runner, run, approval, review_id, principal(request)
         )
-        return {"action": "allowed_command", "resumed_as": resumed_id}
+        # P3-4 (B18): the receipt names where the grant holds (I8).
+        return {
+            "action": "allowed_command",
+            "resumed_as": resumed_id,
+            "remembered": remembered_where(run_store, Path(str(run["repo"]))),
+        }
 
     @app.post("/api/approvals/{review_id}/allow-host")
     def allow_host(review_id: str, body: ResolveRequest, request: Request) -> dict[str, str]:

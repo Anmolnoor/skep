@@ -777,7 +777,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "confirms). EXCEPTION: a host the policy allows (an allow_fetch_domain "
         "grant, or a baseline or operator rule naming it) reads inside the turn "
         "with no card (a redirect off it still fails closed) AND returns a 4x "
-        "larger excerpt; a host a rule denies is refused, no card. Use after "
+        "larger excerpt, as does a URL under one whose card was kept "
+        "session/always; a host a rule denies is refused, no card. Use after "
         "search_web when one "
         "page would answer directly; the reply is a bounded markdown excerpt "
         "(headings/links/lists kept; pass mode='text' for flat text) and a cut "
@@ -801,9 +802,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE running ONE shell command on the supervisor host with the "
         "operator's own standing (requires user confirmation — the card "
         "shows the exact command; a standing shell allow rule runs it "
-        "in-turn instead). Approving a card with keep session/always grants "
-        "exactly that command line, in a role chat too; one extra argument "
-        "cards again. A policy deny refuses, no card. "
+        "in-turn instead). Approving a card with keep session (this chat "
+        "only) or always grants exactly that command line, in a role chat "
+        "too; one extra argument or a trailing & cards again. A policy deny "
+        "refuses, no card. "
         "For one-off diagnostics: 'what's on port 8765?', "
         "'df -h', 'systemd status'. NOT for repo work — a cwd inside a "
         "registered repo REFUSES (a shell there edits files with no patch "
@@ -2613,7 +2615,13 @@ def _human_answers(store: RunStore, chat_id: str | None) -> bool:
 
 
 def fetch_grant_decision(
-    store: RunStore, holder: ConfigHolder, host: str, *, role: Role | None = None
+    store: RunStore,
+    holder: ConfigHolder,
+    host: str,
+    *,
+    role: Role | None = None,
+    chat_id: str | None = None,
+    url: str | None = None,
 ) -> AutonomyDecision:
     """read_url's ``network.fetch <host>``, decided by ``policy_v3.decide()``
     with the chat's role (ADR 0059 P3-3) — the verdict and ``decided_by``
@@ -2624,13 +2632,18 @@ def fetch_grant_decision(
     operator overlay, and the learned grants — which also answer a role's
     catch-all ``net-fetch-gated *`` ask (decision #1, B56). allow → in-turn
     on the granted lane; deny → refused, no card; ask → the per-URL card
-    naming the rule that asked. A grant matches the host exactly, as before
-    (``domain_allowed``: example.com never covers docs.example.com). A policy
+    naming the rule that asked. A read_url keep covers its URL's directory on
+    that scheme and host only, with no other query (P3-4, B74 — ``url``); a
+    grant from before P3-4 or ``allow_fetch_domain`` matches the host exactly
+    (``domain_allowed``: example.com never covers docs.example.com). A session
+    grant applies only in the chat that made it (``chat_id``, B39). A policy
     that will not load refuses (fail closed)."""
     from ..policy_v3 import Request, queen_decide
 
     try:
-        verdict = queen_decide(holder, store, Request("network", "fetch", host), role=role)
+        verdict = queen_decide(
+            holder, store, Request("network", "fetch", host), role=role, chat_id=chat_id, url=url
+        )
     except Exception as exc:  # I4/I9: a policy that will not load never fetches
         return AutonomyDecision(
             verdict="deny",
@@ -2733,6 +2746,7 @@ def queen_shell_decision(
     cwd: str | None,
     background: bool = False,
     role: Role | None = None,
+    chat_id: str | None = None,
 ) -> AutonomyDecision | None:
     """The run_shell / start_process / stop_process lane, decided by
     ``policy_v3.decide()`` with the chat's role (ADR 0059 P3-2) — the verdict
@@ -2749,7 +2763,8 @@ def queen_shell_decision(
     v83-F8: ``background=True`` (start_process) decides on ``run_background``
     instead — a daemon is a different promise than a 60s one-off, so a 'run'
     grant never covers it (review item 3); repo cwds refuse flat (daemons do
-    not belong in checkouts)."""
+    not belong in checkouts). ``chat_id``: the chat asking — its own session
+    grants apply, no other chat's (P3-4, B39)."""
     from ..policy_v3 import Request, floor_verdict, queen_decide
 
     if not command.strip():
@@ -2791,8 +2806,9 @@ def queen_shell_decision(
                 decided_by="queen-shell-guard",
             )
         verdict = queen_decide(
-            holder, store, Request("shell", "run_repo", command), role=role, cwd=cwd
-        )
+            holder, store, Request("shell", "run_repo", command), role=role, cwd=cwd,
+            chat_id=chat_id,
+        )  # fmt: skip
         if verdict.verdict == "allow":
             return AutonomyDecision(
                 verdict="allow",
@@ -2820,7 +2836,9 @@ def queen_shell_decision(
             decided_by=verdict.decided_by,
         )
     action = "run_background" if background else "run"
-    verdict = queen_decide(holder, store, Request("shell", action, command), role=role, cwd=cwd)
+    verdict = queen_decide(
+        holder, store, Request("shell", action, command), role=role, cwd=cwd, chat_id=chat_id
+    )
     if verdict.verdict == "allow":
         return AutonomyDecision(
             verdict="allow",
@@ -3718,7 +3736,11 @@ def _execute_mutation(
         url = str(args["url"])
         host = urllib.parse.urlparse(url).hostname or ""
         fetch_role = _chat_role(store, holder, chat_id)
-        now = fetch_grant_decision(store, holder, host, role=fetch_role) if host else None
+        now = (
+            fetch_grant_decision(store, holder, host, role=fetch_role, chat_id=chat_id, url=url)
+            if host
+            else None
+        )
         if now is not None and now.verdict == "deny":
             raise ValueError(f"denied by policy: {now.detail}")
         # v72-F7: on the granted-domain lane the standing grant is the gate —
@@ -3732,7 +3754,10 @@ def _execute_mutation(
         )
 
         def _hop_allowed(candidate_host: str) -> bool:
-            hop = fetch_grant_decision(store, holder, candidate_host, role=fetch_role)
+            # A hop is known by its host only: a url_prefix grant never covers it.
+            hop = fetch_grant_decision(
+                store, holder, candidate_host, role=fetch_role, chat_id=chat_id
+            )
             return hop.allows_execution() if granted else hop.verdict != "deny"
 
         if granted:
@@ -3784,6 +3809,7 @@ def _execute_mutation(
             command=shell_command,
             cwd=shell_cwd,
             role=_chat_role(store, holder, chat_id),
+            chat_id=chat_id,
         )
         if last_guard is not None and last_guard.verdict == "deny":
             raise ValueError(last_guard.detail or "denied by policy")
@@ -3911,6 +3937,7 @@ def _execute_mutation(
             cwd=start_cwd,
             background=True,
             role=_chat_role(store, holder, chat_id),
+            chat_id=chat_id,
         )
         if start_guard is not None and start_guard.verdict == "deny":
             raise ValueError(start_guard.detail or "denied by policy")
@@ -4656,7 +4683,9 @@ def _execute_mutation(
         resumed = actions.allow_shell_command_and_resume(
             store, holder, runner, run, approval, review_id, actor
         )
-        return {"action": "allowed_command", "resumed_as": resumed}
+        # P3-4 (B18): say where the grant holds — a project grant, not a knob.
+        where = actions.remembered_where(store, str(run["repo"]))
+        return {"action": "allowed_command", "resumed_as": resumed, "remembered": where}
     if name == "deny_review":
         review_id = str(args["review_id"])
         actions.pending_approval_or_409(store, review_id)
@@ -5313,6 +5342,7 @@ def mutation_execution_decision(
             command=str(args.get("command") or ""),
             cwd=None if args.get("cwd") is None else str(args["cwd"]),
             role=role,
+            chat_id=chat_id,
         )
     if name == "start_process":
         # v83-F8: the run_background action — a 'run' grant never covers a
@@ -5324,6 +5354,7 @@ def mutation_execution_decision(
             cwd=None if args.get("cwd") is None else str(args["cwd"]),
             background=True,
             role=role,
+            chat_id=chat_id,
         )
     if name == "stop_process":
         # v83-F8 (review item 3): stopping CARDS by default — the operator
@@ -5335,8 +5366,9 @@ def mutation_execution_decision(
         if record is None:
             return None  # the honest not-found error surfaces on confirm
         stop_decision = queen_shell_decision(
-            store, holder, command=record.command, cwd=None, background=True, role=role
-        )
+            store, holder, command=record.command, cwd=None, background=True, role=role,
+            chat_id=chat_id,
+        )  # fmt: skip
         if stop_decision is not None and stop_decision.allows_execution():
             return AutonomyDecision(
                 verdict="allow",
@@ -5369,10 +5401,11 @@ def mutation_execution_decision(
         # URL cards too — the honest error surfaces on confirm.
         import urllib.parse
 
-        host = urllib.parse.urlparse(str(args.get("url") or "")).hostname or ""
+        url = str(args.get("url") or "")
+        host = urllib.parse.urlparse(url).hostname or ""
         if not host:
             return None
-        return fetch_grant_decision(store, holder, host, role=role)
+        return fetch_grant_decision(store, holder, host, role=role, chat_id=chat_id, url=url)
     if name != "dispatch_run":
         return None
     return actions.dispatch_run_decision(

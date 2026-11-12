@@ -300,10 +300,13 @@ def run_fetch(
     return f"ran {result.get('decided_by') or '-'} {size} hops={call['hops']}"
 
 
-def _grant(store: RunStore, grant: str) -> None:
-    actions.remember_action_for_session(
-        store, tool="read_url", args={"url": GRANTED_URL}, actor="op", tier=grant
-    )
+def _grant(store: RunStore, grant: str, chats: list[str]) -> None:
+    # P3-4: a session keep holds in the chat it was made in — kept in each.
+    for chat in chats if grant == "session" else chats[:1]:
+        actions.remember_action_for_session(
+            store, tool="read_url", args={"url": GRANTED_URL}, actor="op", tier=grant,
+            chat_id=chat,
+        )  # fmt: skip
     server, tool = GRANTED_TOOL
     actions.learn_policy_rule(
         store,
@@ -332,7 +335,7 @@ def rows(root: Path, kind: str) -> Iterator[tuple[str, str]]:
             store = RunStore(config.db_path)
             try:
                 if grant != "none":
-                    _grant(store, grant)
+                    _grant(store, grant, list(chats.values()))
             finally:
                 store.close()
             for role in ROLES:

@@ -53,6 +53,7 @@ def build_status(
             + _model_truth_advisories(home)
             + _baseline_advisories(home)
             + _policy_v3_advisories(home)
+            + _legacy_host_advisories(home)
             + _channel_user_advisories(home)
         )
         payload["stale_pending"] = stale_pending
@@ -85,6 +86,7 @@ def build_status(
         + _model_truth_advisories(home)
         + _baseline_advisories(home)
         + _policy_v3_advisories(home)
+        + _legacy_host_advisories(home)
         + _channel_user_advisories(home)
     )
     payload["stale_pending"] = stale_pending
@@ -371,6 +373,35 @@ def _policy_v3_advisories(home: Path) -> list[str]:
             "still want into the baseline (skep policy approve --reapprove)"
         )
     return lines
+
+
+def _legacy_host_advisories(home: Path) -> list[str]:
+    """ADR 0059 P3-4 (B74): a read_url grant from before P3-4 covers its
+    whole host (any path, any query) — kept so operators are not broken,
+    named here so they can revoke it; a new keep covers one URL directory."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        document_from_settings,
+        is_legacy_host,
+    )
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    finally:
+        store.close()
+    hosts = [r.pattern for r in (document.learned if document else []) if is_legacy_host(r)]
+    if not hosts:
+        return []
+    return [
+        f"{len(hosts)} legacy-host fetch grant(s) cover every path and query of "
+        f"{', '.join(hosts)} — revoke on the Policies page (DELETE /api/policy/rules/<id>); "
+        "a new read_url keep covers one URL directory"
+    ]
 
 
 def _browse_advisories(home: Path) -> list[str]:
