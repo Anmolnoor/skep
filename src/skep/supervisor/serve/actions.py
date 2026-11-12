@@ -5116,6 +5116,24 @@ def keep_options(tool: str, args: dict[str, Any]) -> list[str]:
     return list(KEEP_TIERS) if keep_refusal(tool, args, "session") is None else ["once"]
 
 
+def keep_covers(tool: str, args: dict[str, Any]) -> str | None:
+    """What a keep on this card would allow, in words — the card says it, so
+    "always" never hides that a compound line's commands are each granted on
+    their own (B61) or that a URL keep covers its whole directory (B74)."""
+    found = _grant_subjects(tool, args)
+    if isinstance(found, str):
+        return None
+    if tool == "read_url":
+        base, _, query = found[0][2].partition("?")
+        return f"a keep allows any page under {base} with no query" + (
+            f" or ?{query}" if query else ""
+        )
+    commands = "; ".join(f"`{pattern}`" for _scope, _action, pattern, _matcher in found)
+    head = "each of these on its own, exactly: " if len(found) > 1 else "exactly "
+    tail = ", as a background process" if tool == "start_process" else ""
+    return f"a keep allows {head}{commands}{tail}"
+
+
 def remember_action_for_session(
     store: RunStore,
     *,

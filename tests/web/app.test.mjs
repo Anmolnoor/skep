@@ -227,3 +227,11 @@ test("resolvesOnCommands: operator commands and gate mirrors, never a model card
   assert.equal(app.resolvesOnCommands({ source: "gate" }), true);
   assert.equal(app.resolvesOnCommands({ source: "assistant" }), false);
 });
+
+test("keepCovers: the card says what a keep would allow, and nothing when it allows nothing", () => {
+  const app = loadApp();
+  assert.equal(app.keepCovers(undefined), null);
+  assert.equal(app.keepCovers({ keep: ["once"] }), null);
+  const line = app.keepCovers({ keep: ["once", "session", "always"], keep_covers: "a keep allows each of these on its own, exactly: `ls`; `make`" });
+  assert.equal(line.textContent, "a keep allows each of these on its own, exactly: `ls`; `make`");
+});

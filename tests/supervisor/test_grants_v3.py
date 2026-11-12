@@ -429,3 +429,22 @@ def test_an_exact_grant_never_covers_a_line_sh_reads_as_other_commands(home: Any
     assert shell_segments("ls \\\n-la") == ["ls -la"]
     assert backgrounds("npm run dev &\nls")
     assert queen_command_line_refusal("ls\ngit push origin main") is not None
+
+
+def test_the_card_says_what_a_keep_would_cover() -> None:
+    """A compound keep grants each command on its own and a read_url keep a
+    whole URL directory (the whole host for a top-level page): the card says
+    so, never just "always"."""
+    compound = card_summary("run_shell", {"command": "ls -la && " + GRANTED})
+    assert compound["keep_covers"] == (
+        f"a keep allows each of these on its own, exactly: `ls -la`; `{GRANTED}`"
+    )
+    page = card_summary("read_url", {"url": "https://granted.example/page?x=1"})
+    assert page["keep_covers"] == (
+        "a keep allows any page under https://granted.example/ with no query or ?x=1"
+    )
+    assert card_summary("start_process", {"command": "npm run dev"})["keep_covers"] == (
+        "a keep allows exactly `npm run dev`, as a background process"
+    )
+    assert "keep_covers" not in card_summary("run_shell", {"command": "git push"})
+    assert "keep_covers" not in card_summary("set_personality", {"value": "x"})
