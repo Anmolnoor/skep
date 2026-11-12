@@ -465,3 +465,36 @@ def test_an_allow_fetch_domain_grant_is_a_host_grant_not_a_legacy_one(home: Any)
     assert (rule["matcher"], rule["lifetime"], rule["bound"]) == ("host", "global", "everywhere")
     assert h.decide("read_url", url="https://granted.example/any?q=1").startswith("allow grant:")
     assert _legacy_host_advisories(h.paths["personal"]) == []
+
+
+def test_b32_a_keep_a_deny_would_reject_is_refused_before_the_command_runs(
+    home: Any, tmp_path: Path
+) -> None:
+    """store_grant refuses a grant that reaches into a deny. That check ran
+    AFTER the confirmed command, so the command ran and the card said
+    "failed: bad arguments". Now the confirm is a 400 and nothing runs."""
+    from skep.supervisor.policy_schema import PolicyRule, ScopePolicy
+
+    h = home("legacy")
+    marker = tmp_path / "ran.txt"
+    document = document_from_settings(h.store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    document = document or PolicyDocument()
+    shell = ScopePolicy(scope="shell", deny=[
+        PolicyRule(rule_id="no-touch-x", action="run", pattern=f"touch {marker} --x"),
+    ])  # fmt: skip
+    others = [s for s in document.scopes if s.scope != "shell"]
+    h.store.set_setting(
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        document.model_copy(update={"scopes": [*others, shell]}).model_dump_json(),
+    )
+    args = {"command": f"touch {marker}", "cwd": str(tmp_path)}
+    engine = ChatEngine(store=h.store, holder=h.holder, runner=cast(Any, None), home=h.config.home)
+    action_id = h.store.add_chat_action(h.chat_a, tool="run_shell", args=args)
+    with pytest.raises(HTTPException) as refused:
+        engine.verdict_events(
+            h.chat_a, h.store.get_chat(h.chat_a), action_id, confirm=True, keep="always"
+        )
+    assert refused.value.status_code == 400
+    assert "no-touch-x" in str(refused.value.detail)
+    assert not marker.exists()
+    assert h.store.get_chat_action(action_id).status == "proposed"

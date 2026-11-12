@@ -5105,16 +5105,55 @@ def _grant_subjects(tool: str, args: dict[str, Any]) -> list[tuple[str, str, str
     return list(dict.fromkeys(subjects))
 
 
-def keep_refusal(tool: str, args: dict[str, Any], keep: str) -> str | None:
+def keep_refusal(
+    tool: str, args: dict[str, Any], keep: str, store: RunStore | None = None
+) -> str | None:
     """Why the server would refuse this keep on this card, or None (B32: a
     keep the tool cannot honour is refused up front, never a false
-    "remembered"). ``once`` always holds."""
+    "remembered"). ``once`` always holds. With ``store``, also a grant that
+    store_grant would refuse for reaching into a deny — checked BEFORE the
+    card runs, not after it already ran."""
     if keep == "once":
         return None
     if keep not in KEEP_TIERS:
         return "keep must be one of 'once', 'session', 'always'"
     found = _grant_subjects(tool, args)
-    return found if isinstance(found, str) else None
+    if isinstance(found, str):
+        return found
+    return None if store is None else _denied_grant(store, found)
+
+
+def _denied_grant(store: RunStore, subjects: list[tuple[str, str, str, str]]) -> str | None:
+    """store_grant's write-time vet over these subjects: why they land in a
+    deny of the setup document, or None."""
+    from ..policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        LearnedRule,
+        LearnedRuleRejected,
+        PolicyDocument,
+        document_from_settings,
+        resolve,
+    )
+
+    document = (
+        document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
+    )
+    learned = [
+        LearnedRule(
+            rule_id=f"{scope}:{action}:{pattern}",
+            action=action,
+            pattern=pattern,
+            scope=scope,  # type: ignore[arg-type]
+            provenance="keep-check",
+            matcher=matcher,  # type: ignore[arg-type]
+        )
+        for scope, action, pattern, matcher in subjects
+    ]
+    try:
+        resolve(document.model_copy(update={"learned": learned}), v2_scopes=engine_v2_scopes(store))
+    except LearnedRuleRejected as exc:
+        return str(exc)
+    return None
 
 
 def keep_options(tool: str, args: dict[str, Any]) -> list[str]:

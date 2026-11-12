@@ -2179,7 +2179,7 @@ class ChatEngine:
             keep = "session" if len(actions.keep_options(action.tool, action.args)) > 1 else "once"
         # B32: a keep this card cannot honour is refused BEFORE it runs, never
         # executed with a false "remembered" (the card offers only what holds).
-        refused = actions.keep_refusal(action.tool, action.args, keep)
+        refused = actions.keep_refusal(action.tool, action.args, keep, store=self.store)
         if refused is not None:
             raise HTTPException(status_code=400, detail=f"keep={keep!r} refused: {refused}")
         if action.source in ("operator", "gate"):
