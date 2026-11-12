@@ -344,3 +344,24 @@ def test_b79_a_shell_card_names_the_rule_that_asked(grid: Callable[..., Any]) ->
     _paths, fmt, store, holder = grid("legacy")
     unmatched = queen_shell_decision(store, holder, command="uv sync", cwd=fmt["outside"])
     assert verdict_why(asdict(unmatched)) == "asked: no policy rule covers this, so it asks"
+
+
+def test_the_floor_answers_the_queen_when_the_policy_document_will_not_load(
+    grid: Callable[..., Any],
+) -> None:
+    """I4: both lanes consult the floor before they load a document, so a
+    corrupt one still refuses a credential read and git push; off the floor
+    it raises — never an allow."""
+    from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
+
+    _paths, fmt, store, holder = grid("builder")
+    store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, "{not json")
+    key = queen_filesystem_decision(store, holder, action="read", path=f"{fmt['home']}/.netrc")
+    assert (key.verdict, key.decided_by) == ("deny", "floor/floor.secret-reads")
+    push = queen_shell_decision(store, holder, command="git push", cwd=fmt["outside"])
+    assert push is not None
+    assert (push.verdict, push.decided_by) == ("deny", "floor/floor.worker-git-hard-denies")
+    with pytest.raises(ValueError):
+        queen_shell_decision(store, holder, command="ls", cwd=fmt["outside"])
+    with pytest.raises(ValueError):
+        queen_filesystem_decision(store, holder, action="read", path=f"{fmt['repo']}/README.md")
