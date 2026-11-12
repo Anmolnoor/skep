@@ -3059,8 +3059,9 @@ def register_supervisor_commands(
         help="domain the worker may reach, e.g. pypi.org (repeatable, D1). Omitted, "
         "the policy's default_network applies: the builder and operator baselines "
         "allow their package-registry hosts (and start the filtering proxy); the "
-        "assistant baseline and a bare home allow none. A coding worker's LLM "
-        "provider host is always added; --minimal denies all. A concrete list is "
+        "assistant baseline and a bare home allow none. A worker that calls the LLM "
+        "reaches its configured provider on its own (provider_hosts), whatever "
+        "this list says; --minimal denies all else. A concrete list is "
         "enforced by a loopback filtering proxy.",
     )
     run.add_argument(

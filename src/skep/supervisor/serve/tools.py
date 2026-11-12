@@ -352,7 +352,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         "effective_policy",
         "What a run against this repo will ACTUALLY get: resolved project (or "
         "'global defaults'), execution mode, the shell allowlist as the worker "
-        "sees it, network post-provider-merge, and the landing posture. Check "
+        "sees it, network, provider_hosts (the worker's own LLM endpoint), "
+        "and the landing posture. Check "
         "this FIRST when a command was gated or before dispatching to a repo.",
         {"repo": {"type": "string", "description": "repo slug or path"}},
         ["repo"],
@@ -1826,7 +1827,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "network": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "domain allowlist; omit for policy default, [] denies all",
+                "description": (
+                    "domain allowlist; omit for policy default; [] = only the worker's own LLM"
+                ),
             },
             "wall_clock_seconds": {"type": "integer"},
             "max_iterations": {"type": "integer"},
