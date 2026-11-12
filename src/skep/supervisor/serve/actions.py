@@ -86,7 +86,7 @@ from ..policy_schema import (
     shell_segments,
 )
 from ..policy_templates import PolicyTemplate, layer_view, load_policy_template
-from ..policy_v3 import Request, Stack, Verdict, load_stack, log_decision
+from ..policy_v3 import Request, Stack, Verdict, floor_verdict, load_stack, log_decision
 from ..policy_v3 import decide as decide_v3
 from ..projects import (
     PROJECT_PHASES,
@@ -1897,13 +1897,19 @@ def policy_decide(
     home = holder.current.home
     role_record = resolve_role(role, home) if role is not None else None
     chain = parse_delegation_chain(delegation_chain, home)
-    baseline_alarm(holder, store)  # O2: a NEW tamper event cards the operator
     try:
-        stack = load_stack(holder, store, repo=repo)
-    except HTTPException as exc:
-        stack = replace(
-            load_stack(holder, store), cwd=repo, run_note=f"repo not resolvable: {exc.detail}"
-        )
+        baseline_alarm(holder, store)  # O2: a NEW tamper event cards the operator
+        try:
+            stack = load_stack(holder, store, repo=repo)
+        except HTTPException as exc:
+            stack = replace(
+                load_stack(holder, store), cwd=repo, run_note=f"repo not resolvable: {exc.detail}"
+            )
+    except Exception:
+        # I4: the floor reads no document, so one that will not load cannot lift it.
+        if floor_verdict(scope, value, action=action, home=home, cwd=repo) is None:
+            raise
+        stack = Stack(home=home, cwd=repo, guard={}, baseline="", operator={})
     verdict = decide_v3(
         Request(scope, action, value), stack=stack, role=role_record, chain=chain, face=ring
     )

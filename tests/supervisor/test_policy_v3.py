@@ -414,3 +414,28 @@ def test_the_decision_log_line_rotates_at_10_mb_and_holds_no_secret(
         assert policy_decisions(config.audit_dir)["total"] == len(secrets) + 2
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("where", ["repo", "none"])
+def test_the_floor_still_denies_when_the_operator_document_will_not_load(
+    where: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I4: the floor is consulted before any document is read. Before P3-1 a
+    corrupt global document still answered `git push` with the floor's deny;
+    loading the stack first turned it into an exception — `ask` on the hook,
+    a forward to the human on ACP."""
+    home, repo = build_home(tmp_path, "builder")
+    store = RunStore(build_config(home, None).db_path)
+    store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, "{not json")
+    store.close()
+    cwd = {"repo": str(repo)} if where == "repo" else {}
+    push = _decide(home, scope="shell", action="run", value="git push", **cwd)
+    assert (push["verdict"], push["decided_by"]) == ("deny", "floor/floor.worker-git-hard-denies")
+    key = str(tmp_path / "fakehome" / ".ssh" / "id_rsa")
+    read = _decide(home, scope="filesystem", action="read", value=key, **cwd)
+    assert (read["verdict"], read["decided_by"]) == ("deny", "floor/floor.secret-reads")
+    hook = _hook(home, {"tool_name": "Bash", "tool_input": {"command": "git push"}}, repo,
+                 monkeypatch)  # fmt: skip
+    assert hook["permissionDecision"] == "deny"
+    with pytest.raises(ValueError):  # off the floor, the broken document still refuses
+        _decide(home, scope="shell", action="run", value="ls", **cwd)
