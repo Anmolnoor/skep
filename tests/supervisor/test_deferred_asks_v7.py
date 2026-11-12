@@ -785,3 +785,17 @@ def test_no_chat_or_a_channel_that_cannot_confirm_gets_no_deferred_ask(
         assert _human_answers(store, None) is False
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    ("delegation", "who"),
+    [
+        ({"chain": [], "role": "builder"}, "worker@builder asks shell.run make — its role builder"),
+        (None, "worker asks shell.run make — its delegation would ask"),
+    ],
+)
+def test_the_card_names_a_role_only_dispatch_truthfully(
+    tmp_path: Path, delegation: dict[str, Any] | None, who: str
+) -> None:
+    registry = CapabilityRegistry(tmp_path, emit=lambda _t, _p: None, delegation=delegation)
+    assert registry.delegated_ask_text("shell.run", "make").startswith(who)
