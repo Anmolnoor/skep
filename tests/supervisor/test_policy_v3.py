@@ -368,3 +368,49 @@ def test_a_repo_that_resolves_to_no_run_policy_says_so(tmp_path: Path) -> None:
     finally:
         store.close()
     assert "missing" in view["run"]["error"] and view["operator"]["decided_by"] == UNMATCHED
+
+
+def test_the_decision_log_line_rotates_at_10_mb_and_holds_no_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D1: one JSON line per decide() from a wired face, under
+    <audit>/policy/decisions.jsonl; past 10 MB the file becomes ``.1``. A
+    path or a host is logged as is; an inline credential never is."""
+    from skep.supervisor import policy_v3
+
+    home, repo = build_home(tmp_path, "legacy")
+    config = build_config(home, None)
+    log = config.audit_dir / "policy" / "decisions.jsonl"
+    record = _decide(home, scope="filesystem", action="write", value="/etc/x", repo=str(repo),
+                     actor="t", role="builder")  # fmt: skip
+    (line,) = [json.loads(raw) for raw in log.read_text().splitlines()]
+    assert line == {**record, "value": "/etc/x"}
+    assert set(line) >= {"at", "actor", "repo", "scope", "action", "value", "source", "verdict",
+                         "rule_id", "decided_by", "layer", "role", "project"}  # fmt: skip
+    secrets = (
+        "curl -H 'Authorization: Bearer CANARY-1' https://x.example",
+        "GITHUB_TOKEN=CANARY-2 gh api user",
+        "mysql --password=CANARY-3 db",
+        "git clone https://bob:CANARY-4@git.example/r",
+        "curl 'https://x.example/a?api_key=CANARY-5&q=1'",
+        "echo ghp_CANARY6abcdefghijklmnop",
+    )
+    for command in secrets:
+        returned = _decide(home, scope="shell", action="run", value=command)
+        assert returned["value"] == command  # the caller gets its own value back
+    text = log.read_text()
+    assert "CANARY" not in text and text.count("***") == len(secrets)
+    assert "https://x.example" in text and "git.example/r" in text
+    keep = "cat ~/skep-workspace-checkout/notes --author=me"
+    assert policy_v3.redact(keep) == keep  # a word that only starts like a token stays
+    monkeypatch.setattr(policy_v3, "DECISION_LOG_MAX_BYTES", log.stat().st_size)
+    _decide(home, scope="network", action="search", value="ddgs")
+    assert log.with_name("decisions.jsonl.1").read_text() == text
+    assert [json.loads(raw)["value"] for raw in log.read_text().splitlines()] == ["ddgs"]
+    store = RunStore(config.db_path)
+    try:
+        from skep.supervisor.serve.actions import policy_decisions
+
+        assert policy_decisions(config.audit_dir)["total"] == len(secrets) + 2
+    finally:
+        store.close()

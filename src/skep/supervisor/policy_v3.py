@@ -26,6 +26,8 @@ REST and the CLI said deny while the Queen carded (B77).
 
 from __future__ import annotations
 
+import json
+import re
 import shlex
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -362,3 +364,45 @@ def decide(
             verdict = replace(_with(verdict, held), deferred=held["verdict"] == "require_approval")
         verdict = replace(verdict, chain=tuple(hop.entry for hop in chain))
     return verdict
+
+
+# D1: the decision log. Every decide() a wired face makes is one line here;
+# V11's replay reads it back. Rotated at 10 MB to one ``.1`` generation.
+DECISION_LOG_MAX_BYTES = 10 * 1024 * 1024
+_MASK = "***"
+# ponytail: the common inline-credential shapes only (UPPERCASE env assignments, auth
+# flags and headers, URL userinfo and query keys, well-known token prefixes);
+# add a shape when a field test logs one.
+_SECRET_SHAPES = (
+    re.compile(r"\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSW(?:OR)?D|API_?KEY|ACCESS_?KEY|AUTH)"
+               r"[A-Z0-9_]*=)(\S+)"),
+    re.compile(r"(?i)(--?(?:token|password|passwd|secret|api-?key|auth)(?:=|\s+))(\S+)"),
+    re.compile(r"(?i)(\bauthorization:\s*(?:bearer\s+|basic\s+|token\s+)?)([^\s'\"]+)"),
+    re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)([^@\s/]+)(?=@)"),
+    re.compile(r"(?i)([?&](?:token|key|api_key|access_token|password|secret|sig|signature)=)"
+               r"([^&\s'\"]+)"),
+    re.compile(r"()\b((?:sk-|ghp_|gho_|ghs_|ghu_|github_pat_|xox[abpr]-|AKIA)[-_A-Za-z0-9]{12,})"),
+)  # fmt: skip
+
+
+def redact(value: str) -> str:
+    """``value`` with every inline credential replaced by ``***``. A path or
+    a host stays readable; a secret's VALUE never reaches the log."""
+    for shape in _SECRET_SHAPES:
+        value = shape.sub(lambda m: m.group(1) + _MASK, value)
+    return value
+
+
+def log_decision(audit_dir: Path, row: dict[str, Any]) -> None:
+    """Append one row to ``<audit>/policy/decisions.jsonl`` (I8, I13) with its
+    ``value`` redacted; a file past 10 MB first becomes ``decisions.jsonl.1``."""
+    path = audit_dir / "policy" / "decisions.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size >= DECISION_LOG_MAX_BYTES:
+        path.replace(path.with_name(path.name + ".1"))
+    if isinstance(row.get("value"), str):
+        row = {**row, "value": redact(row["value"])}
+    # ponytail: the append is unlocked; concurrent writers interleave whole <4 KiB
+    # lines on POSIX — lock when a home gets a second writer
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")

@@ -86,7 +86,7 @@ from ..policy_schema import (
     shell_segments,
 )
 from ..policy_templates import PolicyTemplate, layer_view, load_policy_template
-from ..policy_v3 import Request, Stack, Verdict, load_stack
+from ..policy_v3 import Request, Stack, Verdict, load_stack, log_decision
 from ..policy_v3 import decide as decide_v3
 from ..projects import (
     PROJECT_PHASES,
@@ -1910,7 +1910,7 @@ def policy_decide(
     record = _decision_row(
         verdict, stack, actor=actor, repo=repo, req=(scope, action, value), role=role_record
     )
-    _append_policy_ledger(holder.current.audit_dir, "decisions", record)
+    log_decision(holder.current.audit_dir, record)
     return record
 
 
@@ -2112,9 +2112,7 @@ def policy_note(
         "source": source,
         **fields,
     }
-    # ponytail: the append is unlocked; concurrent governors interleave whole <4 KiB
-    # writes on POSIX — lock when a home gets a second writer
-    _append_policy_ledger(audit_dir, "decisions", row)
+    log_decision(audit_dir, row)
     return row
 
 
@@ -4392,7 +4390,7 @@ def _within_delegation(
         row = row_for(scope, action, value)
         if not narrowed_by(row):
             return True
-        _append_policy_ledger(holder.current.audit_dir, "decisions", row)
+        log_decision(holder.current.audit_dir, row)
         rows.append(row)
         return False
 
@@ -4404,7 +4402,7 @@ def _within_delegation(
         # An ask stays: the patch card is already the human's gate (I1).
         row = row_for("filesystem", "write", path)
         if narrowed_by(row) and row["verdict"] == "deny":
-            _append_policy_ledger(holder.current.audit_dir, "decisions", row)
+            log_decision(holder.current.audit_dir, row)
             beyond = "the delegator" if row["rule_id"] == EXCEEDS_DELEGATOR else "the role"
             raise HTTPException(
                 status_code=403,
@@ -4924,7 +4922,8 @@ def clear_session_policy_rules(store: RunStore) -> int:
 
 def _append_policy_ledger(audit_dir: Path, name: str, payload: dict[str, Any]) -> None:
     """One JSON line under ``<audit>/policy/<name>.jsonl`` — the policy
-    engine's own record (I8): engine flips (P1) and outside decisions (P3)."""
+    engine's own record (I8): engine flips (P1). Decisions go through
+    ``policy_v3.log_decision`` (redacted, rotated)."""
     path = audit_dir / "policy" / f"{name}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -4953,8 +4952,13 @@ def policy_decisions(
     notes = ("observed", "forwarded", "delegated")
     summary = dict.fromkeys(("allow", "deny", "require_approval", *notes), 0)
     rows: list[dict[str, Any]] = []
-    # ponytail: reads the whole file; tail-seek when a ledger outgrows memory
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    # ponytail: reads both generations whole (at most 2 x 10 MB); tail-seek if that hurts
+    lines = [
+        line
+        for file in (path.with_name(path.name + ".1"), path)
+        if file.exists()
+        for line in file.read_text(encoding="utf-8").splitlines()
+    ]
     for line in lines:
         try:
             row = json.loads(line)
