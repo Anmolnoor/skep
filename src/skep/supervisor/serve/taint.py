@@ -167,8 +167,3 @@ def taint_line(store: RunStore, chat_id: str, taint: ChatTaint) -> str | None:
     else:
         tail = "actions it takes need your OK, even where a rule or grant allows them"
     return f"this chat has {' and has '.join(parts)}, so {tail}"
-
-
-def chat_taint(store: RunStore, chat_id: str | None) -> ChatTaint | None:
-    """The chat's taint, or None for no chat (REST, the CLI: no taint)."""
-    return None if chat_id is None else store.get_chat_taint(chat_id)

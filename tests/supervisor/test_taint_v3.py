@@ -772,3 +772,69 @@ def test_faces_with_no_chat_decide_as_before_beside_a_tainted_chat(
 
     queen = search_web_verdict(env.store, env.holder, chat)
     assert (queen.verdict, queen.decided_by) == ("require_approval", "taint/trifecta")
+
+
+def test_a_repo_shell_rule_under_untrusted_asks_never_refuses(
+    live: Callable[[str], Live],
+) -> None:
+    """The repo pen refuses anything not allowed — but taint only ever moves
+    an allow to an ask: a run_repo rule in an untrusted chat cards."""
+    from skep.supervisor.policy_schema import (
+        OPERATOR_POLICY_SETTINGS_KEY,
+        PolicyDocument,
+        PolicyRule,
+        ScopePolicy,
+    )
+
+    env = live("legacy")
+    rule = PolicyRule(rule_id="repo-ls", action="run_repo", pattern="ls")
+    overlay = PolicyDocument(scopes=[ScopePolicy(scope="shell", allow=[rule])])
+    env.store.set_setting(OPERATOR_POLICY_SETTINGS_KEY, overlay.model_dump_json())
+    chat = env.chat()
+    args = {"command": "ls", "cwd": str(env.paths["repo"])}
+    before = mutation_execution_decision(
+        "run_shell", args, store=env.store, holder=env.holder, chat_id=chat
+    )
+    assert before is not None and before.verdict == "allow"
+    set_taint(env.store, chat, "untrusted")
+    after = mutation_execution_decision(
+        "run_shell", args, store=env.store, holder=env.holder, chat_id=chat
+    )
+    assert after is not None
+    assert (after.verdict, after.decided_by) == ("require_approval", "taint/untrusted-action")
+
+
+def test_a_confirmed_search_card_still_refuses_a_deny_that_landed_since(
+    live: Callable[[str], Live],
+) -> None:
+    from skep.supervisor.serve.tools import execute_mutation
+
+    env = live("builder")
+    chat = env.chat()
+    actions.set_operator_policy_rule(
+        env.store, scope="network", action="search", pattern="ddgs", verdict="deny"
+    )
+    with pytest.raises(ValueError, match="denied by policy"):
+        execute_mutation(
+            "search_web", {"query": "q"}, store=env.store, holder=env.holder,
+            runner=cast(Any, None), actor="op", chat_id=chat,
+        )  # fmt: skip
+    assert env.searched == []
+
+
+def test_search_files_hits_outside_the_roots_set_private_none_inside(
+    live: Callable[[str], Live],
+) -> None:
+    from skep.supervisor.serve.taint import record_tool_taint
+
+    env = live("builder")
+    chat = env.chat()
+    hit = {"matches": [{"path": "x", "line": 1, "text": "x"}]}
+    record_tool_taint(env.store, env.holder, chat, "search_files",
+                      {"path": str(env.paths["repo"])}, hit, 5)  # fmt: skip
+    record_tool_taint(env.store, env.holder, chat, "search_files",
+                      {"path": str(env.paths["outside"])}, {"matches": []}, 6)  # fmt: skip
+    assert env.store.get_chat_taint(chat) == ChatTaint()
+    record_tool_taint(env.store, env.holder, chat, "search_files",
+                      {"path": str(env.paths["outside"])}, hit, 7)  # fmt: skip
+    assert env.store.get_chat_taint(chat) == ChatTaint(private=7)
