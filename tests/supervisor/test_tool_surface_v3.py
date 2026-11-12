@@ -7,6 +7,8 @@ verb with no operator face."""
 
 from __future__ import annotations
 
+import json
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,8 @@ from skep.supervisor.serve.tools import (
 )
 
 from .fake_ollama import FakeOllama
+from .surface_grid import HOMES as SURFACE_HOMES
+from .surface_grid import rows as surface_rows
 from .test_role_policy import _home
 from .test_serve_chat import configured_client
 
@@ -498,3 +502,80 @@ def test_the_spec_sent_carries_the_line_and_it_is_the_same_every_turn(
     sent = [read_file_spec(body) for body in ollama.chat_bodies()[1:]]
     assert len(sent) == 2 and sent[0] == sent[1]
     assert sent[0].endswith(_lines(config, "operator")["read_file"])
+
+
+# --- the frozen table: hiding and role defaults only ever tighten -----------------------
+
+SURFACE_FROZEN: dict[str, str] = json.loads(
+    (Path(__file__).parents[1] / "fixtures/policy_v3/pre_p3_6_surface_verdicts.json").read_text()
+)
+_RANK = {"allow": 0, "card": 1, "require_approval": 1, "deny": 2}
+ROLE_LESS_KINDS = ("channel", "analysis", "hermes")
+# Hidden in an assistant chat, yet the dispatch lane still cards as it did
+# (byte-identical: the frozen taint table holds it) — a home whose run policy
+# cannot resolve the dispatch: the tampered baseline, and the assistant
+# baseline's gated repo. Such a card can never succeed on confirm.
+HIDDEN_YET_CARDS = {
+    "tampered": {"batch_dispatch", "dispatch_run", "dispatch_run@gated",
+                 "dispatch_run@role-assistant", "quick_edit", "run_code"},
+    "assistant": {"dispatch_run@gated"},
+}  # fmt: skip
+SURFACE_FLIPS = {
+    "web:assistant": {"hidden": 6, "b22:card->deny": 2},
+    "web:builder": {"b22:role=": 1},
+    "web:operator": {"b22:role=": 1},
+    "web:null": {"b22:role=": 1},
+}
+
+
+def _surface_flip(home: str, key: str, old: str, new: str) -> str:
+    _home, kind, what, probe = key.split("|")
+    tool = probe.split("@")[0]
+    if what == "offered":
+        assert (kind, old, new) == ("web:assistant", "offered", "hidden"), key
+        assert tool in ASSISTANT_HIDDEN, key
+        calls = [k for k in SURFACE_FROZEN if k.startswith(f"{home}|{kind}|call|{tool}")]
+        for call in calls:
+            probe_id = call.rsplit("|", 1)[1]
+            assert (
+                SURFACE_FROZEN[call].startswith("deny")
+                or tool in ("start_research", "forge_tool")
+                or probe_id in HIDDEN_YET_CARDS.get(home, ())
+            ), (key, call, SURFACE_FROZEN[call])
+        return "hidden"
+    assert new.startswith("deny") and not old.startswith("deny"), (key, old, new)
+    if probe == "dispatch_run@role-assistant":
+        return "b22:role="  # carded or ran, then 403'd at the dispatch
+    assert kind == "web:assistant" and tool in ("start_research", "forge_tool"), key
+    return "b22:card->deny"  # carded, then 403'd on confirm
+
+
+@pytest.mark.parametrize("home", SURFACE_HOMES)
+def test_hiding_and_role_defaults_only_tighten_against_the_frozen_surface(
+    home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six homes x seven kinds of chat x every tool, held to es-p4-2's answers.
+    A chat that had a role decides every call as before but for the B22
+    refusals; its list shrinks only by tools its role denies. A channel,
+    analysis or hermes-import chat — role-less before — is now the assistant
+    row, cell for cell, and nothing in it loosened."""
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    monkeypatch.chdir(tmp_path)
+    new = dict(surface_rows(tmp_path / home, home))
+    assert set(new) == {k for k in SURFACE_FROZEN if k.startswith(f"{home}|")}
+    flips: dict[str, Counter[str]] = {}
+    for key, shown in new.items():
+        _home, kind, what, probe = key.split("|")
+        old = SURFACE_FROZEN[key]
+        if kind in ROLE_LESS_KINDS:
+            assert shown == new[f"{home}|web:assistant|{what}|{probe}"], key
+            if what == "call" and shown != old:
+                assert _RANK[shown.split()[0]] >= _RANK[old.split()[0]], (key, old, shown)
+            continue
+        if shown != old:
+            flips.setdefault(kind, Counter())[_surface_flip(home, key, old, shown)] += 1
+    # on the tampered home the run policy never resolves, so role= is not judged
+    expected = (
+        {"web:assistant": SURFACE_FLIPS["web:assistant"]} if home == "tampered" else SURFACE_FLIPS
+    )
+    assert {kind: dict(found) for kind, found in flips.items()} == expected
