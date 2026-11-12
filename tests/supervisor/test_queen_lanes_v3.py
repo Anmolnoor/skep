@@ -8,6 +8,7 @@ import io
 import json
 from collections import Counter
 from collections.abc import Callable, Iterator
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -326,3 +327,20 @@ def test_doctor_and_onboard_check_say_which_allows_stopped_granting(
         assert stale == legacy == []
     for line in stale + legacy:
         assert line in report
+
+
+def test_b79_a_shell_card_names_the_rule_that_asked(grid: Callable[..., Any]) -> None:
+    """B79: a Queen shell ask is a decision naming its rule, so the card's
+    why-line reads it — never "no policy rule covers this tool" where the
+    baseline's shell-learnable asked; that line only when nothing matched."""
+    from skep.supervisor.onboard import verdict_why
+
+    _paths, fmt, store, holder = grid("builder")
+    asked = queen_shell_decision(store, holder, command="uv sync", cwd=fmt["outside"])
+    assert verdict_why(asdict(asked)) == (
+        "asked: rule shell-learnable in the template:builder layer"
+        " — shell.require_approval.shell-learnable"
+    )
+    _paths, fmt, store, holder = grid("legacy")
+    unmatched = queen_shell_decision(store, holder, command="uv sync", cwd=fmt["outside"])
+    assert verdict_why(asdict(unmatched)) == "asked: no policy rule covers this, so it asks"
