@@ -450,22 +450,43 @@ def _deliver_tick_text(
     text: str,
     notify: Callable[[str, str, str], None] | None,
     kind: str = "info",
+    *,
+    script_output: bool = False,
+    context: str | None = None,
 ) -> None:
     """Deliver a repo-less tick's text: bound chat (+ best-effort outbound
     push, v44-F2) when it still exists, otherwise an inert note. The chat row
     is the durable copy; a push failure never breaks the tick. ``kind``
     (v78-F1) threads the delivery classification through to the push choke
     point, so a schedule-dispatched run's pending gate still reaches an
-    'approvals'-level channel."""
+    'approvals'-level channel.
+
+    ADR 0059 D5 (B26): a script's output (``script_output``, or a chained
+    source's ``context``) is outside content — a user row from
+    ``schedule:<name>``, replayed wrapped, setting the chat's ``untrusted``
+    bit; never the Queen's own words. The push carries the same text."""
+    prefix = "" if context is None else f"[Context from schedule {schedule.chain!r}]:\n{context}"
+    pushed = f"{prefix}\n\n{text}" if prefix else text
     if schedule.chat_id and store.get_chat(schedule.chat_id) is not None:
-        store.add_chat_message(schedule.chat_id, role="assistant", content=text)
+        if prefix:
+            store.add_chat_message(
+                schedule.chat_id, role="user", content=prefix,
+                provenance=f"schedule:{schedule.chain}",
+            )  # fmt: skip
+        if script_output:
+            store.add_chat_message(
+                schedule.chat_id, role="user", content=text,
+                provenance=f"schedule:{schedule.name}",
+            )  # fmt: skip
+        else:
+            store.add_chat_message(schedule.chat_id, role="assistant", content=text)
         if notify is not None:
             try:
-                notify(schedule.chat_id, text, kind)
+                notify(schedule.chat_id, pushed, kind)
             except Exception:
                 logger.warning("schedule %r outbound push failed", schedule.name, exc_info=True)
     else:
-        store.create_note(text, actor=f"schedule:{schedule.name}")
+        store.create_note(pushed, actor=f"schedule:{schedule.name}")
 
 
 def compose_digest(store: RunStore) -> str:
@@ -571,12 +592,7 @@ def run_due(
                 # otherwise as an inert note (the twin of chat add_note). No
                 # repo, no worker, no policy surface; "note_posted" rides the
                 # blocked_state no-dispatch tail and counts as a health success.
-                note_text = schedule.instructions
-                if chained is not None:
-                    note_text = (
-                        f"[Context from schedule {schedule.chain!r}]:\n{chained}\n\n{note_text}"
-                    )
-                _deliver_tick_text(store, schedule, note_text, notify)
+                _deliver_tick_text(store, schedule, schedule.instructions, notify, context=chained)
                 store.record_schedule_output(schedule.name, schedule.instructions)
                 blocked_state = "note_posted"
             elif schedule.worker_kind == "script":
@@ -608,7 +624,7 @@ def run_due(
                     blocked_state = "script_ran"
                 else:
                     report = f"[{schedule.name}] {output}" if not script_ok else output
-                    _deliver_tick_text(store, schedule, report, notify)
+                    _deliver_tick_text(store, schedule, report, notify, script_output=True)
                     blocked_state = "script_ran" if script_ok else "script_failed"
             elif schedule.worker_kind == "prompt":
                 # v83-F5 (ADR 0042): a Queen turn at tick time. Read-only by
@@ -643,11 +659,7 @@ def run_due(
                 # no worker, read-only over the store.
                 digest_text = compose_digest(store)
                 store.record_schedule_output(schedule.name, digest_text)
-                if chained is not None:
-                    digest_text = (
-                        f"[Context from schedule {schedule.chain!r}]:\n{chained}\n\n{digest_text}"
-                    )
-                _deliver_tick_text(store, schedule, digest_text, notify)
+                _deliver_tick_text(store, schedule, digest_text, notify, context=chained)
                 blocked_state = "digest_posted"
             elif schedule.template_name is not None:
                 # Template-bound: re-instantiate the live template at tick time, so

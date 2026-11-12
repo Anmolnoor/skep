@@ -227,3 +227,37 @@ test("resolvesOnCommands: operator commands and gate mirrors, never a model card
   assert.equal(app.resolvesOnCommands({ source: "gate" }), true);
   assert.equal(app.resolvesOnCommands({ source: "assistant" }), false);
 });
+
+// ---------- P4-1: the trifecta guard on the card and the transcript ----------
+
+test("taintNote renders the server's plain-words why; a clean chat's card has none", () => {
+  const app = loadApp();
+  assert.equal(app.taintNote({ headline: "x" }), null);
+  assert.equal(app.taintNote(undefined), null);
+  const line = "this chat has read private data (it ran a shell command), so sending anything out needs your OK";
+  assert.equal(app.taintNote({ taint: line }).textContent, line);
+});
+
+test("cardClass: a HIGH card (both taint bits) looks different", () => {
+  const app = loadApp();
+  assert.equal(app.cardClass({ tier: "high" }), "confirm-card card-high");
+  assert.equal(app.cardClass({}), "confirm-card");
+  assert.equal(app.cardClass(undefined), "confirm-card");
+});
+
+test("a doubly tainted card offers no keep: the server sends keep ['once']", () => {
+  const app = loadApp();
+  assert.equal(app.keepSelect({ keep: ["once"], tier: "high" }), null);
+  const select = app.keepSelect({ keep: ["once", "always"] }); // untrusted run_shell
+  assert.deepEqual(select.querySelectorAll("option").map(o => o.getAttribute("value")), ["once", "always"]);
+});
+
+test("authorLabel: a row you did not write says who did (B26, B37)", () => {
+  const app = loadApp();
+  assert.equal(app.authorLabel({ role: "user", provenance: "operator" }, "You"), "You");
+  assert.equal(app.authorLabel({ role: "user" }, "You"), "You"); // a row older than the column
+  assert.equal(app.authorLabel({ role: "user", provenance: "webhook:ci" }, "You"), "from webhook:ci");
+  assert.equal(app.authorLabel({ role: "user", provenance: "worker:t1" }, "You"), "from worker:t1");
+  assert.equal(app.authorLabel({ role: "user", provenance: "queen" }, "You"), "skep");
+  assert.equal(app.authorLabel({ role: "assistant", provenance: "queen" }, "qwen3"), "qwen3");
+});
