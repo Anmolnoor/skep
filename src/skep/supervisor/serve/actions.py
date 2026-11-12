@@ -3544,6 +3544,21 @@ def _asked(command: Sequence[str], permissions: Permissions | None) -> bool:
     return any(held[: len(prefix)] == spelled(prefix) for prefix in asks)
 
 
+def _a_delegated_ask(
+    config: SupervisorConfig,
+    task_id: str,
+    *,
+    commands: Sequence[Sequence[str]] = (),
+    host: str = "",
+) -> bool:
+    """Does the run's own envelope name any of these as a deferred ask?"""
+    permissions = _deferred_asks(config, task_id)
+    return any(_asked(command, permissions) for command in commands) or bool(
+        # the worker's own matcher: case-insensitive, a trailing dot ignored
+        permissions is not None and host and domain_allowed(host, tuple(permissions.network_ask))
+    )
+
+
 def _refuse_remembering_an_ask(
     config: SupervisorConfig,
     task_id: str,
@@ -3554,11 +3569,7 @@ def _refuse_remembering_an_ask(
     """ADR 0059 D3 (V7): a deferred delegated ask is approve-once for THIS
     run — "Allow & remember" would turn the chain's ask into a standing
     grant for every run of the project (and the chain asks again anyway)."""
-    permissions = _deferred_asks(config, task_id)
-    if any(_asked(command, permissions) for command in commands) or (
-        # the worker's own matcher: case-insensitive, a trailing dot ignored
-        permissions is not None and host and domain_allowed(host, tuple(permissions.network_ask))
-    ):
+    if _a_delegated_ask(config, task_id, commands=commands, host=host):
         raise HTTPException(
             status_code=409,
             detail=(
@@ -3915,11 +3926,25 @@ def ledger_remember_suggestions(store: RunStore, repo: str | None = None) -> lis
     return suggestions
 
 
-def remember_suggestion_for_review(store: RunStore, review_id: str) -> str | None:
+def remember_suggestion_for_review(
+    store: RunStore, review_id: str, config: SupervisorConfig
+) -> str | None:
     """The one-line nudge an approve response carries when its key just hit
-    the suggestion threshold (the F6 hint pattern: inform, never block)."""
+    the suggestion threshold (the F6 hint pattern: inform, never block).
+    Never for a delegated ask (V7): Allow & remember refuses one, and the
+    chain asks again whatever the project remembers."""
     entry = store.ledger_entry_for_review(review_id)
     if entry is None or entry.remembered:
+        return None
+    if entry.action == "shell.run":
+        try:  # the resource is parsed from the worker's card text
+            command = shlex.split(entry.resource)
+        except ValueError:
+            command = entry.resource.split()
+        asked = _a_delegated_ask(config, entry.task_id, commands=[command])
+    else:
+        asked = _a_delegated_ask(config, entry.task_id, host=entry.resource)
+    if asked:
         return None
     for candidate in store.ledger_remember_candidates():
         if (candidate["action"], candidate["resource"], candidate["repo"]) == (

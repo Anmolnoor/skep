@@ -750,6 +750,32 @@ def test_the_supervisor_knows_an_ask_by_the_workers_own_spelling(
     actions._refuse_remembering_an_ask(config, "t-ask", host="other.org")  # not an ask
 
 
+def test_a_delegated_ask_gets_no_allow_and_remember_nudge(
+    config: SupervisorConfig, repo: Path, task_payload: dict[str, Any]
+) -> None:
+    """The Nth approve of the same key says Allow & remember would stop the
+    asking — false for a delegated ask, which that button refuses (409)."""
+    from .test_ledger_suggestions import PIP, _seed_approvals
+
+    store = RunStore(config.db_path)
+    try:
+        review_ids = _seed_approvals(store, repo, count=3)
+        entry = store.ledger_entry_for_review(review_ids[-1])
+        assert entry is not None
+        assert actions.remember_suggestion_for_review(store, review_ids[-1], config) is not None
+        permissions = {**task_payload["permissions"], "shell_ask": [shlex.split(PIP)[:2]]}
+        (config.audit_dir / entry.task_id).mkdir(parents=True, exist_ok=True)
+        (config.audit_dir / entry.task_id / "task.json").write_text(
+            json.dumps({**task_payload, "task_id": entry.task_id, "permissions": permissions})
+        )
+        assert actions.remember_suggestion_for_review(store, review_ids[-1], config) is None
+        # a card text shlex cannot parse still answers (the approve already resumed)
+        unparsed = _seed_approvals(store, repo, count=3, resource="make 'x")
+        assert actions.remember_suggestion_for_review(store, unparsed[-1], config) is not None
+    finally:
+        store.close()
+
+
 # --- B22: the proposal consults the chain ----------------------------------
 
 
