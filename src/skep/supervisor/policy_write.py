@@ -319,8 +319,8 @@ def vet_write(
     ]
     if not replay:
         return {"warnings": warnings}
-    summary = replay_decisions(read_log(holder.current.audit_dir), after, before=before)
-    return {"warnings": warnings, "replay": summary, "replay_line": replay_line(summary)}
+    summary, line = _replay(holder.current.audit_dir, after, before=before)
+    return {"warnings": warnings, "replay": summary, "replay_line": line}
 
 
 # -- replay ------------------------------------------------------------------
@@ -340,10 +340,24 @@ def read_log(audit_dir: Path, limit: int = REPLAY_ROWS) -> list[dict[str, Any] |
     for line in lines:
         try:
             row = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             row = None
         rows.append(row if isinstance(row, dict) else None)
     return rows
+
+
+def _replay(
+    audit_dir: Path, after: Stack, *, before: Stack | None = None
+) -> tuple[dict[str, Any], str]:
+    """The replay and its line; a log the serve cannot read is said, never
+    raised — the replay is advisory and must not fail the write."""
+    try:
+        rows = read_log(audit_dir)
+    except OSError as exc:
+        summary = replay_decisions([], after, before=before)
+        return summary, f"replay: the decision log could not be read ({exc.strerror or exc})"
+    summary = replay_decisions(rows, after, before=before)
+    return summary, replay_line(summary)
 
 
 def _unreplayable(row: dict[str, Any] | None) -> str | None:
@@ -395,10 +409,14 @@ def replay_decisions(
             skipped[why or "unreadable row"] += 1
             continue
         req = Request(row["scope"], row["action"], row["value"])
-        new = decide(req, stack=after, role=role)
+        try:
+            new = decide(req, stack=after, role=role)
+            old_view = None if before is None else decide(req, stack=before, role=role)
+        except (ValueError, OSError, RecursionError):  # a value nothing can decide
+            skipped["unreadable row"] += 1
+            continue
         old: str
-        if before is not None:
-            old_view = decide(req, stack=before, role=role)
+        if old_view is not None:
             old, old_by = old_view.verdict, old_view.decided_by
         else:
             old, old_by = str(row.get("verdict")), str(row.get("decided_by"))
@@ -455,7 +473,7 @@ def migration_report(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
     from .policy_schema import SCOPES
 
     stack = load_stack(holder, store)
-    summary = replay_decisions(read_log(holder.current.audit_dir), stack)
+    summary, line = _replay(holder.current.audit_dir, stack)
     b31 = None
     missing = [s for s in SCOPES if s not in set(engine_v2_scopes(store))]
     if missing and isinstance(verify(store_home(store)), Ok):
@@ -465,7 +483,7 @@ def migration_report(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
         )
     return {
         "replay": summary,
-        "replay_line": replay_line(summary),
+        "replay_line": line,
         "held": [f.message for f in findings(stack)],
         "b31": b31,
     }

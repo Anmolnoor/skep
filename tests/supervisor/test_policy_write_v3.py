@@ -9,6 +9,7 @@ that proposes it) carries an advisory replay of recent decisions."""
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -621,3 +622,23 @@ def test_b82_put_policy_keeps_card_timeout_and_names_unknown_keys(config: Superv
     assert client.get("/api/policy").json()["card_timeout_seconds"] == 600
     refused = client.put("/api/policy", json={"card_timeout": 5})
     assert refused.status_code == 400 and "card_timeout" in refused.json()["detail"]
+
+
+def test_a_corrupt_or_unreadable_log_never_fails_a_write(home: Home) -> None:
+    """The replay is advisory: a row nothing can re-decide (a path with a NUL
+    in it), a line too deeply nested to parse, or a log the serve cannot read
+    is counted or skipped — the keep still lands."""
+    home.log(_row("filesystem", "read", "/tmp/a\u0000b", "require_approval", "default/unmatched"))
+    home.log("[" * 100_000)
+    receipt = _keep(home, "ls -la")
+    assert "2 not replayable (2 unreadable row)" in receipt["replay"]
+    path = home.config.audit_dir / "policy" / "decisions.jsonl"
+    path.chmod(0)
+    try:
+        if os.access(path, os.R_OK):  # pragma: no cover - running as root
+            pytest.skip("root reads a 0000 file")
+        receipt = _keep(home, "pwd")
+        assert "could not be read" in receipt["replay"]
+    finally:
+        path.chmod(0o644)
+    assert [r.pattern for r in home.learned()] == ["ls -la", "pwd"]
