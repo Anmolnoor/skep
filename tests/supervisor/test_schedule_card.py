@@ -18,6 +18,7 @@ from skep.supervisor import RunStore
 from skep.supervisor.scheduler import (
     make_schedule,
     next_fire_times,
+    next_run_after,
     run_schedule_script,
     script_env,
 )
@@ -79,6 +80,17 @@ def test_next_fire_times_come_from_the_scheduler(store: RunStore) -> None:
     assert once is not None and once["next"] == ["2030-01-01T08:00:00Z"]
     bad = schedule_facts({**SCRIPT, "every": "forever"}, store)
     assert bad is not None and "invalid interval" in bad["error"] and "next" not in bad
+
+
+def test_a_start_at_in_the_past_shows_the_runs_the_scheduler_will_make() -> None:
+    """A past ``start_at`` is due at once: the scheduler fires on its next
+    tick and counts the next run from that firing (``tick``: next_run_after
+    the tick's moment). The card listed the past start and its past
+    successors as "next runs"."""
+    before = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    times = next_fire_times("2020-01-01T00:00:00Z", 3600)
+    assert times[0] >= before
+    assert times[1] == next_run_after(times[0], 3600)
 
 
 def test_replacing_a_schedule_by_name_says_what_it_replaces(store: RunStore) -> None:
