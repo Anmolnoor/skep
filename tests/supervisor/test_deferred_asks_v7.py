@@ -50,7 +50,12 @@ from skep.supervisor.serve.tools import (
     mutation_execution_decision,
 )
 from skep.supervisor.spawner import effective_network_domains
-from skep.worker_contract import CodingWorkerTask, Permissions
+from skep.worker_contract import (
+    APPROVAL_GRANTS_STATE_KEY,
+    RESUME_CHECKPOINT_ARTIFACT_NAME,
+    CodingWorkerTask,
+    Permissions,
+)
 from skep.workers.capabilities import (
     DELEGATED_ASK_REASON,
     CapabilityApprovalRequired,
@@ -59,6 +64,7 @@ from skep.workers.capabilities import (
 
 from .conftest import FAKE_WORKER, predating_home
 from .test_queen_delegates import _wait_run as wait_run
+from .test_resume import _shell_verdict
 from .test_role_policy import _home
 
 
@@ -536,6 +542,50 @@ def test_the_proxy_admits_an_approved_ask_and_nothing_else(tmp_path: Path) -> No
         "example.com",
     )
     assert effective_network_domains(task([], "example.com")) == ("pypi.org",)
+
+
+def test_a_worker_written_checkpoint_grants_no_asked_host(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """The resume checkpoint is the worker's own file (its workspace's
+    .artifacts, copied to audit). An ``approval_grants`` key in it is not a
+    grant: on a first resume — approving an unrelated command — a host the
+    run only ASKS about must not join the proxy's egress."""
+    perms = _perms(
+        read=["workspace"], write=["workspace"], network=["pypi.org"], network_ask=["example.com"]
+    )
+
+    def delegated(reason: str) -> AutonomyDecision:
+        return AutonomyDecision(verdict="allow", reason=reason, delegation=CHAIN)
+
+    suspended = run_task(
+        repo,
+        "Commit this. MODE:pending",
+        config=config,
+        permissions=perms,
+        dispatch_decision=delegated("dispatch.allow.test"),
+        execution_mode="workspace",
+    )
+    assert suspended.record.state == "pending_approval"
+    checkpoint = config.audit_dir / suspended.record.task_id / RESUME_CHECKPOINT_ARTIFACT_NAME
+    forged = json.loads(checkpoint.read_text()) if checkpoint.is_file() else {}
+    forged[APPROVAL_GRANTS_STATE_KEY] = {"version": 1, "network_hosts": ["example.com"]}
+    checkpoint.write_text(json.dumps(forged))
+    resumed = run_task(
+        repo,
+        "Commit this. MODE:pending",
+        config=config,
+        permissions=perms,
+        resume_of=suspended.record.task_id,
+        approval_verdict=_shell_verdict("git add README.md"),
+        dispatch_decision=delegated("dispatch.allow.resume_after_approval"),
+        execution_mode="workspace",
+    )
+    task = CodingWorkerTask.model_validate_json(
+        (config.audit_dir / resumed.record.task_id / "task.json").read_text()
+    )
+    assert task.permissions.network_ask == ["example.com"]
+    assert "example.com" not in effective_network_domains(task)
 
 
 # --- the approval: this run only ------------------------------------------
