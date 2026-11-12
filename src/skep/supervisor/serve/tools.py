@@ -1372,10 +1372,11 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "prefixes are also always rejected. GRANTING MEANS: this command can "
         "read and modify files in its working directory without a patch card "
         "— the user grants with eyes open. TIERS: with `repo` (or a chat bound "
-        "to a project) the grant lands in that project's own allowlist; without "
-        "either it lands in the GLOBAL list, which a project's own list SHADOWS — "
+        "to a project) it is a standing grant for that project (that repo if it "
+        "has none); without either it lands in the GLOBAL list, which a "
+        "project's own list SHADOWS — "
         "so for project work always pass repo, or the gate stays shut. The "
-        "result's `tier` says which list was written.",
+        "result's `tier` says where it holds.",
         {
             "command": {
                 "type": "string",

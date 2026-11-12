@@ -4132,8 +4132,9 @@ def allow_shell_command(
     way a PUT-shaped set_policy field could.
 
     v114-F2: with ``repo`` the grant goes through ``persist_remembered_command``
-    — the bound project's overlay, global only when unbound — and the list
-    returned is that tier's. Without ``repo`` it is the global list, as before."""
+    — a project grant (the repo's project, else the repo; ADR 0059 D4) — and
+    the list returned is every worker grant that holds there. Without
+    ``repo`` it is the global list, as before."""
     try:
         argv = shlex.split(command)
     except ValueError as exc:
