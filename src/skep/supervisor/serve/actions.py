@@ -4617,11 +4617,11 @@ def _within_delegation(
     host is a flat deny at the worker; a dropped prefix meets the worker's
     ordinary not-allowlisted gate. A grant is kept only where its row,
     held to the chain, still says ``allow`` (§5.4 check 5: no allow the
-    delegator lacks). That also covers B147 — on a zero-state home every row
-    reads ``ask baseline/no_baseline``, the delegator's too, so nothing
-    compared "stricter" and the worker kept allows its delegator would ask
-    about — and an explicit ``network`` host the run policy has no rule for
-    (its row is deny), which the worker used to keep.
+    delegator lacks). That also covers an explicit ``network`` host the run
+    policy has no rule for, which the worker used to keep. B147 is NOT closed
+    here: on a zero-state home every row reads ``ask baseline/no_baseline``,
+    the delegator's too, and the worker keeps those grants as it always has
+    (see ``kept``).
 
     R3 (ADR 0055 D5): the worker's own ``role`` decides beside the chain —
     a grant its role layer made stricter is narrowed the same way, recorded
@@ -4659,7 +4659,11 @@ def _within_delegation(
     def kept(scope: str, action: str, value: str, *, askable: bool) -> bool | None:
         """True: kept as a grant. None: a deferred ask. False: dropped."""
         row = row_for(scope, action, value)
-        if row["verdict"] == "allow":
+        if row["verdict"] == "allow" or row["rule_id"] == NO_BASELINE_REASON:
+            # B147 stays open: on a zero-state home every row, the delegator's
+            # too, is the same baseline placeholder, so nothing is stricter and
+            # the grant is kept as before. Asking here strands a sandboxed
+            # `uv sync`: the proxy cannot card a subprocess for a registry host.
             return True
         ask = deferred_asks and askable and row["verdict"] == "require_approval"
         row = {**row, "delegated": "ask" if ask else "dropped"}

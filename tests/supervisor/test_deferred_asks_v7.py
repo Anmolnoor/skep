@@ -361,8 +361,10 @@ def test_a_child_never_holds_an_allow_its_delegator_lacks(
 ) -> None:
     """ADR 0059 §5.4 check 5, counting ask as weaker than allow: every grant
     the worker keeps is one each delegator (and its own role) allows; every
-    deferred ask is one they would ask about — never one they deny. On a
-    zero-state home (B147) the delegator asks everything, so nothing stays."""
+    deferred ask is one they would ask about — never one they deny. A
+    zero-state home is the exception this round leaves open (B147): every
+    row there is the baseline placeholder, so the worker keeps its grants as
+    before — asking would strand a sandboxed install the proxy cannot card."""
     config = {
         "locked": lambda: _home(tmp_path, repo, capsys),
         "zero": lambda: _zero_state(tmp_path, repo),
@@ -399,6 +401,10 @@ def test_a_child_never_holds_an_allow_its_delegator_lacks(
         finally:
             store.close()
 
+    if state == "zero":
+        assert narrowed.network == hosts and narrowed.shell_allowlist == PREFIXES
+        assert narrowed.network_ask == [] and narrowed.shell_ask == []
+        return
     for host in narrowed.network:
         assert verdicts("network", "connect", host) == {"allow"}, host
     for prefix in narrowed.shell_allowlist:
@@ -407,8 +413,6 @@ def test_a_child_never_holds_an_allow_its_delegator_lacks(
         assert "deny" not in verdicts("network", "connect", host), host
     for prefix in narrowed.shell_ask:
         assert "deny" not in verdicts("shell", "run", shlex.join(prefix)), prefix
-    if state == "zero":
-        assert narrowed.network == [] and narrowed.shell_allowlist == []
 
 
 @pytest.mark.parametrize(
