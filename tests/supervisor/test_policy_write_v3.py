@@ -445,7 +445,7 @@ def test_a_policy_write_card_carries_the_replay_and_a_refused_one_gets_no_card(
              "verdict": "allow"},
         )  # fmt: skip
     keep = policy_write_preview(home.store, home.holder, "run_shell", {"command": "ls -la"})
-    assert keep["keep_replay"].startswith("replay of the last 1 decisions")
+    assert keep == {}  # a keep-able card carries no replay: it is raised on every ask
     home.lock("builder", NO_CURL)
     refused = policy_write_preview(
         home.store, home.holder, "run_shell", {"command": "curl -sI https://example.com"}

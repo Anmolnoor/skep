@@ -2321,11 +2321,16 @@ class ChatEngine:
                 status_code=422, detail="keep must be one of 'once', 'session', 'always'"
             )
         taint = self.store.get_chat_taint(chat_id)  # P4-1: a tainted chat keeps less
+        named = keep is not None
         if keep is None:
             keep = actions.default_keep(action.tool, action.args, taint)
         # B32: a keep this card cannot honour is refused BEFORE it runs, never
         # executed with a false "remembered" (the card offers only what holds).
         refused = actions.keep_refusal(action.tool, action.args, keep, taint, store=self.store)
+        if refused is not None and not named:
+            # The write-time check narrowed this card to "once" and the client
+            # named no keep: a plain Approve runs once, it is not a 400.
+            keep, refused = "once", None
         if refused is not None:
             raise HTTPException(status_code=400, detail=f"keep={keep!r} refused: {refused}")
         if action.source in ("operator", "gate"):

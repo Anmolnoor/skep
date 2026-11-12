@@ -5010,7 +5010,7 @@ def learn_policy_rule(
         # unlabelled legacy-host row doctor lists for revocation (P3-4).
         matcher="host" if scope == "network" else None,
     )
-    kept, status = store_grant(store, rule, report=report)
+    kept, status = store_grant(store, rule, report=report, replay=True)
     return None if status == "kept" else kept.rule_id
 
 
@@ -5020,6 +5020,7 @@ def store_grant(
     *,
     context: dict[str, str] | None = None,
     report: dict[str, Any] | None = None,
+    replay: bool = False,
 ) -> tuple[LearnedRule, str]:
     """Store one grant on the ONE learned list (ADR 0059 D4); return the row
     that now covers its subject and ``added`` / ``upgraded`` / ``kept``.
@@ -5036,13 +5037,16 @@ def store_grant(
     refused with ``PolicyWriteRejected`` naming the deny, and nothing is
     written. The grant is vetted unbound: a chat- or repo-bound grant must
     clear the same denies. ``report`` (when given) receives the check's
-    replay summary and warnings."""
+    warnings, and with ``replay`` its replay summary. The replay re-decides
+    up to 200 logged rows twice (seconds on a full log), so only a standing
+    write asks for it — the explicit policy verbs and an ``always`` keep —
+    never a session keep or a worker approval, which run on every card."""
     from ..policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
 
     rule, status, updated = _grant_plan(store, rule, context)
     if updated is None:
         return rule, status
-    found = _vet_grant(store, rule, updated)
+    found = _vet_grant(store, rule, updated, replay=replay)
     if report is not None:
         report.update(found)
     store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
@@ -5374,7 +5378,14 @@ def remember_action_for_session(
             bound=bound,  # type: ignore[arg-type]
         )
         stored.append(
-            store_grant(store, rule, context={"chat_id": chat_id} if chat_id else {}, report=report)
+            store_grant(
+                store,
+                rule,
+                context={"chat_id": chat_id} if chat_id else {},
+                report=report,
+                # A standing grant shows what it flips; a session keep is too frequent.
+                replay=not session,
+            )
         )
     rules = [rule for rule, _status in stored]
     statuses = {status for _rule, status in stored}

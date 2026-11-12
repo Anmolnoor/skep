@@ -3757,9 +3757,10 @@ def policy_write_preview(
     write-time check at PROPOSAL, nothing written. A proposal the check
     refuses raises ``PolicyWriteRejected``: no card is shown whose confirm can
     only fail (the B22 lesson). A keep-able card (read_url / run_shell /
-    start_process) gets ``keep_replay`` for an ``always`` keep, or only
-    ``once`` with ``keep_refused`` when the check refuses its grants. Bad
-    arguments yield nothing here: the confirm reports them as it always has."""
+    start_process) offers only ``once``, with ``keep_refused``, when the
+    check refuses its grants; it carries no replay — these cards are raised
+    on every ask, and a replay costs seconds on a full log. Bad arguments
+    yield nothing here: the confirm reports them as it always has."""
     from ..policy_schema import LearnedRule
     from ..policy_write import PolicyWriteRejected, vet_write
 
@@ -3770,9 +3771,7 @@ def policy_write_preview(
             refused = actions.keep_refusal(name, args, "always", store=store)
             if refused is not None:
                 return {"keep": ["once"], "keep_refused": refused}
-            subjects = actions._grant_subjects(name, args)
-            assert not isinstance(subjects, str)  # keep_options offered a keep
-            return {"keep_replay": actions.vet_keep(store, subjects).get("replay_line")}
+            return {}
         if name == "set_operator_policy":
             return actions.set_operator_policy_rule(
                 store, scope=str(args["scope"]), action=str(args["action"]),

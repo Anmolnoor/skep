@@ -498,3 +498,39 @@ def test_b32_a_keep_a_deny_would_reject_is_refused_before_the_command_runs(
     assert "no-touch-x" in str(refused.value.detail)
     assert not marker.exists()
     assert h.store.get_chat_action(action_id).status == "proposed"
+
+
+def test_a_confirm_that_names_no_keep_runs_once_when_the_default_keep_would_be_refused(
+    home: Any, tmp_path: Path
+) -> None:
+    """The write-time check narrows such a card to "once", and the web UI then
+    sends no keep at all. The confirm's default was "session" judged by taint
+    alone, so a plain Approve on that card was a 400. A keep nobody named
+    falls back to once; a keep the client did name is still refused."""
+    from skep.supervisor.policy_schema import PolicyRule, ScopePolicy
+
+    h = home("legacy")
+    marker = tmp_path / "ran.txt"
+    document = document_from_settings(h.store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    document = document or PolicyDocument()
+    shell = ScopePolicy(scope="shell", deny=[
+        PolicyRule(rule_id="no-touch-x", action="run", pattern=f"touch {marker} --x"),
+    ])  # fmt: skip
+    others = [s for s in document.scopes if s.scope != "shell"]
+    h.store.set_setting(
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        document.model_copy(update={"scopes": [*others, shell]}).model_dump_json(),
+    )
+    args = {"command": f"touch {marker}", "cwd": str(tmp_path)}
+    engine = ChatEngine(store=h.store, holder=h.holder, runner=cast(Any, None), home=h.config.home)
+    action_id = h.store.add_chat_action(h.chat_a, tool="run_shell", args=args)
+    with pytest.raises(HTTPException) as named:
+        engine.verdict_events(
+            h.chat_a, h.store.get_chat(h.chat_a), action_id, confirm=True, keep="session"
+        )
+    assert "no-touch-x" in str(named.value.detail)
+    with pytest.raises(HTTPException) as unnamed:
+        engine.verdict_events(h.chat_a, h.store.get_chat(h.chat_a), action_id, confirm=True)
+    # Past the keep check: what stops this bare test home is that it has no model.
+    assert unnamed.value.status_code == 409
+    assert "keep" not in str(unnamed.value.detail)
