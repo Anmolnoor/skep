@@ -57,6 +57,7 @@ from ..policy_schema import (
     resolve,
     shell_tokens,
 )
+from ..secret_floor import HOME_SECRETS
 from ..shell_prefixes import dangerous_prefix_reason
 
 TEMPLATES_DIR = Path(__file__).parent
@@ -289,11 +290,10 @@ _FLOOR_ROWS: dict[str, tuple[str, str, str]] = {
     "floor.secret-reads": (
         "filesystem",
         "read",
-        "~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials "
-        "~/.docker/config.json ~/.kube ~/.secrets ~/.config/gcloud ~/.azure ~/.npmrc "
-        "~/.pypirc ~/.claude/.credentials.json ~/.codex/auth.json ~/Library/Keychains "
-        "~/.vault-token ~/.terraform.d/credentials.tfrc.json ~/.config/op, "
-        "any .env / .env.* (any case), skep's own secrets",
+        # B125: from the floor's own list — a hand copy went stale.
+        " ".join(f"~/{rel}" for rel in HOME_SECRETS)
+        + ", any .env / .env.* (any case), skep's own secrets"
+        + " — read, or named in a shell line",
     ),
     "floor.outbound-content": ("*", "*", "a post, send or publish — the card shows the payload"),
 }

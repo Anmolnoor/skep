@@ -513,3 +513,14 @@ def test_a_shipped_file_must_name_itself_and_a_real_pack(
     (tmp_path / "builder.json").write_text(json.dumps(packless))
     with pytest.raises(ValueError, match="unknown pack 'no-such-pack'"):
         load_policy_template("personal-dev")  # the alias takes the same door
+
+
+def test_the_secret_floor_row_names_every_floored_path() -> None:
+    """I8: the floor table is the whole floor — B125 widened HOME_SECRETS
+    (shell rc/history, cargo, .claude.json) and the hand-written row kept
+    the old list, so `policy explain` hid what the Queen now refuses."""
+    from skep.supervisor.secret_floor import HOME_SECRETS
+
+    [row] = [row for row in floor_rows() if row["rule_id"] == "floor.secret-reads"]
+    named = set(row["pattern"].replace(",", " ").split())
+    assert {f"~/{rel}" for rel in HOME_SECRETS} <= named
