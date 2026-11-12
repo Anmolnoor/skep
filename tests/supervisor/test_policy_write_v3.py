@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 
+from skep.cli import main
 from skep.supervisor import RunStore, policy_write
 from skep.supervisor import policy_baseline as pb
 from skep.supervisor.cli_cmds import build_config
@@ -290,6 +291,9 @@ def _writers(home: Home) -> dict[str, Callable[[], Any]]:
         "baseline approve": lambda: actions.approve_policy_baseline(
             home.config.home, template="builder", approved_by="op", store=home.store
         ),
+        "setup --template": lambda: main(
+            ["--home", str(home.root), "setup", "--template", "builder", "--apply"]
+        ),
     }
 
 
@@ -331,6 +335,9 @@ def test_every_shipped_template_passes_its_own_check(home: Home, template: str) 
         home.config.home, reapprove=True, approved_by="op", store=home.store
     )
     assert again["approved"]["template"] == template
+    assert main(["--home", str(home.root), "setup", "--template", template, "--apply"]) == 0
+    for name in TEMPLATE_NAMES:  # switching between them, both ways
+        assert main(["--home", str(home.root), "setup", "--template", name, "--apply"]) == 0
 
 
 def test_a_deny_is_always_accepted_and_names_the_grant_it_shadows(home: Home) -> None:
@@ -481,6 +488,43 @@ def test_the_chat_card_shows_the_replay_and_refuses_at_proposal(
     assert [d for name, d in events if name == "action"] == []
     (refusal,) = [d["result"] for name, d in events if name == "tool"]
     assert refusal["ok"] is False and "§5.4 check 1" in refusal["error"]
+
+
+# -- B38: `skep setup --template` keeps the grants --
+
+
+def test_b38_setup_template_keeps_grants_and_shows_them(
+    home: Home, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--home", str(home.root), "setup", "--template", "builder"]) == 0
+    _keep(home, "ls -la")
+    _worker_remember(home, "make test")  # a worker project grant (the P3-4 review case)
+    capsys.readouterr()
+    assert main(["--home", str(home.root), "setup", "--template", "operator"]) == 1
+    shown = capsys.readouterr().out
+    assert "kept grant 'shell:run:ls -la'" in shown
+    assert "kept grant 'shell:run:make test@repo:" in shown
+    assert main(["--home", str(home.root), "setup", "--template", "operator", "--apply"]) == 0
+    assert "kept grant 'shell:run:ls -la'" in capsys.readouterr().out
+    assert [r.pattern for r in home.learned()] == ["ls -la", "make test"]
+
+
+def test_b38_a_grant_the_new_template_denies_is_dropped_with_a_line(home: Home) -> None:
+    _keep(home, "ls -la")
+    _keep(home, "curl -sI https://example.com")
+    template = load_policy_template("operator").document()
+    template.scopes.append(
+        PolicyDocument.model_validate(
+            {"scopes": [{"scope": "shell", "deny": [
+                {"rule_id": "no-curl", "action": "run", "pattern": "curl"}]}]}
+        ).scopes[0]
+    )  # fmt: skip
+    kept, lines = policy_write.keep_grants(home.holder, home.store, template)
+    assert [r.pattern for r in kept.learned] == ["ls -la"]
+    assert (
+        "dropped grant 'shell:run:curl -sI https://example.com': it lands inside deny "
+        "global/no-curl" in lines
+    )
 
 
 def test_b82_put_policy_keeps_card_timeout_and_names_unknown_keys(config: SupervisorConfig) -> None:

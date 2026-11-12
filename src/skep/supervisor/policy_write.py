@@ -54,6 +54,7 @@ from .secret_floor import HOME_SECRETS
 from .store import RunStore
 
 if TYPE_CHECKING:
+    from .policy_schema import PolicyDocument
     from .policy_templates import PolicyTemplate
     from .roles import Role
     from .serve.settings import ConfigHolder
@@ -253,6 +254,33 @@ def inside_a_deny(stack: Stack, allow: Allow, role: Role | None = None) -> list[
                 "a grant there is never honoured (§5.4 check 6)")
         for hit in dict.fromkeys(hits)
     ]  # fmt: skip
+
+
+def keep_grants(
+    holder: ConfigHolder, store: RunStore, document: PolicyDocument
+) -> tuple[PolicyDocument, list[str]]:
+    """B38: a template's document replacing the setup document keeps every
+    learned grant the store holds — the Queen's and the workers' — except one
+    the new stack's denies collide with, which is dropped with a line saying
+    which deny (never silently). Returns the document to store and the lines."""
+    from .policy_schema import POLICY_DOCUMENT_SETTINGS_KEY, document_from_settings
+
+    current = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    held = list(current.learned) if current is not None else []
+    candidate = document.model_copy(update={"learned": held})
+    stack = would_be_stack(
+        holder, store, settings={POLICY_DOCUMENT_SETTINGS_KEY: candidate.model_dump_json()}
+    )
+    kept, lines = [], []
+    for rule in held:
+        hits = inside_a_deny(stack, Allow(rule.scope, rule.action, rule.pattern, rule.rule_id))
+        if hits:
+            deny = hits[0].key.partition("->")[2]
+            lines.append(f"dropped grant {rule.rule_id!r}: it lands inside deny {deny}")
+        else:
+            kept.append(rule)
+            lines.append(f"kept grant {rule.rule_id!r} ({rule.scope} {rule.action} {rule.pattern})")
+    return document.model_copy(update={"learned": kept}), lines
 
 
 def rejection(found: Sequence[Finding]) -> str:
