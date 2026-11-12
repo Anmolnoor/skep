@@ -333,7 +333,7 @@ def test_the_continuation_may_propose_but_never_execute(
     from skep.supervisor.store import RunStore
 
     client = configured_client(config, ollama)
-    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    chat_id = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
 
     store = RunStore(config.db_path)
     try:

@@ -29,6 +29,7 @@ from typing import Any, Protocol
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
+from ...roles import ROLE_LESS_CHAT_ROLE
 from ..chat import (
     ATTACHMENT_MAX_BYTES,
     TURN_BUSY,
@@ -180,6 +181,7 @@ def run_channel_turn(
             title=f"{message.channel} {message.identity.identity_id}",
             model=None,
             source=message.channel,
+            role=ROLE_LESS_CHAT_ROLE,  # decision #4 (B55): never the widest lanes
         )
         store.bind_channel_session(
             session_key=message.session_key,

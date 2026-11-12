@@ -116,7 +116,7 @@ def test_a_fresh_chat_advertises_only_the_core_and_carries_the_index(
     config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
     client = configured_client(config, ollama)
-    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    chat_id = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
     ollama.script_reply("hello")
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
     body = ollama.chat_bodies()[0]
@@ -199,7 +199,7 @@ def test_describe_tools_activates_and_the_next_round_advertises(
     config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
     client = configured_client(config, ollama)
-    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    chat_id = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
     ollama.script_tool_call(DESCRIBE_TOOL_NAME, {"names": ["list_notes", "add_note"]})
     ollama.script_reply("described")
     response = client.post(f"/api/chats/{chat_id}/messages", json={"content": "notes?"})
@@ -303,7 +303,7 @@ def test_the_full_setting_restores_the_old_array_byte_for_byte(
     client = configured_client(config, ollama)
     assert client.get("/api/llm/config").json()["tool_delivery"] == "indexed"
     client.put("/api/llm/config", json={"tool_delivery": "full"})
-    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    chat_id = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
     ollama.script_reply("hello")
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
     body = ollama.chat_bodies()[0]

@@ -11,6 +11,7 @@ verbs as the buttons in the Approvals/Policies views, under actor
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from collections.abc import Callable, Sequence
@@ -26,7 +27,7 @@ from ..engines import engine_names
 from ..memory import MEMORY_CLASSES, MemoryError
 from ..projects import list_projects, project_to_dict
 from ..providers import PROVIDER_COST_CLASSES, PROVIDER_PROTOCOLS
-from ..roles import Role, role_for_chat
+from ..roles import Role, role_denies_every, role_for_chat
 from ..store import ChatSearchHit, RunStore
 from . import actions
 from .jobs import Dispatcher
@@ -2222,6 +2223,10 @@ def _workspace(_args: dict[str, Any]) -> str:
     return "workspace"
 
 
+def _ddgs(_args: dict[str, Any]) -> str:
+    return "ddgs"  # search_web decides its lane, never the query
+
+
 # P3-6 (ADR 0059 D7, B32): the one map of what governs each Queen tool. A
 # tool here is decided by ``policy_v3.decide()`` on ``(scope, action,
 # value(args))`` (stop_process names a proc_id: its lane decides the command
@@ -2236,7 +2241,7 @@ TOOL_SCOPES: dict[str, tuple[str, str, Callable[[dict[str, Any]], str]]] = {
     "start_process": ("shell", "run_background", lambda args: str(args.get("command") or "")),
     "stop_process": ("shell", "run_background", lambda args: str(args.get("proc_id") or "")),
     "read_url": ("network", "fetch", _url_host),
-    "search_web": ("network", "search", lambda _args: "ddgs"),
+    "search_web": ("network", "search", _ddgs),
     "call_mcp_tool": (
         "mcp",
         "call",
@@ -2297,6 +2302,35 @@ _ALWAYS_CARD_GROUPS: dict[str, tuple[str, ...]] = {
 ALWAYS_CARDS: dict[str, str] = {
     tool: reason for reason, tools in _ALWAYS_CARD_GROUPS.items() for tool in tools
 }
+
+
+def hidden_tools(role: Role | None) -> dict[str, str]:
+    """P3-6 (ADR 0059 D7, B22): tool -> the role rule that denies every call
+    of it. Such a tool is not offered to the chat, and is refused if the
+    model calls it anyway. Role-only — never taint or per-turn state — so a
+    chat's tool list is the same on every turn. An ask hides nothing."""
+    return {} if role is None else _hidden_tools(role)
+
+
+@functools.lru_cache(maxsize=32)
+def _hidden_tools(role: Role) -> dict[str, str]:
+    hidden = {}
+    for tool, (scope, action, value) in TOOL_SCOPES.items():
+        constant = value({}) if value in (_workspace, _ddgs) else None
+        hit = role_denies_every(role, scope, action, constant)
+        if hit is not None:
+            hidden[tool] = hit.decided_by
+    return hidden
+
+
+def hidden_refusal(tool: str, role: Role, decided_by: str) -> str:
+    """What the model hears when it calls a tool its chat's role hides."""
+    return (
+        f"{tool} is not available in this chat: its role {role.name} never allows it "
+        f"({decided_by}). Tell the user what you would do; the operator can switch this "
+        "chat's role with /role <name> (e.g. builder) or `skep role use <name> --chat <id>`."
+    )
+
 
 # v83-F5 (ADR 0042): read tools with NETWORK egress, refused in unattended
 # (scheduled) turns. Nobody is watching a scheduled turn, so it reads the
@@ -2603,9 +2637,13 @@ def _index_line(spec: dict[str, Any]) -> str:
     return f"{name}{mark}({args})" + (f" — {gloss}" if gloss else "")
 
 
-def _tool_index_block() -> str:
+@functools.lru_cache(maxsize=32)
+def tool_index_block(hidden: frozenset[str] = frozenset()) -> str:
+    """The index, less the tools this chat's role hides (P3-6)."""
     grouped: dict[str, list[str]] = {category: [] for category in TOOL_CATEGORIES}
     for spec in TOOL_SPECS:
+        if spec["function"]["name"] in hidden:
+            continue
         category = _TOOL_CATEGORY_BY_NAME.get(spec["function"]["name"], "other")
         grouped.setdefault(category, []).append(_index_line(spec))
     lines = [_TOOL_INDEX_HEADER]
@@ -2618,18 +2656,22 @@ def _tool_index_block() -> str:
 
 
 # Generated from the registry at import time — the index CANNOT drift.
-TOOL_INDEX_BLOCK = _tool_index_block()
+TOOL_INDEX_BLOCK = tool_index_block()
 
 
 def advertised_tool_specs(
-    active: list[str] | tuple[str, ...], *, read_only: bool = False
+    active: list[str] | tuple[str, ...],
+    *,
+    read_only: bool = False,
+    hidden: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """The specs an indexed-delivery round advertises: core + this chat's
     described-active tools, in registry order. read_only turns (v67 /btw)
-    keep only the read-shaped part."""
-    names = CORE_TOOL_NAMES | set(active)
+    keep only the read-shaped part. ``hidden`` (P3-6): the tools the chat's
+    role hides — never advertised."""
     source = READ_TOOL_SPECS if read_only else TOOL_SPECS
-    return [t for t in source if t["function"]["name"] in names]
+    names = CORE_TOOL_NAMES | set(active)
+    return [t for t in source if t["function"]["name"] in names - hidden]
 
 
 def _run_view(record: Any, *, store: RunStore | None = None) -> dict[str, Any]:
@@ -3107,6 +3149,11 @@ def execute_read_tool(
     holder: ConfigHolder,
     chat_id: str | None = None,
 ) -> Any:
+    hidden = hidden_tools(_chat_role(store, holder, chat_id)) if chat_id else {}
+    if name in hidden:
+        role = _chat_role(store, holder, chat_id)
+        assert role is not None
+        return {"ok": False, "error": hidden_refusal(name, role, hidden[name])}
     if name == DESCRIBE_TOOL_NAME:
         # v74-F3: on-demand schema fetch. The chat engine persists the
         # described names as the chat's active tools (it holds the chat_id);
@@ -3126,15 +3173,17 @@ def execute_read_tool(
             )
             requested = requested[:DESCRIBE_TOOLS_MAX]
         described["tools"] = [
-            dict(_SPEC_BY_NAME[n]["function"]) for n in requested if n in _SPEC_BY_NAME
+            dict(_SPEC_BY_NAME[n]["function"])
+            for n in requested
+            if n in _SPEC_BY_NAME and n not in hidden
         ]
-        unknown = [n for n in requested if n not in _SPEC_BY_NAME]
+        unknown = [n for n in requested if n not in _SPEC_BY_NAME or n in hidden]
         if unknown:
             described["unknown"] = {
                 "names": unknown,
                 "note": (
-                    "no tools by these names — the tool index in the system "
-                    "prompt lists everything that exists"
+                    "no tools by these names in this chat — the tool index in "
+                    "the system prompt lists everything it can use"
                 ),
             }
         return described
@@ -5535,6 +5584,12 @@ def mutation_execution_decision(
     from ..policy_v3 import ACTION_REQUEST, Verdict, taint_asks, taint_verdict
 
     decision = _mutation_execution_decision(name, args, store=store, holder=holder, chat_id=chat_id)
+    if decision is None:
+        # P3-6 (D7, B22): a tool the chat's role hides is refused, not given
+        # the default card — hiding is advertisement, this is the boundary. A
+        # lane that decides (the dispatch lanes consult the chain) keeps its
+        # own verdict, byte for byte.
+        decision = _hidden_decision(name, store=store, holder=holder, chat_id=chat_id)
     if (
         chat_id is None
         or name in _DECIDED_LANES
@@ -5549,6 +5604,24 @@ def mutation_execution_decision(
         return decision
     held = Verdict("allow", "", "", decision.decided_by or "", "operator")
     return taint_decision(taint_verdict(held, taint, *ACTION_REQUEST, read_only=False))
+
+
+def _hidden_decision(
+    name: str, *, store: RunStore, holder: ConfigHolder, chat_id: str | None
+) -> AutonomyDecision | None:
+    try:
+        role = _chat_role(store, holder, chat_id)
+    except ValueError:
+        return None  # the lane already refused: role.deny.unloadable
+    rule = hidden_tools(role).get(name)
+    if role is None or rule is None:
+        return None
+    return AutonomyDecision(
+        verdict="deny",
+        reason="role.deny.tool_hidden",
+        detail=hidden_refusal(name, role, rule),
+        decided_by=rule,
+    )
 
 
 def _mutation_execution_decision(
@@ -5636,6 +5709,7 @@ def _mutation_execution_decision(
                 # this member gates the batch (actions.py explicit_run_overrides).
                 engine=(None if entry.get("engine") is None else str(entry["engine"])),
                 delegation_chain=chain,
+                role=None if entry.get("role") is None else str(entry["role"]),
             )
             if member.verdict == "deny" and member.reason == "dispatch.deny.exceeds_delegator":
                 return member  # B22: a member the chain can never dispatch refuses the batch
@@ -5741,4 +5815,5 @@ def _mutation_execution_decision(
         max_provider_calls=_optional_int(args, "max_provider_calls"),
         engine=None if args.get("engine") is None else str(args["engine"]),
         delegation_chain=chain,
+        role=None if args.get("role") is None else str(args["role"]),
     )

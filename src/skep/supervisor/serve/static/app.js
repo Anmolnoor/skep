@@ -2580,14 +2580,17 @@ async function viewChat(main, chatId) {
   modelSelect.value = activeChat?.model || llm.default_model || "";
   modelSelect.disabled = Boolean(activeChatId);
   // R1: a new chat opens with a role picker defaulting to the onboard choice
-  // (or `skep role use`); an open chat switches with /role (a confirm card).
+  // (or `skep role use`, else assistant: ADR 0059 decision #4); an open chat
+  // switches with /role (a confirm card). Only a chat made before every chat
+  // recorded a role shows "no role".
+  const legacyRoleLess = Boolean(activeChatId) && !activeChat?.role;
   const roleSelect = el("select", {
     class: "composer-model-select",
     "aria-label": "chat role",
     title: activeChatId ? "switch with /role <name>" : "role for the next new chat",
-  }, [el("option", { value: "" }, "no role"),
+  }, [...(legacyRoleLess ? [el("option", { value: "" }, "no role")] : []),
     ...roleList.roles.map(role => el("option", { value: role.name }, `role: ${role.name}`))]);
-  roleSelect.value = activeChatId ? (activeChat?.role || "") : (roleList.default || "");
+  roleSelect.value = activeChatId ? (activeChat?.role || "") : (roleList.default || "assistant");
   roleSelect.disabled = Boolean(activeChatId);
   roleSelect.hidden = roleList.roles.length === 0;
   const contextPopover = el("div", { class: "context-popover" });

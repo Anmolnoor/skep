@@ -364,6 +364,15 @@ def test_telegram_button_confirms_a_low_risk_dispatch(
         _enable_telegram(config, ollama, can_confirm=True)
         harness = _TelegramHarness(config)
         try:
+            # A channel chat opens as assistant, which may not dispatch (ADR
+            # 0059 decision #4); the operator gave this one the builder role.
+            builder = harness.store.create_chat(
+                title="telegram 42", model=None, source="telegram", role="builder"
+            )
+            harness.store.bind_channel_session(
+                session_key="telegram:42", channel="telegram", identity_id="42",
+                chat_id=builder.chat_id,
+            )  # fmt: skip
             ollama.script_tool_call(
                 "dispatch_run",
                 {

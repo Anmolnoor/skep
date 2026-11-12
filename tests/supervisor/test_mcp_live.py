@@ -78,8 +78,16 @@ def chat_client(config: SupervisorConfig, ollama: FakeOllama) -> tuple[TestClien
         "/api/llm/config",
         json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
     )
-    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
-    return client, str(chat_id)
+    chat_id = str(client.post("/api/chats", json={}).json()["chat_id"])
+    # The MCP lane on its own: a chat from before every chat recorded a role
+    # (ADR 0059 P3-6) — a new chat is an assistant chat, whose mcp-gated ask
+    # would answer every probe here.
+    store = RunStore(config.db_path)
+    try:
+        store.set_chat_role(chat_id, None)
+    finally:
+        store.close()
+    return client, chat_id
 
 
 def _seed_server(config: SupervisorConfig) -> None:

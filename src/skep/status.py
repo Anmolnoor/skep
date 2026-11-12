@@ -54,6 +54,7 @@ def build_status(
             + _baseline_advisories(home)
             + _policy_v3_advisories(home)
             + _legacy_host_advisories(home)
+            + _role_less_chat_advisories(home)
             + _policy_migration_advisories(home)
             + _channel_user_advisories(home)
         )
@@ -88,6 +89,7 @@ def build_status(
         + _baseline_advisories(home)
         + _policy_v3_advisories(home)
         + _legacy_host_advisories(home)
+        + _role_less_chat_advisories(home)
         + _policy_migration_advisories(home)
         + _channel_user_advisories(home)
     )
@@ -403,6 +405,29 @@ def _legacy_host_advisories(home: Path) -> list[str]:
         f"{len(hosts)} legacy-host fetch grant(s) cover every path and query of "
         f"{', '.join(hosts)} — revoke on the Policies page (DELETE /api/policy/rules/<id>); "
         "a new read_url keep covers one URL directory"
+    ]
+
+
+def _role_less_chat_advisories(home: Path) -> list[str]:
+    """ADR 0059 P3-6 (B55): every new chat records a role (no pick and no
+    default is ``assistant``); a chat made before that has none and runs with
+    no role layer — named here, with the one command that gives it one."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        role_less = [chat for chat in store.list_chats() if not chat.role]
+    finally:
+        store.close()
+    if not role_less:
+        return []
+    return [
+        f"{len(role_less)} chat(s) have no role (made before every chat recorded one) and run "
+        "with no role layer, the widest Queen lanes; new chats open as assistant — give one a "
+        f"role with `skep role use assistant --chat {role_less[0].chat_id}` or /role in the chat"
     ]
 
 

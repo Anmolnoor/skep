@@ -220,7 +220,7 @@ def test_run_code_cards_then_confirm_runs_sandboxed(
 ) -> None:
     """An unbound repo cards; confirming dispatches the sandboxed script
     worker and the script's stdout comes back as the tool result."""
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call("run_code", {"repo": str(repo), "code": "print(2+2)"})
     events = sse_events(
         client.post(f"/api/chats/{chat_id}/messages", json={"content": "calc"}).text
@@ -250,7 +250,7 @@ def test_run_code_auto_runs_on_a_trusted_project(
 ) -> None:
     """Where dispatch_run would auto-dispatch, run_code runs without a card —
     the script envelope is strictly tighter than the trusted default."""
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     created = client.post(
         "/api/projects",
         json={
@@ -290,7 +290,7 @@ def test_run_code_timeout_seconds_is_honored_and_capped(
     still binds — a wild ask clamps to 600."""
     import json as json_mod
 
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     client.post(
         "/api/projects",
         json={

@@ -102,6 +102,7 @@ from ..projects import (
 )
 from ..roles import (
     EXCEEDS_DELEGATOR,
+    ROLE_LESS_CHAT_ROLE,
     Delegator,
     Role,
     parse_delegation_chain,
@@ -2004,7 +2005,9 @@ def baseline_alarm(holder: ConfigHolder, store: RunStore) -> dict[str, str]:
     if row is not None:
         chat = next((c for c in store.list_chats() if c.source == "policy"), None)
         if chat is None:
-            chat = store.create_chat(title="policy baseline", model=None, source="policy")
+            chat = store.create_chat(
+                title="policy baseline", model=None, source="policy", role=ROLE_LESS_CHAT_ROLE
+            )
         if row["reason"] == "schema_changed":
             text = (
                 "The policy baseline was approved under an older schema. Its content is "
@@ -4961,12 +4964,14 @@ def dispatch_run_decision(
     execution_mode: str | None = None,
     engine: str | None = None,
     delegation_chain: Sequence[str] = (),
+    role: str | None = None,
 ) -> AutonomyDecision:
     """The dispatch gate. ADR 0059 D3 (V7, B22): with the proposing chat's
     ``delegation_chain`` it consults the chain first — a dispatch the
     delegator could never make (its role denies the workspace write) is
     refused at proposal time with the reason, never carded only to 403 on
-    confirm."""
+    confirm. P3-6 (B22 residue): so is a worker ``role`` that may not write
+    the workspace — the same refusal ``_within_delegation`` gives on confirm."""
     decision = _dispatch_run_decision(
         holder,
         store,
@@ -4981,10 +4986,11 @@ def dispatch_run_decision(
         execution_mode=execution_mode,
         engine=engine,
     )
-    if not delegation_chain or decision.verdict == "deny" or is_git_url(repo):
+    if (not delegation_chain and not role) or decision.verdict == "deny" or is_git_url(repo):
         return decision
     try:
         chain = parse_delegation_chain(delegation_chain, holder.current.home)
+        worker_role = resolve_role(role, holder.current.home) if role else None
         resolved = resolve_repo_arg(repo, repos_root(holder), store)
         write = resolve_run_policy(
             store=store,
@@ -5004,7 +5010,7 @@ def dispatch_run_decision(
         ).permissions.write
     except (ValueError, HTTPException, PolicyResolutionError):
         return decision  # the dispatch itself answers with the honest error
-    refusal = _delegated_write_refusal(holder, store, resolved, chain, write)
+    refusal = _delegated_write_refusal(holder, store, resolved, chain, write, role=worker_role)
     if refusal is None:
         return decision
     return AutonomyDecision(

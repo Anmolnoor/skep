@@ -58,7 +58,7 @@ def test_batch_cards_then_confirm_dispatches_all_in_parallel(
     repo: Path, tmp_path: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
     repo_two = _second_repo(tmp_path)
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     tasks = [
         {
             "repo": str(repo),
@@ -106,7 +106,7 @@ def test_batch_auto_resolves_only_when_every_member_matches(
     repo: Path, tmp_path: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
     repo_two = _second_repo(tmp_path)  # stays unbound → gates the batch
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     created = client.post(
         "/api/projects",
         json={
@@ -142,7 +142,7 @@ def test_batch_auto_resolves_only_when_every_member_matches(
     assert "task 2/2" in actions[0]["decision"]["detail"]
 
     # All-trusted → no card, both dispatch inside the turn.
-    chat_two = client.post("/api/chats", json={}).json()["chat_id"]
+    chat_two = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
     ollama.script_tool_call(
         "batch_dispatch",
         {
@@ -292,7 +292,7 @@ def test_an_explicit_member_engine_cards_the_whole_batch(
 ) -> None:
     """v95-F3's rule survives the batch: an explicit engine is an explicit run
     override, so it cards even where the project auto-dispatches (I6/I7)."""
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     created = client.post(
         "/api/projects",
         json={
@@ -332,7 +332,7 @@ def test_batch_members_get_separate_audit_trails(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
     """Per-task task.json in the audit dir — the batch never merges evidence."""
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call(
         "batch_dispatch",
         {

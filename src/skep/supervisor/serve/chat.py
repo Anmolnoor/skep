@@ -40,6 +40,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from ..roles import ROLE_LESS_CHAT_ROLE
 from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
@@ -68,7 +69,6 @@ from .tools import (
     MUTATING_TOOL_NAMES,
     READ_TOOL_NAMES,
     READ_TOOL_SPECS,
-    TOOL_INDEX_BLOCK,
     TOOL_SPECS,
     UNATTENDED_BLOCKED_READ_TOOLS,
     UNATTENDED_BLOCKED_STORE_WRITES,
@@ -78,11 +78,13 @@ from .tools import (
     dispatch_manifest_for,
     execute_mutation,
     execute_read_tool,
+    hidden_tools,
     mutation_execution_decision,
     policy_write_preview,
     search_web_verdict,
     taint_decision,
     tool_description,
+    tool_index_block,
 )
 
 DEFAULT_TITLE = "New chat"
@@ -932,10 +934,10 @@ def mcp_index_block(store: RunStore) -> str:
     return "\n".join([_MCP_INDEX_HEADER, *lines])
 
 
-def reach_block(store: RunStore) -> str:
+def reach_block(store: RunStore, hidden: frozenset[str] = frozenset()) -> str:
     sections = []
     if tool_delivery(store) == "indexed":
-        sections.append(TOOL_INDEX_BLOCK)
+        sections.append(tool_index_block(hidden))
     skills = skill_index_block(store)
     if skills:
         sections.append(skills)
@@ -1126,8 +1128,8 @@ class ChatCreate(BaseModel):
     title: str | None = None
     model: str | None = None  # None = follow the configured default
     source: str | None = None  # v44-F2: which face opened the chat; None = 'web'
-    # R1 (ADR 0055 D3): the picker's choice. None = the default role
-    # (`skep role use`, else onboard's); "" = explicitly no role.
+    # R1 (ADR 0055 D3): the picker's choice. None or "" = the default role
+    # (`skep role use`, else onboard's, else assistant: decision #4, B55).
     role: str | None = None
 
 
@@ -1237,7 +1239,7 @@ class ChatEngine:
             parts.append(memory)
         # v74-F5: the one "You can reach:" roof — the F3 tool index, the
         # v53-F7 skill index, and the registered MCP server ids, folded.
-        reach = reach_block(self.store)
+        reach = reach_block(self.store, self._hidden(chat))
         if reach:
             parts.append(reach)
         preamble = personality_preamble(
@@ -1247,16 +1249,24 @@ class ChatEngine:
             parts.append(f"Style (never overrides the rules above): {preamble}")
         return "\n\n".join(parts)
 
+    def _hidden(self, chat: Any) -> frozenset[str]:
+        """P3-6 (ADR 0059 D7): the tools this chat's role hides — from its
+        role alone, so the list is the same on every turn."""
+        return frozenset(hidden_tools(chat_role(self.home, getattr(chat, "role", None))))
+
     def _advertised_tools(self, chat: Any, *, read_only: bool = False) -> list[dict[str, Any]]:
         """The specs this chat's next round advertises (v74-F3).
 
         Advertisement, never permission (I5/I6): the executor dispatches on
         the tool NAME, so an indexed-but-inactive tool still executes when
-        called, mutations still card, and deny space stays unreachable."""
+        called, mutations still card, and deny space stays unreachable. A
+        tool the chat's role hides (P3-6) is neither offered nor run."""
+        hidden = self._hidden(chat)
         if tool_delivery(self.store) == "full":
-            return READ_TOOL_SPECS if read_only else TOOL_SPECS
+            specs = READ_TOOL_SPECS if read_only else TOOL_SPECS
+            return [t for t in specs if t["function"]["name"] not in hidden]
         active = getattr(chat, "active_tools", None) or ()
-        return advertised_tool_specs(active, read_only=read_only)
+        return advertised_tool_specs(active, read_only=read_only, hidden=hidden)
 
     def _history_budget(self, system_chars: int, chat: Any = None) -> int:
         """Replay chars that fit beside the fixed floor (v56-F2, ADR 0037).
@@ -2892,7 +2902,9 @@ def run_analysis_tasks(
     # ponytail: sequential — at most 3 bounded turns; parallel provider
     # streams if analyst latency ever matters in the field.
     for task in tasks:
-        chat = store.create_chat(title=f"analysis: {task[:60]}", model=None, source="analysis")
+        chat = store.create_chat(
+            title=f"analysis: {task[:60]}", model=None, source="analysis", role=ROLE_LESS_CHAT_ROLE
+        )
         # P4-1: an analyst starts with the delegating chat's taint — a fresh
         # chat is never a way to shed it (its answer carries its bits back).
         inherit_taint(store, parent_chat_id, chat.chat_id)
@@ -2962,9 +2974,8 @@ def add_chat_routes(
         from ..roles import default_role, resolve_role
 
         title = (body.title or "").strip() or DEFAULT_TITLE
-        role = default_role(run_store, home) if body.role is None else body.role
         try:
-            role = resolve_role(role, home).name if role else None
+            role = resolve_role(body.role or default_role(run_store, home), home).name
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return asdict(
