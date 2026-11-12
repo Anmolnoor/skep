@@ -264,7 +264,11 @@ def test_the_queen_rest_cli_and_hook_give_one_verdict_and_one_label(
         for _probe, template in FILE_PROBES:
             path = template.format(**fmt)
             queen = queen_filesystem_decision(
-                store, holder, action="read", path=path, role=role and SHIPPED_ROLES[role]
+                store,
+                holder,
+                action="read",
+                path=path,
+                role=None if role is None else SHIPPED_ROLES[role],
             )
             if queen.reason == "filesystem.deny.no_such_path":
                 continue
@@ -284,7 +288,7 @@ def test_the_queen_rest_cli_and_hook_give_one_verdict_and_one_label(
                 holder,
                 command=command,
                 cwd=fmt["outside"],
-                role=role and SHIPPED_ROLES[role],
+                role=None if role is None else SHIPPED_ROLES[role],
             )
             assert shell is not None
             rest = policy_decide(holder, store, scope="shell", action="run", value=command,
@@ -337,12 +341,14 @@ def test_b79_a_shell_card_names_the_rule_that_asked(grid: Callable[..., Any]) ->
 
     _paths, fmt, store, holder = grid("builder")
     asked = queen_shell_decision(store, holder, command="uv sync", cwd=fmt["outside"])
+    assert asked is not None
     assert verdict_why(asdict(asked)) == (
         "asked: rule shell-learnable in the template:builder layer"
         " — shell.require_approval.shell-learnable"
     )
     _paths, fmt, store, holder = grid("legacy")
     unmatched = queen_shell_decision(store, holder, command="uv sync", cwd=fmt["outside"])
+    assert unmatched is not None
     assert verdict_why(asdict(unmatched)) == "asked: no policy rule covers this, so it asks"
 
 
