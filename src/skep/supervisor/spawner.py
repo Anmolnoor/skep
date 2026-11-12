@@ -83,6 +83,18 @@ def build_worker_env(
     return env
 
 
+# B144: git inside a worker may use only its local ``file`` transport. The
+# git floor reads command lines, so a script's own ``subprocess.run(['git',
+# 'push'])`` slipped past it; this env reaches every git the worker tree
+# starts (engines, scripts, grandchildren via the capability passthrough) and
+# outranks ``-c protocol.*.allow``. https, ssh, git:// and ext:: all fail with
+# "transport not allowed"; worktree, commit, diff and local clones still work.
+# Supervisor-side pushes (open_pr, push) never run in this env.
+# ponytail: env, so a script that rebuilds its env from scratch drops it; the
+# sandbox's network policy is the wall, this closes the inherited-env path.
+WORKER_GIT_ENV = {"GIT_ALLOW_PROTOCOL": "file"}
+
+
 _LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
 
 
@@ -227,6 +239,7 @@ def spawn_worker(
         env.update(extra_env)
     if proxy_port is not None:
         env.update(_proxy_env(proxy_port, loopback_direct=not own_netns))
+    env.update(WORKER_GIT_ENV)  # last: nothing above may loosen it
     log_handle = log_path.open("ab")
     try:
         return subprocess.Popen(

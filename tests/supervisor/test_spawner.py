@@ -303,3 +303,77 @@ def test_proxy_env_keeps_loopback_direct_only_where_the_sandbox_shares_the_host_
     bridged = _proxy_env(8080, loopback_direct=False)
     assert "NO_PROXY" not in bridged and "no_proxy" not in bridged
     assert bridged["HTTP_PROXY"] == bridged["https_proxy"] == "http://127.0.0.1:8080"
+
+
+@pytest.mark.parametrize("worker_argv", [None, ("claude-adapter",)])
+def test_no_git_a_worker_starts_can_reach_a_remote(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_argv: tuple[str, ...] | None,
+) -> None:
+    """B144: the git floor reads only the command line, so an approved
+    script's own ``subprocess.run(['git', 'push'])`` reached the remote. The
+    worker env now allows git only its local ``file`` transport — for the
+    worker, an external engine, and every grandchild the capability layer
+    starts — and local git keeps working."""
+    from skep.supervisor import spawner as supervisor_spawner
+    from skep.workers import capabilities
+
+    captured: dict[str, object] = {}
+    config = SupervisorConfig(home=tmp_path / "home", worker_command=("w",), sandbox=False)
+    task = mint_task(workspace=repo, instructions="x", budget=DEFAULT_BUDGET)
+    with monkeypatch.context() as m:
+        m.setattr(
+            subprocess,
+            "Popen",
+            lambda *a, **kw: captured.update(kw) or type("P", (), {"pid": 1})(),
+        )
+        supervisor_spawner.spawn_worker(
+            config,
+            task,
+            tmp_path / "t.json",
+            tmp_path / "o.json",
+            log_path=tmp_path / "w.log",
+            worker_argv=worker_argv,
+        )
+    worker_env = captured["env"]
+    assert isinstance(worker_env, dict)
+    assert worker_env["GIT_ALLOW_PROTOCOL"] == "file"
+    # A grandchild: env rebuilt by the real capability boundary, inside the worker.
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", dict(worker_env))
+        child_env = capabilities._child_process_env(
+            env_allowlist=[], env_baseline=("PATH", "HOME"), network_allowlist=()
+        )
+    assert child_env["GIT_ALLOW_PROTOCOL"] == "file"
+
+    script = (
+        "import subprocess, sys\n"
+        "for argv in (['push', sys.argv[1], 'HEAD:main'], ['fetch', sys.argv[1]]):\n"
+        "    print(subprocess.run(['git', *argv], capture_output=True, text=True).stderr)\n"
+    )
+    for url in (
+        "https://example.invalid/x.git",
+        "ssh://git@example.invalid/x",
+        "git@example.invalid:x",
+        "git://example.invalid/x",
+    ):
+        out = subprocess.run(
+            [sys.executable, "-c", script, url],
+            cwd=repo,
+            env=child_env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert out.count("not allowed") == 2, (url, out)
+    # Local git is untouched: status, a commit, a clone of a local path.
+    local = subprocess.run(
+        ["git", "clone", "-q", str(repo), str(tmp_path / "clone")],
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert local.returncode == 0, local.stderr

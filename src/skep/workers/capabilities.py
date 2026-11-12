@@ -55,6 +55,7 @@ class _EmitStream:
 # class — dropped here, a grandchild fell back to /tmp (which a nested bwrap
 # tmpfs-masks, v107-F3) and to the read-only ``~/.cache/uv``.
 _CHILD_ENV_PASSTHROUGH: tuple[str, ...] = (
+    "GIT_ALLOW_PROTOCOL",  # B144: the spawner's no-remote git, to every grandchild
     "SKEP_HOME",
     "npm_config_cache",
     "TMPDIR",
