@@ -131,9 +131,9 @@ What that policy answers:
 |---|---|
 | `git status`, `ls`, `pnpm test` | allow (`shell:<command>`) |
 | a write inside the repo | allow (`fs: workspace`) |
-| `rm -rf build` (unlisted) | default-deny → forwarded: the human in T3 decides |
-| `ls -la; rm -rf build` | default-deny → forwarded: a chained line is decided one command at a time, and `rm` is unlisted |
-| `ls $(cat names)`, `sh -c '…'` | default-deny → forwarded: text a prefix matcher cannot read matches nothing |
+| `rm -rf build` (unlisted) | unmatched (ask) → forwarded: the human in T3 decides |
+| `ls -la; rm -rf build` | unmatched (ask) → forwarded: a chained line is decided one command at a time, and `rm` is unlisted |
+| `ls $(cat names)`, `sh -c '…'` | unmatched (ask) → forwarded: text a prefix matcher cannot read matches nothing |
 | `git push` | floor deny, before the client sees it |
 
 A repo's run policy compiles **allow lists only** (`allowed_shell_commands`,
@@ -168,12 +168,12 @@ Rows of the kinds a live session produces (trimmed):
 {"actor": "acp:codex-acp", "scope": "shell", "action": "run", "value": "git status",
  "source": "observed", "agent": "codex-acp"}
 {"actor": "acp:claude-agent-acp", "scope": "filesystem", "action": "write", "value": "workspace",
- "source": "run", "verdict": "allow", "decided_by": "trusted_local_dev/fs:workspace"}
+ "source": "run", "verdict": "allow", "decided_by": "dispatch/fs:workspace"}
 {"actor": "acp:codex-acp", "scope": "shell", "action": "run", "value": "rm -rf build",
- "source": "run", "verdict": "deny", "rule_id": "default-deny",
- "decided_by": "trusted_local_dev/default-deny"}
+ "source": "run", "verdict": "require_approval", "rule_id": "unmatched",
+ "decided_by": "default/unmatched"}
 {"actor": "human@<client>", "scope": "shell", "action": "run", "value": "rm -rf build",
- "source": "forwarded", "agent": "codex-acp", "outcome": "allow_once", "note": "default-deny"}
+ "source": "forwarded", "agent": "codex-acp", "outcome": "allow_once", "note": "unmatched"}
 {"actor": "acp:codex-acp", "scope": "shell", "action": "run", "value": "git push",
  "source": "floor", "verdict": "deny", "rule_id": "floor.worker-git-hard-denies"}
 ```

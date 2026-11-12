@@ -76,7 +76,11 @@ def test_decide_answers_from_the_run_policy_in_a_repo_and_the_operator_otherwise
     assert allowed["verdict"] == "allow" and allowed["rule_id"] == "shell:uv sync"
     assert allowed["source"] == "run" and allowed["project"]["project_id"] == "app"
     assert allowed["actor"] == "t" and allowed["at"].endswith("Z")
-    assert unlisted["verdict"] == "deny" and unlisted["rule_id"] == "default-deny"
+    # ADR 0059 B77: no rule matched is an ask on every face, as the Queen cards.
+    assert (unlisted["verdict"], unlisted["decided_by"]) == (
+        "require_approval",
+        "default/unmatched",
+    )
     assert inside["verdict"] == "allow" and inside["rule_id"] == "fs:workspace"
     # The Queen-side lanes answer from the operator document even in a repo.
     assert search_in_repo["source"] == "operator" and search_in_repo["rule_id"] == "net:search"
@@ -178,17 +182,13 @@ def test_hook_output_maps_verdicts_and_never_fails_open() -> None:
         ]
         == "ask"
     )
-    assert (
-        out(
-            {
-                "verdict": "deny",
-                "rule_id": "default-deny",
-                "decided_by": "t/default-deny",
-                "source": "run",
-            }
-        )[0]
-        == "ask"
-    )
+    unmatched = {"verdict": "require_approval", "rule_id": "unmatched", "layer": "default"}
+    decision, reason = out({**unmatched, "decided_by": "default/unmatched", "source": "run"})
+    assert decision == "ask" and reason.endswith("no rule matches, so a human answers")
+    # ADR 0059 P3-1: decide() names unmatched itself; a deny is a deny.
+    deny = {"verdict": "deny", "rule_id": "default-deny", "decided_by": "t/default-deny"}
+    assert out({**deny, "source": "run"})[0] == "deny"
+    assert out({"verdict": "maybe", "source": "run"})[0] == "ask"  # never a silent allow
     decision, reason = out(None, error="store is gone")
     assert decision == "ask" and reason == "skep could not decide: store is gone"
 

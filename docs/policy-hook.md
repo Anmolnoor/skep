@@ -87,10 +87,10 @@ rule; a hook that denied every read would be inventing policy.
 | `deny` by the floor (`git push`, `sudo …`, `rm -rf /`) | `deny` — Claude Code refuses the call and names the floor key |
 | `deny` by an explicit deny rule | `deny` — Claude Code refuses the call and shows the rule |
 | `require_approval` | `ask` — Claude Code asks the human |
-| unmatched (`default-deny`) | `ask` — the shape skep gives its own workers: an unlisted command cards, an explicit deny refuses |
+| no rule matched (`default/unmatched`, ADR 0059) | `ask` — a human answers what nobody wrote a rule for, as the Queen's own card does; an explicit deny refuses |
 | skep could not decide (bad home, broken store) | `ask`, with the error as the reason — towards the human, never a silent allow |
 | the approved baseline no longer matches its lock (`baseline_tampered`, first-run O2) | `ask` — every call, until `skep policy approve --reapprove`; the floor still denies first, and `skep acp govern`'s hard ring answers `deny` |
 | a fresh home with no baseline approved yet (`no_baseline`, first-run O5) | `ask` — every call in an engine-v2 scope, until `skep onboard` or `skep policy approve --template NAME`; the floor still denies first. A home from before 1.2.1 keeps deciding by rule |
 
-The reason string names the rule (`skep: allow by trusted_local_dev/shell:uv
+The reason string names the rule (`skep: allow by project:app/shell:uv
 run pytest (run policy)`), so `skep policy why` explains any surprise.

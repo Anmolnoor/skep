@@ -124,7 +124,7 @@ def test_rsop_attributes_compiled_rules_and_operator_rules_to_their_sources(
     assert operator["net:search"]["source"] == "operator_policy_document"
 
 
-def test_why_answers_with_the_rule_that_decided_or_the_default_deny(
+def test_why_answers_with_the_rule_that_decided_or_unmatched(
     repo: Path, config: SupervisorConfig
 ) -> None:
     _seed(config, repo)
@@ -143,8 +143,8 @@ def test_why_answers_with_the_rule_that_decided_or_the_default_deny(
     assert allowed["run"]["rule_id"] == "shell:uv sync"
     assert allowed["run"]["decided_by"].endswith("/shell:uv sync")
     assert [rule["rule_id"] for rule in allowed["run"]["considered"]] == ["shell:uv sync"]
-    assert denied["run"]["verdict"] == "deny"
-    assert denied["run"]["rule_id"] == "default-deny"
+    assert denied["run"]["verdict"] == "require_approval"  # ADR 0059 B77
+    assert denied["run"]["decided_by"] == "default/unmatched"
     # F1 (I4): the floor answers before any document, for the run AND the
     # Queen, naming the registry's floor key; a compound line does not hide it.
     assert floored["run"]["rule_id"] == "floor.worker-git-hard-denies"

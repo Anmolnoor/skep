@@ -68,6 +68,16 @@ SCOPE_ACTIONS: dict[str, frozenset[str]] = {
     "browse": frozenset({"read", "act"}),
 }
 
+# ADR 0059 D1 (policy_v3.SCOPE_ACTIONS): every (scope, action) with what "no
+# rule matched" means on the decide faces. Ask everywhere — a human answers
+# what nobody wrote a rule for — except a shell in a repo cwd: that is a
+# file-write pen with no patch card (v83-F9).
+UNMATCHED_VERDICT: dict[tuple[str, str], Verdict] = {
+    (scope, action): "deny" if (scope, action) == ("shell", "run_repo") else "require_approval"
+    for scope, actions in SCOPE_ACTIONS.items()
+    for action in actions
+}
+
 # The settings key holding the global PolicyDocument (JSON-in-settings, the
 # house storage pattern — no new table).
 POLICY_DOCUMENT_SETTINGS_KEY = "policy_document"
@@ -188,6 +198,9 @@ class PolicyDecision:
 
 
 DEFAULT_DENY_RULE_ID = "default-deny"
+# ADR 0059 D1: what policy_v3 names "no rule matched" (``default/unmatched``);
+# its verdict is the scope action's own (policy_v3.SCOPE_ACTIONS).
+UNMATCHED_RULE_ID = "unmatched"
 
 
 def _require_scope_action(scope: str, action: str) -> None:

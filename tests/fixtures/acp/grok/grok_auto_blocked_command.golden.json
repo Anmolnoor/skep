@@ -25,9 +25,10 @@
         "phase": "build"
       },
       "source": "run",
-      "verdict": "deny",
-      "rule_id": "default-deny",
-      "decided_by": "trusted_local_dev/default-deny"
+      "verdict": "require_approval",
+      "rule_id": "unmatched",
+      "decided_by": "default/unmatched",
+      "layer": "default"
     },
     {
       "actor": "human@client",
@@ -41,7 +42,7 @@
       "tool_call_id": "call-a578f4fc-2b4d-4e69-a435-4bc42ace7377-1",
       "request_id": 9099,
       "outcome": "allow_once",
-      "note": "default-deny"
+      "note": "unmatched"
     }
   ]
 }

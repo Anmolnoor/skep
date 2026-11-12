@@ -64,8 +64,8 @@ MATRIX: dict[tuple[str, str, str], dict[str, str]] = {
         "operator": "A A A Q",
         "assistant": "Qx Qx Qx Q",
     },
-    ("email", "read", "inbox"): {  # the baseline denies it: no chain changes that
-        role: "D D D D" for role in ROLES
+    ("email", "read", "inbox"): {  # no run-policy rule: unmatched asks (ADR 0059 B77)
+        role: "Q Q Q Q" for role in ROLES
     },
     ("shell", "run", "git push"): {role: "D D D D" for role in ROLES},  # the floor
 }
@@ -542,18 +542,18 @@ def test_a_queen_whose_role_vanished_dispatches_nothing(
 def test_a_delegator_face_that_does_not_resolve_holds_nothing(
     config: SupervisorConfig, repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """T3-3 (#7, unrun before): a tampered baseline fails the run face closed
-    with an error — the delegator's own run face has no verdict, so it holds
-    nothing there and the delegatee's face keeps its error rather than being
-    "tightened" against a verdict that does not exist. The operator face
-    still resolves and still carries the chain."""
+    """T3-3 (#7): a tampered baseline fails both faces closed. ADR 0059
+    P3-1: the run face answers what decide() does with this repo —
+    ``baseline_tampered`` — where it used to show the resolver's error, so the
+    delegator's own run face holds that ask too. A run face that resolves to
+    nothing for any other reason still holds nothing (the next test)."""
     from .test_policy_baseline import _tamper
 
     _tamper(config.home)
     why = ["--home", str(config.home.parent), "policy", "why", str(repo)]
     assert main([*why, "shell", "run", "git status", "--delegated-by", "queen@builder"]) == 0
     view = json.loads(capsys.readouterr().out)
-    assert view["run"]["error"].startswith("baseline_tampered:")
-    assert view["delegation"]["held"]["run"] is None
+    assert view["run"]["rule_id"] == "baseline_tampered"
+    assert view["delegation"]["held"]["run"]["verdict"] == "require_approval"
     assert view["delegation"]["held"]["operator"]["verdict"] == "require_approval"
     assert view["operator"]["rule_id"] == "baseline_tampered"

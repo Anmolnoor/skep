@@ -46,6 +46,7 @@ from .policy_engine import Layer, resolve_stack
 from .policy_schema import (
     _VERDICT_RANK,
     DEFAULT_DENY_RULE_ID,
+    UNMATCHED_RULE_ID,
     PolicyDecision,
     decide,
     shell_segments,
@@ -246,9 +247,13 @@ def tighten(
     """The stricter of ``verdict`` (``verdict``/``rule_id``/``decided_by``)
     and the role layer's own answer. When the role decided, ``decided_by``
     names its layer — ``role:operator/shell-gated`` — which is how every
-    ``why`` names it."""
+    ``why`` names it. ADR 0059 D2: against an unmatched verdict a role rule
+    as strict wins the tie — the role said something, nobody else did."""
     hit = None if role is None else role_decision(role, scope, action, value)
-    if hit is None or _VERDICT_RANK[hit.verdict] <= _VERDICT_RANK[str(verdict["verdict"])]:
+    if hit is None:
+        return verdict
+    rank, held = _VERDICT_RANK[hit.verdict], _VERDICT_RANK[str(verdict["verdict"])]
+    if rank < held or (rank == held and verdict.get("rule_id") != UNMATCHED_RULE_ID):
         return verdict
     return {**verdict, "verdict": hit.verdict, "rule_id": hit.rule_id, "decided_by": hit.decided_by}
 

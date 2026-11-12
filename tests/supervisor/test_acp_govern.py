@@ -36,7 +36,7 @@ GOLDEN_FIXTURES = sorted(
 def _demo_home(tmp_path: Path, *, fresh: bool = False) -> tuple[Path, Path]:
     """The B3 demo policy, as far as a repo's run policy can say it: allow
     `git status`, `ls`, `pnpm test` and `fs: workspace`; everything else is
-    unmatched (default-deny -> forward); the floor denies `git push`. The run
+    unmatched (ask -> forward); the floor denies `git push`. The run
     policy compiles allows only, so explicit deny / require_approval live on
     the operator lanes (`network.fetch`), which decide even with a repo.
     A home that predates O5 unless ``fresh`` (then the zero state binds)."""
@@ -256,8 +256,8 @@ def test_the_forwarded_row_names_the_asking_item_and_a_client_error(tmp_path: Pa
         open_governor(home, ["fx"]), repo, [_ask(5, two, SEND), _frame("c2a", id=5, error=broke)]
     )
     *decided, forwarded = _ledger(home)
-    assert [r["verdict"] for r in decided] == ["allow", "deny"]
-    assert forwarded["value"] == "/etc/x" and forwarded["note"] == "default-deny"
+    assert [r["verdict"] for r in decided] == ["allow", "require_approval"]
+    assert forwarded["value"] == "/etc/x" and forwarded["note"] == "unmatched"
     assert forwarded["outcome"] == "error"
 
 

@@ -25,9 +25,10 @@
         "phase": "build"
       },
       "source": "run",
-      "verdict": "deny",
-      "rule_id": "default-deny",
-      "decided_by": "trusted_local_dev/default-deny"
+      "verdict": "require_approval",
+      "rule_id": "unmatched",
+      "decided_by": "default/unmatched",
+      "layer": "default"
     },
     {
       "actor": "human@skep-acp-tap",
@@ -41,7 +42,7 @@
       "tool_call_id": "exec-6769909f-ebf3-4a89-a4ad-9fe4a95ebc4c",
       "request_id": 0,
       "outcome": "allow_once",
-      "note": "default-deny"
+      "note": "unmatched"
     }
   ]
 }
