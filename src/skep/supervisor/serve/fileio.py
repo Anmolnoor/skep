@@ -1,12 +1,14 @@
 """Queen-side governed file reads (v51-F2, ADR 0023).
 
 The Queen is an operator-trust process — the OS sandbox is for workers. What
-governs Queen file access is the policy engine: explicit ``filesystem``-scope
-rules in the stored policy document win (a deny is a hard deny — no card),
-and an unmatched path falls back to the operator roots — the skep home, the
-registered-repos root, and every workon-bound project path. Inside a root a
-read executes in the turn; outside, the call becomes a confirmation card
-naming the exact resolved path (the ``call_mcp_tool`` precedent, v40-F10).
+governs Queen file access is ``policy_v3.decide()`` (ADR 0059 P3-2), the
+same decision REST and the CLI give with no repo: the secret floor first,
+then explicit ``filesystem`` rules (a deny is a hard deny — no card), then
+the operator roots — the skep home, the registered-repos root, and every
+workon-bound project path — as generated ``global/operator-root`` allows.
+Inside a root a read executes in the turn; outside, the call becomes a
+confirmation card naming the exact resolved path (the ``call_mcp_tool``
+precedent, v40-F10).
 
 Writes intentionally do not exist here: no observed demand, and a Queen
 writing into a repo's working tree needs a dirty-worktree design answer
@@ -20,9 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from ..autonomy import AutonomyDecision
-from ..policy_resolver import resolve_operator_policy
-from ..policy_schema import DEFAULT_DENY_RULE_ID
-from ..roles import Role, tighten_autonomy
+from ..policy_v3 import OPERATOR_ROOT, Request, floor_verdict, queen_decide
+from ..roles import Role
 from ..secret_floor import secret_floor_reason
 from ..store import RunStore
 from .registry import repos_root
@@ -60,20 +61,12 @@ def queen_filesystem_decision(
     path: str,
     role: Role | None = None,
 ) -> AutonomyDecision:
-    """R1 (ADR 0055 D3): the chat's role layer tightens the lane below."""
-    lane = _queen_filesystem_lane(store, holder, action=action, path=path)
-    return tighten_autonomy(lane, role, "filesystem", action, lane.detail or path) or lane
-
-
-def _queen_filesystem_lane(
-    store: RunStore, holder: ConfigHolder, *, action: str, path: str
-) -> AutonomyDecision:
-    """Decide one Queen-side filesystem access against the filesystem scope.
+    """One Queen-side filesystem access, decided by ``policy_v3.decide()`` as
+    ``filesystem.<action>`` with the chat's role (ADR 0059 P3-2).
 
     Path resolution happens BEFORE the decision (symlinks cannot smuggle a
-    read out of a root), explicit scope rules win, and the unmatched
-    fallback is: operator roots allow, everything else cards.
-    """
+    read out of a root); the secret floor judges the requested path and its
+    realpath before any document is read (ES-F1)."""
     if not path.strip():
         return AutonomyDecision(verdict="deny", reason="filesystem.deny.missing_path", detail=path)
     try:
@@ -82,52 +75,37 @@ def _queen_filesystem_lane(
         return AutonomyDecision(
             verdict="deny", reason="filesystem.deny.unresolvable_path", detail=f"{path}: {exc}"
         )
-    # ES-F1 (V3): the secret floor sits above every layer, grant and card —
-    # judged on the requested path and its realpath, before any rule is read.
-    secret = secret_floor_reason(path, skep_home=holder.current.home)
-    if secret is not None:
+    floor = floor_verdict("filesystem", path, action=action, home=holder.current.home)
+    if floor is not None:
         return AutonomyDecision(
             verdict="deny",
             reason="filesystem.deny.secret_floor",
-            detail=secret,
-            decided_by="floor/floor.secret-reads",
+            detail=floor["reason"],
+            decided_by=floor["decided_by"],
         )
-    # v52-F3: the standing operator policy decides — the global document's
-    # rules keep their effect, composed with the Queen-only operator overlay.
-    policy = resolve_operator_policy(store)
-    decision = policy.decision("filesystem", action, str(target))
-    if decision.rule_id != DEFAULT_DENY_RULE_ID:
-        return AutonomyDecision(
-            verdict=decision.verdict,
-            reason=f"filesystem.{decision.verdict}.scope_rule",
-            detail=str(target),
-            decided_by=decision.decided_by,
-        )
-    label = policy.template or "policy"
-    for root in operator_roots(store, holder):
-        if target == root or root in target.parents:
-            return AutonomyDecision(
-                verdict="allow",
-                reason="filesystem.allow.operator_root",
-                detail=str(target),
-                decided_by=f"{label}/operator-root",
-            )
-    # v59-F9: a nonexistent path outside the roots gets no card — the card
-    # protects reading a real file, and a probe of an invented path (field
-    # test 2026-07-18: ~15 SKEP_HOME/… cards, some auto-denied minutes later)
-    # interrupts the operator while protecting nothing. Fail fast instead.
-    if not target.exists():
+    verdict = queen_decide(holder, store, Request("filesystem", action, str(target)), role=role)
+    unmatched = verdict.layer == "default" or verdict.layer.startswith("role:")
+    if verdict.verdict == "require_approval" and unmatched and not target.exists():
+        # v59-F9: a nonexistent path no rule covers gets no card — the card
+        # protects reading a real file, and a probe of an invented path (field
+        # test 2026-07-18: ~15 SKEP_HOME/… cards) interrupts the operator while
+        # protecting nothing. A validity check, so it sits outside decide().
         return AutonomyDecision(
             verdict="deny",
             reason="filesystem.deny.no_such_path",
             detail=str(target),
-            decided_by=f"{label}/no-such-path",
+            decided_by="default/no-such-path",
         )
+    if verdict.rule_id == OPERATOR_ROOT:
+        reason = "filesystem.allow.operator_root"
+    elif verdict.layer == "default":
+        reason = "filesystem.require_approval.outside_operator_roots"
+    elif verdict.layer.startswith("role:"):
+        reason = f"filesystem.{verdict.verdict}.role_layer"
+    else:
+        reason = f"filesystem.{verdict.verdict}.scope_rule"
     return AutonomyDecision(
-        verdict="require_approval",
-        reason="filesystem.require_approval.outside_operator_roots",
-        detail=str(target),
-        decided_by=f"{label}/outside-operator-roots",
+        verdict=verdict.verdict, reason=reason, detail=str(target), decided_by=verdict.decided_by
     )
 
 

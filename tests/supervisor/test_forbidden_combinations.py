@@ -1,8 +1,12 @@
-"""ES-F6 (edge sweep §5.4, items 1 and 3): forbidden combinations, as a
-property over every shipped template, role and engine.
+"""ES-F6 (edge sweep §5.4, items 1, 3 and 6): forbidden combinations, as a
+property over every shipped template, role, engine and learned-grant tier.
 
 1. No reachable verdict allows reading a secret-floor path.
-3. No Queen host-lane rule lets a package install run without a card.
+3. No Queen host-lane rule lets a package install or a networked command
+   run without a card — a grant (P3-2: it answers a role's catch-all ask)
+   covers only the exact line a human approved.
+6. A learned rule that lands inside a deny at any layer is ignored at decide
+   time (and named in the decision log), never honoured and never raised.
 
 Each template reaches a home two ways at once — the global document
 `skep setup --template` stores and the approved baseline — the widest
@@ -12,7 +16,9 @@ purpose, so the same file fails against the tree before ES-F1/ES-F3.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -30,6 +36,16 @@ from .conftest import predating_home
 
 ROLES = (None, *SHIPPED_ROLES)
 ENGINES = {"v1": [], "v2": list(SCOPES)}
+GRANTS = ("none", "session", "always")
+GRANTED_INSTALL = "npm install left-pad@1.3.0"  # the one install a human approved
+NETWORKED = (
+    "curl https://x.example",
+    "wget https://x.example",
+    "ssh host.example",
+    "scp a.txt host.example:b",
+    "nc host.example 80",
+    "rsync -a . host.example:x",
+)
 HOME_SECRETS = (
     ".ssh/id_rsa",
     ".aws/credentials",
@@ -62,14 +78,22 @@ INSTALLS = (
 )
 
 
-@pytest.fixture(params=[(t, e) for t in TEMPLATE_NAMES for e in ENGINES], ids=lambda p: "-".join(p))
+def _doc(store: RunStore) -> dict[str, Any]:
+    raw = store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)
+    return json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+
+
+@pytest.fixture(
+    params=[(t, e, g) for t in TEMPLATE_NAMES for e in ENGINES for g in GRANTS],
+    ids=lambda p: "-".join(p),
+)
 def stack(
     request: pytest.FixtureRequest,
     config: SupervisorConfig,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[RunStore, ConfigHolder, list[str]]:
-    template_name, engine = request.param
+    template_name, engine, grant = request.param
     home = tmp_path / "fakehome"
     secrets = [home / rel for rel in HOME_SECRETS]
     project = tmp_path / "project"  # a workon-bound path: an operator root
@@ -90,6 +114,20 @@ def stack(
         project_id="p", name="p", strategy="trusted_local_dev", phase="build", policy={}
     )
     store.add_project_binding(project_id="p", binding_kind="repo_path", binding_value=str(project))
+    if grant != "none":
+        from skep.supervisor.serve.actions import remember_action_for_session
+
+        assert remember_action_for_session(
+            store, tool="run_shell", args={"command": GRANTED_INSTALL}, actor="op", tier=grant
+        )
+        # A grant written before the floor existed, inside it: still a deny.
+        document = template.document().model_dump(mode="json")
+        document["learned"] = [
+            *(_doc(store).get("learned") or []),
+            {"rule_id": "fs:all", "scope": "filesystem", "action": "read", "pattern": "*",
+             "provenance": "allow-always:op"},
+        ]  # fmt: skip
+        store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, json.dumps(document))
     pb.write_lock(config.home, template, approved_by="op")
     paths = [str(path) for path in secrets] + [str(link), "~/.ssh/id_rsa"]
     request.addfinalizer(store.close)
@@ -121,7 +159,7 @@ def test_no_queen_host_rule_installs_a_package_without_a_card(
     stack: tuple[RunStore, ConfigHolder, list[str]], role: str | None, tmp_path: Path
 ) -> None:
     store, holder, _ = stack
-    for command in INSTALLS:
+    for command in (*INSTALLS, *NETWORKED):
         decision = queen_shell_decision(
             store,
             holder,
@@ -130,3 +168,49 @@ def test_no_queen_host_rule_installs_a_package_without_a_card(
             role=None if role is None else SHIPPED_ROLES[role],
         )
         assert decision is None or decision.verdict != "allow", (command, decision)
+
+
+NO_CURL = {"scope": "shell", "verdict": "deny", "action": "run", "pattern": "curl",
+           "rule_id": "no-curl"}  # fmt: skip
+
+
+@pytest.mark.parametrize("template_name", TEMPLATE_NAMES)
+@pytest.mark.parametrize("role", ROLES, ids=lambda r: r or "no-role")
+@pytest.mark.parametrize("tier", ["session", "always"])
+def test_a_learned_rule_inside_a_deny_is_ignored_never_honoured_never_raised(
+    config: SupervisorConfig, tmp_path: Path, template_name: str, role: str | None, tier: str
+) -> None:
+    """§5.4 #6 (B23): a grant stored before the baseline denied its command —
+    every lane still decides (no LearnedRuleRejected), the deny decides that
+    command, and the decision log names the ignored grant."""
+    from skep.supervisor.serve.actions import remember_action_for_session
+
+    store = RunStore(predating_home(config.db_path))
+    try:
+        assert remember_action_for_session(
+            store, tool="run_shell", args={"command": "curl https://x.example/y"}, actor="op",
+            tier=tier,
+        )  # fmt: skip
+        layer = load_policy_template(template_name).model_dump(mode="json")
+        layer["rules"] = [*layer["rules"], NO_CURL]
+        pb.write_lock(config.home, pb._load_layer(layer), approved_by="op")
+        holder = ConfigHolder(config, store)
+        chat_role = None if role is None else SHIPPED_ROLES[role]
+        curl = queen_shell_decision(
+            store, holder, command="curl https://x.example/y", cwd=str(tmp_path), role=chat_role
+        )
+        assert curl is not None
+        assert (curl.verdict, curl.decided_by) == ("deny", f"template:{template_name}/no-curl")
+        other = queen_shell_decision(store, holder, command="ls", cwd=str(tmp_path), role=chat_role)
+        assert other is not None and other.verdict != "allow"
+        read = queen_filesystem_decision(
+            store, holder, action="read", path=str(config.home), role=chat_role
+        )
+        assert read.verdict in ("allow", "require_approval")
+    finally:
+        store.close()
+    rows = (config.audit_dir / "policy" / "decisions.jsonl").read_text().splitlines()
+    assert (
+        "shell:run:curl https://x.example/y (deny/no-curl)"
+        in json.loads(rows[-1])["ignored_grants"]
+    )

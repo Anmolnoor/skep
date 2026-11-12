@@ -141,9 +141,8 @@ def test_a_baseline_shell_deny_still_binds_the_queen(
             "template:builder/ask-make-deploy",
         )
         # The worker allows still stay out of the host lane.
-        assert (
-            queen_shell_decision(store, holder, command="npm install x", cwd=str(tmp_path)) is None
-        )
+        npm = queen_shell_decision(store, holder, command="npm install x", cwd=str(tmp_path))
+        assert npm is not None and npm.verdict == "require_approval", npm
     finally:
         store.close()
 
@@ -167,6 +166,7 @@ def test_a_global_document_shell_deny_still_binds_the_queen(
             store, holder, command="wget https://example.com", cwd=str(tmp_path)
         )
         assert decision is not None and decision.verdict == "deny", decision
-        assert queen_shell_decision(store, holder, command="uv sync", cwd=str(tmp_path)) is None
+        uv = queen_shell_decision(store, holder, command="uv sync", cwd=str(tmp_path))
+        assert uv is not None and uv.verdict == "require_approval", uv
     finally:
         store.close()

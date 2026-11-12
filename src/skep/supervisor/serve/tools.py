@@ -2723,60 +2723,35 @@ def queen_shell_decision(
     background: bool = False,
     role: Role | None = None,
 ) -> AutonomyDecision | None:
-    """R1 (ADR 0055 D3): the chat's role layer tightens the lane below — a
-    role that asks for a command cards it even where a standing rule allows."""
-    lane = _queen_shell_lane(store, holder, command=command, cwd=cwd, background=background)
-    action = "run_background" if background else "run"
-    return tighten_autonomy(lane, role, "shell", action, command)
+    """The run_shell / start_process / stop_process lane, decided by
+    ``policy_v3.decide()`` with the chat's role (ADR 0059 P3-2) — the verdict
+    and ``decided_by`` REST and the CLI give for the same line with no repo.
 
+    The floor first, judged per segment (v109-F1): git push/pull/fetch/switch,
+    sudo and the catastrophic commands (v83-F9), and a line naming a credential
+    path (ES-F8, B73) — deny, ungrantable. A line that runs in or reaches a
+    registered repo is ``shell.run_repo``, which REFUSES unless a rule allows
+    it (a shell in a checkout is a file-write pen with no patch card — review
+    item 2). Elsewhere ``shell.run``: allow → in-turn, deny → refuse, ask →
+    the per-command card naming the rule that asked.
 
-def _queen_shell_lane(
-    store: RunStore,
-    holder: ConfigHolder,
-    *,
-    command: str,
-    cwd: str | None,
-    background: bool = False,
-) -> AutonomyDecision | None:
-    """v83-F9: the run_shell lane. Hard guards first (git/sudo — deny,
-    ungrantable); a repo cwd needs an explicit ``shell/run_repo`` allow and
-    otherwise REFUSES (a shell in a checkout is a file-write pen with no
-    patch card — review item 2); elsewhere ``shell/run``: allow → in-turn,
-    explicit deny → refuse, default → the per-command card.
-
-    v83-F8: ``background=True`` (start_process) decides on the
-    ``run_background`` action instead — a daemon is a different promise
-    than a 60s one-off, so a 'run' grant never covers it (review item 3);
-    repo cwds refuse flat (daemons do not belong in checkouts)."""
-    from ..policy_resolver import resolve_operator_policy
-    from ..policy_schema import DEFAULT_DENY_RULE_ID
-    from ..secret_floor import shell_secret_floor_reason
-    from ..shell_prefixes import queen_command_line_refusal
+    v83-F8: ``background=True`` (start_process) decides on ``run_background``
+    instead — a daemon is a different promise than a 60s one-off, so a 'run'
+    grant never covers it (review item 3); repo cwds refuse flat (daemons do
+    not belong in checkouts)."""
+    from ..policy_v3 import Request, floor_verdict, queen_decide
 
     if not command.strip():
         return None
-    # v109-F1: judged per segment — `cd <repo> && git checkout <branch>` ran
-    # from chat because argv[0] was `cd`. Malformed lines still fall to the
-    # card so the honest error surfaces on confirm.
-    reason = queen_command_line_refusal(command)
-    if reason is not None:
+    floor = floor_verdict("shell", command, home=holder.current.home, cwd=cwd)
+    if floor is not None:
+        secret = floor["rule_id"] == "floor.secret-reads"
         return AutonomyDecision(
             verdict="deny",
-            reason="shell.deny.queen_guard",
-            detail=reason,
-            decided_by="queen-shell-guard",
+            reason="shell.deny.secret_floor" if secret else "shell.deny.queen_guard",
+            detail=floor["reason"],
+            decided_by=floor["decided_by"],
         )
-    # ES-F8 (B73): the secret floor, like read_file's — a line naming a
-    # credential path refuses before any rule, grant or card is consulted.
-    secret = shell_secret_floor_reason(command, cwd=cwd, skep_home=holder.current.home)
-    if secret is not None:
-        return AutonomyDecision(
-            verdict="deny",
-            reason="shell.deny.secret_floor",
-            detail=secret,
-            decided_by="floor/floor.secret-reads",
-        )
-    policy = resolve_operator_policy(store)
     repo = _cwd_registered_repo(store, holder, cwd)
     reached = None if repo is not None else _command_registered_repo(store, holder, command, cwd)
     target = repo if repo is not None else reached
@@ -2804,13 +2779,15 @@ def _queen_shell_lane(
                 ),
                 decided_by="queen-shell-guard",
             )
-        repo_decision = policy.decision("shell", "run_repo", command)
-        if repo_decision.verdict == "allow":
+        verdict = queen_decide(
+            holder, store, Request("shell", "run_repo", command), role=role, cwd=cwd
+        )
+        if verdict.verdict == "allow":
             return AutonomyDecision(
                 verdict="allow",
                 reason="shell.allow.run_repo_rule",
                 detail=command,
-                decided_by=repo_decision.decided_by,
+                decided_by=verdict.decided_by,
             )
         return AutonomyDecision(
             verdict="deny",
@@ -2829,24 +2806,32 @@ def _queen_shell_lane(
                 "action='run_repo' with the command prefix — a standing rule, not "
                 "a one-off."
             ),
-            decided_by="queen-shell-guard",
+            decided_by=verdict.decided_by,
         )
-    run_decision = policy.decision("shell", "run_background" if background else "run", command)
-    if run_decision.verdict == "allow":
+    action = "run_background" if background else "run"
+    verdict = queen_decide(holder, store, Request("shell", action, command), role=role, cwd=cwd)
+    if verdict.verdict == "allow":
         return AutonomyDecision(
             verdict="allow",
             reason="shell.allow.run_rule",
             detail=command,
-            decided_by=run_decision.decided_by,
+            decided_by=verdict.decided_by,
         )
-    if run_decision.verdict == "deny" and run_decision.rule_id != DEFAULT_DENY_RULE_ID:
+    if verdict.verdict == "deny":
         return AutonomyDecision(
             verdict="deny",
             reason="shell.deny.rule",
-            detail="an explicit operator deny covers this command",
-            decided_by=run_decision.decided_by,
+            detail=f"a policy rule denies this command ({verdict.decided_by})",
+            decided_by=verdict.decided_by,
         )
-    return None  # default → the ordinary per-command card
+    # B79: the card names the rule that asked — never "no rule covers this".
+    asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
+    return AutonomyDecision(
+        verdict="require_approval",
+        reason=f"shell.require_approval.{asked}",
+        detail=command,
+        decided_by=verdict.decided_by,
+    )
 
 
 def _draft_excerpt(artifacts: list[dict[str, Any]]) -> str | None:

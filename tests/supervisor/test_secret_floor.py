@@ -377,9 +377,8 @@ def test_ordinary_commands_still_reach_the_card(
         "curl -s https://example.com/.env",  # a URL, not a local file
         "grep -r env .",
     ):
-        assert queen_shell_decision(store, holder, command=command, cwd=str(fake_home)) is None, (
-            command
-        )
+        decision = queen_shell_decision(store, holder, command=command, cwd=str(fake_home))
+        assert decision is not None and decision.verdict == "require_approval", command
 
 
 def test_a_secret_spelled_in_another_case_is_still_the_secret(

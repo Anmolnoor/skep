@@ -123,8 +123,10 @@ def test_grant_runs_in_turn_default_cards_deny_refuses(
     store, holder = _parts(config)
     try:
         assert "run_shell" in MUTATING_TOOL_NAMES
-        # default → card (decision None)
-        assert queen_shell_decision(store, holder, command="uname -a", cwd=None) is None
+        # default → card, naming what asked (P3-2, B79)
+        carded = queen_shell_decision(store, holder, command="uname -a", cwd=None)
+        assert carded is not None
+        assert (carded.verdict, carded.decided_by) == ("require_approval", "default/unmatched")
         # allow rule → in-turn
         _allow(store, "run", "uname")
         allowed = queen_shell_decision(store, holder, command="uname -a", cwd=None)
@@ -269,7 +271,8 @@ def test_repo_targets_refuse_from_any_cwd(config: SupervisorConfig, tmp_path: Pa
             assert decision.reason == "shell.deny.repo_target", command
             assert "myrepo" in (decision.detail or "") and "quick_edit" in (decision.detail or "")
         # A command that names no repo, from a neutral cwd, is still the ordinary card.
-        assert queen_shell_decision(store, holder, command="uname -a", cwd=str(neutral)) is None
+        plain = queen_shell_decision(store, holder, command="uname -a", cwd=str(neutral))
+        assert plain is not None and plain.verdict == "require_approval", plain
         # A run_repo grant opens a repo target exactly as it opens a repo cwd.
         _allow(store, "run_repo", "git")
         opened = queen_shell_decision(
