@@ -24,6 +24,7 @@ from skep.supervisor.serve.tools import (
     MUTATING_TOOL_NAMES,
     TOOL_SCOPES,
     TOOL_SPECS,
+    chat_policy_lines,
     execute_read_tool,
     hidden_tools,
     mutation_execution_decision,
@@ -427,3 +428,73 @@ def test_b20_a_run_repo_allow_opens_one_exact_line_in_a_repo(
     _operator_shell(locked, "allow", "make test", action="run_repo")
     assert _shell(locked, "make test", cwd=str(repo)).startswith("allow grant:global/")
     assert _shell(locked, "make test-all", cwd=str(repo)).startswith("deny")
+
+
+# --- D7: the generated "In this chat:" line (the B33 class) -----------------------------
+
+
+def _lines(config: SupervisorConfig, role: str | None) -> dict[str, str]:
+    store = RunStore(config.db_path)
+    try:
+        return chat_policy_lines(
+            ConfigHolder(config, store), store, None if role is None else SHIPPED_ROLES[role]
+        )
+    finally:
+        store.close()
+
+
+def test_the_line_is_rendered_from_decide_for_the_role_and_the_home(
+    locked: SupervisorConfig, tmp_path: Path
+) -> None:
+    """B33: read_file's description said outside-root reads card when, under
+    the baseline, they did not. The line is decide()'s answer, pinned here."""
+    from skep.supervisor.cli_cmds import build_config
+
+    reads = "reads inside your folders run; elsewhere ask first; credential files are refused"
+    assert _lines(locked, "builder") == {
+        "read_file": f"In this chat: {reads}.",
+        "search_files": f"In this chat: {reads}.",
+        "run_shell": "In this chat: a command no rule names: ask first; git push and sudo are "
+        "refused.",
+        "start_process": "In this chat: a daemon no rule names: ask first.",
+        "read_url": "In this chat: a page no rule names: ask first.",
+        "search_web": "In this chat: searches run.",
+        "call_mcp_tool": "In this chat: a tool no rule names: ask first if it acts, ask first if "
+        "read-only.",
+    }
+    assistant = _lines(locked, "assistant")
+    assert assistant["search_web"] == (
+        "In this chat: searches run; start_research is not available here."
+    )
+    # a home with no baseline yet: every read asks — what the static text gets wrong
+    fresh = build_config(tmp_path / "fresh", None)
+    RunStore(fresh.db_path).close()
+    assert _lines(fresh, None)["read_file"].startswith(
+        "In this chat: reads inside your folders ask first; elsewhere ask first;"
+    )
+    assert _lines(fresh, None)["search_web"] == "In this chat: searches ask first."
+    # a policy write moves the line with it — it cannot drift from decide()
+    _operator_shell(locked, "deny", "skep-probe")
+    assert _lines(locked, "builder")["run_shell"].startswith(
+        "In this chat: a command no rule names: are refused;"
+    )
+
+
+def test_the_spec_sent_carries_the_line_and_it_is_the_same_every_turn(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={"role": "operator"}).json()["chat_id"]
+    ollama.script_tool_call("describe_tools", {"names": ["read_file"]})
+    ollama.script_reply("ok")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "read things"})
+    ollama.script_reply("ok")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "again"})
+
+    def read_file_spec(body: dict[str, Any]) -> str:
+        (spec,) = [t for t in body["tools"] if t["function"]["name"] == "read_file"]
+        return str(spec["function"]["description"])
+
+    sent = [read_file_spec(body) for body in ollama.chat_bodies()[1:]]
+    assert len(sent) == 2 and sent[0] == sent[1]
+    assert sent[0].endswith(_lines(config, "operator")["read_file"])

@@ -67,6 +67,7 @@ from .tools import (
     COMMAND_TOOL_NAMES,
     DESCRIBE_TOOL_NAME,
     MUTATING_TOOL_NAMES,
+    POLICY_LINE_TOOLS,
     READ_TOOL_NAMES,
     READ_TOOL_SPECS,
     TOOL_SPECS,
@@ -75,6 +76,7 @@ from .tools import (
     UNATTENDED_READ_REFUSAL,
     UNATTENDED_WRITE_REFUSAL,
     advertised_tool_specs,
+    chat_policy_lines,
     dispatch_manifest_for,
     execute_mutation,
     execute_read_tool,
@@ -1264,9 +1266,28 @@ class ChatEngine:
         hidden = self._hidden(chat)
         if tool_delivery(self.store) == "full":
             specs = READ_TOOL_SPECS if read_only else TOOL_SPECS
-            return [t for t in specs if t["function"]["name"] not in hidden]
-        active = getattr(chat, "active_tools", None) or ()
-        return advertised_tool_specs(active, read_only=read_only, hidden=hidden)
+            specs = [t for t in specs if t["function"]["name"] not in hidden]
+        else:
+            active = getattr(chat, "active_tools", None) or ()
+            specs = advertised_tool_specs(active, read_only=read_only, hidden=hidden)
+        return self._with_policy_lines(chat, specs)
+
+    def _with_policy_lines(self, chat: Any, specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """P3-6 (ADR 0059 D7): each scoped tool's description ends with its
+        "In this chat:" line, rendered from decide() for the chat's role and
+        this home — the same on every turn until either changes."""
+        if not {t["function"]["name"] for t in specs} & POLICY_LINE_TOOLS:
+            return specs
+        lines = chat_policy_lines(
+            self.holder, self.store, chat_role(self.home, getattr(chat, "role", None))
+        )
+        return [
+            {**t, "function": {**t["function"], "description": (
+                f"{t['function']['description']} {lines[t['function']['name']]}"
+            )}}
+            if t["function"]["name"] in lines else t
+            for t in specs
+        ]  # fmt: skip
 
     def _history_budget(self, system_chars: int, chat: Any = None) -> int:
         """Replay chars that fit beside the fixed floor (v56-F2, ADR 0037).

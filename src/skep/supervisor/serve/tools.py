@@ -2324,6 +2324,56 @@ def _hidden_tools(role: Role) -> dict[str, str]:
     return hidden
 
 
+_LINE_WORDS = {"allow": "run", "require_approval": "ask first", "deny": "are refused"}
+POLICY_LINE_TOOLS = frozenset(
+    {"read_file", "search_files", "run_shell", "start_process", "read_url", "search_web",
+     "call_mcp_tool"}
+)  # fmt: skip
+_SHELL_PROBE = "skep-probe --no-rule-names-this"  # a line no rule can name
+
+
+def chat_policy_lines(holder: ConfigHolder, store: RunStore, role: Role | None) -> dict[str, str]:
+    """P3-6 (ADR 0059 D7, the B33 class): the "In this chat:" line of each
+    tool where a wrong belief cost the most (f1-15/f1-17: five or six calls
+    asking policy_why after a card that could not succeed), rendered from
+    ``decide()`` for this chat's role and home. No chat is passed — no taint,
+    no chat-bound grant — so the line is the same on every turn until the
+    role or the home's policy changes. Pure: nothing is logged."""
+    from ..policy_v3 import Request, decide, load_stack
+
+    stack = load_stack(holder, store)
+
+    def says(scope: str, action: str, value: str, *, read_only: bool = False) -> str:
+        verdict = decide(Request(scope, action, value), stack=stack, role=role, read_only=read_only)
+        return _LINE_WORDS[verdict.verdict]
+
+    roots = [rule.pattern.removesuffix("/**") for rule in stack.roots]
+    credential = str(Path.home() / ".ssh" / "id_rsa")
+    reads = (
+        (
+            f"reads inside your folders {says('filesystem', 'read', roots[0] + '/x')}; "
+            if roots
+            else ""
+        )
+        + f"elsewhere {says('filesystem', 'read', '/skep-probe/outside')}; "
+        + f"credential files {says('filesystem', 'read', credential)}"
+    )
+    hidden = hidden_tools(role)
+    research = "; start_research is not available here" if "start_research" in hidden else ""
+    lines = {
+        "read_file": reads,
+        "search_files": reads,
+        "run_shell": f"a command no rule names: {says('shell', 'run', _SHELL_PROBE)}; "
+        f"git push and sudo {says('shell', 'run', 'git push')}",
+        "start_process": f"a daemon no rule names: {says('shell', 'run_background', _SHELL_PROBE)}",
+        "read_url": f"a page no rule names: {says('network', 'fetch', 'x.invalid')}{research}",
+        "search_web": f"searches {says('network', 'search', 'ddgs')}{research}",
+        "call_mcp_tool": f"a tool no rule names: {says('mcp', 'call', 'probe:act')} if it acts, "
+        f"{says('mcp', 'call', 'probe:list', read_only=True)} if read-only",
+    }
+    return {tool: f"In this chat: {line}." for tool, line in lines.items()}
+
+
 def hidden_refusal(tool: str, role: Role, decided_by: str) -> str:
     """What the model hears when it calls a tool its chat's role hides."""
     return (
