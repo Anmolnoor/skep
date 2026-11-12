@@ -463,3 +463,28 @@ def test_the_decision_log_masks_basic_auth_bare_keys_quoted_values_and_key_heade
 
     masked = redact(command)
     assert "CANARY" not in masked and "***" in masked, masked
+
+
+def test_a_writer_that_loses_the_rotation_race_still_logs_its_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Serve, the CLI and every hook process append to one decisions.jsonl.
+    Two that both see it past the cap both rename it; the second rename
+    found nothing and raised — and a decide() that raises is an `ask` on the
+    hook, a 500 on REST and a failed dispatch."""
+    from skep.supervisor import policy_v3
+
+    log = tmp_path / "policy" / "decisions.jsonl"
+    log.parent.mkdir()
+    log.write_text('{"old": 1}\n')
+    monkeypatch.setattr(policy_v3, "DECISION_LOG_MAX_BYTES", 1)
+    real = Path.replace
+
+    def racing(self: Path, target: Path) -> Path:
+        real(self, target)  # the other writer rotates first
+        return real(self, target)  # ours finds nothing to rename
+
+    monkeypatch.setattr(Path, "replace", racing)
+    policy_v3.log_decision(tmp_path, {"value": "ls"})
+    assert log.with_name("decisions.jsonl.1").read_text() == '{"old": 1}\n'
+    assert json.loads(log.read_text()) == {"value": "ls"}

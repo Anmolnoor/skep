@@ -404,8 +404,14 @@ def log_decision(audit_dir: Path, row: dict[str, Any]) -> None:
     ``value`` redacted; a file past 10 MB first becomes ``decisions.jsonl.1``."""
     path = audit_dir / "policy" / "decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.stat().st_size >= DECISION_LOG_MAX_BYTES:
-        path.replace(path.with_name(path.name + ".1"))
+    # ponytail: unlocked rotation; a writer that loses the race finds nothing to rename
+    # (fine), but one that stat'd the old file can rename a fresh one over ``.1`` and
+    # drop that generation. flock the rotation if a home ever loses lines to it.
+    try:
+        if path.stat().st_size >= DECISION_LOG_MAX_BYTES:
+            path.replace(path.with_name(path.name + ".1"))
+    except FileNotFoundError:
+        pass  # no log yet, or another writer rotated it first
     if isinstance(row.get("value"), str):
         row = {**row, "value": redact(row["value"])}
     # ponytail: the append is unlocked; concurrent writers interleave whole <4 KiB
