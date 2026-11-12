@@ -4231,7 +4231,8 @@ def _queen_shell_allow(
                 store,
                 LearnedRule(
                     rule_id=f"{scope}:{rule_action}:{line}", action=rule_action, pattern=line,
-                    scope=scope, provenance="set_operator_policy", lifetime="global",
+                    scope=scope,  # type: ignore[arg-type]
+                    provenance="set_operator_policy", lifetime="global",
                     matcher=matcher,  # type: ignore[arg-type]
                 ),
                 report=report,
@@ -5385,8 +5386,8 @@ def _grant_subjects(tool: str, args: dict[str, Any]) -> list[tuple[str, str, str
     if tool not in REMEMBERABLE_TOOLS:
         from .tools import ALWAYS_CARDS
 
-        why = ALWAYS_CARDS.get(tool, "only read_url, run_shell and start_process approvals keep")
-        return f"{tool} has no standing grant ({why}), so this card is approve-once"
+        reason = ALWAYS_CARDS.get(tool, "only read_url, run_shell and start_process approvals keep")
+        return f"{tool} has no standing grant ({reason}), so this card is approve-once"
     if tool == "read_url":
         prefix = url_prefix_of(str(args.get("url") or ""))
         if prefix is None:

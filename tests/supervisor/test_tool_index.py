@@ -19,6 +19,7 @@ from skep.supervisor.serve.tools import (
     CORE_TOOL_NAMES,
     DESCRIBE_TOOL_NAME,
     MUTATING_TOOL_NAMES,
+    POLICY_LINE_TOOLS,
     READ_TOOL_NAMES,
     TOOL_CATEGORIES,
     TOOL_INDEX_BLOCK,
@@ -307,7 +308,15 @@ def test_the_full_setting_restores_the_old_array_byte_for_byte(
     ollama.script_reply("hello")
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
     body = ollama.chat_bodies()[0]
-    assert json.dumps(body["tools"]) == json.dumps(TOOL_SPECS)
+    # P3-6 (ADR 0059 D7): byte for byte but each scoped tool's "In this chat:" line
+    sent = json.loads(json.dumps(body["tools"]))
+    for spec in sent:
+        description = spec["function"]["description"]
+        spec["function"]["description"] = description.split(" In this chat: ")[0]
+    assert json.dumps(sent) == json.dumps(TOOL_SPECS)
+    lined = [t["function"]["name"] for t in body["tools"]
+             if " In this chat: " in t["function"]["description"]]  # fmt: skip
+    assert set(lined) == POLICY_LINE_TOOLS
     assert "Tool index" not in body["messages"][0]["content"]
 
 
