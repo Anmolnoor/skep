@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.mcp_client import (
     MCPServerConfig,
@@ -24,6 +26,14 @@ from skep.supervisor.mcp_client import (
 from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation
+
+from .conftest import predating_home
+
+
+@pytest.fixture(autouse=True)
+def _rules_home(config: SupervisorConfig) -> None:
+    """P3-3: about the rules; a fresh (O5 zero-state) home asks for every call."""
+    predating_home(config.db_path)
 
 
 def test_classify_browse_action_read_vs_act() -> None:
@@ -79,16 +89,16 @@ def test_browse_reads_flow_and_acts_card(config: SupervisorConfig) -> None:
         assert mcp_tool_scope_action(store, _tool("browser_snapshot")) == ("browse", "read")
         assert mcp_tool_scope_action(store, _tool("browser_navigate")) == ("browse", "act")
 
-        snapshot = mcp_scope_decision(store, _tool("browser_snapshot"))
+        snapshot = mcp_scope_decision(store, ConfigHolder(config, store), _tool("browser_snapshot"))
         assert snapshot.verdict == "allow"
         assert snapshot.reason == "browse.allow.read_risk"
 
         # Every act cards — navigation included, and the generic ladder's
         # "browse ⊂ browser_navigate → network risk" path must not fire.
-        navigate = mcp_scope_decision(store, _tool("browser_navigate"))
+        navigate = mcp_scope_decision(store, ConfigHolder(config, store), _tool("browser_navigate"))
         assert navigate.verdict == "require_approval"
-        assert navigate.reason == "browse.require_approval.page_action"
-        click = mcp_scope_decision(store, _tool("browser_click"))
+        assert navigate.reason == "browse.require_approval.unmatched"
+        click = mcp_scope_decision(store, ConfigHolder(config, store), _tool("browser_click"))
         assert click.verdict == "require_approval"
     finally:
         store.close()
@@ -127,10 +137,23 @@ def test_browse_deny_rule_refuses_and_allow_rule_admits(
                 }
             ),
         )
-        assert mcp_scope_decision(store, _tool("browser_evaluate")).verdict == "deny"
-        assert mcp_scope_decision(store, _tool("browser_navigate")).verdict == "allow"
+        assert (
+            mcp_scope_decision(
+                store, ConfigHolder(config, store), _tool("browser_evaluate")
+            ).verdict
+            == "deny"
+        )
+        assert (
+            mcp_scope_decision(
+                store, ConfigHolder(config, store), _tool("browser_navigate")
+            ).verdict
+            == "allow"
+        )
         # An unmatched act still cards — the rule admitted navigation only.
-        assert mcp_scope_decision(store, _tool("browser_click")).verdict == "require_approval"
+        assert (
+            mcp_scope_decision(store, ConfigHolder(config, store), _tool("browser_click")).verdict
+            == "require_approval"
+        )
     finally:
         store.close()
 
@@ -150,7 +173,12 @@ def test_allow_mcp_tool_learns_a_browse_scope_rule(config: SupervisorConfig) -> 
         )
         assert result["scope"] == "browse"
         assert result["rule_id"] == "browse:playwright:browser_navigate"
-        assert mcp_scope_decision(store, _tool("browser_navigate")).verdict == "allow"
+        assert (
+            mcp_scope_decision(
+                store, ConfigHolder(config, store), _tool("browser_navigate")
+            ).verdict
+            == "allow"
+        )
     finally:
         store.close()
 

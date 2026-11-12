@@ -96,9 +96,9 @@ def fetch_url_text(
                 target_host = urllib.parse.urlparse(target).hostname or ""
                 if not target_host or not redirect_guard(target_host):
                     raise ValueError(
-                        f"redirect to {target_host or 'nowhere'!r} leaves the granted "
-                        "domain — read_url that URL explicitly (one card) or "
-                        "allow_fetch_domain it"
+                        f"redirect to {target_host or 'nowhere'!r} is refused: it leaves "
+                        "the granted domain or a policy rule denies it — read_url that "
+                        "URL explicitly (one card) or allow_fetch_domain it"
                     )
                 current = target
                 continue

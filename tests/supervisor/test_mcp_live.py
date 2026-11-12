@@ -26,8 +26,16 @@ from skep.supervisor.mcp_client import (
 )
 from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
 
+from .conftest import predating_home
 from .conftest import serve_client as _client
 from .fake_ollama import FakeOllama
+
+
+@pytest.fixture(autouse=True)
+def _rules_home(config: SupervisorConfig) -> None:
+    """P3-3: these tests are about the rules; a fresh (O5 zero-state) home now
+    asks for every MCP call until a baseline is approved."""
+    predating_home(config.db_path)
 
 
 @pytest.fixture()
@@ -161,7 +169,7 @@ def test_unknown_tool_cards_then_executes_on_confirm(
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "frobnicate it"})
     (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
     assert action["status"] == "proposed"
-    assert action["decided_by"] == "policy/risk:unknown"  # v39-F1 fail-closed
+    assert action["decided_by"] == "default/unmatched"  # v39-F1 fail-closed (P3-3 label)
     assert fake_runner == []  # nothing ran before the human said so
 
     ollama.script_reply("done frobnicating")
@@ -298,7 +306,7 @@ def test_email_server_reads_flow_and_sends_card(
         if a["status"] == "proposed"
     ]
     assert action["status"] == "proposed"
-    assert action["decided_by"] == "policy/risk:external_side_effect"
+    assert action["decided_by"] == "default/unmatched"  # a send is never a read
     assert ("tools/call", {"name": "send_message", "arguments": {"to": "x"}}) not in fake_runner
 
     ollama.script_reply("sent")

@@ -40,7 +40,6 @@ from typing import Any, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from .autonomy import AutonomyDecision
 from .castes import CASTES
 from .policy_engine import Layer, resolve_stack
 from .policy_schema import (
@@ -281,24 +280,6 @@ def role_for_chat(store: RunStore, home: Path, chat_id: str | None) -> Role | No
     than quietly running with no role layer."""
     chat = store.get_chat(chat_id) if chat_id else None
     return resolve_role(chat.role, home) if chat is not None and chat.role else None
-
-
-def tighten_autonomy(
-    decision: AutonomyDecision | None, role: Role | None, scope: str, action: str, value: str
-) -> AutonomyDecision | None:
-    """``tighten`` for a Queen-side lane, where None means "the ordinary
-    card". A role answer stricter than the lane's becomes the decision:
-    ``require_approval`` cards, ``deny`` refuses with no card (I6)."""
-    hit = None if role is None else role_decision(role, scope, action, value)
-    current = "require_approval" if decision is None else decision.verdict
-    if hit is None or _VERDICT_RANK[hit.verdict] <= _VERDICT_RANK.get(current, 0):
-        return decision
-    return AutonomyDecision(
-        verdict=hit.verdict,
-        reason=f"{scope}.{hit.verdict}.role_layer",
-        detail=f"{role.label if role else ''} decides {scope}.{action} {value}",
-        decided_by=hit.decided_by,
-    )
 
 
 EXCEEDS_DELEGATOR = "exceeds_delegator"

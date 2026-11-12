@@ -22,7 +22,12 @@ def _doc(store: RunStore) -> PolicyDocument:
 
 
 def test_confirming_a_url_card_grants_the_host_for_the_session(config: SupervisorConfig) -> None:
-    store = RunStore(config.db_path)
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    from .conftest import predating_home
+
+    store = RunStore(predating_home(config.db_path))
+    holder = ConfigHolder(config, store)
     try:
         grant = actions.remember_action_for_session(
             store, tool="read_url", args={"url": "https://docs.example.com/x"}, actor="me"
@@ -35,10 +40,14 @@ def test_confirming_a_url_card_grants_the_host_for_the_session(config: Superviso
         # The same decision function the read_url card consults now allows it.
         from skep.supervisor.serve.tools import fetch_grant_decision
 
-        decision = fetch_grant_decision(store, "docs.example.com")
-        assert decision is not None and decision.verdict == "allow"
+        decision = fetch_grant_decision(store, holder, "docs.example.com")
+        assert (decision.verdict, decision.decided_by) == (
+            "allow",
+            "grant:session/network:fetch:docs.example.com",
+        )
         # EXACT host only — a subdomain is its own decision (fail closed).
-        assert fetch_grant_decision(store, "other.example.com") is None
+        other = fetch_grant_decision(store, holder, "other.example.com")
+        assert other.verdict == "require_approval"
     finally:
         store.close()
 

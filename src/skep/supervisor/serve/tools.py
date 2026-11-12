@@ -26,7 +26,7 @@ from ..engines import engine_names
 from ..memory import MEMORY_CLASSES, MemoryError
 from ..projects import list_projects, project_to_dict
 from ..providers import PROVIDER_COST_CLASSES, PROVIDER_PROTOCOLS
-from ..roles import Role, role_for_chat, tighten_autonomy
+from ..roles import Role, role_for_chat
 from ..store import ChatSearchHit, RunStore
 from . import actions
 from .jobs import Dispatcher
@@ -2607,51 +2607,52 @@ def _human_answers(store: RunStore, chat_id: str | None) -> bool:
 
 
 def fetch_grant_decision(
-    store: RunStore, host: str, *, role: Role | None = None
-) -> AutonomyDecision | None:
-    """R1 (ADR 0055 D3): the chat's role layer tightens the lane below."""
-    return tighten_autonomy(_fetch_grant_lane(store, host), role, "network", "fetch", host)
+    store: RunStore, holder: ConfigHolder, host: str, *, role: Role | None = None
+) -> AutonomyDecision:
+    """read_url's ``network.fetch <host>``, decided by ``policy_v3.decide()``
+    with the chat's role (ADR 0059 P3-3) — the verdict and ``decided_by``
+    REST and the CLI give for the same host and role with no repo. Every
+    layer reaches it: the baseline's allows and denies (B29: an operator
+    template's ``net-fetch-github`` runs in-turn, a baseline deny refuses),
+    the setup document (tighten-only under a locked baseline, B30), the
+    operator overlay, and the learned grants — which also answer a role's
+    catch-all ``net-fetch-gated *`` ask (decision #1, B56). allow → in-turn
+    on the granted lane; deny → refused, no card; ask → the per-URL card
+    naming the rule that asked. A grant matches the host exactly, as before
+    (``domain_allowed``: example.com never covers docs.example.com). A policy
+    that will not load refuses (fail closed)."""
+    from ..policy_v3 import Request, queen_decide
 
-
-def _fetch_grant_lane(store: RunStore, host: str) -> AutonomyDecision | None:
-    """v72-F7: the granted-domain read_url lane. An explicit ``network/fetch``
-    rule decides — allow runs in-turn, deny refuses without a card; no
-    matching rule returns None and the per-URL card stays exactly as it was.
-    Domain matching is ``domain_allowed`` (the run-egress matcher): EXACT
-    host only — a grant on example.com does NOT cover docs.example.com;
-    each host is its own operator decision (fail closed)."""
-    from ..policy_schema import (
-        DEFAULT_DENY_RULE_ID,
-        POLICY_DOCUMENT_SETTINGS_KEY,
-        PolicyDocument,
-        decide,
-        document_from_settings,
-        resolve,
-    )
-
-    raw = store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)
-    document = document_from_settings(raw) or PolicyDocument()
-    from ..policy_resolver import engine_v2_scopes
-
-    resolved = resolve(document, v2_scopes=engine_v2_scopes(store))
-    decision = decide(resolved, "network", "fetch", host, template=document.template)
-    if decision.rule_id == DEFAULT_DENY_RULE_ID:
-        return None
-    if decision.verdict == "allow":
+    try:
+        verdict = queen_decide(holder, store, Request("network", "fetch", host), role=role)
+    except Exception as exc:  # I4/I9: a policy that will not load never fetches
+        return AutonomyDecision(
+            verdict="deny",
+            reason="network.deny.policy_unloadable",
+            detail=f"the policy did not load, so nothing is fetched: {exc}",
+            decided_by="policy/unloadable",
+        )
+    if verdict.verdict == "allow":
         return AutonomyDecision(
             verdict="allow",
             reason="network.allow.fetch_grant",
             detail=host,
-            decided_by=decision.decided_by,
+            decided_by=verdict.decided_by,
         )
-    if decision.verdict == "deny":
+    if verdict.verdict == "deny":
         return AutonomyDecision(
             verdict="deny",
             reason="network.deny.fetch_rule",
-            detail=f"an explicit deny covers {host!r}",
-            decided_by=decision.decided_by,
+            detail=f"a policy rule denies fetching {host!r} ({verdict.decided_by})",
+            decided_by=verdict.decided_by,
         )
-    return None  # require_approval → the ordinary per-URL card
+    asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
+    return AutonomyDecision(
+        verdict="require_approval",
+        reason=f"network.require_approval.{asked}",
+        detail=host,
+        decided_by=verdict.decided_by,
+    )
 
 
 # v83-F9: one-off Queen-side shell — bounds.
@@ -3009,7 +3010,7 @@ def execute_read_tool(
         # gets — the role layer included.
         role = _chat_role(store, holder, chat_id)
         for tool in tools:
-            decision = mcp_scope_decision(store, tool, role=role)
+            decision = mcp_scope_decision(store, holder, tool, role=role)
             views.append(
                 {
                     "name": tool.name,
@@ -3512,17 +3513,27 @@ def execute_read_tool(
     if name == "search_web":
         # v44-F8: Queen-side discovery — a failed search is a clean tool error,
         # never an exception into the turn loop (the small model handles text).
-        # v52-F3: the operator policy decides first (network/search — allowed
-        # by the default net:search rule; an operator deny stops search here).
-        # Read tools never card: anything but allow is a clean policy error.
-        from ..policy_resolver import resolve_operator_policy
+        # P3-3 (B78): ``network.search`` through decide() WITH the chat's role.
+        # The value is the backend, never the query: the decision log keeps no
+        # query text. Read tools never card: anything but allow is a clean
+        # policy error, and so is a policy that will not load.
+        from ..policy_v3 import Request, queen_decide
         from . import websearch
 
-        search_decision = resolve_operator_policy(store).decision("network", "search", "ddgs")
+        try:
+            search_decision = queen_decide(
+                holder,
+                store,
+                Request("network", "search", "ddgs"),
+                role=_chat_role(store, holder, chat_id),
+            )
+        except Exception as exc:  # fail closed: no decision, no search
+            return {"error": f"web search refused: the policy did not load ({exc})", "results": []}
         if search_decision.verdict != "allow":
             return {
-                "error": "web search is not allowed by the operator policy "
+                "error": "web search is not allowed by policy "
                 f"(decided_by: {search_decision.decided_by})",
+                "decided_by": search_decision.decided_by,
                 "results": [],
             }
         try:
@@ -3691,44 +3702,46 @@ def _execute_mutation(
     if name == "read_url":
         # v47-F4: Queen search ≠ Queen fetch — the fetch happens HERE, strictly
         # after the card confirm; a failed read degrades to a clean tool error.
-        # v52-F3 (Option A): the card IS the human gate; the operator policy is
-        # consulted for AUDIT only — an explicit allow's rule id rides the
-        # result, otherwise decided_by names the card. Never blocks a confirm.
+        # P3-3: the fetch decision is re-made here (the last guard): a host a
+        # rule denies is refused even on a confirmed card, and nothing is
+        # fetched (f1-27). The card IS the human gate for an ask.
         import urllib.parse
 
-        from ..policy_resolver import resolve_operator_policy
         from . import websearch
 
         url = str(args["url"])
         host = urllib.parse.urlparse(url).hostname or ""
+        fetch_role = _chat_role(store, holder, chat_id)
+        now = fetch_grant_decision(store, holder, host, role=fetch_role) if host else None
+        if now is not None and now.verdict == "deny":
+            raise ValueError(f"denied by policy: {now.detail}")
         # v72-F7: on the granted-domain lane the standing grant is the gate —
         # every redirect hop re-decides against it (a redirect must never
-        # widen a grant; fail closed off-domain).
+        # widen a grant; fail closed off-domain). P3-3: on the card lane a hop
+        # re-decides too, and one a rule denies is refused.
         granted = (
             decision is not None
             and decision.reason == "network.allow.fetch_grant"
             and decision.allows_execution()
         )
-        redirect_guard = None
+
+        def _hop_allowed(candidate_host: str) -> bool:
+            hop = fetch_grant_decision(store, holder, candidate_host, role=fetch_role)
+            return hop.allows_execution() if granted else hop.verdict != "deny"
+
         if granted:
-            hop_role = _chat_role(store, holder, chat_id)
-
-            def _hop_allowed(candidate_host: str) -> bool:
-                hop = fetch_grant_decision(store, candidate_host, role=hop_role)
-                return hop is not None and hop.allows_execution()
-
-            redirect_guard = _hop_allowed
             decided_by = decision.decided_by if decision is not None else "operator-card"
         else:
-            connect = resolve_operator_policy(store).decision("network", "connect", host)
-            decided_by = connect.decided_by if connect.verdict == "allow" else "operator-card"
+            decided_by = "operator-card"
+            if now is not None and now.verdict == "allow":
+                decided_by = now.decided_by or decided_by
         # v83-F1: the granted lane earned the bigger budget; the card lane
         # stays small so a card review stays cheap. Markdown by default.
         try:
             return {
                 **websearch.fetch_url_text(
                     url,
-                    redirect_guard=redirect_guard,
+                    redirect_guard=_hop_allowed,
                     markdown=str(args.get("mode") or "markdown") != "text",
                     max_bytes=websearch.GRANTED_READ_MAX_BYTES
                     if granted
@@ -4418,6 +4431,7 @@ def _execute_mutation(
         # space stays unreachable by confirmation.
         last_guard = mcp_scope_decision(
             store,
+            holder,
             MCPTool(server_id=server_id, name=tool_name, description=""),
             role=_chat_role(store, holder, chat_id),
         )
@@ -5224,6 +5238,7 @@ def mutation_execution_decision(
 
         return mcp_scope_decision(
             store,
+            holder,
             MCPTool(
                 server_id=str(args.get("server_id") or ""),
                 name=str(args.get("tool") or ""),
@@ -5351,7 +5366,7 @@ def mutation_execution_decision(
         host = urllib.parse.urlparse(str(args.get("url") or "")).hostname or ""
         if not host:
             return None
-        return fetch_grant_decision(store, host, role=role)
+        return fetch_grant_decision(store, holder, host, role=role)
     if name != "dispatch_run":
         return None
     return actions.dispatch_run_decision(
