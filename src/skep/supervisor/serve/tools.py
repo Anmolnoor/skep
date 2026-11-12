@@ -775,7 +775,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE reading ONE public web page as text (requires user confirmation "
         "— the card shows the exact URL; nothing is fetched until the user "
         "confirms). EXCEPTION: a host the policy allows (an allow_fetch_domain "
-        "grant, or a baseline or operator rule naming it) reads inside the turn "
+        "grant, or a baseline rule naming it) reads inside the turn "
         "with no card (a redirect off it still fails closed) AND returns a 4x "
         "larger excerpt; a host a rule denies is refused, no card. Use after "
         "search_web when one "
@@ -1320,7 +1320,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE adding one rule to the QUEEN's standing operator policy "
         "(requires user confirmation) — the document governing Queen-side "
         "scoped tools: read_file/search_files paths, search_web/read_url "
-        "network (fetch rules decide read_url), and run_shell/start_process "
+        "network (a fetch deny refuses read_url; a fetch allow is recorded "
+        "and shown by policy why but does not yet let read_url run), and "
+        "run_shell/start_process "
         "shell lanes. NOT "
         "set_policy: run/worker policy is untouched. verdict 'allow' or "
         "'deny'; deny wins ties; an allow never lifts a baseline deny or "
@@ -2621,7 +2623,9 @@ def fetch_grant_decision(
     layer reaches it: the baseline's allows and denies (B29: an operator
     template's ``net-fetch-github`` runs in-turn, a baseline deny refuses),
     the setup document (tighten-only under a locked baseline, B30), the
-    operator overlay, and the learned grants — which also answer a role's
+    operator overlay's denies and asks (its fetch allows are recorded and
+    shown by ``policy why`` but do not yet let read_url run — operator
+    decision, ``policy_v3.operator_lane``), and the learned grants — which also answer a role's
     catch-all ``net-fetch-gated *`` ask (decision #1, B56). allow → in-turn
     on the granted lane; deny → refused, no card; ask → the per-URL card
     naming the rule that asked. A grant matches the host exactly, as before

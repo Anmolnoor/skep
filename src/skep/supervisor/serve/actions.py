@@ -2195,6 +2195,21 @@ def policy_why(
         view["run"] = {**_face(run), "considered": considered}
     if operator.source == "floor":
         view["floor"] = operator.note  # the floor binds workers AND the Queen (v83-F9)
+    if (scope, action) == ("network", "fetch"):
+        # P3-3 operator decision: shown, not yet granting (policy_v3.operator_lane).
+        overlay = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
+        held = [
+            rule.rule_id
+            for bucket in overlay.scopes
+            if bucket.scope == "network"
+            for rule in bucket.allow
+            if rule.action == "fetch" and pattern_matches("network", rule.pattern, value)
+        ]
+        if held:
+            view["overlay_fetch_allow"] = (
+                f"{', '.join(held)}: an operator-overlay fetch allow is recorded but does "
+                "not let read_url run yet — the verdict above is what read_url gets"
+            )
     if stack.guard.get(scope) == NO_BASELINE_REASON:
         view["baseline"] += f" — {NO_BASELINE_REASON}: every decision asks until one is"
     if role_record is not None:

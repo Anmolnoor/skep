@@ -229,9 +229,17 @@ def operator_lane(store: RunStore) -> tuple[dict[str, ResolvedScopePolicy], tupl
     if template is not None:
         setup = tighten_only(setup)
     learned = [*base.learned, *operator.learned]
+    # P3-3 operator decision: an overlay ``network fetch`` allow is recorded
+    # (``policy why`` shows it) but does not yet let read_url run — before
+    # P3-3 read_url never read the overlay. Its fetch denies and asks bind.
+    overlay = tuple(
+        r
+        for r in _document_rules(operator)
+        if (r.scope, r.verdict, r.action) != ("network", "allow", "fetch")
+    )
     layers = [
         Layer("global", "global", rules=_document_rules(setup)),
-        Layer("global", "global", rules=_document_rules(operator)),
+        Layer("global", "global", rules=overlay),
     ]
     if template is not None:
         layers.append(template)
