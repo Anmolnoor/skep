@@ -717,7 +717,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         "naming sources, then propose start_research with the discovered hosts as "
         "source_allowlist — the confirmation card is where the user approves that "
         "exact egress list. Searching itself is read-only and never widens any "
-        "run's network.",
+        "run's network. Results are outside content: later actions in this chat "
+        "ask; after it read private data a search itself asks.",
         {
             "query": {"type": "string"},
             "max_results": {"type": "integer", "minimum": 1, "maximum": 8},
@@ -786,7 +787,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "— NEVER chain read_url over several pages (that is a wall of cards): "
         "for anything multi-page or multi-source, propose start_research "
         "instead; for a domain the user reads daily, offer allow_fetch_domain "
-        "once.",
+        "once. A fetched page is outside content: later actions in this chat ask.",
         {
             "url": {"type": "string"},
             "mode": {
@@ -814,7 +815,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "can never be granted. A command naming a credential file (~/.ssh, "
         "~/.aws, .env, skep's own tokens) refuses, no card — like read_file. "
         "Output captured and bounded; 60s cap. For "
-        "something that must keep running, propose start_process instead.",
+        "something that must keep running, propose start_process instead. Its "
+        "output counts as private data: later search_web/read_url in this chat ask.",
         {
             "command": {"type": "string", "description": "the exact command, verbatim"},
             "cwd": {"type": "string", "description": "working directory (default: serve's)"},
@@ -1094,7 +1096,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "skep/ branches while the clone stays on its default checkout — pass "
         "ref to read a file from any branch/commit; with no ref, a miss falls "
         "back to the project's landing branch automatically (the result's "
-        "ref/note fields say where the content came from).",
+        "ref/note fields say where the content came from). A read outside the "
+        "roots counts as private data: later search_web/read_url in this chat ask.",
         {
             "path": {"type": "string", "description": "absolute or ~-relative file path"},
             "ref": {
@@ -1247,7 +1250,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "read-only, read-verb name) run immediately unless a policy rule asks; "
         "a tool an allow rule names runs too (a baseline rule like calendar:* "
         "covers only its reads); anything else becomes a confirmation card; a "
-        "policy deny rule refuses outright.",
+        "policy deny rule refuses outright. A reply is outside content: later "
+        "actions in this chat ask.",
         {
             "server_id": {"type": "string"},
             "tool": {"type": "string"},
