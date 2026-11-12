@@ -241,6 +241,23 @@ def role_covers(role: Role, scope: str, action: str, value: str) -> bool:
     return bool(hits) and all(hit is not None for hit in hits)
 
 
+def catch_all_asks_only(role: Role, scope: str, action: str, value: str) -> bool:
+    """ADR 0059 decision #1: the role says nothing binding about any part of
+    the action — no deny, no named ask; at most its catch-all ``*`` ask
+    (``shell-learnable``, ``shell-gated``, ``net-gated``, …), which is a
+    default a human's grant answers, not a ceiling."""
+    layer = role.layer()
+    if layer is None:
+        return True
+    stars = {r.rule_id for r in layer.rules if r.verdict == "require_approval" and r.pattern == "*"}
+    return all(
+        hit is None
+        or hit.verdict == "allow"
+        or (hit.verdict == "require_approval" and hit.rule_id in stars)
+        for hit in _role_hits(role, scope, action, value)
+    )
+
+
 def tighten(
     verdict: dict[str, Any], role: Role | None, scope: str, action: str, value: str
 ) -> dict[str, Any]:

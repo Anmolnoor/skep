@@ -1,31 +1,35 @@
-"""Policy v3: one ``decide()`` (ADR 0059 D1/D2, round P3-1).
+"""Policy v3: one ``decide()`` (ADR 0059 D1/D2, rounds P3-1 and P3-2).
 
 ``decide(req, stack=, role=, chain=, face=)`` is the one decision the
 advisory and hard faces make — ``POST /api/policy/decide``, ``skep policy
-decide`` / ``why``, the Claude Code hook and ``skep acp govern`` — and the
-dispatch's delegation narrowing. It is pure over a ``Stack`` that
-``load_stack`` builds once per request. The Queen's own lanes (read_file,
-run_shell, read_url, search_web, MCP, browse) and the run compile move in
-rounds P3-2/P3-3; until then they keep their own paths and labels.
+decide`` / ``why``, the Claude Code hook and ``skep acp govern`` — the
+dispatch's delegation narrowing, and (P3-2) the Queen's own file and shell
+lanes: read_file / search_files decide ``filesystem.read``, run_shell /
+start_process / stop_process ``shell.run`` / ``run_background`` /
+``run_repo`` (``queen_decide``). It is pure over a ``Stack`` that
+``load_stack`` builds once per request. read_url, search_web, MCP, browse and
+the run compile move in P3-3 and later; until then they keep their own paths.
 
 Order (D2): floor deny → baseline guard → the lane's rules (the run policy
-in a repo, the operator document otherwise; most specific wins, deny wins
-ties) → unmatched (``SCOPE_ACTIONS``) → the role layer (only tightens) →
-the delegation cap. Every verdict names its layer in one vocabulary (B79):
-``floor/``, ``baseline/``, ``global/``, ``template:<name>/``,
-``role:<name>/``, ``phase:<p>/``, ``group:<name>/``, ``project:<id>/``,
-``grant:session/`` · ``grant:global/``, ``dispatch/``,
-``delegation:<who>/``, ``default/unmatched``.
-
-Unchanged from ADR 0059 P2 (they are P3-2's): a template's ``*`` ask still
-binds as a ceiling, and the global document still grants under a locked
-baseline. The one verdict this round flips is "no rule matched": it is
-``SCOPE_ACTIONS``' answer — ask, except ``shell.run_repo`` (deny) — where
-REST and the CLI said deny while the Queen carded (B77).
+in a repo, the operator document otherwise) → the operator roots → unmatched
+(``SCOPE_ACTIONS``) → the role layer (only tightens) → the delegation cap.
+Inside one layer the most specific rule wins, deny wins ties; across layers
+any deny binds, then any named ask, then the most specific of the rest — so
+a catch-all ``*`` ask is a default an allow more specific than it answers.
+The role layer never grants, and its ``*`` ask is a default too: an allow a
+human granted (``grant:session`` / ``grant:global``) answers it (decision
+#1, B56); its denies and named asks bind. Under a locked baseline the
+``skep setup`` document only tightens: its allows leave the stack (decision
+#2, B30). Every verdict names its layer in one vocabulary (B79): ``floor/``,
+``baseline/``, ``global/``, ``template:<name>/``, ``role:<name>/``,
+``phase:<p>/``, ``group:<name>/``, ``project:<id>/``, ``grant:session/`` ·
+``grant:global/``, ``dispatch/``, ``delegation:<who>/``,
+``default/unmatched``.
 """
 
 from __future__ import annotations
 
+import glob
 import json
 import re
 import shlex
@@ -42,9 +46,9 @@ from .policy_resolver import (
 )
 from .policy_schema import (
     _VERDICT_RANK,
-    DEFAULT_DENY_RULE_ID,
     OPERATOR_POLICY_SETTINGS_KEY,
     POLICY_DOCUMENT_SETTINGS_KEY,
+    SCOPES,
     UNMATCHED_RULE_ID,
     UNMATCHED_VERDICT,
     PolicyDocument,
@@ -53,14 +57,16 @@ from .policy_schema import (
     document_from_settings,
     is_session_rule,
     operator_document_from_settings,
+    pattern_matches,
     shell_segments,
+    specificity,
 )
 from .policy_schema import Verdict as VerdictName
-from .policy_schema import decide as _decide_rules
 from .roles import (
     EXCEEDS_DELEGATOR,
     Delegator,
     Role,
+    catch_all_asks_only,
     role_covers,
     tighten,
     within_delegator,
@@ -83,6 +89,8 @@ if TYPE_CHECKING:
 # ``shell.run_repo`` (deny). Defined beside the vocabulary it covers.
 SCOPE_ACTIONS = UNMATCHED_VERDICT
 UNMATCHED = f"default/{UNMATCHED_RULE_ID}"
+OPERATOR_ROOT = "operator-root"  # the generated rule an operator root becomes
+GRANT_LAYERS = ("grant:session", "grant:global")
 # The Queen-side lanes by definition: search is the keyless discovery, fetch
 # the read_url granted-domain lane. Asked about from a repo, the operator
 # document still answers.
@@ -128,6 +136,13 @@ class Stack:
     run_note: str | None = None
     # skep's own LLM endpoints for a run here (ADR 0059 D3): never a grant.
     provider_hosts: tuple[str, ...] = ()
+    # P3-2: the operator roots as generated ``global/operator-root`` allows,
+    # consulted where the operator lane matched nothing (they never outrank
+    # an explicit rule, exactly the fallback they replace).
+    roots: tuple[ResolvedRule, ...] = ()
+    # Learned rules the stack ignored because they land in a deny or the
+    # floor (B23, §5.4 #6): named in the decision log, never honoured.
+    ignored: tuple[str, ...] = ()
 
 
 def floor_verdict(
@@ -184,31 +199,90 @@ def _relabel(
     }
 
 
-def operator_lane(store: RunStore) -> dict[str, ResolvedScopePolicy]:
-    """The Queen's standing policy (``resolve_operator_policy``, rule for
-    rule) with each rule labelled: the global document and the operator
-    overlay are ``global``, the approved baseline ``template:<name>``, a
-    learned rule ``grant:session`` or ``grant:global`` (B34, B79)."""
-    from .policy_resolver import resolve_operator_policy
+def operator_lane(store: RunStore) -> tuple[dict[str, ResolvedScopePolicy], tuple[str, ...]]:
+    """The Queen's standing policy, rule for rule, each rule labelled: the
+    global document and the operator overlay are ``global``, the approved
+    baseline ``template:<name>``, a learned rule ``grant:session`` or
+    ``grant:global`` (B34, B79). Also the learned rules it ignored.
+
+    P3-2: every scope composes the baseline — v3 has no v1/v2 split, so an
+    upgraded home without ``policy_engine_v2_scopes`` gets its approved
+    baseline too (B31). Under a locked baseline the ``skep setup`` document
+    only tightens: its allows leave, its denies and asks stay (B30). The
+    template's and the setup document's worker shell allows never reach the
+    Queen's host (ES-F3, B03). A learned rule that lands in a deny or the
+    floor is ignored and named, not raised through every lane (B23)."""
+    from .policy_engine import Layer, LayerRule, _document_rules, resolve_stack
+    from .policy_layers import queen_template_layer, store_home
+    from .policy_resolver import queen_global_document
 
     base = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    base = base or PolicyDocument()
     operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
-    grants = {
-        (rule.rule_id, rule.action, rule.pattern): (
-            "grant:session" if is_session_rule(rule) else "grant:global"
-        )
-        for document in (base or PolicyDocument(), operator)
-        for rule in document.learned
-    }
+    template = queen_template_layer(store_home(store))
+    setup = queen_global_document(base)
+    if template is not None:
+        setup = tighten_only(setup)
+    learned = [*base.learned, *operator.learned]
+    layers = [
+        Layer("global", "global", rules=_document_rules(setup)),
+        Layer("global", "global", rules=_document_rules(operator)),
+    ]
+    if template is not None:
+        layers.append(template)
+    grants: dict[tuple[str, str, str], str] = {}
+    if learned:
+        grants = {
+            (rule.rule_id, rule.action, rule.pattern): GRANT_LAYERS[
+                0 if is_session_rule(rule) else 1
+            ]
+            for rule in learned
+        }
+        rules = tuple(
+            LayerRule(rule.scope, "allow", rule.rule_id, rule.action, rule.pattern, learned=True)
+            for rule in learned
+        )  # no ``origin``: resolve_stack records a refusal instead of raising
+        layers.append(Layer("session", "learned", rules=rules))
+    resolved = resolve_stack(layers)
 
-    def label(rule: ResolvedRule) -> str:
+    def label(rule: ResolvedRule, layer: str) -> str:
         if rule.layer is not None:
             return rule.layer
-        if rule.verdict == "allow":
-            return grants.get((rule.rule_id, rule.action, rule.pattern), "global")
+        if layer == "learned":
+            return grants[(rule.rule_id, rule.action, rule.pattern)]
         return "global"
 
-    return _relabel(resolve_operator_policy(store).resolved_scopes, label)
+    scopes = {
+        scope: ResolvedScopePolicy(
+            scope,
+            tuple(
+                replace(e.rule, layer=label(e.rule, e.layer)) for e in resolved.rules.get(scope, ())
+            ),
+        )
+        for scope in SCOPES
+    }
+    ignored = tuple(f"{r.rule_id} ({r.reason})" for r in resolved.refusals if r.layer == "learned")
+    return scopes, ignored
+
+
+def tighten_only(document: PolicyDocument) -> PolicyDocument:
+    """Decision #2 (B30): the ``skep setup`` document under a locked baseline —
+    no allows (they stop granting); denies and asks still bind. Learned rules
+    are grants and stay."""
+    return document.model_copy(
+        update={"scopes": [s.model_copy(update={"allow": []}) for s in document.scopes]}
+    )
+
+
+def root_rules(roots: Sequence[Path]) -> tuple[ResolvedRule, ...]:
+    """D1: each operator root as a generated ``global`` allow
+    ``filesystem read <root>/**`` (and the root itself)."""
+    rules: list[ResolvedRule] = []
+    for root in roots:
+        pattern = glob.escape(str(root))
+        for each in (pattern, f"{pattern.rstrip('/')}/**"):
+            rules.append(ResolvedRule("allow", OPERATOR_ROOT, "read", each, layer="global"))
+    return tuple(rules)
 
 
 def _knob_layer(source: str | None, project: dict[str, Any] | None) -> str:
@@ -258,14 +332,18 @@ def load_stack(holder: ConfigHolder, store: RunStore, *, repo: str | None = None
     registry's HTTPException, as ``why`` always has."""
     from .policy_layers import baseline_guard
     from .serve.actions import _project_summary, _repo_project_for_view, _resolve_for_view
+    from .serve.fileio import operator_roots
 
     home = holder.current.home
+    operator, ignored = operator_lane(store)
     stack = Stack(
         home=home,
         cwd=repo,
         guard=baseline_guard(store),
         baseline=status_line(home),
-        operator=operator_lane(store),
+        operator=operator,
+        roots=root_rules(operator_roots(store, holder)),
+        ignored=ignored,
     )
     if not repo:
         return stack
@@ -305,12 +383,40 @@ def _with(verdict: Verdict, held: dict[str, Any]) -> Verdict:
     )
 
 
+def _hit(
+    scopes: dict[str, ResolvedScopePolicy], scope: str, action: str, value: str
+) -> ResolvedRule | None:
+    """D2 for one simple value: inside one layer the most specific matching
+    rule wins (deny wins ties); across layers any deny binds, then any named
+    (non-``*``) ask, then the most specific of the rest — allows and
+    catch-all asks, ask winning ties. None when no rule matches."""
+    policy = scopes.get(scope)
+    by_layer: dict[str | None, list[ResolvedRule]] = {}
+    for rule in policy.rules if policy else ():
+        if rule.action == action and pattern_matches(scope, rule.pattern, value, exact=rule.exact):
+            by_layer.setdefault(rule.layer, []).append(rule)
+
+    def best(rules: Sequence[ResolvedRule]) -> ResolvedRule:
+        top = max(specificity(scope, rule.pattern) for rule in rules)
+        tied = [rule for rule in rules if specificity(scope, rule.pattern) == top]
+        return max(tied, key=lambda rule: _VERDICT_RANK[rule.verdict])
+
+    winners = [best(rules) for rules in by_layer.values()]
+    if not winners:
+        return None
+    denies = [w for w in winners if w.verdict == "deny"]
+    named = [w for w in winners if w.verdict == "require_approval" and w.pattern != "*"]
+    return best(denies or named or winners)
+
+
 def _match(
     scopes: dict[str, ResolvedScopePolicy], req: Request, source: str, note: str | None
 ) -> Verdict:
     """The lane's answer. A chained shell line is decided one simple command
     at a time and the least favourable decides (B3-F7); a segment no rule
-    matches is unmatched — never the explicit deny of a sibling segment."""
+    matches is unmatched — never the explicit deny of a sibling segment.
+    Among equal allows a non-grant segment names the verdict, so the verdict
+    is labelled ``grant:`` only when grants allow every segment."""
     scope, action, value = req
     unmatched = Verdict(
         SCOPE_ACTIONS[(scope, action)], "default", UNMATCHED_RULE_ID, UNMATCHED, source, note
@@ -320,13 +426,18 @@ def _match(
         parts = shell_segments(value) or []  # opaque text matches nothing
     found: list[Verdict] = []
     for part in parts:
-        hit = _decide_rules(scopes, scope, action, part, template="?")
-        if hit.decided_by == f"?/{DEFAULT_DENY_RULE_ID}":  # "?" labels no rule: none matched
+        hit = _hit(scopes, scope, action, part)
+        if hit is None:
             found.append(unmatched)
         else:
-            layer = hit.decided_by.partition("/")[0]
-            found.append(Verdict(hit.verdict, layer, hit.rule_id, hit.decided_by, source, note))
-    return max(found, key=lambda v: _VERDICT_RANK[v.verdict], default=unmatched)
+            layer = hit.layer or "global"
+            decided_by = f"{layer}/{hit.rule_id}"
+            found.append(Verdict(hit.verdict, layer, hit.rule_id, decided_by, source, note))
+    return max(
+        found,
+        key=lambda v: (_VERDICT_RANK[v.verdict], v.layer not in GRANT_LAYERS),
+        default=unmatched,
+    )
 
 
 def decide(
@@ -361,7 +472,14 @@ def decide(
             verdict = _match(stack.run, req, "run", note)
         else:
             verdict = _match(stack.operator, req, "operator", note)
-    if role is not None:
+            if verdict.layer == "default" and stack.roots:
+                roots = {"filesystem": ResolvedScopePolicy("filesystem", stack.roots)}
+                fallback = _match(roots, req, "operator", note)
+                verdict = verdict if fallback.layer == "default" else fallback
+    granted = verdict.verdict == "allow" and verdict.layer in GRANT_LAYERS
+    if role is not None and not (granted and catch_all_asks_only(role, scope, action, value)):
+        # Decision #1 (B56): a role's catch-all ask is a default a human's
+        # grant answers; anything else the role says binds as before.
         verdict = _with(verdict, tighten(_view(verdict), role, scope, action, value))
     if chain:
         *outer, delegator = chain
@@ -374,6 +492,29 @@ def decide(
         if held["rule_id"] == EXCEEDS_DELEGATOR:
             verdict = replace(_with(verdict, held), deferred=held["verdict"] == "require_approval")
         verdict = replace(verdict, chain=tuple(hop.entry for hop in chain))
+    return verdict
+
+
+def queen_decide(
+    holder: ConfigHolder,
+    store: RunStore,
+    req: Request,
+    *,
+    role: Role | None = None,
+    cwd: str | None = None,
+) -> Verdict:
+    """P3-2: the Queen's own file and shell lanes. ``decide()`` over the stack
+    with no repo — exactly what REST, the CLI and the hook answer for the same
+    request and role with no repo — logged as actor ``queen`` (I13). ``cwd``
+    is where a shell line runs (the secret floor resolves against it)."""
+    from .serve.actions import _decision_row
+
+    stack = replace(load_stack(holder, store), cwd=cwd)
+    verdict = decide(req, stack=stack, role=role)
+    row = _decision_row(
+        verdict, stack, actor="queen", repo=None, req=(req.scope, req.action, req.value), role=role
+    )
+    log_decision(holder.current.audit_dir, row)
     return verdict
 
 

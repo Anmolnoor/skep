@@ -295,6 +295,8 @@ def _specificity(scope: str, pattern: str) -> tuple[int, int]:
     return (0 if any(ch in pattern for ch in "*?[") else 1, len(pattern))
 
 
+specificity = _specificity  # P3-2: policy_v3 ranks rules inside one layer with it
+
 _VERDICT_RANK: dict[str, int] = {"deny": 2, "require_approval": 1, "allow": 0}
 
 

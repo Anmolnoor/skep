@@ -57,15 +57,21 @@ def test_no_verdict_is_more_permissive_than_before_but_unmatched(kind: str, tmp_
     verdicts the pre-v3 code gave (frozen). A cell that was the unmatched
     ``default-deny`` now gets the scope action's unmatched verdict or
     stricter — never allow; every other cell keeps its verdict exactly, and
-    a floor denial stays the same floor denial."""
+    a floor denial stays the same floor denial. P3-2: with no repo, a read
+    inside an operator root allows by ``global/operator-root`` — the rule
+    the Queen's read_file has always allowed it by, now in the one stack."""
     actions = {probe_id: (scope, action) for probe_id, scope, action, _ in PROBES}
     flipped = 0
     for row in rows(tmp_path, kind):
         old_verdict, old_rule, old_by = FROZEN[row["key"]].split(" ", 2)
         new_verdict = row["verdict"]
         assert not row["decided_by"].startswith(LEGACY_LABELS), row
+        probe, where = row["key"].split("|")[1:3]
+        if row["decided_by"] == "global/operator-root":
+            assert (actions[probe], where) == (("filesystem", "read"), "none"), row
+            continue
         if old_rule == "default-deny":
-            floor = UNMATCHED_VERDICT[actions[row["key"].split("|")[1]]]
+            floor = UNMATCHED_VERDICT[actions[probe]]
             assert _VERDICT_RANK[new_verdict] >= _VERDICT_RANK[floor], row
             flipped += new_verdict != old_verdict
             continue
@@ -540,3 +546,130 @@ def test_a_role_dispatch_keeps_the_engine_host_and_asks_for_a_network_host_no_ru
         assert "files.example" not in [*headless.network, *headless.network_ask]
     finally:
         store.close()
+
+
+# --- P3-2: D2's two signed semantics, at decide() ------------------------------------------
+
+
+def _lock(home: Path, name: str, *extra: dict[str, str]) -> None:
+    from skep.supervisor import policy_baseline as pb
+    from skep.supervisor.policy_templates import load_policy_template
+
+    layer = load_policy_template(name).model_dump(mode="json")
+    layer["rules"] = [*layer["rules"], *extra]
+    pb.write_lock(build_config(home, None).home, pb._load_layer(layer), approved_by="op")
+
+
+def _grant(home: Path, command: str, tier: str = "session") -> None:
+    from skep.supervisor.serve.actions import remember_action_for_session
+
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        assert remember_action_for_session(
+            store, tool="run_shell", args={"command": command}, actor="op", tier=tier
+        )
+    finally:
+        store.close()
+
+
+ASK_MAKE = {"scope": "shell", "verdict": "require_approval", "action": "run",
+            "pattern": "make deploy", "rule_id": "ask-make-deploy"}  # fmt: skip
+NO_CURL = {"scope": "shell", "verdict": "deny", "action": "run", "pattern": "curl",
+           "rule_id": "no-curl"}  # fmt: skip
+
+
+def test_decision_1_a_grant_answers_a_roles_catch_all_ask_and_a_named_ask_binds(
+    tmp_path: Path,
+) -> None:
+    """ADR 0059 decision #1 (B56): a role's `*` ask is a default — the
+    operator's exact-argv grant answers it in every role; a different argv
+    still asks; a named ask binds even against a grant that is more specific
+    than it (before, the most specific rule won and the grant ran)."""
+    home, _repo = build_home(tmp_path, "legacy")
+    _lock(home, "builder", ASK_MAKE)
+    _grant(home, "make build")
+    _grant(home, "make deploy now", tier="always")
+    for role in (None, "builder", "assistant", "operator"):
+        hit = _decide(home, scope="shell", action="run", value="make build", role=role)
+        assert (hit["verdict"], hit["decided_by"]) == (
+            "allow",
+            "grant:session/shell:run:make build",
+        )
+        wider = _decide(home, scope="shell", action="run", value="make build --all", role=role)
+        assert wider["verdict"] == "require_approval", (role, wider)
+        named = _decide(home, scope="shell", action="run", value="make deploy now", role=role)
+        assert (named["verdict"], named["decided_by"]) == (
+            "require_approval",
+            "template:builder/ask-make-deploy",
+        )
+    # A role's named rule still binds: the assistant role denies coding edits.
+    edit = _decide(home, scope="coding", action="edit", value="workspace", role="assistant")
+    assert edit["verdict"] == "deny"
+
+
+def test_decision_2_the_setup_document_only_tightens_under_a_locked_baseline(
+    tmp_path: Path,
+) -> None:
+    """ADR 0059 decision #2 (B30): a stale `skep setup --template builder`
+    document under a locked assistant baseline — its allows stop granting,
+    its denies still bind. With no baseline locked it grants as before."""
+    from skep.supervisor.policy_schema import PolicyRule
+    from skep.supervisor.policy_templates import load_policy_template
+
+    home, _repo = build_home(tmp_path, "legacy")
+    outside = tmp_path / "outside"
+    (outside / "private").mkdir(parents=True)
+    document = load_policy_template("builder").document()
+    for scope in document.scopes:
+        if scope.scope == "filesystem":
+            scope.allow.append(PolicyRule(rule_id="fs-read", action="read", pattern="*"))
+            scope.deny.append(
+                PolicyRule(rule_id="no-private", action="read", pattern=f"{outside}/private/*")
+            )
+    store = RunStore(build_config(home, None).db_path)
+    store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, document.model_dump_json())
+    store.close()
+    read = {"scope": "filesystem", "action": "read"}
+    before = _decide(home, **read, value=f"{outside}/notes.txt")
+    assert (before["verdict"], before["decided_by"]) == ("allow", "global/fs-read")
+    _lock(home, "assistant")
+    after = _decide(home, **read, value=f"{outside}/notes.txt")
+    assert (after["verdict"], after["decided_by"]) == ("require_approval", UNMATCHED)
+    denied = _decide(home, **read, value=f"{outside}/private/x.txt")
+    assert (denied["verdict"], denied["decided_by"]) == ("deny", "global/no-private")
+
+
+def test_b31_an_upgraded_home_composes_its_baseline_in_every_scope(tmp_path: Path) -> None:
+    """B31: v3 has no v1/v2 split — a home with no policy_engine_v2_scopes
+    gets its approved baseline's deny like any other."""
+    home, _repo = build_home(tmp_path, "legacy")
+    store = RunStore(build_config(home, None).db_path)
+    store.set_setting("policy_engine_v2_scopes", [])
+    store.close()
+    _lock(home, "builder", NO_CURL)
+    curl = _decide(home, scope="shell", action="run", value="curl -sI https://example.com")
+    assert (curl["verdict"], curl["decided_by"]) == ("deny", "template:builder/no-curl")
+
+
+def test_b23_a_learned_rule_inside_a_deny_is_ignored_and_logged_not_raised(
+    tmp_path: Path,
+) -> None:
+    """§5.4 #6 (ADR 0059 D4's B23 note): a grant stored before a baseline
+    denied its command is ignored at decide time and named in the decision
+    log; every other decision keeps working (before: LearnedRuleRejected on
+    every Queen-side decision)."""
+    from skep.supervisor.policy_v3 import operator_lane
+
+    home, _repo = build_home(tmp_path, "legacy")
+    _grant(home, "curl https://x.example/y", tier="always")
+    _lock(home, "builder", NO_CURL)
+    curl = _decide(home, scope="shell", action="run", value="curl https://x.example/y")
+    assert (curl["verdict"], curl["decided_by"]) == ("deny", "template:builder/no-curl")
+    assert curl["ignored_grants"] == ["shell:run:curl https://x.example/y (deny/no-curl)"]
+    assert _decide(home, scope="shell", action="run", value="ls")["verdict"] == "require_approval"
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        _scopes, ignored = operator_lane(store)
+    finally:
+        store.close()
+    assert ignored == ("shell:run:curl https://x.example/y (deny/no-curl)",)

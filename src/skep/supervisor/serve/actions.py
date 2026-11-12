@@ -1957,6 +1957,8 @@ def _decision_row(
     )
     if verdict.deferred:
         record["deferred"] = True
+    if stack.ignored:  # B23: grants the stack ignored because they land in a deny
+        record["ignored_grants"] = list(stack.ignored)
     return record
 
 
