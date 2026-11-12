@@ -61,7 +61,10 @@ Read three fields back to them, in plain words:
   answers a card).
 - `decided_by` / `rule_id` — *which* rule decided: `floor/...` is the
   never-allowed list, a template rule id comes from the baseline,
-  `role:<name>` is the role layer.
+  `role:<name>` is the role layer, `grant:session/...` / `grant:global/...`
+  is a card someone approved with keep, `global/operator-root` is a read
+  inside the operator's own roots, `default/unmatched` means no rule
+  matched (so it asks).
 - `floor` (when present) — the reason in a sentence.
 
 Example: "`git push` is denied by `floor.worker-git-hard-denies`. Workers
@@ -78,8 +81,12 @@ A newly onboarded skep also prints a short why-line under every verdict card;
 A role is a prompt, a voice and a policy layer that sits *under* the
 baseline: `builder`, `operator`, `assistant`, or a custom one
 (`skep role list`, `skep role show <name>`). A role can only tighten — if the
-baseline says ask and the role says allow, it still asks. A chat runs in one
-role; `skep role use <name>` sets the default.
+baseline says ask and the role says allow, it still asks. One exception the
+operator signed (ADR 0059): a role's catch-all ask (`shell-learnable *`,
+`shell-gated *`) is a default, not a ceiling — a command you approved with
+keep session/always runs again in that role without a card. The role's
+denies and named asks still bind. A chat runs in one role; `skep role use
+<name>` sets the default.
 
 Say: "The role changes what the assistant is for and narrows what it may do.
 It can never give it more than you locked."
