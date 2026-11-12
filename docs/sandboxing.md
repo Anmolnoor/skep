@@ -69,6 +69,14 @@ Skep models network access as a domain list:
 - `*`: allow all outbound network
 - concrete domains: allow only those domains, when the backend can enforce it
 
+Whatever the mode, every worker env carries `GIT_ALLOW_PROTOCOL=file`: git
+inside a worker (and every process it starts) uses only its local transport,
+so a push, fetch, clone or submodule update over https, ssh or git:// fails
+with "transport not allowed". That includes a package manager's git-sourced
+dependencies (`git+https://…` in uv/pip, `github:` in npm) unless they are
+already in the cache. A process that rewrites its own env can drop the variable; the
+network mode above is the wall.
+
 ### macOS
 
 For concrete domain allowlists, Seatbelt pins worker egress to Skep's loopback
