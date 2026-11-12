@@ -182,3 +182,37 @@ def test_wrapped_outside_rows_replay_on_every_strict_protocol(
     sent = json.dumps(provider.chat_bodies()[-1])
     for source in ("webhook:ci", "worker:t1", "schedule:s"):
         assert f'<untrusted source=\\"{source}\\">' in sent, (source, sent)
+
+
+def test_an_outside_row_landing_while_a_card_waits_replays_after_its_result(
+    config: SupervisorConfig, provider: Any
+) -> None:
+    """P4-1 follow-up: a webhook that fires while a card waits stores its row
+    between the card's tool call and the result the confirm writes. Replayed
+    in arrival order, the wrapped user turn split the call from its result and
+    the confirm's continuation was refused (anthropic, bedrock: the result
+    must lead the user turn; openai-compat: the call is unanswered) — and so
+    was every later turn. It now replays after the result."""
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": provider.base_url, "default_model": "m",
+              "protocol": provider.protocol, "api_key": "sk-fake"},
+    )  # fmt: skip
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    provider.script_tool_call("set_policy", {"auto_approve": True})
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "on"}).text)
+    assert events[-1] == ("done", {"state": "awaiting_confirmation"})
+    store = RunStore(config.db_path)
+    try:
+        store.add_chat_message(chat_id, role="user", content="ci failed", provenance="webhook:ci")
+    finally:
+        store.close()
+    action_id = client.get(f"/api/chats/{chat_id}").json()["actions"][0]["action_id"]
+    provider.script_reply("done")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm").text)
+    assert events[-1] == ("done", {"state": "complete"})
+    provider.script_reply("seen")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "?"}).text)
+    assert events[-1] == ("done", {"state": "complete"})
+    assert '<untrusted source=\\"webhook:ci\\">' in json.dumps(provider.chat_bodies()[-1])

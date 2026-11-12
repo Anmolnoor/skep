@@ -1285,7 +1285,24 @@ class ChatEngine:
         messages: list[dict[str, Any]] = []
         last_user_index: int | None = None
         untrusted_row = 0
+        # An outside row that landed inside an open tool round (a webhook while
+        # a card waits) replays after that round's results: between a call and
+        # its result a user turn is refused by the strict providers.
+        held: list[tuple[int, dict[str, Any]]] = []
+        open_calls = 0
+
+        def flush() -> None:
+            nonlocal last_user_index
+            for row_id, wrapped in held:
+                messages.append(wrapped)
+                if row_id == last_user_id:
+                    last_user_index = len(messages) - 1
+            held.clear()
+
         for record in records:
+            if record.role != "tool" and (record.trusted or not open_calls):
+                flush()
+                open_calls = 0
             if record.role == "tool":
                 content = record.content
                 # Current-turn tool results (after the newest user message)
@@ -1304,6 +1321,9 @@ class ChatEngine:
                 if record.tool_call_id:
                     message["tool_call_id"] = record.tool_call_id
                 messages.append(message)
+                open_calls = max(open_calls - 1, 0)
+                if not open_calls:
+                    flush()
             elif record.role == "assistant" and record.tool_calls:
                 messages.append(
                     {
@@ -1312,19 +1332,30 @@ class ChatEngine:
                         "tool_calls": [_replayable_call(c) for c in record.tool_calls],
                     }
                 )
+                open_calls = len(record.tool_calls)
             elif not record.trusted:
                 # P4-1 (B26): outside content is a user turn, wrapped — never
                 # the Queen's own words, never an instruction from the operator.
-                messages.append(
-                    {"role": "user", "content": wrap_untrusted(record.provenance, record.content)}
+                held.append(
+                    (
+                        record.id,
+                        {
+                            "role": "user",
+                            "content": wrap_untrusted(record.provenance, record.content),
+                        },
+                    )
                 )
+                if not open_calls:
+                    flush()
                 untrusted_row = untrusted_row or record.id
+                continue
             elif record.role == "user" and record.attachments:
                 messages.append(self._user_message_with_images(chat_id, record, vision))
             else:
                 messages.append({"role": record.role, "content": record.content})
             if record.role == "user" and record.id == last_user_id:
                 last_user_index = len(messages) - 1
+        flush()
         if untrusted_row and self.store.get_chat_taint(chat_id).untrusted is None:
             # its presence sets ``untrusted`` (a row written before the bit was)
             self.store.add_chat_taint(chat_id, untrusted=untrusted_row)
