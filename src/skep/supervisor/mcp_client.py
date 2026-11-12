@@ -593,7 +593,12 @@ def mcp_tool_scope_action(store: RunStore, tool: MCPTool) -> tuple[Scope, str]:
 
 
 def mcp_scope_decision(
-    store: RunStore, holder: ConfigHolder, tool: MCPTool, *, role: Role | None = None
+    store: RunStore,
+    holder: ConfigHolder,
+    tool: MCPTool,
+    *,
+    role: Role | None = None,
+    chat_id: str | None = None,
 ) -> AutonomyDecision:
     """One MCP tool call, decided by ``policy_v3.decide()`` with the chat's
     role (ADR 0059 P3-3) under the scope its server binds: ``mcp.call``,
@@ -610,7 +615,8 @@ def mcp_scope_decision(
     (B29); a learned ``allow_mcp_tool`` grant answers a role's catch-all
     ``mcp-gated *`` ask (decision #1, B56). allow → in-turn, deny → refused
     with no card, ask → the card naming the rule that asked. A policy that
-    will not load refuses (fail closed)."""
+    will not load refuses (fail closed). ``chat_id``: the chat asking — its
+    taint gates the call (P4-1, D5: a non-read tool is outbound and acts)."""
     from .autonomy import AutonomyDecision
     from .policy_v3 import READ_ONLY, Request, queen_decide
 
@@ -622,8 +628,9 @@ def mcp_scope_decision(
     )
     try:
         verdict = queen_decide(
-            holder, store, Request(scope, action, value), role=role, read_only=read_only
-        )
+            holder, store, Request(scope, action, value), role=role, read_only=read_only,
+            chat_id=chat_id,
+        )  # fmt: skip
     except Exception as exc:  # I9: a policy that will not load never calls a tool
         return AutonomyDecision(
             verdict="deny",
@@ -634,6 +641,11 @@ def mcp_scope_decision(
     if verdict.verdict == "require_approval":
         asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
         reason = f"{scope}.require_approval.{asked}"
+        if verdict.layer == "taint":
+            return AutonomyDecision(
+                verdict="require_approval", reason=f"taint.require_approval.{asked}",
+                detail=verdict.note, decided_by=verdict.decided_by,
+            )  # fmt: skip
     elif verdict.decided_by == f"default/{READ_ONLY}":
         reason = f"{scope}.allow.read_risk"
     else:

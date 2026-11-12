@@ -280,6 +280,32 @@ function keepSelect(card) {
       k === "session" ? { value: k, selected: "" } : { value: k }, KEEP_LABELS[k] || k)));
 }
 
+// P4-1 (ADR 0059 D5): a tainted chat's card says why in plain words (the
+// server's card.taint), and a doubly tainted one is HIGH — it looks different.
+function taintNote(card) {
+  return card && card.taint ? el("p", { class: "note card-taint" }, card.taint) : null;
+}
+
+function cardClass(card) {
+  return card && card.tier === "high" ? "confirm-card card-high" : "confirm-card";
+}
+
+// P4-1 (ADR 0059 D5): a run dispatched from a tainted chat says so on its card.
+function taintChip(decision) {
+  const bits = decision?.constraints?.chat_taint;
+  if (!Array.isArray(bits) || !bits.length) return null;
+  return el("span", { class: "chip", title: "the dispatching chat's taint" },
+    `chat: ${bits.map(String).join(" + ")}`);
+}
+
+// P4-1 (B26, B37): a row you did not write says who did — a webhook, a
+// script, a worker (`from webhook:ci`), or skep's own prompt (`skep`).
+function authorLabel(message, fallback) {
+  const author = message.provenance || "";
+  if (message.role !== "user" || !author || author === "operator") return fallback;
+  return author === "queen" ? "skep" : `from ${author}`;
+}
+
 // What a keep would allow (card.keep_covers): each command of a compound line
 // on its own, or a whole URL directory — said on the card, not only "always".
 function keepCovers(card) {
@@ -3027,6 +3053,7 @@ async function viewChat(main, chatId) {
         ? el("p", { class: "card-risk" },
             el("span", { class: "card-risk-label" }, "Needs your attention: "), card.risk)
         : null,
+      taintNote(card),
       details.length
         ? el("details", { class: "card-details" },
             el("summary", {}, "details"), details)
@@ -3059,7 +3086,7 @@ async function viewChat(main, chatId) {
     // v112-F1: the keep choice rides the confirm — session stays the default.
     const keep = keepSelect(d.card);
     // v81-F13: the id on the DOM lets reconcilers see which cards are drawn.
-    const card = el("div", { class: "confirm-card", "data-action-id": d.action_id },
+    const card = el("div", { class: cardClass(d.card), "data-action-id": d.action_id },
       ...cardBody(d),
       whyLine(d),
       keepCovers(d.card),
@@ -3571,11 +3598,13 @@ async function viewChat(main, chatId) {
     // tool call) — an empty bubble reads as a rendering bug.
     else if ((message.content && message.content.trim()) || message.thinking) {
       replayGroup = null;
+      const own = message.role === "user" && authorLabel(message, null) === null;
       renderChatMessage(log, message.role, message.content, {
-        label: message.role === "user" ? "You" : (activeChat?.model || llm.default_model || "skep"),
+        label: authorLabel(message,
+          message.role === "user" ? "You" : (activeChat?.model || llm.default_model || "skep")),
         createdAt: message.created_at,
         thinking: message.thinking,
-        onResend: message.role === "user" ? fillInput : null,
+        onResend: own ? fillInput : null,
         scroll: scrollBottom,
         attachments: message.attachments || [],
         chatId: activeChatId,
@@ -3945,6 +3974,7 @@ function buildRunCard(run) {
         ? el("span", { class: "chip", title: "delegated by" },
           delegationText(run.dispatch_decision.delegation))
         : null,
+      taintChip(run.dispatch_decision),
       project ? el("span", {}, project) : null,
       autonomy !== "-" ? el("span", { class: "run-card-autonomy mono" }, autonomy) : null));
 }

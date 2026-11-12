@@ -88,7 +88,9 @@ def _harvest_chat_lines(store: RunStore) -> list[str]:
         # be a webhook delivery, script output or the model's words; a channel
         # chat's user row is any channel member — none may write memory that
         # every chat then reads as approved (I5/I6).
-        if message.role != "user":
+        # P4-1 (ADR 0059 D5): and only rows the operator wrote — a webhook or
+        # a script's output is a user row now (B26), never the operator's.
+        if message.role != "user" or message.provenance != "operator":
             continue
         text = message.content.strip()
         if not text:
@@ -162,8 +164,16 @@ def observe_conversations(store: RunStore) -> list[str]:
 
 def _draft_from_last_turn(store: RunStore, chat_id: str) -> str | None:
     messages = store.chat_messages(chat_id)
+    # P4-1 (ADR 0059 D5, the B113 class): the ask is the operator's own — a
+    # webhook, a script's output, a worker's report or skep's own prompt never
+    # becomes "when the user asks".
     last_user = next(
-        (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"), None
+        (
+            i
+            for i in range(len(messages) - 1, -1, -1)
+            if messages[i].role == "user" and messages[i].provenance == "operator"
+        ),
+        None,
     )
     if last_user is None:
         return None

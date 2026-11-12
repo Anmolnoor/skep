@@ -32,6 +32,7 @@ from ..shell_prefixes import (
     queen_command_line_refusal,
     queen_shell_refusal,
 )
+from ..store import ChatTaint
 
 # The "thing" a card is about, in priority order. One generic rule beats a
 # 69-entry per-tool table: every mutating tool names its subject with one of
@@ -267,11 +268,20 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
     return None
 
 
-def card_summary(tool: str, args: Any, description: str = "") -> dict[str, Any]:
+def card_summary(
+    tool: str,
+    args: Any,
+    description: str = "",
+    *,
+    taint: ChatTaint | None = None,
+    taint_line: str | None = None,
+) -> dict[str, Any]:
     """The human-facing three lines for one proposed action.
 
     ``risk`` is omitted entirely when there is nothing notable, so the card
-    stays quiet about quiet things.
+    stays quiet about quiet things. P4-1 (ADR 0059 D5): in a tainted chat
+    (``taint``) the card says why in plain words (``taint_line``), offers
+    only the keeps that chat may store, and with both bits is ``tier: high``.
     """
     safe_args: dict[str, Any] = args if isinstance(args, dict) else {}
     summary: dict[str, Any] = {"headline": headline(tool, safe_args)}
@@ -290,8 +300,12 @@ def card_summary(tool: str, args: Any, description: str = "") -> dict[str, Any]:
     if tool in REMEMBERABLE_TOOLS:
         # P3-4 (ADR 0059 D4): the keep choices the server will honour — the
         # card never offers a lifetime the confirm would refuse (B32).
-        summary["keep"] = keep_options(tool, safe_args)
+        summary["keep"] = keep_options(tool, safe_args, taint)
         covers = keep_covers(tool, safe_args)
         if covers is not None:
             summary["keep_covers"] = covers  # what "session"/"always" would allow
+    if taint_line:
+        summary["taint"] = taint_line
+    if taint is not None and taint.private is not None and taint.untrusted is not None:
+        summary["tier"] = "high"
     return summary

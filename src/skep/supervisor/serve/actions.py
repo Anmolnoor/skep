@@ -115,7 +115,7 @@ from ..shell_prefixes import (
     normalize_remembered_command,
     worker_allowlist_reason,
 )
-from ..store import RunStore
+from ..store import ChatTaint, RunStore
 from ..worktree import TREE_LOCK
 from .jobs import Dispatcher, DispatchError
 from .registry import (
@@ -4256,6 +4256,7 @@ def submit_run(
     role: str | None = None,
     team: str | None = None,
     deferred_asks: bool = False,
+    chat_taint: Sequence[str] = (),
 ) -> str:
     """Resolve the repo, fill policy defaults (A5), and dispatch in background.
 
@@ -4274,7 +4275,11 @@ def submit_run(
     ADR 0059 D3 (V7): ``deferred_asks`` says a human can answer this run's
     gate cards (REST, the CLI, a chat that can show a card). Only then does a
     grant the chain makes an ask ride ``network_ask``/``shell_ask``; on every
-    other face (the default) it is dropped — a headless ask is a deny (I6)."""
+    other face (the default) it is dropped — a headless ask is a deny (I6).
+
+    ADR 0059 D5 (P4-1): ``chat_taint`` is the dispatching chat's taint bits;
+    the dispatch decision records them (``constraints.chat_taint``) so every
+    run card shows them. The worker's own permissions do not change."""
     # v101-F10: F1 wrote a resolver that refuses an unknown caste by name, and
     # nothing called it — so an unknown caste reached the contract validator
     # deep in dispatch and surfaced as a 500 with no usable detail. Every
@@ -4391,6 +4396,12 @@ def submit_run(
         effective_dispatch_decision = delegated_decision(
             effective_dispatch_decision, delegation, delegation_note
         )
+        if chat_taint:
+            constraints = {**(effective_dispatch_decision.constraints or {})}
+            constraints["chat_taint"] = list(chat_taint)
+            effective_dispatch_decision = replace(
+                effective_dispatch_decision, constraints=constraints
+            )
         task_id = runner.submit(
             resolved,
             instructions,
@@ -5180,14 +5191,48 @@ def _grant_subjects(tool: str, args: dict[str, Any]) -> list[tuple[str, str, str
     return list(dict.fromkeys(subjects))
 
 
+def _taint_keep_refusal(tool: str, keep: str, taint: ChatTaint | None) -> str | None:
+    """P4-1 (ADR 0059 D5): the keeps a tainted chat may not store. Both bits:
+    once only (a HIGH card). Any bit: never a standing fetch grant (egress).
+    A session keep the chat's own taint would ask past anyway is refused,
+    not stored as a grant that changes nothing (I8)."""
+    if taint is None or not taint.any or keep == "once":
+        return None
+    if taint.private is not None and taint.untrusted is not None:
+        return (
+            "this chat has read private data and taken in outside content, so its "
+            "approvals hold once"
+        )
+    egress = tool == "read_url"
+    if egress and (keep == "always" or taint.private is not None):
+        return (
+            "this chat has read private data or taken in outside content, so a fetch "
+            "approval here holds once"
+            if keep == "always"
+            else "this chat has read private data, so every fetch from it asks: a session "
+            "keep would change nothing"
+        )
+    if keep == "session" and not egress and taint.untrusted is not None:
+        return (
+            "this chat has taken in outside content, so every command it runs asks: a "
+            "session keep would change nothing ('always' holds in your other chats)"
+        )
+    return None
+
+
 def keep_refusal(
-    tool: str, args: dict[str, Any], keep: str, store: RunStore | None = None
+    tool: str,
+    args: dict[str, Any],
+    keep: str,
+    taint: ChatTaint | None = None,
+    store: RunStore | None = None,
 ) -> str | None:
     """Why the server would refuse this keep on this card, or None (B32: a
     keep the tool cannot honour is refused up front, never a false
-    "remembered"). ``once`` always holds. With ``store``, also a grant that
-    store_grant would refuse for reaching into a deny — checked BEFORE the
-    card runs, not after it already ran."""
+    "remembered"). ``once`` always holds. ``taint`` is the confirming chat's
+    (P4-1): a tainted chat is offered fewer keeps. With ``store``, also a
+    grant that store_grant would refuse for reaching into a deny — checked
+    BEFORE the card runs, not after it already ran."""
     if keep == "once":
         return None
     if keep not in KEEP_TIERS:
@@ -5195,6 +5240,9 @@ def keep_refusal(
     found = _grant_subjects(tool, args)
     if isinstance(found, str):
         return found
+    refused = _taint_keep_refusal(tool, keep, taint)
+    if refused is not None:
+        return refused
     return None if store is None else _denied_grant(store, found)
 
 
@@ -5247,10 +5295,15 @@ def vet_keep(
     )
 
 
-def keep_options(tool: str, args: dict[str, Any]) -> list[str]:
-    """The keep choices a card offers: all three where a grant can be stored,
-    else only ``once`` — the card never offers what the server refuses."""
-    return list(KEEP_TIERS) if keep_refusal(tool, args, "session") is None else ["once"]
+def keep_options(tool: str, args: dict[str, Any], taint: ChatTaint | None = None) -> list[str]:
+    """The keep choices a card offers — the card never offers what the
+    server refuses (``keep_refusal`` with the same taint)."""
+    return [keep for keep in KEEP_TIERS if keep_refusal(tool, args, keep, taint) is None]
+
+
+def default_keep(tool: str, args: dict[str, Any], taint: ChatTaint | None = None) -> str:
+    """The keep a confirm with none named stores: ``session`` where offered."""
+    return "session" if "session" in keep_options(tool, args, taint) else "once"
 
 
 def keep_covers(tool: str, args: dict[str, Any]) -> str | None:

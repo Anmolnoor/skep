@@ -151,3 +151,68 @@ def test_a_stored_garbled_tool_call_replays_in_a_valid_shape(
         assert events[-1] == ("done", {"state": "complete"})
     # The raw text never reaches the wire (json.dumps escapes its quotes).
     assert '{\\"limit\\": 5' not in json.dumps(provider.chat_bodies())
+
+
+def test_wrapped_outside_rows_replay_on_every_strict_protocol(
+    config: SupervisorConfig, provider: Any
+) -> None:
+    """P4-1 (B26): a webhook row, a worker's report and a script's output sit
+    in the transcript as wrapped user turns — next to the operator's own
+    message, a tool round and skep's prompt — and every strict provider
+    accepts the replay; none of them is ever sent as the assistant."""
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": provider.base_url, "default_model": "m",
+              "protocol": provider.protocol, "api_key": "sk-fake"},
+    )  # fmt: skip
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        store.add_chat_message(chat_id, role="user", content="ci failed", provenance="webhook:ci")
+        store.add_chat_message(chat_id, role="user", content="done", provenance="worker:t1")
+        store.add_chat_message(chat_id, role="user", content="Continue.", provenance="queen")
+        store.add_chat_message(chat_id, role="user", content="x", provenance="schedule:s")
+    finally:
+        store.close()
+    provider.script_tool_call("list_runs", {"limit": 5})
+    provider.script_reply("ok")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "?"}).text)
+    assert events[-1] == ("done", {"state": "complete"})
+    sent = json.dumps(provider.chat_bodies()[-1])
+    for source in ("webhook:ci", "worker:t1", "schedule:s"):
+        assert f'<untrusted source=\\"{source}\\">' in sent, (source, sent)
+
+
+def test_an_outside_row_landing_while_a_card_waits_replays_after_its_result(
+    config: SupervisorConfig, provider: Any
+) -> None:
+    """P4-1 follow-up: a webhook that fires while a card waits stores its row
+    between the card's tool call and the result the confirm writes. Replayed
+    in arrival order, the wrapped user turn split the call from its result and
+    the confirm's continuation was refused (anthropic, bedrock: the result
+    must lead the user turn; openai-compat: the call is unanswered) — and so
+    was every later turn. It now replays after the result."""
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": provider.base_url, "default_model": "m",
+              "protocol": provider.protocol, "api_key": "sk-fake"},
+    )  # fmt: skip
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    provider.script_tool_call("set_policy", {"auto_approve": True})
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "on"}).text)
+    assert events[-1] == ("done", {"state": "awaiting_confirmation"})
+    store = RunStore(config.db_path)
+    try:
+        store.add_chat_message(chat_id, role="user", content="ci failed", provenance="webhook:ci")
+    finally:
+        store.close()
+    action_id = client.get(f"/api/chats/{chat_id}").json()["actions"][0]["action_id"]
+    provider.script_reply("done")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm").text)
+    assert events[-1] == ("done", {"state": "complete"})
+    provider.script_reply("seen")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "?"}).text)
+    assert events[-1] == ("done", {"state": "complete"})
+    assert '<untrusted source=\\"webhook:ci\\">' in json.dumps(provider.chat_bodies()[-1])

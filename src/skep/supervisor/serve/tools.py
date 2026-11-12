@@ -717,7 +717,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         "naming sources, then propose start_research with the discovered hosts as "
         "source_allowlist — the confirmation card is where the user approves that "
         "exact egress list. Searching itself is read-only and never widens any "
-        "run's network.",
+        "run's network. Results are outside content: later actions in this chat "
+        "ask; after it read private data a search itself asks.",
         {
             "query": {"type": "string"},
             "max_results": {"type": "integer", "minimum": 1, "maximum": 8},
@@ -786,7 +787,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "— NEVER chain read_url over several pages (that is a wall of cards): "
         "for anything multi-page or multi-source, propose start_research "
         "instead; for a domain the user reads daily, offer allow_fetch_domain "
-        "once.",
+        "once. A fetched page is outside content: later actions in this chat ask.",
         {
             "url": {"type": "string"},
             "mode": {
@@ -815,7 +816,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "can never be granted. A command naming a credential file (~/.ssh, "
         "~/.aws, .env, skep's own tokens) refuses, no card — like read_file. "
         "Output captured and bounded; 60s cap. For "
-        "something that must keep running, propose start_process instead.",
+        "something that must keep running, propose start_process instead. Its "
+        "output counts as private data: later search_web/read_url in this chat ask.",
         {
             "command": {"type": "string", "description": "the exact command, verbatim"},
             "cwd": {"type": "string", "description": "working directory (default: serve's)"},
@@ -1095,7 +1097,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "skep/ branches while the clone stays on its default checkout — pass "
         "ref to read a file from any branch/commit; with no ref, a miss falls "
         "back to the project's landing branch automatically (the result's "
-        "ref/note fields say where the content came from).",
+        "ref/note fields say where the content came from). A read outside the "
+        "roots counts as private data: later search_web/read_url in this chat ask.",
         {
             "path": {"type": "string", "description": "absolute or ~-relative file path"},
             "ref": {
@@ -1248,7 +1251,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "read-only, read-verb name) run immediately unless a policy rule asks; "
         "a tool an allow rule names runs too (a baseline rule like calendar:* "
         "covers only its reads); anything else becomes a confirmation card; a "
-        "policy deny rule refuses outright.",
+        "policy deny rule refuses outright. A reply is outside content: later "
+        "actions in this chat ask.",
         {
             "server_id": {"type": "string"},
             "tool": {"type": "string"},
@@ -2673,11 +2677,46 @@ def fetch_grant_decision(
             detail=f"a policy rule denies fetching {host!r} ({verdict.decided_by})",
             decided_by=verdict.decided_by,
         )
+    if verdict.layer == "taint":
+        return taint_decision(verdict)
     asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
     return AutonomyDecision(
         verdict="require_approval",
         reason=f"network.require_approval.{asked}",
         detail=host,
+        decided_by=verdict.decided_by,
+    )
+
+
+def search_web_verdict(store: RunStore, holder: ConfigHolder, chat_id: str | None) -> Any:
+    """search_web's ``network.search`` (P3-3, B78: with the chat's role; P4-1:
+    with its taint). The value is the backend, never the query: the decision
+    log keeps no query text."""
+    from ..policy_v3 import Request, queen_decide
+
+    return queen_decide(
+        holder,
+        store,
+        Request("network", "search", "ddgs"),
+        role=_chat_role(store, holder, chat_id),
+        chat_id=chat_id,
+    )
+
+
+def chat_taint_bits(store: RunStore, chat_id: str | None) -> list[str]:
+    """P4-1 (ADR 0059 D5): the dispatching chat's taint bits, which the run's
+    dispatch decision records — none for a dispatch from no chat."""
+    return [] if chat_id is None else store.get_chat_taint(chat_id).bits()
+
+
+def taint_decision(verdict: Any) -> AutonomyDecision:
+    """P4-1 (ADR 0059 D5): a ``taint/<rule>`` ask as the card's decision —
+    the why-line on ``detail``, so the card says in plain words why a granted
+    thing is asking again (I8)."""
+    return AutonomyDecision(
+        verdict="require_approval",
+        reason=f"taint.require_approval.{verdict.rule_id}",
+        detail=verdict.note,
         decided_by=verdict.decided_by,
     )
 
@@ -2824,6 +2863,8 @@ def queen_shell_decision(
                 detail=command,
                 decided_by=verdict.decided_by,
             )
+        if verdict.layer == "taint":  # P4-1: a rule allowed it; taint only asks
+            return taint_decision(verdict)
         return AutonomyDecision(
             verdict="deny",
             reason="shell.deny.repo_cwd" if via_cwd else "shell.deny.repo_target",
@@ -2861,6 +2902,8 @@ def queen_shell_decision(
             detail=f"a policy rule denies this command ({verdict.decided_by})",
             decided_by=verdict.decided_by,
         )
+    if verdict.layer == "taint":
+        return taint_decision(verdict)
     # B79: the card names the rule that asked — never "no rule covers this".
     asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
     return AutonomyDecision(
@@ -3042,7 +3085,7 @@ def execute_read_tool(
         # gets — the role layer included.
         role = _chat_role(store, holder, chat_id)
         for tool in tools:
-            decision = mcp_scope_decision(store, holder, tool, role=role)
+            decision = mcp_scope_decision(store, holder, tool, role=role, chat_id=chat_id)
             views.append(
                 {
                     "name": tool.name,
@@ -3549,18 +3592,21 @@ def execute_read_tool(
         # The value is the backend, never the query: the decision log keeps no
         # query text. Read tools never card: anything but allow is a clean
         # policy error, and so is a policy that will not load.
-        from ..policy_v3 import Request, queen_decide
         from . import websearch
 
         try:
-            search_decision = queen_decide(
-                holder,
-                store,
-                Request("network", "search", "ddgs"),
-                role=_chat_role(store, holder, chat_id),
-            )
+            search_decision = search_web_verdict(store, holder, chat_id)
         except Exception as exc:  # fail closed: no decision, no search
             return {"error": f"web search refused: the policy did not load ({exc})", "results": []}
+        if search_decision.layer == "taint":
+            # P4-1: a live turn cards this (chat.py); a turn that cannot card
+            # (/btw, unattended) refuses and says why.
+            return {
+                "error": f"web search needs the operator's OK here: {search_decision.note} — "
+                "ask in a live turn",
+                "decided_by": search_decision.decided_by,
+                "results": [],
+            }
         if search_decision.verdict != "allow":
             return {
                 "error": "web search is not allowed by policy "
@@ -3816,6 +3862,21 @@ def _execute_mutation(
     decision: AutonomyDecision | None = None,
     chat_id: str | None = None,
 ) -> Any:
+    if name == "search_web":
+        # P4-1: a taint card the operator confirmed (chat.py cards search_web
+        # only for a taint ask) — the human's OK answers the ask; a deny that
+        # landed since still refuses (denied space unreachable by confirmation).
+        from . import websearch
+
+        last_guard = search_web_verdict(store, holder, chat_id)
+        if last_guard.verdict == "deny":
+            raise ValueError(f"denied by policy: {last_guard.decided_by}")
+        return {
+            "results": websearch.search_web(
+                str(args["query"]), max_results=int(args.get("max_results") or 5)
+            ),
+            "decided_by": "operator/confirmed",
+        }
     if name == "register_mcp_server":
         from ..mcp_client import MCPError, MCPServerConfig, save_mcp_server
 
@@ -4031,6 +4092,7 @@ def _execute_mutation(
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
             deferred_asks=_human_answers(store, chat_id),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         return {
             "task_id": task_id,
@@ -4106,6 +4168,7 @@ def _execute_mutation(
             holder.current.home,
             analysis_tasks,
             None if args.get("context") is None else str(args["context"]),
+            parent_chat_id=chat_id,
         )
     if name == "batch_dispatch":
         # v51-F5 (ADR 0025): N independent dispatch_runs submitted together.
@@ -4152,6 +4215,7 @@ def _execute_mutation(
                 delegation_chain=_queen_chain(store, holder, chat_id, actor),
                 role=None if entry.get("role") is None else str(entry["role"]),
                 deferred_asks=_human_answers(store, chat_id),
+                chat_taint=chat_taint_bits(store, chat_id),
             )
             for entry in entries
         ]
@@ -4253,6 +4317,7 @@ def _execute_mutation(
             wall_clock_seconds=wall_clock,
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         result = _script_run_result(store, task_id, wall_clock_seconds=wall_clock)
         if fast_requested:
@@ -4358,6 +4423,7 @@ def _execute_mutation(
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
             deferred_asks=_human_answers(store, chat_id),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         forge.save_plugin(
             store,
@@ -4928,6 +4994,7 @@ def _execute_mutation(
             deferred_asks=_human_answers(store, chat_id),
             protocol=None if args.get("protocol") is None else str(args["protocol"]),
             engine=None if args.get("engine") is None else str(args["engine"]),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         # v40-F2 (v35): repo + caste ride the result so both the live SSE tool
         # event and the stored transcript row can render a human summary —
@@ -4972,6 +5039,7 @@ def _execute_mutation(
             network=source_allowlist,
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         return {"task_id": task_id, "state": "research_dispatched"}
     if name == "propose_schedule":
@@ -5320,7 +5388,49 @@ def mutation_executes_in_turn(
     return decision is not None and decision.allows_execution()
 
 
+# P4-1: the mutating tools whose lane is ``policy_v3.decide()`` — it applies
+# the chat's taint itself (and knows a read from an act). Every other allow a
+# mutation gets (a project's auto-dispatch, an inert proposal, any lane added
+# later) is a consequential action the ``untrusted`` bit sends to a card.
+_DECIDED_LANES = frozenset(
+    {"run_shell", "start_process", "stop_process", "read_file", "search_files", "read_url",
+     "call_mcp_tool"}
+)  # fmt: skip
+
+
 def mutation_execution_decision(
+    name: str,
+    args: dict[str, Any],
+    *,
+    store: RunStore,
+    holder: ConfigHolder,
+    chat_id: str | None = None,
+) -> AutonomyDecision | None:
+    """The gate for one Queen tool call: allow runs in-turn, deny refuses
+    with no card, anything else (None too) is the card. P4-1 (ADR 0059 D5):
+    in a chat with the ``untrusted`` bit an allow from outside decide() is a
+    consequential action and asks (``taint/untrusted-action``, or
+    ``taint/trifecta`` when the chat has both bits)."""
+    from ..policy_v3 import ACTION_REQUEST, Verdict, taint_asks, taint_verdict
+
+    decision = _mutation_execution_decision(name, args, store=store, holder=holder, chat_id=chat_id)
+    if (
+        chat_id is None
+        or name in _DECIDED_LANES
+        or decision is None
+        or not decision.allows_execution()
+    ):
+        return decision
+    taint = store.get_chat_taint(chat_id)
+    # ADR 0059 D1 names a dispatch ``dispatch.delegate``; every allow here is
+    # an action of that weight (a run, a proposal, a later lane).
+    if taint_asks(taint, *ACTION_REQUEST) is None:
+        return decision
+    held = Verdict("allow", "", "", decision.decided_by or "", "operator")
+    return taint_decision(taint_verdict(held, taint, *ACTION_REQUEST, read_only=False))
+
+
+def _mutation_execution_decision(
     name: str,
     args: dict[str, Any],
     *,
@@ -5365,7 +5475,9 @@ def mutation_execution_decision(
                 description="",
             ),
             role=role,
+            chat_id=chat_id,
         )
+
     if name == "run_code":
         # v51-F3: run_code auto-resolves exactly where a plain dispatch_run
         # would — the project's own auto-dispatch posture decides, and the

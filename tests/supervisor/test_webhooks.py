@@ -98,8 +98,10 @@ def test_github_signed_ingest_delivers_into_the_bound_chat(config: SupervisorCon
     store = RunStore(config.db_path)
     try:
         messages = store.chat_messages(chat_id)
-        assert [(m.role, m.content) for m in messages] == [
-            ("assistant", "📦 anmolnoor/skep: failure")
+        # ADR 0059 D5 (B26): outside text is a user row from the webhook,
+        # never the Queen's own words.
+        assert [(m.role, m.provenance, m.content) for m in messages] == [
+            ("user", "webhook:github-ci", "📦 anmolnoor/skep: failure")
         ]
     finally:
         store.close()
