@@ -4073,7 +4073,22 @@ def apply_shell_preset(store: RunStore, holder: ConfigHolder, preset: str) -> li
 
 # v52-F4: the scopes the Queen actually consults — the honest bound for
 # operator-policy edits (shell/coding/mcp/email decide elsewhere).
-OPERATOR_POLICY_SCOPES = ("filesystem", "network")
+OPERATOR_POLICY_SCOPES = ("filesystem", "network", "shell")
+# P3-6 (B20): what a standing Queen shell allow may never name, beyond what a
+# run_shell keep already refuses (remote git, outbound posts, privilege,
+# catastrophic and ops-mutating lines, `sh -c`): a program that runs other
+# code or reaches the network, and a package install.
+_NO_STANDING_SHELL = frozenset(
+    {"bash", "sh", "zsh", "fish", "dash", "ksh", "python", "python3", "node", "deno", "bun",
+     "perl", "ruby", "php", "lua", "osascript", "pwsh", "npx", "bunx", "pnpx", "env", "xargs",
+     "eval", "exec", "source", "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp",
+     "sftp", "ftp", "telnet", "rsync"}
+)  # fmt: skip
+_PACKAGE_MANAGERS = frozenset(
+    {"pip", "pip3", "pipx", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
+     "gem", "go", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk"}
+)  # fmt: skip
+_INSTALL_VERBS = frozenset({"install", "i", "add", "sync", "update", "upgrade", "get"})
 
 
 def set_operator_policy_rule(
@@ -4122,6 +4137,8 @@ def set_operator_policy_rule(
     pattern = pattern.strip()
     if not pattern:
         raise HTTPException(status_code=400, detail="pattern must be non-empty")
+    if scope == "shell" and verdict == "allow":
+        return _queen_shell_allow(store, action, pattern, holder=holder, dry_run=dry_run)
     document = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
     bucket = next((s for s in document.scopes if s.scope == scope), None)
     if bucket is None:
@@ -4149,6 +4166,86 @@ def set_operator_policy_rule(
         "rule": {"rule_id": rule_id, "action": action, "pattern": pattern},
         "allow": [r.model_dump() for r in bucket.allow],
         "deny": [r.model_dump() for r in bucket.deny],
+        **_write_report(report),
+    }
+
+
+def queen_shell_allow_refusal(pattern: str, action: str) -> str | list[tuple[str, str, str, str]]:
+    """P3-6 (B20): why a standing Queen shell allow of ``pattern`` is refused,
+    or the grants it is — exactly what an approved run_shell keep=always
+    stores (one exact argv per segment of a line ``sh`` would split), and
+    never an interpreter, a network tool, a package install, a credential
+    path, or a line with a newline or ``#`` (a comment can hide a segment)."""
+    from ..secret_floor import shell_secret_floor_reason
+    from ..shell_prefixes import program_name
+
+    if "\n" in pattern or "\r" in pattern or "#" in pattern:
+        return "a standing shell allow is one line with no '#': write the exact command alone"
+    found = _grant_subjects("start_process" if action == "run_background" else "run_shell",
+                            {"command": pattern})  # fmt: skip
+    if isinstance(found, str):
+        return found.replace("approve-once", "never a standing allow")
+    for _scope, _action, line, _matcher in found:
+        argv = shlex.split(line)
+        program = program_name(argv[0])
+        if program in _NO_STANDING_SHELL:
+            return (
+                f"{program}: a program that runs other code or reaches the network "
+                "is never a standing allow"
+            )
+        verbs = [token for token in argv[1:4] if not token.startswith("-")]
+        if program in _PACKAGE_MANAGERS and _INSTALL_VERBS & set(verbs):
+            return f"{line!r}: a package install is never a standing allow"
+    secret = shell_secret_floor_reason(pattern, cwd=None)
+    if secret is not None:
+        return secret
+    return [(scope, action, line, matcher) for scope, _a, line, matcher in found]
+
+
+def _queen_shell_allow(
+    store: RunStore,
+    action: str,
+    pattern: str,
+    *,
+    holder: ConfigHolder | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """B20: ``set_operator_policy scope=shell verdict=allow`` stores the grant
+    a human-approved run_shell keep=always stores (exact argv, global, on the
+    one learned list ``revoke_policy_rule`` lists) — through the same
+    write-time check — and nothing wider."""
+    from ..policy_schema import LearnedRule
+    from ..policy_write import PolicyWriteRejected
+
+    found = queen_shell_allow_refusal(pattern, action)
+    if isinstance(found, str):
+        # as a PolicyWriteRejected cause: the proposal answers it, no card (B22)
+        detail = f"shell allow refused: {found}"
+        raise HTTPException(status_code=400, detail=detail) from PolicyWriteRejected(detail)
+    report: dict[str, Any] = {}
+    try:
+        if dry_run:
+            report = vet_keep(store, found)
+        for scope, rule_action, line, matcher in [] if dry_run else found:
+            store_grant(
+                store,
+                LearnedRule(
+                    rule_id=f"{scope}:{rule_action}:{line}", action=rule_action, pattern=line,
+                    scope=scope, provenance="set_operator_policy", lifetime="global",
+                    matcher=matcher,  # type: ignore[arg-type]
+                ),
+                report=report,
+                replay=True,
+            )  # fmt: skip
+    except PolicyWriteRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    lines = [line for _scope, _action, line, _matcher in found]
+    return {
+        "scope": "shell",
+        "verdict": "allow",
+        "rule": {"rule_id": f"shell:{action}:{lines[0]}", "action": action, "pattern": pattern},
+        "patterns": lines,
+        "matcher": "exact_argv",
         **_write_report(report),
     }
 

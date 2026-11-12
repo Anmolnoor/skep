@@ -1650,10 +1650,10 @@ def test_set_operator_policy_rule_takes_effect_and_guards_denied_space(
             )
         assert "no-vault" in str(excinfo.value.detail)
 
-        # Unknown scope/action are clean errors.
+        # Unknown scope/action are clean errors (shell is a scope since P3-6, B20).
         with raises(HTTPException):
             actions.set_operator_policy_rule(
-                store, scope="shell", action="run", pattern="ls", verdict="allow"
+                store, scope="email", action="send", pattern="*", verdict="allow"
             )
         with raises(HTTPException):
             actions.set_operator_policy_rule(

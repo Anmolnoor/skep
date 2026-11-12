@@ -1337,11 +1337,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "named ask; an allow is refused before any card when it reaches "
         "into a deny (named), covers a credential file, or reads outside the "
         "operator roots while search_web runs uncarded (deny search first); "
-        "a deny is always accepted. NOTE for shell allows: a granted "
-        "command can read and modify files in its working directory without "
-        "a patch card — say so when proposing one. shell actions: 'run' "
-        "(run_shell one-offs), 'run_repo' (repo cwds — the file-write pen), "
-        "'run_background' (start_process daemons); a grant for one never "
+        "a deny is always accepted. A shell allow is one exact command line "
+        "(each part of an && line its own rule) — never a prefix, an "
+        "interpreter, a network tool or an install — and can read and modify "
+        "files in its working directory with no patch card: say so. A shell deny may "
+        "be a prefix and beats every grant. shell actions: 'run' (run_shell), "
+        "'run_repo' (repo cwds), 'run_background' (start_process); one never "
         "covers the others.",
         {
             "scope": {"type": "string", "enum": ["filesystem", "network", "shell"]},
@@ -1355,8 +1356,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "pattern": {
                 "type": "string",
                 "description": (
-                    "path glob, domain, or command prefix — e.g. '/tmp/**', "
-                    "'docs.python.org', 'lsof -i'"
+                    "path glob, domain, or shell line (allow: the exact line; "
+                    "deny: a prefix) — e.g. '/tmp/**', 'docs.python.org', 'df -h'"
                 ),
             },
             "verdict": {"type": "string", "enum": ["allow", "deny"]},
@@ -3037,8 +3038,8 @@ def queen_shell_decision(
                 "read_file, git_log, git_diff run in-turn with no card. To change "
                 "something: quick_edit for one file, dispatch_run for more. Only to "
                 "open repo shells deliberately: set_operator_policy scope='shell' "
-                "action='run_repo' with the command prefix — a standing rule, not "
-                "a one-off."
+                "action='run_repo' with the exact command line — a standing rule, "
+                "not a one-off."
             ),
             decided_by=verdict.decided_by,
         )

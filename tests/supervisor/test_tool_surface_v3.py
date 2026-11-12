@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.policy_v3 import SCOPE_ACTIONS
@@ -26,6 +27,7 @@ from skep.supervisor.serve.tools import (
     execute_read_tool,
     hidden_tools,
     mutation_execution_decision,
+    queen_shell_decision,
 )
 
 from .fake_ollama import FakeOllama
@@ -279,3 +281,149 @@ def test_doctor_names_the_chats_left_with_no_role(tmp_path: Path) -> None:
     (line,) = [a for a in build_status(tmp_path)["advisories"] if "have no role" in a]
     assert line.startswith("1 chat(s) have no role")
     assert "skep role use assistant --chat old-chat" in line
+
+
+def _learned(store: RunStore) -> list[Any]:
+    from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY, document_from_settings
+
+    document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    return list(document.learned) if document else []
+
+
+# --- B20: set_operator_policy scope=shell (the Queen's host shell only) -----------------
+
+
+def _operator_shell(config: SupervisorConfig, verdict: str, pattern: str, **kw: Any) -> Any:
+    store = RunStore(config.db_path)
+    try:
+        return actions.set_operator_policy_rule(
+            store, scope="shell", action=kw.pop("action", "run"), pattern=pattern,
+            verdict=verdict, holder=ConfigHolder(config, store), **kw,
+        )  # fmt: skip
+    finally:
+        store.close()
+
+
+def _shell(config: SupervisorConfig, command: str, *, role: str | None = None, cwd: str) -> str:
+    store = RunStore(config.db_path)
+    try:
+        decision = queen_shell_decision(
+            store, ConfigHolder(config, store), command=command, cwd=cwd,
+            role=None if role is None else SHIPPED_ROLES[role],
+        )  # fmt: skip
+    finally:
+        store.close()
+    return "card -" if decision is None else f"{decision.verdict} {decision.decided_by}"
+
+
+def test_b20_a_shell_allow_is_the_exact_line_a_keep_always_would_store(
+    locked: SupervisorConfig, tmp_path: Path
+) -> None:
+    out = str(tmp_path)
+    assert _shell(locked, "df -h", cwd=out).startswith("require_approval")
+    dry = _operator_shell(locked, "allow", "df -h", dry_run=True)
+    assert dry["patterns"] == ["df -h"] and dry["matcher"] == "exact_argv"
+    assert _shell(locked, "df -h", cwd=out).startswith("require_approval")  # nothing written
+    _operator_shell(locked, "allow", "df  -h")  # normalised like a keep
+    assert _shell(locked, "df -h", cwd=out) == "allow grant:global/shell:run:df -h"
+    # exact, never a prefix; a role's catch-all ask yields to it, as to a keep (decision #1)
+    assert _shell(locked, "df -h /", cwd=out).startswith("require_approval")
+    assert _shell(locked, "df -h", cwd=out, role="builder").startswith("allow grant:global/")
+    # a compound line is one exact rule per segment
+    both = _operator_shell(locked, "allow", "uptime && whoami")
+    assert both["patterns"] == ["uptime", "whoami"]
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "*",
+        "curl https://example.com",
+        "wget https://example.com",
+        "npm install left-pad",
+        "uv pip install requests",
+        "pip install requests",
+        "git push origin main",
+        "git pull",
+        "git fetch",
+        "git clone https://example.com/x.git",
+        "sh -c 'ls'",
+        "bash",
+        "python3 build.py",
+        "echo hi\ngit push",
+        "ls # ; git push",
+        "uptime\rwhoami",
+        "cat ~/.ssh/id_rsa",
+        "sudo ls",
+        "ls && git push",
+        "echo $(git push)",
+    ],
+)
+def test_b20_a_shell_allow_cannot_express_a_prefix_a_guarded_class_or_a_trick(
+    locked: SupervisorConfig, pattern: str
+) -> None:
+    with pytest.raises(HTTPException) as refused:
+        _operator_shell(locked, "allow", pattern)
+    assert refused.value.status_code == 400
+    assert str(refused.value.detail).startswith("shell allow refused: ")
+    store = RunStore(locked.db_path)
+    try:
+        assert not [r for r in _learned(store) if r.scope == "shell"]
+    finally:
+        store.close()
+
+
+def test_b20_a_shell_deny_binds_on_the_queens_lane_and_beats_a_grant(
+    locked: SupervisorConfig, tmp_path: Path
+) -> None:
+    """NEW-F1L-01's gap: the one sanctioned home for a Queen host-shell deny.
+    A deny is always accepted (stricter), may be a prefix, and wins over a
+    standing grant inside it."""
+    out = str(tmp_path)
+    _operator_shell(locked, "allow", "df -h")
+    assert _shell(locked, "df -h", cwd=out).startswith("allow grant:global/")
+    result = _operator_shell(locked, "deny", "df")
+    assert result["deny"][0]["pattern"] == "df"
+    assert _shell(locked, "df -h", cwd=out) == "deny global/op:shell:run:df"
+    assert _shell(locked, "df -i", cwd=out, role="operator") == "deny global/op:shell:run:df"
+    _operator_shell(locked, "deny", "npm run dev", action="run_background")
+    assert _shell(locked, "npm run dev", cwd=out).startswith("require_approval")  # run: no rule
+    store = RunStore(locked.db_path)
+    try:
+        background = queen_shell_decision(
+            store, ConfigHolder(locked, store), command="npm run dev", cwd=out, background=True
+        )
+    finally:
+        store.close()
+    assert background is not None and background.verdict == "deny"
+
+
+def test_b20_the_set_operator_policy_card_is_high(locked: SupervisorConfig) -> None:
+    from skep.supervisor.serve.cards import high_tier
+
+    args = {"scope": "shell", "action": "run", "pattern": "df -h", "verdict": "allow"}
+    assert high_tier("set_operator_policy", args) == "it changes standing policy"
+
+
+def test_b20_a_refused_shell_allow_gets_no_card(locked: SupervisorConfig) -> None:
+    """Checked at proposal (P3-5): the model hears why, no card can only fail."""
+    from skep.supervisor.policy_write import PolicyWriteRejected
+    from skep.supervisor.serve.tools import policy_write_preview
+
+    args = {"scope": "shell", "action": "run", "pattern": "curl https://x", "verdict": "allow"}
+    store = RunStore(locked.db_path)
+    try:
+        with pytest.raises(PolicyWriteRejected, match="never a standing allow"):
+            policy_write_preview(store, ConfigHolder(locked, store), "set_operator_policy", args)
+    finally:
+        store.close()
+
+
+def test_b20_a_run_repo_allow_opens_one_exact_line_in_a_repo(
+    locked: SupervisorConfig, repo: Path
+) -> None:
+    """What the repo-pen refusal tells the model to propose, and no more."""
+    assert _shell(locked, "make test", cwd=str(repo)).startswith("deny")
+    _operator_shell(locked, "allow", "make test", action="run_repo")
+    assert _shell(locked, "make test", cwd=str(repo)).startswith("allow grant:global/")
+    assert _shell(locked, "make test-all", cwd=str(repo)).startswith("deny")

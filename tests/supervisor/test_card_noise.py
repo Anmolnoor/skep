@@ -350,11 +350,11 @@ def test_f1_transcript_card_noise(live: Callable[[str], Live], ticking_clock: No
 
     # Pinned: what this branch reaches on F1's script (ADR targets in the module doc).
     assert counts["total"] == 17, counts  # target <= 12: missed (see the round report)
-    # The one noise card: set_operator_policy scope=shell still cards and is
-    # refused on confirm (B20, round P3-6: its description advertises shell).
-    assert counts["refused"] == ["set_operator_policy"], counts
+    # Noise 0 (target met): set_operator_policy scope=shell, the last noise
+    # card, now stores df -h as an exact-argv grant on confirm (B20, P3-6).
+    assert counts["refused"] == [], counts
     assert counts["covered"] == [] and counts["empty_keeps"] == 0, counts
-    assert counts["noise"] == 1, counts
+    assert counts["noise"] == 0, counts
     assert counts["ran_free_on_a_grant"] >= 4, counts  # t08/t09/t18/t19 repeats
 
     shown = script["shown"]
