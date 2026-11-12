@@ -476,7 +476,14 @@ def decide(
                 roots = {"filesystem": ResolvedScopePolicy("filesystem", stack.roots)}
                 fallback = _match(roots, req, "operator", note)
                 verdict = verdict if fallback.layer == "default" else fallback
-    granted = verdict.verdict == "allow" and verdict.layer in GRANT_LAYERS
+    # Only the operator lane's learned grants: exact argv, human-approved. The
+    # run lane's ``grant:session`` is the worker session tier — a prefix held
+    # for every repo (B39) — and never answers a role.
+    granted = (
+        verdict.verdict == "allow"
+        and verdict.layer in GRANT_LAYERS
+        and verdict.source == "operator"
+    )
     if role is not None and not (granted and catch_all_asks_only(role, scope, action, value)):
         # Decision #1 (B56): a role's catch-all ask is a default a human's
         # grant answers; anything else the role says binds as before.

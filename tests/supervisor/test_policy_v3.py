@@ -607,6 +607,59 @@ def test_decision_1_a_grant_answers_a_roles_catch_all_ask_and_a_named_ask_binds(
     assert edit["verdict"] == "deny"
 
 
+@pytest.mark.parametrize("kind", ["legacy", "builder", "assistant"])
+def test_a_workers_session_tier_never_answers_a_roles_catch_all_ask(
+    kind: str, tmp_path: Path
+) -> None:
+    """Decision #1 is the Queen's exact-argv grant. The worker session tier
+    (a plain approve on a worker card) is a PREFIX, held for every repo
+    (B39): approved in repo A, it must not reach a role-governed decision in
+    repo B as an allow — REST with a repo, and a builder chat's delegated
+    worker (dropped headless, a deferred ask where a human answers)."""
+    from skep.supervisor.policy_resolver import resolve_run_policy
+    from skep.supervisor.serve.actions import delegate_permissions, remember_commands_for_session
+
+    home, _repo_a = build_home(tmp_path, kind)
+    repo_b = tmp_path / "repo-b"
+    repo_b.mkdir()
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(project_id="b", name="b", strategy="trusted_local_dev",
+                                 phase="build", policy={})  # fmt: skip
+        store.add_project_binding(project_id="b", binding_kind="repo_path",
+                                  binding_value=str(repo_b.resolve()))  # fmt: skip
+        remember_commands_for_session(store, [["npm", "run", "x"]])  # approved in repo A
+        holder = ConfigHolder(config, store)
+        for value in ("npm run x", "npm run x --evil"):
+            plain = policy_decide(holder, store, scope="shell", action="run", value=value,
+                                  repo=str(repo_b))  # fmt: skip
+            assert (plain["verdict"], plain["decided_by"]) == (
+                "allow",
+                "grant:session/shell:npm run x",
+            )  # no role: the session tier allows as it always has (B39 stays open)
+            for role in ("builder", "assistant", "operator"):
+                held = policy_decide(holder, store, scope="shell", action="run", value=value,
+                                     repo=str(repo_b), role=role)  # fmt: skip
+                assert held["verdict"] == "require_approval", (value, role, held)
+        permissions = resolve_run_policy(
+            store=store, config=config, repo=repo_b, caste="coding", network=None,
+            env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
+            max_actions=None, max_provider_calls=None, execution_mode=None,
+            binding_candidates=[], engine=None,
+        ).permissions  # fmt: skip
+        assert ["npm", "run", "x"] in permissions.shell_allowlist
+        for deferred in (False, True):
+            narrowed = delegate_permissions(
+                holder, store, repo_b, permissions, role=None,
+                delegation_chain=["queen@builder"], deferred_asks=deferred,
+            )[0]  # fmt: skip
+            assert ["npm", "run", "x"] not in narrowed.shell_allowlist, deferred
+            assert (["npm", "run", "x"] in narrowed.shell_ask) is deferred
+    finally:
+        store.close()
+
+
 def test_decision_2_the_setup_document_only_tightens_under_a_locked_baseline(
     tmp_path: Path,
 ) -> None:
