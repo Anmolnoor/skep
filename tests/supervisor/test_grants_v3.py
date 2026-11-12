@@ -448,3 +448,20 @@ def test_the_card_says_what_a_keep_would_cover() -> None:
     )
     assert "keep_covers" not in card_summary("run_shell", {"command": "git push"})
     assert "keep_covers" not in card_summary("set_personality", {"value": "x"})
+
+
+def test_an_allow_fetch_domain_grant_is_a_host_grant_not_a_legacy_one(home: Any) -> None:
+    """allow_fetch_domain grants a whole host on purpose (the ``host``
+    matcher); doctor's legacy-host list is for rows written before P3-4."""
+    from skep.status import _legacy_host_advisories
+    from skep.supervisor.serve.tools import execute_mutation
+
+    h = home("legacy")
+    execute_mutation(
+        "allow_fetch_domain", {"domain": "granted.example"}, store=h.store, holder=h.holder,
+        runner=cast(Any, None), actor="op", chat_id=h.chat_a,
+    )  # fmt: skip
+    [rule] = list_policy_rules(h.store)["rules"]
+    assert (rule["matcher"], rule["lifetime"], rule["bound"]) == ("host", "global", "everywhere")
+    assert h.decide("read_url", url="https://granted.example/any?q=1").startswith("allow grant:")
+    assert _legacy_host_advisories(h.paths["personal"]) == []

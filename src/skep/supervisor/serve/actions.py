@@ -4948,7 +4948,14 @@ def learn_policy_rule(
     from ..policy_schema import LearnedRule
 
     rule = LearnedRule(
-        rule_id=rule_id, action=action, pattern=pattern, scope=scope, provenance=provenance
+        rule_id=rule_id,
+        action=action,
+        pattern=pattern,
+        scope=scope,
+        provenance=provenance,
+        # allow_fetch_domain grants a host on purpose: ``host``, not the
+        # unlabelled legacy-host row doctor lists for revocation (P3-4).
+        matcher="host" if scope == "network" else None,
     )
     kept, status = store_grant(store, rule)
     return None if status == "kept" else kept.rule_id
