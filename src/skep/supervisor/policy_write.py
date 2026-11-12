@@ -203,26 +203,29 @@ def findings(stack: Stack, new: Sequence[Allow] = (), role: Role | None = None) 
         for action, probe in EGRESS_PROBES.items()
         if (verdict := decide(Request("network", action, probe), stack=host)).verdict == "allow"
     ]
-    if outside and egress:
-        read, (action, by) = outside[0], egress[0]
-        out.append(
-            Finding(
-                2,
-                f"2:{_name(read)}+{by}",
-                f"{_name(read)} allows reading outside the workspace ({read.pattern}) and "
-                f"{by} allows network {action} to any host — together they can carry a "
-                "private file off this machine (§5.4 check 2)",
+    # One finding per pair / per rule, so a write that removes one of them
+    # (a deny) never makes a pair the stack already held look new.
+    for read in outside:
+        for action, by in egress:
+            out.append(
+                Finding(
+                    2,
+                    f"2:{_name(read)}+{by}",
+                    f"{_name(read)} allows reading outside the workspace ({read.pattern}) and "
+                    f"{by} allows network {action} to any host — together they can carry a "
+                    "private file off this machine (§5.4 check 2)",
+                )
             )
-        )
+    shell: dict[str, Finding] = {}
     for action in ("run", "run_background"):
         for probe in HOST_PROBES:
             verdict = decide(Request("shell", action, probe), stack=host)
-            if verdict.verdict == "allow":
-                out.append(
-                    Finding(3, f"3:{verdict.decided_by}", f"{verdict.decided_by} lets the Queen's "
-                            f"host shell run `{probe}` with no card (§5.4 check 3)")
+            if verdict.verdict == "allow" and f"3:{verdict.decided_by}" not in shell:
+                shell[f"3:{verdict.decided_by}"] = Finding(
+                    3, f"3:{verdict.decided_by}", f"{verdict.decided_by} lets the Queen's "
+                    f"host shell run `{probe}` with no card (§5.4 check 3)"
                 )  # fmt: skip
-                break
+    out.extend(shell.values())
     for allow in new:
         out.extend(inside_a_deny(stack, allow, role))
     return out

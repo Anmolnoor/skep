@@ -642,3 +642,43 @@ def test_a_corrupt_or_unreadable_log_never_fails_a_write(home: Home) -> None:
     finally:
         path.chmod(0o644)
     assert [r.pattern for r in home.learned()] == ["ls -la", "pwd"]
+
+
+def test_a_deny_on_a_home_that_already_holds_a_combination_is_accepted(
+    home: Home, tmp_path: Path
+) -> None:
+    """A held §5.4 pair (an outside read beside connect AND search to any
+    host): denying one egress leaves the other pair, which was already held —
+    the deny tightens and lands. A second outside read is a new pair."""
+    from skep.supervisor.policy_schema import OPERATOR_POLICY_SETTINGS_KEY
+
+    home.store.set_setting(OPERATOR_POLICY_SETTINGS_KEY, json.dumps({"scopes": [
+        {"scope": "filesystem", "allow": [
+            {"rule_id": "old-read", "action": "read", "pattern": f"{tmp_path}/data/**"}]},
+        {"scope": "network", "allow": [
+            {"rule_id": "old-connect", "action": "connect", "pattern": "*"},
+            {"rule_id": "old-search", "action": "search", "pattern": "*"}]},
+    ]}))  # fmt: skip
+    actions.set_operator_policy_rule(
+        home.store, scope="network", action="connect", pattern="*", verdict="deny"
+    )
+    with pytest.raises(HTTPException, match=r"§5\.4 check 2"):
+        actions.set_operator_policy_rule(
+            home.store, scope="filesystem", action="read", pattern=f"{tmp_path}/more/**",
+            verdict="allow",
+        )  # fmt: skip
+
+
+def test_a_stricter_baseline_over_held_shell_grants_is_accepted(home: Home) -> None:
+    """Two held grants that let the host shell install: a baseline denying the
+    first leaves the second, already held — the stricter layer locks."""
+    home.store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, json.dumps({"learned": [
+        {"rule_id": "old-pip", "scope": "shell", "action": "run", "pattern": "pip",
+         "provenance": "allow-always:op", "matcher": "prefix"},
+        {"rule_id": "old-curl", "scope": "shell", "action": "run", "pattern": "curl",
+         "provenance": "allow-always:op", "matcher": "prefix"},
+    ]}))  # fmt: skip
+    layer = load_policy_template("builder").model_dump(mode="json")
+    layer["rules"].append({"scope": "shell", "verdict": "deny", "action": "run",
+                           "pattern": "pip", "rule_id": "no-pip"})  # fmt: skip
+    vet_write(home.store, holder=home.holder, baseline=pb._load_layer(layer))
