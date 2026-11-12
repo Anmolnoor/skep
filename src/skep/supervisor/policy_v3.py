@@ -91,6 +91,7 @@ from .shell_prefixes import (
 from .store import ChatTaint, RunStore
 
 if TYPE_CHECKING:
+    from .policy_templates import PolicyTemplate
     from .serve.settings import ConfigHolder
 
 # D1: every (scope, action) with its unmatched verdict — ask, except
@@ -219,7 +220,7 @@ def _relabel(
 
 
 def operator_lane(
-    store: RunStore, *, chat: str | None = None
+    store: RunStore, *, chat: str | None = None, baseline: PolicyTemplate | None = None
 ) -> tuple[dict[str, ResolvedScopePolicy], tuple[str, ...]]:
     """The Queen's standing policy, rule for rule, each rule labelled: the
     global document and the operator overlay are ``global``, the approved
@@ -235,15 +236,21 @@ def operator_lane(
     floor is ignored and named, not raised through every lane (B23).
 
     P3-4 (B39): a learned rule bound to a chat composes only for that chat; one
-    bound to a repo or project (a worker grant) never reaches the Queen."""
+    bound to a repo or project (a worker grant) never reaches the Queen.
+
+    P3-5 (V11): ``baseline`` is a candidate layer composed in place of the
+    locked one — the would-be stack a baseline write is checked against."""
     from .policy_engine import Layer, LayerRule, _document_rules, resolve_stack
-    from .policy_layers import queen_template_layer, store_home
+    from .policy_layers import candidate_layer, queen_template_layer, queen_view, store_home
     from .policy_resolver import queen_global_document
 
     base = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
     base = base or PolicyDocument()
     operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
-    template = queen_template_layer(store_home(store))
+    if baseline is None:
+        template = queen_template_layer(store_home(store))
+    else:
+        template = queen_view(candidate_layer(baseline))
     setup = queen_global_document(base)
     if template is not None:
         setup = tighten_only(setup)

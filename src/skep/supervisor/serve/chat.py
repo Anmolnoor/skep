@@ -44,6 +44,7 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
+from ..policy_write import PolicyWriteRejected
 from . import actions
 from .cards import card_summary, fold_subject, high_tier, recorded_card
 from .jobs import Dispatcher
@@ -78,6 +79,7 @@ from .tools import (
     execute_mutation,
     execute_read_tool,
     mutation_execution_decision,
+    policy_write_preview,
     search_web_verdict,
     taint_decision,
     tool_description,
@@ -2071,6 +2073,22 @@ class ChatEngine:
                             receipt["grant"] = grant
                         yield ("tool", receipt)
                         continue
+                    # P3-5 (V11): a policy write is checked at PROPOSAL — one
+                    # the write-time check refuses gets no card (its confirm
+                    # could only fail, B22); one it passes carries the replay.
+                    try:
+                        checked = policy_write_preview(self.store, self.holder, name, args)
+                    except PolicyWriteRejected as exc:
+                        payload = {"ok": False, "error": str(exc)}
+                        self.store.add_chat_message(
+                            chat_id,
+                            role="tool",
+                            tool_name=name,
+                            tool_call_id=call_id,
+                            content=json.dumps(payload, ensure_ascii=True),
+                        )
+                        yield ("tool", {"tool": name, "result": payload})
+                        continue
                     # v109-F2: a pending twin is not a new question. Identical
                     # args → the model gets the pending card back and the turn
                     # continues; changed args, same subject → the stale card is
@@ -2120,6 +2138,8 @@ class ChatEngine:
                         # v90-F2: and the three lines a human reads first; the
                         # description moves behind the details disclosure.
                         "description": tool_description(name),
+                        # P3-5: laid over the card when the round closes.
+                        "_checked": checked,
                     }
                     if decision is not None:
                         action_event["decision"] = asdict(decision)
@@ -2236,7 +2256,8 @@ class ChatEngine:
                 # P4-2: the card as the server recorded it — every folded item.
                 record = self.store.get_chat_action(str(action_event["action_id"]))
                 tool = str(action_event["tool"])
-                card = self._card(chat_id, tool, action_event["args"], action=record)
+                checked = action_event.pop("_checked", {})  # P3-5: replay, a narrowed keep
+                card = {**self._card(chat_id, tool, action_event["args"], action=record), **checked}
                 yield ("action", {**action_event, "card": card})
             if paused:
                 # The turn waits for the human; verdict endpoints resume it.
@@ -2409,6 +2430,7 @@ class ChatEngine:
                 "CLI: open skep and confirm it there" + (f". {line}" if line else ""),
             )
         folded = [item["args"] for item in action.fold_items()]  # P4-2: every item
+        named = keep is not None
         if keep is None:
             defaults = {
                 actions.default_keep(action.tool, item, taint, high=high is not None)
@@ -2430,6 +2452,10 @@ class ChatEngine:
             ),
             None,
         )
+        if refused is not None and not named:
+            # The write-time check narrowed this card to "once" and the client
+            # named no keep: a plain Approve runs once, it is not a 400.
+            keep, refused = "once", None
         if refused is not None:
             raise HTTPException(status_code=400, detail=f"keep={keep!r} refused: {refused}")
         if action.source in ("operator", "gate"):

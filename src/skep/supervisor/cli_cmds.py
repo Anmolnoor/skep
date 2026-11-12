@@ -2881,6 +2881,23 @@ def cmd_policy_approve(args: argparse.Namespace) -> int:
         for line in view["diff"] or ["(none)"]:
             print(f"  {line}")
         print()
+    if args.diff:
+        # P3-5 (V11): the replay before the re-lock — the same check approve runs.
+        from .policy_write import PolicyWriteRejected, vet_write
+        from .serve.settings import ConfigHolder
+
+        config = build_config(args.home, None)
+        store = RunStore(config.db_path)
+        try:
+            report = vet_write(store, holder=ConfigHolder(config, store), baseline=_layer)
+        except PolicyWriteRejected as exc:
+            return _err(str(exc))
+        finally:
+            store.close()
+        print("what this layer changes:")
+        for line in [report["replay_line"], *report["warnings"]]:
+            print(f"  {line}")
+        print()
     _print_table(view["table"])
     print()
     if not args.yes:
@@ -2903,6 +2920,39 @@ def cmd_policy_approve(args: argparse.Namespace) -> int:
         return _err(str(exc))
     row = result["approved"]
     print(f"baseline locked: {row['template']} sha256 {row['sha256'][:12]} ({row['approved_at']})")
+    return 0
+
+
+def cmd_policy_migrate(args: argparse.Namespace) -> int:
+    """ADR 0059 P3-5 (Migration): ``--dry-run`` replays the home's decision log
+    under the stack decide() uses today and prints every flip, the §5.4
+    combinations the home already holds and the B31 upgrade. Writes nothing:
+    v3 needs no in-place migration, so there is no mode that does."""
+    from .policy_write import VERDICT_WORDS, migration_report
+    from .serve.settings import ConfigHolder
+
+    if not args.dry_run:
+        return _err("only --dry-run exists: v3 decides from the stored policy as it is")
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        print("no store at this home — nothing was ever decided here")
+        return 0
+    store = RunStore(config.db_path)
+    try:
+        report = migration_report(ConfigHolder(config, store), store)
+    finally:
+        store.close()
+    print("policy migrate --dry-run — nothing is written")
+    print(report["replay_line"])
+    for label, n in report["replay"]["flips"].items():
+        old, _, new = label.partition("->")
+        print(f"  now {VERDICT_WORDS[new]} {n} past {VERDICT_WORDS[old]}:")
+        for example in report["replay"]["examples"].get(label, []):
+            print(f"    {example}")
+    for line in report["held"]:
+        print(f"already held (decide() still binds it; no write can add one): {line}")
+    if report["b31"]:
+        print(report["b31"])
     return 0
 
 
@@ -3608,7 +3658,20 @@ def register_supervisor_commands(
         help="re-lock after a change: shows the diff against the locked baseline first",
     )
     policy_approve.add_argument("--yes", action="store_true", help="skip the typed `yes`")
+    policy_approve.add_argument(
+        "--diff",
+        action="store_true",
+        help="before locking, replay recent decisions under the new layer and show what flips",
+    )
     policy_approve.set_defaults(func=cmd_policy_approve)
+    policy_migrate = policy_sub.add_parser(
+        "migrate",
+        help="--dry-run: replay the decision log under today's policy and list every flip",
+    )
+    policy_migrate.add_argument(
+        "--dry-run", action="store_true", help="print what changed; write nothing (required)"
+    )
+    policy_migrate.set_defaults(func=cmd_policy_migrate)
     policy_baseline = policy_sub.add_parser(
         "baseline", help="the approved baseline: status (exit 1 if tampered) or diff (O2)"
     )

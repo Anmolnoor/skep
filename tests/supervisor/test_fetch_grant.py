@@ -133,6 +133,8 @@ def test_allow_fetch_domain_writes_a_vetted_rule(
     assert result == {
         "allowed_fetch_domain": "docs.python.org",
         "rule_id": "network:fetch:docs.python.org",
+        # P3-5: every policy write answers what it would flip among past decisions
+        "replay": "replay: the decision log is empty — no past decision to compare",
     }
     decision = fetch_grant_decision(store, holder, "docs.python.org")
     assert decision is not None and decision.allows_execution()

@@ -955,6 +955,13 @@ def setup_project_record(
             kind=binding.kind,
             value=binding.value,
         )
+    from ..policy_write import PolicyWriteRejected, vet_write
+
+    try:
+        # P3-5 (V11): the one write-time check, before the project is written.
+        vet_write(run_store, replay=False)
+    except PolicyWriteRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     result = _persist_project(run_store, project)
     seeded_templates: list[dict[str, Any]] = []
     seeds_skipped: list[str] = []

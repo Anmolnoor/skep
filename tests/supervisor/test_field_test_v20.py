@@ -82,7 +82,6 @@ def _configure(config: SupervisorConfig, server: FakeOpenAI, tmp_path: Path) -> 
         json={
             "trusted_workspace_roots": [str(tmp_path)],
             "default_execution_mode": "workspace",
-            "auto_apply_verified_patch": False,
             # ES-F3: a verify label is no grant; the operator allowlisted it.
             "allowed_shell_commands": [_VERIFY],
         },

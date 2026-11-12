@@ -261,13 +261,11 @@ def test_learned_rule_into_denied_space_is_rejected_with_the_denys_rule_id(
     )
     client, chat_id = chat_client(config, ollama)
     ollama.script_tool_call("allow_mcp_tool", {"server_id": "issues", "tool": "frobnicate_gizmo"})
-    client.post(f"/api/chats/{chat_id}/messages", json={"content": "always allow it"})
-    (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
     ollama.script_reply("could not remember that")
-    client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
-    (resolved,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
-    assert resolved["result"]["ok"] is False
-    assert "no-gizmos" in resolved["result"]["error"]
+    response = client.post(f"/api/chats/{chat_id}/messages", json={"content": "always allow it"})
+    # P3-5: refused at proposal — no card whose confirm could only fail (B22).
+    assert client.get(f"/api/chats/{chat_id}").json()["actions"] == []
+    assert "no-gizmos" in response.text
     # The document did not gain the rule.
     store = RunStore(config.db_path)
     try:
@@ -320,7 +318,8 @@ def test_email_deny_rule_refuses_inline_and_blocks_learned_allows(
     fake_runner: list[tuple[str, dict[str, Any]]],
 ) -> None:
     """An explicit email deny is a hard deny: no card, and a learned allow
-    into that space is rejected with the deny's rule id."""
+    into that space is rejected with the deny's rule id — P3-5: at proposal,
+    so no card is shown whose confirm could only fail (B22)."""
     _seed_email_server(config)
     _seed_document(
         config,
@@ -343,13 +342,10 @@ def test_email_deny_rule_refuses_inline_and_blocks_learned_allows(
     assert fake_runner == []
 
     ollama.script_tool_call("allow_mcp_tool", {"server_id": "mail", "tool": "send_message"})
-    client.post(f"/api/chats/{chat_id}/messages", json={"content": "always allow sending"})
-    (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
     ollama.script_reply("could not remember that")
-    client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
-    (resolved,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
-    assert resolved["result"]["ok"] is False
-    assert "no-sending" in resolved["result"]["error"]
+    response = client.post(f"/api/chats/{chat_id}/messages", json={"content": "always allow"})
+    assert client.get(f"/api/chats/{chat_id}").json()["actions"] == []  # NO card
+    assert "no-sending" in response.text
 
 
 def test_email_allow_always_writes_an_email_scope_rule(

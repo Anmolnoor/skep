@@ -228,6 +228,20 @@ test("resolvesOnCommands: operator commands and gate mirrors, never a model card
   assert.equal(app.resolvesOnCommands({ source: "assistant" }), false);
 });
 
+test("cardReplay: a policy-write card shows its replay, shadowed grants and keep replay", () => {
+  const app = loadApp();
+  assert.equal(app.cardReplay(undefined), null);
+  assert.equal(app.cardReplay({ headline: "x" }), null);
+  const node = app.cardReplay({ replay: "replay of the last 3 decisions: now allows 1 past asks",
+    policy_warnings: ["grant g now lands inside a deny"] });
+  assert.equal(node.children.length, 2);
+  assert.equal(node.children[0].textContent, "replay of the last 3 decisions: now allows 1 past asks");
+  // the keep replay shows only where the card offers a keep
+  assert.equal(app.cardReplay({ keep: ["once"], keep_replay: "r" }), null);
+  const keep = app.cardReplay({ keep: ["once", "session", "always"], keep_replay: "r" });
+  assert.equal(keep.children[0].textContent, "r");
+});
+
 // ---------- P4-1: the trifecta guard on the card and the transcript ----------
 
 test("taintNote renders the server's plain-words why; a clean chat's card has none", () => {
