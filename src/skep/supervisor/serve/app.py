@@ -244,6 +244,7 @@ class PolicyDecideRequest(BaseModel):
     actor: str = "api"
     role: str | None = None  # R1: decide under this role's layer
     delegation_chain: list[str] = []  # R2: actor@role hops, outermost first
+    read_only: bool = False  # P3-3: the MCP / browse / email action reports itself read-only
 
 
 class BaselineApproveRequest(BaseModel):
@@ -773,6 +774,7 @@ def create_app(
                 actor=body.actor,
                 role=body.role,
                 delegation_chain=body.delegation_chain,
+                read_only=body.read_only,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

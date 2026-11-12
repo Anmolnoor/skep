@@ -1,14 +1,15 @@
-"""Policy v3: one ``decide()`` (ADR 0059 D1/D2, rounds P3-1 and P3-2).
+"""Policy v3: one ``decide()`` (ADR 0059 D1/D2, rounds P3-1 to P3-3).
 
-``decide(req, stack=, role=, chain=, face=)`` is the one decision the
-advisory and hard faces make — ``POST /api/policy/decide``, ``skep policy
+``decide(req, stack=, role=, chain=, face=, read_only=)`` is the one decision
+the advisory and hard faces make — ``POST /api/policy/decide``, ``skep policy
 decide`` / ``why``, the Claude Code hook and ``skep acp govern`` — the
-dispatch's delegation narrowing, and (P3-2) the Queen's own file and shell
-lanes: read_file / search_files decide ``filesystem.read``, run_shell /
-start_process / stop_process ``shell.run`` / ``run_background`` /
-``run_repo`` (``queen_decide``). It is pure over a ``Stack`` that
-``load_stack`` builds once per request. read_url, search_web, MCP, browse and
-the run compile move in P3-3 and later; until then they keep their own paths.
+dispatch's delegation narrowing, and the Queen's own lanes
+(``queen_decide``): read_file / search_files decide ``filesystem.read``,
+run_shell / start_process / stop_process ``shell.run`` / ``run_background`` /
+``run_repo`` (P3-2); read_url ``network.fetch <host>``, search_web
+``network.search``, call_mcp_tool ``mcp.call`` / ``email.*`` / ``browse.*``
+(P3-3). It is pure over a ``Stack`` that ``load_stack`` builds once per
+request. The run compile and the ops bounds keep their own paths for now.
 
 Order (D2): floor deny → baseline guard → the lane's rules (the run policy
 in a repo, the operator document otherwise) → the operator roots → unmatched
@@ -90,10 +91,12 @@ if TYPE_CHECKING:
 SCOPE_ACTIONS = UNMATCHED_VERDICT
 UNMATCHED = f"default/{UNMATCHED_RULE_ID}"
 OPERATOR_ROOT = "operator-root"  # the generated rule an operator root becomes
+READ_ONLY = "read-only"  # the default a read-only request answers where nothing matched
 GRANT_LAYERS = ("grant:session", "grant:global")
 # The Queen-side lanes by definition: search is the keyless discovery, fetch
-# the read_url granted-domain lane. Asked about from a repo, the operator
-# document still answers.
+# read_url. The Queen asks with no repo anyway; this keeps the hook's
+# WebFetch / WebSearch from a checkout on the operator document, which is
+# what decides them, instead of the worker's run policy.
 OPERATOR_LANES: frozenset[tuple[str, str]] = frozenset(
     {("network", "search"), ("network", "fetch")}
 )
@@ -409,6 +412,24 @@ def _hit(
     return best(denies or named or winners)
 
 
+def _granting(
+    scopes: dict[str, ResolvedScopePolicy], scope: str, read_only: bool
+) -> dict[str, ResolvedScopePolicy]:
+    """P3-3 (B09): a template's ``mcp.call`` allow (``calendar:*``) grants only
+    a tool that reports itself read-only; for any other tool of that server it
+    drops out and the template's own ask or the unmatched default answers.
+    The setup document's and the grants' allows are untouched."""
+    policy = scopes.get(scope)
+    if scope != "mcp" or read_only or policy is None:
+        return scopes
+    kept = tuple(
+        rule
+        for rule in policy.rules
+        if not (rule.verdict == "allow" and (rule.layer or "").startswith("template:"))
+    )
+    return {**scopes, scope: ResolvedScopePolicy(scope, kept)}
+
+
 def _match(
     scopes: dict[str, ResolvedScopePolicy], req: Request, source: str, note: str | None
 ) -> Verdict:
@@ -447,10 +468,17 @@ def decide(
     role: Role | None = None,
     chain: Sequence[Delegator] = (),
     face: Face = "advisory",
+    read_only: bool = False,
 ) -> Verdict:
     """One decision (ADR 0059 D1). ``face="hard"`` is the governor's hard
     ring, which has no human hop: there a tampered baseline denies (O2);
-    every other ask stays an ask the ring itself refuses."""
+    every other ask stays an ask the ring itself refuses.
+
+    ``read_only`` (P3-3) is a fact about the request, not a rule: the MCP
+    tool reports itself read-only (``readOnlyHint`` and a leading read verb,
+    B09), an email read, a browse page-state read. Only then does a template
+    allow grant an ``mcp.call``, and only then does an unmatched request
+    answer ``default/read-only`` allow instead of ``default/unmatched``."""
     scope, action, value = req
     floor = floor_verdict(scope, value, action=action, home=stack.home, cwd=stack.cwd)
     if floor is not None:
@@ -469,13 +497,19 @@ def decide(
         operator_only = (scope, action) in OPERATOR_LANES
         note = None if operator_only else stack.run_note
         if stack.run is not None and not operator_only:
-            verdict = _match(stack.run, req, "run", note)
+            verdict = _match(_granting(stack.run, scope, read_only), req, "run", note)
         else:
-            verdict = _match(stack.operator, req, "operator", note)
+            verdict = _match(_granting(stack.operator, scope, read_only), req, "operator", note)
             if verdict.layer == "default" and stack.roots:
                 roots = {"filesystem": ResolvedScopePolicy("filesystem", stack.roots)}
                 fallback = _match(roots, req, "operator", note)
                 verdict = verdict if fallback.layer == "default" else fallback
+            if verdict.layer == "default" and read_only:
+                # P3-3: the read default the MCP/browse ladder held — a request
+                # that reports itself read-only runs where nothing matched.
+                verdict = Verdict(
+                    "allow", "default", READ_ONLY, f"default/{READ_ONLY}", "operator", note
+                )
     granted = verdict.verdict == "allow" and verdict.layer in GRANT_LAYERS
     if role is not None and not (granted and catch_all_asks_only(role, scope, action, value)):
         # Decision #1 (B56): a role's catch-all ask is a default a human's
@@ -484,7 +518,9 @@ def decide(
     if chain:
         *outer, delegator = chain
         bound = (
-            decide(req, stack=stack, role=delegator.role, chain=outer, face=face)
+            decide(
+                req, stack=stack, role=delegator.role, chain=outer, face=face, read_only=read_only
+            )
             if role_covers(delegator.role, scope, action, value)
             else None
         )
@@ -502,15 +538,17 @@ def queen_decide(
     *,
     role: Role | None = None,
     cwd: str | None = None,
+    read_only: bool = False,
 ) -> Verdict:
-    """P3-2: the Queen's own file and shell lanes. ``decide()`` over the stack
-    with no repo — exactly what REST, the CLI and the hook answer for the same
-    request and role with no repo — logged as actor ``queen`` (I13). ``cwd``
-    is where a shell line runs (the secret floor resolves against it)."""
+    """The Queen's own lanes: files and shell (P3-2), read_url, search_web,
+    MCP and browse (P3-3). ``decide()`` over the stack with no repo — exactly
+    what REST, the CLI and the hook answer for the same request and role with
+    no repo — logged as actor ``queen`` (I13). ``cwd`` is where a shell line
+    runs (the secret floor resolves against it)."""
     from .serve.actions import _decision_row
 
     stack = replace(load_stack(holder, store), cwd=cwd)
-    verdict = decide(req, stack=stack, role=role)
+    verdict = decide(req, stack=stack, role=role, read_only=read_only)
     row = _decision_row(
         verdict, stack, actor="queen", repo=None, req=(req.scope, req.action, req.value), role=role
     )
