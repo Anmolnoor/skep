@@ -729,6 +729,37 @@ def test_an_ask_cannot_be_remembered_and_deny_keeps_it_refused(
         store.close()
 
 
+def test_skep_review_keeps_a_delegated_ask_approve_once(
+    tmp_path: Path,
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI face (ADR 0050): `skep review --allow-command` refuses an ask
+    and persists nothing; `--approve` resumes without the session tier."""
+    config, task_id = _gated_delegated_run(tmp_path, repo, capsys)
+    worker = shlex.join([sys.executable, str(FAKE_WORKER)])
+    review = ["--home", str(tmp_path), "review", task_id, "--actor", "tester"]
+    assert main([*review, "--allow-command"]) != 0
+    assert "delegated ask" in capsys.readouterr().err
+    store = RunStore(config.db_path)
+    try:
+        project = store.project_for_binding("repo_path", str(repo))
+        assert project is not None
+        assert project.policy["allowed_shell_commands"] == [["make"]]  # nothing persisted
+        assert len(store.pending_approvals()) == 1
+    finally:
+        store.close()
+    monkeypatch.setenv("SKEP_WORKER_CMD", worker)
+    main([*review, "--approve"])
+    store = RunStore(config.db_path)
+    try:
+        assert store.pending_approvals() == []
+        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) in (None, [])
+    finally:
+        store.close()
+
+
 def test_the_supervisor_knows_an_ask_by_the_workers_own_spelling(
     config: SupervisorConfig, task_payload: dict[str, Any]
 ) -> None:
