@@ -50,6 +50,20 @@ Notes:
   true resume with zero schema change.
 Forward-compatibility commitments (D1/D2 from the decision record — design constraints today,
 fields tomorrow):
+- **`permissions.provider_hosts`** (v0.3.6, additive, ADR 0059 D3): `list[str]` of
+  `host:port` entries naming the supervisor's own LLM endpoint(s). Filled by the supervisor
+  from its configured provider registry (an external engine gets only its own API host),
+  never from a request; it is a supervisor resource, not a grant, so delegation never narrows
+  it. Egress = `network` ∪ `provider_hosts` (`["*"]` already allows all); the proxy admits a
+  provider entry on that exact port only. Absent ≡ `[]`.
+- **`permissions.network_ask` / `permissions.shell_ask`** (v0.3.7, additive, ADR 0059 D3 V7):
+  `list[str]` of bare hostnames / `list[list[str]]` of argv prefixes that the delegation chain
+  made an *ask* (the delegator would itself ask). Filled only by the supervisor, at a dispatch a
+  human can answer; a headless dispatch drops them instead (deny). They are never egress and
+  never an allow: a worker with a capability gate returns `require_approval` for one, and the
+  approval holds for that run's resume chain only. A wildcard host or a guarded prefix (remote
+  git, outbound content, dangerous) is never an ask. External engines have no gate, so the hosts
+  stay out of their egress. Absent ≡ `[]`.
 - **`permissions.network` will evolve from `bool` to a domain allowlist** (`list[str]`, where
   `false` ≡ `[]`). Planned minor bump (target v0.2). Consequence now: Q1's sandbox enforcement
   must be designed around *allowlists*, not an on/off switch, even though v1 only ever passes

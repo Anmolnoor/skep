@@ -436,7 +436,8 @@ def test_doctor_flags_deprecated_global_auto_approve(tmp_path: Path) -> None:
 def test_cli_run_merges_configured_provider_host_into_network(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """v19-F2: a run minted via the CLI carries the configured provider host."""
+    """v19-F2: a run minted via the CLI carries the configured provider host —
+    as provider_hosts (ADR 0059 D3), not in its network grant."""
     from skep.profile import run_personal_setup
 
     home = tmp_path / "home"
@@ -465,7 +466,8 @@ def test_cli_run_merges_configured_provider_host_into_network(
     task = json.loads(
         (home / "supervisor" / "audit" / task_id / "task.json").read_text(encoding="utf-8")
     )
-    assert "provider.example" in task["permissions"]["network"]
+    assert task["permissions"]["provider_hosts"] == ["provider.example:11434"]
+    assert "provider.example" not in task["permissions"]["network"]
 
 
 def test_status_personal_moves_superseded_runs_out_of_the_table(
@@ -2915,6 +2917,18 @@ def test_cli_run_network_help_says_what_an_omitted_flag_does(
     out = " ".join(capsys.readouterr().out.split())
     assert "omit to deny all outbound" not in out
     assert "default_network applies" in out and "--minimal denies all" in out
+
+
+def test_cli_run_minimal_help_says_the_llm_still_reaches_its_provider(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR 0059 D3: run_task gives every run that calls the LLM its
+    provider_hosts, --minimal included — "deny-all" alone is no longer true."""
+    with pytest.raises(SystemExit):
+        main(["run", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "start with deny-all permissions and learn" not in out
+    assert "--minimal start with deny-all grants (a worker that calls the LLM" in out
 
 
 def test_es_f4_cli_refuses_a_second_landing(

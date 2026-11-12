@@ -27,7 +27,6 @@ from skep.worker_contract import (
     ProjectContextPayload,
 )
 
-from .castes import CASTES
 from .config import SupervisorConfig
 from .policy_registry import registry_keys
 from .policy_schema import (
@@ -49,6 +48,7 @@ from .projects import (
     phase_default_policy,
     stored_policy_groups,
 )
+from .provider_hosts import provider_hosts_for
 from .serve.settings import (
     POLICY_ENGINE_V2_SCOPES,
     RUN_EXECUTION_MODES,
@@ -589,7 +589,6 @@ def resolve_run_policy(
     max_actions: int | None,
     max_provider_calls: int | None,
     execution_mode: str | None,
-    extra_network_hosts: Sequence[str] = (),
     binding_candidates: Sequence[tuple[str, str]] = (),
     engine: str | None = None,
 ) -> ResolvedRunPolicy:
@@ -688,31 +687,16 @@ def resolve_run_policy(
         resolved_execution_mode = "sandbox"
     default_network = list(policy["default_network"])
     chosen_network = list(default_network if network is None else network)
-    # v19-F2: a coding worker that cannot reach its LLM provider cannot work at
-    # all, so the provider host is merged into the allowlist on every creation
-    # path (not only when network was left unspecified). ``["*"]`` already allows
-    # everything; leave it untouched. Deny-all ``[]`` becomes ``[<provider-host>]``.
-    # v72-F2: the document caste drafts through the same provider — same rule.
-    # v108-F1: the gate reads the caste registry's needs_provider flag — the
-    # field always claimed to drive this merge (castes.py) while a hardcoded
-    # tuple here starved the reviewer caste, which hard-fails without its host.
-    caste_spec = CASTES.get(caste)
-    if caste_spec is not None and caste_spec.needs_provider and chosen_network != ["*"]:
-        seen = set(chosen_network)
-        for host in extra_network_hosts:
-            if host not in seen:
-                chosen_network.append(host)
-                seen.add(host)
-        # v90-F1: the same rule for a CLI engine's own API host — an agent that
-        # cannot reach its provider cannot work at all, and without this the
-        # failure is a confusing timeout instead of a stated denial (I12).
-        if (
-            caste == "coding"
-            and chosen_engine.network_host
-            and chosen_engine.network_host not in seen
-        ):
-            chosen_network.append(chosen_engine.network_host)
-            seen.add(chosen_engine.network_host)
+    # v19-F2 → ADR 0059 D3 (V6a): a worker that cannot reach its LLM provider
+    # cannot work at all, so every needs_provider caste gets the provider on
+    # every creation path — as provider_hosts (host:port), NOT merged into
+    # network: skep's own endpoint is a supervisor resource, so the delegation
+    # narrowing never drops it (B12) and an explicit network cannot lose it. An
+    # external engine (v90-F1) gets its own API host and nothing else (B140).
+    # run_task recomputes it with the same call, so this copy is what faces show.
+    provider_hosts = provider_hosts_for(
+        store, config.home.parent, caste=caste, engine=chosen_engine.name
+    )
     # v23-F5: a trusted local dev run with no explicit network gets the package
     # registries — wherever the sandbox can actually enforce the list. Workspace
     # mode always enforces via the proxy; sandbox mode enforces since v28 on both
@@ -764,6 +748,7 @@ def resolve_run_policy(
         shell_allowlist=_shell_scope_view(resolved_scopes),
         allowed_plugin_risks=list(policy.get("allowed_plugin_risks") or []),
         allow_git_mutation=bool(policy.get("allow_git_mutation") is True),
+        provider_hosts=provider_hosts,
     )
     budget = Budget(
         wall_clock_seconds=(

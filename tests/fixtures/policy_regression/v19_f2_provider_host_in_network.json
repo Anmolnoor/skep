@@ -7,19 +7,22 @@
       "caste": "coding",
       "network": [],
       "provider_hosts": ["provider.example"],
-      "network_out": ["provider.example"]
+      "network_out": [],
+      "provider_hosts_out": ["provider.example:443"]
     },
     {
       "caste": "coding",
       "network": ["*"],
       "provider_hosts": ["provider.example"],
-      "network_out": ["*"]
+      "network_out": ["*"],
+      "provider_hosts_out": ["provider.example:443"]
     },
     {
       "caste": "audit",
       "network": [],
       "provider_hosts": ["provider.example"],
-      "network_out": []
+      "network_out": [],
+      "provider_hosts_out": []
     }
   ]
 }

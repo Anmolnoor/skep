@@ -56,14 +56,21 @@ from skep.worker_contract import (
 from .apply import RefreshError, refresh_clone, repo_default_branch, resolve_commit
 from .autonomy import AutonomyDecision, AutonomyVerdict
 from .config import SupervisorConfig
-from .contracts_io import mint_task, read_event_log, read_result, write_task_file
+from .contracts_io import (
+    DEFAULT_PERMISSIONS,
+    mint_task,
+    read_event_log,
+    read_result,
+    write_task_file,
+)
 from .ingest import IngestOutcome, ingest_run
 from .monitor import MonitorVerdict, kill_session, synthesize_terminal, watch_worker
 from .netproxy import FilteringProxy, control_plane_ports
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
+from .provider_hosts import provider_hosts_for
 from .providers import ProviderProfile
 from .reverify import reverify_run
-from .sandbox import DENY_ALL_NETWORK, NetworkPolicy, SandboxUnavailableError
+from .sandbox import NetworkPolicy, SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
 from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
 from .store import RunStore
@@ -287,8 +294,11 @@ def _resolve_provider_routing(
     domains = set(effective_network_domains(task))
 
     def host_granted(profile: ProviderProfile) -> bool:
-        host = urlparse(profile.base_url).hostname or ""
-        return "*" in domains or host in domains
+        url = urlparse(profile.base_url)
+        host = url.hostname or ""
+        port = url.port or (443 if url.scheme == "https" else 80)
+        # ADR 0059 D3: the provider rides provider_hosts as host:port.
+        return "*" in domains or host in domains or f"{host}:{port}" in domains
 
     allow_remote = any(p.cost_class != "local" and host_granted(p) for p in profiles)
     decision = resolve_routed_provider(
@@ -378,6 +388,23 @@ def run_task(
     from .engines import engine_available, resolve_engine
 
     engine = resolve_engine(coding_engine or None)
+    # ADR 0059 D3 (V6a): the one place a worker's provider_hosts is set. Every
+    # face (chat, REST, CLI, scheduler, resume, batch, templates) reaches it,
+    # and a caller's value is never trusted: it is recomputed from the
+    # supervisor's own registry for the engine that actually runs (I5).
+    permissions = (permissions or DEFAULT_PERMISSIONS).model_copy(
+        update={
+            "provider_hosts": provider_hosts_for(
+                run_store, config.home.parent, caste=worker_kind, engine=engine.name
+            )
+        }
+    )
+    # ADR 0059 D3 (V7): a deferred ask exists only on a delegated dispatch —
+    # its one writer is the chain narrowing (``_within_delegation``), and a
+    # resume carries the delegation with it. Any other envelope naming one
+    # (a hand-edited task, a stray caller) loses it here.
+    if dispatch_decision is None or dispatch_decision.delegation is None:
+        permissions = permissions.model_copy(update={"network_ask": [], "shell_ask": []})
     # Only an EXTERNAL engine replaces the worker argv. "builtin" defers to
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
@@ -389,7 +416,7 @@ def run_task(
         # "sandbox". Refuse before any run record or worktree exists.
         backend = resolve_sandbox_backend(
             config,
-            NetworkPolicy(allow=tuple(permissions.network)) if permissions else DENY_ALL_NETWORK,
+            NetworkPolicy(allow=tuple(permissions.egress())),
         )
         probe = sandbox_availability(backend)
         if not probe.usable:

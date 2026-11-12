@@ -112,6 +112,9 @@ CapabilityVerdict = Literal["allow", "allow_with_constraints", "require_approval
 
 CAPABILITY_REASON_PREFIX = "capability."
 CAPABILITY_REASON_TERMS = frozenset({"allow", "require_approval", "deny"})
+# ADR 0059 D3 (V7): a grant the delegation chain made an ask — carded naming
+# the chain, approve-once for this run (the supervisor never remembers it).
+DELEGATED_ASK_REASON = "capability.require_approval.delegated_ask"
 
 
 def _run_in_own_group(
@@ -466,6 +469,7 @@ class CapabilityRegistry:
         env_allowlist: Sequence[str] = (),
         env_baseline: Sequence[str] = ("PATH", "HOME"),
         network_allowlist: Sequence[str] = (),
+        provider_hosts: Sequence[str] = (),
         shell_allowlist: Sequence[Sequence[str]] = (),
         approved_shell_commands: Sequence[Sequence[str]] = (),
         plugin_tools: Sequence[PluginToolSpec] = (),
@@ -477,6 +481,9 @@ class CapabilityRegistry:
         approved_plugin_risks: Mapping[str, str] | None = None,
         command_timeout_seconds: float | None = None,
         verify_command: str = "",
+        network_ask: Sequence[str] = (),
+        shell_ask: Sequence[Sequence[str]] = (),
+        delegation: Mapping[str, Any] | None = None,
     ) -> None:
         self._workspace = workspace.resolve()
         # ES-F3 (B06): the project's pinned verify_command — with the
@@ -499,11 +506,19 @@ class CapabilityRegistry:
         self._child_env = _child_process_env(
             env_allowlist=tuple(str(name) for name in env_allowlist),
             env_baseline=tuple(str(name) for name in env_baseline),
-            network_allowlist=tuple(str(host) for host in network_allowlist),
+            network_allowlist=tuple(str(host) for host in (*network_allowlist, *provider_hosts)),
         )
         self._diff_baseline = self._resolve_diff_baseline()
         self._network_allowlist = tuple(network_allowlist)
+        # ADR 0059 D3: the provider endpoint is egress the run has, never a
+        # host grant — it only keeps "no allowlist at all" (which cards)
+        # from describing a run that does reach the network.
+        self._has_egress = bool(network_allowlist or provider_hosts)
         self._approved_network_hosts = tuple(approved_network_hosts)
+        # V7: never egress, never an allow — only the gate below reads them.
+        self._network_ask = tuple(network_ask)
+        self._shell_ask = tuple(_normalized_shell_argv(prefix) for prefix in shell_ask)
+        self._delegation = delegation if isinstance(delegation, Mapping) else {}
         self._shell_allowlist = tuple(_normalized_shell_argv(prefix) for prefix in shell_allowlist)
         self._approved_shell_commands = tuple(
             _normalized_shell_argv(prefix) for prefix in approved_shell_commands
@@ -762,6 +777,21 @@ class CapabilityRegistry:
         a model-chosen verify is exactly what the pin exists to refuse."""
         self._pinned_verify.add(_normalized_shell_argv(argv))
 
+    def delegated_ask_text(self, capability: str, value: str) -> str:
+        """The card for a deferred ask (V7), naming the chain that made it:
+        "worker@builder asks network.connect X — delegated by queen@builder,
+        which would itself ask; approve once for this run, or deny"."""
+        chain = [str(hop) for hop in self._delegation.get("chain") or []]
+        role = self._delegation.get("role")
+        if chain:
+            by = f"delegated by {' → '.join(chain)}, which would itself ask"
+        elif role:
+            by = f"its role {role} would ask"
+        else:
+            by = "its delegation would ask"
+        worker = f"worker@{role}" if role else "worker"
+        return f"{worker} asks {capability} {value} — {by}; approve once for this run, or deny"
+
     def _shell_decision(
         self, *, purpose: str, argv: Sequence[str], command: str
     ) -> CapabilityDecision:
@@ -787,6 +817,11 @@ class CapabilityRegistry:
             )
         )
         assert shell is not None
+        if shell.verdict == "require_approval" and _argv_matches_prefix(argv, self._shell_ask):
+            # V7: only an ask is re-labelled — every deny above stands.
+            return CapabilityDecision(
+                verdict="require_approval", reason=DELEGATED_ASK_REASON, detail=command
+            )
         return shell
 
     def _plugin_decision(self, spec: PluginToolSpec) -> CapabilityDecision:
@@ -801,7 +836,7 @@ class CapabilityRegistry:
         )
         if guard is not None:
             return guard
-        if spec.risk == "network" and not self._network_allowlist:
+        if spec.risk == "network" and not self._has_egress:
             return CapabilityDecision(
                 verdict="deny",
                 reason="capability.deny.plugin_network_task_allowlist_missing",
@@ -899,7 +934,11 @@ class CapabilityRegistry:
                 reason="capability.allow.network_loopback",
                 detail=hostname,
             )
-        if not self._network_allowlist:
+        if domain_allowed(hostname, self._network_ask):
+            return CapabilityDecision(
+                verdict="require_approval", reason=DELEGATED_ASK_REASON, detail=hostname
+            )
+        if not self._has_egress:
             return CapabilityDecision(
                 verdict="require_approval",
                 reason="capability.require_approval.network_allowlist_missing",
@@ -1370,6 +1409,8 @@ class CapabilityRegistry:
                     # detail (e.g. "branch operations are managed by the skep
                     # supervisor"); surface it so the run details explain the deny.
                     error = f"shell.run denied: {decision.detail} ({command})"
+            elif decision.reason == DELEGATED_ASK_REASON:
+                error = self.delegated_ask_text("shell.run", command)
             else:
                 error = f"shell.run requires approval for command: {command}"
             self._emit_blocked_command(
@@ -1797,7 +1838,11 @@ class CapabilityRegistry:
         decision = self._network_fetch_decision(hostname)
         command = f"GET {url}"
         if decision.verdict == "require_approval":
-            approval_error = f"{capability_id} requires approval with a task network allowlist"
+            approval_error = (
+                self.delegated_ask_text("network.connect", hostname)
+                if decision.reason == DELEGATED_ASK_REASON
+                else f"{capability_id} requires approval with a task network allowlist"
+            )
             self._emit_blocked_command(
                 capability_id=capability_id,
                 command=command,

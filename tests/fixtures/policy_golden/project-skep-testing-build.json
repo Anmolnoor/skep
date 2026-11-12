@@ -45,6 +45,8 @@
         "pypi.org",
         "registry.npmjs.org"
       ],
+      "network_ask": [],
+      "provider_hosts": [],
       "read": [
         "workspace"
       ],
@@ -69,6 +71,7 @@
           "youtube-transcript-api"
         ]
       ],
+      "shell_ask": [],
       "write": [
         "workspace"
       ]

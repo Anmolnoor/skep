@@ -1563,7 +1563,9 @@ def test_dispatch_adds_configured_llm_host_when_network_is_omitted(
 
     task_json = config.audit_dir / str(run["task_id"]) / "task.json"
     permissions = json.loads(task_json.read_text())["permissions"]
-    assert permissions["network"] == ["127.0.0.1"]
+    # ADR 0059 D3: the endpoint rides provider_hosts at its exact port.
+    assert permissions["network"] == []
+    assert permissions["provider_hosts"] == [server.base_url.split("//")[1].split("/")[0]]
 
 
 def test_auto_approve_write_returns_deprecation_notice(

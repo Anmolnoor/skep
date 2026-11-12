@@ -126,6 +126,8 @@ class Stack:
     repo: str | None = None  # the resolved checkout
     project: dict[str, Any] | None = None
     run_note: str | None = None
+    # skep's own LLM endpoints for a run here (ADR 0059 D3): never a grant.
+    provider_hosts: tuple[str, ...] = ()
 
 
 def floor_verdict(
@@ -277,7 +279,12 @@ def load_stack(holder: ConfigHolder, store: RunStore, *, repo: str | None = None
     except PolicyResolutionError as exc:
         return replace(stack, run_note=f"run policy did not resolve: {exc}")
     note = None if project is not None else "repo is not bound to a project — the global run policy"
-    return replace(stack, run=run_lane(resolved, project), run_note=note)
+    return replace(
+        stack,
+        run=run_lane(resolved, project),
+        run_note=note,
+        provider_hosts=tuple(resolved.permissions.provider_hosts),
+    )
 
 
 def _view(verdict: Verdict) -> dict[str, Any]:

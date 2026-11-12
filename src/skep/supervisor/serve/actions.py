@@ -32,6 +32,7 @@ from skep.worker_contract import (
     TaskIntent,
     TaskState,
 )
+from skep.worker_contract.task import ASK_HOST_RE
 
 from ..apply import (
     RefreshError,
@@ -96,7 +97,6 @@ from ..projects import (
     project_to_dict,
     validate_allowed_plugin_risks,
 )
-from ..provider_hosts import configured_provider_hosts
 from ..roles import (
     EXCEEDS_DELEGATOR,
     Delegator,
@@ -1716,7 +1716,6 @@ def _resolve_for_view(
         max_actions=None,
         max_provider_calls=None,
         execution_mode=None,
-        extra_network_hosts=_configured_provider_hosts(store, holder.current.home.parent),
         binding_candidates=binding_candidates,
     )
 
@@ -2227,6 +2226,20 @@ def policy_why(
                 )
             ),
         }
+    endpoints = [
+        entry
+        for entry in stack.provider_hosts
+        if scope == "network"
+        and value.strip().lower().rstrip(".") in (entry, entry.rpartition(":")[0].strip("[]"))
+    ]
+    if endpoints:
+        # ADR 0059 D3 (I8): this decision is about a grant; skep's own
+        # endpoint is not one, and a run reaches it either way.
+        view["provider_host"] = (
+            f"{', '.join(endpoints)} is skep's own LLM endpoint: every run that calls "
+            "the provider reaches it as provider_hosts, outside this decision and "
+            "the delegation narrowing — the verdict above is for anything else"
+        )
     return view
 
 
@@ -2285,6 +2298,8 @@ def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> d
                 "needs this allowlist or an approval"
             ),
             "network": list(resolved.permissions.network),
+            # ADR 0059 D3 (I8): skep's own LLM endpoint, apart from the grants.
+            "provider_hosts": list(resolved.permissions.provider_hosts),
             "allow_git_mutation": resolved.permissions.allow_git_mutation,
             "landing": "auto-apply verified patch" if landing_auto else "landing approval gate",
             "budget": resolved.budget.model_dump(mode="json"),
@@ -3237,14 +3252,10 @@ def resume_crashed_run(
             "dispatch a fresh run instead"
         )
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
+    # v19-F2 held on resume: run_task recomputes provider_hosts from the
+    # registry (ADR 0059 D3), so a run created before the provider was
+    # configured — or before contract 0.3.6 — still reaches it.
     permissions = original.permissions
-    # v19-F2 held on resume: re-merge the configured provider host.
-    merged_network = list(permissions.network)
-    if merged_network != ["*"]:
-        for host in configured_provider_hosts(store, config.home.parent):
-            if host not in merged_network:
-                merged_network.append(host)
-        permissions = permissions.model_copy(update={"network": merged_network})
     repo = Path(record.repo)
     execution_mode = str(record.execution_mode or "sandbox")
     preserved = _resume_workspace(store, repo, config.worktrees_root, task_id)
@@ -3267,6 +3278,9 @@ def resume_crashed_run(
                 verdict="allow",
                 reason="dispatch.allow.resume_after_crash",
                 detail=f"operator-confirmed resume of {task_id} by {actor}",
+                # V7: the chain rides the resume, so its deferred asks (and
+                # the cards naming it) survive a crash too.
+                delegation=_delegation_of(original),
             ).with_project_context(original.project_context),
             ref=record.ref,
             resume_of=task_id,
@@ -3368,6 +3382,50 @@ def remember_commands_for_session(store: RunStore, commands: list[list[str]]) ->
     return added
 
 
+def _deferred_asks(config: SupervisorConfig, task_id: str) -> Permissions | None:
+    """The gated run's own envelope (the supervisor's audit copy) — where its
+    deferred asks (V7) live; None when it is gone."""
+    path = config.audit_dir / task_id / "task.json"
+    if not path.is_file():
+        return None
+    return CodingWorkerTask.model_validate_json(path.read_text()).permissions
+
+
+def _asked(command: Sequence[str], permissions: Permissions | None) -> bool:
+    """Is ``command`` under one of the run's ``shell_ask`` prefixes?"""
+    asks = [] if permissions is None else permissions.shell_ask
+    return any(list(command[: len(prefix)]) == prefix for prefix in asks)
+
+
+def _refuse_remembering_an_ask(
+    config: SupervisorConfig,
+    task_id: str,
+    *,
+    commands: Sequence[Sequence[str]] = (),
+    host: str = "",
+) -> None:
+    """ADR 0059 D3 (V7): a deferred delegated ask is approve-once for THIS
+    run — "Allow & remember" would turn the chain's ask into a standing
+    grant for every run of the project (and the chain asks again anyway)."""
+    permissions = _deferred_asks(config, task_id)
+    if any(_asked(command, permissions) for command in commands) or (
+        permissions is not None and host and host in permissions.network_ask
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this is a delegated ask (the dispatching chain would itself ask): it can "
+                "only be approved once, for this run — approve it, or deny"
+            ),
+        )
+
+
+def _delegation_of(task: CodingWorkerTask) -> dict[str, Any] | None:
+    """The original dispatch's delegation record (R3), for a resume."""
+    delegation = getattr(task.dispatch_decision, "delegation", None)
+    return delegation if isinstance(delegation, dict) else None
+
+
 def resume_past_gate(
     store: RunStore,
     config: SupervisorConfig,
@@ -3398,21 +3456,15 @@ def resume_past_gate(
         raise HTTPException(status_code=409, detail="original task envelope is missing")
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
     permissions = original.permissions
-    delegation = getattr(original.dispatch_decision, "delegation", None)
+    delegation = _delegation_of(original)
     if shell_allowlist is not None and delegation:
         held = permissions.shell_allowlist
         shell_allowlist = [*held, *(list(c) for c in granted if list(c) not in held)]
     if shell_allowlist is not None:
         permissions = permissions.model_copy(update={"shell_allowlist": shell_allowlist})
     # v19-F2: a run created before the provider was configured froze a stale
-    # allowlist. Re-merge the configured provider host on resume so the resumed
-    # worker can always reach its LLM (``["*"]`` already allows everything).
-    merged_network = list(permissions.network)
-    if merged_network != ["*"]:
-        for host in configured_provider_hosts(store, config.home.parent):
-            if host not in merged_network:
-                merged_network.append(host)
-        permissions = permissions.model_copy(update={"network": merged_network})
+    # allowlist; run_task recomputes provider_hosts from the registry on every
+    # resume (ADR 0059 D3), so the resumed worker always reaches its LLM.
     approval = store.get_approval(review_id)
     decision = None
     action = None
@@ -3426,10 +3478,14 @@ def resume_past_gate(
     approval_commands = store.approval_commands(review_id)
     # v86-F1: a plain approve also holds for the serve session (the operator's
     # explicit ask); "remember" already wrote the durable tier before this call.
+    # V7: never a deferred delegated ask — that approval is this run's alone
+    # (the verdict and the resume chain's worker_state carry it) and must not
+    # reach the session tier every repo's runs read (B39).
     session_kept: list[list[str]] = []
     if not remembered and approval_commands:
         session_kept = remember_commands_for_session(
-            store, [list(command) for command in approval_commands]
+            store,
+            [list(command) for command in approval_commands if not _asked(command, permissions)],
         )
     verdict = ApprovalVerdict(
         approved=True,
@@ -3611,6 +3667,7 @@ def allow_network_host_and_resume(
             status_code=409,
             detail=f"{host!r} is not a rememberable bare hostname; approve it once instead",
         )
+    _refuse_remembering_an_ask(holder.current, str(run["task_id"]), host=host)
     repo = Path(str(run["repo"]))
     _persist_remembered_network_host(store, holder, repo, host)
     return resume_past_gate(
@@ -3848,6 +3905,7 @@ def allow_shell_command_and_resume(
         guard_reason = dangerous_prefix_reason(command)
         if guard_reason is not None:
             raise HTTPException(status_code=409, detail=guard_reason)
+    _refuse_remembering_an_ask(holder.current, str(run["task_id"]), commands=normalized_commands)
     repo = Path(str(run["repo"]))
     # v19-F4: prefer the repo's bound project policy; fall back to global.
     for command in normalized_commands:
@@ -4083,6 +4141,7 @@ def submit_run(
     delegation_chain: Sequence[str] = (),
     role: str | None = None,
     team: str | None = None,
+    deferred_asks: bool = False,
 ) -> str:
     """Resolve the repo, fill policy defaults (A5), and dispatch in background.
 
@@ -4096,7 +4155,12 @@ def submit_run(
     delegator's. A delegated or role-bearing dispatch writes one ``delegated``
     ledger row (``record_delegation``) and carries the chain on its dispatch
     decision, which every run card reads. ``team`` is set only by
-    ``submit_team``."""
+    ``submit_team``.
+
+    ADR 0059 D3 (V7): ``deferred_asks`` says a human can answer this run's
+    gate cards (REST, the CLI, a chat that can show a card). Only then does a
+    grant the chain makes an ask ride ``network_ask``/``shell_ask``; on every
+    other face (the default) it is dropped — a headless ask is a deny (I6)."""
     # v101-F10: F1 wrote a resolver that refuses an unknown caste by name, and
     # nothing called it — so an unknown caste reached the contract validator
     # deep in dispatch and surfaced as a 500 with no usable detail. Every
@@ -4149,7 +4213,6 @@ def submit_run(
             max_actions=max_actions,
             max_provider_calls=max_provider_calls,
             execution_mode=execution_mode,
-            extra_network_hosts=_configured_provider_hosts(store, holder.current.home.parent),
             binding_candidates=binding_candidates,
             engine=engine,
         )
@@ -4165,6 +4228,7 @@ def submit_run(
         role=role,
         delegation_chain=delegation_chain,
         team=team,
+        deferred_asks=deferred_asks,
     )
     try:
         auto_apply_verified_patch = None
@@ -4271,6 +4335,7 @@ def delegate_permissions(
     role: str | None,
     delegation_chain: Sequence[str],
     team: str | None = None,
+    deferred_asks: bool = False,
 ) -> tuple[Permissions, dict[str, Any] | None, str | None]:
     """The worker's permissions held to its role and its chain, with the
     delegation record for the dispatch decision and the dispatch note — or
@@ -4279,7 +4344,9 @@ def delegate_permissions(
     chain, worker_role = delegation_inputs(holder, delegation_chain, role, team=team)
     if not chain and worker_role is None:
         return permissions, None, None
-    return _within_delegation(holder, store, repo, chain, permissions, worker_role, team)
+    return _within_delegation(
+        holder, store, repo, chain, permissions, worker_role, team, deferred_asks=deferred_asks
+    )
 
 
 def delegated_decision(
@@ -4359,17 +4426,32 @@ def _within_delegation(
     permissions: Permissions,
     role: Role | None = None,
     team: str | None = None,
+    *,
+    deferred_asks: bool = False,
 ) -> tuple[Permissions, dict[str, Any], str]:
     """R2 (ADR 0055 D4): a worker a bot dispatched gets no grant beyond its
     delegator. Every shell prefix and egress host the run policy granted is
     decided under the chain (``policy_v3.decide``, I5); one beyond the
-    delegator is dropped — the worker then cards for it, so a human answers,
-    never the bot — and its ``exceeds_delegator`` row is recorded. Workspace
-    writes the delegator is denied refuse the dispatch outright: the worker
-    exists to write.
+    delegator leaves the grants and its ``exceeds_delegator`` row is
+    recorded. Workspace writes the delegator is denied refuse the dispatch
+    outright: the worker exists to write.
+
+    ADR 0059 D3 (V7): where the delegator would itself ASK, and a human can
+    answer (``deferred_asks``), the grant moves to ``network_ask`` /
+    ``shell_ask`` — the worker cards it naming the chain, approve-once for
+    that run. A deny, a headless dispatch, a wildcard host and a guarded
+    prefix (remote git, outbound content, dangerous) are dropped: a dropped
+    host is a flat deny at the worker; a dropped prefix meets the worker's
+    ordinary not-allowlisted gate. A grant is kept only where its row,
+    held to the chain, still says ``allow`` (§5.4 check 5: no allow the
+    delegator lacks). That also covers B147 — on a zero-state home every row
+    reads ``ask baseline/no_baseline``, the delegator's too, so nothing
+    compared "stricter" and the worker kept allows its delegator would ask
+    about — and an explicit ``network`` host the run policy has no rule for
+    (its row is deny), which the worker used to keep.
 
     R3 (ADR 0055 D5): the worker's own ``role`` decides beside the chain —
-    a grant its role layer made stricter is dropped the same way, recorded
+    a grant its role layer made stricter is narrowed the same way, recorded
     under that role. Returns the narrowed permissions, the delegation record
     for the dispatch decision, and the dispatch note."""
     # ponytail: a prefix is judged as written; a delegator rule narrower than
@@ -4386,63 +4468,123 @@ def _within_delegation(
         )
         return {**row, "team": team} if team else row
 
-    def narrowed_by(row: dict[str, Any]) -> bool:
-        """The chain or the worker's role made this stricter than the run
-        policy that granted it. A role rule only as strict as an unmatched
-        verdict names the role (D2's tie) but narrows nothing: the engine host
-        and a per-dispatch network list are unmatched in this stack."""
-        if row["rule_id"] == EXCEEDS_DELEGATOR:
-            return True
-        if role is None or not str(row["decided_by"]).startswith(f"{role.label}/"):
-            return False
-        base = decide_v3(Request(row["scope"], row["action"], row["value"]), stack=stack)
-        return _VERDICT_RANK[row["verdict"]] > _VERDICT_RANK[base.verdict]
+    asks: list[dict[str, Any]] = []
 
-    def kept(scope: str, action: str, value: str) -> bool:
+    def kept(scope: str, action: str, value: str, *, askable: bool) -> bool | None:
+        """True: kept as a grant. None: a deferred ask. False: dropped."""
         row = row_for(scope, action, value)
-        if not narrowed_by(row):
+        if row["verdict"] == "allow":
             return True
+        ask = deferred_asks and askable and row["verdict"] == "require_approval"
+        row = {**row, "delegated": "ask" if ask else "dropped"}
         log_decision(holder.current.audit_dir, row)
-        rows.append(row)
-        return False
+        (asks if ask else rows).append(row)
+        return None if ask else False
 
-    entries = " → ".join(hop.entry for hop in chain)
-    who = " · ".join(
-        ([f"delegated by {entries}"] if chain else []) + ([f"role {role.name}"] if role else [])
+    who = _delegation_who(chain, role)
+    refusal = _delegated_write_refusal(
+        holder, store, repo, chain, permissions.write, role=role, team=team, stack=stack
     )
-    for path in permissions.write:
-        # An ask stays: the patch card is already the human's gate (I1).
-        row = row_for("filesystem", "write", path)
-        if narrowed_by(row) and row["verdict"] == "deny":
-            log_decision(holder.current.audit_dir, row)
-            beyond = "the delegator" if row["rule_id"] == EXCEEDS_DELEGATOR else "the role"
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"{who}: filesystem.write {path} exceeds {beyond} "
-                    f"({row['decided_by']}) — a worker it dispatches could write what it "
-                    "may not; dispatch from a role that holds it, or as the operator"
-                ),
-            )
+    if refusal is not None:
+        raise HTTPException(status_code=403, detail=refusal)
+    shell = {
+        shlex.join(prefix): (
+            prefix,
+            kept(
+                "shell", "run", shlex.join(prefix), askable=worker_allowlist_reason(prefix) is None
+            ),
+        )
+        for prefix in permissions.shell_allowlist
+    }
+    network = {
+        host: kept("network", "connect", host, askable=ASK_HOST_RE.match(host) is not None)
+        for host in permissions.network
+    }
     narrowed = permissions.model_copy(
         update={
-            "shell_allowlist": [
-                prefix
-                for prefix in permissions.shell_allowlist
-                if kept("shell", "run", shlex.join(prefix))
-            ],
-            "network": [host for host in permissions.network if kept("network", "connect", host)],
+            "shell_allowlist": [prefix for prefix, held in shell.values() if held],
+            "shell_ask": [prefix for prefix, held in shell.values() if held is None],
+            "network": [host for host, held in network.items() if held],
+            "network_ask": [host for host, held in network.items() if held is None],
         }
     )
-    dropped = [f"{row['scope']}.{row['action']} {row['value']}" for row in rows]
+
+    def named(found: list[dict[str, Any]]) -> str:
+        return ", ".join(f"{row['scope']}.{row['action']} {row['value']}" for row in found)
+
     beyond = "the delegator" if chain else "the role"
-    note = who + (f"; beyond {beyond}, dropped: {', '.join(dropped)}" if dropped else "")
+    note = (
+        who
+        + (f"; beyond {beyond}, asks a human (this run only): {named(asks)}" if asks else "")
+        + (f"; beyond {beyond}, dropped: {named(rows)}" if rows else "")
+    )
     delegation = {
         "chain": [hop.entry for hop in chain],
         "role": None if role is None else role.name,
         "team": team,
     }
     return narrowed, delegation, note
+
+
+def _delegation_who(chain: Sequence[Delegator], role: Role | None) -> str:
+    entries = " → ".join(hop.entry for hop in chain)
+    return " · ".join(
+        ([f"delegated by {entries}"] if chain else []) + ([f"role {role.name}"] if role else [])
+    )
+
+
+def _narrowed_by(row: dict[str, Any], stack: Stack, role: Role | None) -> bool:
+    """The chain or the worker's role made this stricter than the run policy
+    alone. A role rule only as strict as an unmatched verdict names the role
+    (D2's tie) but narrows nothing."""
+    if row["rule_id"] == EXCEEDS_DELEGATOR:
+        return True
+    if role is None or not str(row["decided_by"]).startswith(f"{role.label}/"):
+        return False
+    base = decide_v3(Request(row["scope"], row["action"], row["value"]), stack=stack)
+    return _VERDICT_RANK[row["verdict"]] > _VERDICT_RANK[base.verdict]
+
+
+def _delegated_write_refusal(
+    holder: ConfigHolder,
+    store: RunStore,
+    repo: Path,
+    chain: Sequence[Delegator],
+    write: Sequence[str],
+    *,
+    role: Role | None = None,
+    team: str | None = None,
+    stack: Stack | None = None,
+) -> str | None:
+    """Why a worker this chain (or role) dispatches may not write — the
+    workspace write its delegator is denied — recorded; None when it may.
+    ``_within_delegation`` refuses the dispatch with it (403) and
+    ``dispatch_run_decision`` refuses the proposal (B22: before a card)."""
+    if stack is None:
+        baseline_alarm(holder, store)
+        stack = load_stack(holder, store, repo=str(repo))
+    for path in write:
+        # An ask stays: the patch card is already the human's gate (I1).
+        verdict = decide_v3(
+            Request("filesystem", "write", path), stack=stack, role=role, chain=chain
+        )
+        row = _decision_row(
+            verdict,
+            stack,
+            actor="dispatch",
+            repo=str(repo),
+            req=("filesystem", "write", path),
+            role=role,
+        )
+        if _narrowed_by(row, stack, role) and row["verdict"] == "deny":
+            log_decision(holder.current.audit_dir, {**row, "team": team} if team else row)
+            beyond = "the delegator" if row["rule_id"] == EXCEEDS_DELEGATOR else "the role"
+            return (
+                f"{_delegation_who(chain, role)}: filesystem.write {path} exceeds {beyond} "
+                f"({row['decided_by']}) — a worker it dispatches could write what it "
+                "may not; dispatch from a role that holds it, or as the operator"
+            )
+    return None
 
 
 TEAM_CAP = 3  # v51's batch cap: a team is a batch with a manager
@@ -4457,6 +4599,7 @@ def submit_team(
     tasks: Sequence[dict[str, Any]],
     delegation_chain: Sequence[str] = (),
     dispatch_decision: AutonomyDecision | None = None,
+    deferred_asks: bool = False,
 ) -> dict[str, Any]:
     """R3 (ADR 0055 D5): a team run — v51's batch dispatch with a manager as
     the dispatcher. The manager is a hop, ``manager@<role>``, under whoever
@@ -4505,6 +4648,7 @@ def submit_team(
             delegation_chain=chain,
             role=str(task.get("role") or manager),
             team=team,
+            deferred_asks=deferred_asks,
         )
         for task in tasks
     ]
@@ -4547,6 +4691,72 @@ def dispatch_run_auto_allowed(
 
 
 def dispatch_run_decision(
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    repo: str,
+    caste: str = "coding",
+    network: list[str] | None = None,
+    env_allowlist: list[str] | None = None,
+    wall_clock_seconds: int | None = None,
+    max_iterations: int | None = None,
+    max_actions: int | None = None,
+    max_provider_calls: int | None = None,
+    execution_mode: str | None = None,
+    engine: str | None = None,
+    delegation_chain: Sequence[str] = (),
+) -> AutonomyDecision:
+    """The dispatch gate. ADR 0059 D3 (V7, B22): with the proposing chat's
+    ``delegation_chain`` it consults the chain first — a dispatch the
+    delegator could never make (its role denies the workspace write) is
+    refused at proposal time with the reason, never carded only to 403 on
+    confirm."""
+    decision = _dispatch_run_decision(
+        holder,
+        store,
+        repo=repo,
+        caste=caste,
+        network=network,
+        env_allowlist=env_allowlist,
+        wall_clock_seconds=wall_clock_seconds,
+        max_iterations=max_iterations,
+        max_actions=max_actions,
+        max_provider_calls=max_provider_calls,
+        execution_mode=execution_mode,
+        engine=engine,
+    )
+    if not delegation_chain or decision.verdict == "deny" or is_git_url(repo):
+        return decision
+    try:
+        chain = parse_delegation_chain(delegation_chain, holder.current.home)
+        resolved = resolve_repo_arg(repo, repos_root(holder), store)
+        write = resolve_run_policy(
+            store=store,
+            config=holder.current,
+            repo=resolved,
+            caste=caste,
+            network=network,
+            env_allowlist=env_allowlist,
+            wall_clock_seconds=wall_clock_seconds,
+            max_iterations=max_iterations,
+            max_actions=max_actions,
+            max_provider_calls=max_provider_calls,
+            # the write grant does not depend on the mode; an unset project
+            # mode ("ask") must not hide the refusal behind its own card
+            execution_mode=execution_mode or "workspace",
+            engine=engine,
+        ).permissions.write
+    except (ValueError, HTTPException, PolicyResolutionError):
+        return decision  # the dispatch itself answers with the honest error
+    refusal = _delegated_write_refusal(holder, store, resolved, chain, write)
+    if refusal is None:
+        return decision
+    return AutonomyDecision(
+        verdict="deny", reason="dispatch.deny.exceeds_delegator", detail=refusal
+    )
+
+
+def _dispatch_run_decision(
     holder: ConfigHolder,
     store: RunStore,
     *,
@@ -4626,7 +4836,6 @@ def dispatch_run_decision(
             max_actions=max_actions,
             max_provider_calls=max_provider_calls,
             execution_mode=effective_mode,
-            extra_network_hosts=_configured_provider_hosts(store, holder.current.home.parent),
             binding_candidates=binding_candidates,
         )
     except PolicyResolutionError as exc:
@@ -4641,11 +4850,6 @@ def dispatch_run_decision(
         requested_execution_mode=execution_mode,
         explicit_run_overrides=False,
     ).with_project_context(resolved_policy.project_context)
-
-
-def _configured_provider_hosts(store: RunStore, home: Path) -> list[str]:
-    # Thin alias kept for in-module call sites; logic lives in provider_hosts.
-    return configured_provider_hosts(store, home)
 
 
 def learn_policy_rule(

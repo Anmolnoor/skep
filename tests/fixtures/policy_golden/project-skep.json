@@ -112,6 +112,8 @@
         "pypi.org",
         "registry.npmjs.org"
       ],
+      "network_ask": [],
+      "provider_hosts": [],
       "read": [
         "workspace"
       ],
@@ -179,6 +181,7 @@
           "starlette"
         ]
       ],
+      "shell_ask": [],
       "write": [
         "workspace"
       ]

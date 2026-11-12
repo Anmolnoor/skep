@@ -129,7 +129,7 @@ def admit_target(
         if port in denied_ports:
             return 403, "Forbidden: the skep control plane is not reachable from a run", []
         return 200, "", [(host.strip("[]"), port)]
-    if not domain_allowed(host, allowlist):
+    if not domain_allowed(host, allowlist, port=port):
         return 403, f"Forbidden: {host!r} is not in the task network allowlist", []
     try:
         return 200, "", [(str(ipaddress.ip_address(host.strip("[]"))), port)]
@@ -172,16 +172,23 @@ def _host_header_mismatch(headers: list[bytes], host: str, port: int) -> str | N
     return None
 
 
-def domain_allowed(host: str, allowlist: tuple[str, ...]) -> bool:
+def domain_allowed(host: str, allowlist: tuple[str, ...], *, port: int | None = None) -> bool:
     """True if ``host`` is permitted by ``allowlist``.
 
     ``"*"`` allows everything. A plain entry (``"pypi.org"``) matches that host
     exactly — never its subdomains. A ``"*.example.com"`` entry matches the apex
     and any subdomain. Matching is case-insensitive and ignores a trailing dot.
+    A ``host:port`` entry (ADR 0059 D3: a provider endpoint) matches that host
+    on that ``port`` only — never a port-less question.
     """
     host = host.strip().lower().rstrip(".")
     for raw in allowlist:
         entry = raw.strip().lower()
+        pinned = split_authority(entry)
+        if pinned is not None:
+            if port == pinned[1] and host.strip("[]") == pinned[0].rstrip("."):
+                return True
+            continue
         if entry == "*":
             return True
         if entry.startswith("*."):

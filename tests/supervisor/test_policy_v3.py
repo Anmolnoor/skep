@@ -26,6 +26,7 @@ from skep.supervisor.policy_v3 import UNMATCHED, Request, decide, load_stack
 from skep.supervisor.roles import SHIPPED_ROLES, parse_delegation_chain
 from skep.supervisor.serve.actions import policy_decide, policy_why
 from skep.supervisor.serve.settings import ConfigHolder
+from skep.worker_contract import Permissions
 
 from .conftest import serve_client
 from .policy_v3_grid import HOMES, PROBES, build_home, rows
@@ -491,14 +492,15 @@ def test_a_writer_that_loses_the_rotation_race_still_logs_its_line(
 
 
 @pytest.mark.parametrize("role", ["builder", "operator"])
-def test_a_role_dispatch_keeps_the_engine_host_and_the_network_it_was_granted(
+def test_a_role_dispatch_keeps_the_engine_host_and_asks_for_a_network_host_no_rule_covers(
     role: str, tmp_path: Path
 ) -> None:
-    """The dispatch grants the engine's API host and a per-dispatch network
-    list; the stack `_within_delegation` judges them on resolves neither, so
-    they are unmatched there. A role's `*` ask winning that tie (D2's
-    labelling) is not the role narrowing the grant — before P3-1 they were
-    kept, and dropping api.anthropic.com leaves claude_code unable to work."""
+    """The stack `_within_delegation` judges grants on resolves neither the
+    engine's API host nor a per-dispatch network list. The engine host rides
+    provider_hosts (ADR 0059 D3), which the narrowing never sees, so a role
+    dispatch keeps it. A per-dispatch host no rule covers is unmatched there —
+    an ask (B77) — so it is the worker's deferred ask where a human answers
+    (V7), dropped where none does, and never an allow the role lacks."""
     from skep.supervisor.policy_resolver import resolve_run_policy
     from skep.supervisor.serve.actions import delegate_permissions
 
@@ -507,20 +509,34 @@ def test_a_role_dispatch_keeps_the_engine_host_and_the_network_it_was_granted(
     store = RunStore(config.db_path)
     store.add_project_policy(project_id="app", name="app", strategy="trusted_local_dev",
                              phase="build", policy={"verify_command": "uv run pytest"})  # fmt: skip
+
+    def granted(engine: str | None, network: list[str] | None) -> Permissions:
+        return resolve_run_policy(
+            store=store, config=config, repo=repo, caste="coding", network=network,
+            env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
+            max_actions=None, max_provider_calls=None, execution_mode=None,
+            binding_candidates=[], engine=engine,
+        ).permissions  # fmt: skip
+
+    def narrowed(permissions: Permissions, *, deferred_asks: bool) -> Permissions:
+        return delegate_permissions(
+            ConfigHolder(config, store), store, repo, permissions,
+            role=role, delegation_chain=(), deferred_asks=deferred_asks,
+        )[0]  # fmt: skip
+
     try:
-        for engine, network in (("claude_code", None), (None, ["files.example"])):
-            resolved = resolve_run_policy(
-                store=store, config=config, repo=repo, caste="coding", network=network,
-                env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
-                max_actions=None, max_provider_calls=None, execution_mode=None,
-                binding_candidates=[], engine=engine,
-            )  # fmt: skip
-            granted = resolved.permissions.network
-            assert "api.anthropic.com" in granted or "files.example" in granted
-            narrowed, _, _ = delegate_permissions(
-                ConfigHolder(config, store), store, repo, resolved.permissions,
-                role=role, delegation_chain=(),
-            )  # fmt: skip
-            assert narrowed.network == granted, (engine, network)
+        engine_run = granted("claude_code", None)
+        assert "api.anthropic.com:443" in engine_run.provider_hosts
+        held = narrowed(engine_run, deferred_asks=False)
+        assert held.provider_hosts == engine_run.provider_hosts
+        assert held.network == engine_run.network
+
+        explicit = granted(None, ["files.example"])
+        assert "files.example" in explicit.network
+        asked = narrowed(explicit, deferred_asks=True)
+        assert asked.network_ask == ["files.example"]
+        assert "files.example" not in asked.network
+        headless = narrowed(explicit, deferred_asks=False)
+        assert "files.example" not in [*headless.network, *headless.network_ask]
     finally:
         store.close()
