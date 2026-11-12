@@ -116,7 +116,9 @@ class Stack:
     """Everything decide() reads, loaded once per request."""
 
     home: Path
-    cwd: str | None  # the raw repo argument; the shell secret floor resolves against it
+    # The resolved repo (the raw argument when it does not resolve): the
+    # shell secret floor resolves relative paths against it.
+    cwd: str | None
     guard: Mapping[str, str]  # scope -> baseline_guard reason
     baseline: str  # status_line, the note a guarded verdict carries
     operator: dict[str, ResolvedScopePolicy]
@@ -267,7 +269,9 @@ def load_stack(holder: ConfigHolder, store: RunStore, *, repo: str | None = None
         return stack
     resolved_repo, candidates, project_row = _repo_project_for_view(holder, store, repo)
     project = _project_summary(project_row)
-    stack = replace(stack, repo=str(resolved_repo), project=project)
+    # B123: a shell line is judged from the repo the arg names (a slug is
+    # not a path under the process cwd, v87-F1).
+    stack = replace(stack, repo=str(resolved_repo), cwd=str(resolved_repo), project=project)
     try:
         resolved = _resolve_for_view(holder, store, resolved_repo, candidates)
     except PolicyResolutionError as exc:

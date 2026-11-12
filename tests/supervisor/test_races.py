@@ -784,6 +784,26 @@ def test_a_gate_whose_dispatch_fails_hands_the_approval_back(rig: Rig, repo: Any
     assert approval is not None and approval.status == "pending"
 
 
+def test_a_gate_the_pool_refuses_hands_the_approval_back(rig: Rig, repo: Any) -> None:
+    """The pool's own refusal (DispatchError → 500) un-claims too: the gate
+    stays approvable instead of sitting 'applying' until a restart."""
+    from skep.supervisor.serve import actions
+    from skep.supervisor.serve.jobs import DispatchError
+
+    run, review_id = _gated_run(rig, repo)
+    held = _HeldMutation(error=DispatchError("pool full"))
+    held.release.set()
+
+    with pytest.raises(HTTPException) as refused:
+        actions.resume_past_gate(
+            rig.store, rig.holder.current, _runner(held), run, review_id, "operator"
+        )
+
+    assert refused.value.status_code == 500
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "pending"
+
+
 # ---------- ES-F5: gate-mirror cards ----------
 
 
