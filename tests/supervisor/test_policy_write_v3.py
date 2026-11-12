@@ -1,0 +1,493 @@
+"""ADR 0059 P3-5 (D6, V11): look before every policy write.
+
+Every policy writer runs the one write-time check (``policy_write.vet_write``)
+on the would-be stack before it stores anything: a NEW §5.4 forbidden
+combination is refused naming the rule and its layer, and the store stays
+byte-identical; a deny is always accepted; the write's answer (and the card
+that proposes it) carries an advisory replay of recent decisions."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi import HTTPException
+
+from skep.supervisor import RunStore, policy_write
+from skep.supervisor import policy_baseline as pb
+from skep.supervisor.cli_cmds import build_config
+from skep.supervisor.config import SupervisorConfig
+from skep.supervisor.policy_schema import (
+    POLICY_DOCUMENT_SETTINGS_KEY,
+    LearnedRule,
+    PolicyDocument,
+    document_from_settings,
+)
+from skep.supervisor.policy_templates import TEMPLATE_NAMES, load_policy_template
+from skep.supervisor.policy_write import Allow, PolicyWriteRejected, vet_write
+from skep.supervisor.roles import SHIPPED_ROLES
+from skep.supervisor.serve import actions
+from skep.supervisor.serve.registry import setup_project_record
+from skep.supervisor.serve.settings import ConfigHolder
+from skep.supervisor.serve.tools import policy_write_preview
+
+from .conftest import predating_home
+from .fake_ollama import FakeOllama
+from .test_serve_chat import sse_events
+from .test_serve_chat_tools import chat_client
+
+CHAT = "chat-1"
+
+
+@dataclass
+class Home:
+    root: Path
+    config: SupervisorConfig
+    store: RunStore
+    holder: ConfigHolder
+
+    def lock(self, template: str = "builder", *extra: dict[str, str]) -> None:
+        layer = load_policy_template(template).model_dump(mode="json")
+        layer["rules"] = [*layer["rules"], *extra]
+        pb.write_lock(self.config.home, pb._load_layer(layer), approved_by="op")
+
+    def snapshot(self) -> tuple[Any, ...]:
+        files = sorted(
+            (str(p), p.read_bytes())
+            for p in self.config.home.glob("policy/*")
+            if p.is_file()
+        )  # fmt: skip
+        return self.store.all_settings(), files
+
+    def learned(self) -> list[LearnedRule]:
+        doc = document_from_settings(self.store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+        return [] if doc is None else list(doc.learned)
+
+    def log(self, *rows: dict[str, Any] | str) -> None:
+        path = self.config.audit_dir / "policy" / "decisions.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            for row in rows:
+                handle.write((row if isinstance(row, str) else json.dumps(row)) + "\n")
+
+
+@pytest.fixture()
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Home]:
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))
+    root = tmp_path / "skep"
+    config = build_config(root, None)
+    config.home.mkdir(parents=True)
+    store = RunStore(predating_home(config.db_path))
+    store.add_project_policy(
+        project_id="p", name="p", strategy="trusted_local_dev", phase="build", policy={}
+    )
+    yield Home(root, config, store, ConfigHolder(config, store))
+    store.close()
+
+
+NO_CURL = {"scope": "shell", "verdict": "deny", "action": "run", "pattern": "curl",
+           "rule_id": "no-curl"}  # fmt: skip
+NO_EXAMPLE = {"scope": "network", "verdict": "deny", "action": "fetch",
+              "pattern": "example.com", "rule_id": "no-example"}  # fmt: skip
+
+
+# -- the grant and overlay writers, each with a subject a deny can collide with --
+
+GrantWriter = Callable[[Home, str], Any]
+
+
+def _keep(h: Home, command: str) -> Any:
+    return actions.remember_action_for_session(
+        h.store, tool="run_shell", args={"command": command}, actor="op", tier="always"
+    )
+
+
+def _session_keep(h: Home, command: str) -> Any:
+    return actions.remember_action_for_session(
+        h.store, tool="run_shell", args={"command": command}, actor="op", tier="session",
+        chat_id=CHAT,
+    )  # fmt: skip
+
+
+def _worker_remember(h: Home, command: str) -> Any:
+    return actions.persist_remembered_command(h.store, h.holder, h.root / "repo", command.split())
+
+
+def _fetch_domain(h: Home, host: str) -> Any:
+    return actions.learn_policy_rule(
+        h.store, rule_id=f"network:fetch:{host}", action="fetch", pattern=host, scope="network",
+        provenance="allow-always:op",
+    )  # fmt: skip
+
+
+def _overlay_fetch(h: Home, host: str) -> Any:
+    return actions.set_operator_policy_rule(
+        h.store, scope="network", action="fetch", pattern=host, verdict="allow", holder=h.holder
+    )
+
+
+# writer, a harmless subject, a subject inside the baseline deny, the deny's name
+GRANT_WRITERS: dict[str, tuple[GrantWriter, str, str, str]] = {
+    "keep=always": (_keep, "ls -la", "curl -sI https://example.com", "no-curl"),
+    "keep=session": (_session_keep, "ls -la", "curl -sI https://example.com", "no-curl"),
+    "worker remember": (_worker_remember, "make test", "curl -sI", "no-curl"),
+    "allow_fetch_domain": (_fetch_domain, "docs.example.org", "example.com", "no-example"),
+    "set_operator_policy": (_overlay_fetch, "docs.example.org", "example.com", "no-example"),
+}
+
+
+@pytest.mark.parametrize("writer", GRANT_WRITERS)
+def test_b23_a_write_inside_a_baseline_deny_is_refused_naming_it(home: Home, writer: str) -> None:
+    write, harmless, inside, deny = GRANT_WRITERS[writer]
+    home.lock("builder", NO_CURL, NO_EXAMPLE)
+    before = home.snapshot()
+    with pytest.raises((ValueError, HTTPException)) as refused:
+        write(home, inside)
+    text = str(getattr(refused.value, "detail", refused.value))
+    assert f"template:builder/{deny}" in text and "§5.4 check 6" in text
+    assert "nothing was stored" in text
+    assert home.snapshot() == before  # byte-identical
+    write(home, harmless)  # an ordinary grant still lands
+    assert home.snapshot() != before
+
+
+@pytest.mark.parametrize("writer", ["keep=always", "worker remember"])
+def test_b23_a_setup_document_deny_is_named_too(home: Home, writer: str) -> None:
+    write, _harmless, inside, _deny = GRANT_WRITERS[writer]
+    document = PolicyDocument.model_validate(
+        {"scopes": [{"scope": "shell", "deny": [
+            {"rule_id": "doc-no-curl", "action": "run", "pattern": "curl"}]}]}
+    )  # fmt: skip
+    home.store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, document.model_dump_json())
+    before = home.snapshot()
+    with pytest.raises(ValueError, match="global/doc-no-curl"):
+        write(home, inside)
+    assert home.snapshot() == before
+
+
+def test_b23_the_floor_and_a_role_deny_are_named(home: Home) -> None:
+    with pytest.raises(PolicyWriteRejected, match="floor/"):
+        actions.learn_policy_rule(
+            home.store, rule_id="sudo", action="run", pattern="sudo rm -rf /", scope="shell",
+            provenance="allow-always:op",
+        )  # fmt: skip
+    with pytest.raises(PolicyWriteRejected, match="role:assistant/coding-denied"):
+        vet_write(
+            home.store, new=[Allow("coding", "edit", "src/*", "g")], role=SHIPPED_ROLES["assistant"]
+        )
+    vet_write(
+        home.store, new=[Allow("coding", "edit", "src/*", "g")], role=SHIPPED_ROLES["builder"]
+    )
+
+
+# -- §5.4 checks 1 and 2, on the writers that can create them --
+
+
+def test_check_1_a_secret_floor_read_allow_is_refused(home: Home) -> None:
+    secret = str(Path.home() / ".ssh" / "*")
+    before = home.snapshot()
+    with pytest.raises(HTTPException) as refused:
+        actions.set_operator_policy_rule(
+            home.store, scope="filesystem", action="read", pattern=secret, verdict="allow"
+        )
+    assert "§5.4 check 1" in str(refused.value.detail)
+    assert f"op:filesystem:read:{secret}" in str(refused.value.detail)
+    assert home.snapshot() == before
+    inside = f"{home.config.home}/notes/*"  # inside an operator root (the skep home)
+    actions.set_operator_policy_rule(
+        home.store, scope="filesystem", action="read", pattern=inside, verdict="allow"
+    )
+
+
+def test_check_2_an_outside_read_beside_egress_to_any_host_is_refused(
+    home: Home, tmp_path: Path
+) -> None:
+    """The default operator document allows ``network search *`` (search_web),
+    so an outside-the-workspace read allow is the f1-07 pair — refused; after
+    the operator denies the search, the same read lands."""
+    outside = f"{tmp_path}/data/*"
+    with pytest.raises(HTTPException) as refused:
+        actions.set_operator_policy_rule(
+            home.store, scope="filesystem", action="read", pattern=outside, verdict="allow"
+        )
+    detail = str(refused.value.detail)
+    assert "§5.4 check 2" in detail and "global/net:search" in detail
+    assert "deny network search" in detail  # what would be accepted (I9)
+    actions.set_operator_policy_rule(
+        home.store, scope="network", action="search", pattern="*", verdict="deny"
+    )
+    actions.set_operator_policy_rule(
+        home.store, scope="filesystem", action="read", pattern=outside, verdict="allow"
+    )
+
+
+def test_check_2_on_a_baseline_write(home: Home, tmp_path: Path) -> None:
+    """A custom layer that adds an outside read to the builder template (which
+    allows search) is refused before anything is locked."""
+    layer = load_policy_template("builder").model_dump(mode="json")
+    layer["template"] = "custom"
+    layer["rules"].append({"scope": "filesystem", "verdict": "allow", "action": "read",
+                           "pattern": f"{tmp_path}/data/*", "rule_id": "data-read"})  # fmt: skip
+    path = tmp_path / "layer.json"
+    path.write_text(json.dumps(layer))
+    with pytest.raises(PolicyWriteRejected, match="template:custom/data-read"):
+        actions.approve_policy_baseline(
+            home.config.home, file=str(path), approved_by="op", store=home.store
+        )
+    assert not pb.lock_path(home.config.home).exists()
+
+
+def test_check_3_a_rule_that_lets_the_host_shell_install_is_refused(home: Home) -> None:
+    """No writer offers a wildcard host-shell grant; a learned prefix rule
+    unbound (what an older writer could store) is the shape check 3 catches."""
+    rule = LearnedRule(
+        rule_id="pip", action="run", pattern="pip install", scope="shell",
+        provenance="allow-always:op", matcher="prefix",
+    )  # fmt: skip
+    with pytest.raises(PolicyWriteRejected, match=r"§5\.4 check 3"):
+        actions.store_grant(home.store, rule)
+    assert home.learned() == []
+    exact = rule.model_copy(update={"rule_id": "pip-one", "matcher": "exact_argv",
+                                    "pattern": "pip install requests==2.32.3"})  # fmt: skip
+    actions.store_grant(home.store, exact)  # a card's exact line is fine
+
+
+# -- every writer runs the one check: a writer that skips it fails here --
+
+
+def _writers(home: Home) -> dict[str, Callable[[], Any]]:
+    repo = home.root / "repos" / "r"
+    repo.mkdir(parents=True, exist_ok=True)
+    return {
+        "store_grant/keep": lambda: _keep(home, "ls -la"),
+        "learn_policy_rule": lambda: _fetch_domain(home, "docs.example.org"),
+        "worker remember": lambda: _worker_remember(home, "make test"),
+        "set_operator_policy": lambda: _overlay_fetch(home, "docs.example.org"),
+        "PUT /api/policy": lambda: actions.update_policy(
+            home.store, home.holder, {"card_timeout_seconds": 60}
+        ),
+        "set_policy_group": lambda: actions.set_policy_group(
+            home.store, name="web", policy={"default_network": ["example.org"]}
+        ),
+        "attach_policy_group": lambda: actions.attach_policy_group(
+            home.store, project_id="p", name="python-bootstrap"
+        ),
+        "project setup": lambda: setup_project_record(
+            run_store=home.store,
+            root=home.root / "repos",
+            project_id="q",
+            name="q",
+            strategy="trusted_local_dev",
+            phase="build",
+            repo_path=str(repo),
+            seed_default_schedules=False,
+            seed_shell_commands=False,
+        ),
+        "baseline approve": lambda: actions.approve_policy_baseline(
+            home.config.home, template="builder", approved_by="op", store=home.store
+        ),
+    }
+
+
+def test_every_policy_writer_runs_the_one_check_before_it_writes(
+    home: Home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise PolicyWriteRejected("policy write refused, nothing was stored: probe")
+
+    monkeypatch.setattr(policy_write, "vet_write", refuse)
+    for name, write in _writers(home).items():
+        before = home.snapshot()
+        try:
+            outcome = write()
+        except (ValueError, HTTPException) as exc:
+            assert "probe" in str(getattr(exc, "detail", exc)), name
+        else:
+            assert outcome == 2, f"{name} wrote without the check"
+        assert home.snapshot() == before, name
+
+
+def test_every_writer_passes_an_ordinary_write(home: Home) -> None:
+    for name, write in _writers(home).items():
+        outcome = write()
+        assert outcome is not None and outcome != 2, name
+
+
+# -- shipped templates, stricter writes, re-approval --
+
+
+@pytest.mark.parametrize("template", TEMPLATE_NAMES)
+def test_every_shipped_template_passes_its_own_check(home: Home, template: str) -> None:
+    _keep(home, "ls -la")  # a home with an ordinary grant
+    result = actions.approve_policy_baseline(
+        home.config.home, template=template, approved_by="op", store=home.store
+    )
+    assert result["approved"]["template"] == template
+    again = actions.approve_policy_baseline(
+        home.config.home, reapprove=True, approved_by="op", store=home.store
+    )
+    assert again["approved"]["template"] == template
+
+
+def test_a_deny_is_always_accepted_and_names_the_grant_it_shadows(home: Home) -> None:
+    _fetch_domain(home, "example.com")
+    result = actions.set_operator_policy_rule(
+        home.store, scope="network", action="fetch", pattern="example.com", verdict="deny"
+    )
+    assert any("network:fetch:example.com" in w for w in result["warnings"])
+    _keep(home, "curl -sI https://example.com")
+    result = actions.approve_policy_baseline(
+        home.config.home, template="builder", approved_by="op", store=home.store
+    )
+    home.lock("builder", NO_CURL)  # a stricter baseline over the grant re-locks
+    layer = pb.current_layer(home.config.home)
+    vet_write(home.store, baseline=layer)
+
+
+def test_an_existing_home_with_a_forbidden_combination_keeps_working(home: Home) -> None:
+    """A grant inside a deny and a legacy ``filesystem read *`` written before
+    the check: the next unrelated write still lands (the check only stops a
+    NEW combination), and decide() still ignores the grant."""
+    document = PolicyDocument.model_validate(
+        {
+            "scopes": [{"scope": "shell", "deny": [
+                {"rule_id": "doc-no-curl", "action": "run", "pattern": "curl"}]}],
+            "learned": [
+                {"rule_id": "curl-old", "scope": "shell", "action": "run",
+                 "pattern": "curl -sI https://example.com", "provenance": "allow-always:op"},
+                {"rule_id": "fs:all", "scope": "filesystem", "action": "read", "pattern": "*",
+                 "provenance": "allow-always:op"},
+            ],
+        }
+    )  # fmt: skip
+    home.store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, document.model_dump_json())
+    _keep(home, "ls -la")
+    record = actions.policy_decide(
+        home.holder, home.store, scope="shell", action="run", value="curl -sI https://example.com"
+    )
+    assert record["verdict"] == "deny"
+    assert any("curl-old" in g for g in record["ignored_grants"])
+
+
+# -- replay --
+
+
+def _row(
+    scope: str, action: str, value: str, verdict: str, by: str, **extra: Any
+) -> dict[str, Any]:
+    return {"actor": "queen", "repo": None, "scope": scope, "action": action, "value": value,
+            "source": "operator", "verdict": verdict, "rule_id": by.partition("/")[2],
+            "decided_by": by, **extra}  # fmt: skip
+
+
+def test_replay_counts_flips_and_what_it_cannot_replay(home: Home) -> None:
+    root_file = f"{home.config.home}/notes.txt"
+    home.log(
+        _row("shell", "run", "ls -la", "require_approval", "default/unmatched"),
+        _row("shell", "run", "ls -la", "require_approval", "default/unmatched"),
+        _row("filesystem", "read", root_file, "allow", "global/operator-root"),
+        _row("shell", "run", "env TOKEN=***", "require_approval", "default/unmatched"),
+        _row("shell", "run", "make", "allow", "dispatch/x", repo="/r"),
+        _row("network", "fetch", "example.com", "require_approval", "default/unmatched"),
+        _row("mcp", "call", "notes:list", "allow", "default/read-only"),
+        _row("shell", "run", "df", "allow", "grant:session/df@chat:c"),
+        "not json",
+    )
+    receipt = _keep(home, "ls -la")
+    assert receipt["replay"].startswith("replay of the last 9 decisions: now allows 2 past asks")
+    assert "6 not replayable" in receipt["replay"]
+    for why in ("value redacted", "run lane", "URL not logged", "read-only", "chat-bound",
+                "unreadable"):  # fmt: skip
+        assert why in receipt["replay"], why
+    denied = actions.set_operator_policy_rule(
+        home.store, scope="filesystem", action="read", pattern=f"{home.config.home}/*",
+        verdict="deny",
+    )  # fmt: skip
+    assert "now denies 1 past allows" in denied["replay"]
+    assert "global/operator-root → global/op:filesystem:read:" in denied["replay"]
+
+
+def test_replay_never_blocks_and_says_when_the_log_is_empty(home: Home) -> None:
+    receipt = _keep(home, "ls -la")
+    assert receipt["replay"] == "replay: the decision log is empty — no past decision to compare"
+
+
+# -- the card that proposes a policy write --
+
+
+def test_a_policy_write_card_carries_the_replay_and_a_refused_one_gets_no_card(
+    home: Home, tmp_path: Path
+) -> None:
+    home.log(_row("network", "search", "ddgs", "allow", "global/net:search"))
+    card = policy_write_preview(
+        home.store, home.holder, "set_operator_policy",
+        {"scope": "network", "action": "search", "pattern": "*", "verdict": "deny"},
+    )  # fmt: skip
+    assert "now denies 1 past allows" in card["replay"]
+    assert home.store.get_setting("operator_policy_document") is None  # nothing written
+    with pytest.raises(PolicyWriteRejected, match=r"§5\.4 check 2"):
+        policy_write_preview(
+            home.store, home.holder, "set_operator_policy",
+            {"scope": "filesystem", "action": "read", "pattern": f"{tmp_path}/x/*",
+             "verdict": "allow"},
+        )  # fmt: skip
+    keep = policy_write_preview(home.store, home.holder, "run_shell", {"command": "ls -la"})
+    assert keep["keep_replay"].startswith("replay of the last 1 decisions")
+    home.lock("builder", NO_CURL)
+    refused = policy_write_preview(
+        home.store, home.holder, "run_shell", {"command": "curl -sI https://example.com"}
+    )
+    assert refused["keep"] == ["once"] and "template:builder/no-curl" in refused["keep_refused"]
+    for name, args in (
+        ("set_policy", {"card_timeout_seconds": 60}),
+        ("attach_policy_group", {"project_id": "p", "name": "python-bootstrap"}),
+        ("approve_policy_baseline", {"reapprove": True}),
+        ("allow_fetch_domain", {"domain": "docs.example.org"}),
+    ):
+        assert policy_write_preview(home.store, home.holder, name, args)["replay"], name
+    assert policy_write_preview(home.store, home.holder, "set_policy", {"nope": 1}) == {}
+
+
+@pytest.fixture()
+def ollama() -> Iterator[FakeOllama]:
+    server = FakeOllama(api_key="sk-fake").start()
+    yield server
+    server.stop()
+
+
+def test_the_chat_card_shows_the_replay_and_refuses_at_proposal(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    client, chat_id = chat_client(config, ollama)
+    secret = str(Path.home() / ".ssh" / "*")
+    ollama.script_tool_call(
+        "set_operator_policy",
+        {"scope": "network", "action": "search", "pattern": "*", "verdict": "deny"},
+    )
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "x"}).text)
+    (card,) = [d["card"] for name, d in events if name == "action"]
+    assert card["replay"].startswith("replay")
+    ollama.script_tool_call(
+        "set_operator_policy",
+        {"scope": "filesystem", "action": "read", "pattern": secret, "verdict": "allow"},
+    )
+    ollama.script_reply("ok")
+    other = client.post("/api/chats", json={}).json()["chat_id"]
+    events = sse_events(client.post(f"/api/chats/{other}/messages", json={"content": "y"}).text)
+    assert [d for name, d in events if name == "action"] == []
+    (refusal,) = [d["result"] for name, d in events if name == "tool"]
+    assert refusal["ok"] is False and "§5.4 check 1" in refusal["error"]
+
+
+def test_b82_put_policy_keeps_card_timeout_and_names_unknown_keys(config: SupervisorConfig) -> None:
+    from .conftest import serve_client
+
+    client = serve_client(config)
+    assert client.put("/api/policy", json={"card_timeout_seconds": 600}).status_code == 200
+    assert client.get("/api/policy").json()["card_timeout_seconds"] == 600
+    refused = client.put("/api/policy", json={"card_timeout": 5})
+    assert refused.status_code == 400 and "card_timeout" in refused.json()["detail"]

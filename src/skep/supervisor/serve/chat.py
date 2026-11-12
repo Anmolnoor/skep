@@ -44,6 +44,7 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
+from ..policy_write import PolicyWriteRejected
 from . import actions
 from .cards import card_summary
 from .jobs import Dispatcher
@@ -76,6 +77,7 @@ from .tools import (
     execute_mutation,
     execute_read_tool,
     mutation_execution_decision,
+    policy_write_preview,
     tool_description,
 )
 
@@ -1870,6 +1872,22 @@ class ChatEngine:
                             receipt["grant"] = grant
                         yield ("tool", receipt)
                         continue
+                    # P3-5 (V11): a policy write is checked at PROPOSAL — one
+                    # the write-time check refuses gets no card (its confirm
+                    # could only fail, B22); one it passes carries the replay.
+                    try:
+                        checked = policy_write_preview(self.store, self.holder, name, args)
+                    except PolicyWriteRejected as exc:
+                        payload = {"ok": False, "error": str(exc)}
+                        self.store.add_chat_message(
+                            chat_id,
+                            role="tool",
+                            tool_name=name,
+                            tool_call_id=call_id,
+                            content=json.dumps(payload, ensure_ascii=True),
+                        )
+                        yield ("tool", {"tool": name, "result": payload})
+                        continue
                     # v109-F2: a pending twin is not a new question. Identical
                     # args → the model gets the pending card back and the turn
                     # continues; changed args, same subject → the stale card is
@@ -1916,7 +1934,7 @@ class ChatEngine:
                         # v90-F2: and the three lines a human reads first; the
                         # description moves behind the details disclosure.
                         "description": tool_description(name),
-                        "card": card_summary(name, args, tool_description(name)),
+                        "card": {**card_summary(name, args, tool_description(name)), **checked},
                     }
                     if decision is not None:
                         action_event["decision"] = asdict(decision)

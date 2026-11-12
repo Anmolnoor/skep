@@ -1329,8 +1329,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "shell lanes. NOT "
         "set_policy: run/worker policy is untouched. verdict 'allow' or "
         "'deny'; deny wins ties; an allow never lifts a baseline deny or "
-        "named ask; an allow reaching into denied space is "
-        "rejected with the deny's rule id. NOTE for shell allows: a granted "
+        "named ask; an allow is refused before any card when it reaches "
+        "into a deny (named), covers a credential file, or reads outside the "
+        "operator roots while search_web runs uncarded (deny search first); "
+        "a deny is always accepted. NOTE for shell allows: a granted "
         "command can read and modify files in its working directory without "
         "a patch card — say so when proposing one. shell actions: 'run' "
         "(run_shell one-offs), 'run_repo' (repo cwds — the file-write pen), "
@@ -3666,6 +3668,112 @@ def _queen_landing_branch(store: RunStore, run: dict[str, Any], raw: Any) -> str
     return branch
 
 
+def _learned_grant(store: RunStore, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """The learned rule an allow_fetch_domain / allow_mcp_tool confirm stores."""
+    if name == "allow_fetch_domain":
+        # v72-F7: the allow_mcp_tool pattern, for the read_url lane — one
+        # vetted learned rule in the one engine; deny always wins (v40).
+        domain = str(args["domain"]).strip().lower().rstrip(".")
+        if not domain or "*" in domain or any(ch in domain for ch in "/:@ ") or "." not in domain:
+            raise ValueError(
+                "domain must be a bare hostname like 'docs.python.org' — no scheme, "
+                "path, port, or wildcard"
+            )
+        return {
+            "rule_id": f"network:fetch:{domain}",
+            "action": "fetch",
+            "pattern": domain,
+            "scope": "network",
+        }
+    from ..mcp_client import MCPTool, mcp_tool_scope_action
+
+    server_id = str(args["server_id"])
+    tool_name = str(args["tool"])
+    # v41-F3: the rule lands in the scope the tool actually decides under
+    # (email/read or email/send for a mail-bound server, else mcp/call).
+    rule_scope, rule_action = mcp_tool_scope_action(
+        store, MCPTool(server_id=server_id, name=tool_name, description="")
+    )
+    return {
+        "rule_id": f"{rule_scope}:{server_id}:{tool_name}",
+        "action": rule_action,
+        "pattern": f"{server_id}:{tool_name}",
+        "scope": rule_scope,
+    }
+
+
+def policy_write_preview(
+    store: RunStore, holder: ConfigHolder, name: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    """P3-5 (V11, ADR 0059 D6): the card fields a policy-write proposal
+    carries — ``replay`` (what its confirm would flip among recent decisions)
+    and ``policy_warnings`` (grants it would shadow) — from the one
+    write-time check at PROPOSAL, nothing written. A proposal the check
+    refuses raises ``PolicyWriteRejected``: no card is shown whose confirm can
+    only fail (the B22 lesson). A keep-able card (read_url / run_shell /
+    start_process) gets ``keep_replay`` for an ``always`` keep, or only
+    ``once`` with ``keep_refused`` when the check refuses its grants. Bad
+    arguments yield nothing here: the confirm reports them as it always has."""
+    from ..policy_schema import LearnedRule
+    from ..policy_write import PolicyWriteRejected, vet_write
+
+    def check() -> dict[str, Any]:
+        if name in actions.REMEMBERABLE_TOOLS:
+            if len(actions.keep_options(name, args)) < 2:
+                return {}
+            refused = actions.keep_refusal(name, args, "always", store=store)
+            if refused is not None:
+                return {"keep": ["once"], "keep_refused": refused}
+            subjects = actions._grant_subjects(name, args)
+            assert not isinstance(subjects, str)  # keep_options offered a keep
+            return {"keep_replay": actions.vet_keep(store, subjects).get("replay_line")}
+        if name == "set_operator_policy":
+            return actions.set_operator_policy_rule(
+                store, scope=str(args["scope"]), action=str(args["action"]),
+                pattern=str(args["pattern"]), verdict=str(args["verdict"]), holder=holder,
+                dry_run=True,
+            )  # fmt: skip
+        if name in ("allow_fetch_domain", "allow_mcp_tool"):
+            rule = LearnedRule(**_learned_grant(store, name, args), provenance="card")
+            rule, _status, updated = actions._grant_plan(store, rule, None)
+            if updated is None:
+                return {"replay": f"already granted by {rule.rule_id!r} — nothing changes"}
+            return actions._write_report(actions._vet_grant(store, rule, updated))
+        if name == "approve_policy_baseline":
+            layer, _view = actions.baseline_preview(
+                holder.current.home,
+                template=None if args.get("template") is None else str(args["template"]),
+                reapprove=bool(args.get("reapprove")),
+            )
+            return actions._write_report(vet_write(store, holder=holder, baseline=layer))
+        if name == "set_policy":
+            return actions.update_policy(store, holder, dict(args), dry_run=True)
+        if name in ("set_policy_group", "attach_policy_group"):
+            # Run-lane knobs only: the operator stack is unchanged (the check
+            # still runs; the replay says nothing flips).
+            return actions._write_report(vet_write(store, holder=holder))
+        return {}
+
+    try:
+        found = check()
+    except PolicyWriteRejected:
+        raise
+    except HTTPException as exc:
+        if isinstance(exc.__cause__, PolicyWriteRejected):
+            raise exc.__cause__ from None
+        return {}
+    except (KeyError, TypeError, ValueError):
+        return {}
+    fields = {
+        key: found[key]
+        for key in ("replay", "keep", "keep_refused", "keep_replay")
+        if found.get(key)
+    }
+    if found.get("warnings"):
+        fields["policy_warnings"] = found["warnings"]
+    return fields
+
+
 def execute_mutation(
     name: str,
     args: dict[str, Any],
@@ -4487,51 +4595,19 @@ def _execute_mutation(
         if not call.ok:
             return {"server_id": server_id, "tool": tool_name, "ok": False, "error": call.error}
         return {"server_id": server_id, "tool": tool_name, "ok": True, "content": call.content}
-    if name == "allow_fetch_domain":
-        # v72-F7: the allow_mcp_tool pattern, for the read_url lane — one
-        # vetted learned rule in the one engine; deny always wins (v40).
-
-        domain = str(args["domain"]).strip().lower().rstrip(".")
-        if not domain or "*" in domain or any(ch in domain for ch in "/:@ ") or "." not in domain:
-            raise ValueError(
-                "domain must be a bare hostname like 'docs.python.org' — no scheme, "
-                "path, port, or wildcard"
-            )
-        # v90-F3: one shared writer (it vets against every deny before storing).
+    if name in ("allow_fetch_domain", "allow_mcp_tool"):
+        # v90-F3: one shared writer; P3-5: it runs the write-time check first.
+        grant = _learned_grant(store, name, args)
+        checked: dict[str, Any] = {}
         rule_id = actions.learn_policy_rule(
-            store,
-            rule_id=f"network:fetch:{domain}",
-            action="fetch",
-            pattern=domain,
-            scope="network",
-            provenance=f"allow-always:{actor}",
+            store, **grant, provenance=f"allow-always:{actor}", report=checked
         )
-        return {"allowed_fetch_domain": domain, "rule_id": rule_id or f"network:fetch:{domain}"}
-    if name == "allow_mcp_tool":
-        from ..mcp_client import MCPTool, mcp_tool_scope_action
-
-        server_id = str(args["server_id"])
-        tool_name = str(args["tool"])
-        # v41-F3: the rule lands in the scope the tool actually decides under
-        # (email/read or email/send for a mail-bound server, else mcp/call).
-        rule_scope, rule_action = mcp_tool_scope_action(
-            store, MCPTool(server_id=server_id, name=tool_name, description="")
-        )
-        pattern = f"{server_id}:{tool_name}"
-        # v90-F3: one shared writer (it vets against every deny before storing).
-        rule_id = actions.learn_policy_rule(
-            store,
-            rule_id=f"{rule_scope}:{server_id}:{tool_name}",
-            action=rule_action,
-            pattern=pattern,
-            scope=rule_scope,
-            provenance=f"allow-always:{actor}",
-        )
-        return {
-            "allowed": pattern,
-            "rule_id": rule_id or f"{rule_scope}:{server_id}:{tool_name}",
-            "scope": rule_scope,
-        }
+        rule_id = rule_id or str(grant["rule_id"])
+        if name == "allow_fetch_domain":
+            answer = {"allowed_fetch_domain": grant["pattern"], "rule_id": rule_id}
+        else:
+            answer = {"allowed": grant["pattern"], "rule_id": rule_id, "scope": grant["scope"]}
+        return {**answer, **actions._write_report(checked)}
     if name == "revoke_policy_rule":
         # v109-F9: the narrowing half of allow_fetch_domain / allow_mcp_tool /
         # the session grants — one shared verb; the REST DELETE is the
@@ -4545,6 +4621,8 @@ def _execute_mutation(
             template=None if args.get("template") is None else str(args["template"]),
             reapprove=bool(args.get("reapprove")),
             approved_by=actor,
+            store=store,
+            holder=holder,
         )
     if name == "set_policy":
         return actions.update_policy(store, holder, args)
@@ -4575,6 +4653,7 @@ def _execute_mutation(
             action=str(args["action"]),
             pattern=str(args["pattern"]),
             verdict=str(args["verdict"]),
+            holder=holder,
         )
     if name == "approve_review":
         review_id = str(args["review_id"])

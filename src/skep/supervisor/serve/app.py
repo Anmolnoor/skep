@@ -20,7 +20,7 @@ from typing import Annotated, Any, Literal
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.base import RequestResponseEndpoint
 
 from skep.worker_contract import Event
@@ -212,7 +212,11 @@ class BranchMergeRequest(BaseModel):
 
 
 class PolicyUpdate(BaseModel):
-    """Body of ``PUT /api/policy`` — only provided fields are written."""
+    """Body of ``PUT /api/policy`` — only provided fields are written. B82: an
+    unknown key rides through to ``update_policy``, which answers 400 naming
+    it (it used to be dropped with a 200)."""
+
+    model_config = ConfigDict(extra="allow")
 
     auto_approve: bool | None = None
     worker_cmd: str | None = None
@@ -222,6 +226,7 @@ class PolicyUpdate(BaseModel):
     trusted_workspace_roots: list[str] | None = None
     sandbox_required_for: list[str] | None = None
     ticker_interval_seconds: int | None = Field(default=None, ge=1)
+    card_timeout_seconds: int | None = Field(default=None, ge=0)  # B82: was dropped
     default_wall_clock_seconds: int | None = Field(default=None, ge=1)
     default_max_iterations: int | None = Field(default=None, ge=1)
     default_max_actions: int | None = Field(default=None, ge=1)
@@ -677,6 +682,8 @@ def create_app(
                 file=body.file,
                 reapprove=body.reapprove,
                 approved_by=principal(request),
+                store=run_store,
+                holder=holder,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
