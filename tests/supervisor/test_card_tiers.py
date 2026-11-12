@@ -61,6 +61,15 @@ HIGH_KINDS: list[tuple[str, str, dict[str, Any], str]] = [
     ("engine change", "dispatch_run",
      {"repo": "r", "instructions": "i", "engine": "claude_code"}, "none"),
     ("engine change", "setup_project", {"path": "/x", "engine": "codex"}, "none"),
+    # the same engine, network and group writes spelled through the overlay
+    ("policy write", "setup_project",
+     {"project_id": "p", "name": "p", "strategy": "trusted_local_dev",
+      "policy_overrides": {"coding_engine": "claude_code"}}, "none"),
+    ("policy write", "setup_project",
+     {"project_id": "p", "name": "p", "strategy": "trusted_local_dev",
+      "policy_overrides": {"default_network": ["*"]}}, "none"),
+    ("policy write", "setup_project",
+     {"project_id": "p", "name": "p", "strategy": "trusted_local_dev", "groups": ["g"]}, "none"),
     ("network *", "dispatch_run", {"repo": "r", "instructions": "i", "network": ["*"]}, "none"),
     ("network *", "batch_dispatch",
      {"tasks": [{"repo": "r", "instructions": "i", "network": ["*"]}]}, "none"),
@@ -81,6 +90,8 @@ MEDIUM_KINDS: list[tuple[str, dict[str, Any], str]] = [
      {"name": "n", "caste": "note", "instructions": "hi", "every": "1d"}, "none"),
     ("revoke_policy_rule", {"rule_id": "x"}, "none"),  # narrows: an ordinary card
     ("forge_tool", {"name": "t", "purpose": "p"}, "none"),  # lands as a patch first
+    ("setup_project", {"project_id": "p", "name": "p", "strategy": "trusted_local_dev",
+                       "policy_overrides": {}, "groups": []}, "none"),
 ]  # fmt: skip
 
 

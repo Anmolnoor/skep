@@ -189,6 +189,10 @@ def high_tier(
         return "it activates a skill pack's scripts"
     if tool in _HIGH_POLICY_TOOLS:
         return "it changes standing policy"
+    if tool == "setup_project" and (safe.get("policy_overrides") or safe.get("groups")):
+        # the overlay spells any knob (coding_engine, default_network, …) and
+        # groups= is attach_policy_group: both write the project's policy
+        return "it writes the project's policy (policy_overrides or groups)"
     if manifest is not None and "*" in (manifest.get("network") or []):
         return "the run may reach any host on the internet (network '*')"
     if tool in _DISPATCH_TOOLS:
