@@ -216,3 +216,35 @@ def test_the_capability_layer_does_not_treat_the_provider_as_a_fetch_grant(
     bare = CapabilityRegistry(tmp_path, emit=lambda _t, _p: None)
     assert bare._network_fetch_decision("example.com").verdict == "require_approval"
     assert "HTTPS_PROXY" not in bare._child_env
+
+
+@pytest.mark.parametrize("module", ["document", "reviewer"])
+def test_document_and_reviewer_reach_the_provider_through_provider_hosts(
+    module: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 0.3.6 task: network [] and the provider only in provider_hosts."""
+    import importlib
+
+    from skep.profile import ProviderProfile
+    from skep.workers.llm_plan import WorkerProvider
+
+    worker = importlib.import_module(f"skep.workers.{module}")
+    provider = WorkerProvider(
+        ProviderProfile(name="ollama", model="m", endpoint="http://localhost:11434")
+    )
+    monkeypatch.setattr(worker, "worker_provider_from_env", lambda: provider)
+    monkeypatch.setattr(worker, "_provider_chunks", lambda *_a, **_k: ["ok"])
+    task = _task(network=[], provider_hosts=["localhost:11434"])
+    assert worker._default_generate(task, []) == "ok"
+    with pytest.raises(LlmPlanError, match="localhost:11434"):
+        worker._default_generate(_task(network=[], provider_hosts=["localhost:1"]), [])
+
+
+def test_an_endpoint_url_with_a_bad_port_is_no_provider_host() -> None:
+    from skep.supervisor.provider_hosts import _aux_endpoint, _url_host
+
+    assert _url_host("http://localhost:99999") is None
+    assert _url_host("ftp://x") is None
+    assert _url_host("https://[::1]:8443/v1") == "[::1]:8443"
+    assert _aux_endpoint("*.example.com") is None
+    assert _aux_endpoint("auth.example:8443") == "auth.example:8443"

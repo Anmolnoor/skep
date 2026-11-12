@@ -436,7 +436,8 @@ def test_doctor_flags_deprecated_global_auto_approve(tmp_path: Path) -> None:
 def test_cli_run_merges_configured_provider_host_into_network(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """v19-F2: a run minted via the CLI carries the configured provider host."""
+    """v19-F2: a run minted via the CLI carries the configured provider host —
+    as provider_hosts (ADR 0059 D3), not in its network grant."""
     from skep.profile import run_personal_setup
 
     home = tmp_path / "home"
@@ -465,7 +466,8 @@ def test_cli_run_merges_configured_provider_host_into_network(
     task = json.loads(
         (home / "supervisor" / "audit" / task_id / "task.json").read_text(encoding="utf-8")
     )
-    assert "provider.example" in task["permissions"]["network"]
+    assert task["permissions"]["provider_hosts"] == ["provider.example:11434"]
+    assert "provider.example" not in task["permissions"]["network"]
 
 
 def test_status_personal_moves_superseded_runs_out_of_the_table(

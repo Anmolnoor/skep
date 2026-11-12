@@ -526,7 +526,7 @@ def onboard_check(supervisor_home: Path) -> dict[str, Any]:
         model_egress = str(model["egress"])
     elif not hosts:
         model_egress = "no provider configured — nothing is sent"
-    elif all(host in _LOOPBACK for host in hosts):
+    elif all(host.rpartition(":")[0].strip("[]") in _LOOPBACK for host in hosts):  # host:port
         model_egress = f"LOCAL ({', '.join(hosts)}) — nothing leaves this machine"
     else:
         model_egress = (

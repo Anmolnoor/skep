@@ -33,7 +33,6 @@ from .dispatch import run_task
 from .ingest import IngestOutcome
 from .nodes import OPS_INSPECT_CAPABILITIES, OPS_MUTATING_CAPABILITIES
 from .policy_resolver import PolicyResolutionError, resolve_run_policy, run_policy_for_repo
-from .provider_hosts import configured_provider_hosts
 from .providers import ProviderHealth, ProviderProfile, check_provider_health
 from .spawner import build_worker_env
 from .store import SCHEDULE_SUCCESS_STATES, RunStore, ScheduleRecord
@@ -346,18 +345,6 @@ class TickResult:
 
 
 DispatchFn = Callable[..., IngestOutcome]
-
-
-def _with_provider_hosts(permissions: Permissions, hosts: Sequence[str]) -> Permissions:
-    """v24-F2: an unbound tick must still reach its LLM provider (v19-F2 held
-    on every creation path EXCEPT this one). ``["*"]`` is left untouched."""
-    network = list(permissions.network)
-    if network == ["*"] or not hosts:
-        return permissions
-    merged = sorted(dict.fromkeys([*network, *hosts]))
-    if merged == network:
-        return permissions
-    return permissions.model_copy(update={"network": merged})
 
 
 def _schedule_dispatch_decision(
@@ -698,9 +685,6 @@ def run_due(
                             max_actions=instance.budget.max_actions,
                             max_provider_calls=instance.budget.max_provider_calls,
                             execution_mode=None,
-                            extra_network_hosts=configured_provider_hosts(
-                                store, config.home.parent
-                            ),
                             binding_candidates=[("template_name", schedule.template_name)],
                         )
                     except PolicyResolutionError as exc:
@@ -731,10 +715,9 @@ def run_due(
                         ).with_network_audit(resolved.network_requested, resolved.network_resolved)
                 else:
                     dispatch_decision = _schedule_dispatch_decision(project_bound=False)
-                    permissions = _with_provider_hosts(
-                        instance.permissions,
-                        configured_provider_hosts(store, config.home.parent),
-                    )
+                    # v24-F2 → ADR 0059 D3: run_task gives an unbound tick
+                    # its provider_hosts, as it does every face.
+                    permissions = instance.permissions
                     budget = instance.budget
                     execution_mode = "sandbox"
                     project_context = None
@@ -777,9 +760,6 @@ def run_due(
                             max_actions=None,
                             max_provider_calls=None,
                             execution_mode=None,
-                            extra_network_hosts=configured_provider_hosts(
-                                store, config.home.parent
-                            ),
                             binding_candidates=[("repo_slug", repo.name)],
                         )
                     except PolicyResolutionError as exc:
@@ -810,14 +790,11 @@ def run_due(
                         ).with_network_audit(resolved.network_requested, resolved.network_resolved)
                 else:
                     dispatch_decision = _schedule_dispatch_decision(project_bound=False)
-                    permissions = _with_provider_hosts(
-                        Permissions(
-                            read=["workspace"],
-                            write=["workspace"],
-                            network=list(schedule.network),
-                            env_allowlist=list(schedule.env_allowlist),
-                        ),
-                        configured_provider_hosts(store, config.home.parent),
+                    permissions = Permissions(
+                        read=["workspace"],
+                        write=["workspace"],
+                        network=list(schedule.network),
+                        env_allowlist=list(schedule.env_allowlist),
                     )
                     budget = DEFAULT_BUDGET
                     execution_mode = "sandbox"

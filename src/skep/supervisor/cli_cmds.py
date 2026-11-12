@@ -44,7 +44,6 @@ from .projects import (
     project_from_store,
     project_to_dict,
 )
-from .provider_hosts import configured_provider_hosts
 from .roles import delegation_line
 from .scheduler import make_schedule, make_template_schedule, parse_interval, run_due
 from .store import RunRecord, RunStore, UsageRecord
@@ -778,7 +777,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                     max_actions=budget.max_actions,
                     max_provider_calls=budget.max_provider_calls,
                     execution_mode=execution_mode,
-                    extra_network_hosts=configured_provider_hosts(store, config.home.parent),
                     binding_candidates=[("template_name", args.template)],
                     engine=args.engine,
                 )
@@ -844,7 +842,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                         max_actions=args.budget_max_actions,
                         max_provider_calls=args.budget_max_provider_calls,
                         execution_mode=execution_mode,
-                        extra_network_hosts=configured_provider_hosts(store, config.home.parent),
                         engine=args.engine,
                     )
                     permissions = resolved_policy.permissions

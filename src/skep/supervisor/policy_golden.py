@@ -260,7 +260,6 @@ def _project_golden(
             max_actions=None,
             max_provider_calls=None,
             execution_mode=None,
-            extra_network_hosts=(),
             binding_candidates=candidates,
         )
     except PolicyResolutionError as exc:
