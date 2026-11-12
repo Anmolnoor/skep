@@ -4216,6 +4216,7 @@ def submit_run(
     role: str | None = None,
     team: str | None = None,
     deferred_asks: bool = False,
+    chat_taint: Sequence[str] = (),
 ) -> str:
     """Resolve the repo, fill policy defaults (A5), and dispatch in background.
 
@@ -4234,7 +4235,11 @@ def submit_run(
     ADR 0059 D3 (V7): ``deferred_asks`` says a human can answer this run's
     gate cards (REST, the CLI, a chat that can show a card). Only then does a
     grant the chain makes an ask ride ``network_ask``/``shell_ask``; on every
-    other face (the default) it is dropped — a headless ask is a deny (I6)."""
+    other face (the default) it is dropped — a headless ask is a deny (I6).
+
+    ADR 0059 D5 (P4-1): ``chat_taint`` is the dispatching chat's taint bits;
+    the dispatch decision records them (``constraints.chat_taint``) so every
+    run card shows them. The worker's own permissions do not change."""
     # v101-F10: F1 wrote a resolver that refuses an unknown caste by name, and
     # nothing called it — so an unknown caste reached the contract validator
     # deep in dispatch and surfaced as a 500 with no usable detail. Every
@@ -4351,6 +4356,12 @@ def submit_run(
         effective_dispatch_decision = delegated_decision(
             effective_dispatch_decision, delegation, delegation_note
         )
+        if chat_taint:
+            constraints = {**(effective_dispatch_decision.constraints or {})}
+            constraints["chat_taint"] = list(chat_taint)
+            effective_dispatch_decision = replace(
+                effective_dispatch_decision, constraints=constraints
+            )
         task_id = runner.submit(
             resolved,
             instructions,

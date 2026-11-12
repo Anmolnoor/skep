@@ -2695,6 +2695,12 @@ def search_web_verdict(store: RunStore, holder: ConfigHolder, chat_id: str | Non
     )
 
 
+def chat_taint_bits(store: RunStore, chat_id: str | None) -> list[str]:
+    """P4-1 (ADR 0059 D5): the dispatching chat's taint bits, which the run's
+    dispatch decision records — none for a dispatch from no chat."""
+    return [] if chat_id is None else store.get_chat_taint(chat_id).bits()
+
+
 def taint_decision(verdict: Any) -> AutonomyDecision:
     """P4-1 (ADR 0059 D5): a ``taint/<rule>`` ask as the card's decision —
     the why-line on ``detail``, so the card says in plain words why a granted
@@ -3972,6 +3978,7 @@ def _execute_mutation(
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
             deferred_asks=_human_answers(store, chat_id),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         return {
             "task_id": task_id,
@@ -4094,6 +4101,7 @@ def _execute_mutation(
                 delegation_chain=_queen_chain(store, holder, chat_id, actor),
                 role=None if entry.get("role") is None else str(entry["role"]),
                 deferred_asks=_human_answers(store, chat_id),
+                chat_taint=chat_taint_bits(store, chat_id),
             )
             for entry in entries
         ]
@@ -4195,6 +4203,7 @@ def _execute_mutation(
             wall_clock_seconds=wall_clock,
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         result = _script_run_result(store, task_id, wall_clock_seconds=wall_clock)
         if fast_requested:
@@ -4300,6 +4309,7 @@ def _execute_mutation(
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
             deferred_asks=_human_answers(store, chat_id),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         forge.save_plugin(
             store,
@@ -4899,6 +4909,7 @@ def _execute_mutation(
             deferred_asks=_human_answers(store, chat_id),
             protocol=None if args.get("protocol") is None else str(args["protocol"]),
             engine=None if args.get("engine") is None else str(args["engine"]),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         # v40-F2 (v35): repo + caste ride the result so both the live SSE tool
         # event and the stored transcript row can render a human summary —
@@ -4943,6 +4954,7 @@ def _execute_mutation(
             network=source_allowlist,
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         return {"task_id": task_id, "state": "research_dispatched"}
     if name == "propose_schedule":

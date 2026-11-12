@@ -13,7 +13,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 
 import pytest
@@ -635,3 +635,118 @@ def test_the_continuation_seed_splits_the_workers_words_from_skeps(
         ("worker:task-b37-xyz", True), ("queen", False),
     ]  # fmt: skip
     assert env.store.get_chat_taint(chat).untrusted == rows[0].id
+
+
+# --- laundering ------------------------------------------------------------------------
+
+
+def test_a_btw_side_turn_in_a_tainted_chat_cannot_search(live: Callable[[str], Live]) -> None:
+    """/btw is the same chat, read-only: it cannot card, so the taint ask is
+    a refusal that says why — and nothing is searched."""
+    env = live("builder")
+    chat = env.chat()
+    set_taint(env.store, chat, "private")
+    env.ollama.script_tool_call("search_web", {"query": "secret"})
+    env.ollama.script_reply("can't")
+    env.turn(chat, "/btw search it", read_only=True)
+    assert env.searched == [] and env.pending(chat) == []
+    row = [m for m in env.store.chat_messages(chat) if m.tool_name == "search_web"][-1]
+    assert "needs the operator's OK" in row.content and "taint/private-egress" in row.content
+
+
+def test_search_chats_from_a_clean_chat_carries_the_tainted_chats_bits(
+    live: Callable[[str], Live],
+) -> None:
+    env = live("builder")
+    dirty, clean = env.chat(), env.chat()
+    row = env.store.add_chat_message(dirty, role="user", content="the codename is ZEBRA42")
+    env.store.add_chat_taint(dirty, private=row)
+    env.ollama.script_tool_call("search_chats", {"query": "ZEBRA42"})
+    env.ollama.script_tool_call("search_web", {"query": "ZEBRA42"})
+    card = _action(env.turn(clean, "find the codename and search it"))
+    assert env.store.get_chat_taint(clean).private is not None
+    assert card["decision"]["decided_by"] == "taint/private-egress"
+    assert env.searched == []
+
+
+def test_get_chat_messages_of_a_tainted_chat_taints_the_reader(
+    live: Callable[[str], Live],
+) -> None:
+    env = live("builder")
+    dirty, clean = env.chat(), env.chat()
+    env.store.add_chat_message(dirty, role="user", content="x", provenance="webhook:ci")
+    env.ollama.script_tool_call("get_chat_messages", {"chat_id": dirty})
+    env.ollama.script_reply("read")
+    env.turn(clean, "what did the other chat say?")
+    assert env.store.get_chat_taint(clean).untrusted is not None
+
+
+def test_an_analyst_starts_with_its_parents_taint_and_hands_its_bits_back(
+    live: Callable[[str], Live],
+) -> None:
+    """delegate_analysis opens fresh chats: they inherit the delegating
+    chat's bits (no laundering through a new chat), cannot search past
+    them, and the answer carries their bits back."""
+    from skep.supervisor.serve.chat import run_analysis_tasks
+    from skep.supervisor.serve.taint import record_tool_taint
+
+    env = live("builder")
+    parent = env.chat()
+    row = env.store.add_chat_message(parent, role="tool", tool_name="run_shell", content="{}")
+    env.store.add_chat_taint(parent, private=row)
+    env.ollama.script_tool_call("search_web", {"query": "leak"})
+    env.ollama.script_reply("analysed")
+    result = run_analysis_tasks(
+        env.store, env.holder, env.engine.runner, env.holder.current.home, ["look"], None,
+        parent_chat_id=parent,
+    )  # fmt: skip
+    analyst = result["analyses"][0]["chat_id"]
+    assert env.store.get_chat_taint(analyst).private == row
+    assert env.searched == []
+    clean = env.chat()
+    record_tool_taint(env.store, env.holder, clean, "delegate_analysis", {}, result, 99)
+    assert env.store.get_chat_taint(clean).private == 99
+
+
+def test_a_dispatch_records_the_chats_taint_and_the_worker_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.serve.tools import execute_mutation
+
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    config = build_config(tmp_path / "personal", None)
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for argv in (["init", "-q"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit",
+                                  "-q", "--allow-empty", "-m", "base"]):  # fmt: skip
+        subprocess.run(["git", *argv], cwd=repo, check=True)
+    store = RunStore(config.db_path)
+    submitted: list[dict[str, Any]] = []
+
+    class Runner:
+        def submit(self, *_a: Any, **kw: Any) -> str:
+            submitted.append(kw)
+            return "task-1"
+
+    try:
+        holder = ConfigHolder(config, store)
+        chat = store.create_chat(title="t", model=None).chat_id
+        for taint in ("none", "both"):
+            set_taint(store, chat, taint)
+            args = {"repo": str(repo), "instructions": "x", "execution_mode": "sandbox"}
+            execute_mutation(
+                "dispatch_run", args,
+                store=store, holder=holder, runner=cast(Any, Runner()), actor="op", chat_id=chat,
+            )  # fmt: skip
+        clean, dirty = (kw["dispatch_decision"] for kw in submitted)
+        assert "chat_taint" not in (clean.constraints or {})
+        assert dirty.constraints["chat_taint"] == ["private", "untrusted"]
+        assert clean_permissions(submitted[0]) == clean_permissions(submitted[1])
+    finally:
+        store.close()
+
+
+def clean_permissions(kw: dict[str, Any]) -> Any:
+    return kw["permissions"].model_dump()

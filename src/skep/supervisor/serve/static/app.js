@@ -290,6 +290,14 @@ function cardClass(card) {
   return card && card.tier === "high" ? "confirm-card card-high" : "confirm-card";
 }
 
+// P4-1 (ADR 0059 D5): a run dispatched from a tainted chat says so on its card.
+function taintChip(decision) {
+  const bits = decision?.constraints?.chat_taint;
+  if (!Array.isArray(bits) || !bits.length) return null;
+  return el("span", { class: "chip", title: "the dispatching chat's taint" },
+    `chat: ${bits.map(String).join(" + ")}`);
+}
+
 // P4-1 (B26, B37): a row you did not write says who did — a webhook, a
 // script, a worker (`from webhook:ci`), or skep's own prompt (`skep`).
 function authorLabel(message, fallback) {
@@ -3946,6 +3954,7 @@ function buildRunCard(run) {
         ? el("span", { class: "chip", title: "delegated by" },
           delegationText(run.dispatch_decision.delegation))
         : null,
+      taintChip(run.dispatch_decision),
       project ? el("span", {}, project) : null,
       autonomy !== "-" ? el("span", { class: "run-card-autonomy mono" }, autonomy) : null));
 }

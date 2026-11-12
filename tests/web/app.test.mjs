@@ -261,3 +261,15 @@ test("authorLabel: a row you did not write says who did (B26, B37)", () => {
   assert.equal(app.authorLabel({ role: "user", provenance: "queen" }, "You"), "skep");
   assert.equal(app.authorLabel({ role: "assistant", provenance: "queen" }, "qwen3"), "qwen3");
 });
+
+test("a run dispatched from a tainted chat carries the taint as a chip", () => {
+  const app = loadApp();
+  const run = { task_id: "task-abcdef123456", state: "running", updated_at: "2026-11-09T00:00:00Z" };
+  const chip = (card) => card.querySelectorAll(".chip")
+    .find(c => c.getAttribute("title") === "the dispatching chat's taint");
+  assert.equal(chip(app.buildRunCard(run)), undefined);
+  const tainted = app.buildRunCard({
+    ...run, dispatch_decision: { constraints: { chat_taint: ["private", "untrusted"] } },
+  });
+  assert.equal(chip(tainted).textContent, "chat: private + untrusted");
+});
