@@ -2328,7 +2328,11 @@ def policy_why(
         "value": value,
         "baseline": status_line(holder.current.home),
     }
-    floor = _floor_verdict(scope, value, action=action, home=holder.current.home, cwd=repo)
+    # B123: a shell line is judged from the repo the arg names (a slug is
+    # not a path under the process cwd, v87-F1).
+    floor = _floor_verdict(
+        scope, value, action=action, home=holder.current.home, cwd=str(resolved_repo)
+    )
     if floor is not None:
         # The floor binds workers AND the Queen (v83-F9): one answer, twice.
         verdict = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
