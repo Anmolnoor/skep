@@ -273,3 +273,11 @@ test("a run dispatched from a tainted chat carries the taint as a chip", () => {
   });
   assert.equal(chip(tainted).textContent, "chat: private + untrusted");
 });
+
+test("keepCovers: the card says what a keep would allow, and nothing when it allows nothing", () => {
+  const app = loadApp();
+  assert.equal(app.keepCovers(undefined), null);
+  assert.equal(app.keepCovers({ keep: ["once"] }), null);
+  const line = app.keepCovers({ keep: ["once", "session", "always"], keep_covers: "a keep allows each of these on its own, exactly: `ls`; `make`" });
+  assert.equal(line.textContent, "a keep allows each of these on its own, exactly: `ls`; `make`");
+});

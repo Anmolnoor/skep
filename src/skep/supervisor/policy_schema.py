@@ -33,7 +33,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 from pydantic import BaseModel, Field, model_validator
 
 from .netproxy import domain_allowed
-from .shell_prefixes import dangerous_prefix_reason
+from .shell_prefixes import dangerous_prefix_reason, sh_command_list
 
 if TYPE_CHECKING:
     from .policy_engine import Layer
@@ -288,8 +288,9 @@ def shell_segments(value: str) -> list[str] | None:
         return None
     # Non-POSIX keeps quotes on the tokens, so a worker's literal '&&' argument
     # (shlex.join quotes it) stays a word and only bare operators split.
-    lexer = shlex.shlex(value, posix=False, punctuation_chars=True)
+    lexer = shlex.shlex(sh_command_list(value), posix=False, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""  # sh_command_list dropped the comments sh drops
     try:
         tokens = list(lexer)
     except ValueError:
@@ -313,8 +314,9 @@ def shell_segments(value: str) -> list[str] | None:
 def backgrounds(value: str) -> bool:
     """B21: does the line send a command to the background (a lone ``&``)?
     A ``run`` grant never covers that: a daemon is ``run_background``."""
-    lexer = shlex.shlex(value, posix=False, punctuation_chars=True)
+    lexer = shlex.shlex(sh_command_list(value), posix=False, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""
     try:
         return "&" in list(lexer)
     except ValueError:

@@ -804,7 +804,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "operator's own standing (requires user confirmation — the card "
         "shows the exact command; a standing shell allow rule runs it "
         "in-turn instead). Approving a card with keep session (this chat "
-        "only) or always grants exactly that command line, in a role chat "
+        "only) or always grants exactly that command (each command of a "
+        "&&/;/| line on its own), in a role chat "
         "too; one extra argument or a trailing & cards again. A policy deny "
         "refuses, no card. "
         "For one-off diagnostics: 'what's on port 8765?', "
@@ -1375,10 +1376,11 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "prefixes are also always rejected. GRANTING MEANS: this command can "
         "read and modify files in its working directory without a patch card "
         "— the user grants with eyes open. TIERS: with `repo` (or a chat bound "
-        "to a project) the grant lands in that project's own allowlist; without "
-        "either it lands in the GLOBAL list, which a project's own list SHADOWS — "
+        "to a project) it is a standing grant for that project (that repo if it "
+        "has none); without either it lands in the GLOBAL list, which a "
+        "project's own list SHADOWS — "
         "so for project work always pass repo, or the gate stays shut. The "
-        "result's `tier` says which list was written.",
+        "result's `tier` says where it holds.",
         {
             "command": {
                 "type": "string",

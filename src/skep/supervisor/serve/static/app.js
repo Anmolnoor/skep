@@ -306,6 +306,13 @@ function authorLabel(message, fallback) {
   return author === "queen" ? "skep" : `from ${author}`;
 }
 
+// What a keep would allow (card.keep_covers): each command of a compound line
+// on its own, or a whole URL directory — said on the card, not only "always".
+function keepCovers(card) {
+  if (!card || !card.keep_covers || keepSelect(card) === null) return null;
+  return el("p", { class: "card-keep-covers" }, card.keep_covers);
+}
+
 function receiptNode(d) {
   const card = d.card || {};
   const decision = d.decision || {};
@@ -3071,6 +3078,7 @@ async function viewChat(main, chatId) {
     const card = el("div", { class: cardClass(d.card), "data-action-id": d.action_id },
       ...cardBody(d),
       whyLine(d),
+      keepCovers(d.card),
       el("div", { class: "actions" }, approve, refuse, keep));
     const verdict = (verb) => async () => {
       approve.disabled = refuse.disabled = true; // double-click guard

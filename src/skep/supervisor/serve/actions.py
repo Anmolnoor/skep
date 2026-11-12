@@ -4132,8 +4132,9 @@ def allow_shell_command(
     way a PUT-shaped set_policy field could.
 
     v114-F2: with ``repo`` the grant goes through ``persist_remembered_command``
-    — the bound project's overlay, global only when unbound — and the list
-    returned is that tier's. Without ``repo`` it is the global list, as before."""
+    — a project grant (the repo's project, else the repo; ADR 0059 D4) — and
+    the list returned is every worker grant that holds there. Without
+    ``repo`` it is the global list, as before."""
     try:
         argv = shlex.split(command)
     except ValueError as exc:
@@ -4959,7 +4960,14 @@ def learn_policy_rule(
     from ..policy_schema import LearnedRule
 
     rule = LearnedRule(
-        rule_id=rule_id, action=action, pattern=pattern, scope=scope, provenance=provenance
+        rule_id=rule_id,
+        action=action,
+        pattern=pattern,
+        scope=scope,
+        provenance=provenance,
+        # allow_fetch_domain grants a host on purpose: ``host``, not the
+        # unlabelled legacy-host row doctor lists for revocation (P3-4).
+        matcher="host" if scope == "network" else None,
     )
     kept, status = store_grant(store, rule)
     return None if status == "kept" else kept.rule_id
@@ -5139,12 +5147,18 @@ def _taint_keep_refusal(tool: str, keep: str, taint: ChatTaint | None) -> str | 
 
 
 def keep_refusal(
-    tool: str, args: dict[str, Any], keep: str, taint: ChatTaint | None = None
+    tool: str,
+    args: dict[str, Any],
+    keep: str,
+    taint: ChatTaint | None = None,
+    store: RunStore | None = None,
 ) -> str | None:
     """Why the server would refuse this keep on this card, or None (B32: a
     keep the tool cannot honour is refused up front, never a false
     "remembered"). ``once`` always holds. ``taint`` is the confirming chat's
-    (P4-1): a tainted chat is offered fewer keeps."""
+    (P4-1): a tainted chat is offered fewer keeps. With ``store``, also a
+    grant that store_grant would refuse for reaching into a deny — checked
+    BEFORE the card runs, not after it already ran."""
     if keep == "once":
         return None
     if keep not in KEEP_TIERS:
@@ -5152,7 +5166,43 @@ def keep_refusal(
     found = _grant_subjects(tool, args)
     if isinstance(found, str):
         return found
-    return _taint_keep_refusal(tool, keep, taint)
+    refused = _taint_keep_refusal(tool, keep, taint)
+    if refused is not None:
+        return refused
+    return None if store is None else _denied_grant(store, found)
+
+
+def _denied_grant(store: RunStore, subjects: list[tuple[str, str, str, str]]) -> str | None:
+    """store_grant's write-time vet over these subjects: why they land in a
+    deny of the setup document, or None."""
+    from ..policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        LearnedRule,
+        LearnedRuleRejected,
+        PolicyDocument,
+        document_from_settings,
+        resolve,
+    )
+
+    document = (
+        document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
+    )
+    learned = [
+        LearnedRule(
+            rule_id=f"{scope}:{action}:{pattern}",
+            action=action,
+            pattern=pattern,
+            scope=scope,  # type: ignore[arg-type]
+            provenance="keep-check",
+            matcher=matcher,  # type: ignore[arg-type]
+        )
+        for scope, action, pattern, matcher in subjects
+    ]
+    try:
+        resolve(document.model_copy(update={"learned": learned}), v2_scopes=engine_v2_scopes(store))
+    except LearnedRuleRejected as exc:
+        return str(exc)
+    return None
 
 
 def keep_options(tool: str, args: dict[str, Any], taint: ChatTaint | None = None) -> list[str]:
@@ -5164,6 +5214,24 @@ def keep_options(tool: str, args: dict[str, Any], taint: ChatTaint | None = None
 def default_keep(tool: str, args: dict[str, Any], taint: ChatTaint | None = None) -> str:
     """The keep a confirm with none named stores: ``session`` where offered."""
     return "session" if "session" in keep_options(tool, args, taint) else "once"
+
+
+def keep_covers(tool: str, args: dict[str, Any]) -> str | None:
+    """What a keep on this card would allow, in words — the card says it, so
+    "always" never hides that a compound line's commands are each granted on
+    their own (B61) or that a URL keep covers its whole directory (B74)."""
+    found = _grant_subjects(tool, args)
+    if isinstance(found, str):
+        return None
+    if tool == "read_url":
+        base, _, query = found[0][2].partition("?")
+        return f"a keep allows any page under {base} with no query" + (
+            f" or ?{query}" if query else ""
+        )
+    commands = "; ".join(f"`{pattern}`" for _scope, _action, pattern, _matcher in found)
+    head = "each of these on its own, exactly: " if len(found) > 1 else "exactly "
+    tail = ", as a background process" if tool == "start_process" else ""
+    return f"a keep allows {head}{commands}{tail}"
 
 
 def remember_action_for_session(

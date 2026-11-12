@@ -408,3 +408,93 @@ def test_queen_rest_and_cli_agree_on_a_grant_and_its_near_miss(
         cli = json.loads(capsys.readouterr().out)
         assert (queen.verdict, queen.decided_by) == (rest["verdict"], rest["decided_by"])
         assert (cli["verdict"], cli["decided_by"]) == (rest["verdict"], rest["decided_by"])
+
+
+def test_an_exact_grant_never_covers_a_line_sh_reads_as_other_commands(home: Any) -> None:
+    """``/bin/sh -c`` reads an unquoted newline as ``;`` and ``#`` as a comment
+    only at the start of a word. The segmenter read a newline as a space and
+    ``--fast#x`` as ``--fast``, so a kept ``echo git push origin main`` ran
+    ``echo`` then ``git push`` with no card."""
+    from skep.supervisor.policy_schema import backgrounds, shell_segments
+    from skep.supervisor.shell_prefixes import queen_command_line_refusal
+
+    h = home("builder")
+    h.keep("run_shell", command="echo git push origin main")
+    h.keep("run_shell", command=GRANTED)
+    for line in ("echo\ngit push origin main", "echo git\npush origin main", GRANTED + "#x"):
+        assert not h.decide("run_shell", command=line).startswith("allow"), line
+    assert h.decide("run_shell", command=GRANTED + " # a note").startswith("allow grant:")
+    assert h.decide("run_shell", command="echo 'git\npush'").startswith("require_approval")
+    assert shell_segments("ls\nmake # x; rm\n'a\nb'") == ["ls", "make", "'a\nb'"]
+    assert shell_segments("ls \\\n-la") == ["ls -la"]
+    assert backgrounds("npm run dev &\nls")
+    assert queen_command_line_refusal("ls\ngit push origin main") is not None
+
+
+def test_the_card_says_what_a_keep_would_cover() -> None:
+    """A compound keep grants each command on its own and a read_url keep a
+    whole URL directory (the whole host for a top-level page): the card says
+    so, never just "always"."""
+    compound = card_summary("run_shell", {"command": "ls -la && " + GRANTED})
+    assert compound["keep_covers"] == (
+        f"a keep allows each of these on its own, exactly: `ls -la`; `{GRANTED}`"
+    )
+    page = card_summary("read_url", {"url": "https://granted.example/page?x=1"})
+    assert page["keep_covers"] == (
+        "a keep allows any page under https://granted.example/ with no query or ?x=1"
+    )
+    assert card_summary("start_process", {"command": "npm run dev"})["keep_covers"] == (
+        "a keep allows exactly `npm run dev`, as a background process"
+    )
+    assert "keep_covers" not in card_summary("run_shell", {"command": "git push"})
+    assert "keep_covers" not in card_summary("set_personality", {"value": "x"})
+
+
+def test_an_allow_fetch_domain_grant_is_a_host_grant_not_a_legacy_one(home: Any) -> None:
+    """allow_fetch_domain grants a whole host on purpose (the ``host``
+    matcher); doctor's legacy-host list is for rows written before P3-4."""
+    from skep.status import _legacy_host_advisories
+    from skep.supervisor.serve.tools import execute_mutation
+
+    h = home("legacy")
+    execute_mutation(
+        "allow_fetch_domain", {"domain": "granted.example"}, store=h.store, holder=h.holder,
+        runner=cast(Any, None), actor="op", chat_id=h.chat_a,
+    )  # fmt: skip
+    [rule] = list_policy_rules(h.store)["rules"]
+    assert (rule["matcher"], rule["lifetime"], rule["bound"]) == ("host", "global", "everywhere")
+    assert h.decide("read_url", url="https://granted.example/any?q=1").startswith("allow grant:")
+    assert _legacy_host_advisories(h.paths["personal"]) == []
+
+
+def test_b32_a_keep_a_deny_would_reject_is_refused_before_the_command_runs(
+    home: Any, tmp_path: Path
+) -> None:
+    """store_grant refuses a grant that reaches into a deny. That check ran
+    AFTER the confirmed command, so the command ran and the card said
+    "failed: bad arguments". Now the confirm is a 400 and nothing runs."""
+    from skep.supervisor.policy_schema import PolicyRule, ScopePolicy
+
+    h = home("legacy")
+    marker = tmp_path / "ran.txt"
+    document = document_from_settings(h.store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    document = document or PolicyDocument()
+    shell = ScopePolicy(scope="shell", deny=[
+        PolicyRule(rule_id="no-touch-x", action="run", pattern=f"touch {marker} --x"),
+    ])  # fmt: skip
+    others = [s for s in document.scopes if s.scope != "shell"]
+    h.store.set_setting(
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        document.model_copy(update={"scopes": [*others, shell]}).model_dump_json(),
+    )
+    args = {"command": f"touch {marker}", "cwd": str(tmp_path)}
+    engine = ChatEngine(store=h.store, holder=h.holder, runner=cast(Any, None), home=h.config.home)
+    action_id = h.store.add_chat_action(h.chat_a, tool="run_shell", args=args)
+    with pytest.raises(HTTPException) as refused:
+        engine.verdict_events(
+            h.chat_a, h.store.get_chat(h.chat_a), action_id, confirm=True, keep="always"
+        )
+    assert refused.value.status_code == 400
+    assert "no-touch-x" in str(refused.value.detail)
+    assert not marker.exists()
+    assert h.store.get_chat_action(action_id).status == "proposed"

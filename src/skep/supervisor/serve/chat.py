@@ -2270,7 +2270,7 @@ class ChatEngine:
             keep = actions.default_keep(action.tool, action.args, taint)
         # B32: a keep this card cannot honour is refused BEFORE it runs, never
         # executed with a false "remembered" (the card offers only what holds).
-        refused = actions.keep_refusal(action.tool, action.args, keep, taint)
+        refused = actions.keep_refusal(action.tool, action.args, keep, taint, store=self.store)
         if refused is not None:
             raise HTTPException(status_code=400, detail=f"keep={keep!r} refused: {refused}")
         if action.source in ("operator", "gate"):

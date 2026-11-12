@@ -295,12 +295,15 @@ def card_summary(
         # v114-F3: a standing change, not a one-off — clients that pre-confirm
         # (`skep chat --yes`) must leave it for a named confirm.
         summary["policy"] = True
-    from .actions import REMEMBERABLE_TOOLS, keep_options
+    from .actions import REMEMBERABLE_TOOLS, keep_covers, keep_options
 
     if tool in REMEMBERABLE_TOOLS:
         # P3-4 (ADR 0059 D4): the keep choices the server will honour — the
         # card never offers a lifetime the confirm would refuse (B32).
         summary["keep"] = keep_options(tool, safe_args, taint)
+        covers = keep_covers(tool, safe_args)
+        if covers is not None:
+            summary["keep_covers"] = covers  # what "session"/"always" would allow
     if taint_line:
         summary["taint"] = taint_line
     if taint is not None and taint.private is not None and taint.untrusted is not None:
