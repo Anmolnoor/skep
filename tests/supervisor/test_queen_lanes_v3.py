@@ -296,3 +296,33 @@ def test_the_queen_rest_cli_and_hook_give_one_verdict_and_one_label(
                 answer = _hook(paths["personal"], command, monkeypatch)
                 assert answer["permissionDecision"] == hook[shell.verdict], (kind, _probe)
                 assert str(shell.decided_by) in answer["permissionDecisionReason"], (kind, _probe)
+
+
+@pytest.mark.parametrize("kind", ["stale-global", "legacy-fsread", "builder"])
+def test_doctor_and_onboard_check_say_which_allows_stopped_granting(
+    kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator-visible trace for the two P3-2 verdicts that get stricter:
+    a stale setup document's allows (B30) and a legacy fs-read * (B01)."""
+    from skep.status import build_status
+    from skep.supervisor.onboard import onboard_check
+
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    paths = build_home(tmp_path, kind)
+    advisories = build_status(paths["personal"], provider_timeout=0.01)["advisories"]
+    report = onboard_check(paths["skep"])["report"]
+    stale = [line for line in advisories if line.startswith("policy document (skep setup")]
+    legacy = [line for line in advisories if "legacy `filesystem read *`" in line]
+    if kind == "stale-global":
+        assert len(stale) == 1 and "under the locked assistant baseline" in stale[0], advisories
+        assert "--template builder" in stale[0]
+    if kind == "legacy-fsread":
+        assert legacy == [
+            "baseline: its legacy `filesystem read *` allow no longer applies — Queen reads "
+            "outside the operator roots card; `skep policy approve --reapprove --template "
+            "builder` adopts the shipped file"
+        ]
+    if kind == "builder":  # a shipped baseline and no setup document: nothing to say
+        assert stale == legacy == []
+    for line in stale + legacy:
+        assert line in report

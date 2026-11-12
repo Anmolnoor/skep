@@ -52,6 +52,7 @@ def build_status(
             + _stale_store_advisories(home)
             + _model_truth_advisories(home)
             + _baseline_advisories(home)
+            + _policy_v3_advisories(home)
             + _channel_user_advisories(home)
         )
         payload["stale_pending"] = stale_pending
@@ -83,6 +84,7 @@ def build_status(
         + _stale_store_advisories(home)
         + _model_truth_advisories(home)
         + _baseline_advisories(home)
+        + _policy_v3_advisories(home)
         + _channel_user_advisories(home)
     )
     payload["stale_pending"] = stale_pending
@@ -327,6 +329,48 @@ def _baseline_advisories(home: Path) -> list[str]:
         return [] if zero_state_home(store) else [NO_BASELINE_WARNING]
     finally:
         store.close()
+
+
+def _policy_v3_advisories(home: Path) -> list[str]:
+    """ADR 0059 P3-2: the two verdicts an already-onboarded home sees change
+    — a legacy ``filesystem read *`` dropped from the baseline (B01-upgraded)
+    and a ``skep setup`` document whose allows stopped granting under the
+    locked baseline (decision #2, B30). Silent otherwise."""
+    from .supervisor.policy_baseline import Ok, verify
+    from .supervisor.policy_layers import legacy_fs_read_dropped
+
+    state = verify(home / "supervisor")
+    if not isinstance(state, Ok):
+        return []
+    lines: list[str] = []
+    template = legacy_fs_read_dropped(state)
+    if template is not None:
+        lines.append(
+            f"baseline: its legacy `filesystem read *` allow no longer applies — Queen "
+            f"reads outside the operator roots card; `skep policy approve --reapprove "
+            f"--template {template}` adopts the shipped file"
+        )
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return lines
+    from .supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY, document_from_settings
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    finally:
+        store.close()
+    allows = sum(len(scope.allow) for scope in document.scopes) if document else 0
+    if document is not None and allows:
+        lines.append(
+            f"policy document (skep setup --template {document.template or '?'}): "
+            f"{allows} allow rule(s) no longer grant under the locked "
+            f"{state.layer.template} baseline — only its denies and asks bind for "
+            "read_file, run_shell and `skep policy decide`/`why`; approve what you "
+            "still want into the baseline (skep policy approve --reapprove)"
+        )
+    return lines
 
 
 def _browse_advisories(home: Path) -> list[str]:
