@@ -106,7 +106,7 @@ from ..roles import (
     tighten,
     within_delegator,
 )
-from ..secret_floor import secret_floor_reason
+from ..secret_floor import secret_floor_reason, shell_secret_floor_reason
 from ..shell_prefixes import (
     command_line_segments,
     dangerous_prefix_reason,
@@ -1865,7 +1865,12 @@ def _check_scope_action(scope: str, action: str) -> None:
 
 
 def _floor_verdict(
-    scope: str, value: str, *, action: str = "", home: Path | None = None
+    scope: str,
+    value: str,
+    *,
+    action: str = "",
+    home: Path | None = None,
+    cwd: str | None = None,
 ) -> dict[str, Any] | None:
     """I4: the floor sits ABOVE every document, so it is consulted before
     ``decide()`` ever runs (F1 of the P3 review: the hook answered `ask` for
@@ -1876,7 +1881,9 @@ def _floor_verdict(
     names the registry's floor key — so RSoP, the why-query and the hook all
     say the same thing. Not a rule: nothing in any layer can lift it.
 
-    ES-F1 (V3): a filesystem read of a credential file is the secret floor."""
+    ES-F1 (V3): a filesystem read of a credential file is the secret floor,
+    and so is a shell line naming one (B123: run_shell's ES-F8 floor, judged
+    against ``cwd`` — the hook said ask where the lane refused)."""
     if scope == "filesystem" and action == "read":
         secret = secret_floor_reason(value, skep_home=home)
         if secret is None:
@@ -1887,7 +1894,11 @@ def _floor_verdict(
         return None
     reason = queen_command_line_refusal(value)
     if reason is None:
-        return None
+        secret = shell_secret_floor_reason(value, cwd=cwd, skep_home=home)
+        if secret is None:
+            return None
+        key = "floor.secret-reads"
+        return {"verdict": "deny", "rule_id": key, "decided_by": f"floor/{key}", "reason": secret}
     git_floor = any(
         is_remote_git_command(argv)
         or is_worker_commit_command(argv)
@@ -1994,7 +2005,7 @@ def _decision_record(
     if chain:
         record["delegation_chain"] = [hop.entry for hop in chain]
     decision: dict[str, Any] | None = None
-    floor = _floor_verdict(scope, value, action=action, home=holder.current.home)
+    floor = _floor_verdict(scope, value, action=action, home=holder.current.home, cwd=repo)
     if floor is not None:
         decision = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
         record["source"] = "floor"
@@ -2319,7 +2330,7 @@ def policy_why(
         "value": value,
         "baseline": status_line(holder.current.home),
     }
-    floor = _floor_verdict(scope, value, action=action, home=holder.current.home)
+    floor = _floor_verdict(scope, value, action=action, home=holder.current.home, cwd=repo)
     if floor is not None:
         # The floor binds workers AND the Queen (v83-F9): one answer, twice.
         verdict = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}

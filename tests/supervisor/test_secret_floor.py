@@ -222,6 +222,38 @@ def test_policy_decide_names_the_floor_for_a_secret_read(
     )
 
 
+def test_the_hook_and_policy_why_refuse_a_shell_line_naming_a_secret(
+    config: SupervisorConfig,
+    store: RunStore,
+    holder: ConfigHolder,
+    fake_home: Path,
+    tmp_path: Path,
+) -> None:
+    """B123: run_shell refuses `cat ~/.ssh/id_rsa` on the secret floor, but
+    the hook (policy_decide) and `skep policy why` (policy_why) said ask —
+    _floor_verdict never ran the shell secret floor. Same verdict now."""
+    from skep.supervisor.serve.actions import policy_why
+    from skep.supervisor.serve.tools import queen_shell_decision
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".env").write_text("CANARY=1\n")
+    for line, cwd in (("cat ~/.ssh/id_rsa", None), ("cat .env", str(work))):
+        lane = queen_shell_decision(store, holder, command=line, cwd=cwd or str(tmp_path))
+        assert lane is not None and lane.decided_by == "floor/floor.secret-reads"
+        record = policy_decide(holder, store, scope="shell", action="run", value=line, repo=cwd)
+        assert (record["verdict"], record["source"], record["rule_id"]) == (
+            "deny",
+            "floor",
+            "floor.secret-reads",
+        ), line
+        why = policy_why(holder, store, cwd or str(tmp_path), "shell", "run", line)
+        assert why["run"]["rule_id"] == why["operator"]["rule_id"] == "floor.secret-reads"
+    # An ordinary line still reaches the layers.
+    record = policy_decide(holder, store, scope="shell", action="run", value="ls")
+    assert record["source"] != "floor"
+
+
 def test_a_worker_never_reads_a_dotenv(tmp_path: Path) -> None:
     git(tmp_path, "init", "-q")
     (tmp_path / ".env").write_text("TOKEN=CANARY-env\n")
