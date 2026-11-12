@@ -254,6 +254,27 @@ def test_the_hook_and_policy_why_refuse_a_shell_line_naming_a_secret(
     assert record["source"] != "floor"
 
 
+def test_policy_why_judges_a_shell_line_from_the_repo_a_slug_names(
+    store: RunStore, holder: ConfigHolder, fake_home: Path
+) -> None:
+    """B123 follow-up: `skep policy why <slug> shell run "cat key"` judged
+    `key` against the process cwd + the bare slug (v87-F1's CWD accident),
+    not the clone the slug names — so a symlink there to ~/.ssh/id_rsa missed
+    the floor run_shell applies from that repo."""
+    from skep.supervisor.serve.actions import policy_why
+    from skep.supervisor.serve.registry import repos_root
+    from skep.supervisor.serve.tools import queen_shell_decision
+
+    clone = repos_root(holder) / "myapp"
+    clone.mkdir(parents=True)
+    git(clone, "init", "-q")
+    (clone / "key").symlink_to(fake_home / ".ssh" / "id_rsa")
+    lane = queen_shell_decision(store, holder, command="cat key", cwd=str(clone))
+    assert lane is not None and lane.decided_by == "floor/floor.secret-reads"
+    why = policy_why(holder, store, "myapp", "shell", "run", "cat key")
+    assert why["run"]["rule_id"] == "floor.secret-reads"
+
+
 def test_a_worker_never_reads_a_dotenv(tmp_path: Path) -> None:
     git(tmp_path, "init", "-q")
     (tmp_path / ".env").write_text("TOKEN=CANARY-env\n")
