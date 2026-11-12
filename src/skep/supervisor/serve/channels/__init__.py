@@ -142,11 +142,36 @@ def card_notes(card: Mapping[str, Any] | None) -> tuple[str, ...]:
         )
     if card.get("taint"):
         notes.append(str(card["taint"]))
+    schedule = card.get("schedule")
+    if isinstance(schedule, Mapping):  # P4-2: what a script schedule really does
+        notes.extend(schedule_lines(schedule))
     items = card.get("items")
     if isinstance(items, list) and len(items) > 1:
         notes.append(f"{len(items)} items, one approval covers exactly these:")
         notes.extend(f"- {item}" for item in items)
     return tuple(notes)
+
+
+def schedule_lines(facts: Mapping[str, Any]) -> list[str]:
+    """The schedule card's facts as plain lines (``cards.schedule_facts``)."""
+    lines: list[str] = []
+    if facts.get("command"):
+        lines.append(f"command: {facts['command']}")
+    if facts.get("every"):
+        lines.append(f"every: {facts['every']}")
+    if facts.get("next"):
+        lines.append("next runs: " + ", ".join(str(t) for t in facts["next"]))
+    if facts.get("error"):
+        lines.append(f"will not save: {facts['error']}")
+    if "env" in facts:
+        lines.append("environment: " + (", ".join(facts["env"]) or "(empty)"))
+    if facts.get("chain"):
+        lines.append("reads the output of: " + " <- ".join(str(c) for c in facts["chain"]))
+    if facts.get("replaces"):
+        lines.append(f"replaces {facts['replaces']}")
+    if facts.get("runs"):
+        lines.append(str(facts["runs"]))
+    return lines
 
 
 def render_confirm_card(

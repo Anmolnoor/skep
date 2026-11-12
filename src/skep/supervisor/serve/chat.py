@@ -45,7 +45,7 @@ from ..store import ChatActionRecord, RunStore
 if TYPE_CHECKING:
     from ..roles import Role
 from . import actions
-from .cards import card_summary, fold_subject, high_tier
+from .cards import card_summary, fold_subject, high_tier, recorded_card
 from .jobs import Dispatcher
 from .llm import (
     _TRANSIENT_STATUSES,
@@ -2075,7 +2075,7 @@ class ChatEngine:
                         decided_by=(
                             None if decision is None else decision.decided_by or decision.reason
                         ),
-                        card=None if high is None else {"tier": "high", "high": high},
+                        card=recorded_card(name, args, high, self.store),
                     )
                     if fold_key:
                         round_folds[fold_key] = action_id

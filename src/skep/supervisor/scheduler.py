@@ -73,6 +73,13 @@ _RUNNING_GROUPS: set[int] = set()
 _RUNNING_LOCK = threading.Lock()
 
 
+def script_env() -> dict[str, str]:
+    """The environment a script schedule runs with — the scrubbed baseline
+    present in this process, nothing else. The script card lists these
+    names (P4-2), so the card and the run read one function."""
+    return build_worker_env((), baseline=SCRIPT_ENV_BASELINE)
+
+
 def kill_running_scripts() -> None:
     """ES B120: SIGKILL every running script's whole process group — serve
     shutdown calls this so a restart never leaves a script running with no
@@ -106,7 +113,7 @@ def run_schedule_script(
             stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            env=build_worker_env((), baseline=SCRIPT_ENV_BASELINE),
+            env=script_env(),
             start_new_session=True,
         )
     except OSError as exc:
@@ -252,6 +259,20 @@ MAX_SCHEDULE_CONSECUTIVE_FAILURES = 5
 def next_run_after(reference: str, interval_seconds: int) -> str:
     """Next fire time = reference + interval (scheduled from the tick, so no catch-up storm)."""
     return _fmt_ts(_parse_ts(reference) + timedelta(seconds=interval_seconds))
+
+
+def next_fire_times(
+    start_at: str | None, interval_seconds: int, *, once: bool = False, count: int = 3
+) -> list[str]:
+    """The next ``count`` fire times of a schedule created now, by the
+    scheduler's own rules: the first is ``start_at`` (normalised) or the next
+    tick, each later one ``next_run_after`` the previous. A tick that runs
+    late pushes the rest later by as much (no catch-up storm). ``once`` fires
+    once. ValueError on a bad ``start_at``."""
+    times = [_start_slot(start_at) or now_ts()]
+    while not once and len(times) < count:
+        times.append(next_run_after(times[-1], interval_seconds))
+    return times
 
 
 def make_schedule(

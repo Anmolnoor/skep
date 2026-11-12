@@ -302,3 +302,17 @@ test("foldItems: a folded card lists every item; a plain card lists none", () =>
     ["read_url — https://a.example/1", "read_url — https://a.example/2"]);
   assert.equal(texts(node, "note")[0], "2 items, one approval covers exactly these:");
 });
+
+test("scheduleNode: a script schedule shows the server's facts and the sentence", () => {
+  const app = loadApp();
+  assert.equal(app.scheduleNode({ headline: "x" }), null);
+  const node = app.scheduleNode({ schedule: {
+    command: "df -h /", every: "1d", next: ["2026-11-12T10:00:00Z", "2026-11-13T10:00:00Z"],
+    env: ["HOME", "PATH"], chain: ["disk"], replaces: "your note schedule 'x'",
+    runs: "runs as you, on this host, unattended, until disabled" } });
+  const text = node.textContent;
+  for (const part of ["df -h /", "1d", "2026-11-13T10:00:00Z", "HOME, PATH", "disk",
+    "your note schedule 'x'", "runs as you, on this host, unattended, until disabled"]) {
+    assert.ok(text.includes(part), part);
+  }
+});

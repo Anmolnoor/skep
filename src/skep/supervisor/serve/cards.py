@@ -364,6 +364,61 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
     return None
 
 
+SCRIPT_SENTENCE = "runs as you, on this host, unattended, until disabled"
+
+
+def schedule_facts(args: dict[str, Any], store: RunStore | None = None) -> dict[str, Any] | None:
+    """P4-2 (ADR 0059 D6, F3 lesson 1): what a script, chained or replacing
+    schedule will really do — the command, the interval, the env names the
+    script really gets (``scheduler.script_env``), the next three fire times
+    (``scheduler.next_fire_times``), the chain it reads from, what it
+    replaces. None for any other schedule. With no ``store`` (a resolved
+    card) the chain is the one named, not walked."""
+    from ..scheduler import next_fire_times, parse_interval, script_env
+
+    caste = args.get("caste")
+    existing = None if store is None else store.get_schedule(str(args.get("name") or ""))
+    if caste != "script" and not args.get("chain") and existing is None:
+        return None
+    facts: dict[str, Any] = {"name": str(args.get("name") or ""), "caste": caste}
+    if caste == "script":
+        facts["command"] = str(args.get("instructions") or "")
+        facts["env"] = sorted(script_env())
+        facts["runs"] = SCRIPT_SENTENCE
+    facts["every"] = str(args.get("every") or "")
+    try:
+        start = None if args.get("start_at") is None else str(args["start_at"])
+        facts["next"] = next_fire_times(
+            start, parse_interval(facts["every"]), once=bool(args.get("once"))
+        )
+    except ValueError as exc:
+        facts["error"] = str(exc)  # the confirm refuses the same way
+    chain: list[str] = []
+    current = args.get("chain")
+    while current and str(current) not in chain and len(chain) < 4:
+        chain.append(str(current))
+        source = None if store is None else store.get_schedule(str(current))
+        current = None if source is None else source.chain
+    if chain:
+        facts["chain"] = chain  # this one reads chain[0]'s output, which reads chain[1]'s…
+    if existing is not None:
+        facts["replaces"] = f"your {existing.worker_kind} schedule {existing.name!r}"
+    return facts
+
+
+def recorded_card(
+    tool: str, args: dict[str, Any], high: str | None, store: RunStore
+) -> dict[str, Any] | None:
+    """What the server records on a card when it is proposed (P4-2): its
+    HIGH tier and, for a schedule, the facts the card shows."""
+    record: dict[str, Any] = {} if high is None else {"tier": "high", "high": high}
+    if tool == "propose_schedule":
+        facts = schedule_facts(args, store)
+        if facts is not None:
+            record["schedule"] = facts
+    return record or None
+
+
 def fold_subject(tool: str, args: Any, decided_by: str | None) -> str | None:
     """P4-2 (ADR 0059 D6): when two cards are one question — ``(tool, scope,
     matcher subject)`` plus the rule that asked, so a folded card's why-line
@@ -445,6 +500,12 @@ def card_summary(
         if covers:
             # what "session"/"always" would allow — for every item of a fold
             summary["keep_covers"] = "; ".join(dict.fromkeys(covers))
+    if tool == "propose_schedule":
+        # a pending card says what confirming NOW does; a resolved one what
+        # the server recorded when it was proposed
+        facts = schedule_facts(safe_args, store) if live_tier else (recorded or {}).get("schedule")
+        if facts is not None:
+            summary["schedule"] = facts
     if len(folded) > 1:
         summary["items"] = [headline(tool, item) for item in folded]
         summary["headline"] = f"{summary['headline']} (+{len(folded) - 1} more)"

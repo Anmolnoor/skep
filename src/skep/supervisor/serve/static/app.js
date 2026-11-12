@@ -308,6 +308,25 @@ function foldItems(card) {
     el("ul", {}, ...card.items.map((item) => el("li", { class: "mono" }, String(item)))));
 }
 
+// P4-2 (ADR 0059 D6, F3 lesson 1): a script, chained or replacing schedule
+// shows what it will really do — the server computed every line (the env the
+// script gets, the scheduler's next fire times), the card only lists them.
+function scheduleNode(card) {
+  const s = card && card.schedule;
+  if (!s) return null;
+  const row = (label, value) => el("div", { class: "arg-row" },
+    el("span", { class: "arg-key" }, `${label}:`), el("span", { class: "arg-value mono" }, value));
+  return el("div", { class: "card-schedule" },
+    s.command ? row("command", s.command) : null,
+    s.every ? row("every", s.every) : null,
+    Array.isArray(s.next) ? row("next runs", s.next.join(", ")) : null,
+    s.error ? row("will not save", s.error) : null,
+    Array.isArray(s.env) ? row("environment", s.env.join(", ") || "(empty)") : null,
+    Array.isArray(s.chain) ? row("reads the output of", s.chain.join(" ← ")) : null,
+    s.replaces ? row("replaces", s.replaces) : null,
+    s.runs ? el("p", { class: "card-risk" }, el("strong", {}, s.runs)) : null);
+}
+
 // P4-1 (ADR 0059 D5): a run dispatched from a tainted chat says so on its card.
 function taintChip(decision) {
   const bits = decision?.constraints?.chat_taint;
@@ -3057,6 +3076,7 @@ async function viewChat(main, chatId) {
       tierNote(card),
       el("p", { class: "card-headline mono" }, card.headline || d.tool),
       foldItems(card),
+      scheduleNode(card),
       card.purpose ? el("p", { class: "card-purpose" }, card.purpose) : null,
       card.risk
         ? el("p", { class: "card-risk" },
