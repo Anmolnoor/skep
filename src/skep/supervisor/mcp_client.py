@@ -592,6 +592,19 @@ def mcp_tool_scope_action(store: RunStore, tool: MCPTool) -> tuple[Scope, str]:
     return "mcp", "call"
 
 
+def _read_only(tool: MCPTool, scope: str, action: str) -> bool:
+    return action == "read" if scope in ("email", "browse") else classify_mcp_risk(tool) == "read"
+
+
+def mcp_call_is_read(store: RunStore, server_id: str, name: str) -> bool:
+    """P4-2 (ADR 0059 D6): is this call a read, by the same classifier
+    ``mcp_scope_decision`` hands ``decide()``? A non-read call on a server
+    with no trust flag (none exists yet) is a HIGH card."""
+    tool = with_server_hints(store, MCPTool(server_id=server_id, name=name, description=""))
+    scope, action = mcp_tool_scope_action(store, tool)
+    return _read_only(tool, scope, action)
+
+
 def mcp_scope_decision(
     store: RunStore,
     holder: ConfigHolder,
@@ -623,9 +636,7 @@ def mcp_scope_decision(
     tool = with_server_hints(store, tool)
     scope, action = mcp_tool_scope_action(store, tool)
     value = f"{tool.server_id}:{tool.name}"
-    read_only = (
-        action == "read" if scope in ("email", "browse") else (classify_mcp_risk(tool) == "read")
-    )
+    read_only = _read_only(tool, scope, action)
     try:
         verdict = queen_decide(
             holder, store, Request(scope, action, value), role=role, read_only=read_only,

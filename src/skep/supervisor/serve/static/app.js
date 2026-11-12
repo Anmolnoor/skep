@@ -290,6 +290,15 @@ function cardClass(card) {
   return card && card.tier === "high" ? "confirm-card card-high" : "confirm-card";
 }
 
+// P4-2 (ADR 0059 D6): a HIGH card says so in words, not only with a red
+// border — and why, and that it holds once and no messenger can confirm it.
+function tierNote(card) {
+  if (!card || card.tier !== "high") return null;
+  return el("p", { class: "card-high-label" },
+    el("strong", {}, "HIGH risk: "), card.high || "see details",
+    ". It holds once, and only the web UI or the CLI can confirm it.");
+}
+
 // P4-1 (ADR 0059 D5): a run dispatched from a tainted chat says so on its card.
 function taintChip(decision) {
   const bits = decision?.constraints?.chat_taint;
@@ -3036,6 +3045,7 @@ async function viewChat(main, chatId) {
     const args = renderArgs(d.args);
     if (args) details.push(args);
     return [
+      tierNote(card),
       el("p", { class: "card-headline mono" }, card.headline || d.tool),
       card.purpose ? el("p", { class: "card-purpose" }, card.purpose) : null,
       card.risk

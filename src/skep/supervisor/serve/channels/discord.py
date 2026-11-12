@@ -9,7 +9,8 @@ live Discord). ✅/❌ confirm/deny only through the shared, fail-closed
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from . import (
     ChannelConfig,
@@ -94,10 +95,12 @@ def confirmation_embed(
     commands: Sequence[Sequence[str]],
     config: ChannelConfig,
     web_ui_url: str = "",
+    card: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
-    card = render_confirm_card(action_class, commands)
-    fields = [{"name": "command", "value": line} for line in card.commands]
-    if card.web_ui_only or not config.channel_can_confirm:
+    view = render_confirm_card(action_class, commands, card)
+    fields = [{"name": "command", "value": line} for line in view.commands]
+    fields += [{"name": "note", "value": line} for line in view.notes]
+    if view.web_ui_only or not config.channel_can_confirm:
         # v66-F3: name the link the card points at (Telegram always did).
         description = "This action can only be confirmed from the skep web UI."
         if web_ui_url:
@@ -105,7 +108,8 @@ def confirmation_embed(
         return {
             "embeds": [
                 {
-                    "title": "Review in the web UI",
+                    # P4-2: a HIGH card says so in words, not only by colour.
+                    "title": "HIGH risk: needs the web UI" if view.high else "Review in the web UI",
                     "description": description,
                     "fields": fields,
                 }

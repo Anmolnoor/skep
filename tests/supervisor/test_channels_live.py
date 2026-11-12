@@ -967,3 +967,85 @@ def test_slack_push_threads_under_the_conversation_with_rich_blocks(
         assert [b["type"] for b in blocks] == ["section"]  # single-section text
     finally:
         store.close()
+
+
+# P4-2 (ADR 0059 D6): a HIGH card is never confirmable from a channel — the
+# server refuses the press and says to use the web UI; the card waits.
+_HIGH_DISPATCH = {"instructions": "Fix the bug. MODE:happy", "network": ["*"]}
+
+
+def test_telegram_never_confirms_a_high_card(repo: object, config: SupervisorConfig) -> None:
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama, can_confirm=True)
+        harness = _TelegramHarness(config)
+        try:
+            chat = harness.store.create_chat(title="telegram 42", model=None)
+            action_id = harness.store.add_chat_action(
+                chat.chat_id, tool="dispatch_run", args={"repo": str(repo), **_HIGH_DISPATCH}
+            )
+            harness.updates.append([_telegram_callback(1, "42", "42", f"confirm:{action_id}")])
+            assert harness.poller.poll_once() == 1
+            answer = harness.answers[-1][2]
+            assert "HIGH risk" in answer and "web UI" in answer
+            refreshed = harness.store.get_chat_action(action_id)
+            assert refreshed is not None and refreshed.status == "proposed"
+            assert harness.store.recent_runs(5) == []
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_slack_never_confirms_a_high_card(
+    repo: object, config: SupervisorConfig, monkeypatch: object
+) -> None:
+    import json as _json
+    from urllib.parse import quote_plus
+
+    from skep.supervisor import RunStore
+    from skep.supervisor.serve.channels import runtime
+
+    from .fake_ollama import FakeOllama
+
+    sent: list[list[dict[str, object]]] = []
+
+    def send(_token: str, _channel: str, blocks: list[dict[str, object]]) -> bool:
+        sent.append(blocks)
+        return True
+
+    monkeypatch.setattr(runtime, "_default_slack_send", send)  # type: ignore[attr-defined]
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_slack(config, ollama, can_confirm=True)
+        store = RunStore(config.db_path)
+        try:
+            chat = store.create_chat(title="slack C1", model=None)
+            action_id = store.add_chat_action(
+                chat.chat_id, tool="dispatch_run", args={"repo": str(repo), **_HIGH_DISPATCH}
+            )
+        finally:
+            store.close()
+        payload = {
+            "channel": {"id": "C1"},
+            "user": {"id": "U1"},
+            "actions": [{"action_id": "confirm", "value": action_id}],
+        }
+        body = ("payload=" + quote_plus(_json.dumps(payload))).encode()
+        webhook = _slack_app_client(config)
+        response = webhook.post(  # type: ignore[attr-defined]
+            "/api/channels/slack/interact", content=body, headers=_slack_headers("signing-1", body)
+        )
+        assert response.status_code == 200
+        assert "HIGH risk" in str(sent[-1]) and "web UI" in str(sent[-1])
+        check = RunStore(config.db_path)
+        try:
+            refreshed = check.get_chat_action(action_id)
+            assert refreshed is not None and refreshed.status == "proposed"
+            assert check.recent_runs(5) == []
+        finally:
+            check.close()
+    finally:
+        ollama.stop()

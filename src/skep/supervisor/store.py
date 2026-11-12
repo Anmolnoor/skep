@@ -375,7 +375,11 @@ CREATE TABLE IF NOT EXISTS chat_actions (
     -- v106-F4 (v101-F15): the model's own call id. A card resolves minutes
     -- after its call, in a different request — the id must survive on the
     -- action row so the result row can carry it back.
-    tool_call_id TEXT
+    tool_call_id TEXT,
+    -- P4-2 (ADR 0059 D6): what the server recorded on the card when it was
+    -- proposed — the HIGH tier, the folded items, the dispatch manifest. A
+    -- confirm acts on exactly this, never on a later recomputation.
+    card_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_actions_pending ON chat_actions (chat_id, status);
 -- v7 Stage B: inert notes and tasks the assistant may append to freely; due
@@ -748,6 +752,15 @@ class ChatActionRecord:
     source: str = "assistant"  # 'assistant' (model-proposed) | 'operator' (/command)
     decided_by: str | None = None  # v40-F8: the routing policy decision, when any
     tool_call_id: str | None = None  # v106-F4: the model's call id, for the result row
+    # P4-2 (ADR 0059 D6): the server's record of the card at proposal time:
+    # ``tier``/``high`` (HIGH and why), ``items`` (folded calls beyond this
+    # row's own: ``{"args", "tool_call_id"}``), ``manifest`` (a dispatch's).
+    card: dict[str, Any] | None = None
+
+    def fold_items(self) -> list[dict[str, Any]]:
+        """Every call this card answers: its own first, then the folded ones."""
+        extra = (self.card or {}).get("items") or []
+        return [{"args": self.args, "tool_call_id": self.tool_call_id}, *extra]
 
 
 @dataclass(frozen=True)
@@ -1056,6 +1069,10 @@ class RunStore:
             # v106-F4 (v101-F15): a card resolves in a later request — the
             # call id survives on the action row so the result row carries it.
             self._conn.execute("ALTER TABLE chat_actions ADD COLUMN tool_call_id TEXT")
+        if "card_json" not in action_columns:
+            # P4-2 (ADR 0059 D6): the card as the server recorded it (tier,
+            # folded items, manifest). NULL = a card from before P4-2.
+            self._conn.execute("ALTER TABLE chat_actions ADD COLUMN card_json TEXT")
         chat_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(chats)")}
         if "personality" not in chat_columns:
             # v44-F10: per-chat style preamble.
@@ -3976,7 +3993,7 @@ class RunStore:
 
     _ACTION_COLS = (
         "action_id, chat_id, tool, args_json, status, result_json, created_at, resolved_at,"
-        " source, decided_by, tool_call_id"
+        " source, decided_by, tool_call_id, card_json"
     )
 
     @staticmethod
@@ -3993,6 +4010,7 @@ class RunStore:
             source=str(row[8]),
             decided_by=None if row[9] is None else str(row[9]),
             tool_call_id=None if row[10] is None else str(row[10]),
+            card=None if row[11] is None else dict(json.loads(str(row[11]))),
         )
 
     @_locked
@@ -4005,13 +4023,14 @@ class RunStore:
         source: str = "assistant",
         decided_by: str | None = None,
         tool_call_id: str | None = None,
+        card: dict[str, Any] | None = None,
     ) -> str:
         action_id = str(uuid.uuid4())
         self._conn.execute(
             "INSERT INTO chat_actions"
             " (action_id, chat_id, tool, args_json, status, created_at, source, decided_by,"
-            "  tool_call_id)"
-            " VALUES (?, ?, ?, ?, 'proposed', ?, ?, ?, ?)",
+            "  tool_call_id, card_json)"
+            " VALUES (?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)",
             (
                 action_id,
                 chat_id,
@@ -4021,10 +4040,35 @@ class RunStore:
                 source,
                 decided_by,
                 tool_call_id,
+                None if card is None else json.dumps(card, ensure_ascii=True),
             ),
         )
         self._conn.commit()
         return action_id
+
+    @_locked
+    def fold_into_chat_action(
+        self, action_id: str, *, args: dict[str, Any], tool_call_id: str | None
+    ) -> bool:
+        """P4-2 (ADR 0059 D6): add one call to a pending card's item list.
+
+        Only while the card is still 'proposed' — one conditional UPDATE, so
+        a card a confirm already claimed never gains an item it did not show.
+        False when the card is gone or no longer pending."""
+        row = self._conn.execute(
+            "SELECT card_json FROM chat_actions WHERE action_id = ? AND status = 'proposed'",
+            (action_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        card = {} if row[0] is None else dict(json.loads(str(row[0])))
+        card["items"] = [*(card.get("items") or []), {"args": args, "tool_call_id": tool_call_id}]
+        cursor = self._conn.execute(
+            "UPDATE chat_actions SET card_json = ? WHERE action_id = ? AND status = 'proposed'",
+            (json.dumps(card, ensure_ascii=True), action_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     @_locked
     def record_resolved_chat_action(

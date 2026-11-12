@@ -32,7 +32,7 @@ from ..shell_prefixes import (
     queen_command_line_refusal,
     queen_shell_refusal,
 )
-from ..store import ChatTaint
+from ..store import ChatTaint, RunStore
 
 # The "thing" a card is about, in priority order. One generic rule beats a
 # 69-entry per-tool table: every mutating tool names its subject with one of
@@ -98,6 +98,100 @@ _DESTRUCTIVE_TOOLS = frozenset(
     }
 )
 _NETWORK_TOOLS = frozenset({"read_url", "register_mcp_server", "call_mcp_tool", "setup_browser"})
+
+# P4-2 (ADR 0059 D6): the policy writes a HIGH card covers — every verb that
+# widens or reshapes standing policy. ``revoke_policy_rule`` only narrows and
+# stays an ordinary card; a card keep=always is the operator's choice on an
+# ordinary card in the web UI or CLI (a channel confirm never names a keep).
+_HIGH_POLICY_TOOLS = _POLICY_TOOLS | {
+    "approve_policy_baseline",
+    "detach_policy_group",  # a group can carry denies: detaching it widens
+    "set_policy_group",
+    "set_role",  # the chat's role is a ceiling on the Queen's own lanes
+}
+_DISPATCH_TOOLS = frozenset({"dispatch_run", "quick_edit", "setup_project", "batch_dispatch"})
+
+
+def _wildcard_network(args: dict[str, Any]) -> bool:
+    for key in ("network", "source_allowlist"):
+        value = args.get(key)
+        if isinstance(value, list) and any(str(host).strip() == "*" for host in value):
+            return True
+    return False
+
+
+_TRIFECTA = "this chat has read private data and taken in outside content"
+
+
+def _named_by_operator(store: RunStore, server: str, name: str) -> bool:
+    """No per-server MCP trust flag exists. The one trust mark there is: the
+    operator's ``allow_mcp_tool`` grant naming exactly this ``server:tool``
+    (itself a HIGH card). A glob grant (``bank:*``) is not a name."""
+    from ..policy_schema import POLICY_DOCUMENT_SETTINGS_KEY, document_from_settings
+
+    document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    exact = f"{server}:{name}"
+    return document is not None and any(
+        rule.scope in ("mcp", "email", "browse") and rule.pattern == exact
+        for rule in document.learned
+    )
+
+
+def _doubly_tainted(taint: ChatTaint | None) -> bool:
+    return taint is not None and taint.private is not None and taint.untrusted is not None
+
+
+def high_tier(
+    tool: str, args: Any, *, taint: ChatTaint | None = None, store: RunStore | None = None
+) -> str | None:
+    """P4-2 (ADR 0059 D6): why this action is a HIGH card, or None.
+
+    The one place the tier is decided — the card renders it and every
+    confirm path re-asks it (``chat.verdict_events``). A HIGH card looks
+    different, holds once, never folds, is never auto-allowed and is never
+    confirmable from a messenger channel. Without ``store`` an MCP call
+    cannot be shown to be a read, so it is HIGH (fail closed)."""
+    safe: dict[str, Any] = args if isinstance(args, dict) else {}
+    if _doubly_tainted(taint):
+        return _TRIFECTA
+    if tool == "propose_schedule":
+        if safe.get("caste") == "script":
+            return "a script schedule runs a command as you, on this host, unattended"
+        if safe.get("chain"):
+            return "a chained schedule feeds another schedule's output into this one"
+        existing = None if store is None else store.get_schedule(str(safe.get("name") or ""))
+        if existing is not None and existing.worker_kind == "script":
+            return f"it replaces your script schedule {existing.name!r}"
+        return None
+    if tool == "call_mcp_tool":
+        from ..mcp_client import mcp_call_is_read
+
+        server, name = str(safe.get("server_id") or ""), str(safe.get("tool") or "")
+        if store is not None and (
+            mcp_call_is_read(store, server, name) or _named_by_operator(store, server, name)
+        ):
+            return None
+        return "an MCP tool that acts (not a read), and you have not allowed it by name"
+    if tool == "register_mcp_server" or tool == "setup_browser":
+        return "it adds an MCP server whose tools can act as you"
+    if tool == "promote_tool":
+        return "it installs a forged tool: its code runs on this host"
+    if tool == "promote_skill_pack":
+        return "it activates a skill pack's scripts"
+    if tool in _HIGH_POLICY_TOOLS:
+        return "it changes standing policy"
+    if tool in _DISPATCH_TOOLS:
+        tasks = safe.get("tasks") if tool == "batch_dispatch" else [safe]
+        for task in tasks if isinstance(tasks, list) else []:
+            if not isinstance(task, dict):
+                continue
+            if _wildcard_network(task):
+                return "the run may reach any host on the internet (network '*')"
+            if task.get("engine") not in (None, ""):
+                return f"it picks the coding agent itself (engine {task['engine']!r})"
+    if tool == "start_research" and _wildcard_network(safe):
+        return "the run may reach any host on the internet (network '*')"
+    return None
 
 
 def _argv_of(args: dict[str, Any]) -> list[str]:
@@ -275,15 +369,27 @@ def card_summary(
     *,
     taint: ChatTaint | None = None,
     taint_line: str | None = None,
+    store: RunStore | None = None,
+    recorded: dict[str, Any] | None = None,
+    live_tier: bool = True,
 ) -> dict[str, Any]:
     """The human-facing three lines for one proposed action.
 
     ``risk`` is omitted entirely when there is nothing notable, so the card
     stays quiet about quiet things. P4-1 (ADR 0059 D5): in a tainted chat
     (``taint``) the card says why in plain words (``taint_line``), offers
-    only the keeps that chat may store, and with both bits is ``tier: high``.
+    only the keeps that chat may store. P4-2 (D6): a HIGH action
+    (``high_tier``, or HIGH as ``recorded`` when it was proposed) is
+    ``tier: high`` with ``high`` saying why, and offers ``once`` only. A
+    resolved card (``live_tier`` False) asks no server or schedule again.
     """
     safe_args: dict[str, Any] = args if isinstance(args, dict) else {}
+    high = (recorded or {}).get("high")
+    if high is None and live_tier:
+        high = high_tier(tool, safe_args, taint=taint, store=store)
+    elif high is None and _doubly_tainted(taint):
+        high = _TRIFECTA
+
     summary: dict[str, Any] = {"headline": headline(tool, safe_args)}
     why = purpose(description)
     if why is not None:
@@ -300,12 +406,13 @@ def card_summary(
     if tool in REMEMBERABLE_TOOLS:
         # P3-4 (ADR 0059 D4): the keep choices the server will honour — the
         # card never offers a lifetime the confirm would refuse (B32).
-        summary["keep"] = keep_options(tool, safe_args, taint)
+        summary["keep"] = keep_options(tool, safe_args, taint, high=high is not None)
         covers = keep_covers(tool, safe_args)
         if covers is not None:
             summary["keep_covers"] = covers  # what "session"/"always" would allow
     if taint_line:
         summary["taint"] = taint_line
-    if taint is not None and taint.private is not None and taint.untrusted is not None:
+    if high is not None:
         summary["tier"] = "high"
+        summary["high"] = high
     return summary

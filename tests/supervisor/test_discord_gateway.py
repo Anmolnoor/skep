@@ -1270,3 +1270,79 @@ def test_followup_failure_falls_back_to_a_channel_message(
         assert any("late but honest" in text for text in sent_texts)
     finally:
         harness.close()
+
+
+# P4-2 (ADR 0059 D6): a HIGH card is never confirmable from a channel — refused
+# by the server on every Discord path, even for a class the channel may confirm.
+_HIGH_DISPATCH = {"instructions": "Fix the bug. MODE:happy", "network": ["*"]}
+
+
+def _high_interaction(action_id: str) -> str:
+    return json.dumps(
+        {
+            "op": 0,
+            "t": "INTERACTION_CREATE",
+            "s": 2,
+            "d": {
+                "id": "i-9",
+                "token": "itok-9",
+                "channel_id": "42",
+                "member": {"user": {"id": "u1"}},
+                "data": {"custom_id": f"confirm:{action_id}"},
+            },
+        }
+    )
+
+
+_HIGH_REACTION = json.dumps(
+    {
+        "op": 0,
+        "t": "MESSAGE_REACTION_ADD",
+        "s": 2,
+        "d": {"channel_id": "42", "user_id": "u1", "emoji": {"name": "✅"}},
+    }
+)
+
+
+@pytest.mark.parametrize("path", ["button", "reaction", "slash"])
+def test_discord_never_confirms_a_high_card(
+    repo: object, config: SupervisorConfig, path: str
+) -> None:
+    from skep.supervisor import RunStore
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_discord(config, ollama, can_confirm=True)
+        store = RunStore(config.db_path)
+        try:
+            chat = store.create_chat(title="discord 42", model=None)
+            store.bind_channel_session(
+                session_key="discord:42", channel="discord", identity_id="42", chat_id=chat.chat_id
+            )
+            action_id = store.add_chat_action(
+                chat.chat_id, tool="dispatch_run", args={"repo": str(repo), **_HIGH_DISPATCH}
+            )
+        finally:
+            store.close()
+        harness = _DiscordHarness(config)
+        try:
+            frame = {
+                "button": _high_interaction(action_id),
+                "reaction": _HIGH_REACTION,
+                "slash": _slash("approve"),
+            }[path]
+            harness.script(HELLO, READY_APP, frame)
+            assert harness.gateway.session_once() is True
+            reply = (
+                harness.sent[-1][2]["content"] if path == "reaction" else harness.followups[-1][2]
+            )
+            assert "HIGH risk" in str(reply) and "web UI" in str(reply)
+            refreshed = harness.store.get_chat_action(action_id)
+            assert refreshed is not None and refreshed.status == "proposed"
+            assert harness.store.recent_runs(5) == []
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()

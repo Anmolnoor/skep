@@ -16,9 +16,10 @@ contract and — the security core — the confirmation gating:
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 CHANNELS: frozenset[str] = frozenset({"discord", "telegram", "slack"})
 
@@ -121,18 +122,52 @@ class ConfirmCard:
     action_class: str
     commands: tuple[str, ...]
     web_ui_only: bool
+    # P4-2 (ADR 0059 D6): plain lines from the server's card — a HIGH card's
+    # "needs the web UI" and why, the chat's taint, every folded item.
+    notes: tuple[str, ...] = ()
+    high: bool = False
 
 
-def render_confirm_card(action_class: str, commands: Sequence[Sequence[str]] = ()) -> ConfirmCard:
+def card_notes(card: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """The lines a messenger shows from the server's card (``card_summary``):
+    a HIGH card says it needs the web UI and why, then the taint line; a
+    folded card lists every item it would approve."""
+    if not card:
+        return ()
+    notes: list[str] = []
+    if card.get("tier") == "high":
+        notes.append(
+            f"HIGH risk: {card.get('high') or 'see the web UI'}. No messenger can confirm "
+            "this: open the skep web UI or the CLI."
+        )
+    if card.get("taint"):
+        notes.append(str(card["taint"]))
+    items = card.get("items")
+    if isinstance(items, list) and len(items) > 1:
+        notes.append(f"{len(items)} items, one approval covers exactly these:")
+        notes.extend(f"- {item}" for item in items)
+    return tuple(notes)
+
+
+def render_confirm_card(
+    action_class: str,
+    commands: Sequence[Sequence[str]] = (),
+    card: Mapping[str, Any] | None = None,
+) -> ConfirmCard:
     """A platform-neutral confirm-card view. Renders the v19-F1 multi-command
-    payload as a LIST of command strings (never a single joined string)."""
+    payload as a LIST of command strings (never a single joined string).
+    P4-2: a HIGH ``card`` is web-UI-only whatever its class (the server
+    refuses a channel confirm of it too: ``chat.verdict_events``)."""
     from shlex import join as _join
 
     command_lines = tuple(_join([str(part) for part in command]) for command in commands)
+    high = bool(card) and card.get("tier") == "high"  # type: ignore[union-attr]
     return ConfirmCard(
         action_class=action_class,
         commands=command_lines,
-        web_ui_only=action_class not in CHANNEL_CONFIRMABLE_ACTIONS,
+        web_ui_only=action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high,
+        notes=card_notes(card),
+        high=high,
     )
 
 

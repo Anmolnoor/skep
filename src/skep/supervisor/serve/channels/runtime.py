@@ -320,7 +320,7 @@ class TelegramPoller(threading.Thread):
                 # the shared gate could allow it; anything else keeps the v16
                 # web-UI pointer text.
                 card_text, keyboard = telegram_adapter.confirmation_card(
-                    str(action.get("tool")), (), config, self._web_ui_url
+                    str(action.get("tool")), (), config, self._web_ui_url, _card_of(action)
                 )
                 if keyboard is not None:
                     keyboard = _telegram_action_keyboard(keyboard, str(action.get("action_id")))
@@ -497,13 +497,19 @@ def _text_blocks(text: str) -> list[dict[str, object]]:
     return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
+def _card_of(action: dict[str, object]) -> dict[str, Any] | None:
+    """P4-2: the server's card on an action event (HIGH, taint, items)."""
+    card = action.get("card")
+    return card if isinstance(card, dict) else None
+
+
 def _slack_action_blocks(
-    action_id: str, tool: str, config: ChannelConfig
+    action_id: str, tool: str, config: ChannelConfig, card: dict[str, Any] | None = None
 ) -> list[dict[str, object]]:
     """The adapter's confirm-card blocks, with the chat-action id stamped onto
     the buttons so the interact callback knows what it is resolving. The
     adapter itself stays pure (its tests pin the block shapes)."""
-    blocks = slack_adapter.confirmation_blocks(tool, (), config)
+    blocks = slack_adapter.confirmation_blocks(tool, (), config, card)
     for block in blocks:
         elements = block.get("elements")
         if block.get("type") == "actions" and isinstance(elements, list):
@@ -582,7 +588,7 @@ def add_slack_routes(
             _deliver(bot_token, message.identity.identity_id, _text_blocks(text))
         for action in actions:
             blocks = _slack_action_blocks(
-                str(action.get("action_id")), str(action.get("tool")), config
+                str(action.get("action_id")), str(action.get("tool")), config, _card_of(action)
             )
             _deliver(bot_token, message.identity.identity_id, blocks)
 
@@ -891,12 +897,16 @@ def _default_gateway_connect(url: str) -> Any:
 
 
 def _discord_action_payload(
-    action_id: str, tool: str, config: ChannelConfig, web_ui_url: str = ""
+    action_id: str,
+    tool: str,
+    config: ChannelConfig,
+    web_ui_url: str = "",
+    card: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     """The adapter's confirm-card embed, with the chat-action id stamped onto
     the button custom_ids so INTERACTION_CREATE knows what it is resolving.
     The adapter itself stays pure (its tests pin the embed shape)."""
-    payload = discord_adapter.confirmation_embed(tool, (), config, web_ui_url)
+    payload = discord_adapter.confirmation_embed(tool, (), config, web_ui_url, card)
     rows = payload.get("components")
     if isinstance(rows, list):
         for row in rows:
@@ -1198,7 +1208,11 @@ class DiscordGateway(threading.Thread):
             self._deliver(token, channel_id, text)
         for action in actions:
             payload = _discord_action_payload(
-                str(action.get("action_id")), str(action.get("tool")), config, self._web_ui_url
+                str(action.get("action_id")),
+                str(action.get("tool")),
+                config,
+                self._web_ui_url,
+                _card_of(action),
             )
             if not self._send(token, channel_id, payload):
                 logger.warning("discord card delivery failed")

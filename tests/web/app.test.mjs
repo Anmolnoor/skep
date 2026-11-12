@@ -281,3 +281,14 @@ test("keepCovers: the card says what a keep would allow, and nothing when it all
   const line = app.keepCovers({ keep: ["once", "session", "always"], keep_covers: "a keep allows each of these on its own, exactly: `ls`; `make`" });
   assert.equal(line.textContent, "a keep allows each of these on its own, exactly: `ls`; `make`");
 });
+
+// ---------- P4-2: HIGH cards, folds, the dispatch manifest, the schedule card ----------
+
+test("tierNote: a HIGH card says so in words, not only by colour", () => {
+  const app = loadApp();
+  assert.equal(app.tierNote({ headline: "x" }), null);
+  assert.equal(app.tierNote(undefined), null);
+  const note = app.tierNote({ tier: "high", high: "it changes standing policy" });
+  assert.equal(note.textContent,
+    "HIGH risk: it changes standing policy. It holds once, and only the web UI or the CLI can confirm it.");
+});

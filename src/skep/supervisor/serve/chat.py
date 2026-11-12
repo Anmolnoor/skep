@@ -45,7 +45,7 @@ from ..store import ChatActionRecord, RunStore
 if TYPE_CHECKING:
     from ..roles import Role
 from . import actions
-from .cards import card_summary
+from .cards import card_summary, high_tier
 from .jobs import Dispatcher
 from .llm import (
     _TRANSIENT_STATUSES,
@@ -379,6 +379,20 @@ def duplicate_proposal_result(action_id: str) -> dict[str, Any]:
 
 
 _SUPERSEDED_BY_NEWER = "superseded by a newer proposal for the same subject"
+
+
+def high_tier_decision(high: str, allowed: Any) -> Any:
+    """P4-2 (ADR 0059 D6): the card a HIGH action gets where policy would
+    have run it unasked — it says what allowed it and why it asks anyway."""
+    from ..autonomy import AutonomyDecision
+
+    return AutonomyDecision(
+        verdict="require_approval",
+        reason="tier.require_approval.high",
+        detail=f"{high} — a HIGH action always asks, even where "
+        f"{allowed.decided_by or allowed.reason} would allow it",
+        decided_by="tier/high",
+    )
 
 
 def card_taken(store: RunStore, action_id: str) -> HTTPException:
@@ -1921,6 +1935,14 @@ class ChatEngine:
                             {"tool": name, "decision": asdict(decision), "result": payload},
                         )
                         continue
+                    # P4-2 (ADR 0059 D6): a HIGH action always cards — no
+                    # auto-dispatch, grant or rule runs it unasked. Not a
+                    # decide() verdict: the allow is recorded, the card asks.
+                    high = high_tier(
+                        name, args, taint=self.store.get_chat_taint(chat_id), store=self.store
+                    )
+                    if high is not None and decision is not None and decision.allows_execution():
+                        decision = high_tier_decision(high, decision)
                     # ES-F3 (B08): an unattended turn never executes — it
                     # fires whether or not anyone is watching, so even a
                     # policy-allowed mutation becomes a card a human pulls.
@@ -2029,6 +2051,7 @@ class ChatEngine:
                         decided_by=(
                             None if decision is None else decision.decided_by or decision.reason
                         ),
+                        card=None if high is None else {"tier": "high", "high": high},
                     )
                     action_event: dict[str, Any] = {
                         "action_id": action_id,
@@ -2039,7 +2062,9 @@ class ChatEngine:
                         # v90-F2: and the three lines a human reads first; the
                         # description moves behind the details disclosure.
                         "description": tool_description(name),
-                        "card": self._card(chat_id, name, args),
+                        "card": self._card(
+                            chat_id, name, args, action=self.store.get_chat_action(action_id)
+                        ),
                     }
                     if decision is not None:
                         action_event["decision"] = asdict(decision)
@@ -2303,11 +2328,27 @@ class ChatEngine:
                 status_code=422, detail="keep must be one of 'once', 'session', 'always'"
             )
         taint = self.store.get_chat_taint(chat_id)  # P4-1: a tainted chat keeps less
+        # P4-2 (ADR 0059 D6): the tier is asked again here, on every confirm
+        # path — HIGH as recorded at proposal, or HIGH now.
+        high = (action.card or {}).get("high") or high_tier(
+            action.tool, action.args, taint=taint, store=self.store
+        )
+        if confirm and high is not None and actor.startswith("channel:"):
+            # I6: a messenger account is not the operator's desk. Refused
+            # here, whatever the channel's own gate said.
+            line = taint_line(self.store, chat_id, taint)
+            raise HTTPException(
+                status_code=403,
+                detail=f"this card is HIGH risk ({high}), so it needs the web UI or the "
+                "CLI: open skep and confirm it there" + (f". {line}" if line else ""),
+            )
         if keep is None:
-            keep = actions.default_keep(action.tool, action.args, taint)
+            keep = actions.default_keep(action.tool, action.args, taint, high=high is not None)
         # B32: a keep this card cannot honour is refused BEFORE it runs, never
         # executed with a false "remembered" (the card offers only what holds).
-        refused = actions.keep_refusal(action.tool, action.args, keep, taint, store=self.store)
+        refused = actions.keep_refusal(
+            action.tool, action.args, keep, taint, store=self.store, high=high is not None
+        )
         if refused is not None:
             raise HTTPException(status_code=400, detail=f"keep={keep!r} refused: {refused}")
         if action.source in ("operator", "gate"):
@@ -2434,13 +2475,26 @@ class ChatEngine:
             )  # fmt: skip
         return payload
 
-    def _card(self, chat_id: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    def _card(
+        self,
+        chat_id: str,
+        tool: str,
+        args: dict[str, Any],
+        *,
+        action: ChatActionRecord | None = None,
+    ) -> dict[str, Any]:
         """The card for one call in this chat — P4-1: with the chat's taint
-        (the keeps it may store, the why-line, the HIGH tier)."""
+        (the keeps it may store, the why-line). P4-2: with what the server
+        recorded on ``action`` (its HIGH tier). A resolved card renders from
+        that record alone — it asks nothing live of the policy or a server."""
         taint = self.store.get_chat_taint(chat_id)
+        pending = action is None or action.status == "proposed"
         return card_summary(
             tool, args, tool_description(tool),
             taint=taint, taint_line=taint_line(self.store, chat_id, taint),
+            store=self.store if pending else None,
+            recorded=None if action is None else (action.card or {}),
+            live_tier=pending,
         )  # fmt: skip
 
 
@@ -2751,7 +2805,7 @@ def add_chat_routes(
                 {
                     **asdict(a),
                     "description": tool_description(a.tool),
-                    "card": engine._card(chat_id, a.tool, a.args),
+                    "card": engine._card(chat_id, a.tool, a.args, action=a),
                 }
                 for a in run_store.chat_actions(chat_id)
             ],

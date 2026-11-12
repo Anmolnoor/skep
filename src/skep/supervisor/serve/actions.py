@@ -5146,29 +5146,37 @@ def _taint_keep_refusal(tool: str, keep: str, taint: ChatTaint | None) -> str | 
     return None
 
 
+_HIGH_KEEP = "this is a HIGH card, so its approval holds once"
+
+
 def keep_refusal(
     tool: str,
     args: dict[str, Any],
     keep: str,
     taint: ChatTaint | None = None,
     store: RunStore | None = None,
+    *,
+    high: bool = False,
 ) -> str | None:
     """Why the server would refuse this keep on this card, or None (B32: a
     keep the tool cannot honour is refused up front, never a false
     "remembered"). ``once`` always holds. ``taint`` is the confirming chat's
     (P4-1): a tainted chat is offered fewer keeps. With ``store``, also a
     grant that store_grant would refuse for reaching into a deny — checked
-    BEFORE the card runs, not after it already ran."""
+    BEFORE the card runs, not after it already ran. P4-2 (ADR 0059 D6): a
+    ``high`` card holds once."""
     if keep == "once":
         return None
     if keep not in KEEP_TIERS:
         return "keep must be one of 'once', 'session', 'always'"
     found = _grant_subjects(tool, args)
     if isinstance(found, str):
-        return found
+        return _HIGH_KEEP if high else found
     refused = _taint_keep_refusal(tool, keep, taint)
     if refused is not None:
         return refused
+    if high:
+        return _HIGH_KEEP
     return None if store is None else _denied_grant(store, found)
 
 
@@ -5205,15 +5213,19 @@ def _denied_grant(store: RunStore, subjects: list[tuple[str, str, str, str]]) ->
     return None
 
 
-def keep_options(tool: str, args: dict[str, Any], taint: ChatTaint | None = None) -> list[str]:
+def keep_options(
+    tool: str, args: dict[str, Any], taint: ChatTaint | None = None, *, high: bool = False
+) -> list[str]:
     """The keep choices a card offers — the card never offers what the
-    server refuses (``keep_refusal`` with the same taint)."""
-    return [keep for keep in KEEP_TIERS if keep_refusal(tool, args, keep, taint) is None]
+    server refuses (``keep_refusal`` with the same taint and tier)."""
+    return [keep for keep in KEEP_TIERS if keep_refusal(tool, args, keep, taint, high=high) is None]
 
 
-def default_keep(tool: str, args: dict[str, Any], taint: ChatTaint | None = None) -> str:
+def default_keep(
+    tool: str, args: dict[str, Any], taint: ChatTaint | None = None, *, high: bool = False
+) -> str:
     """The keep a confirm with none named stores: ``session`` where offered."""
-    return "session" if "session" in keep_options(tool, args, taint) else "once"
+    return "session" if "session" in keep_options(tool, args, taint, high=high) else "once"
 
 
 def keep_covers(tool: str, args: dict[str, Any]) -> str | None:
