@@ -2669,11 +2669,40 @@ def fetch_grant_decision(
             detail=f"a policy rule denies fetching {host!r} ({verdict.decided_by})",
             decided_by=verdict.decided_by,
         )
+    if verdict.layer == "taint":
+        return taint_decision(verdict)
     asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
     return AutonomyDecision(
         verdict="require_approval",
         reason=f"network.require_approval.{asked}",
         detail=host,
+        decided_by=verdict.decided_by,
+    )
+
+
+def search_web_verdict(store: RunStore, holder: ConfigHolder, chat_id: str | None) -> Any:
+    """search_web's ``network.search`` (P3-3, B78: with the chat's role; P4-1:
+    with its taint). The value is the backend, never the query: the decision
+    log keeps no query text."""
+    from ..policy_v3 import Request, queen_decide
+
+    return queen_decide(
+        holder,
+        store,
+        Request("network", "search", "ddgs"),
+        role=_chat_role(store, holder, chat_id),
+        chat_id=chat_id,
+    )
+
+
+def taint_decision(verdict: Any) -> AutonomyDecision:
+    """P4-1 (ADR 0059 D5): a ``taint/<rule>`` ask as the card's decision —
+    the why-line on ``detail``, so the card says in plain words why a granted
+    thing is asking again (I8)."""
+    return AutonomyDecision(
+        verdict="require_approval",
+        reason=f"taint.require_approval.{verdict.rule_id}",
+        detail=verdict.note,
         decided_by=verdict.decided_by,
     )
 
@@ -2820,6 +2849,8 @@ def queen_shell_decision(
                 detail=command,
                 decided_by=verdict.decided_by,
             )
+        if verdict.layer == "taint":  # P4-1: a rule allowed it; taint only asks
+            return taint_decision(verdict)
         return AutonomyDecision(
             verdict="deny",
             reason="shell.deny.repo_cwd" if via_cwd else "shell.deny.repo_target",
@@ -2857,6 +2888,8 @@ def queen_shell_decision(
             detail=f"a policy rule denies this command ({verdict.decided_by})",
             decided_by=verdict.decided_by,
         )
+    if verdict.layer == "taint":
+        return taint_decision(verdict)
     # B79: the card names the rule that asked — never "no rule covers this".
     asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
     return AutonomyDecision(
@@ -3038,7 +3071,7 @@ def execute_read_tool(
         # gets — the role layer included.
         role = _chat_role(store, holder, chat_id)
         for tool in tools:
-            decision = mcp_scope_decision(store, holder, tool, role=role)
+            decision = mcp_scope_decision(store, holder, tool, role=role, chat_id=chat_id)
             views.append(
                 {
                     "name": tool.name,
@@ -3545,18 +3578,21 @@ def execute_read_tool(
         # The value is the backend, never the query: the decision log keeps no
         # query text. Read tools never card: anything but allow is a clean
         # policy error, and so is a policy that will not load.
-        from ..policy_v3 import Request, queen_decide
         from . import websearch
 
         try:
-            search_decision = queen_decide(
-                holder,
-                store,
-                Request("network", "search", "ddgs"),
-                role=_chat_role(store, holder, chat_id),
-            )
+            search_decision = search_web_verdict(store, holder, chat_id)
         except Exception as exc:  # fail closed: no decision, no search
             return {"error": f"web search refused: the policy did not load ({exc})", "results": []}
+        if search_decision.layer == "taint":
+            # P4-1: a live turn cards this (chat.py); a turn that cannot card
+            # (/btw, unattended) refuses and says why.
+            return {
+                "error": f"web search needs the operator's OK here: {search_decision.note} — "
+                "ask in a live turn",
+                "decided_by": search_decision.decided_by,
+                "results": [],
+            }
         if search_decision.verdict != "allow":
             return {
                 "error": "web search is not allowed by policy "
@@ -3706,6 +3742,21 @@ def _execute_mutation(
     decision: AutonomyDecision | None = None,
     chat_id: str | None = None,
 ) -> Any:
+    if name == "search_web":
+        # P4-1: a taint card the operator confirmed (chat.py cards search_web
+        # only for a taint ask) — the human's OK answers the ask; a deny that
+        # landed since still refuses (denied space unreachable by confirmation).
+        from . import websearch
+
+        last_guard = search_web_verdict(store, holder, chat_id)
+        if last_guard.verdict == "deny":
+            raise ValueError(f"denied by policy: {last_guard.decided_by}")
+        return {
+            "results": websearch.search_web(
+                str(args["query"]), max_results=int(args.get("max_results") or 5)
+            ),
+            "decided_by": "operator/confirmed",
+        }
     if name == "register_mcp_server":
         from ..mcp_client import MCPError, MCPServerConfig, save_mcp_server
 
@@ -3996,6 +4047,7 @@ def _execute_mutation(
             holder.current.home,
             analysis_tasks,
             None if args.get("context") is None else str(args["context"]),
+            parent_chat_id=chat_id,
         )
     if name == "batch_dispatch":
         # v51-F5 (ADR 0025): N independent dispatch_runs submitted together.
@@ -5239,7 +5291,49 @@ def mutation_executes_in_turn(
     return decision is not None and decision.allows_execution()
 
 
+# P4-1: the mutating tools whose lane is ``policy_v3.decide()`` — it applies
+# the chat's taint itself (and knows a read from an act). Every other allow a
+# mutation gets (a project's auto-dispatch, an inert proposal, any lane added
+# later) is a consequential action the ``untrusted`` bit sends to a card.
+_DECIDED_LANES = frozenset(
+    {"run_shell", "start_process", "stop_process", "read_file", "search_files", "read_url",
+     "call_mcp_tool"}
+)  # fmt: skip
+
+
 def mutation_execution_decision(
+    name: str,
+    args: dict[str, Any],
+    *,
+    store: RunStore,
+    holder: ConfigHolder,
+    chat_id: str | None = None,
+) -> AutonomyDecision | None:
+    """The gate for one Queen tool call: allow runs in-turn, deny refuses
+    with no card, anything else (None too) is the card. P4-1 (ADR 0059 D5):
+    in a chat with the ``untrusted`` bit an allow from outside decide() is a
+    consequential action and asks (``taint/untrusted-action``, or
+    ``taint/trifecta`` when the chat has both bits)."""
+    from ..policy_v3 import ACTION_REQUEST, Verdict, taint_asks, taint_verdict
+
+    decision = _mutation_execution_decision(name, args, store=store, holder=holder, chat_id=chat_id)
+    if (
+        chat_id is None
+        or name in _DECIDED_LANES
+        or decision is None
+        or not decision.allows_execution()
+    ):
+        return decision
+    taint = store.get_chat_taint(chat_id)
+    # ADR 0059 D1 names a dispatch ``dispatch.delegate``; every allow here is
+    # an action of that weight (a run, a proposal, a later lane).
+    if taint_asks(taint, *ACTION_REQUEST) is None:
+        return decision
+    held = Verdict("allow", "", "", decision.decided_by or "", "operator")
+    return taint_decision(taint_verdict(held, taint, *ACTION_REQUEST, read_only=False))
+
+
+def _mutation_execution_decision(
     name: str,
     args: dict[str, Any],
     *,
@@ -5284,7 +5378,9 @@ def mutation_execution_decision(
                 description="",
             ),
             role=role,
+            chat_id=chat_id,
         )
+
     if name == "run_code":
         # v51-F3: run_code auto-resolves exactly where a plain dispatch_run
         # would — the project's own auto-dispatch posture decides, and the

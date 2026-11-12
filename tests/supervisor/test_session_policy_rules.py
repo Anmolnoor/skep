@@ -26,9 +26,10 @@ def _doc(store: RunStore) -> PolicyDocument:
 def test_confirming_a_url_card_grants_the_host_for_the_session(config: SupervisorConfig) -> None:
     from skep.supervisor.serve.settings import ConfigHolder
 
-    from .conftest import predating_home
+    from .conftest import known_chat, predating_home
 
     store = RunStore(predating_home(config.db_path))
+    known_chat(config.db_path, "c1")
     holder = ConfigHolder(config, store)
     try:
         grant = actions.remember_action_for_session(

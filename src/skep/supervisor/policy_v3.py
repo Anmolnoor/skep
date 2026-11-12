@@ -27,7 +27,8 @@ and named asks bind. Under a locked baseline the
 ``baseline/``, ``global/``, ``template:<name>/``, ``role:<name>/``,
 ``phase:<p>/``, ``group:<name>/``, ``project:<id>/``, ``grant:session/`` ·
 ``grant:global/``, ``dispatch/``, ``delegation:<who>/``,
-``default/unmatched``.
+``default/unmatched``, ``taint/`` (P4-1: the trifecta guard, last before the
+face — ``taint_verdict``).
 """
 
 from __future__ import annotations
@@ -87,7 +88,7 @@ from .shell_prefixes import (
     is_worker_commit_command,
     queen_command_line_refusal,
 )
-from .store import RunStore
+from .store import ChatTaint, RunStore
 
 if TYPE_CHECKING:
     from .serve.settings import ConfigHolder
@@ -158,6 +159,9 @@ class Stack:
     # P3-4 (B39): the Queen chat asking — its own session grants apply, no
     # other chat's. None (REST, the CLI, the hook): no chat-bound grant does.
     chat: str | None = None
+    # P4-1 (D5): the asking chat's trifecta bits. None — no chat (REST, the
+    # CLI, the hook, ACP) — is no taint: those faces decide as before.
+    taint: ChatTaint | None = None
 
 
 def floor_verdict(
@@ -379,6 +383,7 @@ def load_stack(
         roots=root_rules(operator_roots(store, holder)),
         ignored=ignored,
         chat=chat,
+        taint=None if chat is None else store.get_chat_taint(chat),
     )
     if not repo:
         return stack
@@ -598,7 +603,7 @@ def decide(
         bound = (
             decide(
                 req,
-                stack=stack,
+                stack=replace(stack, taint=None),  # the guard runs once, at the top
                 role=delegator.role,
                 chain=outer,
                 face=face,
@@ -612,7 +617,89 @@ def decide(
         if held["rule_id"] == EXCEEDS_DELEGATOR:
             verdict = replace(_with(verdict, held), deferred=held["verdict"] == "require_approval")
         verdict = replace(verdict, chain=tuple(hop.entry for hop in chain))
-    return verdict
+    return taint_verdict(verdict, stack.taint, scope, action, read_only=read_only)
+
+
+# P4-1 (ADR 0059 D5): the trifecta guard. Egress that carries model-chosen
+# text, every egress, and the consequential actions, per (scope, action).
+# ``mcp.call`` carries text out and acts unless the tool reports itself
+# read-only; every other scope not named is neither.
+_TEXT_EGRESS = frozenset(
+    {("network", "search"), ("network", "fetch"), ("network", "connect"),
+     ("email", "send"), ("browse", "act")}
+)  # fmt: skip
+_EGRESS_SCOPES = frozenset({"network", "mcp", "email", "browse"})
+_CONSEQUENTIAL = frozenset(
+    {("shell", "run"), ("shell", "run_background"), ("shell", "run_repo"),
+     ("filesystem", "write"), ("coding", "edit"), ("coding", "verify"),
+     ("email", "send"), ("browse", "act"), ("dispatch", "delegate")}
+)  # fmt: skip
+# What a Queen mutation that does not route through decide() (a dispatch the
+# project auto-allows, an inert proposal) is asked as: a consequential action.
+ACTION_REQUEST = ("dispatch", "delegate")
+TAINT_PRIVATE_EGRESS = "private-egress"
+TAINT_UNTRUSTED_ACTION = "untrusted-action"
+TAINT_TRIFECTA = "trifecta"
+
+
+def taint_asks(
+    taint: ChatTaint | None, scope: str, action: str, *, read_only: bool = False
+) -> str | None:
+    """The ``taint/<rule>`` a request asks under in a chat with ``taint``, or
+    None. Private only: egress carrying model-chosen text. Untrusted only:
+    consequential actions. Both: those plus every egress (``trifecta``)."""
+    if taint is None or not taint.any:
+        return None
+    mcp_out = scope == "mcp" and action == "call" and not read_only
+    text = (scope, action) in _TEXT_EGRESS or mcp_out
+    acts = (scope, action) in _CONSEQUENTIAL or mcp_out
+    private, untrusted = taint.private is not None, taint.untrusted is not None
+    if private and untrusted and (scope in _EGRESS_SCOPES or acts):
+        return TAINT_TRIFECTA
+    if private and text:
+        return TAINT_PRIVATE_EGRESS
+    if untrusted and acts:
+        return TAINT_UNTRUSTED_ACTION
+    return None
+
+
+def taint_verdict(
+    verdict: Verdict, taint: ChatTaint | None, scope: str, action: str, *, read_only: bool
+) -> Verdict:
+    """D5 at decide(): after the layers, the grants and the delegation cap,
+    before the face. Only an allow moves — to an ask labelled ``taint/<rule>``,
+    even where a rule or a grant allowed it. Taint never turns a deny into an
+    ask and never grants; an ask stays the ask that asked (its own label)."""
+    rule = taint_asks(taint, scope, action, read_only=read_only)
+    if rule is None or verdict.verdict != "allow":
+        return verdict
+    return replace(
+        verdict,
+        verdict="require_approval",
+        layer="taint",
+        rule_id=rule,
+        decided_by=f"taint/{rule}",
+        note=TAINT_WHY[rule],
+    )
+
+
+# The card's why-line for each taint rule, in plain words (I8).
+TAINT_WHY = {
+    TAINT_PRIVATE_EGRESS: (
+        "this chat has read private data (a file outside your folders, or command "
+        "output), so sending anything out from it needs your OK, even where a rule "
+        "or grant allows it"
+    ),
+    TAINT_UNTRUSTED_ACTION: (
+        "this chat has taken in outside content (a web page, search results, tool "
+        "output or a message skep did not write), so actions it takes need your OK, "
+        "even where a rule or grant allows them"
+    ),
+    TAINT_TRIFECTA: (
+        "this chat has read private data and has taken in outside content, so "
+        "anything it sends out or changes needs your OK, one approval at a time"
+    ),
+}
 
 
 def queen_decide(
@@ -631,7 +718,8 @@ def queen_decide(
     what REST, the CLI and the hook answer for the same request and role with
     no repo — logged as actor ``queen`` (I13). ``cwd`` is where a shell line
     runs (the secret floor resolves against it); ``chat_id`` the chat asking,
-    whose own session grants apply (P3-4, B39); ``url`` what read_url reads."""
+    whose own session grants apply (P3-4, B39) and whose taint gates egress
+    and actions (P4-1, D5); ``url`` what read_url reads."""
     from .serve.actions import _decision_row
 
     stack = replace(load_stack(holder, store, chat=chat_id), cwd=cwd)
@@ -639,6 +727,8 @@ def queen_decide(
     row = _decision_row(
         verdict, stack, actor="queen", repo=None, req=(req.scope, req.action, req.value), role=role
     )
+    if stack.taint is not None and stack.taint.any:
+        row["taint"] = stack.taint.bits()  # I13: the bits the verdict read
     log_decision(holder.current.audit_dir, row)
     return verdict
 

@@ -31,7 +31,7 @@ from skep.supervisor.serve.fileio import queen_filesystem_decision
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import queen_shell_decision
 
-from .conftest import predating_home
+from .conftest import known_chat, predating_home
 
 # legacy: predates the baseline, nothing approved · zero: a fresh store (O5) ·
 # builder / assistant: a locked baseline (+ a curl deny and a named ask) ·
@@ -199,6 +199,7 @@ def rows(root: Path, kind: str) -> Iterator[tuple[str, str]]:
     config = build_config(paths["personal"], None)
     fmt = {name: str(path) for name, path in paths.items()}
     os.chdir(paths["outside"])  # the relative probes resolve outside every root
+    known_chat(config.db_path, GRID_CHAT)  # P4-1: a missing chat reads as tainted
     for grant in GRANTS:
         store = RunStore(config.db_path)
         try:

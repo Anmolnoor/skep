@@ -59,6 +59,7 @@ from .llm import (
     tool_delivery,
 )
 from .settings import ConfigHolder
+from .taint import inherit_taint, record_tool_taint, taint_line
 from .tools import (
     CLARIFY_TOOL_NAME,
     COMMAND_TOOL_NAMES,
@@ -76,6 +77,8 @@ from .tools import (
     execute_mutation,
     execute_read_tool,
     mutation_execution_decision,
+    search_web_verdict,
+    taint_decision,
     tool_description,
 )
 
@@ -1675,6 +1678,9 @@ class ChatEngine:
                 pending_nudge = STALL_NUDGE
                 continue
             paused = False
+            # P4-1: one taint card per tool per round — a burst of N searches
+            # from one request asks once; the rest wait on that card.
+            taint_carded: set[str] = set()
             for call in tool_calls:
                 name = str(call.get("function", {}).get("name") or "")
                 args = _call_args(call)
@@ -1745,7 +1751,13 @@ class ChatEngine:
                     # v115-F3: the terminal receipt names the lane (I8).
                     yield ("tool", {"tool": name, "kind": "read", "result": result})
                     continue
-                if name in MUTATING_TOOL_NAMES:
+                # P4-1 (ADR 0059 D5): search_web is a read tool, and read tools
+                # never card — except a taint ask in a turn a human can answer.
+                search_ask = None
+                if name == "search_web" and not read_only and not unattended:
+                    verdict = search_web_verdict(self.store, self.holder, chat_id)
+                    search_ask = taint_decision(verdict) if verdict.layer == "taint" else None
+                if name in MUTATING_TOOL_NAMES or search_ask is not None:
                     if read_only:
                         # v67-F3: read-only by construction — a mutation
                         # attempt is answered with an error row, never carded,
@@ -1774,9 +1786,40 @@ class ChatEngine:
                         )
                         yield ("tool", {"tool": name, "result": refusal})
                         continue
-                    decision = mutation_execution_decision(
+                    decision = search_ask or mutation_execution_decision(
                         name, args, store=self.store, holder=self.holder, chat_id=chat_id
                     )
+                    taint_ask = decision is not None and (decision.decided_by or "").startswith(
+                        "taint/"
+                    )
+                    if taint_ask and (unattended or name in taint_carded):
+                        # P4-1: an unattended turn refuses a taint ask (nobody is
+                        # watching to answer it); a second one this round waits.
+                        assert decision is not None
+                        waiting: dict[str, Any] = {
+                            "ok": False,
+                            "error": (
+                                f"{name} needs the operator's OK in this chat "
+                                f"({decision.detail}) and nobody is watching this turn — "
+                                "say what you would do; the user can ask in a live chat"
+                                if unattended
+                                else f"another {name} from this chat is already waiting "
+                                "for the operator's OK — ask again after it is answered"
+                            ),
+                            "decided_by": decision.decided_by,
+                        }
+                        previous_read_tool = None
+                        self.store.add_chat_message(
+                            chat_id,
+                            role="tool",
+                            tool_name=name,
+                            tool_call_id=call_id,
+                            content=json.dumps(waiting, ensure_ascii=True),
+                        )
+                        yield ("tool", {"tool": name, "result": waiting})
+                        continue
+                    if taint_ask:
+                        taint_carded.add(name)
                     if decision is not None and decision.verdict == "deny":
                         # v40-F10: an explicit deny rule refuses without a card
                         # — a card could be confirmed, and deny space must stay
@@ -1839,13 +1882,18 @@ class ChatEngine:
                             result=payload,
                             decided_by=decision.decided_by or decision.reason,
                         )
-                        self.store.add_chat_message(
+                        row_id = self.store.add_chat_message(
                             chat_id,
                             role="tool",
                             tool_name=name,
                             tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
+                        if payload["ok"]:  # P4-1: what the result brought in
+                            record_tool_taint(
+                                self.store, self.holder, chat_id, name, args,
+                                payload["result"], row_id,
+                            )  # fmt: skip
                         # v90-F3: a grant-covered action leaves a receipt. The
                         # operator could not tell "not asked because you already
                         # approved this" from "not asked because nothing
@@ -1861,7 +1909,7 @@ class ChatEngine:
                             "tool": name,
                             "decision": asdict(decision),
                             "result": payload,
-                            "card": card_summary(name, args, tool_description(name)),
+                            "card": self._card(chat_id, name, args),
                         }
                         # v106-F11 (v90-F3): the receipt names the covering
                         # grant's tier and when the operator gave it.
@@ -1916,13 +1964,14 @@ class ChatEngine:
                         # v90-F2: and the three lines a human reads first; the
                         # description moves behind the details disclosure.
                         "description": tool_description(name),
-                        "card": card_summary(name, args, tool_description(name)),
+                        "card": self._card(chat_id, name, args),
                     }
                     if decision is not None:
                         action_event["decision"] = asdict(decision)
                     yield ("action", action_event)
                     paused = True
                     continue
+                ran = False  # P4-1: only a read that executed brings anything in
                 if name in READ_TOOL_NAMES:
                     # v87-F7: name the wait BEFORE it starts — await_runs can
                     # legitimately block for minutes.
@@ -1965,6 +2014,7 @@ class ChatEngine:
                             result = execute_read_tool(
                                 name, args, store=self.store, holder=self.holder, chat_id=chat_id
                             )
+                            ran = True
                         except HTTPException as exc:
                             result = {"error": str(exc.detail)}
                         except (KeyError, ValueError, TypeError) as exc:
@@ -2013,13 +2063,15 @@ class ChatEngine:
                         )
                     }
                     previous_read_tool = None
-                self.store.add_chat_message(
+                row_id = self.store.add_chat_message(
                     chat_id,
                     role="tool",
                     tool_name=name,
                     tool_call_id=call_id,
                     content=json.dumps(result, ensure_ascii=True),
                 )
+                if ran:
+                    record_tool_taint(self.store, self.holder, chat_id, name, args, result, row_id)
                 # The live event carries the full result for EVERY tool — the
                 # old notes/tasks whitelist left get_run/list_runs/... rendering
                 # as empty expanders until a page reload (history always had it).
@@ -2175,11 +2227,12 @@ class ChatEngine:
             raise HTTPException(
                 status_code=422, detail="keep must be one of 'once', 'session', 'always'"
             )
+        taint = self.store.get_chat_taint(chat_id)  # P4-1: a tainted chat keeps less
         if keep is None:
-            keep = "session" if len(actions.keep_options(action.tool, action.args)) > 1 else "once"
+            keep = actions.default_keep(action.tool, action.args, taint)
         # B32: a keep this card cannot honour is refused BEFORE it runs, never
         # executed with a false "remembered" (the card offers only what holds).
-        refused = actions.keep_refusal(action.tool, action.args, keep)
+        refused = actions.keep_refusal(action.tool, action.args, keep, taint)
         if refused is not None:
             raise HTTPException(status_code=400, detail=f"keep={keep!r} refused: {refused}")
         if action.source in ("operator", "gate"):
@@ -2287,7 +2340,7 @@ class ChatEngine:
                 self.store.resolve_chat_action(action_id, status="denied", result=payload)
             except ValueError:
                 raise card_taken(self.store, action_id) from None
-        self.store.add_chat_message(
+        row_id = self.store.add_chat_message(
             chat_id,
             role="tool",
             tool_name=action.tool,
@@ -2299,7 +2352,21 @@ class ChatEngine:
             tool_call_id=action.tool_call_id,
             content=json.dumps(payload, ensure_ascii=True),
         )
+        if confirm and payload["ok"]:  # P4-1: what the confirmed tool brought in
+            record_tool_taint(
+                self.store, self.holder, chat_id, action.tool, action.args,
+                payload["result"], row_id,
+            )  # fmt: skip
         return payload
+
+    def _card(self, chat_id: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        """The card for one call in this chat — P4-1: with the chat's taint
+        (the keeps it may store, the why-line, the HIGH tier)."""
+        taint = self.store.get_chat_taint(chat_id)
+        return card_summary(
+            tool, args, tool_description(tool),
+            taint=taint, taint_line=taint_line(self.store, chat_id, taint),
+        )  # fmt: skip
 
 
 # ES B27: a scheduled turn's TOTAL budget. The provider timeout is per read,
@@ -2488,6 +2555,7 @@ def run_analysis_tasks(
     home: Path,
     tasks: list[str],
     context: str | None,
+    parent_chat_id: str | None = None,
 ) -> dict[str, Any]:
     """v83-F7 (ADR 0041): reasoning-only delegation.
 
@@ -2502,6 +2570,9 @@ def run_analysis_tasks(
     # streams if analyst latency ever matters in the field.
     for task in tasks:
         chat = store.create_chat(title=f"analysis: {task[:60]}", model=None, source="analysis")
+        # P4-1: an analyst starts with the delegating chat's taint — a fresh
+        # chat is never a way to shed it (its answer carries its bits back).
+        inherit_taint(store, parent_chat_id, chat.chat_id)
         try:
             base_url, api_key, model, protocol = engine.resolved_llm(chat)
         except HTTPException as exc:
@@ -2591,10 +2662,16 @@ def add_chat_routes(
                 {
                     **asdict(a),
                     "description": tool_description(a.tool),
-                    "card": card_summary(a.tool, a.args, tool_description(a.tool)),
+                    "card": engine._card(chat_id, a.tool, a.args),
                 }
                 for a in run_store.chat_actions(chat_id)
             ],
+            # P4-1 (ADR 0059 D5): which trifecta bits this chat carries, and
+            # what that means in words — sticky for the life of the chat.
+            "taint": {
+                "bits": run_store.get_chat_taint(chat_id).bits(),
+                "line": taint_line(run_store, chat_id, run_store.get_chat_taint(chat_id)),
+            },
             # v56-F3: server truth for the composer meter — same math the
             # replay uses, so the gauge cannot drift from reality.
             "context": engine.context_view(chat_id),

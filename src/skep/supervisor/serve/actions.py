@@ -116,7 +116,7 @@ from ..shell_prefixes import (
     normalize_remembered_command,
     worker_allowlist_reason,
 )
-from ..store import RunStore
+from ..store import ChatTaint, RunStore
 from ..worktree import TREE_LOCK
 from .jobs import Dispatcher, DispatchError
 from .registry import (
@@ -5098,22 +5098,61 @@ def _grant_subjects(tool: str, args: dict[str, Any]) -> list[tuple[str, str, str
     return list(dict.fromkeys(subjects))
 
 
-def keep_refusal(tool: str, args: dict[str, Any], keep: str) -> str | None:
+def _taint_keep_refusal(tool: str, keep: str, taint: ChatTaint | None) -> str | None:
+    """P4-1 (ADR 0059 D5): the keeps a tainted chat may not store. Both bits:
+    once only (a HIGH card). Any bit: never a standing fetch grant (egress).
+    A session keep the chat's own taint would ask past anyway is refused,
+    not stored as a grant that changes nothing (I8)."""
+    if taint is None or not taint.any or keep == "once":
+        return None
+    if taint.private is not None and taint.untrusted is not None:
+        return (
+            "this chat has read private data and taken in outside content, so its "
+            "approvals hold once"
+        )
+    egress = tool == "read_url"
+    if egress and (keep == "always" or taint.private is not None):
+        return (
+            "this chat has read private data or taken in outside content, so a fetch "
+            "approval here holds once"
+            if keep == "always"
+            else "this chat has read private data, so every fetch from it asks: a session "
+            "keep would change nothing"
+        )
+    if keep == "session" and not egress and taint.untrusted is not None:
+        return (
+            "this chat has taken in outside content, so every command it runs asks: a "
+            "session keep would change nothing ('always' holds in your other chats)"
+        )
+    return None
+
+
+def keep_refusal(
+    tool: str, args: dict[str, Any], keep: str, taint: ChatTaint | None = None
+) -> str | None:
     """Why the server would refuse this keep on this card, or None (B32: a
     keep the tool cannot honour is refused up front, never a false
-    "remembered"). ``once`` always holds."""
+    "remembered"). ``once`` always holds. ``taint`` is the confirming chat's
+    (P4-1): a tainted chat is offered fewer keeps."""
     if keep == "once":
         return None
     if keep not in KEEP_TIERS:
         return "keep must be one of 'once', 'session', 'always'"
     found = _grant_subjects(tool, args)
-    return found if isinstance(found, str) else None
+    if isinstance(found, str):
+        return found
+    return _taint_keep_refusal(tool, keep, taint)
 
 
-def keep_options(tool: str, args: dict[str, Any]) -> list[str]:
-    """The keep choices a card offers: all three where a grant can be stored,
-    else only ``once`` — the card never offers what the server refuses."""
-    return list(KEEP_TIERS) if keep_refusal(tool, args, "session") is None else ["once"]
+def keep_options(tool: str, args: dict[str, Any], taint: ChatTaint | None = None) -> list[str]:
+    """The keep choices a card offers — the card never offers what the
+    server refuses (``keep_refusal`` with the same taint)."""
+    return [keep for keep in KEEP_TIERS if keep_refusal(tool, args, keep, taint) is None]
+
+
+def default_keep(tool: str, args: dict[str, Any], taint: ChatTaint | None = None) -> str:
+    """The keep a confirm with none named stores: ``session`` where offered."""
+    return "session" if "session" in keep_options(tool, args, taint) else "once"
 
 
 def remember_action_for_session(

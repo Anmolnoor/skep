@@ -28,7 +28,7 @@ from skep.supervisor.serve.actions import remember_action_for_session
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import queen_shell_decision
 
-from .conftest import predating_home
+from .conftest import known_chat, predating_home
 
 
 @pytest.mark.parametrize("tier", ["session", "always"])
@@ -36,6 +36,7 @@ def test_an_approved_command_grants_exactly_itself(
     config: SupervisorConfig, tmp_path: Path, tier: str
 ) -> None:
     store = RunStore(predating_home(config.db_path))
+    known_chat(config.db_path, "c1")
     try:
         holder = ConfigHolder(config, store)
         grant = remember_action_for_session(

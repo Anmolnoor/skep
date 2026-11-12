@@ -681,6 +681,41 @@ class ChatMessageRecord:
     # v106-F4 (v101-F15): which call this tool result answers. NULL on rows
     # older than the column — those replay by position, as they always did.
     tool_call_id: str | None = None
+    # ADR 0059 D5 (B26): who wrote it — ``operator``, ``queen``, ``tool``,
+    # ``webhook:<name>``, ``channel:<platform>:<user>``, ``schedule:<name>``,
+    # ``worker:<task>``. A row older than the column reads as its role's author.
+    provenance: str = ""
+
+    @property
+    def trusted(self) -> bool:
+        """Written by the operator, the Queen, or a tool the Queen called —
+        anything else is outside content (replayed wrapped, sets ``untrusted``)."""
+        return self.provenance in TRUSTED_PROVENANCE
+
+
+TRUSTED_PROVENANCE = frozenset({"operator", "queen", "tool"})
+# The author a row's role implies when nothing recorded one (rows older than
+# the column, and every writer that is the operator, the Queen or a tool).
+_ROLE_AUTHOR = {"user": "operator", "tool": "tool"}
+# A taint bit set where no message id says which (an unreadable taint, a
+# missing chat): it still counts as set.
+UNKNOWN_TAINT_ORIGIN = 0
+
+
+@dataclass(frozen=True)
+class ChatTaint:
+    """ADR 0059 D5 (V9): the chat's two trifecta bits, each the id of the
+    first message that set it (None = unset). Sticky: nothing clears them."""
+
+    private: int | None = None
+    untrusted: int | None = None
+
+    @property
+    def any(self) -> bool:
+        return self.private is not None or self.untrusted is not None
+
+    def bits(self) -> list[str]:
+        return [name for name in ("private", "untrusted") if getattr(self, name) is not None]
 
 
 @dataclass(frozen=True)
@@ -986,6 +1021,11 @@ class RunStore:
             # whatever position it landed in. Old rows keep NULL — replay falls
             # back to arrival order for them, never for new rows (I11).
             self._conn.execute("ALTER TABLE chat_messages ADD COLUMN tool_call_id TEXT")
+        if "provenance" not in chat_message_columns:
+            # ADR 0059 D5 (B26): who wrote the row. NULL on rows older than the
+            # column reads as its role's own author (operator / queen / tool):
+            # an old chat is never retroactively tainted.
+            self._conn.execute("ALTER TABLE chat_messages ADD COLUMN provenance TEXT")
         project_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(project_policies)")
         }
@@ -1038,6 +1078,9 @@ class RunStore:
         if "role" not in chat_columns:
             # first-run R1 (ADR 0055 D3): the chat's role, beside personality.
             self._conn.execute("ALTER TABLE chats ADD COLUMN role TEXT")
+        if "taint" not in chat_columns:
+            # ADR 0059 D5 (V9): the trifecta guard's two bits; NULL = no taint.
+            self._conn.execute("ALTER TABLE chats ADD COLUMN taint TEXT")
         if "source" not in chat_columns:
             # v44-F1: which face opened the chat — 'web', 'terminal', or a channel name.
             self._conn.execute("ALTER TABLE chats ADD COLUMN source TEXT NOT NULL DEFAULT 'web'")
@@ -3848,12 +3891,17 @@ class RunStore:
         tool_name: str | None = None,
         attachments: list[str] | None = None,
         tool_call_id: str | None = None,
+        provenance: str | None = None,
     ) -> int:
+        """Append one transcript row. ``provenance`` names its author when that
+        is not the one its role implies (ADR 0059 D5): a row from outside —
+        a webhook, a script, a worker — also sets the chat's ``untrusted`` bit,
+        in the same write, so no reader can see the row before the bit."""
         now = _now()
         cursor = self._conn.execute(
             "INSERT INTO chat_messages (chat_id, role, content, thinking, tool_calls_json,"
-            " tool_name, tool_call_id, created_at, attachments_json)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " tool_name, tool_call_id, created_at, attachments_json, provenance)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 chat_id,
                 role,
@@ -3864,11 +3912,67 @@ class RunStore:
                 tool_call_id,
                 now,
                 None if not attachments else json.dumps(attachments),
+                provenance,
             ),
         )
+        message_id = int(cursor.lastrowid or 0)
         self._conn.execute("UPDATE chats SET updated_at = ? WHERE chat_id = ?", (now, chat_id))
+        if provenance is not None and provenance not in TRUSTED_PROVENANCE:
+            self._add_chat_taint(chat_id, untrusted=message_id)
         self._conn.commit()
-        return int(cursor.lastrowid or 0)
+        return message_id
+
+    @_locked
+    def get_chat_taint(self, chat_id: str) -> ChatTaint:
+        """The chat's taint (ADR 0059 D5). Fail closed: a chat that is not
+        there, or a value that does not read, counts as BOTH bits set — never
+        as clean."""
+        unknown = ChatTaint(UNKNOWN_TAINT_ORIGIN, UNKNOWN_TAINT_ORIGIN)
+        try:
+            row = self._conn.execute(
+                "SELECT taint FROM chats WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
+        except sqlite3.Error:
+            return unknown
+        if row is None:
+            return unknown
+        if row[0] is None:
+            return ChatTaint()
+        try:
+            raw = json.loads(str(row[0]))
+            if not isinstance(raw, dict):
+                return unknown
+            bits = {key: raw.get(key) for key in ("private", "untrusted")}
+            if any(value is not None and type(value) is not int for value in bits.values()):
+                return unknown
+            return ChatTaint(**bits)
+        except ValueError:
+            return unknown
+
+    @_locked
+    def add_chat_taint(
+        self, chat_id: str, *, private: int | None = None, untrusted: int | None = None
+    ) -> ChatTaint:
+        """Set taint bits that are not yet set (the first message that set a
+        bit keeps it); returns the chat's taint after. Nothing clears a bit."""
+        taint = self._add_chat_taint(chat_id, private=private, untrusted=untrusted)
+        self._conn.commit()
+        return taint
+
+    def _add_chat_taint(
+        self, chat_id: str, *, private: int | None = None, untrusted: int | None = None
+    ) -> ChatTaint:
+        current = self.get_chat_taint(chat_id)
+        merged = ChatTaint(
+            private=current.private if current.private is not None else private,
+            untrusted=current.untrusted if current.untrusted is not None else untrusted,
+        )
+        if merged != current:
+            self._conn.execute(
+                "UPDATE chats SET taint = ? WHERE chat_id = ?",
+                (json.dumps({"private": merged.private, "untrusted": merged.untrusted}), chat_id),
+            )
+        return merged
 
     _ACTION_COLS = (
         "action_id, chat_id, tool, args_json, status, result_json, created_at, resolved_at,"
@@ -4199,11 +4303,12 @@ class RunStore:
             created_at=str(row[7]),
             attachments=None if row[8] is None else list(json.loads(str(row[8]))),
             tool_call_id=None if row[9] is None else str(row[9]),
+            provenance=str(row[10]) if row[10] else _ROLE_AUTHOR.get(str(row[2]), "queen"),
         )
 
     _CHAT_MESSAGE_COLS = (
         "id, chat_id, role, content, thinking, tool_calls_json, tool_name,"
-        " created_at, attachments_json, tool_call_id"
+        " created_at, attachments_json, tool_call_id, provenance"
     )
 
     @_locked
