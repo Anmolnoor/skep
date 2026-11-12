@@ -357,3 +357,29 @@ def test_an_mcp_tool_the_operator_allowed_by_name_is_not_high(live: Any) -> None
         pattern="tracker:update_issue", scope="mcp", provenance="allow-always:op",
     )  # fmt: skip
     assert high_tier("call_mcp_tool", args, store=env.store) is None
+
+
+def test_an_old_database_gains_card_json_and_its_cards_read_as_unrecorded(
+    tmp_path: Any,
+) -> None:
+    """A database from before P4-2 (no card_json) opens and upgrades in
+    place; its cards read ``card=None`` (nothing recorded: HIGH is decided
+    live at confirm)."""
+    import sqlite3
+
+    db = tmp_path / "old.sqlite3"
+    store = RunStore(db)
+    chat = store.create_chat(title="t", model=None).chat_id
+    action_id = store.add_chat_action(chat, tool="set_policy", args={})
+    store.close()
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE chat_actions DROP COLUMN card_json")
+    reopened = RunStore(db)
+    try:
+        action = reopened.get_chat_action(action_id)
+        assert action is not None and action.card is None
+        assert action.fold_items() == [{"args": {}, "tool_call_id": None}]
+        assert reopened.fold_into_chat_action(action_id, args={"x": 1}, tool_call_id="c")
+        assert reopened.fold_into_chat_action("missing", args={}, tool_call_id=None) is False
+    finally:
+        reopened.close()
