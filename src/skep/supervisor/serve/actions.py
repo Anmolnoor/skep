@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, replace
@@ -56,6 +57,7 @@ from ..config import SupervisorConfig
 from ..contracts_io import read_event_log
 from ..ids import mint_uuid7
 from ..memory import MemoryError, MemoryProposal, MemorySource
+from ..netproxy import domain_allowed
 from ..policy_baseline import BASELINE_TAMPERED, NO_BASELINE_REASON, NoBaseline, status_line
 from ..policy_baseline import current_layer as current_baseline_layer
 from ..policy_baseline import layer_diff as baseline_layer_diff
@@ -3528,9 +3530,18 @@ def _deferred_asks(config: SupervisorConfig, task_id: str) -> Permissions | None
 
 
 def _asked(command: Sequence[str], permissions: Permissions | None) -> bool:
-    """Is ``command`` under one of the run's ``shell_ask`` prefixes?"""
+    """Is ``command`` under one of the run's ``shell_ask`` prefixes? Read as
+    the worker spells it: its capability layer runs (and cards) a ``python``
+    argv as its own interpreter (``_normalized_shell_argv``)."""
+
+    def spelled(argv: Sequence[str]) -> list[str]:
+        # ponytail: the worker is spawned with this interpreter; a worker on
+        # another one would card a path this does not map back.
+        return [sys.executable, *argv[1:]] if argv and argv[0] == "python" else list(argv)
+
     asks = [] if permissions is None else permissions.shell_ask
-    return any(list(command[: len(prefix)]) == prefix for prefix in asks)
+    held = spelled(command)
+    return any(held[: len(prefix)] == spelled(prefix) for prefix in asks)
 
 
 def _refuse_remembering_an_ask(
@@ -3545,7 +3556,8 @@ def _refuse_remembering_an_ask(
     grant for every run of the project (and the chain asks again anyway)."""
     permissions = _deferred_asks(config, task_id)
     if any(_asked(command, permissions) for command in commands) or (
-        permissions is not None and host and host in permissions.network_ask
+        # the worker's own matcher: case-insensitive, a trailing dot ignored
+        permissions is not None and host and domain_allowed(host, tuple(permissions.network_ask))
     ):
         raise HTTPException(
             status_code=409,

@@ -729,6 +729,27 @@ def test_an_ask_cannot_be_remembered_and_deny_keeps_it_refused(
         store.close()
 
 
+def test_the_supervisor_knows_an_ask_by_the_workers_own_spelling(
+    config: SupervisorConfig, task_payload: dict[str, Any]
+) -> None:
+    """The worker cards `python …` as `<its interpreter> …` and a URL's host
+    as written (`Example.COM.`): the session-tier skip and the 409 must
+    recognise both, or a plain approve reaches every repo's runs (B39) and
+    Allow & remember persists the ask."""
+    permissions = dict(task_payload["permissions"])
+    permissions.update(shell_ask=[["python", "-m", "pytest"]], network_ask=["example.com"])
+    task = {**task_payload, "task_id": "t-ask", "permissions": permissions}
+    (config.audit_dir / "t-ask").mkdir(parents=True)
+    (config.audit_dir / "t-ask" / "task.json").write_text(json.dumps(task))
+    held = actions._deferred_asks(config, "t-ask")
+    assert actions._asked([sys.executable, "-m", "pytest", "-q"], held)
+    for asked in ({"commands": [[sys.executable, "-m", "pytest", "-q"]]}, {"host": "Example.COM."}):
+        with pytest.raises(HTTPException) as refused:
+            actions._refuse_remembering_an_ask(config, "t-ask", **asked)
+        assert refused.value.status_code == 409
+    actions._refuse_remembering_an_ask(config, "t-ask", host="other.org")  # not an ask
+
+
 # --- B22: the proposal consults the chain ----------------------------------
 
 
