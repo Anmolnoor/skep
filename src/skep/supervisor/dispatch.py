@@ -399,6 +399,12 @@ def run_task(
             )
         }
     )
+    # ADR 0059 D3 (V7): a deferred ask exists only on a delegated dispatch —
+    # its one writer is the chain narrowing (``_within_delegation``), and a
+    # resume carries the delegation with it. Any other envelope naming one
+    # (a hand-edited task, a stray caller) loses it here.
+    if dispatch_decision is None or dispatch_decision.delegation is None:
+        permissions = permissions.model_copy(update={"network_ask": [], "shell_ask": []})
     # Only an EXTERNAL engine replaces the worker argv. "builtin" defers to
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.

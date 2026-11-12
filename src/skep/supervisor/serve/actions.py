@@ -3413,6 +3413,9 @@ def resume_crashed_run(
                 verdict="allow",
                 reason="dispatch.allow.resume_after_crash",
                 detail=f"operator-confirmed resume of {task_id} by {actor}",
+                # V7: the chain rides the resume, so its deferred asks (and
+                # the cards naming it) survive a crash too.
+                delegation=_delegation_of(original),
             ).with_project_context(original.project_context),
             ref=record.ref,
             resume_of=task_id,
@@ -3514,6 +3517,12 @@ def remember_commands_for_session(store: RunStore, commands: list[list[str]]) ->
     return added
 
 
+def _delegation_of(task: CodingWorkerTask) -> dict[str, Any] | None:
+    """The original dispatch's delegation record (R3), for a resume."""
+    delegation = getattr(task.dispatch_decision, "delegation", None)
+    return delegation if isinstance(delegation, dict) else None
+
+
 def resume_past_gate(
     store: RunStore,
     config: SupervisorConfig,
@@ -3544,7 +3553,7 @@ def resume_past_gate(
         raise HTTPException(status_code=409, detail="original task envelope is missing")
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
     permissions = original.permissions
-    delegation = getattr(original.dispatch_decision, "delegation", None)
+    delegation = _delegation_of(original)
     if shell_allowlist is not None and delegation:
         held = permissions.shell_allowlist
         shell_allowlist = [*held, *(list(c) for c in granted if list(c) not in held)]

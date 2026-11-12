@@ -125,7 +125,7 @@ rather than shipping.
 
 ## Worker Contract Stability
 
-The launch build ships worker contract 0.3.6. Check the exact package and
+The launch build ships worker contract 0.3.7. Check the exact package and
 contract versions with:
 
 ```sh
@@ -145,6 +145,17 @@ never emit — so the claude adapter's `>=0.1,<0.3` range still holds.
 Contract 0.2.2 (v13) added one optional, additive field — `memory` on the task
 envelope, a list of curated memory items the supervisor injects as *context, not
 authority*. Workers that ignore it behave exactly as before.
+
+Contract 0.3.7 (ADR 0059 D3, V7) adds two optional, additive fields on
+`permissions` — `network_ask` (bare hosts) and `shell_ask` (argv prefixes): the
+grants a delegated run's chain made an ask instead of dropping them. The builtin
+coding worker cards each one with the chain's name ("worker@builder asks
+network.connect X — delegated by queen@builder, which would itself ask"); the
+approval is approve-once for that run, and Allow & remember is refused for it.
+Neither field is egress. Only the supervisor fills them, and only when a human
+can answer the card; a task persisted before 0.3.7 has neither (= `[]`). A
+worker that ignores them treats the hosts and prefixes as absent — exactly the
+pre-0.3.7 drop.
 
 Contract 0.3.6 (ADR 0059 D3, V6a) adds one optional, additive field —
 `provider_hosts` on `permissions`: skep's own LLM endpoint(s) as `host:port`,
