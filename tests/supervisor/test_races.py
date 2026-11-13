@@ -1127,3 +1127,54 @@ def test_a_claim_owner_reads_the_same_under_another_time_zone(
     finally:
         alive.kill()
         alive.wait()
+
+
+def test_an_answer_that_meets_a_dead_claimers_gate_claim_releases_it_and_applies(
+    rig: Rig, repo: Any
+) -> None:
+    """D24: a CLI killed mid-resume left its gate claim 'applying', and every
+    later answer stalled on a 409 until serve restarted. The answer now
+    checks the claimer is gone (same pid + start time) and releases the
+    claim itself, then applies — an approve resumes, a deny denies."""
+    from skep.supervisor.serve import actions
+
+    run, approve_gate = _gated_run(rig, repo)
+    assert rig.store.claim_approval(approve_gate, owner=_dead_owner())
+    held = _HeldMutation()
+    held.release.set()
+    actions.pending_approval_or_409(rig.store, approve_gate)
+    resumed = actions.resume_past_gate(
+        rig.store, rig.holder.current, _runner(held), run, approve_gate, "operator"
+    )
+    assert held.calls == 1 and resumed
+    approval = rig.store.get_approval(approve_gate)
+    assert approval is not None and approval.status == "approved"
+
+    _run2, deny_gate = _gated_run(rig, repo)
+    assert rig.store.claim_approval(deny_gate, owner=_dead_owner())
+    actions.deny_approval(rig.store, deny_gate, "operator", None)
+    denied = rig.store.get_approval(deny_gate)
+    assert denied is not None and denied.status == "denied"
+
+
+def test_a_live_or_unknown_claimer_and_a_landing_claim_are_never_released(
+    rig: Rig, repo: Any, tmp_path: Any
+) -> None:
+    """D24: only a claimer shown to be gone loses its gate claim. A live one,
+    one whose owner was never recorded, and a landing (git may have half run)
+    keep theirs: the answer is still the 409."""
+    from skep.supervisor.serve import actions
+
+    _r1, live_gate = _gated_run(rig, repo)
+    assert rig.store.claim_approval(live_gate)  # this live process holds it
+    _r2, unknown_gate = _gated_run(rig, repo)
+    assert rig.store.claim_approval(unknown_gate, owner=None)
+    run = _landable_run(rig.store, repo, tmp_path)
+    landing = rig.store.enqueue_approval(str(run["task_id"]), action="apply_patch", reason="land")
+    assert rig.store.claim_approval(landing, owner=_dead_owner())
+    for review_id in (live_gate, unknown_gate, landing):
+        with pytest.raises(HTTPException) as refused:
+            actions.pending_approval_or_409(rig.store, review_id)
+        assert refused.value.status_code == 409
+        approval = rig.store.get_approval(review_id)
+        assert approval is not None and approval.status == "applying"

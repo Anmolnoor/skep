@@ -3109,6 +3109,7 @@ def open_pr_for_runs(
 
 
 def pending_approval_or_409(store: RunStore, review_id: str) -> dict[str, Any]:
+    store.release_dead_gate_claim(review_id)  # D24: a gone claimer's gate claim
     approval = store.get_approval(review_id)
     if approval is None:
         # v24-F3: the most common misuse is passing a TASK id here — teach the
