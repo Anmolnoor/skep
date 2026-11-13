@@ -665,13 +665,15 @@ def test_the_line_is_rendered_from_decide_for_the_role_and_the_home(
         "refused.",
         "start_process": "In this chat: a daemon no rule names: ask first.",
         "read_url": "In this chat: a page no rule names: ask first.",
-        "search_web": "In this chat: searches run.",
+        "search_web": "In this chat: searches run until this chat reads private data, then "
+        "ask first.",
         "call_mcp_tool": "In this chat: a tool no rule names: ask first if it acts, ask first if "
         "read-only.",
     }
     assistant = _lines(locked, "assistant")
     assert assistant["search_web"] == (
-        "In this chat: searches run; start_research is not available here."
+        "In this chat: searches run until this chat reads private data, then ask first; "
+        "start_research is not available here."
     )
     # a home with no baseline yet: every read asks — what the static text gets wrong
     fresh = build_config(tmp_path / "fresh", None)
@@ -903,3 +905,12 @@ def test_b20_a_harmless_exact_line_still_stores_and_matches_only_itself(
     for longer in ("ls -la\ngit push", "ls -la; curl https://x", "ls -la && rm -rf ~",
                    "ls -la | sh", "ls -la $(id)", "ls -la /"):  # fmt: skip
         assert not _shell(locked, longer, cwd=out).startswith("allow"), longer
+
+
+def test_the_search_line_says_taint_can_make_a_search_ask(locked: SupervisorConfig) -> None:
+    """Rendered with no chat, the line cannot see taint — a real-model run
+    told the operator search_web was "immediate, no card" in a chat whose
+    private bit made it ask. The line says when it does."""
+    line = _lines(locked, "builder")["search_web"]
+    assert line.startswith("In this chat: searches run")
+    assert "private data" in line

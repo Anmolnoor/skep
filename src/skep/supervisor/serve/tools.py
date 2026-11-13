@@ -2372,7 +2372,14 @@ def chat_policy_lines(holder: ConfigHolder, store: RunStore, role: Role | None) 
         f"git push and sudo {says('shell', 'run', 'git push')}",
         "start_process": f"a daemon no rule names: {says('shell', 'run_background', _SHELL_PROBE)}",
         "read_url": f"a page no rule names: {says('network', 'fetch', 'x.invalid')}{research}",
-        "search_web": f"searches {says('network', 'search', 'ddgs')}{research}",
+        # no chat: taint is invisible here, so the one "run" taint can move says so
+        "search_web": f"searches {says('network', 'search', 'ddgs')}"
+        + (
+            " until this chat reads private data, then ask first"
+            if says("network", "search", "ddgs") == "run"
+            else ""
+        )
+        + research,
         "call_mcp_tool": f"a tool no rule names: {says('mcp', 'call', 'probe:act')} if it acts, "
         f"{says('mcp', 'call', 'probe:list', read_only=True)} if read-only",
     }
