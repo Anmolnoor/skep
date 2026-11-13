@@ -1217,3 +1217,21 @@ def test_a_live_pid_whose_start_time_cannot_be_read_counts_as_alive(
     owner = json.dumps({"pid": os.getpid(), "started": "Thu Jan  1 00:00:00 1970"})
     monkeypatch.setattr(store_mod, "_process_started", lambda pid: None)
     assert store_mod.owner_alive(owner)
+
+
+def test_a_released_gate_claim_is_named_on_the_approval_record(rig: Rig, repo: Any) -> None:
+    """D24 follow-up (I8, I13): the release swapped 'applying' back to
+    'pending' and nothing recorded it — the verdict row read as if no other
+    process had ever held the gate. Its resolution note now says whose claim
+    was released and why."""
+    from skep.supervisor.serve import actions
+
+    _run, gate = _gated_run(rig, repo)
+    dead = _dead_owner()
+    assert rig.store.claim_approval(gate, owner=dead)
+    actions.deny_approval(rig.store, gate, "operator", "not now")
+    approval = rig.store.get_approval(gate)
+    assert approval is not None and approval.status == "denied"
+    pid = json.loads(dead)["pid"]
+    note = approval.resolution_note or ""
+    assert f"released the claim of pid {pid}" in note and note.endswith("not now"), note

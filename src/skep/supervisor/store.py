@@ -1653,10 +1653,16 @@ class RunStore:
         ).fetchone()
         if row is None or not row[0] or owner_alive(row[0]):
             return False
+        pid = json.loads(row[0]).get("pid")  # owner_alive parsed it: a dict
+        # I13: the verdict's note will say another process held this gate
         cursor = self._conn.execute(
-            "UPDATE approvals SET status = 'pending', claim_owner = NULL"
+            "UPDATE approvals SET status = 'pending', claim_owner = NULL, resolution_note = ?"
             " WHERE review_id = ? AND status = 'applying' AND claim_owner = ?",
-            (review_id, row[0]),
+            (
+                f"released the claim of pid {pid}: that process is no longer running",
+                review_id,
+                row[0],
+            ),
         )
         self._conn.commit()
         return cursor.rowcount == 1
@@ -1744,12 +1750,14 @@ class RunStore:
         claimer holds it there); everything else from 'pending'.
         """
         row = self._conn.execute(
-            "SELECT status FROM approvals WHERE review_id = ?", (review_id,)
+            "SELECT status, resolution_note FROM approvals WHERE review_id = ?", (review_id,)
         ).fetchone()
         if row is None:
             raise KeyError(f"no approval {review_id!r}")
         if row[0] != ("applying" if claimed else "pending"):
             raise ValueError(f"approval {review_id!r} already resolved as {row[0]!r}")
+        if row[1]:  # D24: a released dead claim's line leads the verdict's note
+            note = f"{row[1]}; {note}" if note else str(row[1])
         resolved_at = _now()
         self._conn.execute(
             "UPDATE approvals SET status = ?, resolved_at = ?, resolved_by = ?,"
