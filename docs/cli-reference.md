@@ -347,7 +347,7 @@ A role (first-run R1, ADR 0055) is a record — `name`, `policy_layer`,
 `builder`, `operator` and `assistant` ship bound 1:1 to the templates of the
 same name; custom roles live in `~/.skep/roles/<name>.json` and may bind to
 any template; one that names none acts as `assistant` until it gets one
-(ADR 0059 D14). The role's layer sits directly under the approved baseline and
+(ADR 0059 D14; `skep doctor` names it). The role's layer sits directly under the approved baseline and
 only tightens it: the stricter of the two verdicts stands, a role with no rule
 for an action has no opinion, and the floor is above every role. A chat runs
 in one role — its prompt, its voice (when the chat has no `/personality`) and

@@ -371,6 +371,31 @@ def test_doctor_says_a_chat_with_no_stored_role_runs_as_assistant(tmp_path: Path
     assert "skep role use builder --chat old-chat" in line and "/role builder" in line
 
 
+def test_doctor_names_each_custom_role_with_no_template_acting_as_assistant(
+    tmp_path: Path,
+) -> None:
+    """D14: a custom role that names no template acts as assistant — doctor
+    says so in one line naming each, silent when every role has one."""
+    from skep.status import build_status
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.roles import roles_dir
+
+    config = build_config(tmp_path, None)
+    roles_dir(config.home).mkdir(parents=True)
+    (roles_dir(config.home) / "ops.json").write_text('{"name": "ops", "policy_layer": "operator"}')
+    assert not [a for a in build_status(tmp_path)["advisories"] if "no template" in a]
+    for name in ("quiet", "calm"):
+        (roles_dir(config.home) / f"{name}.json").write_text(f'{{"name": "{name}"}}')
+    (line,) = [a for a in build_status(tmp_path)["advisories"] if "no template" in a]
+    assert line == (
+        "custom role(s) calm, quiet name no template and act as assistant until they get one "
+        "— set policy_layer (builder, operator or assistant) in "
+        f"{roles_dir(config.home)}/<name>.json"
+    )
+    (roles_dir(config.home) / "broken.json").write_text("{")  # refuses by name elsewhere
+    assert not [a for a in build_status(tmp_path)["advisories"] if "no template" in a]
+
+
 @pytest.mark.parametrize("face", ["turn", "btw", "continuation", "unattended", "channel"])
 def test_a_chat_whose_stored_role_is_null_is_an_assistant_chat_on_every_face(
     config: SupervisorConfig, face: str

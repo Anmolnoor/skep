@@ -55,6 +55,7 @@ def build_status(
             + _policy_v3_advisories(home)
             + _legacy_host_advisories(home)
             + _role_less_chat_advisories(home)
+            + _template_less_role_advisories(home)
             + _policy_migration_advisories(home)
             + _channel_user_advisories(home)
         )
@@ -90,6 +91,7 @@ def build_status(
         + _policy_v3_advisories(home)
         + _legacy_host_advisories(home)
         + _role_less_chat_advisories(home)
+        + _template_less_role_advisories(home)
         + _policy_migration_advisories(home)
         + _channel_user_advisories(home)
     )
@@ -428,6 +430,26 @@ def _role_less_chat_advisories(home: Path) -> list[str]:
         f"{len(role_less)} chat(s) have no stored role (made before every chat recorded one) "
         "and run as assistant: no dispatch, quick edit, run code, research or forge — to give "
         f"one back, `skep role use builder --chat {role_less[0].chat_id}` or /role builder"
+    ]
+
+
+def _template_less_role_advisories(home: Path) -> list[str]:
+    """ADR 0059 D14: a custom role that names no template acts as
+    ``assistant`` — named here, one line for all of them."""
+    from .supervisor.roles import all_roles, roles_dir
+
+    supervisor = home / "supervisor"
+    try:
+        roles = all_roles(supervisor)
+    except ValueError:
+        return []  # ponytail: a role file that does not load already refuses by name everywhere
+    names = sorted(name for name, role in roles.items() if role.policy_layer is None)
+    if not names:
+        return []
+    return [
+        f"custom role(s) {', '.join(names)} name no template and act as assistant until they "
+        f"get one — set policy_layer (builder, operator or assistant) in "
+        f"{roles_dir(supervisor)}/<name>.json"
     ]
 
 
