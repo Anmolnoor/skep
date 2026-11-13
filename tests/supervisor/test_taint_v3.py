@@ -90,8 +90,10 @@ def classify(key: str, old: str, new: str) -> str:
 # lanes x builder and operator x 3 grant states (the gated one never allowed;
 # assistant never dispatched, "-" is no-layer:dispatch); other 12 = remember
 # x 4 roles x 3 grant states. no-layer:dispatch = the five dispatch probes x
-# 3 grant states x 4 taint states (four probes on the assistant home, whose
-# gated repo already refused; none on the tampered one, which refused all).
+# 3 grant states x 4 taint states on every home: a layer-less role hides the
+# dispatchers (review follow-up), so the cells that carded where the run
+# policy cannot resolve — the assistant home's gated repo, all of the
+# tampered home — deny too, with the hidden-tool label.
 _SAME = {"dispatch": 24, "other": 12, "shell": 8}
 _UNTRUSTED = {f"untrusted:{lane}": n for lane, n in _SAME.items()} | {"untrusted:mcp": 8}
 _BOTH = {f"both:{lane}": n for lane, n in _SAME.items()}
@@ -114,10 +116,10 @@ EXPECTED_FLIPS: dict[str, dict[str, int]] = {
     # where the run policy cannot resolve, x 3 grant states x 4 taint states:
     # the gated repo here, all five on the tampered home.
     "assistant": _flips(fetch=11, both_mcp=23, search=12)
-    | {"no-layer:dispatch": 48, "hidden:dispatch": 12},
+    | {"no-layer:dispatch": 60, "hidden:dispatch": 12},
     "operator": _flips(fetch=17, both_mcp=11, search=12) | _NO_LAYER,
     # tampered: nothing allows but remember (an inert proposal, outside decide)
-    "tampered": {"untrusted:other": 12, "both:other": 12, "hidden:dispatch": 60},
+    "tampered": {"untrusted:other": 12, "both:other": 12, "hidden:dispatch": 60} | _NO_LAYER,
 }
 
 

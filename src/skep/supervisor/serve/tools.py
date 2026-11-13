@@ -2317,6 +2317,11 @@ def hidden_tools(role: Role | None) -> dict[str, str]:
 def _hidden_tools(role: Role) -> dict[str, str]:
     hidden = {}
     for tool, (scope, action, value) in TOOL_SCOPES.items():
+        if value is _workspace and role.layer() is None:
+            # decision #7: a hop whose role has no rule delegates nothing — the
+            # chain refuses every worker write, so no dispatcher can succeed.
+            hidden[tool] = f"delegation:queen@{role.name}/unset"
+            continue
         constant = value({}) if value in (_workspace, _ddgs) else None
         hit = role_denies_every(role, scope, action, constant)
         if hit is not None:
@@ -2367,7 +2372,14 @@ def chat_policy_lines(holder: ConfigHolder, store: RunStore, role: Role | None) 
         f"git push and sudo {says('shell', 'run', 'git push')}",
         "start_process": f"a daemon no rule names: {says('shell', 'run_background', _SHELL_PROBE)}",
         "read_url": f"a page no rule names: {says('network', 'fetch', 'x.invalid')}{research}",
-        "search_web": f"searches {says('network', 'search', 'ddgs')}{research}",
+        # no chat: taint is invisible here, so the one "run" taint can move says so
+        "search_web": f"searches {says('network', 'search', 'ddgs')}"
+        + (
+            " until this chat reads private data, then ask first"
+            if says("network", "search", "ddgs") == "run"
+            else ""
+        )
+        + research,
         "call_mcp_tool": f"a tool no rule names: {says('mcp', 'call', 'probe:act')} if it acts, "
         f"{says('mcp', 'call', 'probe:list', read_only=True)} if read-only",
     }
@@ -3046,6 +3058,12 @@ def queen_shell_decision(
             if via_cwd
             else f"the command reaches into registered repo {target!r} (a path, cd, or git -C)"
         )
+        # P3-6: never point a chat at a dispatcher its role hides
+        change = (
+            "this chat's role cannot change a repo (the operator can switch it with /role builder)"
+            if "dispatch_run" in hidden_tools(role)
+            else "quick_edit for one file, dispatch_run for more"
+        )
         if background:
             return AutonomyDecision(
                 verdict="deny",
@@ -3057,7 +3075,7 @@ def queen_shell_decision(
                 detail=(
                     f"{how} — daemons do not run in checkouts (a background process "
                     "there could modify files with no patch card, forever). Run it from "
-                    "a non-repo directory, or use dispatch_run for repo work."
+                    f"a non-repo directory. To change the repo: {change}."
                 ),
                 decided_by="queen-shell-guard",
             )
@@ -3086,7 +3104,7 @@ def queen_shell_decision(
                 f"{how} — a shell command there can modify files with no patch card, "
                 "so it refuses by default. To look: repo_state, search_files, "
                 "read_file, git_log, git_diff run in-turn with no card. To change "
-                "something: quick_edit for one file, dispatch_run for more. Only to "
+                f"something: {change}. Only to "
                 "open repo shells deliberately: set_operator_policy scope='shell' "
                 "action='run_repo' with the exact command line — a standing rule, "
                 "not a one-off."
@@ -5852,6 +5870,12 @@ def _mutation_execution_decision(
         return fetch_grant_decision(store, holder, host, role=role, chat_id=chat_id, url=url)
     if name != "dispatch_run":
         return None
+    if not str(args.get("repo") or "").strip():
+        return AutonomyDecision(
+            verdict="deny",
+            reason="dispatch.deny.no_repo",
+            detail="dispatch_run needs repo: a registered repo slug or host path (list_repos)",
+        )
     return actions.dispatch_run_decision(
         holder,
         store,
