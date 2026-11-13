@@ -69,6 +69,7 @@ from .policy_schema import (
     operator_document_from_settings,
     rule_matches,
     shell_segments,
+    shell_tokens,
     specificity,
 )
 from .policy_schema import Verdict as VerdictName
@@ -619,7 +620,30 @@ def _unlocked(stack: Stack, req: Request, verdict: Verdict) -> bool:
             hit = _hit(scopes, scope, action, part)
             if hit is not None and _binding(hit.verdict, hit.pattern):
                 return False
+            if scope == "shell" and _widens(scopes, action, part):
+                return False
     return True
+
+
+def _widens(scopes: dict[str, ResolvedScopePolicy], action: str, part: str) -> bool:
+    """The auto-answer grants ``part`` as an argv PREFIX (the worker
+    contract's matcher), so ``make`` would also run ``make deploy`` and
+    ``env`` / ``timeout 5`` would launch ``curl x``. True when a deny or a
+    named ask binds a line that grant covers: the rule's own words extend
+    ``part``, or ``part`` launches them."""
+    policy = scopes.get("shell")
+    got = shell_tokens(part)
+    for rule in policy.rules if policy else ():
+        if not (
+            _binding(rule.verdict, rule.pattern)
+            and action_binds("shell", rule.verdict, rule.action, action, rule.pattern)
+        ):
+            continue
+        if shell_tokens(rule.pattern)[: len(got)] == got or rule_matches(
+            rule, "shell", f"{part} {rule.pattern}"
+        ):
+            return True
+    return False
 
 
 def decide(

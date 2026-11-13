@@ -327,6 +327,12 @@ UNLOCKED_CELLS = [
     ("network", "connect", "evil.example", "require_approval", "default/unmatched"),
     ("shell", "run", "make deploy", "require_approval", "default/unmatched"),
     ("shell", "run", "rm -rf build && make deploy", "require_approval", "default/unmatched"),
+    # the auto-answer grants an argv PREFIX: `make` would cover `make deploy`,
+    # `env` / `timeout 5` would launch `curl` — each a line the baseline names
+    ("shell", "run", "make", "require_approval", "default/unmatched"),
+    ("shell", "run", "env", "require_approval", "default/unmatched"),
+    ("shell", "run", "timeout 5", "require_approval", "default/unmatched"),
+    ("shell", "run", "make lint", "allow", "unlocked:app/zero-ask"),
     ("shell", "run", "echo $(cat x)", "require_approval", "default/unmatched"),
     ("shell", "run", "sleep 9 &", "require_approval", "default/unmatched"),
     ("filesystem", "write", "/etc/x", None, None),  # not the layer's: as before
