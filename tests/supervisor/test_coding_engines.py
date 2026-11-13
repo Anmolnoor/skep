@@ -421,8 +421,13 @@ def _capture_spawn(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     def fake_spawn(config: object, task: object, *_: object, **kw: object) -> object:
         env = kw["extra_env"]
         assert isinstance(env, dict)
-        logins = sorted(Path(task.workspace, ".toolchain").rglob("auth.json"))  # type: ignore[attr-defined]
+        links = sorted(Path(task.workspace, ".toolchain").rglob("auth.json"))  # type: ignore[attr-defined]
+        # ES-F122 follow-up: the worktree holds only a link; the copy itself
+        # sits in the run's audit dir, bound back into this run's sandbox only.
+        logins = [link.resolve() for link in links]
+        seen["links"] = links
         seen["logins"] = logins
+        seen["unmasked"] = list(kw.get("unmasked") or ())  # type: ignore[call-overload]
         seen["provider_hosts"] = list(task.permissions.provider_hosts)  # type: ignore[attr-defined]
         if logins:
             seen["mode"] = stat.S_IMODE(logins[0].stat().st_mode)
@@ -465,9 +470,12 @@ def test_an_opted_in_codex_run_gets_its_own_refresh_free_login_until_it_ends(
     _chatgpt_login_project(config, repo, monkeypatch)
     seen = _capture_spawn(monkeypatch)
     outcome = run_task(repo, "add a docstring", config=config, coding_engine="codex")
-    logins = seen["logins"]
+    logins, links = seen["logins"], seen["links"]
     assert isinstance(logins, list) and len(logins) == 1
-    assert str(logins[0].parent) == seen["codex_home"]
+    assert isinstance(links, list) and str(links[0].parent) == seen["codex_home"]
+    audit = (config.audit_dir / outcome.record.task_id).resolve()
+    assert logins[0].parent == audit, "the copy must live outside the worktree"
+    assert seen["unmasked"] == [logins[0]], "only this run's sandbox gets the copy back"
     assert seen["mode"] == 0o400
     doc = seen["doc"]
     assert isinstance(doc, dict) and doc["auth_mode"] == "chatgptAuthTokens"
@@ -498,7 +506,7 @@ def test_the_chatgpt_login_never_reaches_another_engine(
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-value")
     seen = _capture_spawn(monkeypatch)
     run_task(repo, "add a docstring", config=config, coding_engine="claude_code")
-    assert seen["logins"] == []
+    assert seen["logins"] == [] and seen["unmasked"] == []
     assert seen["provider_hosts"] == ["api.anthropic.com:443"]
 
 
@@ -511,7 +519,7 @@ def test_an_api_key_still_wins_over_the_chatgpt_login(
     monkeypatch.setenv("OPENAI_API_KEY", "test-value")
     seen = _capture_spawn(monkeypatch)
     run_task(repo, "add a docstring", config=config, coding_engine="codex")
-    assert seen["logins"] == []
+    assert seen["logins"] == [] and seen["unmasked"] == []
     assert seen["provider_hosts"] == ["api.openai.com:443"]
 
 

@@ -7,11 +7,14 @@ design and its failure modes are in ``docs/codex-chatgpt-login.md``. In short:
 
 - the operator's ``$CODEX_HOME/auth.json`` (default ``~/.codex``) is only ever
   READ here, and stays masked from every worker (W33);
-- the run gets a NEW file in its own redirected ``CODEX_HOME``, in the Codex
-  CLI's own externally-managed-token mode (``chatgptAuthTokens``): the access
-  token and account id, an EMPTY refresh token, read-only. Codex never
-  refreshes that mode, so a run can neither rotate the operator's login nor
-  write anything back;
+- the run gets a NEW file in the Codex CLI's own externally-managed-token
+  mode (``chatgptAuthTokens``): the access token and account id, an EMPTY
+  refresh token, read-only. Codex never refreshes that mode, so a run can
+  neither rotate the operator's login nor write anything back. The file sits
+  in the run's audit dir, which every worker's sandbox masks; the run's own
+  ``CODEX_HOME/auth.json`` is a link to it and only that run's sandbox binds
+  it back (``sandbox.write_profile(unmasked=)``) — in the worktree, any other
+  sandboxed run could read it;
 - the access token must outlive the run's budget, or the dispatch refuses and
   says how to refresh it on the host (the Codex CLI does that itself).
 
@@ -129,16 +132,16 @@ def run_auth_source(engine: str, policy: dict[str, Any], *, min_seconds: float) 
     return AUTH_SOURCE
 
 
-def write_run_login(codex_home: Path, *, min_seconds: float) -> Path:
-    """Write the run's own login into ``codex_home`` (the run's redirected
-    ``CODEX_HOME``, never the real one): 0700 dir, 0400 file, access token
-    only. Raises ValueError naming the problem; writes nothing then."""
+def write_run_login(codex_home: Path, path: Path, *, min_seconds: float) -> Path:
+    """Write the run's own login to ``path`` (0400, access token only, in a
+    directory every other run's sandbox masks) and link ``codex_home/auth.json``
+    (the run's redirected ``CODEX_HOME``, 0700, never the real one) to it.
+    Returns ``path``. Raises ValueError naming the problem; writes nothing then."""
     status, access, account = _load(min_seconds)
     if status.problem is not None:
         raise ValueError(status.problem)
     codex_home.mkdir(parents=True, exist_ok=True)
     codex_home.chmod(0o700)
-    path = codex_home / "auth.json"
     path.unlink(missing_ok=True)
     # Codex's own constructor for external tokens (AuthDotJson::
     # from_external_access_token) derives the id-token claims from the access
@@ -157,4 +160,7 @@ def write_run_login(codex_home: Path, *, min_seconds: float) -> Path:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(doc, handle)
+    link = codex_home / "auth.json"
+    link.unlink(missing_ok=True)
+    link.symlink_to(path)  # Codex follows it (auth/storage_file.rs resolve_auth_file)
     return path

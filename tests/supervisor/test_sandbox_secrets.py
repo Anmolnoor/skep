@@ -593,3 +593,78 @@ def test_rancher_desktops_socket_is_masked_but_its_tools_stay_on_path(
     masked = set(sandbox.secret_paths(skep_home))
     assert home / ".rd" / "docker.sock" in masked
     assert not {home / ".rd", home / ".rd" / "bin"} & masked
+
+
+def test_a_runs_own_secret_is_bound_back_after_every_mask(fake_homes: tuple[Path, Path]) -> None:
+    """ES-F122 follow-up: a file inside a masked dir (a codex run's login
+    copy under the audit dir) is readable by its own run only — bound back
+    AFTER the masks on every backend, so the mask still hides its siblings."""
+    _home, skep_home = fake_homes
+    sup = skep_home / "supervisor"
+    (sup / "audit" / "t-own").mkdir(parents=True)
+    own = sup / "audit" / "t-own" / "codex-login.json"
+    masked = sandbox.secret_paths(skep_home)
+    audit = str(sup / "audit")
+    args = sandbox._bubblewrap_args(
+        writable_roots=[Path("/srv/ws")],
+        network=sandbox.NetworkPolicy(allow=("chatgpt.com:443",)),
+        proxy_port=40000,
+        unix_socket_path="/tmp/p.sock",
+        read_denied=masked,
+        unmasked=[own],
+    )
+    at = args.index(str(own))
+    assert args[at - 1 : at + 2] == ["--ro-bind", str(own), str(own)]
+    assert at > args.index(audit) and at < args.index("--")  # before the netshim argv
+    pod = sandbox._podman_args(
+        writable_roots=[Path("/srv/ws")],
+        network=sandbox.DENY_ALL_NETWORK,
+        rootfs=Path("/r"),
+        read_denied=masked,
+        unmasked=[own],
+    )
+    assert pod.index(f"{own}:{own}:ro") > pod.index(f"{audit}:notmpcopyup")
+    lines = sandbox.build_profile(
+        writable_roots=[Path("/w")], read_denied=masked, skep_home=skep_home, unmasked=[own]
+    ).splitlines()
+    allow = f'(allow file-read* (literal "{own}"))'
+    assert lines.index(allow) > lines.index(f'(deny file-read* (subpath "{audit}"))')
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or sandbox.availability().backend != "bubblewrap",
+    reason="real bubblewrap proof (runs where bwrap is the backend)",
+)
+def test_a_real_worker_reads_its_own_login_copy_and_never_another_runs(
+    fake_homes: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """ES-F122 follow-up: before, the copy sat in the run's worktree and any
+    other sandboxed run (any engine, any project) could read it."""
+    _home, skep_home = fake_homes
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    audit = skep_home / "supervisor" / "audit"
+    copies = {}
+    for task in ("t-own", "t-other"):
+        (audit / task).mkdir(parents=True)
+        copies[task] = audit / task / "codex-login.json"
+        copies[task].write_text(f"CANARY {task}\n", encoding="utf-8")
+        copies[task].chmod(0o400)
+    profile = sandbox.write_profile(
+        tmp_path / "p.profile",
+        workspace=workspace,
+        skep_home=skep_home,
+        unmasked=[copies["t-own"]],
+    )
+    proc = subprocess.run(
+        sandbox.wrap_command(
+            [sys.executable, "-c", _READER, str(copies["t-own"]), str(copies["t-other"])], profile
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "CANARY t-own" in proc.stdout
+    assert "CANARY t-other" not in proc.stdout

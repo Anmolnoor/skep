@@ -788,14 +788,17 @@ def run_task(
         cache_root = project_cache_root(run_store, config, repo)
         routed_env.update(_toolchain_env(workspace, engine, cache_root))
         if codex_auth is not None:
-            # ES-F122 (D20): the run's own login copy, in its own CODEX_HOME —
-            # removed in the finally below however the run ends. The record
-            # names the source, never a value (I8).
+            # ES-F122 (D20): the run's own login copy — in its audit dir, which
+            # every other run's sandbox masks, linked from its CODEX_HOME and
+            # bound back for this run only; removed in the finally below
+            # however the run ends. The record names the source, never a
+            # value (I8).
             from .codex_login import write_run_login
 
             try:
                 run_login = write_run_login(
                     Path(routed_env["CODEX_HOME"]),
+                    audit_task_dir / "codex-login.json",
                     min_seconds=task.budget.wall_clock_seconds,
                 )
             except (ValueError, OSError) as exc:
@@ -828,6 +831,7 @@ def run_task(
                 # must outlive the worktree), so the wall needs a door for it.
                 extra_writable=(cache_root,),
                 write_denied=() if git_pin is None else (git_pin,),
+                unmasked=() if run_login is None else (run_login,),
             )
         except SandboxUnavailableError as exc:
             # ES-F1 backstop: the up-front check passed but the backend the

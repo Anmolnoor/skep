@@ -179,6 +179,7 @@ def spawn_worker(
     worker_argv: tuple[str, ...] | None = None,
     extra_writable: Iterable[Path] = (),
     write_denied: Iterable[Path] = (),
+    unmasked: Iterable[Path] = (),
 ) -> subprocess.Popen[bytes]:
     """Start the headless worker in its own session (so the whole tree is killable).
 
@@ -192,6 +193,7 @@ def spawn_worker(
 
     ``write_denied`` (W31): files inside a writable root the sandbox keeps
     read-only — the run's git protocol pin (``worktree.pin_git_protocols``).
+    ``unmasked``: masked files only this run may read (``sandbox.write_profile``).
     """
     argv = [
         # D2: route by caste. v90-F1: a coding run may override this with a
@@ -245,6 +247,7 @@ def spawn_worker(
             worker_llm_key=worker_argv is None
             and getattr(CASTES.get(task.worker_kind), "needs_provider", True),
             write_denied=write_denied,
+            unmasked=unmasked,
         )
         argv = sandbox.wrap_command(argv, profile_path, backend=backend)
     env = build_worker_env(task.permissions.env_allowlist, baseline=config.env_baseline)

@@ -115,8 +115,14 @@ def test_the_run_copy_holds_an_access_token_only_read_only(
     real = write_fake_login(codex_home)
     before = real.read_bytes()
     run_home = tmp_path / "ws" / ".toolchain" / "codex"
-    path = codex_login.write_run_login(run_home, min_seconds=600)
-    assert path == run_home / "auth.json"
+    (tmp_path / "audit").mkdir()
+    login = tmp_path / "audit" / "codex-login.json"
+    path = codex_login.write_run_login(run_home, login, min_seconds=600)
+    # The copy lives OUTSIDE the worktree (a dir every other run's sandbox
+    # masks); the run's CODEX_HOME holds only a link to it.
+    assert path == login
+    assert (run_home / "auth.json").is_symlink()
+    assert (run_home / "auth.json").resolve() == login.resolve()
     assert stat.S_IMODE(run_home.stat().st_mode) == 0o700
     assert stat.S_IMODE(path.stat().st_mode) == 0o400
     doc = json.loads(path.read_text(encoding="utf-8"))
@@ -133,8 +139,9 @@ def test_an_unusable_login_writes_nothing(codex_home: Path, tmp_path: Path) -> N
     write_fake_login(codex_home, expires_in=60)
     run_home = tmp_path / "codex"
     with pytest.raises(ValueError, match="expires"):
-        codex_login.write_run_login(run_home, min_seconds=600)
+        codex_login.write_run_login(run_home, tmp_path / "codex-login.json", min_seconds=600)
     assert not (run_home / "auth.json").exists()
+    assert not (tmp_path / "codex-login.json").exists()
 
 
 def test_the_opt_in_is_a_bool_project_key_off_by_default() -> None:

@@ -66,12 +66,17 @@ The refresh token never leaves the host.
 1. The supervisor reads the operator's `$CODEX_HOME/auth.json` (default
    `~/.codex`). It never writes it.
 2. For a codex run that opted in and has no `OPENAI_API_KEY`, it writes
-   a **new** file into that run's own redirected `CODEX_HOME`
-   (`<workspace>/.toolchain/codex`, v106-F1), in Codex's
-   `chatgptAuthTokens` mode: the access token, the account id, an empty
-   refresh token. The directory is 0700 and the file 0400. Codex never
+   a **new** file in Codex's `chatgptAuthTokens` mode: the access token,
+   the account id, an empty refresh token, mode 0400. Codex never
    refreshes this mode, so nothing a run does can rotate or revoke the
-   operator's login.
+   operator's login. The file lives in the run's audit dir
+   (`<home>/supervisor/audit/<task>/codex-login.json`), which every
+   worker's sandbox masks; the run's redirected `CODEX_HOME`
+   (`<workspace>/.toolchain/codex`, 0700, v106-F1) holds only an
+   `auth.json` link to it, and that one run's sandbox binds the file back
+   read-only after the masks. A copy inside the worktree would be
+   readable by every other sandboxed run on the machine, whatever its
+   engine or project: worktrees are not masked.
 3. The access token must outlive the run's wall-clock budget plus 5
    minutes, or the dispatch refuses before any run record exists and
    says how to refresh on the host (use `codex` once, or `codex login`;
@@ -80,10 +85,11 @@ The refresh token never leaves the host.
    `api.openai.com:443`: the one host this mode talks to.
 5. The file is deleted when the run ends (the `finally` of
    `run_task`), including runs whose worktree is kept for a retry.
-   `.toolchain/` is excluded from every patch.
+   `.toolchain/` (and so the link) is excluded from every patch.
 6. The real `~/.codex/auth.json` stays masked from every worker (W33 is
-   unchanged). The builtin worker, `claude_code`, `aider` and `pi` never
-   get the run file: it is written only for the `codex` engine.
+   unchanged). The builtin worker, `claude_code`, `aider`, `pi` and every
+   other codex run never get the run file: it is written only for an
+   opted-in `codex` run and only that run's sandbox can read it.
 
 ## Opting in
 
@@ -116,9 +122,9 @@ no key is present.
 - **The token is too close to expiry at dispatch**: refused up front,
   with the refresh hint.
 - **The supervisor dies mid-run**: the `finally` does not run and the
-  0400 file stays in the worktree until the orphan sweep removes the
-  tree. It holds an access token only (at most ~10 days of life), never
-  the refresh token.
+  0400 file stays in the run's audit dir, which no worker can read,
+  until the operator removes it. It holds an access token only (at most
+  ~10 days of life), never the refresh token.
 - **The run reads its own token**: the codex process and the commands it
   runs can read the file, exactly as they can read `OPENAI_API_KEY` in
   the key mode. The network pin limits where it can be sent to
