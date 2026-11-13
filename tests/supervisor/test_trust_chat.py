@@ -325,6 +325,8 @@ def test_trust_covers_the_finish_notice_of_runs_in_flight(rig: Rig) -> None:
     chat, _hook, _shell = _tainted_chat(rig)
     flying = _run_in(rig, chat, "running")
     done = _run_in(rig, chat, "completed")
+    gated = _run_in(rig, chat, "running")
+    rig.store.transition(gated, "pending_approval")  # paused at a gate: finished
     other_chat = rig.client.post("/api/chats", json={}).json()["chat_id"]
     elsewhere = _run_in(rig, other_chat, "running")
     body = rig.client.post(f"/api/chats/{chat}/trust", json={"bits": []}).json()
@@ -343,9 +345,9 @@ def test_trust_covers_the_finish_notice_of_runs_in_flight(rig: Rig) -> None:
     assert f'<untrusted source=\\"worker:{flying}\\">' in json.dumps(rig.ollama.chat_bodies()[-1])
     assert rig.store.get_chat_taint(chat).bits() == []
 
-    # anything else still sets the bit: the finished run, another chat's run,
-    # a run dispatched after the /trust
-    for task in (done, elsewhere, _run_in(rig, chat, "running")):
+    # anything else still sets the bit: the finished run, the gated run,
+    # another chat's run, a run dispatched after the /trust
+    for task in (done, gated, elsewhere, _run_in(rig, chat, "running")):
         row = rig.store.add_chat_message(
             chat, role="user", content="x", provenance=f"worker:{task}"
         )
