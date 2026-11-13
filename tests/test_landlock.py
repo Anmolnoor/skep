@@ -45,6 +45,9 @@ def libc(monkeypatch: pytest.MonkeyPatch) -> FakeLibc:
     monkeypatch.setattr(landlock, "_libc", lambda: fake)
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "uname", lambda: _Uname("Linux"))
+    # O_PATH is Linux-only; on macOS a plain read-only open of the root
+    # stands in (the syscalls that would use it are faked above).
+    monkeypatch.setattr(os, "O_PATH", getattr(os, "O_PATH", 0), raising=False)
     return fake
 
 
