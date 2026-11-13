@@ -48,7 +48,14 @@ if TYPE_CHECKING:
 from ..policy_v3 import UNATTENDED_CHATS
 from ..policy_write import PolicyWriteRejected
 from . import actions
-from .cards import card_summary, fold_subject, headline, high_tier, recorded_card
+from .cards import (
+    card_summary,
+    fold_subject,
+    headline,
+    high_tier,
+    recorded_card,
+    unreadable_under_deny,
+)
 from .fileio import resolves_elsewhere
 from .jobs import Dispatcher
 from .llm import (
@@ -2713,6 +2720,10 @@ class ChatEngine:
             ),
             None,
         )
+        if refused is None and keep != "once" and unreadable_under_deny(action.card):
+            refused = (
+                "skep cannot read this line and a deny or named ask exists, so it is once only"
+            )
         if refused is not None and not named:
             # The write-time check narrowed this card to "once" and the client
             # named no keep: a plain Approve runs once, it is not a 400.

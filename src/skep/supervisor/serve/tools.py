@@ -3061,7 +3061,7 @@ def queen_shell_decision(
     grant never covers it (review item 3); repo cwds refuse flat (daemons do
     not belong in checkouts). ``chat_id``: the chat asking — its own session
     grants apply, no other chat's (P3-4, B39)."""
-    from ..policy_v3 import Request, floor_verdict, queen_decide
+    from ..policy_v3 import UNREADABLE_NOTE, Request, floor_verdict, queen_decide
 
     if not command.strip():
         return None
@@ -3169,8 +3169,9 @@ def queen_shell_decision(
         )
     if verdict.layer == "taint":
         return taint_decision(verdict)
-    if verdict.note is not None and verdict.layer == "default":
-        # L13: an unreadable line under a deny — the card's risk line says so
+    if (verdict.note or "").startswith(UNREADABLE_NOTE):
+        # L13, D12: an unreadable line under a deny — the card's risk line
+        # says so, whichever layer's ask labels it (a role's `*` ask too)
         return AutonomyDecision(
             verdict="require_approval",
             reason="shell.require_approval.unreadable_under_deny",

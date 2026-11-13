@@ -84,6 +84,7 @@ from .roles import (
 from .secret_floor import secret_floor_reason, shell_secret_floor_reason
 from .shell_prefixes import (
     command_line_segments,
+    hides_commands,
     is_branch_switch_command,
     is_history_rewrite_command,
     is_remote_git_command,
@@ -524,6 +525,9 @@ def _match(
     parts = [value]
     background = False
     found: list[Verdict] = []
+    if scope == "shell" and hides_commands(value) and _binding_rules(scopes, action):
+        # D12: a shell fed on stdin, inline interpreter code — unreadable
+        return _opaque(scopes, req, unmatched, url, hidden=True)
     if scope == "shell" and action == "run":
         segments = shell_segments(value)
         background = backgrounds(value)
@@ -547,14 +551,35 @@ def _match(
     )
 
 
+UNREADABLE_NOTE = "skep cannot read which command this line runs"
+
+
+def _binding_rules(scopes: dict[str, ResolvedScopePolicy], action: str) -> list[ResolvedRule]:
+    """The shell denies and named asks that bind ``action`` — the rules an
+    unreadable line may be getting around."""
+    policy = scopes.get("shell")
+    return [
+        rule
+        for rule in (policy.rules if policy else ())
+        if _binding(rule.verdict, rule.pattern)
+        and action_binds("shell", rule.verdict, rule.action, action, rule.pattern)
+    ]
+
+
 def _opaque(
-    scopes: dict[str, ResolvedScopePolicy], req: Request, unmatched: Verdict, url: str | None
+    scopes: dict[str, ResolvedScopePolicy],
+    req: Request,
+    unmatched: Verdict,
+    url: str | None,
+    *,
+    hidden: bool = False,
 ) -> Verdict:
     """L13: a line the segment reader cannot split (``sh -c '…'``, ``$(…)``,
     ``$P x``) is allowed by nothing, but a deny or named ask still reads it
-    the way the floor does (``shell_deny_binds`` unwraps ``-c`` payloads), so
-    ``sh -c 'curl x'`` is denied by a curl deny. What even that cannot read
-    asks, and says which denies it may be getting around."""
+    the way the floor does (``shell_deny_binds`` unwraps ``-c`` and ``eval``
+    payloads), so ``sh -c 'curl x'`` is denied by a curl deny. What even that
+    cannot read (``hidden``, D12: a shell fed on stdin, inline interpreter
+    code) asks, and says which denies or named asks it may be getting around."""
     scope, action, value = req
     hit = _hit(scopes, scope, action, value, url)
     if hit is not None and _binding(hit.verdict, hit.pattern):
@@ -562,24 +587,20 @@ def _opaque(
         bound = Verdict(hit.verdict, layer, hit.rule_id, f"{layer}/{hit.rule_id}", unmatched.source)
         return max((bound, unmatched), key=lambda v: _VERDICT_RANK[v.verdict])
     argvs = command_line_segments(value, exact=True)
-    if argvs is not None and not any(a and (a[0] == "eval" or "$" in a[0]) for a in argvs):
+    if not hidden and argvs is not None and not any(a and "$" in a[0] for a in argvs):
         return unmatched  # every program it runs was read, and no deny named one
-    policy = scopes.get(scope)
-    denies = sorted(
-        {
-            rule.pattern
-            for rule in (policy.rules if policy else ())
-            if rule.verdict == "deny" and action_binds(scope, "deny", rule.action, action)
-        }
-    )
-    if not denies:
+    rules = _binding_rules(scopes, action)
+    if not rules:
         return unmatched
-    named = ", ".join(f"`{pattern}`" for pattern in denies[:3])
+    denies = sorted({rule.pattern for rule in rules if rule.verdict == "deny"})
+    kind, patterns = ("deny", denies) if denies else ("ask", sorted({r.pattern for r in rules}))
+    named = ", ".join(f"`{pattern}`" for pattern in patterns[:3])
     return replace(
         unmatched,
         note=(
-            f"skep cannot read which command this line runs, and a deny on {named} exists "
-            "that it may be getting around; approve once only if you can see it does not"
+            f"{UNREADABLE_NOTE}, and {'a' if denies else 'an'} "
+            f"{kind} on {named} exists that it may be getting around; approve once only "
+            "if you can see it does not"
         ),
     )
 

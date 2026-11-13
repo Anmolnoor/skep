@@ -827,6 +827,12 @@ def _unwrap_argv(
         if nested is None:
             return None
         result.extend(nested)
+    if program == "eval" and len(tokens) > 1:
+        # D12: `eval curl x` runs the line its words join into, as `sh -c` does
+        nested = command_line_segments(" ".join(tokens[1:]), _depth + 1, exact=exact)
+        if nested is None:
+            return None
+        result.extend(nested)
     if program in _WRAPPER_SHELLS:
         payload: str | None = None
         for index, token in enumerate(tokens[1:], start=1):
@@ -848,6 +854,32 @@ def _unwrap_argv(
                 return None
             result.extend(nested)
     return result
+
+
+def _stdin_shell(argv: Sequence[str]) -> bool:
+    """D12: a wrapper shell reading its commands from stdin — no ``-c`` and no
+    script operand (``… | sh``, ``sh <<< …``, a here-doc, ``sh -``), or ``-s``."""
+    if program_name(argv[0]) not in _WRAPPER_SHELLS:
+        return False
+    for token in argv[1:]:
+        if not token.startswith("-") or token == "--":
+            return False  # `sh script.sh`: a file, not stdin
+        short = "" if token.startswith("--") else token[1:]
+        if "s" in short:
+            return True
+        if "c" in short:
+            return False  # a -c payload: the floor reads it
+    return True
+
+
+def hides_commands(command: str) -> bool:
+    """D12: does any argv the floor reads in this line hand a shell its
+    commands on stdin, or run inline interpreter code (``python3 -c``,
+    ``node -e``)? Neither names a program a rule can read."""
+    return any(
+        argv and (_stdin_shell(argv) or _inline_code(argv))
+        for argv in command_line_segments(command, exact=True) or []
+    )
 
 
 def sh_command_list(line: str) -> str:

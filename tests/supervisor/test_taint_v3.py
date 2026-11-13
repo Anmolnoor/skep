@@ -966,9 +966,9 @@ def test_w7_a_private_chats_network_line_offers_no_session_keep() -> None:
     ("line", "expected"),
     [("sendmail me@x.example < notes.txt", "taint/private-egress"),
      ("rclone copy notes.txt remote:bucket", "taint/private-egress"),
-     ("python3 -c 'import urllib.request'", "taint/private-egress"),
-     ("perl -pe 's/a/b/' notes.txt", "taint/private-egress"),
-     ("node -e 'fetch(1)'", "taint/private-egress"),
+     ("python3 -c 'import urllib.request'", "unreadable"),
+     ("perl -pe 's/a/b/' notes.txt", "unreadable"),
+     ("node -e 'fetch(1)'", "unreadable"),
      ("python3 build.py -c fast", "allow"),
      ("perl tools/gen.pl", "allow")],
 )  # fmt: skip
@@ -978,7 +978,12 @@ def test_w7_send_only_programs_and_inline_code_ask_in_a_private_chat(
     """ES-F51 review: mail, file-sync and socket programs send data and were
     not on the list; inline interpreter code (`python3 -c`, `perl -pe`) cannot
     be read, so a granted one ran with no card in a private chat. They ask
-    there; a script an interpreter runs, and its own flags, do not."""
+    there; a script an interpreter runs, and its own flags, do not.
+
+    D12 (2026-11-13) moved the inline-code rows: under the builder
+    baseline's shell denies inline code is unreadable, so the grant allows
+    nothing and the line asks before taint is reached — a once-only card
+    naming the denies, no longer labelled ``taint/private-egress``."""
     env = live("builder")
     chat = env.chat()
     actions.remember_action_for_session(
@@ -990,4 +995,6 @@ def test_w7_send_only_programs_and_inline_code_ask_in_a_private_chat(
     )
     assert decision is not None
     got = decision.verdict if decision.verdict == "allow" else decision.decided_by
+    if decision.reason == "shell.require_approval.unreadable_under_deny":
+        got = "unreadable"
     assert got == expected, (line, decision)
