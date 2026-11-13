@@ -213,14 +213,19 @@ def test_a_knob_union_racing_update_policy_never_brings_back_a_removed_entry(
     actions.update_policy(home.store, home.holder, {"allowed_shell_commands": [["make"]]})
     actions.update_policy(home.store, home.holder, {"default_network": ["old.example.org"]})
     repo = home.root / "unbound"
-    outcomes = race(
-        lambda: actions.update_policy(home.store, home.holder, {"allowed_shell_commands": []}),
-        lambda: actions.allow_shell_command(home.store, home.holder, "pytest"),
-        lambda: actions.update_policy(home.store, home.holder, {"default_network": []}),
-        lambda: actions._persist_remembered_network_host(
-            home.store, home.holder, repo, "new.example.org"
+    for removal, union in (
+        (
+            lambda: actions.update_policy(home.store, home.holder, {"allowed_shell_commands": []}),
+            lambda: actions.allow_shell_command(home.store, home.holder, "pytest"),
         ),
-    )
-    assert not [o for o in outcomes if isinstance(o, Exception)], outcomes
+        (
+            lambda: actions.update_policy(home.store, home.holder, {"default_network": []}),
+            lambda: actions._persist_remembered_network_host(
+                home.store, home.holder, repo, "new.example.org"
+            ),
+        ),
+    ):
+        outcomes = race(removal, union)
+        assert not [o for o in outcomes if isinstance(o, Exception)], outcomes
     assert ["make"] not in (home.store.get_setting("allowed_shell_commands") or [])
     assert "old.example.org" not in (home.store.get_setting("default_network") or [])
