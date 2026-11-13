@@ -715,9 +715,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         "search_web",
         "Search the public web (keyless) and get title/url/host/snippet rows. "
         "Use it to DISCOVER source hosts when the user asks for research without "
-        "naming sources, then propose start_research with the discovered hosts as "
-        "source_allowlist — the confirmation card is where the user approves that "
-        "exact egress list. Searching itself is read-only and never widens any "
+        "naming sources; where start_research is offered, propose it with those hosts "
+        "as source_allowlist (its card approves that exact egress list). Searching "
+        "itself is read-only and never widens any "
         "run's network. Results are outside content: later actions in this chat "
         "ask; after it read private data a search itself asks.",
         {
@@ -786,8 +786,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "(headings/links/lists kept; pass mode='text' for flat text) and a cut "
         "is marked, never silent. On an ungranted domain every call is one card "
         "— NEVER chain read_url over several pages (that is a wall of cards): "
-        "for anything multi-page or multi-source, propose start_research "
-        "instead; for a domain the user reads daily, offer allow_fetch_domain "
+        "for anything multi-page or multi-source, propose start_research where "
+        "offered; for a domain the user reads daily, offer allow_fetch_domain "
         "once. A fetched page is outside content: later actions in this chat ask.",
         {
             "url": {"type": "string"},

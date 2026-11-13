@@ -277,6 +277,42 @@ def test_an_assistant_chat_is_offered_no_hidden_tool_and_the_list_never_flickers
     assert "- dispatch_run" in bodies[3]["messages"][0]["content"]
 
 
+def test_the_prompt_tells_a_chat_what_its_role_hides_and_the_static_text_is_conditional(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """W3: the rules describe dispatching and start_research to every chat.
+    An assistant chat's prompt names the tools its role hides and what to do
+    instead; a builder chat's names none. The static text that proposes
+    start_research says "where offered", true in every role."""
+    from skep.supervisor.serve.chat import SYSTEM_PROMPT
+
+    client = configured_client(config, ollama)
+    prompts = {}
+    for role in ("assistant", "builder"):
+        chat_id = client.post("/api/chats", json={"role": role}).json()["chat_id"]
+        ollama.script_reply("ok")
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+        prompts[role] = ollama.chat_bodies()[-1]["messages"][0]["content"]
+    line = (
+        "This chat's role assistant never allows batch_dispatch, dispatch_run, forge_tool, "
+        "quick_edit, run_code, start_research: they are not offered here, so never call "
+        "them — tell the user what you would do; the operator can switch the role with "
+        "/role <name> (e.g. builder)."
+    )
+    assert line in prompts["assistant"]
+    assert "never allows" not in prompts["builder"]
+    assert prompts["assistant"].startswith(SYSTEM_PROMPT)
+    assert "where start_research is offered" in SYSTEM_PROMPT
+    descriptions = {
+        spec["function"]["name"]: spec["function"]["description"] for spec in TOOL_SPECS
+    }
+    assert "where start_research is offered" in descriptions["search_web"]
+    assert "propose start_research where offered" in descriptions["read_url"]
+    for text in (SYSTEM_PROMPT, descriptions["search_web"], descriptions["read_url"]):
+        assert "then propose start_research" not in text
+        assert "propose start_research instead" not in text
+
+
 # --- B55: every chat records a role (operator decision #4) ------------------------------
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "skep"
