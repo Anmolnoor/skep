@@ -146,6 +146,9 @@ def test_generic_secret_header_ingest_falls_back_to_a_note(config: SupervisorCon
     store = RunStore(config.db_path)
     try:
         assert [note.content for note in store.list_notes()] == ["🔔 deploy: done"]
+        # outside text: a chat that lists this note takes ``untrusted`` (W21 review)
+        (note,) = store.list_notes()
+        assert store.content_taint("note", [note.note_id]) == {"untrusted"}
     finally:
         store.close()
 
