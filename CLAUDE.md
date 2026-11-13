@@ -118,9 +118,13 @@ gitignored on the public tree: plans stay local, only the fix commits push
   baseline, then project setup). Keep `COMMANDS`, the executor, and `/help` in
   lockstep — a test pins the table against the parser branches.
 
+## Required design context before acting
+
+Before making a design decision, writing or changing a plan, or modifying SKEP behavior, consult the private [SKEP design archive](https://github.com/Anmolnoor/skep-design). Read its `README.md`, `RECOVERY.md`, relevant ADRs and plans, plus `rules/invariants.md` and applicable `.10x/` decisions. Treat that archive as the canonical source for internal decisions and planning; public code/docs describe the implementation and user-facing contract. Check whether referenced plans/status notes are current before relying on them. If the private repo is inaccessible, state that clearly and do not invent or silently assume its contents; continue only with work that does not depend on missing internal context.
+
 ## Where to look first
 
-`plans/` (all plans + `EXECUTION_LEDGER.md`), `docs/version-history.md`,
+Private design archive first (see above); then `plans/` if present, `docs/version-history.md`,
 `src/skep/supervisor/policy_resolver.py` (run policy), `serve/actions.py`
 (shared verbs), `serve/tools.py` (chat tool surface), `workers/capabilities.py`
 (worker-side gates), `apply.py` (landing).

@@ -252,6 +252,10 @@ commit, with everything auditable on your own disk. A deeper writeup is in
 If you know a project that already does all three locally, open an issue —
 genuinely, I want to compare notes.
 
+## Project design source of truth
+
+Internal design decisions, plans, operating rules, and recovered history are maintained in the private [SKEP design archive](https://github.com/Anmolnoor/skep-design). Contributors and coding agents should consult that archive before proposing decisions, making plans, or changing project behavior. The public ADRs and user documentation remain here; the private archive is canonical for internal planning and design context.
+
 ## Documentation
 
 The curated index lives at [`docs/README.md`](docs/README.md) — start with
