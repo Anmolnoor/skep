@@ -4082,13 +4082,18 @@ _NO_STANDING_SHELL = frozenset(
     {"bash", "sh", "zsh", "fish", "dash", "ksh", "python", "python3", "node", "deno", "bun",
      "perl", "ruby", "php", "lua", "osascript", "pwsh", "npx", "bunx", "pnpx", "env", "xargs",
      "eval", "exec", "source", "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp",
-     "sftp", "ftp", "telnet", "rsync"}
+     "sftp", "ftp", "telnet", "rsync", ".", "busybox", "toybox", "su", "sudo", "doas",
+     "pkexec", "gh", "glab", "docker", "podman", "kubectl", "helm", "aws", "gcloud", "az",
+     "terraform", "ansible", "ansible-playbook", "open", "xdg-open", "uvx", "pipx"}
 )  # fmt: skip
 _PACKAGE_MANAGERS = frozenset(
-    {"pip", "pip3", "pipx", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
+    {"pip", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
      "gem", "go", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk"}
 )  # fmt: skip
-_INSTALL_VERBS = frozenset({"install", "i", "add", "sync", "update", "upgrade", "get"})
+# installs, and the verbs that fetch a package and run it (`pnpm dlx`, `npm exec`)
+_INSTALL_VERBS = frozenset(
+    {"install", "i", "add", "sync", "update", "upgrade", "get", "ci", "dlx", "exec", "x", "tool"}
+)
 
 
 def set_operator_policy_rule(
@@ -4177,7 +4182,7 @@ def queen_shell_allow_refusal(pattern: str, action: str) -> str | list[tuple[str
     never an interpreter, a network tool, a package install, a credential
     path, or a line with a newline or ``#`` (a comment can hide a segment)."""
     from ..secret_floor import shell_secret_floor_reason
-    from ..shell_prefixes import program_name
+    from ..shell_prefixes import _ASSIGNMENT_RE, git_core_argv, launched_command, program_name
 
     if "\n" in pattern or "\r" in pattern or "#" in pattern:
         return "a standing shell allow is one line with no '#': write the exact command alone"
@@ -4188,14 +4193,26 @@ def queen_shell_allow_refusal(pattern: str, action: str) -> str | list[tuple[str
     for _scope, _action, line, _matcher in found:
         argv = shlex.split(line)
         program = program_name(argv[0])
-        if program in _NO_STANDING_SHELL:
+        if _ASSIGNMENT_RE.match(argv[0]):
+            return f"{line!r}: a standing allow never sets the environment (PATH=, LD_PRELOAD=…)"
+        if launched_command(argv) != argv:
+            return f"{program}: it runs the command after it — allow that command itself"
+        # python3.12 is python, pip3 is pip, node18 is node
+        base = program.rstrip("0123456789.") or program
+        if program in _NO_STANDING_SHELL or base in _NO_STANDING_SHELL:
             return (
                 f"{program}: a program that runs other code or reaches the network "
                 "is never a standing allow"
             )
         verbs = [token for token in argv[1:4] if not token.startswith("-")]
-        if program in _PACKAGE_MANAGERS and _INSTALL_VERBS & set(verbs):
+        if base in _PACKAGE_MANAGERS and (not verbs or _INSTALL_VERBS & set(verbs)):
             return f"{line!r}: a package install is never a standing allow"
+        if base == "find" and {"-exec", "-execdir", "-ok", "-okdir", "-delete"} & set(argv):
+            return f"{line!r}: find that runs or deletes is never a standing allow"
+        core = git_core_argv(argv)
+        if base == "git" and (core[1:2] == ["config"] or "-c" in argv[: len(argv) - len(core) + 1]
+                              or any(t.startswith("--config-env") for t in argv)):  # fmt: skip
+            return f"{line!r}: git configuration can run any program, never a standing allow"
     secret = shell_secret_floor_reason(pattern, cwd=None)
     if secret is not None:
         return secret

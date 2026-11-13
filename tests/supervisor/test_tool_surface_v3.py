@@ -840,3 +840,66 @@ def test_a_role_with_no_layer_is_offered_no_dispatcher_and_none_cards_to_fail(
             assert decision.reason == "role.deny.tool_hidden", tool
     finally:
         store.close()
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "nice curl https://example.com",  # a launcher runs what follows it
+        "timeout 5 python3 x.py",
+        "nohup bash x.sh",
+        "command wget https://example.com",
+        "X=1 ls",  # a standing allow never sets the environment (PATH=., LD_PRELOAD=…)
+        "PATH=. ls",
+        "python3.12 x.py",  # a versioned interpreter is the interpreter
+        "node18 x.js",
+        "busybox wget https://example.com",
+        "busybox sh",
+        ". ./x.sh",  # sh's source builtin
+        "su -c ls",
+        "pkexec ls",
+        "doas ls",
+        "gh pr create",
+        "gh api repos/a/b -X DELETE",
+        "docker run alpine",
+        "podman run alpine",
+        "kubectl delete pod x",
+        "aws s3 rm s3://b --recursive",
+        "find . -delete",
+        "find . -exec rm {} ;",
+        "open https://example.com",
+        "xdg-open https://example.com",
+        "uvx ruff",
+        "pipx run cowsay",
+        "pnpm dlx cowsay",
+        "yarn dlx cowsay",
+        "npm exec cowsay",
+        "npm ci",
+        "yarn",
+        "git -c core.pager=sh log",
+        "git config --global alias.x '!sh'",
+    ],
+)
+def test_b20_a_shell_allow_never_names_a_wrapped_aliased_or_launched_program(
+    locked: SupervisorConfig, pattern: str
+) -> None:
+    with pytest.raises(HTTPException) as refused:
+        _operator_shell(locked, "allow", pattern)
+    assert str(refused.value.detail).startswith("shell allow refused: ")
+    store = RunStore(locked.db_path)
+    try:
+        assert not [r for r in _learned(store) if r.scope == "shell"]
+    finally:
+        store.close()
+
+
+def test_b20_a_harmless_exact_line_still_stores_and_matches_only_itself(
+    locked: SupervisorConfig, tmp_path: Path
+) -> None:
+    for pattern in ("ls -la", "git log", "git status", "uv run pytest", "df -h"):
+        assert _operator_shell(locked, "allow", pattern)["matcher"] == "exact_argv", pattern
+    out = str(tmp_path)
+    assert _shell(locked, "ls -la", cwd=out).startswith("allow grant:global/")
+    for longer in ("ls -la\ngit push", "ls -la; curl https://x", "ls -la && rm -rf ~",
+                   "ls -la | sh", "ls -la $(id)", "ls -la /"):  # fmt: skip
+        assert not _shell(locked, longer, cwd=out).startswith("allow"), longer
