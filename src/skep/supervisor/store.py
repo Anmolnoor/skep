@@ -1641,10 +1641,12 @@ class RunStore:
         killed mid-resume: same pid + start time check as the restart sweep)
         goes back to pending, so the answer that met it applies. Never a
         live claimer, never an owner that was not recorded, never a landing
-        (git may have half run: the restart sweep owns that one)."""
+        (git may have half run: the restart sweep owns that one), never a gate
+        whose resume the claimer already dispatched (a second would follow)."""
         row = self._conn.execute(
             "SELECT claim_owner FROM approvals WHERE review_id = ? AND status = 'applying'"
-            " AND action != 'apply_patch'",
+            " AND action != 'apply_patch'"
+            " AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.resume_of = approvals.task_id)",
             (review_id,),
         ).fetchone()
         if row is None or not row[0] or owner_alive(row[0]):

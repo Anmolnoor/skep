@@ -1178,3 +1178,25 @@ def test_a_live_or_unknown_claimer_and_a_landing_claim_are_never_released(
         assert refused.value.status_code == 409
         approval = rig.store.get_approval(review_id)
         assert approval is not None and approval.status == "applying"
+
+
+def test_a_dead_claimer_whose_resume_already_dispatched_keeps_its_gate_claim(
+    rig: Rig, repo: Any
+) -> None:
+    """D24 follow-up: a CLI killed mid-resume has often dispatched its resume
+    already (the run row exists, its worker may still run in the tree).
+    Releasing that claim let the answer dispatch a second resume of the same
+    gate; the restart sweep tells the operator to check for that run. The
+    answer keeps the 409 while a run resumed from the gated task exists."""
+    from skep.supervisor import mint_task
+    from skep.supervisor.serve import actions
+
+    run, gate = _gated_run(rig, repo)
+    assert rig.store.claim_approval(gate, owner=_dead_owner())
+    resume = mint_task(workspace=repo, instructions="gate me", resume_of=str(run["task_id"]))
+    rig.store.create_run(resume, repo=repo, ref=None, execution_mode="workspace")
+    with pytest.raises(HTTPException) as refused:
+        actions.pending_approval_or_409(rig.store, gate)
+    assert refused.value.status_code == 409
+    approval = rig.store.get_approval(gate)
+    assert approval is not None and approval.status == "applying"
