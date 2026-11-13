@@ -40,7 +40,9 @@ task instructions:
 
 A ``GATE`` token (with any mode) holds the worker after ``task.start``,
 heartbeating, until a ``gate`` file appears beside --out; it then records
-whether its proxy answers on its port (``proxy-probe.txt``) and goes on
+whether its proxy answers on its port (``proxy-probe.txt``) — and, when
+relayed (ADR 0062), the status of a model call through its relay
+(``relay-probe.txt``) — and goes on
 — the shape of a worker that outlives a serve restart (ADR 0060).
 """
 
@@ -178,6 +180,23 @@ def main() -> int:
             except OSError as exc:
                 proxy_probe = f"refused: {exc}"
         (args.out.parent / "proxy-probe.txt").write_text(proxy_probe)
+        relay = os.environ.get("SKEP_PROVIDER_RELAY", "")
+        if relay:  # ADR 0062: a model call through the run's relay, after the gate
+            import urllib.error
+            import urllib.request
+
+            spec = json.loads(relay)
+            request = urllib.request.Request(
+                spec["url"] + "/v1/models", headers={"Authorization": f"Bearer {spec['token']}"}
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10) as reply:
+                    relay_probe = str(reply.status)
+            except urllib.error.HTTPError as exc:
+                relay_probe = str(exc.code)
+            except OSError as exc:
+                relay_probe = f"refused: {exc}"
+            (args.out.parent / "relay-probe.txt").write_text(relay_probe)
 
     if mode == "crash":
         stream.emit("plan.created", {"steps": ["about to die"]})

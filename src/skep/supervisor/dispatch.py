@@ -78,7 +78,7 @@ from .monitor import (
 from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
 from .provider_hosts import provider_hosts_for
-from .provider_relay import provider_relay_for_run, relay_worker_env
+from .provider_relay import provider_relay_for_run, readopted_relay, relay_worker_env
 from .providers import ProviderProfile
 from .reverify import reverify_run
 from .sandbox import PODMAN, NetworkPolicy, SandboxUnavailableError
@@ -1408,8 +1408,9 @@ def _adopt_worker(
         try:
             if unix_path is not None and Path(unix_path).is_socket():
                 Path(unix_path).unlink()
+            domains = effective_network_domains(task)
             proxy = FilteringProxy(
-                effective_network_domains(task),
+                () if domains == ("*",) else domains,  # as the live path: relay-only
                 unix_socket_path=unix_path,
                 denied_loopback_ports=control_plane_ports(config.home),
                 asks=task.permissions.network_ask,
@@ -1418,6 +1419,8 @@ def _adopt_worker(
                     task.permissions.loopback_ports, task.permissions.provider_hosts, config.home
                 ),
                 port=int(port),
+                # ADR 0062: its worker holds a token, not the key
+                relay=readopted_relay(run_store, config, task_id),
             ).start()
         except OSError as exc:
             run_store.transition(

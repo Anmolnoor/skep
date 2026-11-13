@@ -823,3 +823,44 @@ def test_a_readopted_landlock_netshim_run_keeps_its_chain_and_reaches_its_proxy(
         assert probe.read_text() == "connected"
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_a_readopted_relayed_run_still_reaches_its_model_through_its_relay(
+    repo: Path, config: SupervisorConfig, mode: str
+) -> None:
+    """ES-INT (R4 x V6b): the re-adopting serve restarts the run's proxy WITH
+    its relay (the token is recomputed from relay-secret and the task id, the
+    key resolved again), so a relayed worker that holds no key still reaches
+    its model after serve died under it. On Linux: through the netshim."""
+    import secrets
+
+    from skep.profile import run_personal_setup
+    from skep.supervisor.serve.llm import store_api_key
+
+    from .fake_openai import FakeOpenAI
+
+    key = "fk-" + secrets.token_hex(12)
+    server = FakeOpenAI(api_key=key).start()
+    try:
+        run_personal_setup(
+            config.home.parent, provider="openai-compat", model="gpt-oss", endpoint=server.base_url
+        )
+        # Where a worker resolves its key (<personal home>/supervisor), direct or relayed.
+        store_api_key(config.home.parent / "supervisor", key)
+        store = RunStore(config.db_path)
+        store.set_setting("provider_key_relay", True)
+        store.close()
+        task_id, _pid = _kill_serve_mid_run(config, repo, "Fix it. MODE:happy GATE", mode)
+        store, recovered = _adopt_and_finish(config, task_id)
+    finally:
+        server.stop()
+    try:
+        assert recovered == [task_id]
+        details = " ".join(d or "" for _, d, _ in store.transitions_for(task_id))
+        assert '"provider_key_relay": "on"' in details, details
+        probe = config.result_path(task_id).parent / "relay-probe.txt"
+        assert probe.read_text() == "200"
+        assert server.requests[-1]["headers"]["Authorization"] == f"Bearer {key}"
+    finally:
+        store.close()

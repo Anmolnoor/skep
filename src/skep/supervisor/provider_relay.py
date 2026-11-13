@@ -121,13 +121,30 @@ def provider_relay_for_run(
         return None, "", "not used: an external engine authenticates from its own auth env"
     if not getattr(CASTES.get(task.worker_kind), "needs_provider", True):
         return None, "", "not used: this caste calls no model"
+    return _relay_for(config, task.task_id)
+
+
+def _relay_for(config: SupervisorConfig, task_id: str) -> tuple[ProviderRelay | None, str, str]:
     plan, why = relay_plan(config.home.parent)
     if plan is None:
         return None, "", f"not used: {why}"
     endpoint, protocol, key, model = plan
-    token = relay_token(config.home, task.task_id)
+    token = relay_token(config.home, task_id)
     relay = ProviderRelay(upstream=endpoint, token=token, key=key, protocol=protocol)
     return relay, model, "on"
+
+
+def readopted_relay(
+    store: RunStore, config: SupervisorConfig, task_id: str
+) -> ProviderRelay | None:
+    """ADR 0060 x 0062: the relay a re-adopted run's proxy must serve again —
+    when its own ``dispatched`` line says it was relayed, whatever the switch
+    says now (its worker holds a token, not the key). Nothing was stored: the
+    token is recomputed and the provider resolved again."""
+    detail = next((d for st, d, _ in store.transitions_for(task_id) if st == "dispatched"), None)
+    if json.loads(detail or "{}").get("provider_key_relay") != "on":
+        return None
+    return _relay_for(config, task_id)[0]
 
 
 def relay_worker_env(relay: ProviderRelay, model: str, port: int) -> dict[str, str]:
