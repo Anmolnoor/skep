@@ -914,3 +914,18 @@ def test_the_search_line_says_taint_can_make_a_search_ask(locked: SupervisorConf
     line = _lines(locked, "builder")["search_web"]
     assert line.startswith("In this chat: searches run")
     assert "private data" in line
+
+
+def test_a_builder_chat_floor_is_pinned_too(config: SupervisorConfig, ollama: FakeOllama) -> None:
+    """The fresh-chat pin (test_tool_index, 25.1K) measured a role-less chat —
+    the whole surface — until P3-6 made a fresh chat an assistant chat, which
+    hides six tools (~20.8K). The widest shipped surface is pinned here at
+    what it measured when that changed (25,470 at es-p3-6 ES-F48, 25,473 at
+    es-p4-2 — it was never under the fresh-chat pin): move it only on purpose."""
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
+    ollama.script_reply("hello")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+    body = ollama.chat_bodies()[0]
+    floor = len(body["messages"][0]["content"]) + len(json.dumps(body["tools"]))
+    assert floor <= 25_470
