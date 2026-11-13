@@ -1235,3 +1235,21 @@ def test_a_released_gate_claim_is_named_on_the_approval_record(rig: Rig, repo: A
     pid = json.loads(dead)["pid"]
     note = approval.resolution_note or ""
     assert f"released the claim of pid {pid}" in note and note.endswith("not now"), note
+
+
+def test_a_cli_gate_approve_releases_a_dead_claimers_claim_as_serve_does(
+    rig: Rig, repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D24 follow-up (ADR 0050): serve's answers release a gone claimer's
+    gate claim, and `skep review --deny` does through deny_approval, but
+    `skep review --approve` claimed directly and still told the operator to
+    restart serve. The CLI approve now releases it and resumes."""
+    run, review_id = _gated_run(rig, repo)
+    assert rig.store.claim_approval(review_id, owner=_dead_owner())
+    held = _HeldMutation()
+    held.release.set()
+    cli = _cli_resume(rig, run, held, monkeypatch)
+    cli()
+    assert held.calls == 1
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "approved"
