@@ -63,8 +63,9 @@ class AdapterSpec:
     # (base_command, instructions) -> the full headless argv.
     build_argv: Callable[[list[str], str], list[str]]
     plan_steps: tuple[str, ...] = ("run the agent CLI", "capture git diff")
-    # ES-F220: an agent whose own sandbox is off runs only where the spawner
-    # marked the launch as inside skep's (SKEP_SANDBOX).
+    # ES-F220: an agent whose commands skip the capability layer (ADR 0047)
+    # runs only where the spawner marked the launch as inside skep's sandbox
+    # (SKEP_SANDBOX) — codex with its own sandbox off, aider and pi with none.
     requires_sandbox: bool = False
 
     def command_from_env(self) -> list[str]:
@@ -410,8 +411,8 @@ def run_cli_agent_task(task_path: Path, out_path: Path, spec: AdapterSpec) -> in
             stream=stream,
             out_path=out_path,
             reason=(
-                f"the {spec.default_command[0]} worker runs with its own sandbox off "
-                "because skep's sandbox is its wall (ADR 0047), and it was started "
+                f"the {spec.default_command[0]} worker's commands skip skep's capability "
+                "layer, so skep's sandbox is its only wall (ADR 0047), and it was started "
                 f"outside skep's sandbox ({SANDBOX_MARKER_ENV} unset) — dispatch it "
                 "with execution mode 'sandbox'"
             ),

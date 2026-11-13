@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -346,18 +347,28 @@ def test_codex_argv_turns_its_own_sandbox_off() -> None:
     assert argv == ["codex", "exec", "--sandbox", "danger-full-access", "add multiply"]
 
 
-def test_codex_refuses_to_start_outside_skeps_sandbox(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("run", "cmd_env"),
+    [
+        (run_codex_task, "SKEP_CODEX_CMD"),
+        (run_aider_task, "SKEP_AIDER_CMD"),
+        (run_pi_task, "SKEP_PI_CMD"),
+    ],
+)
+def test_an_external_agent_refuses_to_start_outside_skeps_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run: Any, cmd_env: str
 ) -> None:
     """ES-F220: with codex's own sandbox off, skep's is its only wall — so a
-    codex worker the spawner did not mark as sandboxed never runs codex."""
+    codex worker the spawner did not mark as sandboxed never runs codex.
+    Aider and pi have no sandbox of their own and skip the capability layer
+    too (ADR 0047), so the same refusal binds them."""
     monkeypatch.delenv("SKEP_SANDBOX")
     workspace = _seed_repo(tmp_path)
-    ran = tmp_path / "codex-ran"
-    fake = tmp_path / "fake-codex"
+    ran = tmp_path / "agent-ran"
+    fake = tmp_path / "fake-agent"
     fake.write_text(f"#!/bin/sh\ntouch {ran}\n", encoding="utf-8")
     fake.chmod(0o755)
-    monkeypatch.setenv("SKEP_CODEX_CMD", str(fake))
+    monkeypatch.setenv(cmd_env, str(fake))
     task = mint_task(
         workspace=workspace,
         instructions="edit",
@@ -367,7 +378,7 @@ def test_codex_refuses_to_start_outside_skeps_sandbox(
     task_path = tmp_path / "task.json"
     task_path.write_text(task.model_dump_json(indent=2), encoding="utf-8")
     out_path = tmp_path / "result.json"
-    assert run_codex_task(task_path, out_path) == 5  # EXIT_REJECTED
+    assert run(task_path, out_path) == 5  # EXIT_REJECTED
     result = read_result(out_path)
     assert result.status is TaskState.REJECTED
     assert "outside skep's sandbox" in result.summary

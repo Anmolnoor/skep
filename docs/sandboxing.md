@@ -158,8 +158,8 @@ off (ES-F220, ES-F221): `codex exec --sandbox danger-full-access`, and
 Claude Code `--settings '{"sandbox": {"enabled": false}}'` (its Bash
 sandbox is bubblewrap, and the operator's or the repo's own settings may
 turn it on). skep's sandbox is their wall (ADR 0047): external engines are
-always run in it (v94-F4), and the codex worker refuses to start unless the
-spawner marked its launch as sandboxed (`SKEP_SANDBOX`). On macOS the same
+always run in it (v94-F4), and the codex, aider and pi workers refuse to
+start unless the spawner marked their launch as sandboxed (`SKEP_SANDBOX`). On macOS the same
 holds for another reason: `sandbox-exec` inside a Seatbelt-sandboxed
 process fails with `sandbox_apply: Operation not permitted`, so an engine's
 own Seatbelt cannot nest inside skep's. With the engine's sandbox off, it

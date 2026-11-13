@@ -230,5 +230,5 @@ its wall (ADR 0047) and a sandbox cannot nest inside skep's (Landlock
 refuses a nested bubblewrap; Seatbelt refuses a nested `sandbox-exec`):
 Codex runs `exec --sandbox danger-full-access`, Claude Code gets
 `--settings '{"sandbox": {"enabled": false}}'`. Aider and pi start none.
-External engines always run in sandbox mode (v94-F4), and the codex worker
-refuses to start outside skep's sandbox. See `sandboxing.md`, Landlock.
+External engines always run in sandbox mode (v94-F4), and the codex, aider
+and pi workers refuse to start outside skep's sandbox. See `sandboxing.md`, Landlock.

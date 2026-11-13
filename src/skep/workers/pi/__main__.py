@@ -28,6 +28,7 @@ PI_SPEC = AdapterSpec(
     # the response, and exits without committing.
     build_argv=lambda base, instructions: [*base, "-p", instructions],
     plan_steps=("run pi -p", "capture git diff"),
+    requires_sandbox=True,
 )
 
 
