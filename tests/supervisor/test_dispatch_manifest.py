@@ -746,3 +746,22 @@ def test_an_open_pr_url_whose_port_does_not_parse_is_never_shown(desk: Desk) -> 
     )  # fmt: skip
     line = pr_push_target(desk.holder, desk.store, {"branch": "feat", "repo": str(desk.repo)})
     assert line.startswith("pushes feat to origin") and login not in line, line
+
+
+def test_an_auto_allowed_batch_whose_runs_would_ask_cards_with_their_manifests(
+    desk: Desk,
+) -> None:
+    """D23 follow-up (B147): an auto-allowed dispatch_run or quick_edit whose
+    sandboxed run would ask about a host cards so one confirm answers it; a
+    batch read only the top of its manifest, which has no asks (they sit in
+    ``members``), so it ran unasked and each run met the proxy's 403 for a
+    card nobody was shown. It now cards when any of its runs would ask."""
+    _auto_dispatch(desk, ["pypi.org", "example.com"])
+    tasks = [{"repo": str(desk.repo), "instructions": n} for n in ("one", "two")]
+    chat, card = _propose_call(desk, "batch_dispatch", {"tasks": tasks})
+    assert desk.runner.submitted == []  # not auto-run
+    members = card["card"]["manifest"]["members"]
+    assert [m["network_ask"] for m in members] == [["example.com"], ["example.com"]]
+    desk.confirm(chat, card["action_id"])
+    assert len(desk.runner.submitted) == 2
+    assert all(s["permissions"].network_ask == [] for s in desk.runner.submitted)

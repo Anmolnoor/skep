@@ -2135,8 +2135,10 @@ class ChatEngine:
                         decision = high_tier_decision(high, decision)
                     elif (
                         manifest is not None
-                        and manifest.get("network_ask")
-                        and manifest.get("execution_mode") == "sandbox"
+                        and any(  # D23: a batch asks when any of its runs does
+                            m.get("network_ask") and m.get("execution_mode") == "sandbox"
+                            for m in [manifest, *(manifest.get("members") or [])]
+                        )
                         and decision is not None
                         and decision.allows_execution()
                     ):
