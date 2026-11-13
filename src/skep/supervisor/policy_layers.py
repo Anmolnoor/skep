@@ -30,7 +30,7 @@ from .policy_baseline import (
     fail_closed_reason,
     verify,
 )
-from .policy_engine import Layer, Setting, document_layers
+from .policy_engine import Layer, LayerRule, Setting, document_layers
 from .policy_resolver import (
     _match_project_for_repo,
     _under_root,
@@ -46,6 +46,7 @@ from .policy_schema import (
     document_from_settings,
     operator_document_from_settings,
 )
+from .policy_templates import TEMPLATE_NAMES
 from .projects import (
     GROUP_LIST_KEYS,
     PROJECT_POLICY_KEYS,
@@ -148,7 +149,34 @@ def template_layer(home: Path) -> Layer | None:
     re-run whenever a baseline file's mtime changes. Anything but Ok is no
     layer: ``baseline_guard`` says what a decision does instead."""
     state = verify(home)
-    return state.enforced_layer() if isinstance(state, Ok) else None
+    if not isinstance(state, Ok):
+        return None
+    layer = state.enforced_layer()
+    if legacy_fs_read_dropped(state) is None:
+        return layer
+    return replace(layer, rules=tuple(r for r in layer.rules if not _legacy_fs_read(r)))
+
+
+def _legacy_fs_read(rule: LayerRule) -> bool:
+    return (rule.scope, rule.verdict, rule.action, rule.pattern) == (
+        "filesystem",
+        "allow",
+        "read",
+        "*",
+    )
+
+
+def legacy_fs_read_dropped(state: object) -> str | None:
+    """ADR 0059 Migration (B01-upgraded): a baseline approved before ES-F2
+    that names a shipped template still carries that template's old
+    ``filesystem read *`` allow — the Queen read any file with no card.
+    ``template_layer`` drops exactly that allow (narrowing only: reads outside
+    the operator roots card again); this names the template when it does, so
+    doctor can say so. ``skep policy approve --reapprove --template <name>``
+    adopts the shipped file."""
+    if not isinstance(state, Ok) or state.layer.template not in TEMPLATE_NAMES:
+        return None
+    return state.layer.template if any(map(_legacy_fs_read, state.layer.layer().rules)) else None
 
 
 def queen_template_layer(home: Path) -> Layer | None:
@@ -231,6 +259,7 @@ __all__ = [
     "document_layers",
     "flatten",
     "layers_for_repo",
+    "legacy_fs_read_dropped",
     "operator_layers",
     "queen_template_layer",
     "store_home",

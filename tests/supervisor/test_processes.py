@@ -61,12 +61,10 @@ def test_a_run_grant_never_covers_a_daemon(config: SupervisorConfig) -> None:
         _shell_allow(store, "run", "sleep")
         # run_shell would auto-run this; start_process still cards.
         assert queen_shell_decision(store, holder, command="sleep 5", cwd=None) is not None
-        assert (
-            mutation_execution_decision(
-                "start_process", {"command": "sleep 5"}, store=store, holder=holder
-            )
-            is None
+        daemon = mutation_execution_decision(
+            "start_process", {"command": "sleep 5"}, store=store, holder=holder
         )
+        assert daemon is not None and daemon.verdict == "require_approval", daemon
         _shell_allow(store, "run_background", "sleep")
         granted = mutation_execution_decision(
             "start_process", {"command": "sleep 5"}, store=store, holder=holder

@@ -45,7 +45,9 @@ def test_an_approved_command_grants_exactly_itself(
 
         def decide_line(command: str) -> str:
             decision = queen_shell_decision(store, holder, command=command, cwd=str(tmp_path))
-            return "card" if decision is None else decision.verdict
+            if decision is None or decision.verdict == "require_approval":
+                return "card"
+            return decision.verdict
 
         assert decide_line("curl https://x/y") == "allow"
         for wider in (

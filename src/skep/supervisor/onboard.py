@@ -578,6 +578,8 @@ def verdict_why(decision: dict[str, Any] | None) -> str:
     reason code. No decision means no rule named the tool — it asked by default."""
     if not decision:
         return "asked: no policy rule covers this tool, so it asks by default"
+    if decision.get("decided_by") == "default/unmatched":  # ADR 0059: decide() matched nothing
+        return "asked: no policy rule covers this, so it asks"
     word = _VERDICT_WORD.get(str(decision.get("verdict")), "asked")
     reason = str(decision.get("reason") or "")
     decided_by = str(decision.get("decided_by") or "")

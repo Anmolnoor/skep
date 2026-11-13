@@ -80,14 +80,14 @@ def test_home_allows_and_elsewhere_cards(
     assert inside.reason == "filesystem.allow.operator_root"
     # v52-F3: decisions resolve through the composed operator policy; with no
     # global template the label is the operator default's.
-    assert inside.decided_by == "operator-default/operator-root"
+    assert inside.decided_by == "global/operator-root"
 
     elsewhere = tmp_path / "elsewhere.txt"
     elsewhere.write_text("real file")  # v59-F9: only an EXISTING path cards
     outside = queen_filesystem_decision(store, holder, action="read", path=str(elsewhere))
     assert outside.verdict == "require_approval"
     assert outside.reason == "filesystem.require_approval.outside_operator_roots"
-    assert outside.decided_by == "operator-default/outside-operator-roots"
+    assert outside.decided_by == "default/unmatched"
 
 
 def test_nonexistent_outside_path_fails_fast_without_a_card(
@@ -101,7 +101,7 @@ def test_nonexistent_outside_path_fails_fast_without_a_card(
     )
     assert decision.verdict == "deny"
     assert decision.reason == "filesystem.deny.no_such_path"
-    assert decision.decided_by == "operator-default/no-such-path"
+    assert decision.decided_by == "default/no-such-path"
     assert decision.detail == str(tmp_path / "SKEP_HOME" / "repos" / "docs")
 
 
@@ -157,13 +157,13 @@ def test_explicit_filesystem_rules_beat_the_root_fallback(
         store, holder, action="read", path=str(config.home / "vault" / "token")
     )
     assert denied.verdict == "deny"
-    assert denied.decided_by == "operator-default/no-vault"
+    assert denied.decided_by == "global/no-vault"
 
     allowed = queen_filesystem_decision(
         store, holder, action="read", path=str(tmp_path / "datasets" / "a.csv")
     )
     assert allowed.verdict == "allow"
-    assert allowed.decided_by == "operator-default/datasets"
+    assert allowed.decided_by == "global/datasets"
 
 
 def test_operator_document_rules_now_govern_queen_reads(
@@ -195,7 +195,7 @@ def test_operator_document_rules_now_govern_queen_reads(
         store, holder, action="read", path=str(tmp_path / "scratch" / "notes.md")
     )
     assert decision.verdict == "allow"
-    assert decision.decided_by == "operator-default/op:scratch"
+    assert decision.decided_by == "global/op:scratch"
 
 
 @pytest.mark.parametrize("template", ["builder", "operator", "assistant"])
@@ -325,7 +325,7 @@ def test_read_inside_root_executes_in_turn(config: SupervisorConfig, ollama: Fak
     assert tools[0]["result"]["ok"] is True
     assert "1\talpha" in tools[0]["result"]["result"]["content"]
     # v52-F5: the admitting rule rides the result — the transcript is the audit.
-    assert tools[0]["result"]["result"]["decided_by"] == "operator-default/operator-root"
+    assert tools[0]["result"]["result"]["decided_by"] == "global/operator-root"
     assert tools[0]["decision"]["reason"] == "filesystem.allow.operator_root"
     assert [d for name, d in events if name == "action"] == []  # no card
     assert events[-1] == ("done", {"state": "complete"})

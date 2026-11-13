@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -122,8 +123,10 @@ def test_cli_role_list_show_use(tmp_path: Path, capsys: pytest.CaptureFixture[st
 
 def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> None:
     """D3: a role is a policy context inside the chat too. With a standing
-    Queen grant `uv sync` runs in-turn for a chat with no role; the same call in
-    an operator chat cards (role:operator asks), and the floor still denies."""
+    Queen grant `uv sync` runs in-turn for a chat with no role — and, since
+    ADR 0059 decision #1 (B56), in an operator chat too: the role's catch-all
+    ask is a default the operator's grant answers. A command nobody granted
+    cards there (role:operator asks), and the floor still denies."""
     from skep.supervisor import policy_baseline as pb
     from skep.supervisor.policy_templates import load_policy_template
     from skep.supervisor.roles import tighten_autonomy
@@ -151,8 +154,24 @@ def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> 
             )
 
         assert decide(plain).verdict == "allow"
-        carded = decide(ops)
-        assert (carded.verdict, carded.reason, carded.decided_by) == (
+        granted = decide(ops)
+        assert (granted.verdict, granted.decided_by) == ("allow", "grant:global/shell:run:uv sync")
+        carded = decide(ops, command="uv lock")
+        assert (carded.verdict, carded.decided_by) == (
+            "require_approval",
+            "template:builder/shell-learnable",  # the baseline asked first; the role ties
+        )
+        # Where the lane itself would run it, the role's ask is what cards.
+        from skep.supervisor.policy_schema import OPERATOR_POLICY_SETTINGS_KEY
+
+        rule = {"rule_id": "op:lsof", "action": "run", "pattern": "lsof"}
+        store.set_setting(
+            OPERATOR_POLICY_SETTINGS_KEY,
+            json.dumps({"scopes": [{"scope": "shell", "allow": [rule]}]}),
+        )
+        assert decide(plain, command="lsof -i").verdict == "allow"
+        role_card = decide(ops, command="lsof -i")
+        assert (role_card.verdict, role_card.reason, role_card.decided_by) == (
             "require_approval",
             "shell.require_approval.role_layer",
             "role:operator/shell-gated",
