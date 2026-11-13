@@ -364,7 +364,7 @@ AGENT_SOCKETS: tuple[str, ...] = (
     ".docker/run",
     ".colima",
     ".lima",
-    ".rd",  # Rancher Desktop
+    ".rd/docker.sock",  # Rancher Desktop (its bin/ holds kubectl, helm: on PATH)
     ".orbstack/run",
     ".local/share/containers/podman/machine",
 )

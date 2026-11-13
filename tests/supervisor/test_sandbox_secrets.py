@@ -579,3 +579,17 @@ def test_the_sockets_the_operators_env_names_are_masked_and_nothing_else(
         srv.close()
     assert home / "d.sock" in masked
     assert home not in masked and Path(os.sep) not in masked
+
+
+def test_rancher_desktops_socket_is_masked_but_its_tools_stay_on_path(
+    fake_homes: tuple[Path, Path],
+) -> None:
+    """R5: ~/.rd holds Rancher Desktop's docker.sock AND its bin/ (kubectl,
+    helm, nerdctl) that a worker's PATH may name; only the socket is hidden."""
+    home, skep_home = fake_homes
+    (home / ".rd" / "bin").mkdir(parents=True)
+    (home / ".rd" / "bin" / "kubectl").write_text("#!/bin/sh\n", encoding="utf-8")
+    (home / ".rd" / "docker.sock").write_text("", encoding="utf-8")
+    masked = set(sandbox.secret_paths(skep_home))
+    assert home / ".rd" / "docker.sock" in masked
+    assert not {home / ".rd", home / ".rd" / "bin"} & masked

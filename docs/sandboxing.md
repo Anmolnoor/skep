@@ -70,7 +70,7 @@ everything under `/tmp` and `/run` (fresh tmpfs: the session D-Bus,
 systemd, rootless Docker and podman, gpg-agent's runtime dir, most
 ssh-agents); the agent places under every home (`~/.ssh`, `~/.gnupg` and
 `sandbox.AGENT_SOCKETS`: `~/.1password`, `~/.bitwarden-ssh-agent.sock`,
-`~/.docker/desktop`, `~/.docker/run`, `~/.colima`, `~/.lima`, `~/.rd`,
+`~/.docker/desktop`, `~/.docker/run`, `~/.colima`, `~/.lima`, `~/.rd/docker.sock`,
 `~/.orbstack/run`, `~/.local/share/containers/podman/machine`); the socket
 serve's own `$SSH_AUTH_SOCK`, or a `unix://` `DOCKER_HOST` or
 `CONTAINER_HOST`, names; and every socket inside a read-only root the sandbox
