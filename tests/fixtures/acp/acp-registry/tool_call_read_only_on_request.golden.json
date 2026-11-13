@@ -1,0 +1,37 @@
+{
+  "to_agent": [],
+  "ledger": [
+    {
+      "actor": "acp:grok-replay",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "printf 'codex app-server approval fixture' > .codex-probe-write-action.txt",
+      "project": {
+        "project_id": "demo",
+        "name": "demo",
+        "strategy": "trusted_local_dev",
+        "phase": "build"
+      },
+      "source": "run",
+      "verdict": "require_approval",
+      "rule_id": "unmatched",
+      "decided_by": "default/unmatched",
+      "layer": "default"
+    },
+    {
+      "actor": "human@client",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "printf 'codex app-server approval fixture' > .codex-probe-write-action.txt",
+      "source": "forwarded",
+      "agent": "grok-replay",
+      "session_id": "grok-replay-session-1",
+      "tool_call_id": "write-probe",
+      "request_id": 9006,
+      "outcome": "allow_once",
+      "note": "unmatched"
+    }
+  ]
+}

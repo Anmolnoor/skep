@@ -164,13 +164,18 @@ def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
         *,
         workspace: Path,
         extra_writable: list[Path],
+        extra_readable: tuple[Path, ...],
         network: object,
         proxy_port: int | None,
         unix_socket_path: str | None = None,
         backend: str | None = None,
+        skep_home: Path | None = None,
+        worker_llm_key: bool = False,
+        write_denied: tuple[Path, ...] = (),
     ) -> Path:
         captured["workspace"] = workspace
         captured["extra_writable"] = tuple(extra_writable)
+        captured["extra_readable"] = extra_readable
         return profile_path
 
     # v44-F7: the spawner resolves a backend then asks availability(backend).
@@ -192,6 +197,8 @@ def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
         "git_metadata_writable_roots",
         lambda _workspace: (gitdir.resolve(),),
     )
+    common = (tmp_path / "repo" / ".git").resolve()
+    monkeypatch.setattr(supervisor_spawner, "git_metadata_readable_roots", lambda _ws: (common,))
     monkeypatch.setattr(subprocess, "Popen", _DummyPopen)
 
     supervisor_spawner.spawn_worker(
@@ -212,6 +219,7 @@ def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
         gitdir.resolve(),
         tmp_path / "cache" / "projects" / "proj-1",
     )
+    assert captured["extra_readable"] == (common,)
 
 
 def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(
@@ -221,12 +229,19 @@ def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(
 
     config = build_config(tmp_path / "home", None)
     captured_domains: list[tuple[str, ...]] = []
+    captured_ports: list[tuple[int, ...]] = []
 
     class _FakeProxy:
         def __init__(
-            self, domains: tuple[str, ...], *, unix_socket_path: str | None = None
+            self,
+            domains: tuple[str, ...],
+            *,
+            unix_socket_path: str | None = None,
+            denied_loopback_ports: tuple[int, ...] = (),
+            asks: tuple[str, ...] | list[str] = (),
         ) -> None:
             captured_domains.append(domains)
+            captured_ports.append(denied_loopback_ports)
             self.port = 8765
             self.unix_socket_path = unix_socket_path
 
@@ -268,9 +283,99 @@ def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(
 
     assert outcome.record.state == "worker_crashed"
     assert captured_domains == [("example.com",)]
+    assert captured_ports == [(8765,)]  # ES-F6: the control plane is refused
     store = RunStore(config.db_path)
     try:
         transitions = [state for state, _, _ in store.transitions_for(outcome.record.task_id)]
     finally:
         store.close()
     assert transitions == ["created", "dispatched", "worker_crashed"]
+
+
+def test_proxy_env_keeps_loopback_direct_only_where_the_sandbox_shares_the_host_loopback() -> None:
+    """v115-F9 made loopback direct for Seatbelt, whose loopback is the host's.
+    Under bubblewrap --unshare-net the sandbox loopback is its own namespace, so a
+    worker's own test server on host 127.0.0.1 is reachable only through the
+    netshim bridge — the NO_PROXY exemption must be off there (the proxy admits
+    loopback), or every LLM-worker run against a loopback provider is refused."""
+    from skep.supervisor.spawner import _LOOPBACK_NO_PROXY, _proxy_env
+
+    direct = _proxy_env(8080)
+    assert direct["NO_PROXY"] == direct["no_proxy"] == _LOOPBACK_NO_PROXY
+    bridged = _proxy_env(8080, loopback_direct=False)
+    assert "NO_PROXY" not in bridged and "no_proxy" not in bridged
+    assert bridged["HTTP_PROXY"] == bridged["https_proxy"] == "http://127.0.0.1:8080"
+
+
+@pytest.mark.parametrize("worker_argv", [None, ("claude-adapter",)])
+def test_no_git_a_worker_starts_can_reach_a_remote(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_argv: tuple[str, ...] | None,
+) -> None:
+    """B144: the git floor reads only the command line, so an approved
+    script's own ``subprocess.run(['git', 'push'])`` reached the remote. The
+    worker env now allows git only its local ``file`` transport — for the
+    worker, an external engine, and every grandchild the capability layer
+    starts — and local git keeps working."""
+    from skep.supervisor import spawner as supervisor_spawner
+    from skep.workers import capabilities
+
+    captured: dict[str, object] = {}
+    config = SupervisorConfig(home=tmp_path / "home", worker_command=("w",), sandbox=False)
+    task = mint_task(workspace=repo, instructions="x", budget=DEFAULT_BUDGET)
+    with monkeypatch.context() as m:
+        m.setattr(
+            subprocess,
+            "Popen",
+            lambda *a, **kw: captured.update(kw) or type("P", (), {"pid": 1})(),
+        )
+        supervisor_spawner.spawn_worker(
+            config,
+            task,
+            tmp_path / "t.json",
+            tmp_path / "o.json",
+            log_path=tmp_path / "w.log",
+            worker_argv=worker_argv,
+        )
+    worker_env = captured["env"]
+    assert isinstance(worker_env, dict)
+    assert worker_env["GIT_ALLOW_PROTOCOL"] == "file"
+    # A grandchild: env rebuilt by the real capability boundary, inside the worker.
+    with monkeypatch.context() as m:
+        m.setattr(os, "environ", dict(worker_env))
+        child_env = capabilities._child_process_env(
+            env_allowlist=[], env_baseline=("PATH", "HOME"), network_allowlist=()
+        )
+    assert child_env["GIT_ALLOW_PROTOCOL"] == "file"
+
+    script = (
+        "import subprocess, sys\n"
+        "for argv in (['push', sys.argv[1], 'HEAD:main'], ['fetch', sys.argv[1]]):\n"
+        "    print(subprocess.run(['git', *argv], capture_output=True, text=True).stderr)\n"
+    )
+    for url in (
+        "https://example.invalid/x.git",
+        "ssh://git@example.invalid/x",
+        "git@example.invalid:x",
+        "git://example.invalid/x",
+    ):
+        out = subprocess.run(
+            [sys.executable, "-c", script, url],
+            cwd=repo,
+            env=child_env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert out.count("not allowed") == 2, (url, out)
+    # Local git is untouched: status, a commit, a clone of a local path.
+    local = subprocess.run(
+        ["git", "clone", "-q", str(repo), str(tmp_path / "clone")],
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert local.returncode == 0, local.stderr

@@ -171,17 +171,54 @@ def test_shell_exec_git_mutation_labeled_verify_does_not_fast_path() -> None:
         ["git", "-C", "/abs/worktree", "show", "HEAD"],
     ],
 )
-def test_shell_exec_verify_fast_path_keeps_non_mutations(argv: list[str]) -> None:
-    """v20-F1: pytest and read-only git keep the verify fast-path to `allow`."""
-    decision = SHELL_EXEC_PLUGIN.decision(
+def test_shell_exec_verify_fast_path_is_the_pinned_argv_only(argv: list[str]) -> None:
+    """ES-F3 (B06): the fast-path allows exactly the project's pinned
+    verify_command. The same argv, merely LABELLED verify by the worker, takes
+    the allowlist/approval path like any other command."""
+    pinned = SHELL_EXEC_PLUGIN.decision(
+        purpose="verify",
+        argv=argv,
+        command=" ".join(argv),
+        approved_shell_commands=[],
+        shell_allowlist=[],
+        pinned_verify=[tuple(argv)],
+    )
+    assert pinned.verdict == "allow"
+    assert pinned.reason == "capability.allow.shell_verify"
+    labelled = SHELL_EXEC_PLUGIN.decision(
         purpose="verify",
         argv=argv,
         command=" ".join(argv),
         approved_shell_commands=[],
         shell_allowlist=[],
     )
-    assert decision.verdict == "allow"
-    assert decision.reason == "capability.allow.shell_verify"
+    assert labelled.verdict == "require_approval"
+
+
+def test_a_verify_label_buys_nothing_for_an_unpinned_command() -> None:
+    """ES-F3 (B06, mac-p1 P1-c): `purpose: verify` on an arbitrary sqlite3
+    write forged an approval row. Unpinned → approval; allowlisted → the
+    allowlist's own constrained verdict, never the verify fast-path."""
+    argv = ["sqlite3", "supervisor.sqlite3", "INSERT INTO approvals VALUES (1)"]
+    forged = SHELL_EXEC_PLUGIN.decision(
+        purpose="verify",
+        argv=argv,
+        command=" ".join(argv),
+        approved_shell_commands=[],
+        shell_allowlist=[],
+        pinned_verify=[("uv", "run", "pytest")],
+    )
+    assert forged.verdict == "require_approval"
+    allowlisted = SHELL_EXEC_PLUGIN.decision(
+        purpose="verify",
+        argv=["uv", "run", "pytest", "-q"],
+        command="uv run pytest -q",
+        approved_shell_commands=[],
+        shell_allowlist=[("uv", "run", "pytest")],
+        pinned_verify=[("uv", "run", "pytest")],
+    )
+    assert allowlisted.verdict == "allow_with_constraints"
+    assert allowlisted.reason == "capability.allow.shell_allowlist_prefix"
 
 
 def _decide_with_grants(
@@ -361,3 +398,119 @@ def test_runtime_plugin_registry_rejects_unknown_plugin() -> None:
             worker_version="coding-minimal-0.1.0",
             plugin_ids=("missing",),
         )
+
+
+# ES-F1 (B124, I4): the floor judges what RUNS, not how it is spelled. Every
+# argv below pushed (or could push) past an allowlist on es-integration-2.
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["/usr/bin/git", "push"],
+        ["git", "-c", "protocol.version=2", "push", "origin", "HEAD:refs/heads/x"],
+        ["git", "--git-dir=.git", "push"],
+        ["git", "--git-dir", ".git", "--work-tree", ".", "push"],
+        ["git", "--no-pager", "-P", "fetch"],
+        ["git", "send-pack", "../origin.git", "main"],
+        ["git", "remote", "set-url", "origin", "https://evil"],
+        ["nice", "-n", "5", "git", "push"],
+        ["timeout", "20", "git", "push"],
+        ["timeout", "-s", "KILL", "20", "git", "push"],
+        ["command", "git", "push"],
+        ["exec", "git", "push"],
+        ["nohup", "git", "push"],
+        ["stdbuf", "-oL", "git", "push"],
+        ["xargs", "-I{}", "git", "push"],
+        ["sudo", "-u", "root", "git", "push"],
+        ["/usr/bin/env", "-S", "git push"],
+        ["sh", "-c", "timeout 5 /usr/bin/git -c a=b push"],
+    ],
+)
+def test_es_f1_git_floor_sees_through_spellings_and_wrappers(argv: list[str]) -> None:
+    decision = SHELL_EXEC_PLUGIN.decision(
+        purpose="run",
+        argv=argv,
+        command=" ".join(argv),
+        approved_shell_commands=[],
+        # The live repro's allowlist: bare `git` and `timeout`.
+        shell_allowlist=[("git",), ("timeout",), (argv[0],)],
+    )
+    assert decision.verdict == "deny", argv
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["git", "-c", "alias.p=push", "p"],
+        ["git", "p", "origin"],
+        ["xargs", "git"],
+        ["git", "update-ref", "refs/heads/main", "HEAD~1"],
+        ["git", "branch", "-f", "main", "HEAD"],
+        ["git", "symbolic-ref", "HEAD", "refs/heads/other"],
+        ["git", "worktree", "add", "../x"],
+    ],
+)
+def test_es_f1_unknown_git_subcommands_and_ref_moves_are_denied(argv: list[str]) -> None:
+    decision = _decide_with_grants(argv, allowlist=[("git",)])
+    assert decision.verdict == "deny", argv  # type: ignore[attr-defined]
+
+
+def test_es_f1_an_exactly_allowlisted_alias_runs() -> None:
+    decision = _decide_with_grants(["git", "lg"], allowlist=[("git", "lg")])
+    assert decision.verdict == "allow_with_constraints"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["/usr/bin/git", "status"],
+        ["git", "-c", "color.ui=never", "diff"],
+        ["timeout", "60", "pytest", "-q"],
+        ["git", "branch", "--show-current"],
+        ["git", "remote", "-v"],
+    ],
+)
+def test_es_f1_normal_commands_still_reach_the_allowlist(argv: list[str]) -> None:
+    decision = _decide_with_grants(argv, allowlist=[tuple(argv)])
+    assert decision.verdict == "allow_with_constraints", argv  # type: ignore[attr-defined]
+
+
+def test_es_f1_command_v_git_is_a_lookup_not_a_launch() -> None:
+    decision = _decide_with_grants(["command", "-v", "git"])
+    assert decision.verdict == "require_approval"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["GIT", "push"],
+        ["/usr/bin/Git", "fetch"],
+        ["TIMEOUT", "5", "git", "push"],
+        ["BASH", "-c", "git push"],
+        ["/bin/bash", "-c", "git push"],
+        ["sh", "-c", "A=1 git push"],
+        ["RM", "-rf", "/"],
+    ],
+)
+def test_a_worker_floor_reads_the_program_however_it_is_cased(argv: list[str]) -> None:
+    decision = _decide(argv)
+    assert decision.verdict == "deny", argv  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["find", ".", "-exec", "git", "push", ";"],
+        ["git", "submodule", "foreach", "git push"],
+        ["git", "bisect", "run", "git", "push"],
+        ["busybox", "sh", "-c", "git push"],
+        ["parallel", "git push", ":::", "a"],
+        ["watch", "git push"],
+        ["script", "-q", "/dev/null", "git", "push"],
+        ["git", "clone", "https://example.com/r.git"],
+        ["git", "ls-remote", "origin"],
+        ["git", "submodule", "update", "--init"],
+    ],
+)
+def test_a_worker_cannot_exec_a_push_through_another_program(argv: list[str]) -> None:
+    decision = _decide(argv)
+    assert decision.verdict == "deny", argv  # type: ignore[attr-defined]

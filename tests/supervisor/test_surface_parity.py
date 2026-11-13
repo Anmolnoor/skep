@@ -157,6 +157,49 @@ CHAT_ONLY: dict[str, str] = {
 }
 
 
+# first-run O1 (ADR 0056 D3, ADR 0050): READ verbs the AST gate above cannot
+# see — `_execute_mutation` is mutations only — that an ADR nonetheless
+# requires on all three faces. One shared function per verb; the CLI module,
+# the REST app and the chat read dispatcher must each call it by name.
+THREE_FACE_READS: dict[str, str] = {
+    "explain_view": "`skep policy explain` — a template, the baseline or a role as the "
+    "allow / ask / deny table (first-run O1)",
+    "presence_view": "`skep agents`, `GET /api/agents` and the chat `list_agents` tool — "
+    "which coding agents run here and which skep governs (first-run L1)",
+}
+THREE_FACE_VERBS: dict[str, str] = {
+    "approve_policy_baseline": "`skep policy approve`, `POST /api/policy/baseline/approve` "
+    "and the chat card lock the policy baseline through one verb (first-run O2)",
+    "revoke_policy_rule": "`skep policy revoke`, `DELETE /api/policy/rules/<id>` and the "
+    "chat revoke_policy_rule card remove one learned grant through one verb (W29)",
+}
+# W29: the grant list, CLI and REST (`skep policy grants`, `GET /api/policy/rules`).
+TWO_FACE_READS: dict[str, str] = {
+    "list_policy_rules": "`skep policy grants` and `GET /api/policy/rules` list every learned "
+    "grant with its scope, matcher, lifetime and binding (W29)",
+}
+THREE_FACES: tuple[Path, ...] = (SUPERVISOR / "cli_cmds.py", SUPERVISOR / "serve/app.py", TOOLS)
+
+# first-run O3 (ADR 0056 D7, ADR 0050): `skep onboard`'s step functions. Two
+# faces, not three: onboarding writes the model, the work directory, the
+# sandbox and the locked baseline the Queen itself runs under, so the model is
+# not handed it — the CLI and the REST routes behind the web /setup form are
+# the operator's faces, and each must call the step function by name.
+ONBOARD_VERBS: dict[str, str] = {
+    "onboard_status": "where `skep onboard` resumes; GET /api/onboard",
+    "onboard_model": "step 1, provider + test call + egress line; POST /api/onboard/model",
+    "onboard_workdir": "step 2, create + register via project setup; POST /api/onboard/workdir",
+    "onboard_sandbox": "step 3, the sandbox_backend record (D8); POST /api/onboard/sandbox",
+    "template_preview": "step 4's table before the typed yes; GET /api/onboard/template",
+    "onboard_template": "step 4, the locked baseline through O2's approve path",
+    "onboard_role": "step 5, first_run.json for O4/R1; POST /api/onboard/role",
+    "onboard_check": "`skep onboard --check` and GET /api/onboard/check, egress truth last",
+    "onboard_transparency": "first-run O4: `skep onboard --quiet | --verbose` and "
+    "POST /api/onboard/transparency — the model never gets the switch that hides its verdicts",
+}
+ONBOARD_FACES: tuple[Path, ...] = (ROOT / "src/skep/cli.py", SUPERVISOR / "serve/app.py")
+
+
 def _tools_tree() -> ast.Module:
     return ast.parse(TOOLS.read_text(encoding="utf-8"))
 
@@ -330,3 +373,68 @@ def test_a_verb_with_no_face_and_no_ruling_fails() -> None:
     calls = {"land_run": {"land_run"}, "frobnicate": {"frobnicate_the_repo"}}
     assert verbs_without_operator_face(calls, surface) == {"frobnicate"}
     assert not {"frobnicate"} & (set(CHAT_ONLY) | KNOWN_GAPS)
+
+
+def test_three_face_reads_are_called_from_cli_rest_and_chat() -> None:
+    """ADR 0050 for reads: `policy explain` ships on the CLI, `GET
+    /api/policy/explain` and the chat `policy_explain` tool, all landing on
+    `policy_templates.explain_view`; the O2 baseline approval is one verb on
+    the same three faces. A face that drops the call fails here naming the
+    file."""
+    for function, why in {**THREE_FACE_READS, **THREE_FACE_VERBS}.items():
+        assert len(why.strip()) >= 20, function
+        for face in THREE_FACES:
+            assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
+                f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
+            )
+
+
+def test_onboard_steps_are_called_from_the_cli_and_rest() -> None:
+    """first-run O3: the web /setup form is the step functions (ADR 0050) — a
+    face that stops calling one fails here naming it."""
+    for function, why in ONBOARD_VERBS.items():
+        assert len(why.strip()) >= 20, function
+        for face in ONBOARD_FACES:
+            assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
+                f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
+            )
+
+
+def test_the_grant_list_is_called_from_the_cli_and_rest() -> None:
+    for function, why in TWO_FACE_READS.items():
+        for face in THREE_FACES[:2]:
+            assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
+                f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
+            )
+
+
+# W20 (ADR 0050, ADR 0059 D5): verbs that are the OPERATOR's alone. The
+# command deck (/trust in app.js and `skep chat`), REST and the CLI reach
+# them; the model's tool surface, the messenger channels and webhooks never
+# do — an injected page would ask for exactly this.
+OPERATOR_ONLY_VERBS: dict[str, str] = {
+    "trust_chat": "/trust clears a chat's taint bits — `skep trust`, POST "
+    "/api/chats/{id}/trust behind the deck; never a model tool (W20)",
+}
+OPERATOR_ONLY_FACES: tuple[Path, ...] = (SUPERVISOR / "cli_cmds.py", SUPERVISOR / "serve/chat.py")
+MODEL_SURFACES: tuple[Path, ...] = (
+    TOOLS,
+    SUPERVISOR / "serve/webhooks.py",
+    *sorted((SUPERVISOR / "serve" / "channels").glob("*.py")),
+)
+
+
+def test_operator_only_verbs_have_operator_faces_and_no_model_face() -> None:
+    for function, why in OPERATOR_ONLY_VERBS.items():
+        assert len(why.strip()) >= 20, function
+        for face in OPERATOR_ONLY_FACES:
+            assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
+                f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
+            )
+        for surface in MODEL_SURFACES:
+            assert function not in surface.read_text(), (
+                f"{function} must never be reachable from {surface.relative_to(ROOT)}"
+            )
+    assert not {name for name in MUTATING_TOOL_NAMES if "trust" in name}
+    app_js = (SUPERVISOR / "serve/static/app.js").read_text()
+    assert "/trust`" in app_js and "/api/chats/${activeChatId}/trust" in app_js

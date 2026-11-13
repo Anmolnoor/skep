@@ -141,7 +141,10 @@ def test_resume_reuses_preserved_worktree_in_place(repo: Path, config: Superviso
     assert resumed.record.state == "completed"
     assert resumed.record.workspace == suspended.record.workspace, "resume must be in-place"
     evidence = json.loads(
-        (config.results_dir / f"reuse-{resumed.record.task_id}.json").read_text(encoding="utf-8")
+        (
+            config.result_path(resumed.record.task_id).parent
+            / f"reuse-{resumed.record.task_id}.json"
+        ).read_text(encoding="utf-8")
     )
     assert evidence["marker"] is True, "the suspended attempt's work must survive the resume"
     assert not preserved.exists(), "the chain's terminal run must remove the preserved worktree"

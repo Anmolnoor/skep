@@ -209,9 +209,16 @@ def _enforcing_sandbox() -> Iterator[None]:
         yield
 
 
+def _rule_view(rule: Any) -> dict[str, Any]:
+    # ES-F4/F5, P3-4: ``exact``, ``layer`` and ``matcher`` show only where set.
+    hidden = ("exact", "layer", "matcher")
+    return {key: value for key, value in asdict(rule).items() if key not in hidden or value}
+
+
 def _scopes_view(resolved: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return {
-        scope: [asdict(rule) for rule in policy.rules] for scope, policy in sorted(resolved.items())
+        scope: [_rule_view(rule) for rule in policy.rules]
+        for scope, policy in sorted(resolved.items())
     }
 
 
@@ -252,7 +259,6 @@ def _project_golden(
             max_actions=None,
             max_provider_calls=None,
             execution_mode=None,
-            extra_network_hosts=(),
             binding_candidates=candidates,
         )
     except PolicyResolutionError as exc:

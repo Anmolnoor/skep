@@ -245,7 +245,9 @@ def test_sandbox_profile_allows_git_worktree_metadata(
         common_dir = _git_path(workspace, "--git-common-dir")
         profile = (log_path.parent / "sandbox.profile.sb").read_text()
         assert f'(subpath "{git_dir}")' in profile
-        assert f'(subpath "{common_dir}")' in profile
+        # ES-F3 (B45): only objects/ of the shared dir; hooks/config/refs stay read-only.
+        assert f'(subpath "{common_dir / "objects"}")' in profile
+        assert f'(subpath "{common_dir}")' not in profile
     finally:
         remove_worktree(repo, workspace)
 
@@ -285,7 +287,10 @@ def test_dispatched_worker_cannot_open_an_outbound_socket(
     """Q1 end-to-end: a worker's outbound connection is physically refused (EPERM)."""
     outcome = run_task(repo, "Probe the network. MODE:netprobe", config=config)
     assert outcome.record.state == "completed"
-    probe_path = config.results_dir / f"netprobe-{outcome.record.task_id}.json"
+    probe_path = (
+        config.result_path(outcome.record.task_id).parent
+        / f"netprobe-{outcome.record.task_id}.json"
+    )
     probe = json.loads(probe_path.read_text())
     assert probe["connected"] is False, "the worker reached the network — boundary is broken"
     assert probe["errno"] == errno.EPERM, (
@@ -311,7 +316,9 @@ def test_env_allowlist_is_a_boundary(
     assert outcome.record.state == "completed"
 
     # The fake worker writes the dump next to --out so it survives teardown.
-    dump_path = config.results_dir / f"envdump-{outcome.record.task_id}.json"
+    dump_path = (
+        config.result_path(outcome.record.task_id).parent / f"envdump-{outcome.record.task_id}.json"
+    )
     assert dump_path.is_file(), "envdump evidence missing"
     child_env = json.loads(dump_path.read_text())
     assert "CANARY_SECRET" not in child_env
@@ -332,7 +339,9 @@ def test_toolchain_state_gets_a_writable_workspace_home(
     outcome = run_task(repo, "Dump env. MODE:envdump", config=config, permissions=permissions)
     assert outcome.record.state == "completed"
 
-    dump_path = config.results_dir / f"envdump-{outcome.record.task_id}.json"
+    dump_path = (
+        config.result_path(outcome.record.task_id).parent / f"envdump-{outcome.record.task_id}.json"
+    )
     child_env = json.loads(dump_path.read_text())
     cache_prefix = str(config.home / "cache" / "projects")
     npm_cache = child_env.get("npm_config_cache", "")
@@ -368,13 +377,16 @@ def test_toolchain_env_resolves_engine_declarations(tmp_path: Path) -> None:
     assert Path(env["npm_config_cache"]).is_dir()
     assert Path(env["UV_CACHE_DIR"]) == cache_root / "uv"
     assert Path(env["UV_CACHE_DIR"]).is_dir()
+    # Mac finding B: clang -fmodules / swiftc ignore TMPDIR and write their
+    # module cache to /var/folders, outside the Seatbelt wall.
+    assert Path(env["CLANG_MODULE_CACHE_PATH"]) == cache_root / "clang"
 
     assert Path(env["TMPDIR"]) == workspace / ".toolchain" / "tmp"
     assert Path(env["TMPDIR"]).is_dir()
 
     builtin = _toolchain_env(workspace, resolve_engine(None), cache_root)
     assert "CLAUDE_CONFIG_DIR" not in builtin
-    assert set(builtin) == {"npm_config_cache", "UV_CACHE_DIR", "TMPDIR"}
+    assert set(builtin) == {"npm_config_cache", "UV_CACHE_DIR", "CLANG_MODULE_CACHE_PATH", "TMPDIR"}
 
 
 def test_project_cache_roots_never_shared_across_projects_or_repos(
@@ -442,7 +454,10 @@ def test_grandchildren_inherit_the_toolchain_env(repo: Path, config: SupervisorC
     outcome = run_task(repo, "Dump grandchild env. MODE:childenv", config=config)
     assert outcome.record.state == "completed"
 
-    dump_path = config.results_dir / f"childenv-{outcome.record.task_id}.json"
+    dump_path = (
+        config.result_path(outcome.record.task_id).parent
+        / f"childenv-{outcome.record.task_id}.json"
+    )
     grandchild_env = json.loads(dump_path.read_text())
     tmpdir = grandchild_env.get("TMPDIR", "")
     assert f"{os.sep}.toolchain{os.sep}tmp" in tmpdir
@@ -534,7 +549,9 @@ def test_injected_memory_reaches_the_worker_prompt_as_context() -> None:
     assert _memory_block([]) == ""
 
 
-def test_watch_worker_allows_a_slow_start_before_the_first_event(tmp_path: Path) -> None:
+def test_watch_worker_allows_a_slow_start_before_the_first_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """v115-F8: ``last_activity`` began at launch, so a worker that took longer
     than 3x the heartbeat to write its FIRST byte was killed as heartbeat_lost
     — on 2026-10-21 that was every `worker_timeout == completed` CI flake
@@ -545,6 +562,8 @@ def test_watch_worker_allows_a_slow_start_before_the_first_event(tmp_path: Path)
     from skep.supervisor.monitor import watch_worker
     from skep.worker_contract import CONTRACT_VERSION, Event, EventType
 
+    # The fakes' pids (4242, 4343) are not ours: never signal a real session.
+    monkeypatch.setattr(monitor_mod, "kill_session", lambda pid: None)
     events_path = tmp_path / "events.ndjson"
     now = {"t": 0.0}
 
@@ -642,3 +661,47 @@ def test_watch_worker_allows_a_slow_start_before_the_first_event(tmp_path: Path)
         monitor_mod.kill_process_tree = original_kill
     assert stalled.kind == "heartbeat_lost" and killed == [4343]
     assert now["t"] < 60  # killed ~36 s after its first byte, not after the startup allowance
+
+
+def test_es_f9_a_worker_that_exits_takes_its_session_with_it(tmp_path: Path) -> None:
+    """ES-F9 (B133, I12): the group was killed only on a budget breach; a
+    worker that crashed (kill -9) or exited left `sh verify.sh` → `sleep 330`
+    running with PPID 1 in a deleted cwd (lane M2-25b). Both a same-group
+    child and one in its own group (how commands now run) die with it."""
+    import os
+    import subprocess
+    import sys
+    import time
+
+    from skep.supervisor.monitor import watch_worker
+
+    script = (
+        "import subprocess, sys; "
+        "a = subprocess.Popen(['sleep', '61']); "
+        "b = subprocess.Popen(['sleep', '62'], process_group=0); "
+        "open(sys.argv[1], 'w').write(f'{a.pid} {b.pid}')"
+    )
+    pids_file = tmp_path / "pids"
+    worker = subprocess.Popen(
+        [sys.executable, "-c", script, str(pids_file)], start_new_session=True
+    )
+    verdict = watch_worker(
+        worker,
+        tmp_path / "events.ndjson",
+        task_id="t",
+        trace_id="tr",
+        wall_clock_seconds=30,
+        grace_seconds=1,
+        heartbeat_seconds=10,
+    )
+    assert verdict.kind == "worker_crashed"
+    for pid in map(int, pids_file.read_text().split()):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(f"pid {pid} outlived its worker")

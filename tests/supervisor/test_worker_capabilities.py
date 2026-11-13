@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -323,8 +326,10 @@ def test_shell_run_heartbeats_while_the_command_runs(
 
     monkeypatch.setattr(capabilities_module, "_EXEC_HEARTBEAT_SECONDS", 0.05)
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
     argv = [sys.executable, "-c", "import time; time.sleep(0.4)"]
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path, emit=lambda t, p: events.append((t, p)), verify_command=shlex.join(argv)
+    )
 
     result = registry.invoke("shell.run", {"argv": argv, "purpose": "verify"})
 
@@ -485,8 +490,10 @@ def test_read_plugin_cannot_mutate_workspace_even_if_manifest_claims_read(tmp_pa
 
 def test_shell_run_records_command_events(tmp_path: Path) -> None:
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
     argv = [sys.executable, "-c", "print('ok')"]
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path, emit=lambda t, p: events.append((t, p)), verify_command=shlex.join(argv)
+    )
 
     result = registry.invoke("shell.run", {"argv": argv, "purpose": "verify"})
 
@@ -516,7 +523,11 @@ def test_shell_run_records_command_events(tmp_path: Path) -> None:
 
 def test_shell_run_accepts_verify_command_string(tmp_path: Path) -> None:
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path,
+        emit=lambda t, p: events.append((t, p)),
+        verify_command=f"{shlex.quote(sys.executable)} -c \"print('ok')\"",
+    )
 
     result = registry.invoke(
         "shell.run",
@@ -545,8 +556,10 @@ def test_shell_run_accepts_verify_command_string(tmp_path: Path) -> None:
 
 def test_shell_run_reports_missing_verify_command_without_crashing(tmp_path: Path) -> None:
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
     argv = ["definitely-missing-skep-command", "--version"]
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path, emit=lambda t, p: events.append((t, p)), verify_command=shlex.join(argv)
+    )
 
     result = registry.invoke("shell.run", {"argv": argv, "purpose": "verify"})
 
@@ -580,7 +593,11 @@ def test_shell_run_uses_worker_interpreter_for_python_verify(
 ) -> None:
     monkeypatch.setenv("PATH", "")
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
+    registry = CapabilityRegistry(  # ES-F3: the pinned verify fast-paths
+        tmp_path,
+        emit=lambda t, p: events.append((t, p)),
+        verify_command="python -c \"print('ok')\"",
+    )
 
     result = registry.invoke(
         "shell.run",
@@ -619,6 +636,7 @@ def test_shell_run_rebuilds_child_environment_from_allowlist(
         tmp_path,
         emit=lambda _t, _p: None,
         env_allowlist=("ALLOWED_PROVIDER_KEY",),
+        shell_allowlist=[(sys.executable, "-c")],  # ES-F3: verify label is no grant
     )
 
     result = registry.invoke(
@@ -649,7 +667,9 @@ def test_proxy_environment_passes_only_when_network_allowlist_exists(
 ) -> None:
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
 
-    blocked = CapabilityRegistry(tmp_path, emit=lambda _t, _p: None).invoke(
+    blocked = CapabilityRegistry(
+        tmp_path, emit=lambda _t, _p: None, shell_allowlist=[(sys.executable, "-c")]
+    ).invoke(
         "shell.run",
         {
             "argv": [sys.executable, "-c", "import os; print(os.environ.get('HTTP_PROXY', ''))"],
@@ -660,6 +680,7 @@ def test_proxy_environment_passes_only_when_network_allowlist_exists(
         tmp_path,
         emit=lambda _t, _p: None,
         network_allowlist=("example.com",),
+        shell_allowlist=[(sys.executable, "-c")],
     ).invoke(
         "shell.run",
         {
@@ -1878,6 +1899,7 @@ def test_shell_run_strips_proxy_environment_when_task_network_is_denied(
         emit=lambda _t, _p: None,
         env_allowlist=(),
         network_allowlist=(),
+        shell_allowlist=[(sys.executable, "-c")],  # ES-F3: verify label is no grant
     )
 
     result = registry.invoke(
@@ -1910,6 +1932,7 @@ def test_shell_run_preserves_proxy_environment_when_task_network_is_allowed(
         emit=lambda _t, _p: None,
         env_allowlist=(),
         network_allowlist=("example.com",),
+        shell_allowlist=[(sys.executable, "-c")],  # ES-F3: verify label is no grant
     )
 
     result = registry.invoke(
@@ -2058,3 +2081,124 @@ def test_network_fetch_loopback_is_allowed_in_its_own_words(
         "reason": "capability.allow.network_loopback",
         "detail": "localhost" if "localhost" in origin_url else "127.0.0.1",
     }
+
+
+def test_es_f2_repo_search_never_reads_through_an_out_of_tree_symlink(
+    repo: Path, tmp_path: Path
+) -> None:
+    """ES-F2 (B126): `repo.search "BEGIN"` read a tracked symlink to a key."""
+    secret = tmp_path / "outside-key"
+    secret.write_text("value = CANARY-SEARCH\n", encoding="utf-8")
+    (repo / "key.txt").symlink_to(secret)
+    subprocess.run(["git", "-C", str(repo), "add", "key.txt"], check=True)
+    registry = CapabilityRegistry(repo, emit=lambda t, p: None)
+    result = registry.invoke("repo.search", {"query": "value", "max_matches": 5})
+    assert "CANARY-SEARCH" not in (result.output or "")
+    assert "existing.py:1:value = 0" in (result.output or "")
+
+
+def _pid_gone(pid: int, seconds: float = 5.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_es_f9_a_timed_out_command_takes_its_children_with_it(tmp_path: Path) -> None:
+    """ES-F9 (B133, I12): subprocess.run's timeout killed only the direct
+    child; `sh tests/verify.sh` → `sleep 330` kept running with PPID 1 after
+    the run ended (lane M2-25a)."""
+    script = (
+        "import subprocess, sys, time; "
+        "p = subprocess.Popen(['sleep', '61']); "
+        "open('gc.pid', 'w').write(str(p.pid)); time.sleep(30)"
+    )
+    registry = CapabilityRegistry(
+        tmp_path,
+        emit=lambda event_type, payload: None,
+        shell_allowlist=[[sys.executable]],
+        command_timeout_seconds=1,
+    )
+    result = registry.invoke("shell.run", {"argv": [sys.executable, "-c", script]})
+    assert result.exit_code == 124
+    assert _pid_gone(int((tmp_path / "gc.pid").read_text()))
+
+
+def test_w8_the_worker_shell_has_the_command_line_secret_floor(tmp_path: Path) -> None:
+    """W8 (PR #65 review, finding 10; B76): with `cat` allowlisted a worker's
+    `cat .env` ran, though `skep policy why` says the floor binds workers. The
+    worker's shell.run now refuses a line naming a secret, leaves the blocked
+    command pair in its events, and still reads its own ordinary files."""
+    events: list[tuple[EventType, dict[str, object]]] = []
+    (tmp_path / ".env").write_text("NAME=value\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
+    registry = CapabilityRegistry(
+        tmp_path, emit=lambda t, p: events.append((t, p)), shell_allowlist=[["cat"]]
+    )
+    for argv in (["cat", ".env"], ["cat", f"{tmp_path}/.env"], ["cat", "README.md", ".env"]):
+        events.clear()
+        assert registry.shell_decision_preview({"argv": argv}).verdict == "deny"
+        with pytest.raises(CapabilityDenied, match="secret floor"):
+            registry.invoke("shell.run", {"argv": argv, "purpose": "modify"})
+        assert [kind for kind, _payload in events] == [
+            EventType.COMMAND_START,
+            EventType.COMMAND_RESULT,
+        ]
+        decision = events[1][1]["decision"]
+        assert isinstance(decision, dict)
+        assert decision["reason"] == "capability.deny.secret_floor"
+    result = registry.invoke("shell.run", {"argv": ["cat", "README.md"], "purpose": "modify"})
+    assert result.status == "allowed" and result.output == "hello\n"
+
+
+def test_es_f52_review_a_dotenv_template_is_not_a_secret_on_the_shell_lane(
+    tmp_path: Path,
+) -> None:
+    """ES-F52 review: the command-line floor read every `.env.*` as a secret,
+    so a worker's `cat .env.example` and `git diff -- .env.sample` failed —
+    ordinary setup work. A committed template (`.example`, `.sample`,
+    `.template`, `.dist`) reads; `.env`, `.env.local` and a template that is
+    a symlink to a secret are still refused."""
+    (tmp_path / ".env").write_text("NAME=value\n", encoding="utf-8")
+    (tmp_path / ".env.local").write_text("NAME=value\n", encoding="utf-8")
+    for name in (".env.example", ".env.sample", ".ENV.TEMPLATE", ".env.dist"):
+        (tmp_path / name).write_text("NAME=\n", encoding="utf-8")
+    (tmp_path / ".env.linked.example").symlink_to(tmp_path / ".env")
+    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: None, shell_allowlist=[["cat"]])
+    for name in (".env.example", ".env.sample", ".ENV.TEMPLATE", ".env.dist"):
+        result = registry.invoke("shell.run", {"argv": ["cat", name], "purpose": "modify"})
+        assert result.status == "allowed" and result.output == "NAME=\n", name
+    for name in (".env", ".env.local", ".env.linked.example"):
+        assert registry.shell_decision_preview({"argv": ["cat", name]}).reason == (
+            "capability.deny.secret_floor"
+        ), name
+
+
+def test_a_successful_commit_drops_only_the_packed_refs_lock_line(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W35 (B108): git >= 2.45's commit deletes the AUTO_MERGE pseudoref after
+    the commit lands, which locks the common dir's packed-refs — read-only in
+    a sandbox (ES-F3), so every commit printed an error it did not have. The
+    line goes from a successful commit's output; a failed commit keeps it."""
+    import subprocess as sp
+
+    common = (repo / ".git").resolve()
+    noise = f"error: Unable to create '{common}/packed-refs.lock': Operation not permitted\n"
+    other = "warning: something real\n"
+    for code in (0, 1):
+        monkeypatch.setattr(
+            "skep.workers.capabilities.subprocess.run",
+            lambda argv, code=code, **_kw: sp.CompletedProcess(
+                argv, code, "[x] y\n", noise + other
+            ),
+        )
+        registry = CapabilityRegistry(
+            repo, emit=lambda _t, _p: None, approved_capability_ids=("git.commit",)
+        )
+        commit = registry.invoke("git.commit", {"message": "m"})
+        assert commit.error == (other if code == 0 else noise + other)

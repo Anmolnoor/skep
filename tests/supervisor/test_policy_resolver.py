@@ -1,7 +1,8 @@
-"""Unit tests for the run-policy network merge (v19-F2).
+"""Unit tests for the run policy's provider endpoint (v19-F2 → ADR 0059 D3).
 
-The provider host must land in every *coding* run's allowlist regardless of how
-network was specified, unless the run opted into allow-all (``["*"]``).
+Every *needs_provider* run gets the configured provider as ``provider_hosts``
+(``host:port``) however network was specified — never merged into
+``network``, which stays exactly what was asked or defaulted.
 """
 
 from __future__ import annotations
@@ -13,6 +14,10 @@ import pytest
 from skep.supervisor import RunStore
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.policy_resolver import ResolvedRunPolicy, resolve_run_policy
+from skep.supervisor.providers import ProviderProfile
+from skep.supervisor.serve.llm import LLM_BASE_URL
+
+from .conftest import predating_home
 
 
 def _resolve(
@@ -22,7 +27,6 @@ def _resolve(
     *,
     caste: str,
     network: list[str] | None,
-    extra: list[str],
 ) -> ResolvedRunPolicy:
     return resolve_run_policy(
         store=store,
@@ -36,75 +40,79 @@ def _resolve(
         max_actions=None,
         max_provider_calls=None,
         execution_mode="sandbox",
-        extra_network_hosts=extra,
     )
 
 
 @pytest.mark.parametrize(
-    ("caste", "network", "extra", "expected"),
+    ("caste", "network", "provider", "expected_network", "expected_provider"),
     [
-        # coding: the provider host is merged whether or not network was set.
-        ("coding", None, ["ollama.com"], ["ollama.com"]),
-        ("coding", ["github.com"], ["ollama.com"], ["github.com", "ollama.com"]),
-        ("coding", [], ["ollama.com"], ["ollama.com"]),
-        # allow-all already reaches everything; leave it untouched.
-        ("coding", ["*"], ["ollama.com"], ["*"]),
-        # already present -> no duplicate.
-        ("coding", ["ollama.com"], ["ollama.com"], ["ollama.com"]),
-        # no configured provider -> nothing to merge.
-        ("coding", None, [], []),
-        # v72-F2: the document caste drafts through the provider — same merge.
-        ("document", [], ["ollama.com"], ["ollama.com"]),
-        ("document", ["github.com"], ["ollama.com"], ["github.com", "ollama.com"]),
-        # provider-less casts never get the provider merge.
-        ("audit", None, ["ollama.com"], []),
-        ("audit", ["github.com"], ["ollama.com"], ["github.com"]),
+        # coding: the provider rides provider_hosts whether or not network was set.
+        ("coding", None, "https://ollama.com", [], ["ollama.com:443"]),
+        ("coding", ["github.com"], "https://ollama.com", ["github.com"], ["ollama.com:443"]),
+        ("coding", [], "http://localhost:11434", [], ["localhost:11434"]),
+        # allow-all stays allow-all; the endpoint is still recorded (I8).
+        ("coding", ["*"], "https://ollama.com", ["*"], ["ollama.com:443"]),
+        # a host the request named stays a grant; the endpoint is separate.
+        ("coding", ["ollama.com"], "https://ollama.com", ["ollama.com"], ["ollama.com:443"]),
+        # no configured provider -> nothing.
+        ("coding", None, None, [], []),
+        # v72-F2: the document caste drafts through the provider — same rule.
+        ("document", [], "https://ollama.com", [], ["ollama.com:443"]),
+        ("reviewer", ["github.com"], "https://ollama.com", ["github.com"], ["ollama.com:443"]),
+        # provider-less castes never get it.
+        ("audit", None, "https://ollama.com", [], []),
+        ("script", ["github.com"], "https://ollama.com", ["github.com"], []),
     ],
 )
-def test_provider_host_merge(
+def test_provider_hosts_for_every_needs_provider_caste(
     tmp_path: Path,
     repo: Path,
     caste: str,
     network: list[str] | None,
-    extra: list[str],
-    expected: list[str],
+    provider: str | None,
+    expected_network: list[str],
+    expected_provider: list[str],
 ) -> None:
     config = build_config(tmp_path / "home", None)
     store = RunStore(config.db_path)
     try:
-        resolved = _resolve(store, config, repo, caste=caste, network=network, extra=extra)
+        if provider is not None:
+            store.set_setting(LLM_BASE_URL, provider)
+        resolved = _resolve(store, config, repo, caste=caste, network=network)
     finally:
         store.close()
-    assert resolved.permissions.network == expected
+    assert resolved.permissions.network == expected_network
+    assert resolved.permissions.provider_hosts == expected_provider
 
 
-def test_merge_is_sorted_and_deduped_regardless_of_input_order(tmp_path: Path, repo: Path) -> None:
-    """v19-F11: equal inputs give a byte-equal, sorted, deduped allowlist."""
+def test_provider_hosts_are_sorted_and_deduped(tmp_path: Path, repo: Path) -> None:
+    """v19-F11: equal inputs give a byte-equal, sorted, deduped list — the
+    settings endpoint, the active profile and its auxiliary hosts together."""
     config = build_config(tmp_path / "home", None)
     store = RunStore(config.db_path)
     try:
-        one = _resolve(
-            store,
-            config,
-            repo,
-            caste="coding",
-            network=["github.com"],
-            extra=["ollama.com", "github.com", "api.openai.com"],
+        store.set_setting(LLM_BASE_URL, "https://ollama.com")
+        store.upsert_provider_profile(
+            ProviderProfile(
+                provider_id="p",
+                protocol="openai_compat",
+                base_url="https://api.openai.com",
+                model="m",
+                cost_class="paid",
+                allowed_network_hosts=("ollama.com", "auth.example", "*.bad.example"),
+            )
         )
-        two = _resolve(
-            store,
-            config,
-            repo,
-            caste="coding",
-            network=["github.com"],
-            extra=["api.openai.com", "ollama.com", "github.com"],
-        )
+        store.set_active_provider("p")
+        resolved = _resolve(store, config, repo, caste="coding", network=["github.com"])
     finally:
         store.close()
-    expected = ["api.openai.com", "github.com", "ollama.com"]
-    assert one.permissions.network == expected
-    # Different extra-host ordering resolves to the identical list.
-    assert two.permissions.network == expected
+    # A wildcard auxiliary entry is no endpoint: it never becomes provider_hosts.
+    assert resolved.permissions.provider_hosts == [
+        "api.openai.com:443",
+        "auth.example:443",
+        "ollama.com:443",
+    ]
+    assert resolved.permissions.network == ["github.com"]
 
 
 def test_managed_repo_is_trusted_by_construction(tmp_path: Path, repo: Path) -> None:
@@ -242,7 +250,7 @@ def test_registry_hosts_follow_enforceability_and_strategy(tmp_path: Path, repo:
 
 
 def test_operator_policy_default_allows_search_denies_connect(tmp_path: Path) -> None:
-    store = RunStore(tmp_path / "supervisor.sqlite3")
+    store = RunStore(predating_home(tmp_path / "supervisor.sqlite3"))
     try:
         from skep.supervisor.policy_resolver import resolve_operator_policy
 
@@ -265,7 +273,7 @@ def test_operator_document_rules_compose_with_the_global_document(tmp_path: Path
         PolicyDocument,
     )
 
-    store = RunStore(tmp_path / "supervisor.sqlite3")
+    store = RunStore(predating_home(tmp_path / "supervisor.sqlite3"))
     try:
         store.set_setting(
             POLICY_DOCUMENT_SETTINGS_KEY,
@@ -309,3 +317,79 @@ def test_operator_document_rules_compose_with_the_global_document(tmp_path: Path
         assert policy.decision("filesystem", "read", "/vault/key").verdict == "deny"
     finally:
         store.close()
+
+
+def test_a_registry_profile_endpoint_keeps_its_own_port(tmp_path: Path, repo: Path) -> None:
+    """The registry stores the endpoint's bare host among its auxiliary hosts
+    (validate_provider_profile); it must not turn into a second, https entry
+    — localhost:443 would be an endpoint nobody configured."""
+    from skep.supervisor.providers import validate_provider_profile
+
+    config = build_config(tmp_path / "home", None)
+    store = RunStore(config.db_path)
+    try:
+        store.upsert_provider_profile(
+            validate_provider_profile(
+                ProviderProfile(
+                    provider_id="local",
+                    protocol="ollama",
+                    base_url="http://localhost:11434",
+                    model="m",
+                    cost_class="local",
+                )
+            )
+        )
+        store.set_active_provider("local")
+        store.set_setting(LLM_BASE_URL, "http://localhost:11434")
+        resolved = _resolve(store, config, repo, caste="coding", network=None)
+    finally:
+        store.close()
+    assert resolved.permissions.provider_hosts == ["localhost:11434"]
+
+
+def test_a_routable_local_profile_is_a_provider_host(tmp_path: Path, repo: Path) -> None:
+    """Dispatch may route to any healthy local registry profile; its endpoint
+    is reachable at its own port. A paid non-active profile is not (routing
+    reaches a remote only through the run's network grant)."""
+    config = build_config(tmp_path / "home", None)
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting(LLM_BASE_URL, "http://localhost:11434")
+        for pid, cost, url in (
+            ("other", "local", "http://localhost:11500"),
+            ("paid", "paid", "https://api.example.com"),
+        ):
+            store.upsert_provider_profile(
+                ProviderProfile(
+                    provider_id=pid, protocol="ollama", base_url=url, model="m", cost_class=cost
+                )
+            )
+        resolved = _resolve(store, config, repo, caste="coding", network=None)
+    finally:
+        store.close()
+    assert resolved.permissions.provider_hosts == ["localhost:11434", "localhost:11500"]
+
+
+def test_a_local_profile_on_a_new_host_opens_no_egress(tmp_path: Path, repo: Path) -> None:
+    """cost_class is the registrant's label, not a fact: a registered, never
+    activated 'local' profile on a host no configured endpoint names must not
+    become every run's egress. Before host:port pinning only the active host
+    was reachable (on any port), so another port of a host already listed is
+    all a routable local profile may add."""
+    config = build_config(tmp_path / "home", None)
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting(LLM_BASE_URL, "http://localhost:11434")
+        for pid, url in (
+            ("lan", "http://192.168.1.50:8000"),
+            ("labelled", "https://exfil.example"),
+        ):
+            store.upsert_provider_profile(
+                ProviderProfile(
+                    provider_id=pid, protocol="ollama", base_url=url, model="m", cost_class="local"
+                )
+            )
+        resolved = _resolve(store, config, repo, caste="coding", network=None)
+    finally:
+        store.close()
+    assert resolved.permissions.provider_hosts == ["localhost:11434"]

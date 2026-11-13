@@ -11,7 +11,14 @@ rules are configured — auto-approval (D3).
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import select
+import signal
+import subprocess
+import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -26,18 +33,62 @@ from .dispatch import run_task
 from .ingest import IngestOutcome
 from .nodes import OPS_INSPECT_CAPABILITIES, OPS_MUTATING_CAPABILITIES
 from .policy_resolver import PolicyResolutionError, resolve_run_policy, run_policy_for_repo
-from .provider_hosts import configured_provider_hosts
 from .providers import ProviderHealth, ProviderProfile, check_provider_health
+from .spawner import build_worker_env
 from .store import SCHEDULE_SUCCESS_STATES, RunStore, ScheduleRecord
 from .templates import WorkflowTemplate, instantiate
 
 logger = logging.getLogger("skep.scheduler")
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# ES B110: the longest interval a schedule may have. `99999999999999d` was
+# accepted and overflowed datetime at tick time; a year is a sane ceiling.
+MAX_INTERVAL_SECONDS = 366 * 86400
 
 # v44-F4: the agent-less cron lane (Hermes `--no-agent --script`).
 SCRIPT_TIMEOUT_SECONDS = 120
 SCRIPT_OUTPUT_CAP = 4000
+
+
+# ES B111: the ONLY variables a script inherits. Never serve.env's keys,
+# never a *KEY*/*SECRET*/*TOKEN* — the output reaches a chat and the provider.
+SCRIPT_ENV_BASELINE = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TERM",
+    "TMPDIR",
+)
+# ES B117: bytes kept from the pipe — enough for SCRIPT_OUTPUT_CAP chars of
+# any UTF-8; the rest is read and dropped so the script never blocks on it.
+_SCRIPT_READ_CAP = SCRIPT_OUTPUT_CAP * 4
+# ES B120: process groups of the scripts running now, for kill_running_scripts.
+_RUNNING_GROUPS: set[int] = set()
+_RUNNING_LOCK = threading.Lock()
+
+
+def script_env() -> dict[str, str]:
+    """The environment a script schedule runs with — the scrubbed baseline
+    present in this process, nothing else. The script card lists these
+    names (P4-2), so the card and the run read one function."""
+    return build_worker_env((), baseline=SCRIPT_ENV_BASELINE)
+
+
+def kill_running_scripts() -> None:
+    """ES B120: SIGKILL every running script's whole process group — serve
+    shutdown calls this so a restart never leaves a script running with no
+    supervisor."""
+    with _RUNNING_LOCK:
+        groups = list(_RUNNING_GROUPS)
+    for group in groups:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(group, signal.SIGKILL)
 
 
 def run_schedule_script(
@@ -48,35 +99,105 @@ def run_schedule_script(
     ``stdin`` carries a chained schedule's last output (v53-F5) — data into
     an operator-vetted command, never a new command.
 
-    SUPERVISOR-SIDE, with the operator's own standing (env, filesystem) — as
-    trusted as the operator's crontab, which is why creation is operator-gated
-    (see the tick branch). Output is stdout+stderr, trimmed and capped, so a
-    chatty script cannot flood a chat transcript.
+    SUPERVISOR-SIDE, with the operator's own filesystem standing — as trusted
+    as the operator's crontab, which is why creation is operator-gated (see
+    the tick branch). Like cron, it gets a minimal env (SCRIPT_ENV_BASELINE),
+    not the daemon's. It runs in its own session, so the timeout kills the
+    whole process group, not just ``sh``. Output is stdout+stderr, read as it
+    streams, trimmed and capped, so a chatty script can flood neither a chat
+    transcript nor the daemon's memory.
     """
-    import subprocess
-
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             ["/bin/sh", "-c", command],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            input=stdin,
+            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=script_env(),
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return (f"script timed out after {timeout_seconds:g}s", False)
     except OSError as exc:
         return (f"script failed to start: {exc}", False)
-    out = (proc.stdout or "").strip()
-    err = (proc.stderr or "").strip()
-    combined = out if not err else (f"{out}\n{err}" if out else err)
-    if len(combined) > SCRIPT_OUTPUT_CAP:
+    with _RUNNING_LOCK:
+        _RUNNING_GROUPS.add(proc.pid)
+    kept = bytearray()
+    truncated = timed_out = False
+    try:
+        if stdin is not None and proc.stdin is not None:
+            # A chained output is already capped (≤ SCRIPT_OUTPUT_CAP), far
+            # below a pipe buffer, so this write cannot block.
+            with contextlib.suppress(BrokenPipeError):
+                proc.stdin.write(stdin.encode())
+            with contextlib.suppress(BrokenPipeError):
+                proc.stdin.close()
+        assert proc.stdout is not None
+        fd = proc.stdout.fileno()
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:  # select retries EINTR itself, so this is the deadline
+                timed_out = True
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break  # EOF: every writer in the group closed the pipe
+            room = _SCRIPT_READ_CAP - len(kept)
+            if len(chunk) > room:
+                truncated = True
+            kept += chunk[: max(room, 0)]
+        if not timed_out:
+            try:
+                proc.wait(timeout=max(deadline - time.monotonic(), 0))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            if timed_out or proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        if proc.stdout is not None:
+            proc.stdout.close()
+        with _RUNNING_LOCK:
+            _RUNNING_GROUPS.discard(proc.pid)
+    combined = kept.decode("utf-8", errors="replace").strip()
+    if truncated or len(combined) > SCRIPT_OUTPUT_CAP:
         combined = combined[:SCRIPT_OUTPUT_CAP] + "\n… (truncated)"
+    if timed_out:
+        note = f"script timed out after {timeout_seconds:g}s"
+        return (f"{combined}\n{note}" if combined else note, False)
     if proc.returncode != 0:
         # A failure always says something, even a mute one.
         return (f"{combined or '(no output)'}\n[exit {proc.returncode}]", False)
     # v51-F6: empty success returns "" so the tick can stay silent (watchdog).
     return (combined, True)
+
+
+SCRIPT_RUNNING_STATE = "script_running"
+
+
+def reconcile_interrupted_scripts(store: RunStore) -> list[str]:
+    """ES B120: at serve start, a schedule still marked running was cut off
+    by the last shutdown. Record that as a health failure; its slot already
+    advanced, so it fires at the next one, not at once."""
+    interrupted: list[str] = []
+    for schedule in store.list_schedules():
+        if schedule.last_state != SCRIPT_RUNNING_STATE:
+            continue
+        state = "script_interrupted: serve stopped mid-script; next run at its next slot"
+        store.mark_schedule_ran(
+            schedule.name,
+            ran_at=schedule.last_run_at or now_ts(),
+            next_run_at=schedule.next_run_at,
+            task_id=None,
+            state=state,
+        )
+        store.record_schedule_outcome(schedule.name, task_id=None, state=state)
+        interrupted.append(schedule.name)
+    return interrupted
 
 
 def parse_interval(spec: str) -> int:
@@ -94,6 +215,8 @@ def parse_interval(spec: str) -> int:
         raise ValueError(f"invalid interval {spec!r}: use e.g. 30s, 5m, 2h, 1d") from exc
     if amount <= 0:
         raise ValueError(f"interval must be positive, got {spec!r}")
+    if amount * factor > MAX_INTERVAL_SECONDS:
+        raise ValueError(f"interval must be at most 366d, got {spec!r}")
     return amount * factor
 
 
@@ -109,6 +232,25 @@ def now_ts() -> str:
     return _fmt_ts(datetime.now(UTC))
 
 
+def _start_slot(start_at: str | None) -> str | None:
+    """ES B116: ``start_at`` → the store's ``…Z`` form, or ValueError.
+
+    ``next_run_at`` is compared as a STRING, so a verbatim ``tomorrow`` sorted
+    after every timestamp (never fired) and ``-08:00`` sorted 8 h early. A
+    naive time is UTC — the documented posture."""
+    if start_at is None or start_at == "":
+        return None
+    try:
+        moment = datetime.fromisoformat(start_at.strip())
+    except ValueError as exc:
+        raise ValueError(
+            f"invalid start_at {start_at!r}: use an ISO time, e.g. 2026-07-16T09:00:00Z"
+        ) from exc
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return _fmt_ts(moment.astimezone(UTC))
+
+
 # v14 Step 2: after this many consecutive failed ticks a schedule is auto-disabled
 # (with a recorded reason) so a persistently broken config stops hot-looping.
 MAX_SCHEDULE_CONSECUTIVE_FAILURES = 5
@@ -117,6 +259,23 @@ MAX_SCHEDULE_CONSECUTIVE_FAILURES = 5
 def next_run_after(reference: str, interval_seconds: int) -> str:
     """Next fire time = reference + interval (scheduled from the tick, so no catch-up storm)."""
     return _fmt_ts(_parse_ts(reference) + timedelta(seconds=interval_seconds))
+
+
+def next_fire_times(
+    start_at: str | None, interval_seconds: int, *, once: bool = False, count: int = 3
+) -> list[str]:
+    """The next ``count`` fire times of a schedule created now, by the
+    scheduler's own rules: the first is ``start_at`` (normalised) or the next
+    tick, each later one ``next_run_after`` the previous. A tick that runs
+    late pushes the rest later by as much (no catch-up storm). ``once`` fires
+    once. A ``start_at`` already past is due at once: the next tick fires it.
+    ValueError on a bad ``start_at``."""
+    now = now_ts()
+    start = _start_slot(start_at)
+    times = [start if start is not None and start > now else now]
+    while not once and len(times) < count:
+        times.append(next_run_after(times[-1], interval_seconds))
+    return times
 
 
 def make_schedule(
@@ -136,6 +295,7 @@ def make_schedule(
     chain: str | None = None,
 ) -> ScheduleRecord:
     created = now_ts()
+    start = _start_slot(start_at)
     return ScheduleRecord(
         name=name,
         repo=str(repo),
@@ -148,7 +308,7 @@ def make_schedule(
         enabled=enabled,
         created_at=created,
         last_run_at=None,
-        next_run_at=start_at or created,  # default: eligible on the next tick
+        next_run_at=start or created,  # default: eligible on the next tick
         last_task_id=None,
         last_state=None,
         chat_id=chat_id,
@@ -179,6 +339,7 @@ def make_template_schedule(
     """
     instance = instantiate(template, params, repo=str(repo), ref=ref)
     created = now_ts()
+    start = _start_slot(start_at)
     return ScheduleRecord(
         name=name,
         repo=instance.repo,
@@ -191,7 +352,7 @@ def make_template_schedule(
         enabled=enabled,
         created_at=created,
         last_run_at=None,
-        next_run_at=start_at or created,
+        next_run_at=start or created,
         last_task_id=None,
         last_state=None,
         template_name=template.name,
@@ -208,18 +369,6 @@ class TickResult:
 
 
 DispatchFn = Callable[..., IngestOutcome]
-
-
-def _with_provider_hosts(permissions: Permissions, hosts: Sequence[str]) -> Permissions:
-    """v24-F2: an unbound tick must still reach its LLM provider (v19-F2 held
-    on every creation path EXCEPT this one). ``["*"]`` is left untouched."""
-    network = list(permissions.network)
-    if network == ["*"] or not hosts:
-        return permissions
-    merged = sorted(dict.fromkeys([*network, *hosts]))
-    if merged == network:
-        return permissions
-    return permissions.model_copy(update={"network": merged})
 
 
 def _schedule_dispatch_decision(
@@ -325,22 +474,48 @@ def _deliver_tick_text(
     text: str,
     notify: Callable[[str, str, str], None] | None,
     kind: str = "info",
+    *,
+    script_output: bool = False,
+    context: str | None = None,
 ) -> None:
     """Deliver a repo-less tick's text: bound chat (+ best-effort outbound
     push, v44-F2) when it still exists, otherwise an inert note. The chat row
     is the durable copy; a push failure never breaks the tick. ``kind``
     (v78-F1) threads the delivery classification through to the push choke
     point, so a schedule-dispatched run's pending gate still reaches an
-    'approvals'-level channel."""
+    'approvals'-level channel.
+
+    ADR 0059 D5 (B26): a script's output (``script_output``, or a chained
+    source's ``context``) is outside content — a user row from
+    ``schedule:<name>``, replayed wrapped, setting the chat's ``untrusted``
+    bit; never the Queen's own words. The push carries the same text."""
+    prefix = "" if context is None else f"[Context from schedule {schedule.chain!r}]:\n{context}"
+    pushed = f"{prefix}\n\n{text}" if prefix else text
     if schedule.chat_id and store.get_chat(schedule.chat_id) is not None:
-        store.add_chat_message(schedule.chat_id, role="assistant", content=text)
+        if prefix:
+            store.add_chat_message(
+                schedule.chat_id, role="user", content=prefix,
+                provenance=f"schedule:{schedule.chain}",
+            )  # fmt: skip
+        if script_output:
+            store.add_chat_message(
+                schedule.chat_id, role="user", content=text,
+                provenance=f"schedule:{schedule.name}",
+            )  # fmt: skip
+        else:
+            store.add_chat_message(schedule.chat_id, role="assistant", content=text)
         if notify is not None:
             try:
-                notify(schedule.chat_id, text, kind)
+                notify(schedule.chat_id, pushed, kind)
             except Exception:
                 logger.warning("schedule %r outbound push failed", schedule.name, exc_info=True)
     else:
-        store.create_note(text, actor=f"schedule:{schedule.name}")
+        # W21 review: a script's output (or a chain's) is outside text, so the
+        # note carries ``untrusted`` to every chat that lists it
+        outside = script_output or context is not None
+        store.create_note(
+            pushed, actor=f"schedule:{schedule.name}", taint=("untrusted",) if outside else ()
+        )
 
 
 def compose_digest(store: RunStore) -> str:
@@ -397,6 +572,21 @@ def compose_digest(store: RunStore) -> str:
     return "\n".join(lines)
 
 
+def _sources_first(due: list[ScheduleRecord]) -> list[ScheduleRecord]:
+    """L14: a chained schedule due in the same tick as its source runs after
+    it, so it reads this tick's output — not the last one. Stable otherwise
+    (next_run_at order); chains are acyclic and capped (``validate_chain``)."""
+    by_name = {schedule.name: schedule for schedule in due}
+
+    def depth(schedule: ScheduleRecord) -> int:
+        level, current = 0, schedule.chain
+        while current in by_name and level <= MAX_CHAIN_DEPTH:
+            level, current = level + 1, by_name[current].chain
+        return level
+
+    return sorted(due, key=depth)
+
+
 # v83-F5 (ADR 0042): the serve daemon's hook for 'prompt' schedules — one
 # read-only Queen turn in the schedule's bound chat; (reply_text, ok). None
 # (the CLI tick) fails the tick honestly: there is no chat engine here.
@@ -420,8 +610,21 @@ def run_due(
     """
     moment = now or now_ts()
     results: list[TickResult] = []
-    for schedule in store.due_schedules(moment):
+    for schedule in _sources_first(store.due_schedules(moment)):
         task_id: str | None
+        try:
+            # ES B110: computed BEFORE the side effect, inside the try — a row
+            # whose interval no clock can hold (stored before the cap) raised
+            # here after its note had posted, outside the try, and killed the
+            # whole tick every second.
+            next_at = next_run_after(moment, schedule.interval_seconds)
+        except (OverflowError, ValueError) as exc:
+            state = f"dispatch_error: interval {schedule.interval_seconds}s is unusable ({exc})"
+            store.set_schedule_enabled(schedule.name, enabled=False)
+            store.set_schedule_disabled_reason(schedule.name, f"auto-disabled: {state}")
+            store.record_schedule_outcome(schedule.name, task_id=None, state=state)
+            results.append(TickResult(name=schedule.name, task_id=None, state=state))
+            continue
         try:
             blocked_state: str | None = None
             # v53-F5: a chained schedule reads its source's last output as
@@ -433,12 +636,7 @@ def run_due(
                 # otherwise as an inert note (the twin of chat add_note). No
                 # repo, no worker, no policy surface; "note_posted" rides the
                 # blocked_state no-dispatch tail and counts as a health success.
-                note_text = schedule.instructions
-                if chained is not None:
-                    note_text = (
-                        f"[Context from schedule {schedule.chain!r}]:\n{chained}\n\n{note_text}"
-                    )
-                _deliver_tick_text(store, schedule, note_text, notify)
+                _deliver_tick_text(store, schedule, schedule.instructions, notify, context=chained)
                 store.record_schedule_output(schedule.name, schedule.instructions)
                 blocked_state = "note_posted"
             elif schedule.worker_kind == "script":
@@ -451,6 +649,16 @@ def run_due(
                 # failure, so a persistently broken script auto-disables.
                 # ponytail: scripts run sequentially inside the tick (120s cap
                 # each); parallelize if a slow monitor ever starves the tick.
+                # ES B120: claim the slot BEFORE the side effect — a serve that
+                # dies mid-script must not re-run it at once on restart
+                # (at-most-once; reconcile_interrupted_scripts records it).
+                store.mark_schedule_ran(
+                    schedule.name,
+                    ran_at=moment,
+                    next_run_at=next_at,
+                    task_id=None,
+                    state=SCRIPT_RUNNING_STATE,
+                )
                 output, script_ok = run_schedule_script(schedule.instructions, stdin=chained)
                 store.record_schedule_output(schedule.name, output)
                 if script_ok and not output:
@@ -460,7 +668,7 @@ def run_due(
                     blocked_state = "script_ran"
                 else:
                     report = f"[{schedule.name}] {output}" if not script_ok else output
-                    _deliver_tick_text(store, schedule, report, notify)
+                    _deliver_tick_text(store, schedule, report, notify, script_output=True)
                     blocked_state = "script_ran" if script_ok else "script_failed"
             elif schedule.worker_kind == "prompt":
                 # v83-F5 (ADR 0042): a Queen turn at tick time. Read-only by
@@ -495,11 +703,7 @@ def run_due(
                 # no worker, read-only over the store.
                 digest_text = compose_digest(store)
                 store.record_schedule_output(schedule.name, digest_text)
-                if chained is not None:
-                    digest_text = (
-                        f"[Context from schedule {schedule.chain!r}]:\n{chained}\n\n{digest_text}"
-                    )
-                _deliver_tick_text(store, schedule, digest_text, notify)
+                _deliver_tick_text(store, schedule, digest_text, notify, context=chained)
                 blocked_state = "digest_posted"
             elif schedule.template_name is not None:
                 # Template-bound: re-instantiate the live template at tick time, so
@@ -537,9 +741,6 @@ def run_due(
                             max_actions=instance.budget.max_actions,
                             max_provider_calls=instance.budget.max_provider_calls,
                             execution_mode=None,
-                            extra_network_hosts=configured_provider_hosts(
-                                store, config.home.parent
-                            ),
                             binding_candidates=[("template_name", schedule.template_name)],
                         )
                     except PolicyResolutionError as exc:
@@ -570,10 +771,9 @@ def run_due(
                         ).with_network_audit(resolved.network_requested, resolved.network_resolved)
                 else:
                     dispatch_decision = _schedule_dispatch_decision(project_bound=False)
-                    permissions = _with_provider_hosts(
-                        instance.permissions,
-                        configured_provider_hosts(store, config.home.parent),
-                    )
+                    # v24-F2 → ADR 0059 D3: run_task gives an unbound tick
+                    # its provider_hosts, as it does every face.
+                    permissions = instance.permissions
                     budget = instance.budget
                     execution_mode = "sandbox"
                     project_context = None
@@ -616,9 +816,6 @@ def run_due(
                             max_actions=None,
                             max_provider_calls=None,
                             execution_mode=None,
-                            extra_network_hosts=configured_provider_hosts(
-                                store, config.home.parent
-                            ),
                             binding_candidates=[("repo_slug", repo.name)],
                         )
                     except PolicyResolutionError as exc:
@@ -649,14 +846,11 @@ def run_due(
                         ).with_network_audit(resolved.network_requested, resolved.network_resolved)
                 else:
                     dispatch_decision = _schedule_dispatch_decision(project_bound=False)
-                    permissions = _with_provider_hosts(
-                        Permissions(
-                            read=["workspace"],
-                            write=["workspace"],
-                            network=list(schedule.network),
-                            env_allowlist=list(schedule.env_allowlist),
-                        ),
-                        configured_provider_hosts(store, config.home.parent),
+                    permissions = Permissions(
+                        read=["workspace"],
+                        write=["workspace"],
+                        network=list(schedule.network),
+                        env_allowlist=list(schedule.env_allowlist),
                     )
                     budget = DEFAULT_BUDGET
                     execution_mode = "sandbox"
@@ -685,58 +879,67 @@ def run_due(
                 task_id, state = None, blocked_state
         except Exception as exc:  # a broken schedule must not abort the rest of the tick
             task_id, state = None, f"dispatch_error: {exc}"
-        store.mark_schedule_ran(
-            schedule.name,
-            ran_at=moment,
-            next_run_at=next_run_after(moment, schedule.interval_seconds),
-            task_id=task_id,
-            state=state,
-        )
-        # v14: record the tick outcome for schedule health (success rate,
-        # consecutive failures, last failure reason).
-        store.record_schedule_outcome(schedule.name, task_id=task_id, state=state)
-        # v72-F3 (R5): a scheduled worker run's terminal state pushes through
-        # the SAME vocabulary as chat-dispatched runs — the scheduler bypasses
-        # the RunPool notify funnel, so a failing nightly run was silent.
-        if task_id is not None:
-            from .serve.run_status import run_terminal_text
+        # ES B110: the bookkeeping stays inside this schedule's own try too —
+        # one schedule's failure must never end the tick for the rest.
+        try:
+            store.mark_schedule_ran(
+                schedule.name,
+                ran_at=moment,
+                next_run_at=next_at,
+                task_id=task_id,
+                state=state,
+            )
+            # v14: record the tick outcome for schedule health (success rate,
+            # consecutive failures, last failure reason).
+            store.record_schedule_outcome(schedule.name, task_id=task_id, state=state)
+            # v72-F3 (R5): a scheduled worker run's terminal state pushes through
+            # the SAME vocabulary as chat-dispatched runs — the scheduler bypasses
+            # the RunPool notify funnel, so a failing nightly run was silent.
+            if task_id is not None:
+                from .serve.run_status import run_terminal_text
 
-            notice = run_terminal_text(store, task_id, audit_dir=config.audit_dir)
-            if notice is not None:
-                terminal_text, terminal_kind = notice
+                notice = run_terminal_text(store, task_id, audit_dir=config.audit_dir)
+                if notice is not None:
+                    terminal_text, terminal_kind = notice
+                    _deliver_tick_text(
+                        store,
+                        schedule,
+                        f"[{schedule.name}] {terminal_text}",
+                        notify,
+                        kind=terminal_kind,
+                    )
+            # v14 Step 2: a schedule that keeps failing (e.g. a persistent policy
+            # block) is auto-disabled rather than retried every interval forever —
+            # it advances and records health, but stops hot-looping on a broken
+            # config until an operator fixes and re-enables it.
+            health = store.schedule_health(schedule.name)
+            if (
+                health is not None
+                and health.consecutive_failures >= MAX_SCHEDULE_CONSECUTIVE_FAILURES
+            ):
+                store.set_schedule_enabled(schedule.name, enabled=False)
+                reason = (
+                    f"auto-disabled after {health.consecutive_failures} "
+                    f"consecutive failures: {state}"
+                )
+                store.set_schedule_disabled_reason(schedule.name, reason)
+                # v72-F3 (R5): the auto-disable reaches the operator where they
+                # are, with the call to action — digest-only was "waiting to be
+                # asked".
                 _deliver_tick_text(
                     store,
                     schedule,
-                    f"[{schedule.name}] {terminal_text}",
+                    f"schedule {schedule.name!r} {reason} — fix the cause, then "
+                    "set_schedule_enabled to resume",
                     notify,
-                    kind=terminal_kind,
                 )
-        # v14 Step 2: a schedule that keeps failing (e.g. a persistent policy
-        # block) is auto-disabled rather than retried every interval forever —
-        # it advances and records health, but stops hot-looping on a broken
-        # config until an operator fixes and re-enables it.
-        health = store.schedule_health(schedule.name)
-        if health is not None and health.consecutive_failures >= MAX_SCHEDULE_CONSECUTIVE_FAILURES:
-            store.set_schedule_enabled(schedule.name, enabled=False)
-            reason = (
-                f"auto-disabled after {health.consecutive_failures} consecutive failures: {state}"
-            )
-            store.set_schedule_disabled_reason(schedule.name, reason)
-            # v72-F3 (R5): the auto-disable reaches the operator where they
-            # are, with the call to action — digest-only was "waiting to be
-            # asked".
-            _deliver_tick_text(
-                store,
-                schedule,
-                f"schedule {schedule.name!r} {reason} — fix the cause, then "
-                "set_schedule_enabled to resume",
-                notify,
-            )
-        if schedule.once:
-            # v44-F2: one-shot means ONE fire, success or not — retrying a
-            # failed one-shot every interval forever would be worse than the
-            # failure. The disabled row + reason is the record of what happened.
-            store.set_schedule_enabled(schedule.name, enabled=False)
-            store.set_schedule_disabled_reason(schedule.name, f"one-shot: fired ({state})")
+            if schedule.once:
+                # v44-F2: one-shot means ONE fire, success or not — retrying a
+                # failed one-shot every interval forever would be worse than the
+                # failure. The disabled row + reason is the record of what happened.
+                store.set_schedule_enabled(schedule.name, enabled=False)
+                store.set_schedule_disabled_reason(schedule.name, f"one-shot: fired ({state})")
+        except Exception:
+            logger.exception("schedule %r: recording its tick failed", schedule.name)
         results.append(TickResult(name=schedule.name, task_id=task_id, state=state))
     return results

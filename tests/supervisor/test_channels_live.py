@@ -130,7 +130,8 @@ def test_chat_engine_is_the_single_turn_implementation() -> None:
 
 
 def _telegram_update(update_id: int, chat_id: str, text: str) -> dict[str, object]:
-    return {"update_id": update_id, "message": {"chat": {"id": chat_id}, "text": text}}
+    message = {"chat": {"id": chat_id}, "from": {"id": chat_id}, "text": text}
+    return {"update_id": update_id, "message": message}
 
 
 class _TelegramHarness:
@@ -204,6 +205,7 @@ def _enable_telegram(config: SupervisorConfig, ollama: object, can_confirm: bool
         json={
             "enabled": True,
             "allowed_identities": ["42"],
+            "allowed_users": ["42"],
             "secret": "bot-token",
             "channel_can_confirm": can_confirm,
         },
@@ -349,6 +351,40 @@ def test_telegram_delivery_failure_never_kills_the_poll(config: SupervisorConfig
         ollama.stop()
 
 
+def test_a_channel_chat_opens_as_assistant_and_cannot_dispatch(
+    repo: object, config: SupervisorConfig
+) -> None:
+    """ADR 0059 decision #4 (B55, F3 lesson 5): a messenger's first contact
+    opens an assistant chat — never the widest lanes — so a dispatch is
+    refused at proposal, no card, saying what to do instead."""
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama, can_confirm=True)
+        harness = _TelegramHarness(config)
+        try:
+            ollama.script_tool_call(
+                "dispatch_run", {"repo": str(repo), "instructions": "Fix the bug. MODE:happy"}
+            )
+            ollama.script_reply("I cannot dispatch from here")
+            harness.updates.append([_telegram_update(1, "42", "fix the bug")])
+            assert harness.poller.poll_once() == 1
+            binding = harness.store.channel_session("telegram:42")
+            assert binding is not None
+            chat = harness.store.get_chat(binding.chat_id)
+            assert chat is not None and chat.role == "assistant"
+            assert harness.store.pending_chat_actions(binding.chat_id) == []
+            (refusal,) = [
+                m for m in harness.store.chat_messages(binding.chat_id) if m.role == "tool"
+            ]
+            assert "exceeds the delegator" in refusal.content
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
 def test_telegram_button_confirms_a_low_risk_dispatch(
     repo: object, config: SupervisorConfig
 ) -> None:
@@ -362,6 +398,15 @@ def test_telegram_button_confirms_a_low_risk_dispatch(
         _enable_telegram(config, ollama, can_confirm=True)
         harness = _TelegramHarness(config)
         try:
+            # A channel chat opens as assistant, which may not dispatch (ADR
+            # 0059 decision #4); the operator gave this one the builder role.
+            builder = harness.store.create_chat(
+                title="telegram 42", model=None, source="telegram", role="builder"
+            )
+            harness.store.bind_channel_session(
+                session_key="telegram:42", channel="telegram", identity_id="42",
+                chat_id=builder.chat_id,
+            )  # fmt: skip
             ollama.script_tool_call(
                 "dispatch_run",
                 {
@@ -493,6 +538,7 @@ def _enable_slack(config: SupervisorConfig, ollama: object, *, can_confirm: bool
             "enabled": True,
             "channel_can_confirm": can_confirm,
             "allowed_identities": ["C1"],
+            "allowed_users": ["U1"],
             "secret": "xoxb-fake",
             "signing_secret": "signing-1",
         },
@@ -556,7 +602,7 @@ def test_slack_message_event_runs_a_turn_and_replies(
         webhook = _slack_app_client(config)
         ollama.script_reply("hive at your service")
         body = _json.dumps(
-            {"type": "event_callback", "event": {"channel": "C1", "text": "status?"}}
+            {"type": "event_callback", "event": {"channel": "C1", "user": "U1", "text": "status?"}}
         ).encode()
         response = webhook.post(  # type: ignore[attr-defined]
             "/api/channels/slack/events", content=body, headers=_slack_headers("signing-1", body)
@@ -577,6 +623,19 @@ def test_slack_message_event_runs_a_turn_and_replies(
         )
         assert acked.status_code == 200
         assert acked.json()["ignored"] == "channel.reject.identity_not_allowlisted"
+        assert sent == []
+
+        # ES (B114, lane F3 f3-24): a stranger IN the allow-listed channel ran a
+        # Queen turn. The person must be listed, not just the room.
+        intruder = _json.dumps(
+            {"type": "event_callback", "event": {"channel": "C1", "user": "UX", "text": "hi"}}
+        ).encode()
+        refused = webhook.post(  # type: ignore[attr-defined]
+            "/api/channels/slack/events",
+            content=intruder,
+            headers=_slack_headers("signing-1", intruder),
+        )
+        assert refused.json()["ignored"] == "channel.reject.user_not_allowlisted"
         assert sent == []
 
         # Bot echoes never become turns.
@@ -627,6 +686,7 @@ def test_slack_button_confirm_is_gated_by_the_v16_allowlist(
         webhook = _slack_app_client(config)
         payload = {
             "channel": {"id": "C1"},
+            "user": {"id": "U1"},
             "actions": [{"action_id": "confirm", "value": action_id}],
         }
         body = ("payload=" + quote_plus(_json.dumps(payload))).encode()
@@ -673,7 +733,9 @@ def test_slack_button_confirms_a_low_risk_dispatch(
         _enable_slack(config, ollama, can_confirm=True)
         store = RunStore(config.db_path)
         try:
-            chat = store.create_chat(title="slack C1", model=None)
+            chat = store.create_chat(
+                title="slack C1", model=None, role="builder"
+            )  # may dispatch (P3-6)
             action_id = store.add_chat_action(
                 chat.chat_id,
                 tool="dispatch_run",
@@ -689,6 +751,7 @@ def test_slack_button_confirms_a_low_risk_dispatch(
         ollama.script_reply("dispatched — I will report back")
         payload = {
             "channel": {"id": "C1"},
+            "user": {"id": "U1"},
             "actions": [{"action_id": "confirm", "value": action_id}],
         }
         body = ("payload=" + quote_plus(_json.dumps(payload))).encode()
@@ -872,7 +935,7 @@ def test_slack_event_captures_the_thread_anchor_after_a_turn(
         body = _json.dumps(
             {
                 "type": "event_callback",
-                "event": {"channel": "C1", "text": "hi", "ts": "1721594000.000100"},
+                "event": {"channel": "C1", "user": "U1", "text": "hi", "ts": "1721594000.000100"},
             }
         ).encode()
         response = webhook.post(  # type: ignore[attr-defined]
@@ -949,3 +1012,85 @@ def test_slack_push_threads_under_the_conversation_with_rich_blocks(
         assert [b["type"] for b in blocks] == ["section"]  # single-section text
     finally:
         store.close()
+
+
+# P4-2 (ADR 0059 D6): a HIGH card is never confirmable from a channel — the
+# server refuses the press and says to use the web UI; the card waits.
+_HIGH_DISPATCH = {"instructions": "Fix the bug. MODE:happy", "network": ["*"]}
+
+
+def test_telegram_never_confirms_a_high_card(repo: object, config: SupervisorConfig) -> None:
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_telegram(config, ollama, can_confirm=True)
+        harness = _TelegramHarness(config)
+        try:
+            chat = harness.store.create_chat(title="telegram 42", model=None)
+            action_id = harness.store.add_chat_action(
+                chat.chat_id, tool="dispatch_run", args={"repo": str(repo), **_HIGH_DISPATCH}
+            )
+            harness.updates.append([_telegram_callback(1, "42", "42", f"confirm:{action_id}")])
+            assert harness.poller.poll_once() == 1
+            answer = harness.answers[-1][2]
+            assert "HIGH risk" in answer and "web UI" in answer
+            refreshed = harness.store.get_chat_action(action_id)
+            assert refreshed is not None and refreshed.status == "proposed"
+            assert harness.store.recent_runs(5) == []
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()
+
+
+def test_slack_never_confirms_a_high_card(
+    repo: object, config: SupervisorConfig, monkeypatch: object
+) -> None:
+    import json as _json
+    from urllib.parse import quote_plus
+
+    from skep.supervisor import RunStore
+    from skep.supervisor.serve.channels import runtime
+
+    from .fake_ollama import FakeOllama
+
+    sent: list[list[dict[str, object]]] = []
+
+    def send(_token: str, _channel: str, blocks: list[dict[str, object]]) -> bool:
+        sent.append(blocks)
+        return True
+
+    monkeypatch.setattr(runtime, "_default_slack_send", send)  # type: ignore[attr-defined]
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_slack(config, ollama, can_confirm=True)
+        store = RunStore(config.db_path)
+        try:
+            chat = store.create_chat(title="slack C1", model=None)
+            action_id = store.add_chat_action(
+                chat.chat_id, tool="dispatch_run", args={"repo": str(repo), **_HIGH_DISPATCH}
+            )
+        finally:
+            store.close()
+        payload = {
+            "channel": {"id": "C1"},
+            "user": {"id": "U1"},
+            "actions": [{"action_id": "confirm", "value": action_id}],
+        }
+        body = ("payload=" + quote_plus(_json.dumps(payload))).encode()
+        webhook = _slack_app_client(config)
+        response = webhook.post(  # type: ignore[attr-defined]
+            "/api/channels/slack/interact", content=body, headers=_slack_headers("signing-1", body)
+        )
+        assert response.status_code == 200
+        assert "HIGH risk" in str(sent[-1]) and "web UI" in str(sent[-1])
+        check = RunStore(config.db_path)
+        try:
+            refreshed = check.get_chat_action(action_id)
+            assert refreshed is not None and refreshed.status == "proposed"
+            assert check.recent_runs(5) == []
+        finally:
+            check.close()
+    finally:
+        ollama.stop()

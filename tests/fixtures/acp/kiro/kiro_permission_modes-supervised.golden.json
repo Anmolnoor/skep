@@ -1,0 +1,48 @@
+{
+  "to_agent": [
+    {
+      "jsonrpc": "2.0",
+      "id": 9024,
+      "result": {
+        "outcome": {
+          "outcome": "selected",
+          "optionId": "accept"
+        }
+      }
+    }
+  ],
+  "ledger": [
+    {
+      "actor": "acp:kiro",
+      "repo": "$REPO",
+      "scope": "filesystem",
+      "action": "write",
+      "value": "workspace",
+      "project": {
+        "project_id": "demo",
+        "name": "demo",
+        "strategy": "trusted_local_dev",
+        "phase": "build"
+      },
+      "source": "run",
+      "verdict": "allow",
+      "rule_id": "fs:workspace",
+      "decided_by": "dispatch/fs:workspace",
+      "layer": "dispatch"
+    },
+    {
+      "actor": "human@client",
+      "repo": "$REPO",
+      "scope": null,
+      "action": null,
+      "value": null,
+      "source": "forwarded",
+      "agent": "kiro",
+      "session_id": "sess_00000000-0000-4000-8000-000000000001",
+      "tool_call_id": "turn_approval_1792442850111_1792442850111_845lqoed",
+      "request_id": 9028,
+      "outcome": "allow_once",
+      "note": "toolCallId turn_approval_1792442850111_1792442850111_845lqoed was never announced"
+    }
+  ]
+}

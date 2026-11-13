@@ -1,0 +1,250 @@
+{
+  "rules": {
+    "browse": [
+      {
+        "verdict": "require_approval",
+        "rule_id": "browse-read-gated",
+        "action": "read",
+        "pattern": "*"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "browse-act-gated",
+        "action": "act",
+        "pattern": "*"
+      }
+    ],
+    "coding": [
+      {
+        "verdict": "allow",
+        "rule_id": "coding-workspace",
+        "action": "edit",
+        "pattern": "workspace"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "verify-workspace",
+        "action": "verify",
+        "pattern": "workspace"
+      }
+    ],
+    "email": [
+      {
+        "verdict": "require_approval",
+        "rule_id": "email-read-gated",
+        "action": "read",
+        "pattern": "*"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "email-send-gated",
+        "action": "send",
+        "pattern": "*"
+      }
+    ],
+    "filesystem": [
+      {
+        "verdict": "allow",
+        "rule_id": "fs-workspace",
+        "action": "write",
+        "pattern": "workspace"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "fs-write-gated",
+        "action": "write",
+        "pattern": "*"
+      }
+    ],
+    "mcp": [
+      {
+        "verdict": "require_approval",
+        "rule_id": "mcp-gated",
+        "action": "call",
+        "pattern": "*"
+      }
+    ],
+    "network": [
+      {
+        "verdict": "allow",
+        "rule_id": "net-pypi",
+        "action": "connect",
+        "pattern": "pypi.org"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "net-pythonhosted",
+        "action": "connect",
+        "pattern": "files.pythonhosted.org"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "net-npm",
+        "action": "connect",
+        "pattern": "registry.npmjs.org"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "net-go",
+        "action": "connect",
+        "pattern": "proxy.golang.org"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "net-search",
+        "action": "search",
+        "pattern": "*"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "net-gated",
+        "action": "connect",
+        "pattern": "*"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "net-fetch-gated",
+        "action": "fetch",
+        "pattern": "*"
+      }
+    ],
+    "shell": [
+      {
+        "verdict": "allow",
+        "rule_id": "shell-git-status",
+        "action": "run",
+        "pattern": "git status"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "shell-git-diff",
+        "action": "run",
+        "pattern": "git diff"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "shell-git-log",
+        "action": "run",
+        "pattern": "git log"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "shell-pytest",
+        "action": "run",
+        "pattern": "pytest"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "shell-uv-run-pytest",
+        "action": "run",
+        "pattern": "uv run pytest"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "shell-uv-sync",
+        "action": "run",
+        "pattern": "uv sync"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "shell-npm-test",
+        "action": "run",
+        "pattern": "npm test"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "shell-npm-install",
+        "action": "run",
+        "pattern": "npm install"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "shell-pnpm-test",
+        "action": "run",
+        "pattern": "pnpm test"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "shell-pnpm-install",
+        "action": "run",
+        "pattern": "pnpm install"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "shell-cargo-test",
+        "action": "run",
+        "pattern": "cargo test"
+      },
+      {
+        "verdict": "allow",
+        "rule_id": "shell-go-test",
+        "action": "run",
+        "pattern": "go test"
+      },
+      {
+        "verdict": "require_approval",
+        "rule_id": "shell-learnable",
+        "action": "run",
+        "pattern": "*"
+      }
+    ]
+  },
+  "settings": {
+    "default_network": [
+      "pypi.org",
+      "files.pythonhosted.org",
+      "registry.npmjs.org",
+      "proxy.golang.org"
+    ],
+    "allowed_shell_commands": [
+      [
+        "git",
+        "status"
+      ],
+      [
+        "git",
+        "diff"
+      ],
+      [
+        "git",
+        "log"
+      ],
+      [
+        "pytest"
+      ],
+      [
+        "uv",
+        "run",
+        "pytest"
+      ],
+      [
+        "uv",
+        "sync"
+      ],
+      [
+        "npm",
+        "test"
+      ],
+      [
+        "npm",
+        "install"
+      ],
+      [
+        "pnpm",
+        "test"
+      ],
+      [
+        "pnpm",
+        "install"
+      ],
+      [
+        "cargo",
+        "test"
+      ],
+      [
+        "go",
+        "test"
+      ]
+    ]
+  }
+}

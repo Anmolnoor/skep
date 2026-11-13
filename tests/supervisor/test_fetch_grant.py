@@ -8,11 +8,8 @@ policy (a redirect must never widen a grant). Deny always wins (v40).
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import pytest
 
@@ -33,12 +30,26 @@ from skep.supervisor.serve.tools import (
 )
 from skep.supervisor.serve.websearch import fetch_url_text
 
+from .conftest import predating_home
+from .test_websearch import _PUBLIC_IP, _FakeWeb, _resolver
+
 
 @pytest.fixture()
-def store(tmp_path: Path) -> Iterator[RunStore]:
-    store = RunStore(tmp_path / "s.sqlite3")
+def store(config: SupervisorConfig) -> Iterator[RunStore]:
+    # P3-3: about the rules; a fresh (O5 zero-state) home asks for every fetch.
+    store = RunStore(predating_home(config.db_path))
     yield store
     store.close()
+
+
+@pytest.fixture()
+def holder(config: SupervisorConfig, store: RunStore) -> ConfigHolder:
+    return ConfigHolder(config, store)
+
+
+def _carded(decision: object) -> bool:
+    """P3-3: an ask is an explicit card naming the rule that asked."""
+    return getattr(decision, "verdict", None) == "require_approval"
 
 
 def _write_document(store: RunStore, document: PolicyDocument) -> None:
@@ -55,22 +66,25 @@ def _grant(domain: str) -> LearnedRule:
     )
 
 
-def test_no_rule_means_the_card_stays(store: RunStore) -> None:
-    assert fetch_grant_decision(store, "example.com") is None
+def test_no_rule_means_the_card_stays(store: RunStore, holder: ConfigHolder) -> None:
+    decision = fetch_grant_decision(store, holder, "example.com")
+    assert (decision.verdict, decision.decided_by) == ("require_approval", "default/unmatched")
 
 
-def test_grant_is_exact_host_and_subdomains_fail_closed(store: RunStore) -> None:
+def test_grant_is_exact_host_and_subdomains_fail_closed(
+    store: RunStore, holder: ConfigHolder
+) -> None:
     _write_document(store, PolicyDocument(learned=[_grant("example.com")]))
-    decision = fetch_grant_decision(store, "example.com")
+    decision = fetch_grant_decision(store, holder, "example.com")
     assert decision is not None and decision.allows_execution()
     assert decision.reason == "network.allow.fetch_grant"
     # The run-egress matcher: exact host only — a subdomain is its own
     # operator decision, so it keeps the card.
-    assert fetch_grant_decision(store, "docs.example.com") is None
-    assert fetch_grant_decision(store, "unrelated.net") is None
+    assert _carded(fetch_grant_decision(store, holder, "docs.example.com"))
+    assert _carded(fetch_grant_decision(store, holder, "unrelated.net"))
 
 
-def test_explicit_deny_refuses_without_a_card(store: RunStore) -> None:
+def test_explicit_deny_refuses_without_a_card(store: RunStore, holder: ConfigHolder) -> None:
     document = PolicyDocument(
         scopes=[
             ScopePolicy(
@@ -81,17 +95,17 @@ def test_explicit_deny_refuses_without_a_card(store: RunStore) -> None:
         learned=[_grant("example.com")],
     )
     _write_document(store, document)
-    denied = fetch_grant_decision(store, "evil.example")
+    denied = fetch_grant_decision(store, holder, "evil.example")
     assert denied is not None and denied.verdict == "deny"
 
 
-def test_read_url_execution_decision_routes_through_the_grant(store: RunStore) -> None:
-    holder = cast(ConfigHolder, None)  # the read_url branch never touches it
-    assert (
+def test_read_url_execution_decision_routes_through_the_grant(
+    store: RunStore, holder: ConfigHolder
+) -> None:
+    assert _carded(
         mutation_execution_decision(
             "read_url", {"url": "https://example.com/a"}, store=store, holder=holder
         )
-        is None
     )
     _write_document(store, PolicyDocument(learned=[_grant("example.com")]))
     decision = mutation_execution_decision(
@@ -104,7 +118,9 @@ def test_read_url_execution_decision_routes_through_the_grant(store: RunStore) -
     )
 
 
-def test_allow_fetch_domain_writes_a_vetted_rule(config: SupervisorConfig, store: RunStore) -> None:
+def test_allow_fetch_domain_writes_a_vetted_rule(
+    config: SupervisorConfig, store: RunStore, holder: ConfigHolder
+) -> None:
     result = execute_mutation(
         "allow_fetch_domain",
         {"domain": " Docs.Python.org. "},
@@ -116,8 +132,10 @@ def test_allow_fetch_domain_writes_a_vetted_rule(config: SupervisorConfig, store
     assert result == {
         "allowed_fetch_domain": "docs.python.org",
         "rule_id": "network:fetch:docs.python.org",
+        # P3-5: every policy write answers what it would flip among past decisions
+        "replay": "replay: the decision log is empty — no past decision to compare",
     }
-    decision = fetch_grant_decision(store, "docs.python.org")
+    decision = fetch_grant_decision(store, holder, "docs.python.org")
     assert decision is not None and decision.allows_execution()
 
 
@@ -138,54 +156,21 @@ def test_allow_fetch_domain_refuses_non_domains(
         )
 
 
-class _PageServer:
-    """Two-endpoint local server: /page serves text, /hop redirects."""
-
-    def __init__(self, redirect_to: str | None = None) -> None:
-        outer = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args: Any) -> None:
-                pass
-
-            def do_GET(self) -> None:
-                if self.path == "/hop":
-                    self.send_response(302)
-                    self.send_header("Location", outer.redirect_to or f"{outer.base_url}/page")
-                    self.end_headers()
-                    return
-                body = b"<html><body>granted page body</body></html>"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-        self.redirect_to = redirect_to
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._thread.start()
-
-    @property
-    def base_url(self) -> str:
-        return f"http://127.0.0.1:{self._server.server_address[1]}"
-
-    def stop(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-
-
-def test_redirect_within_the_grant_flows_and_off_domain_fails_closed() -> None:
-    server = _PageServer()
-    try:
-        same = fetch_url_text(
-            f"{server.base_url}/hop", redirect_guard=lambda host: host == "127.0.0.1"
-        )
-        assert "granted page body" in same["text"]
-        server.redirect_to = f"http://localhost:{server._server.server_address[1]}/page"
-        with pytest.raises(ValueError, match="leaves the granted domain"):
-            fetch_url_text(
-                f"{server.base_url}/hop", redirect_guard=lambda host: host == "127.0.0.1"
-            )
-    finally:
-        server.stop()
+def test_redirect_within_the_grant_flows_and_off_domain_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v72-F7 on fakes (W6: a page on 127.0.0.1 is never read, so the old
+    local server cannot stand in for a granted host)."""
+    names = {"docs.example": _PUBLIC_IP, "other.example": _PUBLIC_IP}
+    pages = {
+        "docs.example/hop": (302, "https://docs.example/page"),
+        "docs.example/page": (200, "<html><body>granted page body</body></html>"),
+    }
+    _FakeWeb(monkeypatch, pages)
+    resolve = _resolver(names)
+    guard = lambda host: host == "docs.example"  # noqa: E731
+    same = fetch_url_text("https://docs.example/hop", redirect_guard=guard, resolve=resolve)
+    assert "granted page body" in same["text"]
+    pages["docs.example/hop"] = (302, "https://other.example/page")
+    with pytest.raises(ValueError, match="leaves the granted domain"):
+        fetch_url_text("https://docs.example/hop", redirect_guard=guard, resolve=resolve)

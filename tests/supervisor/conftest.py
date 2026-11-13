@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -10,12 +12,54 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from skep.supervisor import SupervisorConfig
+from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.serve import create_app
 from skep.supervisor.serve.app import TERMINAL_STATES
 from skep.supervisor.serve.auth import TOKEN_FILE
+from skep.supervisor.serve.settings import FRESH_HOME_SEEDED_AT
 
 FAKE_WORKER = Path(__file__).with_name("fake_worker.py")
+
+
+def predating_home(db_path: Path) -> Path:
+    """Make the home at ``db_path`` one that predates first-run O5: created by
+    the store, then the ``fresh_home_seeded_at`` stamp removed, so the
+    ``no_baseline`` zero state does not bind and every decision answers from
+    the rules exactly as it did before O5 (``policy_layers.zero_state_home``).
+    For tests about the rules, not about the zero state."""
+    RunStore(db_path).close()
+    with contextlib.closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.execute("DELETE FROM settings WHERE key = ?", (FRESH_HOME_SEEDED_AT,))
+    return db_path
+
+
+def known_chat(db_path: Path, chat_id: str) -> str:
+    """Make ``chat_id`` a chat that exists (raw, so the id is the test's own):
+    since P4-1 a chat that is not there reads as tainted (fail closed, ADR
+    0059 D5), so a test about grants in chat ``c1`` needs a chat ``c1``."""
+    with contextlib.closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO chats (chat_id, title, created_at, updated_at)"
+            " VALUES (?, 'test', '2026-01-01', '2026-01-01')",
+            (chat_id,),
+        )
+    return chat_id
+
+
+# ADR 0059 P3-6 (decision #4): a chat whose stored role is NULL reads as
+# assistant. A test about a lane on its own — no role layer, what a NULL chat
+# was before P3-6 — uses a chat in this custom role, which binds no template:
+# the one chat that still has no role layer.
+NO_LAYER_ROLE = "nolayer"
+
+
+def no_layer_role(skep_home: Path) -> str:
+    """Write the custom role ``nolayer`` (no ``policy_layer``) beside the
+    home's persona and return its name, for ``create_chat(role=...)``."""
+    directory = skep_home.parent / "roles"
+    directory.mkdir(exist_ok=True)
+    (directory / f"{NO_LAYER_ROLE}.json").write_text(f'{{"name": "{NO_LAYER_ROLE}"}}')
+    return NO_LAYER_ROLE
 
 
 def serve_client(config: SupervisorConfig, **app_kwargs: Any) -> TestClient:

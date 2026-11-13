@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -14,12 +17,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
 from skep.supervisor.netproxy import domain_allowed, is_loopback_host
+from skep.supervisor.secret_floor import (
+    is_dotenv,
+    secret_floor_reason,
+    shell_secret_floor_reason,
+)
 from skep.supervisor.spawner import build_worker_env
 from skep.worker_contract import BOOKKEEPING_DIRS, PATCH_EXCLUDE_PATHSPECS, EventType
 from skep.workers.html_text import html_to_text
@@ -52,6 +60,7 @@ class _EmitStream:
 # class — dropped here, a grandchild fell back to /tmp (which a nested bwrap
 # tmpfs-masks, v107-F3) and to the read-only ``~/.cache/uv``.
 _CHILD_ENV_PASSTHROUGH: tuple[str, ...] = (
+    "GIT_ALLOW_PROTOCOL",  # B144: the spawner's no-remote git, to every grandchild
     "SKEP_HOME",
     "npm_config_cache",
     "TMPDIR",
@@ -108,6 +117,60 @@ CapabilityVerdict = Literal["allow", "allow_with_constraints", "require_approval
 
 CAPABILITY_REASON_PREFIX = "capability."
 CAPABILITY_REASON_TERMS = frozenset({"allow", "require_approval", "deny"})
+# ADR 0059 D3 (V7): a grant the delegation chain made an ask — carded naming
+# the chain, approve-once for this run (the supervisor never remembers it).
+DELEGATED_ASK_REASON = "capability.require_approval.delegated_ask"
+
+
+def _run_in_own_group(
+    argv: Sequence[str], cwd: Path, env: Mapping[str, str], timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` whose timeout kills the command's whole group.
+
+    ES-F9 (B133): run's timeout kills only the direct child, so `sh verify.sh`
+    → `sleep 330` outlived the run with PPID 1. The command leads its own
+    process group (still inside the worker's session, so the supervisor's
+    session kill reaches it on a worker crash) and the group dies on timeout.
+    """
+    popen = subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=dict(env),
+        process_group=0,
+    )
+    try:
+        stdout, stderr = popen.communicate(timeout=float(timeout))
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            os.killpg(popen.pid, signal.SIGKILL)
+        popen.communicate()
+        raise
+    return subprocess.CompletedProcess(list(argv), popen.returncode, stdout, stderr)
+
+
+def tracked_file_readable(workspace: Path, path: Path) -> bool:
+    """ES-F2 (B126): may a tracked file's content be read without a capability
+    check (the planning snapshot, SKEP.md, ``repo.search``)?
+
+    ``is_file``/``read_text`` follow symlinks, so a tracked
+    ``deploy_key.txt -> ~/.ssh/id_rsa`` reached the provider in the first plan
+    call — before any tool ran or any card showed — and stayed in the audit
+    trail. Only regular files whose realpath stays inside the worktree (and
+    outside its ``.git``) are read. ``.env`` files (any case) never are.
+    """
+    if is_dotenv(path.name):
+        return False
+    try:
+        root = workspace.resolve()
+        real = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return (
+        real.is_relative_to(root) and ".git" not in real.relative_to(root).parts and real.is_file()
+    )
 
 
 @dataclass(frozen=True)
@@ -125,6 +188,20 @@ class CapabilityDecision:
             "reason": self.reason,
             "detail": self.detail,
         }
+
+
+# W35 (B108): after a commit lands, git >= 2.45 deletes the AUTO_MERGE
+# pseudoref through the refs API, and the files backend locks packed-refs in
+# the COMMON dir for any deletion — read-only to a sandboxed worker (ES-F3),
+# so every commit printed this error while succeeding. No config skips the
+# cleanup, and letting the worker create that lock would let it swap the
+# file the host's git later renames into packed-refs. The commit capability
+# drops the line from a successful commit instead.
+_PACKED_REFS_NOISE = re.compile(
+    r"^error: Unable to create '[^'\n]*/packed-refs\.lock': "
+    r"(?:Operation not permitted|Read-only file system)\n?",
+    re.MULTILINE,
+)
 
 
 @dataclass(frozen=True)
@@ -204,7 +281,16 @@ BUILTIN_CAPABILITIES: tuple[CapabilitySpec, ...] = (
         "Restore tracked files in git; requires approval.",
         "git-mutating",
     ),
-    CapabilitySpec("git.commit", "Create a git commit; requires approval.", "git-mutating"),
+    CapabilitySpec(
+        "git.commit",
+        # ES-F3: the repo's refs/ are read-only inside the sandbox, so on macOS
+        # git prints this lock error after every commit and still exits 0.
+        "Create a git commit; requires approval. Exit 0 means the commit "
+        'succeeded, even if git also prints "error: Unable to create '
+        "'…/packed-refs.lock': Operation not permitted\" — the sandbox keeps "
+        "the repo's refs read-only and that message is expected.",
+        "git-mutating",
+    ),
     CapabilitySpec("network.fetch", "Fetch an allowlisted HTTP(S) URL.", "network"),
     CapabilitySpec(
         "network.read",
@@ -402,6 +488,7 @@ class CapabilityRegistry:
         env_allowlist: Sequence[str] = (),
         env_baseline: Sequence[str] = ("PATH", "HOME"),
         network_allowlist: Sequence[str] = (),
+        provider_hosts: Sequence[str] = (),
         shell_allowlist: Sequence[Sequence[str]] = (),
         approved_shell_commands: Sequence[Sequence[str]] = (),
         plugin_tools: Sequence[PluginToolSpec] = (),
@@ -412,8 +499,20 @@ class CapabilityRegistry:
         approved_network_hosts: Sequence[str] = (),
         approved_plugin_risks: Mapping[str, str] | None = None,
         command_timeout_seconds: float | None = None,
+        verify_command: str = "",
+        network_ask: Sequence[str] = (),
+        shell_ask: Sequence[Sequence[str]] = (),
+        delegation: Mapping[str, Any] | None = None,
     ) -> None:
         self._workspace = workspace.resolve()
+        # ES-F3 (B06): the project's pinned verify_command — with the
+        # worker code's own constant verifies (pin_code_verify), the only
+        # argvs the verify fast-path allows. Empty = no pin = no fast-path.
+        self._pinned_verify: set[tuple[str, ...]] = (
+            {_normalized_shell_argv(shlex.split(verify_command))}
+            if verify_command.strip()
+            else set()
+        )
         self._emit = emit
         self._instructions = instructions
         # v115-F6: the per-command cap follows the task's wall-clock budget. A
@@ -426,11 +525,19 @@ class CapabilityRegistry:
         self._child_env = _child_process_env(
             env_allowlist=tuple(str(name) for name in env_allowlist),
             env_baseline=tuple(str(name) for name in env_baseline),
-            network_allowlist=tuple(str(host) for host in network_allowlist),
+            network_allowlist=tuple(str(host) for host in (*network_allowlist, *provider_hosts)),
         )
         self._diff_baseline = self._resolve_diff_baseline()
         self._network_allowlist = tuple(network_allowlist)
+        # ADR 0059 D3: the provider endpoint is egress the run has, never a
+        # host grant — it only keeps "no allowlist at all" (which cards)
+        # from describing a run that does reach the network.
+        self._has_egress = bool(network_allowlist or provider_hosts)
         self._approved_network_hosts = tuple(approved_network_hosts)
+        # V7: never egress, never an allow — only the gate below reads them.
+        self._network_ask = tuple(network_ask)
+        self._shell_ask = tuple(_normalized_shell_argv(prefix) for prefix in shell_ask)
+        self._delegation = delegation if isinstance(delegation, Mapping) else {}
         self._shell_allowlist = tuple(_normalized_shell_argv(prefix) for prefix in shell_allowlist)
         self._approved_shell_commands = tuple(
             _normalized_shell_argv(prefix) for prefix in approved_shell_commands
@@ -530,6 +637,19 @@ class CapabilityRegistry:
                 "is unreachable by design"
             ) from exc
         return resolved, relative.as_posix()
+
+    def _readable_path(self, path: object) -> tuple[Path, str]:
+        """ES-F1 (V3): ``_workspace_path`` plus the secret floor — a ``.env``
+        in the workspace is a credential, judged by requested path and
+        realpath (a symlink to it is still it). No grant lifts this."""
+        target, relative = self._workspace_path(path)
+        requested = Path(str(path))
+        if not requested.is_absolute():
+            requested = self._workspace / requested
+        reason = secret_floor_reason(requested)
+        if reason is not None:
+            raise CapabilityDenied(f"secret floor: {reason}")
+        return target, relative
 
     def _workspace_path_from_existing_suffix(self, candidate: Path) -> tuple[Path, str] | None:
         parts = [part for part in candidate.parts if part not in {"", candidate.anchor}]
@@ -670,11 +790,41 @@ class CapabilityRegistry:
         argv, purpose, command = self._shell_policy_inputs(arguments)
         return self._shell_decision(purpose=purpose, argv=argv, command=command)
 
+    def pin_code_verify(self, argv: Sequence[str]) -> None:
+        """ES-F3: pin a verify argv the worker's own CODE chose as a constant
+        (the no-model hello-world path). Never call it with plan/model input —
+        a model-chosen verify is exactly what the pin exists to refuse."""
+        self._pinned_verify.add(_normalized_shell_argv(argv))
+
+    def delegated_ask_text(self, capability: str, value: str) -> str:
+        """The card for a deferred ask (V7), naming the chain that made it:
+        "worker@builder asks network.connect X — delegated by queen@builder,
+        which would itself ask; approve once for this run, or deny"."""
+        chain = [str(hop) for hop in self._delegation.get("chain") or []]
+        role = self._delegation.get("role")
+        if chain:
+            by = f"delegated by {' → '.join(chain)}, which would itself ask"
+        elif role:
+            by = f"its role {role} would ask"
+        else:
+            by = "its delegation would ask"
+        worker = f"worker@{role}" if role else "worker"
+        return f"{worker} asks {capability} {value} — {by}; approve once for this run, or deny"
+
     def _shell_decision(
         self, *, purpose: str, argv: Sequence[str], command: str
     ) -> CapabilityDecision:
         from .runtime_plugins import INSTRUCTION_GUARD_PLUGIN, SHELL_EXEC_PLUGIN
 
+        # W8: the floor binds the worker's shell as it binds the Queen's (the
+        # line resolved from the workspace); _shell_run emits the blocked pair.
+        secret = shell_secret_floor_reason(command, cwd=str(self._workspace))
+        if secret is not None:
+            return CapabilityDecision(
+                verdict="deny",
+                reason="capability.deny.secret_floor",
+                detail=f"secret floor: {secret}",
+            )
         guard = _runtime_decision_to_capability(
             INSTRUCTION_GUARD_PLUGIN.shell_decision(
                 instructions=self._instructions,
@@ -691,9 +841,15 @@ class CapabilityRegistry:
                 command=command,
                 approved_shell_commands=self._approved_shell_commands,
                 shell_allowlist=self._shell_allowlist,
+                pinned_verify=self._pinned_verify,
             )
         )
         assert shell is not None
+        if shell.verdict == "require_approval" and _argv_matches_prefix(argv, self._shell_ask):
+            # V7: only an ask is re-labelled — every deny above stands.
+            return CapabilityDecision(
+                verdict="require_approval", reason=DELEGATED_ASK_REASON, detail=command
+            )
         return shell
 
     def _plugin_decision(self, spec: PluginToolSpec) -> CapabilityDecision:
@@ -708,7 +864,7 @@ class CapabilityRegistry:
         )
         if guard is not None:
             return guard
-        if spec.risk == "network" and not self._network_allowlist:
+        if spec.risk == "network" and not self._has_egress:
             return CapabilityDecision(
                 verdict="deny",
                 reason="capability.deny.plugin_network_task_allowlist_missing",
@@ -806,7 +962,11 @@ class CapabilityRegistry:
                 reason="capability.allow.network_loopback",
                 detail=hostname,
             )
-        if not self._network_allowlist:
+        if domain_allowed(hostname, self._network_ask):
+            return CapabilityDecision(
+                verdict="require_approval", reason=DELEGATED_ASK_REASON, detail=hostname
+            )
+        if not self._has_egress:
             return CapabilityDecision(
                 verdict="require_approval",
                 reason="capability.require_approval.network_allowlist_missing",
@@ -844,7 +1004,7 @@ class CapabilityRegistry:
         return url, parsed.hostname
 
     def _filesystem_read(self, arguments: Mapping[str, Any]) -> CapabilityResult:
-        target, relative = self._workspace_path(arguments.get("path"))
+        target, relative = self._readable_path(arguments.get("path"))
         max_bytes = arguments.get("max_bytes", 65536)
         if not isinstance(max_bytes, int) or max_bytes <= 0:
             raise CapabilityDenied("max_bytes must be a positive integer")
@@ -875,7 +1035,7 @@ class CapabilityRegistry:
         )
 
     def _filesystem_read_chunk(self, arguments: Mapping[str, Any]) -> CapabilityResult:
-        target, relative = self._workspace_path(arguments.get("path"))
+        target, relative = self._readable_path(arguments.get("path"))
         offset = arguments.get("offset", 0)
         max_bytes = arguments.get("max_bytes", 65536)
         if not isinstance(offset, int) or offset < 0:
@@ -1070,8 +1230,13 @@ class CapabilityRegistry:
         matches: list[str] = []
         for relative in self._tracked_files():
             path = self._workspace / relative
+            if secret_floor_reason(path) is not None:
+                continue  # ES-F1: never quote a credential file
             try:
-                if not path.is_file() or path.stat().st_size > 1_000_000:
+                if (
+                    not tracked_file_readable(self._workspace, path)
+                    or path.stat().st_size > 1_000_000
+                ):
                     continue
                 lines = path.read_text(encoding="utf-8").splitlines()
             except (OSError, UnicodeDecodeError):
@@ -1272,6 +1437,8 @@ class CapabilityRegistry:
                     # detail (e.g. "branch operations are managed by the skep
                     # supervisor"); surface it so the run details explain the deny.
                     error = f"shell.run denied: {decision.detail} ({command})"
+            elif decision.reason == DELEGATED_ASK_REASON:
+                error = self.delegated_ask_text("shell.run", command)
             else:
                 error = f"shell.run requires approval for command: {command}"
             self._emit_blocked_command(
@@ -1310,15 +1477,7 @@ class CapabilityRegistry:
                 interval_seconds=_EXEC_HEARTBEAT_SECONDS,
                 emit_immediately=False,
             ):
-                proc = subprocess.run(
-                    argv,
-                    cwd=str(self._workspace),
-                    capture_output=True,
-                    text=True,
-                    timeout=float(timeout),
-                    check=False,
-                    env=self._child_env,
-                )
+                proc = _run_in_own_group(argv, self._workspace, self._child_env, timeout)
         except subprocess.TimeoutExpired:
             duration_ms = int((time.monotonic() - started) * 1000)
             error = (
@@ -1457,6 +1616,9 @@ class CapabilityRegistry:
             raise CapabilityDenied("rev must be a non-empty string")
         if rev.startswith("-"):
             raise CapabilityDenied("rev must not be an option")
+        _, sep, inner = rev.partition(":")
+        if sep and inner and (reason := secret_floor_reason(self._workspace / inner)):
+            raise CapabilityDenied(f"secret floor: {reason}")
         return self._git_read("git.show", ["show", "--no-ext-diff", rev], f"GIT_SHOW {rev}")
 
     def _git_log(self, arguments: Mapping[str, Any]) -> CapabilityResult:
@@ -1545,7 +1707,7 @@ class CapabilityRegistry:
             if decision.verdict == "deny":
                 raise CapabilityDenied(error, policy_blocked=True)
             raise CapabilityApprovalRequired("git.commit", error, decision=decision)
-        return self._git_mutation(
+        result = self._git_mutation(
             "git.commit",
             [
                 "-c",
@@ -1560,6 +1722,9 @@ class CapabilityRegistry:
             command,
             decision=decision,
         )
+        if result.exit_code != 0 or not result.error:
+            return result
+        return replace(result, error=_PACKED_REFS_NOISE.sub("", result.error))
 
     def _git_restore(self, arguments: Mapping[str, Any]) -> CapabilityResult:
         paths = self._git_paths(arguments.get("paths"))
@@ -1704,7 +1869,11 @@ class CapabilityRegistry:
         decision = self._network_fetch_decision(hostname)
         command = f"GET {url}"
         if decision.verdict == "require_approval":
-            approval_error = f"{capability_id} requires approval with a task network allowlist"
+            approval_error = (
+                self.delegated_ask_text("network.connect", hostname)
+                if decision.reason == DELEGATED_ASK_REASON
+                else f"{capability_id} requires approval with a task network allowlist"
+            )
             self._emit_blocked_command(
                 capability_id=capability_id,
                 command=command,

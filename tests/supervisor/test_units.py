@@ -68,6 +68,12 @@ def test_read_event_log_dedupes_and_orders(tmp_path: Path) -> None:
     assert [event.seq for event in events] == [1, 2]
 
 
+def test_read_event_log_of_a_swept_worktree_is_empty(tmp_path: Path) -> None:
+    # B3-F10: the whole worktree (parent dirs included) can vanish under a
+    # detail view mid-poll; that is "no live events", never an error.
+    assert read_event_log(tmp_path / "gone" / ".events" / "t.ndjson") == []
+
+
 def test_worktree_lifecycle_and_orphan_cleanup(repo: Path, tmp_path: Path) -> None:
     root = tmp_path / "worktrees"
     active = create_worktree(repo, root, "task-active")

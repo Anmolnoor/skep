@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "template": "operator",
+  "pack": "trusted_local_ops",
+  "settings": {
+    "default_network": [
+      "pypi.org",
+      "files.pythonhosted.org",
+      "registry.npmjs.org",
+      "proxy.golang.org"
+    ],
+    "allowed_shell_commands": [
+      ["git", "status"],
+      ["git", "diff"],
+      ["git", "log"],
+      ["df"],
+      ["du"],
+      ["uptime"]
+    ]
+  },
+  "rules": [
+    {"scope": "coding", "verdict": "allow", "action": "edit", "pattern": "workspace", "rule_id": "coding-workspace"},
+    {"scope": "coding", "verdict": "allow", "action": "verify", "pattern": "workspace", "rule_id": "verify-workspace"},
+
+    {"scope": "shell", "verdict": "allow", "action": "run", "pattern": "git status", "rule_id": "shell-git-status"},
+    {"scope": "shell", "verdict": "allow", "action": "run", "pattern": "git diff", "rule_id": "shell-git-diff"},
+    {"scope": "shell", "verdict": "allow", "action": "run", "pattern": "git log", "rule_id": "shell-git-log"},
+    {"scope": "shell", "verdict": "allow", "action": "run", "pattern": "df", "rule_id": "shell-df"},
+    {"scope": "shell", "verdict": "allow", "action": "run", "pattern": "du", "rule_id": "shell-du"},
+    {"scope": "shell", "verdict": "allow", "action": "run", "pattern": "uptime", "rule_id": "shell-uptime"},
+    {"scope": "shell", "verdict": "require_approval", "action": "run", "pattern": "*", "rule_id": "shell-gated"},
+
+    {"scope": "filesystem", "verdict": "allow", "action": "write", "pattern": "workspace", "rule_id": "fs-workspace"},
+    {"scope": "filesystem", "verdict": "require_approval", "action": "write", "pattern": "*", "rule_id": "fs-write-gated"},
+
+    {"scope": "network", "verdict": "allow", "action": "connect", "pattern": "pypi.org", "rule_id": "net-pypi"},
+    {"scope": "network", "verdict": "allow", "action": "connect", "pattern": "files.pythonhosted.org", "rule_id": "net-pythonhosted"},
+    {"scope": "network", "verdict": "allow", "action": "connect", "pattern": "registry.npmjs.org", "rule_id": "net-npm"},
+    {"scope": "network", "verdict": "allow", "action": "connect", "pattern": "proxy.golang.org", "rule_id": "net-go"},
+    {"scope": "network", "verdict": "require_approval", "action": "connect", "pattern": "*", "rule_id": "net-gated"},
+    {"scope": "network", "verdict": "allow", "action": "search", "pattern": "*", "rule_id": "net-search"},
+    {"scope": "network", "verdict": "allow", "action": "fetch", "pattern": "github.com", "rule_id": "net-fetch-github"},
+    {"scope": "network", "verdict": "allow", "action": "fetch", "pattern": "api.github.com", "rule_id": "net-fetch-github-api"},
+    {"scope": "network", "verdict": "require_approval", "action": "fetch", "pattern": "*", "rule_id": "net-fetch-gated"},
+
+    {"scope": "mcp", "verdict": "require_approval", "action": "call", "pattern": "*", "rule_id": "mcp-gated"},
+
+    {"scope": "email", "verdict": "require_approval", "action": "read", "pattern": "*", "rule_id": "email-read-gated"},
+    {"scope": "email", "verdict": "require_approval", "action": "send", "pattern": "*", "rule_id": "email-send-gated"},
+
+    {"scope": "browse", "verdict": "require_approval", "action": "read", "pattern": "*", "rule_id": "browse-read-gated"},
+    {"scope": "browse", "verdict": "require_approval", "action": "act", "pattern": "*", "rule_id": "browse-act-gated"}
+  ]
+}

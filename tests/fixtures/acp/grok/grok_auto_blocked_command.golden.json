@@ -1,0 +1,48 @@
+{
+  "to_agent": [],
+  "ledger": [
+    {
+      "actor": "acp:grok",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "echo grok-auto-routine-ok",
+      "source": "observed",
+      "agent": "grok",
+      "session_id": "00000000-0000-4000-8000-000000000001",
+      "tool_call_id": "call-24294da9-5ce1-46a9-bc23-926eca6c5df7-0"
+    },
+    {
+      "actor": "acp:grok",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "rm -rf ~/grok-auto-probe-does-not-exist",
+      "project": {
+        "project_id": "demo",
+        "name": "demo",
+        "strategy": "trusted_local_dev",
+        "phase": "build"
+      },
+      "source": "run",
+      "verdict": "require_approval",
+      "rule_id": "unmatched",
+      "decided_by": "default/unmatched",
+      "layer": "default"
+    },
+    {
+      "actor": "human@client",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "rm -rf ~/grok-auto-probe-does-not-exist",
+      "source": "forwarded",
+      "agent": "grok",
+      "session_id": "00000000-0000-4000-8000-000000000001",
+      "tool_call_id": "call-a578f4fc-2b4d-4e69-a435-4bc42ace7377-1",
+      "request_id": 9099,
+      "outcome": "allow_once",
+      "note": "unmatched"
+    }
+  ]
+}

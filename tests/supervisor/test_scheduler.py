@@ -916,9 +916,12 @@ def test_scheduler_dispatch_decision_matches_direct_autonomy(
         store.close()
 
 
-def test_unbound_tick_merges_provider_hosts(tmp_path: Path, audit_config: SupervisorConfig) -> None:
-    """v24-F2: an unbound schedule's tick still reaches the configured LLM
-    provider — the v19-F2 merge now holds on this creation path too."""
+def test_unbound_tick_leaves_the_provider_to_run_task(
+    tmp_path: Path, audit_config: SupervisorConfig
+) -> None:
+    """v24-F2 → ADR 0059 D3: an unbound schedule's tick still reaches the
+    configured LLM provider — run_task fills provider_hosts for every face
+    (test_provider_hosts_b12), so the tick no longer merges it into network."""
     repo = create_audit_toy_repo(tmp_path / "audit-repo")
     store = RunStore(audit_config.db_path)
     captured: dict[str, object] = {}
@@ -950,7 +953,7 @@ def test_unbound_tick_merges_provider_hosts(tmp_path: Path, audit_config: Superv
 
     permissions = captured["permissions"]
     assert isinstance(permissions, Permissions)
-    assert "ollama.com" in permissions.network
+    assert "ollama.com" not in permissions.network
 
 
 def test_prompt_schedule_runs_the_injected_turn_and_records_health(

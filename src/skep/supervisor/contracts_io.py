@@ -109,11 +109,15 @@ def read_event_log(path: Path) -> list[Event]:
     (first occurrence wins) and events are returned ordered by ``seq``.
     Truncated trailing lines (a killed worker mid-write) are skipped.
     """
-    if not path.exists():
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # B3-F10: a finished run's worktree is swept while a detail view still
+        # polls it — an exists() check raced the sweep (CI macOS, PR #37).
         return []
     events: list[Event] = []
     seen_ids: set[str] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if not line.strip():
             continue
         try:

@@ -26,7 +26,7 @@ from skep.supervisor.serve.llm import (
 )
 from skep.supervisor.store import RunStore
 from skep.worker_contract import MemoryContextEntry
-from skep.workers.capabilities import builtin_tool_manifest
+from skep.workers.capabilities import builtin_tool_manifest, tracked_file_readable
 
 
 class LlmPlanError(Exception):
@@ -204,13 +204,14 @@ def request_edit_plan(
     workspace: Path,
     instructions: str,
     network_allowlist: Sequence[str],
+    provider_hosts: Sequence[str] = (),
     tool_manifest: Sequence[Mapping[str, str]] | None = None,
     repair_context: tuple[str, str] | None = None,
     memory: Sequence[MemoryContextEntry] = (),
     usage_tally: ProviderUsageTally | None = None,
 ) -> LlmWorkerPlan:
     endpoint = _endpoint(provider.profile)
-    _ensure_network_allowed(endpoint, network_allowlist)
+    _ensure_network_allowed(endpoint, network_allowlist, provider_hosts)
     messages = _messages(
         workspace=workspace,
         instructions=instructions,
@@ -286,14 +287,29 @@ def _api_key(provider: WorkerProvider) -> str | None:
     return value
 
 
-def _ensure_network_allowed(endpoint: str, allowlist: Sequence[str]) -> None:
+def _ensure_network_allowed(
+    endpoint: str, allowlist: Sequence[str], provider_hosts: Sequence[str] = ()
+) -> None:
+    """ADR 0059 D3: the endpoint must be one of the task's ``provider_hosts``
+    (``host:port``, filled by the supervisor) or — a task persisted before
+    contract 0.3.6 — in its network allowlist."""
     parsed = urllib.parse.urlparse(endpoint)
     host = parsed.hostname or ""
-    allowed = tuple(allowlist)
-    if not allowed:
-        raise LlmPlanError("real LLM provider calls require a task network allowlist")
-    if not domain_allowed(host, allowed):
-        raise LlmPlanError(f"provider host {host!r} is not in the task network allowlist")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if domain_allowed(host, tuple(provider_hosts), port=port) or domain_allowed(
+        host, tuple(allowlist)
+    ):
+        return
+    if not allowlist and not provider_hosts:
+        raise LlmPlanError(
+            "real LLM provider calls require a provider host or a task network allowlist; "
+            "this task has neither — configure the provider (`skep doctor` shows it)"
+        )
+    entry = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    raise LlmPlanError(
+        f"provider host {entry!r} is not in the task network allowlist or its provider "
+        f"hosts ({', '.join(provider_hosts) or 'none'})"
+    )
 
 
 def _provider_chunks(
@@ -493,7 +509,7 @@ _BRIEFING_MAX_CHARS = 4_000
 def _briefing_block(workspace: Path) -> str:
     path = workspace / _BRIEFING_FILENAME
     try:
-        if not path.is_file():
+        if not tracked_file_readable(workspace, path):
             return ""
         text = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError):
@@ -514,7 +530,7 @@ def _repository_snapshot(workspace: Path) -> str:
     for relative in files[:40]:
         path = workspace / relative
         try:
-            if not path.is_file() or path.stat().st_size > 8_000:
+            if not tracked_file_readable(workspace, path) or path.stat().st_size > 8_000:
                 continue
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -587,7 +603,7 @@ def plan_from_payload(payload: Mapping[str, Any]) -> LlmWorkerPlan:
     # re-verification (G10) still governs what "verified" means. A verify
     # block that is present-but-malformed still errors (it earns a repair).
     if verify is None and planned_files:
-        verification = PlannedVerification(argv=_DEFAULT_VERIFY_ARGV, expected_stdout=None)
+        verification = PlannedVerification(argv=DEFAULT_VERIFY_ARGV, expected_stdout=None)
     elif not isinstance(verify, dict):
         raise LlmPlanError("LLM plan must include a verify object")
     else:
@@ -645,8 +661,9 @@ def _parse_tool_plan(payload: dict[str, Any], summary: str) -> LlmToolPlan:
 _SHELL_OPERATOR_TOKENS = frozenset({"&&", "||", ";", "|", ">", ">>", "<", "&"})
 
 # v59-F5: the read-only verification injected when a file-changing plan forgot
-# its verify step/argv entirely — always on the shell_verify fast-path.
-_DEFAULT_VERIFY_ARGV: tuple[str, ...] = ("ls", "-la")
+# its verify step/argv entirely. ES-F3: worker code chose it, so the worker
+# pins it (pin_code_verify) — it stays on the shell_verify fast-path.
+DEFAULT_VERIFY_ARGV: tuple[str, ...] = ("ls", "-la")
 
 
 def shell_step_purpose(args: Mapping[str, Any]) -> str:
@@ -726,7 +743,7 @@ def _ensure_verify_step(steps: tuple[PlannedToolStep, ...]) -> tuple[PlannedTool
             *steps,
             PlannedToolStep(
                 tool="shell.run",
-                args={"argv": list(_DEFAULT_VERIFY_ARGV), "purpose": "verify"},
+                args={"argv": list(DEFAULT_VERIFY_ARGV), "purpose": "verify"},
             ),
         )
     return steps
@@ -907,7 +924,7 @@ def _parse_verification(
             argv = []
     if default_when_empty and (argv is None or argv == []):
         # v59-F5: missing/empty argv on a file-writing plan → default listing.
-        return PlannedVerification(argv=_DEFAULT_VERIFY_ARGV, expected_stdout=None)
+        return PlannedVerification(argv=DEFAULT_VERIFY_ARGV, expected_stdout=None)
     if not isinstance(argv, list) or not argv:
         raise LlmPlanError("verify.argv must be a non-empty list")
     parsed = tuple(str(arg) for arg in argv)

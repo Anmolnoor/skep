@@ -7,25 +7,29 @@
       "caste": "reviewer",
       "network": [],
       "provider_hosts": ["provider.example"],
-      "network_out": ["provider.example"]
+      "network_out": [],
+      "provider_hosts_out": ["provider.example:443"]
     },
     {
       "caste": "document",
       "network": [],
       "provider_hosts": ["provider.example"],
-      "network_out": ["provider.example"]
+      "network_out": [],
+      "provider_hosts_out": ["provider.example:443"]
     },
     {
       "caste": "reviewer",
       "network": ["*"],
       "provider_hosts": ["provider.example"],
-      "network_out": ["*"]
+      "network_out": ["*"],
+      "provider_hosts_out": ["provider.example:443"]
     },
     {
       "caste": "script",
       "network": [],
       "provider_hosts": ["provider.example"],
-      "network_out": []
+      "network_out": [],
+      "provider_hosts_out": []
     }
   ]
 }

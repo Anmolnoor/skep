@@ -2,8 +2,7 @@
 
 Worker tests are hermetic (the worker function runs on a task file, no
 sandbox). The end-to-end run_code tests dispatch the REAL script worker
-inside a real sandbox, so they carry the same bubblewrap gate as the
-egress proof.
+inside a real sandbox: bubblewrap on Linux, Seatbelt on macOS (W36).
 """
 
 from __future__ import annotations
@@ -31,9 +30,10 @@ from .fake_ollama import FakeOllama
 from .test_serve_chat import sse_events
 from .test_serve_chat_tools import chat_client
 
+# W36: either native backend — Seatbelt on macOS, bubblewrap on Linux.
 _SANDBOX_GATE = pytest.mark.skipif(
-    sandbox.availability().backend != "bubblewrap",
-    reason="run_code end-to-end needs a real sandbox (bwrap backend)",
+    sandbox.availability().backend not in ("bubblewrap", "seatbelt"),
+    reason="run_code end-to-end needs a real sandbox (bubblewrap or Seatbelt)",
 )
 
 
@@ -220,7 +220,7 @@ def test_run_code_cards_then_confirm_runs_sandboxed(
 ) -> None:
     """An unbound repo cards; confirming dispatches the sandboxed script
     worker and the script's stdout comes back as the tool result."""
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call("run_code", {"repo": str(repo), "code": "print(2+2)"})
     events = sse_events(
         client.post(f"/api/chats/{chat_id}/messages", json={"content": "calc"}).text
@@ -250,7 +250,7 @@ def test_run_code_auto_runs_on_a_trusted_project(
 ) -> None:
     """Where dispatch_run would auto-dispatch, run_code runs without a card —
     the script envelope is strictly tighter than the trusted default."""
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     created = client.post(
         "/api/projects",
         json={
@@ -280,6 +280,7 @@ def test_run_code_auto_runs_on_a_trusted_project(
     # The run is a real, separately audited worker run.
     run = client.get(f"/api/runs/{payload['task_id']}").json()["run"]
     assert run["state"] == "completed"
+    assert run["execution_mode"] == "sandbox"  # W36: inside the host's real wall
 
 
 def test_run_code_timeout_seconds_is_honored_and_capped(
@@ -290,7 +291,7 @@ def test_run_code_timeout_seconds_is_honored_and_capped(
     still binds — a wild ask clamps to 600."""
     import json as json_mod
 
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     client.post(
         "/api/projects",
         json={

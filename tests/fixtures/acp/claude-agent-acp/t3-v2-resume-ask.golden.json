@@ -1,0 +1,72 @@
+{
+  "to_agent": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "outcome": {
+          "outcome": "selected",
+          "optionId": "reject"
+        }
+      }
+    }
+  ],
+  "ledger": [
+    {
+      "actor": "acp:claude-agent-acp",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "git status",
+      "source": "observed",
+      "agent": "claude-agent-acp",
+      "session_id": "db73f532-14e7-4acb-ba67-b56f68f43d3a",
+      "tool_call_id": "toolu_01Md9Y353pvn98rion6YZ8Yv"
+    },
+    {
+      "actor": "acp:claude-agent-acp",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "rm -rf build",
+      "project": {
+        "project_id": "demo",
+        "name": "demo",
+        "strategy": "trusted_local_dev",
+        "phase": "build"
+      },
+      "source": "run",
+      "verdict": "require_approval",
+      "rule_id": "unmatched",
+      "decided_by": "default/unmatched",
+      "layer": "default"
+    },
+    {
+      "actor": "human@t3-code",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "rm -rf build",
+      "source": "forwarded",
+      "agent": "claude-agent-acp",
+      "session_id": "db73f532-14e7-4acb-ba67-b56f68f43d3a",
+      "tool_call_id": "toolu_01M1dv3u6ZVPVzzqhPgZ8a97",
+      "request_id": 0,
+      "outcome": "allow_once",
+      "note": "unmatched"
+    },
+    {
+      "actor": "acp:claude-agent-acp",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "git push -u origin main",
+      "source": "floor",
+      "note": "remote git commands never run from chat \u2014 skep lands patches after approval; use push_branch/open_pr for the governed remote surface",
+      "verdict": "deny",
+      "rule_id": "floor.worker-git-hard-denies",
+      "decided_by": "floor/floor.worker-git-hard-denies",
+      "layer": "floor"
+    }
+  ]
+}

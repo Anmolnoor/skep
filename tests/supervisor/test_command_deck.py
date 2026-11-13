@@ -240,14 +240,14 @@ def test_land_endpoint_lands_a_completed_run_on_a_named_branch(
     assert landed.json()["action"] == "applied"
     assert landed.json()["branch"] == "deck/landing"
     assert "deck/landing" in git(repo, "branch", "--list", "deck/landing").stdout
-    # The landing IS the approval: the review resolved under the deck actor.
+    # The landing IS the approval: the review resolved under the authenticated principal (ES-F1).
     store = RunStore(config.db_path)
     try:
         approvals = store.approvals_for(task_id)
     finally:
         store.close()
     assert [a.status for a in approvals] == ["approved"]
-    assert approvals[0].resolved_by == "operator-command"
+    assert approvals[0].resolved_by == "operator"
 
     assert client.post("/api/runs/no-such-task/land", json={}).status_code == 404
 

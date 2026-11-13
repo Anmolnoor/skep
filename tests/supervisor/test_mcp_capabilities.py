@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from skep.supervisor.mcp_client import (
     MCPGrants,
     MCPTool,
@@ -11,13 +15,14 @@ from skep.supervisor.mcp_client import (
 )
 
 
-def _tool(name: str, server: str = "srv") -> MCPTool:
-    return MCPTool(server_id=server, name=name, description="")
+def _tool(name: str, server: str = "srv", *, read_only: bool | None = True) -> MCPTool:
+    return MCPTool(server_id=server, name=name, description="", read_only=read_only)
 
 
 def test_risk_classification() -> None:
     assert classify_mcp_risk(_tool("read_file")) == "read"
     assert classify_mcp_risk(_tool("list_issues")) == "read"
+    assert classify_mcp_risk(_tool("getUser")) == "read"  # camelCase leading verb
     assert classify_mcp_risk(_tool("create_issue")) == "write"
     assert classify_mcp_risk(_tool("fetch_url")) == "network"
     assert classify_mcp_risk(_tool("send_email")) == "external_side_effect"
@@ -101,3 +106,87 @@ def test_plan_preflight_blocks_on_denied_tool() -> None:
         [_tool("read_file", server="bad")], MCPGrants(denied_servers=("bad",))
     )
     assert gate.denied == ("mcp.bad.read_file",)
+
+
+def test_b09_destructive_names_never_classify_as_read() -> None:
+    """ES-F (B09, P0): risk came from a substring of the name — tar*get*,
+    bud*get*, for*get*, wid*get* all read as "get" and auto-ran on the host.
+    Even a server that marks them read-only cannot make them reads: the
+    LEADING verb must be read-shaped too."""
+    for name in (
+        "budget_transfer",
+        "target_account_purge",
+        "widget_destroy",
+        "forget_all",
+        "purge_target",
+        "run_query",  # a query runner is not a read, whatever it claims
+        "account_status_reset",
+        "lookup_contacts",
+    ):
+        assert classify_mcp_risk(_tool(name)) != "read", name
+        assert mcp_capability_decision(_tool(name), MCPGrants()).verdict != "allow", name
+
+
+def test_b09_read_verb_without_the_server_hint_is_not_a_read() -> None:
+    """A read-shaped name alone is not enough: the server must mark the tool
+    readOnlyHint, and an unannotated (or unknown) tool asks."""
+    for read_only in (False, None):
+        tool = _tool("list_users", read_only=read_only)
+        assert classify_mcp_risk(tool) != "read"
+        assert mcp_capability_decision(tool, MCPGrants()).verdict == "require_approval"
+
+
+def test_b09_list_tools_reads_the_read_only_annotation() -> None:
+    from skep.supervisor.mcp_client import MCPClient, MCPServerConfig
+
+    def runner(method: str, params: object) -> dict[str, object]:
+        return {
+            "tools": [
+                {"name": "list_users", "annotations": {"readOnlyHint": True}},
+                {"name": "list_groups", "annotations": {"readOnlyHint": "yes"}},
+                {"name": "get_x"},
+            ]
+        }
+
+    config = MCPServerConfig(server_id="srv", transport="stdio", command=("x",))
+    tools = MCPClient(config, runner=runner).list_tools()
+    assert [t.read_only for t in tools] == [True, False, False]
+
+
+def test_b09_unreachable_server_cannot_vouch_for_a_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import RunStore
+    from skep.supervisor.mcp_client import MCPServerConfig, mcp_scope_decision, save_mcp_server
+
+    def broken(config: object, **_: object) -> object:
+        def runner(method: str, params: object) -> object:
+            raise OSError("server down")
+
+        return runner
+
+    from skep.supervisor import SupervisorConfig
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    from .conftest import predating_home
+
+    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", broken)
+    store = RunStore(predating_home(tmp_path / "s.sqlite3"))
+    holder = ConfigHolder(SupervisorConfig(home=tmp_path, worker_command=("x",)), store)
+    try:
+        save_mcp_server(store, MCPServerConfig(server_id="srv", transport="stdio", command=("x",)))
+        decision = mcp_scope_decision(store, holder, _tool("list_users", read_only=None))
+        assert (decision.verdict, decision.decided_by) == ("require_approval", "default/unmatched")
+    finally:
+        store.close()
+
+
+def test_w10_a_mutation_verb_anywhere_in_the_name_is_never_a_read() -> None:
+    """W10 (PR #70): `get_and_transfer` was a read — the server set
+    readOnlyHint and the name led with `get`. A mutation verb anywhere in the
+    name makes the tool not-read whatever the hint says (more calls card)."""
+    for name in ("get_and_transfer", "list_then_delete", "read_and_send", "getAndPay",
+                 "search_purge", "show_submit", "find_update", "get_post_and_create"):  # fmt: skip
+        assert classify_mcp_risk(_tool(name, read_only=True)) != "read", name
+    for name in ("get_user", "list_issues", "read_file", "search_docs", "get_settings"):
+        assert classify_mcp_risk(_tool(name, read_only=True)) == "read", name

@@ -195,7 +195,9 @@ use — the assistant's model never sees it. `/help` lists the deck; reads
 (`/policy`, `/state`, `/runs`, `/approvals`, `/repos`) render immediately, and
 mutations (`/setup`, `/workon`, `/phase`, `/land`, `/approve`, `/deny`,
 `/schedule`) show the same confirmation card a model proposal would, audited
-under actor `operator-command`. `/workon <path>` makes any local directory a
+under actor `operator-command`. `/trust` clears a chat's taint (the trifecta
+guard's "this chat read private data / took in outside content" bits) — an
+operator command only, never offered to the model. `/workon <path>` makes any local directory a
 first-class workspace: a confirmed `git init` + baseline commit if needed, then
 the same trusted-project setup a registered repo gets. The same deck works in
 the terminal: `skep chat` (see [`docs/cli-reference.md`](docs/cli-reference.md)).
@@ -252,10 +254,16 @@ commit, with everything auditable on your own disk. A deeper writeup is in
 If you know a project that already does all three locally, open an issue —
 genuinely, I want to compare notes.
 
+## Project design source of truth
+
+Internal design decisions, plans, operating rules, and recovered history are maintained in the private [SKEP design archive](https://github.com/Anmolnoor/skep-design). Contributors and coding agents should consult that archive before proposing decisions, making plans, or changing project behavior. The public ADRs and user documentation remain here; the private archive is canonical for internal planning and design context.
+
 ## Documentation
 
 The curated index lives at [`docs/README.md`](docs/README.md) — start with
-[`docs/quickstart.md`](docs/quickstart.md). Worker adapters and the custom
+[`docs/quickstart.md`](docs/quickstart.md). For agents: [`SKILL.md`](SKILL.md) teaches an agent
+to install and operate skep, and [`docs/agent-guide.md`](docs/agent-guide.md)
+how to explain it to a human. Worker adapters and the custom
 worker contract are in [`docs/workers.md`](docs/workers.md); verification
 semantics in [`docs/verification.md`](docs/verification.md); sandbox
 backends in [`docs/sandboxing.md`](docs/sandboxing.md); configuration in

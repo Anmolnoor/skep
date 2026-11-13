@@ -13,9 +13,11 @@ without a registry line fails the suite, and a registry line without a key
 behind it fails too.
 
 Layer vocabulary (the order the engine applies them, lowest first):
-``floor`` → ``global`` → ``template`` → ``phase`` → ``group`` → ``project``
-→ ``session`` → ``dispatch``. ``layers`` on a key says which of those may
-set it today. ``enforced_at`` is the P1 "enforced" semantic declared now:
+``floor`` → ``global`` → ``template`` → ``role`` → ``phase`` → ``group`` →
+``project`` → ``session`` → ``dispatch``. ``role`` (first-run R1, ADR 0055
+D2) carries rules only and tightens, never loosens (``roles.tighten``).
+``layers`` on a key says which of those may set it today. ``enforced_at``
+is the P1 "enforced" semantic declared now:
 the trust ramp is settable only at ``project`` (ADR 0048 encoded that by
 leaving it out of ``GROUPABLE_POLICY_KEYS``). The floor entries have no
 layers at all — they are listed so RSoP can show them as "not
@@ -28,12 +30,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .policy_schema import SCOPE_ACTIONS
+from .policy_schema import SCOPE_ACTIONS, UNMATCHED_VERDICT
 
 LAYERS: tuple[str, ...] = (
     "floor",
     "global",
     "template",
+    "role",
     "phase",
     "group",
     "project",
@@ -98,6 +101,10 @@ def _knob(
 
 
 _PROJECT_LAYERS = ("global", "phase", "group", "project", "dispatch")
+# first-run O1 (ADR 0056 D3): the two knobs a policy template carries beside
+# its rules — the egress hosts and the shell prefixes its allow rules name.
+# O2 populates the `template` slot from the approved file and enforces them.
+_TEMPLATE_PROJECT_LAYERS = ("global", "template", "phase", "group", "project", "dispatch")
 _RAMP_LAYERS = ("global", "phase", "project")
 
 # --- run-policy knobs (policy_view globals + PROJECT_POLICY_KEYS) -------------
@@ -107,7 +114,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         scope="network",
         type="list[str]",
         default=[],
-        layers=_PROJECT_LAYERS,
+        layers=_TEMPLATE_PROJECT_LAYERS,
         invariant="I12",
         doc="hosts a worker may reach; [] denies all but the provider, ['*'] allows all; "
         "lists union across layers; enforced by the filtering proxy or the sandbox",
@@ -171,7 +178,7 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         scope="shell",
         type="list[argv]",
         default=[],
-        layers=("global", "group", "project"),
+        layers=("global", "template", "group", "project"),
         invariant="I4",
         doc="argv prefixes a worker may run without a card; remote-git and sudo prefixes "
         "are refused at every write (dangerous_prefix_reason) and filtered on every read",
@@ -284,7 +291,8 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         invariant="I5",
         doc="P1 kill switch (ADR 0053 D6): the scopes whose knobs and rules answer from "
         "policy engine v2; every other scope keeps the v1 path. Flips are recorded in "
-        "<audit>/policy/engine-flips.jsonl; cut over shell first, after golden parity",
+        "<audit>/policy/engine-flips.jsonl. A fresh home is seeded with filesystem+shell "
+        "(ADR 0054 A6); an existing home keeps its switch",
     ),
     _knob(
         "auto_approve",
@@ -332,11 +340,12 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
     _knob(
         "sandbox_backend",
         scope="coding",
-        type="enum[auto|podman]",
+        type="enum[auto|podman|none]",
         default="auto",
         layers=("global",),
         invariant="I12",
-        doc="which backend wraps sandboxed workers; podman falls back to native, loudly (v44-F7)",
+        doc="which backend wraps sandboxed workers; podman falls back to native, loudly (v44-F7); "
+        "none: no sandbox ring is counted on (first-run O3)",
     ),
     _knob(
         "session_allowed_shell_commands",
@@ -353,7 +362,10 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
 # --- scope-document rules: one entry per scope·action (ADR 0022) -------------
 _RULE_DOCS: dict[tuple[str, str], str] = {
     ("coding", "edit"): "the worker may edit the workspace",
-    ("coding", "verify"): "the worker may run its verify step (always auto-allowed)",
+    (
+        "coding",
+        "verify",
+    ): "the worker may run its verify step (fast-path: the pinned verify_command)",
     ("shell", "run"): "a one-off command from a non-repo cwd",
     ("shell", "run_repo"): "a command from inside a registered repo (a file-write pen)",
     ("shell", "run_background"): "a daemon; never from a repo cwd",
@@ -361,7 +373,7 @@ _RULE_DOCS: dict[tuple[str, str], str] = {
     ("filesystem", "write"): "workspace / trusted-root write",
     ("network", "connect"): "worker egress to a host",
     ("network", "search"): "the Queen's keyless web search",
-    ("network", "fetch"): "the Queen's read_url to a granted domain",
+    ("network", "fetch"): "the Queen's read_url of one host (allow: in-turn; ask: a card)",
     ("mcp", "call"): "a registered MCP server's tool",
     ("email", "read"): "an email-bound MCP server's read-shaped tools",
     ("email", "send"): "any email side effect",
@@ -374,17 +386,21 @@ def _rule_keys() -> tuple[PolicyKey, ...]:
     keys: list[PolicyKey] = []
     for scope in sorted(SCOPE_ACTIONS):
         for action in sorted(SCOPE_ACTIONS[scope]):
+            unmatched = UNMATCHED_VERDICT[(scope, action)]
             keys.append(
                 PolicyKey(
                     name=f"{scope}.{action}",
                     system="scope_document",
                     kind="rule",
                     type="rule",
-                    default="deny",
+                    default=unmatched,
                     layers=("template", "global", "project", "session"),
                     invariant="I5",
                     doc=_RULE_DOCS.get((scope, action), "")
-                    + " — most specific pattern wins, deny wins ties, unmatched denies",
+                    + " — most specific pattern wins, deny wins ties, unmatched "
+                    + ("denies" if unmatched == "deny" else "asks")
+                    + " (ADR 0059: policy decide/why, the hook, acp govern); a run is "
+                    "granted only what a rule allows",
                 )
             )
     return tuple(keys)
@@ -439,6 +455,17 @@ _FLOOR_KEYS: tuple[PolicyKey, ...] = (
         invariant="I4",
         doc="remote git, sudo and friends are refused by dangerous_prefix_reason at every "
         "allowlist write and filtered on every read",
+    ),
+    PolicyKey(
+        name="floor.secret-reads",
+        system="floor",
+        kind="rule",
+        type="rule",
+        default="deny",
+        layers=(),
+        invariant="I5",
+        doc="credential files (~/.ssh, ~/.aws, .env, skep's own tokens …) are never "
+        "read by the Queen or a worker, by requested path or realpath (ES-F1)",
     ),
     PolicyKey(
         name="floor.outbound-content",

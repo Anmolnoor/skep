@@ -880,8 +880,9 @@ def test_a_grant_covered_action_leaves_a_receipt() -> None:
     assert "if (d.decision) { group = null; receiptCard(d); }" in source
     assert ".receipt-card" in styles
     # No verdict buttons on a receipt.
-    receipt = source[source.index("const receiptCard = (d)") :]
-    receipt = receipt[: receipt.index("// v54-F2")]
+    # T3-1: the body moved to top-level receiptNode (executed in tests/web/).
+    receipt = source[source.index("function receiptNode(d)") :]
+    receipt = receipt[: receipt.index("function formatRunAutonomy")]
     assert "Approve" not in receipt and "Deny" not in receipt
     assert 'class: "actions"' not in receipt
 
@@ -1529,8 +1530,8 @@ def test_dead_cards_drop_their_buttons() -> None:
     ]
     assert 'action.status !== "proposed"' in reconciler
     assert '!drawn.classList.contains("resolved")' in reconciler
-    assert "✗ Superseded" in reconciler
-    assert "resolveCardUI(drawn," in reconciler
+    # ES-F1: the labels live in cardVerdict, executed by tests/web/.
+    assert "resolveCardUI(drawn, ...cardVerdict(action))" in reconciler
 
 
 def test_worker_loader_ticks_from_dispatch_and_announces_terminals_once() -> None:
@@ -1856,6 +1857,7 @@ def test_the_ledger_nudge_has_a_face_on_the_approvals_view() -> None:
     assert "renderRememberSuggestions" in source
     assert "covering_group" in source
     assert "attach_group" in source
-    # The keep selector (v112-F1) rides only rememberable cards.
-    assert 'REMEMBERABLE_TOOLS = new Set(["read_url", "run_shell", "start_process"])' in source
+    # The keep selector (v112-F1) rides only cards the server says can keep a
+    # grant (P3-4: card.keep, tests/web pins keepSelect).
+    assert "keepSelect(d.card)" in source
     assert "card-keep" in source

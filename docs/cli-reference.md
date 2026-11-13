@@ -16,11 +16,37 @@ skep [--home HOME] [--version] <command> ...
 ## Setup and Health
 
 ```sh
+skep onboard [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV]
+             [--workdir DIR] [--sandbox auto|podman|none]
+             [--template builder|operator|assistant] [--role ROLE] [--yes] [--no-chat]
+skep onboard --check
+skep onboard --quiet | --verbose
 skep setup --personal [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV]
 skep doctor
 skep status [--personal] [--json]
 ```
 
+- `onboard` is the guided first run (first-run O3): ① model (detects a local
+  Ollama, makes a test call, prints where prompts go) → ② work directory
+  (created if missing, registered as a project with its inferred
+  `verify_command`) → ③ sandbox backend (`none` is a real answer: the baseline
+  then asks on every write) → ④ policy template (default `assistant`, locked
+  through `skep policy approve`'s path after a typed `yes`) → ⑤ role, recorded
+  in `~/.skep/first_run.json`; then it attaches to (or starts) `skep serve` and
+  opens `skep chat` unless `--no-chat`. Re-running resumes at the first
+  incomplete step; a flag that differs from a finished step re-runs it.
+  `--provider` takes `mock`, `ollama`, `openai-compatible` or a preset id from
+  `skep provider presets`. `--yes` takes every default and skips the typed
+  `yes`. See [onboarding.md](onboarding.md).
+- `onboard --check` is `doctor` plus: baseline hash valid (a tampered one is
+  named `baseline_tampered`), engine v2 scopes on, the chosen sandbox backend
+  present, the work directory writable, the model reachable, all five steps
+  done — then the egress-truth block, whose last line is `telemetry: none`.
+- `onboard --quiet | --verbose` (first-run O4) turns the first-session
+  `why:` line under every chat verdict card, and the per-turn tally, off or
+  back on (`~/.skep/first_run.json` `dismissed`; REST:
+  `POST /api/onboard/transparency {"verbose": bool}`).
+  Exits 0 only when every check is ready.
 - `setup --personal` creates or updates the personal profile.
 - `doctor` reports readiness and exits non-zero when the profile is not ready.
 - `doctor` also reports non-blocking runtime checks such as sandbox backend
@@ -61,9 +87,28 @@ Important options:
 - `--env-allow ENV` passes one environment variable; repeatable.
 - `--caste CASTE` selects the worker kind. The common launch path is `coding`.
 - `--auto-approve` enables configured safe auto-approval rules.
+- `--role NAME` gives the worker a role: its layer narrows the worker's grants
+  (see Roles).
+- `--delegated-by ACTOR@ROLE` dispatches as that delegator (repeat, outermost
+  first); the worker holds no more than it does.
 - `--quiet` suppresses the live phase tail.
 
 `--minimal` cannot be combined with `--template`, `--network`, or `--env-allow`.
+
+## Agents
+
+```sh
+skep agents [--json]
+```
+
+Coding agents running on this machine right now (Claude Code, Codex, Cursor,
+Gemini and ~18 more, matched by process name), each `working`, `idle` or
+`blocked`, and whether skep governs it — running under a skep worker, with the
+run's task id and the dispatching chat's role. `blocked` is read from output,
+which skep only has for processes it started itself; other agents show
+`working`/`idle` by CPU. A `blocked` agent skep does not govern is flagged as
+the gap. Same view as `GET /api/agents` and the Queen's `list_agents`. The
+detection patterns are data from herdr (Apache-2.0; see `NOTICE`).
 
 ## Review and Approval
 
@@ -176,7 +221,7 @@ access token on startup.
 ## Chat
 
 ```sh
-skep chat [--url URL] [--chat ID] [--continue] [--thinking] [--oneshot MESSAGE]
+skep chat [--url URL] [--chat ID] [--continue] [--thinking] [--oneshot MESSAGE] [--role NAME]
 ```
 
 `chat` is the terminal face of the same Queen the web UI talks to. It is an
@@ -195,6 +240,9 @@ daemon: run `skep serve` first. The REPL never opens the store directly.
 - `--oneshot "message"` sends one message to a new chat, streams the reply,
   and exits 0 — no prompts; cards are skipped and reported by id (the
   scripting/cron face).
+- A new interactive chat asks for its role once (Enter takes the default —
+  `skep role use`, else the role `skep onboard` recorded); `--role NAME`
+  skips the question. See "Roles" below.
 
 Messages starting with `/` are the command deck — deterministic operator
 commands the model never sees, identical to the web deck:
@@ -213,6 +261,14 @@ commands the model never sees, identical to the web deck:
 | `/approve <review-id> [branch]` | approve a pending review (confirm card) |
 | `/deny <review-id>` | deny a pending review (confirm card) |
 | `/workon <path>` | make a local directory a first-class workspace (confirm card) |
+| `/role <name>` | switch this chat's role — prompt, voice and policy layer together (confirm card) |
+| `/trust [private\|untrusted]` | trust this chat again: clear its taint bits (both by default); never a model tool, never from a channel |
+
+`skep trust CHAT_ID [--bit private|untrusted]` is the same verb outside chat.
+It writes who cleared which bit, when and the message that had set it to
+`audit/policy/taint-cleared.jsonl` and as a line in the chat. Rows already in
+the chat stay wrapped as outside content; new outside content sets the bit
+again.
 
 ## Skills
 
@@ -233,10 +289,21 @@ skep project show    PROJECT_ID
 skep project set-phase PROJECT_ID PHASE
 skep policy registry
 skep policy rsop REPO
-skep policy why  REPO SCOPE ACTION VALUE
-skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME]
+skep policy why  REPO SCOPE ACTION VALUE [--role NAME] [--delegated-by ACTOR@ROLE ...]
+skep policy explain SUBJECT
+skep policy approve [--template NAME | --file PATH] [--reapprove] [--yes]
+skep policy baseline [status|diff]
+skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME] [--role NAME]
+                   [--delegated-by ACTOR@ROLE ...]
 skep policy hook [--actor NAME]
+skep policy decisions [--actor GLOB] [--since ISO] [--limit N] [--team ID]
+skep policy grants
+skep policy revoke RULE_ID
 ```
+
+`policy grants` lists every learned grant (id, what it matches, lifetime,
+what it is bound to) and `policy revoke` removes one by id — the same verbs
+as `GET` / `DELETE /api/policy/rules` and the chat `revoke_policy_rule` card.
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
 from the repo's own entry point (v91); an explicit `--verify-command` always
@@ -250,7 +317,142 @@ names the rule that decided it (ADR 0052, read-only). `policy decide` is
 the same question asked by an outside agent and RECORDED in
 `<home>/supervisor/audit/policy/decisions.jsonl`; `policy hook` is its
 Claude Code PreToolUse face (payload on stdin, verdict as hook JSON — see
-`docs/policy-hook.md`, ADR 0053 P3).
+`docs/policy-hook.md`, ADR 0053 P3). `policy decisions` reads that ledger
+back, newest first, with counts per verdict and per note source (`observed`,
+`forwarded`); `--actor` is a glob, `--since` a time or bare-date floor
+(also `GET /api/policy/decisions` and the chat `policy_decisions` tool). `policy explain` renders a policy template (`builder`, `operator`, `assistant`), the approved `baseline` or a `role:<name>` as a Markdown allow / ask / deny table grouped by scope, with its settings and the floor rows no layer lifts — the rule ids are the ones `why` prints (first-run O1, ADR 0056 D3; also `GET /api/policy/explain?subject=` and the chat `policy_explain` tool).
+`policy approve` locks a template (or a `--file` layer) as the policy
+baseline: it prints the explain table, takes a typed `yes` unless `--yes`,
+and writes `baseline.json`, `baseline.lock` and a row in
+`<home>/supervisor/audit/policy/baseline-approvals.jsonl`; a second approval
+needs `--reapprove`, which shows the diff against the locked layer first
+(also `POST /api/policy/baseline/approve` and the chat
+`approve_policy_baseline` card). `policy baseline status` prints one line —
+`baseline: TAMPERED since <time>` when the file no longer matches its lock —
+and exits 1 when tampered; `policy baseline diff` prints what changed (also
+`GET /api/policy/baseline`). `policy explain baseline` shows the locked
+layer. See "The Policy Baseline" in `docs/configuration.md` (first-run O2,
+ADR 0056 D1/D2).
+
+## Roles
+
+```sh
+skep role list
+skep role show NAME
+skep role use  NAME [--chat ID]
+```
+
+A role (first-run R1, ADR 0055) is a record — `name`, `policy_layer`,
+`system_prompt`, `default_castes`, `voice` — and a **policy context**:
+`builder`, `operator` and `assistant` ship bound 1:1 to the templates of the
+same name; custom roles live in `~/.skep/roles/<name>.json` and may bind to
+any template. The role's layer sits directly under the approved baseline and
+only tightens it: the stricter of the two verdicts stands, a role with no rule
+for an action has no opinion, and the floor is above every role. A chat runs
+in one role — its prompt, its voice (when the chat has no `/personality`) and
+the Queen's own tool lanes. `role list` marks the default new chats open in
+with `*`; `role show` prints the record and its layer as the explain table;
+`role use NAME` sets that default, `--chat ID` switches one chat (the chat's
+`set_role` card and `/role` are the same verb). A chat made before every
+chat recorded a role has none stored and runs as `assistant`; `skep role use
+builder --chat ID` gives it another (`skep doctor` lists such chats). `skep policy why|decide
+--role NAME` answers under a role: `decided_by` names `role:<name>` when the
+role decided, `why` adds a `role` block naming the layer, and the ledger row
+carries `role` (also `role` on `GET /api/policy/why`, `POST
+/api/policy/decide` and the chat `policy_why` tool; `GET /api/roles` and
+`role` on `POST /api/chats` behind the web picker).
+
+Delegation is subset-only (first-run R2, ADR 0055 D4): `--delegated-by
+ACTOR@ROLE` (repeat, outermost first — e.g. `--delegated-by queen@operator`)
+holds the verdict to what that delegator itself holds — its own effective
+verdict, under its role, bounded by the hops above it. Anything beyond it is
+`exceeds_delegator` (`deny` where the delegator holds no grant, an ask where it
+would itself have to ask) and the ledger row carries `delegation_chain`; `why`
+adds a `delegation` block naming the chain and what the delegator holds. A
+delegator whose role has no rule for the action holds nothing to pass on
+(unset is not granted). The floor is above every chain. Also
+`delegation_chain` on `POST /api/policy/decide`, `GET /api/policy/why` and the
+chat `policy_why` tool. A Queen chat in a role dispatches as `queen@<role>`
+(an operator-typed `/command` and REST or the CLI, with no chat, dispatch as the operator): the
+worker's shell prefixes and egress hosts beyond what that role holds are
+dropped at dispatch — the worker cards for them instead, so a human answers —
+and each drop is a ledger row with `actor: dispatch`; a role denied workspace
+writes cannot dispatch a worker at all. Chains are depth 1 at dispatch.
+
+A worker can be dispatched with its own role (first-run R3, ADR 0055 D5):
+`--role NAME [--delegated-by ACTOR@ROLE]` on `skep run`, `role` and
+`delegation_chain` on `POST /api/runs`, `role` on the chat's `dispatch_run`
+and per task in `batch_dispatch`. The worker's grants are its role ∩ its
+delegator's — a grant either makes stricter is dropped the same way and
+recorded under the worker's role. Every delegated or role-bearing dispatch is
+one `source: delegated` row in the decisions ledger (`skep policy decisions`):
+the delegator as `actor`, `worker@<role>` as `value`, `role`,
+`delegation_chain` and `task_id`. The run's dispatch decision carries
+`delegation` (`chain`, `role`, `team`), shown on the run cards. A worker never
+dispatches: a `worker@…` hop refuses.
+
+```sh
+skep team --manager ROLE --task REPO INSTRUCTIONS [--task ...] [--role NAME]
+          [--delegated-by ACTOR@ROLE] [--execution-mode workspace|sandbox]
+```
+
+A team run (first-run R3) is a batch of 1-3 runs with a manager as the
+dispatcher: each member runs under `[<dispatcher>, manager@<ROLE>]` — held to
+the manager, and the manager to whoever dispatched the team — with the
+manager's role unless `--role` (or a task's `role`) says otherwise. This is the
+one two-hop chain a dispatch accepts; anything deeper, and a manager anywhere
+but innermost, refuses. The team is one ledger thread: the manager's
+`delegated` row, every member's and every drop carry the team id, and `skep
+policy decisions --team ID` reads it in order. `skep team` waits for its
+members like `skep run`; the same verb is `POST /api/teams` and the chat's
+`batch_dispatch` with `manager` (dispatched as `queen@<chat role>`). The
+manager writes no briefs of its own — the Queen or the operator does.
+
+## skep acp
+
+```sh
+skep acp govern [--repo PATH] [--actor NAME] -- AGENT_ARGV...
+skep acp doctor -- AGENT_ARGV...
+skep acp install-hint
+```
+
+`acp govern` is the process an ACP client (T3 Code, Zed, …) spawns in place
+of the agent (ADR 0054). It relays every JSON-RPC line unchanged except the
+agent's `session/request_permission`, which it answers from `policy decide`
+— `allow` selects the agent's `allow_once` option, an explicit or floor deny
+selects `reject_once`; `require_approval`, an unmatched action, or anything
+skep cannot read is forwarded to the human behind the client. It never
+selects an "always" option. Every decision, every tool call the agent ran
+unasked (`source: observed`) and every answer the human gave
+(`source: forwarded`) lands in `decisions.jsonl`. The session is decided
+against `session/new`'s `cwd` unless `--repo` names the checkout;
+`--actor` replaces the ledger actor (default `acp:<agent>`). It reads the
+home directly — `skep serve` need not run; an unreadable store forwards
+every ask with the reason. See what the governed agents did:
+`skep policy decisions --actor 'acp:*'`.
+
+At startup it prints one line to stderr, e.g.
+`skep acp: governing claude-agent-acp (ACP v2) — rings: advisory — home …`.
+**advisory** is the permission ask — decided only when the agent's own mode
+chooses to ask. **hard** appears only on ACP v1 when the client advertised
+`fs.writeTextFile` or `terminal`: the agent's `terminal/create` and
+`fs/write_text_file` then pass only on `allow`; anything else is refused with
+a JSON-RPC error, because that hop has no human to forward to.
+
+`acp doctor` sends `initialize` and a dry `session/new` (never a prompt) and
+prints the agent's name and version, the mapper preset it gets, the modes it
+advertises with the default marked, the rings, and a WARNING when the
+default mode never asks (`auto`, `agent`, `agent-full-access`,
+`bypassPermissions`).
+
+`acp install-hint` first names the locked baseline the governor answers from
+(template, approval time, short sha256) — or says `run skep onboard first`
+when none is approved — then prints what to paste into T3 Code's Settings →
+Providers → Add provider → Show more → Local ACP command dialog, for
+claude-agent-acp and codex-acp: the absolute path of `skep` (T3 launches it with no shell and no
+PATH lookup) and one argument per row — `acp`, `govern`, `--`, `npx`,
+`-y`, `@agentclientprotocol/<adapter>`. See
+[`acp-governor.md`](acp-governor.md).
 
 ## Memory
 

@@ -24,7 +24,7 @@ from typing import Any
 
 from skep.worker_contract import ApprovalVerdict, Budget, CodingWorkerTask, Permissions, TaskState
 
-from .apply import apply_patch_on_branch, validate_landing_branch
+from .apply import land_patch, validate_landing_branch
 from .autonomy import (
     approval_decision_for_action,
     project_policy_dispatch_match,
@@ -44,7 +44,7 @@ from .projects import (
     project_from_store,
     project_to_dict,
 )
-from .provider_hosts import configured_provider_hosts
+from .roles import delegation_line
 from .scheduler import make_schedule, make_template_schedule, parse_interval, run_due
 from .store import RunRecord, RunStore, UsageRecord
 from .template_suggestion import (
@@ -747,9 +747,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
     store = RunStore(config.db_path)
+    # ES-F7 (B57): run the sandbox backend the home chose, as serve does
+    # (ConfigHolder overlays the same setting). Only this key: an explicit
+    # --worker-cmd still outranks a stored one here.
+    from .serve.settings import SANDBOX_BACKEND, apply_settings
+
+    config = apply_settings(config, {SANDBOX_BACKEND: store.get_setting(SANDBOX_BACKEND)})
     auto_apply_verified_patch: bool | None = None
     project_context = None
     resolved_policy: ResolvedRunPolicy | None = None
+    delegation: dict[str, Any] | None = None
+    delegation_note: str | None = None
     try:
         if args.template:
             template_bound = (
@@ -769,7 +777,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                     max_actions=budget.max_actions,
                     max_provider_calls=budget.max_provider_calls,
                     execution_mode=execution_mode,
-                    extra_network_hosts=configured_provider_hosts(store, config.home.parent),
                     binding_candidates=[("template_name", args.template)],
                     engine=args.engine,
                 )
@@ -835,7 +842,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                         max_actions=args.budget_max_actions,
                         max_provider_calls=args.budget_max_provider_calls,
                         execution_mode=execution_mode,
-                        extra_network_hosts=configured_provider_hosts(store, config.home.parent),
                         engine=args.engine,
                     )
                     permissions = resolved_policy.permissions
@@ -846,6 +852,26 @@ def cmd_run(args: argparse.Namespace) -> int:
                     auto_apply_verified_patch = (
                         raw_auto_apply if isinstance(raw_auto_apply, bool) else None
                     )
+        if args.role or args.delegated_by:
+            # first-run R3 (ADR 0055 D5): the same narrowing POST /api/runs does.
+            from fastapi import HTTPException
+
+            from .serve.actions import delegate_permissions
+            from .serve.settings import ConfigHolder
+
+            try:
+                permissions, delegation, delegation_note = delegate_permissions(
+                    ConfigHolder(config, store),
+                    store,
+                    repo,
+                    permissions,
+                    role=args.role,
+                    delegation_chain=args.delegated_by or [],
+                    # V7: the operator runs this — `skep review` answers a card.
+                    deferred_asks=True,
+                )
+            except HTTPException as exc:
+                return _err(str(exc.detail), next_command="skep role list")
     except PolicyResolutionError as exc:
         return _err(
             str(exc),
@@ -887,6 +913,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         dispatch_decision = dispatch_decision.with_network_audit(
             resolved_policy.network_requested, resolved_policy.network_resolved
         )
+    on_run_created: Callable[[str], None] | None = None
+    if delegation is not None:
+        from .serve.actions import delegated_decision, record_delegation
+
+        dispatch_decision = delegated_decision(dispatch_decision, delegation, delegation_note)
+        hop = delegation
+
+        def on_run_created(task_id: str) -> None:
+            record_delegation(config.audit_dir, hop, repo=str(repo), task=task_id)
 
     tail: _PhaseTail | None = None
     if matched_template is not None:
@@ -917,6 +952,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             dispatch_decision=dispatch_decision,
             ref=ref,
             resume_of=args.resume_of,
+            on_run_created=on_run_created,
             execution_mode=execution_mode,
             planning_protocol=planning_protocol,
             # v90-F1 (ADR 0047): the project's chosen coding agent.
@@ -949,6 +985,58 @@ def cmd_run(args: argparse.Namespace) -> int:
     elif record.state == "completed":
         print(f"  next:         skep review {record.task_id}")
     return STATE_EXIT_CODES.get(record.state, 3)
+
+
+def cmd_team(args: argparse.Namespace) -> int:
+    """first-run R3 (ADR 0055 D5): `skep team` — a manager in ``--manager``'s
+    role dispatches every ``--task``; one ledger thread. The same
+    ``submit_team`` as ``POST /api/teams`` and the chat's ``batch_dispatch
+    manager=``, in-process like ``skep run``: it waits for every member."""
+    from fastapi import HTTPException
+
+    from .serve.actions import submit_team
+    from .serve.jobs import Dispatcher
+    from .serve.settings import ConfigHolder
+
+    config = build_config(args.home, args.worker_cmd)
+    tasks = [
+        {
+            "repo": repo,
+            "instructions": text,
+            "role": args.role,
+            "execution_mode": args.execution_mode,
+        }
+        for repo, text in args.task
+    ]
+    store = RunStore(config.db_path)
+    holder = ConfigHolder(config, store)
+    runner = Dispatcher(holder, store)
+    try:
+        try:
+            team = submit_team(
+                holder,
+                runner,
+                store,
+                manager=args.manager,
+                tasks=tasks,
+                delegation_chain=args.delegated_by or [],
+                deferred_asks=True,
+            )
+        except HTTPException as exc:
+            return _err(str(exc.detail), next_command="skep role list")
+        finally:
+            runner.shutdown(wait=True)
+        print(f"team {team['team']}  ({' → '.join(team['delegation_chain'])} → workers)")
+        codes = [0]
+        for task_id in team["dispatched"]:
+            record = store.get_run(task_id)
+            state = record.state if record is not None else "gone"
+            print(f"  {task_id}  {state}")
+            codes.append(STATE_EXIT_CODES.get(state, 3))
+        print(f"  ledger:  skep policy decisions --team {team['team']}")
+        return max(codes)
+    finally:
+        store.close()
 
 
 def cmd_status_personal(args: argparse.Namespace) -> int:
@@ -1045,20 +1133,26 @@ def _shell_command_from_approval_reason(reason: object) -> list[str] | None:
 
 
 def _remember_for_repo(
-    store: RunStore, config: SupervisorConfig, repo: Path, argv: list[str]
+    store: RunStore, config: SupervisorConfig, repo: Path, argv: list[str], task_id: str
 ) -> str:
-    """v114-F2: the ONE writer every face shares (ADR 0050) — the bound
-    project's overlay first, global only when unbound — returning the tier it
-    wrote. The CLI used to append to the global setting on its own, so a
+    """v114-F2: the ONE writer every face shares (ADR 0050) — a project
+    grant (ADR 0059 D4, B18), bound to the repo when it has no project —
+    returning where it holds. The CLI used to append to the global setting on its own, so a
     `--allow-command` on a project-bound run widened every repo and cleared
     nothing for the project whose list shadows the global one."""
-    from .serve.actions import persist_remembered_command
+    from .serve.actions import _a_delegated_ask, persist_remembered_command
     from .serve.settings import ConfigHolder
     from .shell_prefixes import dangerous_prefix_reason, normalize_remembered_command
 
     guard_reason = dangerous_prefix_reason(argv)
     if guard_reason is not None:
         raise ValueError(guard_reason)
+    if _a_delegated_ask(config, task_id, commands=[argv]):
+        # V7: the REST/chat Allow & remember answers 409 here (ADR 0050 parity).
+        raise ValueError(
+            "this is a delegated ask (the dispatching chain would itself ask): it can "
+            "only be approved once, for this run — approve it, or deny"
+        )
     return persist_remembered_command(
         store, ConfigHolder(config, store), repo, normalize_remembered_command(argv)
     )
@@ -1118,6 +1212,12 @@ def cmd_review(args: argparse.Namespace) -> int:
                 dispatch = _decision_summary(audited_task.dispatch_decision)
                 if dispatch:
                     lines.append(f"  dispatch:     {dispatch}")
+                # first-run R3: who delegated this run, under which role.
+                delegated = delegation_line(
+                    getattr(audited_task.dispatch_decision, "delegation", None)
+                )
+                if delegated:
+                    lines.append(f"  delegated:    {delegated}")
                 landing = _decision_summary(audited_task.landing_decision)
                 if landing:
                     lines.append(f"  landing:      {landing}")
@@ -1179,7 +1279,19 @@ def cmd_review(args: argparse.Namespace) -> int:
             review_id = _pending_or_new(
                 store, record, reason=landing_reason(record.instructions, None)
             )
-            store.resolve_approval(review_id, approved=False, actor=actor, note=args.note)
+            from fastapi import HTTPException
+
+            from .serve.actions import deny_approval
+
+            try:
+                deny_approval(store, review_id, actor, args.note)
+            except HTTPException as exc:  # W27c: a resume or landing holds it
+                return _err(
+                    str(exc.detail),
+                    state=record.state,
+                    evidence=str(audit_dir),
+                    next_command=f"skep review {record.task_id}  # see what it left",
+                )
             print(f"denied: task {record.task_id} (by {actor})")
             print(f'  next: skep run {record.repo} "..." --resume-of {record.task_id}')
             return 0
@@ -1209,7 +1321,7 @@ def cmd_review(args: argparse.Namespace) -> int:
                     next_command=f"skep review {record.task_id}  # inspect the evidence",
                 )
             try:
-                tier = _remember_for_repo(store, config, Path(record.repo), argv)
+                tier = _remember_for_repo(store, config, Path(record.repo), argv, record.task_id)
             except ValueError as exc:
                 return _err(
                     f"this command cannot be remembered: {exc}",
@@ -1247,23 +1359,52 @@ def cmd_review(args: argparse.Namespace) -> int:
                 )
         else:
             branch = f"skep/{record.task_id}"
-        failure = apply_patch_on_branch(
-            Path(record.repo), branch, patch_path, task_id=record.task_id, actor=actor
-        )
+        # B150: the same claim serve's apply_patch takes (ES-F4) — without it
+        # a CLI approve during serve's landing applied the patch a second time.
+        review_id = _pending_or_new(store, record, reason=landing_reason(record.instructions, None))
+        if not store.claim_approval(review_id):
+            from .serve.actions import landing_taken
+
+            return _err(
+                str(landing_taken(store, review_id).detail),
+                state=record.state,
+                evidence=str(audit_dir),
+                next_command=f"skep review {record.task_id}  # inspect the evidence",
+            )
+        try:
+            failure = land_patch(
+                store, Path(record.repo), branch, patch_path, task_id=record.task_id, actor=actor
+            )
+        except BaseException:
+            store.unclaim_approval(review_id)
+            raise
         if failure is not None:
+            # v81-F2, as serve does: a failed land ends denied with its reason;
+            # a retry mints a fresh review.
+            store.resolve_approval(
+                review_id,
+                approved=False,
+                actor=actor,
+                note=f"apply failed: {failure}",
+                claimed=True,
+            )
             return _err(
                 failure,
                 state=record.state,
                 evidence=str(audit_dir),
                 next_command=f"skep review {record.task_id}  # re-inspect",
             )
-        review_id = _pending_or_new(store, record, reason=landing_reason(record.instructions, None))
         # v115-F4: the approval row is where the landing branch lives (v30);
         # without it `applied_branch` fell back to skep/<task_id> for a
         # --branch landing — the run page and the PR verbs named a branch
         # that never existed (I8, I13).
         store.resolve_approval(
-            review_id, approved=True, actor=actor, note=args.note, landing_branch=branch
+            review_id,
+            approved=True,
+            actor=actor,
+            note=args.note,
+            landing_branch=branch,
+            claimed=True,
         )
         print(f"approved: task {record.task_id} (by {actor})")
         print(f"  patch applied on branch {branch} in {record.repo}")
@@ -1314,10 +1455,12 @@ def open_pr_for_branch(
 
 
 def _pending_or_new(store: RunStore, record: RunRecord, *, reason: str) -> str:
-    pending = [a for a in store.approvals_for(record.task_id) if a.status == "pending"]
-    if pending:
-        return pending[0].review_id
-    return store.enqueue_approval(record.task_id, action="apply_patch", reason=reason)
+    # ES-F4: one locked store call, the same pending-or-new the serve uses.
+    review_id = store.pending_or_enqueue_approval(
+        record.task_id, action="apply_patch", reason=reason
+    )
+    assert review_id is not None  # create=True always mints
+    return review_id
 
 
 def _prompt_inline_approval(
@@ -1367,7 +1510,9 @@ def _prompt_inline_approval(
                     print("approval left pending")
                     return None
                 try:
-                    tier = _remember_for_repo(run_store, config, Path(record.repo), argv)
+                    tier = _remember_for_repo(
+                        run_store, config, Path(record.repo), argv, record.task_id
+                    )
                 except ValueError as exc:
                     print(f"approval cannot be remembered: {exc}")
                     print("approval left pending")
@@ -1375,7 +1520,15 @@ def _prompt_inline_approval(
                 print(f"  remembered: {shlex.join(argv)} → {tier}")
             return _resume_pending_approval(config, run_store, record, actor, remembered=True)
         if choice in {"d", "deny", "n", "no"}:
-            run_store.resolve_approval(pending.review_id, approved=False, actor=actor)
+            from fastapi import HTTPException
+
+            from .serve.actions import deny_approval
+
+            try:
+                deny_approval(run_store, pending.review_id, actor, None)
+            except HTTPException as exc:  # W27c
+                print(f"not denied: {exc.detail}")
+                return None
             print(f"denied: task {record.task_id} (by {actor})")
             return STATE_EXIT_CODES.get(record.state, 3)
         print("approval left pending")
@@ -1422,6 +1575,37 @@ def _resume_pending_approval(
         )
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
     review_id = _pending_or_new(store, record, reason="resumed past approval gate")
+    # W27a: the claim serve's resume_past_gate takes (B142), held across this
+    # foreground run under this process's pid — a serve approve, or a serve
+    # restart's sweep, sees a live owner and leaves the gate alone.
+    if not store.claim_approval(review_id):
+        from .serve.actions import gate_taken
+
+        return _err(
+            str(gate_taken(store, review_id).detail),
+            state=record.state,
+            evidence=str(config.audit_dir / record.task_id),
+            next_command=f"skep review {record.task_id}  # see the resume that won",
+        )
+    try:
+        return _resume_claimed_gate(
+            config, store, record, actor, original, review_id, remembered=remembered
+        )
+    except BaseException:
+        store.unclaim_approval(review_id)  # never resolved: hand the gate back
+        raise
+
+
+def _resume_claimed_gate(
+    config: SupervisorConfig,
+    store: RunStore,
+    record: RunRecord,
+    actor: str,
+    original: CodingWorkerTask,
+    review_id: str,
+    *,
+    remembered: bool,
+) -> int:
     approval = store.get_approval(review_id)
     approval_reason = None if approval is None else approval.reason
     approval_action = None if approval is None else approval.action
@@ -1433,6 +1617,25 @@ def _resume_pending_approval(
             events=store.events_for(record.task_id),
         )
     )
+    # ES-F8 (B130; ADR 0050 parity with resume_past_gate): a batch card grants
+    # EVERY command it listed (v19-F1) — the CLI granted only the first, so a
+    # "for 3 commands" card cost three approvals and three resumes — and a
+    # plain approve holds for the serve session like the REST face (v86-F1).
+    approval_commands = store.approval_commands(review_id)
+    session_kept: list[list[str]] = []
+    if not remembered and approval_commands:
+        from .serve.actions import _asked, remember_commands_for_session
+
+        # V7: never a delegated ask — that approval is this run's alone (B39).
+        session_kept = remember_commands_for_session(
+            store,
+            [
+                list(command)
+                for command in approval_commands
+                if not _asked(command, original.permissions)
+            ],
+            repo=record.repo,
+        )
     verdict = ApprovalVerdict(
         approved=True,
         actor=actor,
@@ -1440,6 +1643,7 @@ def _resume_pending_approval(
         reason=approval_reason or "approved via review --approve (Q8 resume)",
         action=approval_action,
         decision=None if decision is None else decision.to_payload(),
+        commands=approval_commands,
     )
     print(f"resuming task {record.task_id} with approval by {actor} ...")
     outcome = run_task(
@@ -1451,7 +1655,8 @@ def _resume_pending_approval(
         auto_apply_verified_patch=original.auto_apply_verified_patch,
         project_context=original.project_context,
         dispatch_decision=resume_after_approval_decision(
-            resumed_from_task_id=record.task_id
+            resumed_from_task_id=record.task_id,
+            delegation=getattr(original.dispatch_decision, "delegation", None),
         ).with_project_context(original.project_context),
         ref=record.ref,
         resume_of=record.task_id,
@@ -1467,8 +1672,10 @@ def _resume_pending_approval(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})",
+        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})"
+        + ("; approval held for this serve session, in this repo only" if session_kept else ""),
         remembered=remembered,
+        claimed=True,
     )
     # v115-F1: the parent is superseded by its successor, as resume_past_gate
     # has said since v19-F8 — the CLI face left it "pending_approval" forever
@@ -2449,6 +2656,28 @@ def cmd_pr_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_trust(args: argparse.Namespace) -> int:
+    """W20: ``skep trust CHAT_ID [--bit private|untrusted]`` — the operator
+    trusts one chat again (the command deck's /trust; ADR 0050)."""
+    from .serve.taint import TrustRefused, trust_chat
+
+    if not _stdin_is_interactive():
+        # a pipe is a script — a chat's own shell among them; trusting a chat
+        # is the operator's act at a terminal (W20 review)
+        return _err("skep trust needs you at a terminal; it never runs from a pipe or a script")
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        result = trust_chat(store, config.audit_dir, args.chat_id, args.bit, actor="operator-cli")
+    except TrustRefused as exc:
+        return _err(str(exc))
+    finally:
+        store.close()
+    cleared = ", ".join(sorted(result["cleared"])) or "nothing — " + result.get("note", "")
+    print(f"chat {args.chat_id}: cleared {cleared}")
+    return 0
+
+
 def cmd_repo_list(args: argparse.Namespace) -> int:
     """v116-F4: every repo skep can reach — the list_repos chat read and the
     /repos deck had it; the CLI had only refresh and push-baseline."""
@@ -2619,12 +2848,73 @@ def cmd_policy_decide(args: argparse.Namespace) -> int:
             value=args.value,
             repo=args.repo,
             actor=args.actor,
+            role=args.role,
+            delegation_chain=args.delegated_by or (),
+            read_only=args.read_only,
         )
     except ValueError as exc:
         return _err(str(exc))
     finally:
         store.close()
     print(json.dumps(record, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_policy_decisions(args: argparse.Namespace) -> int:
+    """ADR 0054 A3: read decisions.jsonl back, newest first, with counts."""
+    from .serve.actions import policy_decisions
+
+    config = build_config(args.home, None)
+    try:
+        view = policy_decisions(
+            config.audit_dir, actor=args.actor, since=args.since, limit=args.limit, team=args.team
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    print(json.dumps(view, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_policy_grants(args: argparse.Namespace) -> int:
+    """W29: every learned grant — id, what it matches, lifetime, binding —
+    through ``list_policy_rules``, the read behind ``GET /api/policy/rules``."""
+    from .serve.actions import list_policy_rules
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        rules = list_policy_rules(store)["rules"]
+    finally:
+        store.close()
+    if not rules:
+        print("no learned grants")
+        return 0
+    for rule in rules:
+        print(rule["rule_id"])
+        print(f"  matches:  {rule['scope']}.{rule['action']} {rule['pattern']} ({rule['matcher']})")
+        print(f"  lifetime: {rule['lifetime']}  bound to: {rule['bound']}")
+    print("  next: skep policy revoke <rule_id>")
+    return 0
+
+
+def cmd_policy_revoke(args: argparse.Namespace) -> int:
+    """W29: remove one learned grant through ``revoke_policy_rule`` — the verb
+    ``DELETE /api/policy/rules/<id>`` and the chat card call (ADR 0050)."""
+    from fastapi import HTTPException
+
+    from .serve.actions import revoke_policy_rule
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        receipt = revoke_policy_rule(store, rule_id=args.rule_id)
+    except HTTPException as exc:
+        return _err(str(exc.detail), next_command="skep policy grants")
+    finally:
+        store.close()
+    revoked = receipt["revoked"]
+    print(f"revoked: {revoked['rule_id']}")
+    print(f"  {revoked['scope']}.{revoked['action']} {revoked['pattern']} asks again")
     return 0
 
 
@@ -2664,6 +2954,141 @@ def cmd_policy_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy_explain(args: argparse.Namespace) -> int:
+    """first-run O1 (ADR 0056 D3): a template, the baseline or a role as the
+    allow / ask / deny table — the words `why` uses, paste-ready. Floor rows
+    are dimmed on a TTY only, so a redirect or a paste stays plain text."""
+    from .policy_templates import deprecation_line, explain_view
+
+    try:
+        view = explain_view(args.subject, build_config(args.home, None).home)
+    except ValueError as exc:
+        return _err(str(exc))
+    if view["deprecated_alias"]:
+        print(deprecation_line(view["deprecated_alias"]), file=sys.stderr)
+    _print_table(view["table"])
+    return 0
+
+
+def _print_table(table: str) -> None:
+    from .policy_templates import is_floor_line
+
+    dim = sys.stdout.isatty()
+    for line in table.splitlines():
+        print(f"\x1b[2m{line}\x1b[0m" if dim and is_floor_line(line) else line)
+
+
+def cmd_policy_approve(args: argparse.Namespace) -> int:
+    """first-run O2 (ADR 0056 D1): show the layer about to be locked (and,
+    with --reapprove, what changed against the locked one), take a typed
+    `yes`, then write baseline.json + lock + the approvals-ledger row."""
+    import getpass
+
+    from .serve.actions import approve_policy_baseline, baseline_preview
+
+    home = build_config(args.home, None).home
+    try:
+        _layer, view = baseline_preview(
+            home, template=args.template, file=args.file, reapprove=args.reapprove
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    if args.reapprove:
+        print("changes against the locked baseline:")
+        for line in view["diff"] or ["(none)"]:
+            print(f"  {line}")
+        print()
+    if args.diff:
+        # P3-5 (V11): the replay before the re-lock — the same check approve runs.
+        from .policy_write import PolicyWriteRejected, vet_write
+        from .serve.settings import ConfigHolder
+
+        config = build_config(args.home, None)
+        store = RunStore(config.db_path)
+        try:
+            report = vet_write(store, holder=ConfigHolder(config, store), baseline=_layer)
+        except PolicyWriteRejected as exc:
+            return _err(str(exc))
+        finally:
+            store.close()
+        print("what this layer changes:")
+        for line in [report["replay_line"], *report["warnings"]]:
+            print(f"  {line}")
+        print()
+    _print_table(view["table"])
+    print()
+    if not args.yes:
+        try:
+            answer = input("type yes to lock this as the policy baseline: ")
+        except EOFError:
+            answer = ""
+        if answer.strip() != "yes":
+            return _err("not approved — nothing was written")
+    try:
+        result = approve_policy_baseline(
+            home,
+            template=args.template,
+            file=args.file,
+            reapprove=args.reapprove,
+            approved_by=getpass.getuser(),
+            expect_sha256=view["sha256"],
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    row = result["approved"]
+    print(f"baseline locked: {row['template']} sha256 {row['sha256'][:12]} ({row['approved_at']})")
+    return 0
+
+
+def cmd_policy_migrate(args: argparse.Namespace) -> int:
+    """ADR 0059 P3-5 (Migration): ``--dry-run`` replays the home's decision log
+    under the stack decide() uses today and prints every flip, the §5.4
+    combinations the home already holds and the B31 upgrade. Writes nothing:
+    v3 needs no in-place migration, so there is no mode that does."""
+    from .policy_write import VERDICT_WORDS, migration_report
+    from .serve.settings import ConfigHolder
+
+    if not args.dry_run:
+        return _err("only --dry-run exists: v3 decides from the stored policy as it is")
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        print("no store at this home — nothing was ever decided here")
+        return 0
+    store = RunStore(config.db_path)
+    try:
+        report = migration_report(ConfigHolder(config, store), store)
+    finally:
+        store.close()
+    print("policy migrate --dry-run — nothing is written")
+    print(report["replay_line"])
+    for label, n in report["replay"]["flips"].items():
+        old, _, new = label.partition("->")
+        print(f"  now {VERDICT_WORDS[new]} {n} past {VERDICT_WORDS[old]}:")
+        for example in report["replay"]["examples"].get(label, []):
+            print(f"    {example}")
+    for line in report["held"]:
+        print(f"already held (decide() still binds it; no write can add one): {line}")
+    if report["b31"]:
+        print(report["b31"])
+    return 0
+
+
+def cmd_policy_baseline(args: argparse.Namespace) -> int:
+    """first-run O2: `status` (the one line plus any diff; exit 1 when
+    tampered) or `diff` (what changed against the locked layer)."""
+    from .policy_baseline import baseline_status, status_line
+
+    home = build_config(args.home, None).home
+    view = baseline_status(home)
+    if args.view == "diff":
+        print("\n".join(view["diff"]) or "no change against the locked baseline")
+        return 0
+    print(status_line(home))
+    for line in view["diff"]:
+        print(f"  {line}")
+    return 1 if view["state"] == "tampered" else 0
+
+
 def cmd_policy_why(args: argparse.Namespace) -> int:
     """P0-3 (ADR 0052): would <scope>.<action> <value> be allowed in <repo>?"""
     from fastapi import HTTPException
@@ -2675,7 +3100,14 @@ def cmd_policy_why(args: argparse.Namespace) -> int:
     store = RunStore(config.db_path)
     try:
         view = policy_why(
-            ConfigHolder(config, store), store, args.repo, args.scope, args.action, args.value
+            ConfigHolder(config, store),
+            store,
+            args.repo,
+            args.scope,
+            args.action,
+            args.value,
+            role=args.role,
+            delegation_chain=args.delegated_by or (),
         )
     except ValueError as exc:
         return _err(str(exc))
@@ -2724,6 +3156,31 @@ def cmd_project_set_phase(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_agents(args: argparse.Namespace) -> int:
+    """first-run L1: coding agents running on this machine and which skep
+    governs — the same presence_view the Queen's list_agents reads."""
+    from .agent_presence import presence_view
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        view = presence_view(store, config.audit_dir)
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(view, indent=2))
+        return 0
+    print(view["summary"])
+    for row in view["agents"]:
+        who = f"governed run {row['task_id'] or '?'}" if row["governed"] else "ungoverned"
+        if row["role"]:
+            who += f" role {row['role']}"
+        gap = "  <- blocked and ungoverned" if row["gap"] else ""
+        print(f"{row['pid']:>7}  {row['agent']:<10} {row['state']:<8} {who}{gap}")
+    print(view["note"])
+    return 0
+
+
 def register_supervisor_commands(
     subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
@@ -2745,7 +3202,8 @@ def register_supervisor_commands(
     run.add_argument(
         "--minimal",
         action="store_true",
-        help="start with deny-all permissions and learn through approvals",
+        help="start with deny-all grants (a worker that calls the LLM still reaches its "
+        "configured provider) and learn through approvals",
     )
     run.add_argument(
         "--param",
@@ -2785,8 +3243,13 @@ def register_supervisor_commands(
         action="append",
         default=None,
         metavar="DOMAIN",
-        help="domain the worker may reach, e.g. pypi.org (repeatable, D1); "
-        "omit to deny all outbound. Enforced by a loopback filtering proxy.",
+        help="domain the worker may reach, e.g. pypi.org (repeatable, D1). Omitted, "
+        "the policy's default_network applies: the builder and operator baselines "
+        "allow their package-registry hosts (and start the filtering proxy); the "
+        "assistant baseline and a bare home allow none. A worker that calls the LLM "
+        "reaches its configured provider on its own (provider_hosts), whatever "
+        "this list says; --minimal denies all else. A concrete list is "
+        "enforced by a loopback filtering proxy.",
     )
     run.add_argument(
         "--execution-mode",
@@ -2811,8 +3274,46 @@ def register_supervisor_commands(
         "act-observe loop (ADR 0040); omit to use the project policy's "
         "worker_protocol knob",
     )
+    run.add_argument(
+        "--role",
+        default=None,
+        help="the worker's role (skep role list); its layer narrows the worker's grants",
+    )
+    run.add_argument(
+        "--delegated-by",
+        action="append",
+        default=None,
+        metavar="ACTOR@ROLE",
+        help="dispatch as this delegator (repeat outermost first); the worker holds "
+        "no more than it does (ADR 0055)",
+    )
     run.add_argument("--quiet", action="store_true", help="suppress the live phase tail")
     run.set_defaults(func=cmd_run)
+
+    team = subcommands.add_parser(
+        "team",
+        help="a team run: a manager in a role dispatches 1-3 tasks, one ledger thread (ADR 0055)",
+    )
+    team.add_argument("--manager", required=True, metavar="ROLE", help="the manager's role")
+    team.add_argument(
+        "--task",
+        nargs=2,
+        action="append",
+        required=True,
+        metavar=("REPO", "INSTRUCTIONS"),
+        help="one member run (repeat, up to 3)",
+    )
+    team.add_argument("--role", default=None, help="every member's role (default: the manager's)")
+    team.add_argument(
+        "--delegated-by",
+        action="append",
+        default=None,
+        metavar="ACTOR@ROLE",
+        help="the dispatcher above the manager, e.g. queen@operator",
+    )
+    team.add_argument("--execution-mode", choices=("workspace", "sandbox"), default=None)
+    team.add_argument("--worker-cmd", default=None, help="worker argv prefix, as for `skep run`")
+    team.set_defaults(func=cmd_team)
 
     review = subcommands.add_parser(
         "review",
@@ -2977,6 +3478,12 @@ def register_supervisor_commands(
         help="activate D3: auto-apply safe manifest-only fixes from scheduled runs (U1)",
     )
     tick.set_defaults(func=cmd_tick)
+
+    agents = subcommands.add_parser(
+        "agents", help="coding agents running here: working/idle/blocked, governed or not (L1)"
+    )
+    agents.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    agents.set_defaults(func=cmd_agents)
 
     # v3.5: workflow templates — user-authored, parameterized task recipes.
     template = subcommands.add_parser("template", help="manage workflow templates (v3.5)")
@@ -3220,7 +3727,9 @@ def register_supervisor_commands(
     # v104-F4: the CLI had no `repo` group at all — registration and refresh
     # lived only in REST and chat. Only `refresh` is added here: the verb an
     # operator actually needs to type before reasoning about staleness.
-    policy_group = subcommands.add_parser("policy", help="the policy engine, read-only (P0)")
+    policy_group = subcommands.add_parser(
+        "policy", help="the policy engine: read it, decide, lock the baseline"
+    )
     policy_group.set_defaults(func=_group_usage(policy_group))
     policy_sub = policy_group.add_subparsers(dest="policy_command")
     policy_registry = policy_sub.add_parser("registry", help="every policy setting, as metadata")
@@ -3237,7 +3746,54 @@ def register_supervisor_commands(
     policy_why.add_argument("scope")
     policy_why.add_argument("action")
     policy_why.add_argument("value")
+    policy_why.add_argument("--role", help="answer under this role's layer (skep role list)")
+    policy_why.add_argument(
+        "--delegated-by",
+        action="append",
+        help="held to what this delegator holds (actor@role; repeat outermost first)",
+    )
     policy_why.set_defaults(func=cmd_policy_why)
+    policy_explain = policy_sub.add_parser(
+        "explain",
+        help="a template, the baseline or a role as an allow / ask / deny table (first-run O1)",
+    )
+    policy_explain.add_argument(
+        "subject",
+        help="a template name (builder, operator, assistant), `baseline`, or `role:<name>`",
+    )
+    policy_explain.set_defaults(func=cmd_policy_explain)
+    policy_approve = policy_sub.add_parser(
+        "approve",
+        help="lock a template or layer file as the policy baseline (first-run O2)",
+    )
+    approve_source = policy_approve.add_mutually_exclusive_group()
+    approve_source.add_argument("--template", help="builder, operator or assistant")
+    approve_source.add_argument("--file", help="a layer file in the template format")
+    policy_approve.add_argument(
+        "--reapprove",
+        action="store_true",
+        help="re-lock after a change: shows the diff against the locked baseline first",
+    )
+    policy_approve.add_argument("--yes", action="store_true", help="skip the typed `yes`")
+    policy_approve.add_argument(
+        "--diff",
+        action="store_true",
+        help="before locking, replay recent decisions under the new layer and show what flips",
+    )
+    policy_approve.set_defaults(func=cmd_policy_approve)
+    policy_migrate = policy_sub.add_parser(
+        "migrate",
+        help="--dry-run: replay the decision log under today's policy and list every flip",
+    )
+    policy_migrate.add_argument(
+        "--dry-run", action="store_true", help="print what changed; write nothing (required)"
+    )
+    policy_migrate.set_defaults(func=cmd_policy_migrate)
+    policy_baseline = policy_sub.add_parser(
+        "baseline", help="the approved baseline: status (exit 1 if tampered) or diff (O2)"
+    )
+    policy_baseline.add_argument("view", nargs="?", choices=("status", "diff"), default="status")
+    policy_baseline.set_defaults(func=cmd_policy_baseline)
     policy_decide = policy_sub.add_parser(
         "decide", help="decide <scope>.<action> <value> for an outside agent and record it (P3)"
     )
@@ -3246,6 +3802,17 @@ def register_supervisor_commands(
     policy_decide.add_argument("value")
     policy_decide.add_argument("--repo", help="the checkout the action happens in (slug or path)")
     policy_decide.add_argument("--actor", default="cli", help="who asked (recorded)")
+    policy_decide.add_argument("--role", help="decide under this role's layer (recorded)")
+    policy_decide.add_argument(
+        "--delegated-by",
+        action="append",
+        help="held to what this delegator holds (actor@role; repeat outermost first)",
+    )
+    policy_decide.add_argument(
+        "--read-only",
+        action="store_true",
+        help="the MCP tool / browse / email action reports itself read-only (as the Queen sees it)",
+    )
     policy_decide.set_defaults(func=cmd_policy_decide)
     policy_hook = policy_sub.add_parser(
         "hook",
@@ -3253,6 +3820,37 @@ def register_supervisor_commands(
     )
     policy_hook.add_argument("--actor", default="claude-code", help="recorded on every decision")
     policy_hook.set_defaults(func=cmd_policy_hook)
+    policy_grants = policy_sub.add_parser(
+        "grants", help="every learned grant: id, what it matches, lifetime, bound to (W29)"
+    )
+    policy_grants.set_defaults(func=cmd_policy_grants)
+    policy_revoke = policy_sub.add_parser(
+        "revoke", help="remove one learned grant by id; what it allowed asks again (W29)"
+    )
+    policy_revoke.add_argument("rule_id", help="as `skep policy grants` lists it")
+    policy_revoke.set_defaults(func=cmd_policy_revoke)
+    policy_decisions = policy_sub.add_parser(
+        "decisions", help="the decisions ledger, newest first, with verdict counts (ADR 0054)"
+    )
+    policy_decisions.add_argument("--actor", help="glob on the recorded actor, e.g. 'acp:*'")
+    policy_decisions.add_argument("--since", help="ISO time or bare date floor on `at`")
+    policy_decisions.add_argument("--limit", type=int, default=200, help="max rows (default 200)")
+    policy_decisions.add_argument("--team", help="one team run's thread (first-run R3)")
+    policy_decisions.set_defaults(func=cmd_policy_decisions)
+
+    trust = subcommands.add_parser(
+        "trust",
+        help="trust a chat again: clear its taint bits (W20; the deck's /trust)",
+    )
+    trust.add_argument("chat_id")
+    trust.add_argument(
+        "--bit",
+        action="append",
+        default=[],
+        choices=["private", "untrusted"],
+        help="clear only this bit (repeatable; default: both)",
+    )
+    trust.set_defaults(func=cmd_trust)
 
     repo_group = subcommands.add_parser("repo", help="registered repositories (v104)")
     repo_group.set_defaults(func=_group_usage(repo_group))
@@ -3302,6 +3900,16 @@ def register_supervisor_commands(
     from .channel_cmds import register_channel_commands
 
     register_channel_commands(subcommands)
+
+    # first-run R1 (ADR 0055): roles as records.
+    from .role_cmds import register_role_commands
+
+    register_role_commands(subcommands)
+
+    # ADR 0054 (B1-3): the ACP governor an outside client spawns.
+    from .acp_cmds import register_acp_commands
+
+    register_acp_commands(subcommands)
 
     # v15: nodes + governed local ops.
     from .ops_cmds import register_ops_commands

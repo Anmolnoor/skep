@@ -1,11 +1,11 @@
 [project]
 name = "skep"
-version = "1.1.0"
+version = "1.3.0"
 description = "Govern AI coding agents with sandboxing, verification, approvals, and audit trails."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Anmol Noor" }]
 keywords = [
     "ai-agents",

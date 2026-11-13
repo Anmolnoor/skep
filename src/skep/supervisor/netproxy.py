@@ -20,11 +20,15 @@ Filtering is by the CONNECT target host (HTTPS) or the absolute-form request hos
 
 from __future__ import annotations
 
+import contextlib
+import ipaddress
 import socket
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from socketserver import StreamRequestHandler, ThreadingTCPServer, ThreadingUnixStreamServer
 from types import TracebackType
+from typing import Any
 from urllib.parse import urlsplit
 
 _CONNECT_TIMEOUT = 10.0
@@ -50,16 +54,197 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
-def domain_allowed(host: str, allowlist: tuple[str, ...]) -> bool:
+# ES-F6 (B05/B54): loopback is not egress (v115-F9), but skep serve's own port
+# is the control plane — never reachable from a run. `skep serve` records the
+# port it binds; the default is always refused too.
+SERVE_PORT_FILE = "serve-port"
+DEFAULT_SERVE_PORT = 8765
+
+
+def record_serve_port(home: Path, port: int) -> None:
+    """Called by ``skep serve`` at startup (``home`` = the supervisor home)."""
+    (home / SERVE_PORT_FILE).write_text(f"{port}\n", encoding="utf-8")
+
+
+def control_plane_ports(home: Path) -> tuple[int, ...]:
+    """The loopback ports no run may reach: the default and the recorded one."""
+    ports = {DEFAULT_SERVE_PORT}
+    with contextlib.suppress(OSError, ValueError):
+        ports.add(int((home / SERVE_PORT_FILE).read_text(encoding="utf-8").strip()))
+    return tuple(sorted(ports))
+
+
+def _plain_loopback(host: str) -> bool:
+    """ES-F6: loopback through the proxy is ``localhost`` or a loopback IP
+    literal — never ``*.localhost``, ``LOCALHOST.`` or a name that resolves
+    there (those are how a worker dressed serve up as somewhere else)."""
+    bare = host.strip("[]")
+    if bare.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(bare).is_loopback
+    except ValueError:
+        return False
+
+
+def split_authority(value: str, *, default_port: int | None = None) -> tuple[str, int] | None:
+    """``host:port`` / ``[v6]:port`` → (host, port); None when malformed (ES-F6)."""
+    if value.startswith("["):
+        host, sep, rest = value[1:].partition("]")
+        if not sep or (rest and not rest.startswith(":")):
+            return None
+        port_s = rest[1:] if rest else ""
+    else:
+        host, sep, port_s = value.rpartition(":")
+        if not sep:
+            host, port_s = value, ""
+        elif ":" in host:
+            return None
+    if port_s == "" and default_port is not None and not value.endswith(":"):
+        port_s = str(default_port)
+    if not host or any(c in host for c in "/@ \\?#") or not port_s.isdigit():
+        return None
+    port = int(port_s)
+    return (host, port) if 0 < port < 65536 else None
+
+
+Resolver = Callable[..., list[tuple[Any, ...]]]
+
+
+def admit_target(
+    host: str,
+    port: int,
+    allowlist: tuple[str, ...],
+    *,
+    denied_ports: tuple[int, ...],
+    resolve: Resolver = socket.getaddrinfo,
+    asks: tuple[str, ...] = (),
+) -> tuple[int, str, list[tuple[str, int]]]:
+    """ES-F6 (B54): (200, "", addresses to dial) or (status, reason, []).
+
+    An allowlisted NAME is resolved once here; any non-public answer
+    (loopback, private, link-local, ...) is refused and the caller dials the
+    vetted IPs, so DNS cannot rebind between the check and the connect. An
+    IP literal the operator allowlisted is taken as stated. W30: a refusal
+    names host and port, where else the host is allowed, and whether it is
+    one of the run's deferred asks (``asks``: ``network_ask``)."""
+    if _plain_loopback(host):
+        if port in denied_ports:
+            return 403, "Forbidden: the skep control plane is not reachable from a run", []
+        return 200, "", [(host.strip("[]"), port)]
+    if not domain_allowed(host, allowlist, port=port):
+        return 403, _refusal(host, port, allowlist, asks), []
+    try:
+        return 200, "", [(str(ipaddress.ip_address(host.strip("[]"))), port)]
+    except ValueError:
+        pass
+    addresses, why = resolve_public(host, port, resolve)
+    if not addresses:
+        status, label = (502, "Bad Gateway") if why == UNRESOLVED else (403, "Forbidden")
+        return status, f"{label}: {host!r} {why}", []
+    return 200, "", [(a, port) for a in addresses]
+
+
+UNRESOLVED = "does not resolve"
+
+
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def is_public_address(address: str) -> bool:
+    """A global unicast address — not loopback, private, link-local, CGNAT,
+    unique-local, site-local, multicast, unspecified (``0.0.0.0``), nor an
+    IPv6 form that carries one of those in its low 32 bits (IPv4-mapped,
+    IPv4-compatible ``::7f00:1``, NAT64 ``64:ff9b::7f00:1``)."""
+    ip = ipaddress.ip_address(address.split("%")[0])
+    if not ip.is_global or ip.is_multicast or getattr(ip, "is_site_local", False):
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and (
+        ip.ipv4_mapped or ip in _NAT64 or int(ip) >> 32 == 0
+    ):
+        return is_public_address(str(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)))
+    return True
+
+
+def resolve_public(
+    host: str, port: int, resolve: Resolver = socket.getaddrinfo
+) -> tuple[list[str], str]:
+    """ES-F6 (B54), W6: ``host`` resolved ONCE — (its addresses, "") when every
+    answer is public, else ([], why). Dial what this returns, never the name
+    again, so DNS cannot rebind between the check and the connect. An IP
+    literal resolves to itself (decimal, octal and hex spellings included)."""
+    try:
+        infos = resolve(host.strip("[]"), port, type=socket.SOCK_STREAM)
+    except OSError:
+        return [], UNRESOLVED
+    addresses = list(dict.fromkeys(str(info[4][0]) for info in infos))
+    local = [a for a in addresses if not is_public_address(a)]
+    if local or not addresses:
+        return [], f"resolves to a non-public address {local}"
+    return addresses, ""
+
+
+def _refusal(host: str, port: int, allowlist: tuple[str, ...], asks: tuple[str, ...]) -> str:
+    """The 403's reason: ASCII only, it rides the HTTP status line."""
+    target = f"{host}:{port}"
+    if domain_allowed(host, asks):
+        return (
+            f"Forbidden: {target} needs approval for this run (a deferred ask) and a "
+            "subprocess cannot ask; approve it on the dispatch card, or remember the "
+            "host for the project"
+        )
+    ports = sorted(
+        pinned[1]
+        for pinned in map(split_authority, allowlist)
+        if pinned is not None and pinned[0].rstrip(".") == host.strip("[]").lower().rstrip(".")
+    )
+    elsewhere = f" ({host} is allowed on port {', '.join(map(str, ports))} only)" if ports else ""
+    return f"Forbidden: {target} is not in the task network allowlist{elsewhere}"
+
+
+def _dial(addresses: list[tuple[str, int]]) -> socket.socket:
+    error: OSError = OSError("no address to dial")
+    for address in addresses:
+        try:
+            return socket.create_connection(address, timeout=_CONNECT_TIMEOUT)
+        except OSError as exc:
+            error = exc
+    raise error
+
+
+def _host_header_mismatch(headers: list[bytes], host: str, port: int) -> str | None:
+    """ES-F6 (B54): a Host header naming another host is domain fronting."""
+    for header in headers:
+        name, _, value = header.partition(b":")
+        if name.strip().lower() != b"host":
+            continue
+        claimed = split_authority(value.decode("latin-1").strip(), default_port=port)
+        norm = host.strip("[]").lower().rstrip(".")
+        if claimed is None or (claimed[0].strip("[]").lower().rstrip("."), claimed[1]) != (
+            norm,
+            port,
+        ):
+            return f"Bad Request: Host header {value.strip()!r} does not match {host}:{port}"
+    return None
+
+
+def domain_allowed(host: str, allowlist: tuple[str, ...], *, port: int | None = None) -> bool:
     """True if ``host`` is permitted by ``allowlist``.
 
     ``"*"`` allows everything. A plain entry (``"pypi.org"``) matches that host
     exactly — never its subdomains. A ``"*.example.com"`` entry matches the apex
     and any subdomain. Matching is case-insensitive and ignores a trailing dot.
+    A ``host:port`` entry (ADR 0059 D3: a provider endpoint) matches that host
+    on that ``port`` only — never a port-less question.
     """
     host = host.strip().lower().rstrip(".")
     for raw in allowlist:
         entry = raw.strip().lower()
+        pinned = split_authority(entry)
+        if pinned is not None:
+            if port == pinned[1] and host.strip("[]") == pinned[0].rstrip("."):
+                return True
+            continue
         if entry == "*":
             return True
         if entry.startswith("*."):
@@ -75,9 +260,16 @@ class _ProxyServer(ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, allowlist: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        allowlist: tuple[str, ...],
+        denied_ports: tuple[int, ...] = (),
+        asks: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(("127.0.0.1", 0), _ProxyHandler)
         self.allowlist = allowlist
+        self.denied_ports = denied_ports
+        self.asks = asks  # W30: named in the 403, never admitted
         self._counts_lock = threading.Lock()
         self.allowed = 0
         self.denied = 0
@@ -108,12 +300,21 @@ class _ProxyUnixServer(ThreadingUnixStreamServer):
     def allowlist(self) -> tuple[str, ...]:
         return self._tcp.allowlist
 
+    @property
+    def denied_ports(self) -> tuple[int, ...]:
+        return self._tcp.denied_ports
+
+    @property
+    def asks(self) -> tuple[str, ...]:
+        return self._tcp.asks
+
     def note(self, *, allowed: bool) -> None:
         self._tcp.note(allowed=allowed)
 
 
 class _ProxyHandler(StreamRequestHandler):
     server: _ProxyServer | _ProxyUnixServer
+    _addresses: list[tuple[str, int]]  # set by _admitted, dialled by the caller
 
     def handle(self) -> None:
         try:
@@ -129,7 +330,7 @@ class _ProxyHandler(StreamRequestHandler):
         method, target = parts[0].upper(), parts[1]
         headers = self._read_headers()
         if method == "CONNECT":
-            self._do_connect(target)
+            self._do_connect(target, headers)
         else:
             self._do_http(parts[0], target, headers)
 
@@ -142,20 +343,17 @@ class _ProxyHandler(StreamRequestHandler):
             lines.append(line)
         return lines
 
-    def _do_connect(self, target: str) -> None:
-        host, _, port_s = target.partition(":")
-        # v115-F9: loopback is not egress — a project's own test servers on
-        # 127.0.0.1 stay reachable through the proxied client (the first
-        # skep-maintains-skep run lost 210 tests to this 403). The wall governs
-        # what leaves the machine; the serve API still needs its token (G2).
-        if not (is_loopback_host(host) or domain_allowed(host, self.server.allowlist)):
-            self.server.note(allowed=False)
-            self._reply(403, f"Forbidden: {host!r} is not in the task network allowlist")
+    def _do_connect(self, target: str, headers: list[bytes]) -> None:
+        authority = split_authority(target)
+        if authority is None:
+            # ES-F6 (B58): a malformed port used to crash the handler thread.
+            self._reply(400, f"Bad Request: CONNECT target {target!r} is not host:port")
+            return
+        host, port = authority
+        if not self._admitted(host, port, headers):
             return
         try:
-            upstream = socket.create_connection(
-                (host, int(port_s or 443)), timeout=_CONNECT_TIMEOUT
-            )
+            upstream = _dial(self._addresses)
         except OSError:
             self.server.note(allowed=False)
             self._reply(502, "Bad Gateway")
@@ -165,16 +363,41 @@ class _ProxyHandler(StreamRequestHandler):
         self.wfile.flush()
         self._tunnel(self.connection, upstream)
 
+    def _admitted(self, host: str, port: int, headers: list[bytes]) -> bool:
+        """v115-F9: loopback is not egress — a project's own test servers on
+        127.0.0.1 stay reachable through the proxied client (the first
+        skep-maintains-skep run lost 210 tests to a 403). ES-F6: but never
+        serve's port, never a loopback alias, never a name that resolves to a
+        local address, and never under a Host header naming someone else."""
+        status, reason, self._addresses = admit_target(
+            host,
+            port,
+            self.server.allowlist,
+            denied_ports=self.server.denied_ports,
+            asks=self.server.asks,
+        )
+        if status == 200:
+            mismatch = _host_header_mismatch(headers, host, port)
+            if mismatch is not None:
+                status, reason = 400, mismatch
+        if status != 200:
+            self.server.note(allowed=False)
+            self._reply(status, reason)
+            return False
+        return True
+
     def _do_http(self, method: str, target: str, headers: list[bytes]) -> None:
         split = urlsplit(target)
         host = split.hostname or ""
-        # v115-F9: loopback is not egress — a project's own test servers on
-        # 127.0.0.1 stay reachable through the proxied client (the first
-        # skep-maintains-skep run lost 210 tests to this 403). The wall governs
-        # what leaves the machine; the serve API still needs its token (G2).
-        if not (is_loopback_host(host) or domain_allowed(host, self.server.allowlist)):
-            self.server.note(allowed=False)
-            self._reply(403, f"Forbidden: {host!r} is not in the task network allowlist")
+        try:
+            port = split.port or 80
+        except ValueError:
+            self._reply(400, f"Bad Request: {target!r} has an invalid port")
+            return
+        if not host:
+            self._reply(400, "Bad Request: an absolute-form URL is required")
+            return
+        if not self._admitted(host, port, headers):
             return
         path = (split.path or "/") + (f"?{split.query}" if split.query else "")
         forwarded: list[bytes] = []
@@ -193,7 +416,7 @@ class _ProxyHandler(StreamRequestHandler):
                     content_length = 0
             forwarded.append(header)
         try:
-            upstream = socket.create_connection((host, split.port or 80), timeout=_CONNECT_TIMEOUT)
+            upstream = _dial(self._addresses)
         except OSError:
             self.server.note(allowed=False)
             self._reply(502, "Bad Gateway")
@@ -282,8 +505,10 @@ class FilteringProxy:
         allowlist: tuple[str, ...] | list[str],
         *,
         unix_socket_path: str | None = None,
+        denied_loopback_ports: tuple[int, ...] = (),
+        asks: tuple[str, ...] | list[str] = (),
     ) -> None:
-        self._server = _ProxyServer(tuple(allowlist))
+        self._server = _ProxyServer(tuple(allowlist), tuple(denied_loopback_ports), tuple(asks))
         self._unix_path = unix_socket_path
         self._unix_server = (
             _ProxyUnixServer(unix_socket_path, self._server)

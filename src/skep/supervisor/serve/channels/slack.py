@@ -9,7 +9,8 @@ as a "review in web UI" block. Fake event payloads + fake send in tests.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from . import (
     ChannelConfig,
@@ -21,6 +22,7 @@ from . import (
     channel_confirmation_decision,
     identity_allowlisted,
     render_confirm_card,
+    user_allowlisted,
 )
 
 CHANNEL = "slack"
@@ -40,6 +42,13 @@ def normalize_inbound(event: dict[str, object], config: ChannelConfig) -> Normal
             "channel.reject.identity_not_allowlisted",
             audit={"channel": CHANNEL, "identity": channel_id},
         )
+    user_id = str(payload.get("user") or "")
+    if not user_allowlisted(user_id, config):
+        return NormalizedInbound(
+            None,
+            "channel.reject.user_not_allowlisted",
+            audit={"channel": CHANNEL, "identity": channel_id, "user": user_id},
+        )
     return NormalizedInbound(
         ChannelMessage(
             channel=CHANNEL, identity=identity, text=text, session_key=f"{CHANNEL}:{channel_id}"
@@ -48,15 +57,20 @@ def normalize_inbound(event: dict[str, object], config: ChannelConfig) -> Normal
 
 
 def confirmation_blocks(
-    action_class: str, commands: Sequence[Sequence[str]], config: ChannelConfig
+    action_class: str,
+    commands: Sequence[Sequence[str]],
+    config: ChannelConfig,
+    card: Mapping[str, Any] | None = None,
 ) -> list[dict[str, object]]:
-    card = render_confirm_card(action_class, commands)
+    view = render_confirm_card(action_class, commands, card)
     blocks: list[dict[str, object]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{action_class}*"}}
     ]
-    for line in card.commands:
+    for line in view.commands:
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"`{line}`"}})
-    if card.web_ui_only or not config.channel_can_confirm:
+    for line in view.notes:  # P4-2: HIGH and why, the taint, folded items
+        blocks.append({"type": "section", "text": {"type": "plain_text", "text": line}})
+    if view.web_ui_only or not config.channel_can_confirm:
         blocks.append(
             {
                 "type": "section",
@@ -92,13 +106,16 @@ def handle_button(
     action_class: str,
     identity: ChannelIdentity,
     config: ChannelConfig,
+    user_id: str,
 ) -> ChannelConfirmationDecision:
+    """The channel AND the person who pressed must be listed (B114)."""
     if action_id not in {"confirm", "deny"}:
         return ChannelConfirmationDecision(False, "channel.confirm.denied.unknown_action")
     return channel_confirmation_decision(
         action_class=action_class,
         channel_can_confirm=config.channel_can_confirm,
-        identity_allowlisted=identity_allowlisted(identity, config.allowed_identities),
+        identity_allowlisted=identity_allowlisted(identity, config.allowed_identities)
+        and user_allowlisted(user_id, config),
     )
 
 

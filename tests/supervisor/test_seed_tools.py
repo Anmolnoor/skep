@@ -127,7 +127,14 @@ def test_promote_seed_tool_trials_installs_and_registers(
         sync_seed_tools(store)
 
         def real_trial(
-            store_: Any, holder_: Any, runner_: Any, *, source: str, repo: str, decision: Any
+            store_: Any,
+            holder_: Any,
+            runner_: Any,
+            *,
+            source: str,
+            repo: str,
+            decision: Any,
+            delegation_chain: Any = (),
         ) -> dict[str, Any]:
             assert repo.endswith("forge")  # the trial runs in the forge repo
             return _run_harness(source, tmp_path)

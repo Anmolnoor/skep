@@ -111,7 +111,9 @@ def notify_run_terminal(store: RunStore, home: Path, task_id: str, *, web_ui_url
     chat_id = store.chat_for_task(task_id)
     if chat_id is None or store.get_chat(chat_id) is None:
         return
-    store.add_chat_message(chat_id, role="assistant", content=text)
+    # W21c (P4-1, D5): the notice quotes the worker (its summary, its failure
+    # reason) — an outside row like the continuation's, never the Queen's words.
+    store.add_chat_message(chat_id, role="user", content=text, provenance=f"worker:{task_id}")
     # v87-F2: a pending gate is ALSO an actionable card in the chat — the
     # operator approves where the conversation is, not in a separate view.
     _mirror_gate_card(store, task_id, chat_id)

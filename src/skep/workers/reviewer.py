@@ -6,9 +6,10 @@ arrives as a patch to approve rather than findings to read; ``document`` drafts
 prose with no access to the diff. "Review this branch before I land it" had no
 worker and the operator did it by hand.
 
-This caste diffs the worktree against the **startup baseline** — the same ref
-``git.diff`` uses (v20-F2, ``capabilities.py:1291``), never a ref the worker
-chose — asks the provider for findings, and writes ``.artifacts/review.md``.
+This caste diffs the worktree against where it forked from the repo's default
+branch (ES-F7; on the default itself that is the startup baseline ``git.diff``
+uses, v20-F2) — never a ref the worker chose — asks the provider for findings,
+and writes ``.artifacts/review.md``.
 It reports no changed files and produces no patch artifact, so there is no path
 from a review to a commit (I1 trivially held): the operator reads it and decides.
 
@@ -100,24 +101,34 @@ _SYSTEM_PROMPT = (
 )
 
 
-def resolve_baseline(workspace: Path) -> str | None:
-    """The worktree's HEAD — the same startup baseline ``git.diff`` uses.
-
-    Best-effort, exactly like ``capabilities.py:1291``: a workspace with no git
-    HEAD falls back to the working-tree diff.
-    """
+def _git_out(workspace: Path, *args: str) -> str | None:
     try:
         proc = subprocess.run(
-            ["git", "-C", str(workspace), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
+            ["git", "-C", str(workspace), *args], capture_output=True, text=True, check=False
         )
     except OSError:
         return None
-    if proc.returncode != 0:
-        return None
-    return proc.stdout.strip() or None
+    return (proc.stdout.strip() or None) if proc.returncode == 0 else None
+
+
+def resolve_baseline(workspace: Path) -> str | None:
+    """The commit the review diffs against: where this checkout forked from
+    the repo's default branch.
+
+    ES-F7 (B134): every dispatch makes a fresh worktree AT its ref, so the
+    worktree's HEAD (the v20-F2 startup baseline) always gave an empty diff —
+    "review this branch before I land it" was a no-op reporting success. The
+    baseline is now ``merge-base <default> HEAD``: still computed from repo
+    state, never a ref the worker chose. On the default branch itself it IS
+    HEAD, so only uncommitted work shows. No HEAD → the working-tree diff.
+    """
+    from skep.supervisor.apply import repo_default_branch
+
+    head = _git_out(workspace, "rev-parse", "HEAD")
+    default = repo_default_branch(workspace)
+    if head is None or default is None:
+        return head
+    return _git_out(workspace, "merge-base", f"refs/heads/{default}", "HEAD") or head
 
 
 def collect_diff(workspace: Path, baseline: str | None) -> str:
@@ -217,7 +228,9 @@ def _default_generate(task: CodingWorkerTask, messages: list[dict[str, Any]]) ->
             "the reviewer caste needs the saved assistant LLM"
         )
     endpoint = _endpoint(provider.profile)
-    _ensure_network_allowed(endpoint, list(task.permissions.network))
+    _ensure_network_allowed(
+        endpoint, list(task.permissions.network), task.permissions.provider_hosts
+    )
     return "".join(_provider_chunks(provider, endpoint=endpoint, messages=messages))
 
 

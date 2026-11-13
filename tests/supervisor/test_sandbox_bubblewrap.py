@@ -52,10 +52,16 @@ def test_linux_availability_uses_bubblewrap_probe(monkeypatch: pytest.MonkeyPatc
             "/",
             "--dev",
             "/dev",
+            "--unshare-pid",
+            "--unshare-ipc",
             "--proc",
             "/proc",
             "--tmpfs",
             "/tmp",
+            "--tmpfs",
+            "/run",
+            "--die-with-parent",
+            "--new-session",
             "--unshare-net",
             "/usr/bin/true",
         ]
@@ -74,6 +80,7 @@ def test_linux_bubblewrap_wraps_worker_with_writable_roots_and_deny_all_network(
     evidence = sandbox.write_profile(
         tmp_path / "sandbox.profile",
         workspace=workspace,
+        skep_home=tmp_path / "skep-home",
         extra_writable=[results],
         network=sandbox.DENY_ALL_NETWORK,
     )
@@ -95,6 +102,7 @@ def test_linux_bubblewrap_creates_tmp_mountpoints_before_binding(
     evidence = sandbox.write_profile(
         tmp_path / "sandbox.profile",
         workspace=Path("/tmp/skep/workspace"),
+        skep_home=tmp_path / "skep-home",
         extra_writable=[Path("/tmp/skep/results")],
         network=sandbox.DENY_ALL_NETWORK,
     )
@@ -118,6 +126,7 @@ def test_linux_bubblewrap_enforces_a_domain_allowlist_via_the_shim(
     evidence = sandbox.write_profile(
         tmp_path / "sandbox.profile",
         workspace=workspace,
+        skep_home=tmp_path / "skep-home",
         network=sandbox.NetworkPolicy(allow=("pypi.org",)),
         proxy_port=54321,
         unix_socket_path="/tmp/skep-x/p.sock",
@@ -156,6 +165,7 @@ def test_linux_bubblewrap_domain_list_still_needs_a_proxy_and_socket(
         sandbox.write_profile(
             tmp_path / "sandbox.profile",
             workspace=workspace,
+            skep_home=tmp_path / "skep-home",
             network=sandbox.NetworkPolicy(allow=("pypi.org",)),
             proxy_port=54321,  # port but no socket path
         )

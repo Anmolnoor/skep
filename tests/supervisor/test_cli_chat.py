@@ -591,7 +591,18 @@ def test_tool_receipts_name_the_lane(capsys: pytest.CaptureFixture[str]) -> None
             "result": {"ok": True, "result": {"exit_code": 0}},
         },
     )
+    # T3-2: allow_with_constraints executes too (AutonomyDecision.allows_execution).
+    printer.feed(
+        "tool",
+        {
+            "tool": "run_shell",
+            "decision": {"verdict": "allow_with_constraints", "reason": "ops.allow.dry_run"},
+            "result": {"ok": True},
+        },
+    )
     out = capsys.readouterr().out
+    assert "ran without asking — covered by ops.allow.dry_run" in out
+    assert "denied — ops.allow" not in out
     assert "ran in-turn — read tool" in out
     assert "denied — shell.deny.repo_target (git -C /repo status)" in out
     assert "ran without asking — covered by capability.allow.learned_rule (uv sync)" in out
@@ -727,7 +738,7 @@ def test_confirmed_dispatch_auto_tails_to_the_terminal_state(
     )
     ollama.script_reply("dispatched — watching it for you")
     script_input(monkeypatch, ["fix the bug", "y"])
-    assert run_chat(home=config.home, url="http://unused", client=client) == 0
+    assert run_chat(home=config.home, url="http://unused", client=client, role="builder") == 0
     out = capsys.readouterr().out
     assert "confirm: dispatch_run" in out
     assert "watching" in out
@@ -756,7 +767,7 @@ def test_gated_run_prompts_and_approve_tails_the_successor(
     )
     ollama.script_reply("dispatched the gated run")
     script_input(monkeypatch, ["do the gated work", "y", "a"])
-    assert run_chat(home=config.home, url="http://unused", client=client) == 0
+    assert run_chat(home=config.home, url="http://unused", client=client, role="builder") == 0
     out = capsys.readouterr().out
     assert "approval needed: git_commit" in out
     assert "resuming as" in out
@@ -785,7 +796,7 @@ def test_gated_run_deny_returns_to_the_prompt(
     )
     ollama.script_reply("dispatched")
     script_input(monkeypatch, ["do the gated work", "y", "d"])
-    assert run_chat(home=config.home, url="http://unused", client=client) == 0
+    assert run_chat(home=config.home, url="http://unused", client=client, role="builder") == 0
     assert "denied: task" in capsys.readouterr().out
     approvals = client.get("/api/approvals").json()["approvals"]
     assert approvals == []  # resolved — nothing left pending
@@ -1336,3 +1347,81 @@ def test_oneshot_yes_never_preconfirms_a_policy_card(
     out = capsys.readouterr().out
     assert "policy card" in out and "/approve" in out
     assert ["uv", "tree"] not in client.get("/api/policy").json()["allowed_shell_commands"]
+
+
+def test_deck_deny_of_a_gate_card_denies_its_review(
+    config: SupervisorConfig,
+    client: TestClient,
+    ollama: FakeOllama,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ES-F5 (B98): a gate mirror resolves on the commands endpoints, whose
+    Deny denies the REVIEW (v87-F2). The terminal sent it to /actions, which
+    dismissed the card and left the run stuck in pending_approval."""
+    from skep.supervisor import RunStore
+    from skep.supervisor.serve import chat as chat_module
+
+    ran: list[tuple[str, dict[str, Any]]] = []
+
+    def execute(tool: str, args: dict[str, Any], **_: Any) -> dict[str, str]:
+        ran.append((tool, args))
+        return {"action": "denied"}
+
+    monkeypatch.setattr(chat_module, "execute_mutation", execute)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        gate = store.add_chat_action(
+            chat_id, tool="approve_review", args={"review_id": "r-1"}, source="gate"
+        )
+    finally:
+        store.close()
+
+    script_input(monkeypatch, [f"/deny {gate}"])
+    assert run_chat(home=config.home, url="http://unused", client=client, continue_latest=True) == 0
+
+    assert ran == [("deny_review", {"review_id": "r-1"})]
+    (resolved,) = _chat_actions(client)
+    assert resolved["status"] == "denied"
+
+
+def test_skep_chat_talks_to_the_serve_of_its_own_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L25: `skep chat` defaulted to 8765 whatever port the home's serve
+    recorded — with two homes on one machine it talked to the OTHER serve.
+    It now reads the home's ``serve-port`` (what ``skep serve`` writes);
+    ``--url`` and ``$SKEP_SERVE_URL`` still win."""
+    import argparse
+
+    import skep.cli_chat
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.netproxy import record_serve_port
+
+    supervisor = build_config(tmp_path / "home", None).home
+    supervisor.mkdir(parents=True)
+    seen: list[str] = []
+
+    def run_chat(**kw: Any) -> int:
+        seen.append(kw["url"])
+        return 0
+
+    monkeypatch.setattr(skep.cli_chat, "run_chat", run_chat)
+    monkeypatch.delenv("SKEP_SERVE_URL", raising=False)
+    args = argparse.Namespace(
+        home=tmp_path / "home", url=None, chat_id=None, continue_latest=False,
+        thinking=False, oneshot=None, yes=False, role=None,
+    )  # fmt: skip
+    skep.cli_chat.cmd_chat(args)
+    record_serve_port(supervisor, 8766)
+    skep.cli_chat.cmd_chat(args)
+    monkeypatch.setenv("SKEP_SERVE_URL", "http://127.0.0.1:9001")
+    skep.cli_chat.cmd_chat(args)
+    skep.cli_chat.cmd_chat(argparse.Namespace(**{**vars(args), "url": "http://h:1"}))
+    assert seen == [
+        "http://127.0.0.1:8765",
+        "http://127.0.0.1:8766",
+        "http://127.0.0.1:9001",
+        "http://h:1",
+    ]

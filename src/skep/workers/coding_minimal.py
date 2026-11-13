@@ -40,6 +40,7 @@ from skep.worker_contract import (
 )
 
 from .capabilities import (
+    DELEGATED_ASK_REASON,
     CapabilityApprovalRequired,
     CapabilityDecision,
     CapabilityDenied,
@@ -49,6 +50,7 @@ from .capabilities import (
     load_plugin_tools_from_env,
 )
 from .llm_plan import (
+    DEFAULT_VERIFY_ARGV,
     LlmEditPlan,
     LlmPlanError,
     LlmToolPlan,
@@ -69,8 +71,6 @@ from .runtime_plugins import (
     VERIFICATION_PLUGIN,
     ReactCheckpoint,
     ResumeCursor,
-    _strip_git_chdir,
-    is_git_mutation_argv,
     runtime_plugin_manifest,
 )
 from .worker_runtime import (
@@ -746,6 +746,7 @@ def _execute(
         emit=stream.emit,
         env_allowlist=task.permissions.env_allowlist,
         network_allowlist=task.permissions.network,
+        provider_hosts=task.permissions.provider_hosts,
         approved_network_hosts=_approved_network_hosts(
             task.approval_verdict, granted_network_hosts
         ),
@@ -758,7 +759,13 @@ def _execute(
         approved_capability_ids=tuple(approved_capability_ids),
         approved_plugin_risks=approved_plugin_risks,
         command_timeout_seconds=task.budget.wall_clock_seconds,
+        verify_command=task.verify_command,
+        network_ask=task.permissions.network_ask,
+        shell_ask=task.permissions.shell_ask,
+        delegation=getattr(task.dispatch_decision, "delegation", None),
     )
+    # ES-F3: the injected default verify is a code constant, not model input.
+    capabilities.pin_code_verify(DEFAULT_VERIFY_ARGV)
 
     try:
         checkpoint = RESUME_CHECKPOINT_PLUGIN.checkpoint_from_state(task.worker_state)
@@ -882,6 +889,9 @@ def _execute(
     changed_files.extend(write_result.changed_files)
 
     verify_command = f"{sys.executable} hello.py"
+    # ES-F3: no model in this path — the argv and hello.py's content are
+    # constants, so the worker pins its own verify rather than carding it.
+    capabilities.pin_code_verify([sys.executable, "hello.py"])
     run_result = capabilities.invoke(
         "shell.run",
         {"argv": [sys.executable, "hello.py"], "purpose": "verify"},
@@ -1025,6 +1035,7 @@ def _execute_llm_plan(
                     workspace=workspace,
                     instructions=task.instructions,
                     network_allowlist=task.permissions.network,
+                    provider_hosts=task.permissions.provider_hosts,
                     tool_manifest=capabilities.tool_manifest(),
                     repair_context=repair_context,
                     memory=task.memory,
@@ -1929,7 +1940,18 @@ def _apply_llm_tool_plan(
         blocked_commands = [argv for argv, _, _ in blocked_shell_steps]
         first_command = blocked_shell_steps[0][1]
         first_decision = blocked_shell_steps[0][2]
-        if len(blocked_shell_steps) == 1:
+        asked = next(
+            (cmd for _, cmd, found in blocked_shell_steps if found.reason == DELEGATED_ASK_REASON),
+            None,
+        )
+        if asked is not None:
+            # V7: the card names the chain; the one approval covers the rest.
+            reason = capabilities.delegated_ask_text("shell.run", asked) + (
+                f" (this approval covers {len(blocked_shell_steps)} commands)"
+                if len(blocked_shell_steps) > 1
+                else ""
+            )
+        elif len(blocked_shell_steps) == 1:
             reason = f"shell.run requires approval for command: {first_command}"
         else:
             reason = (
@@ -2256,10 +2278,12 @@ def _command_from_shell_args(arguments: object) -> str:
 def _preflight_blocked_shell_steps(
     capabilities: CapabilityRegistry, plan: LlmToolPlan, start_step: int
 ) -> list[tuple[list[str], str, CapabilityDecision]]:
-    """Every not-yet-run, non-verify shell.run step that needs approval (v19-F1).
+    """Every not-yet-run shell.run step that needs approval (v19-F1).
 
     Denied steps are excluded on purpose: they fail at execution (F7 recovers).
-    Granted commands preview as allowed, so a resume never re-gates.
+    Granted commands preview as allowed, so a resume never re-gates. ES-F3:
+    verify steps are previewed too — only the pinned verify command skips
+    approval now, so an unpinned verify joins the plan's one gate.
     """
     blocked: list[tuple[list[str], str, CapabilityDecision]] = []
     for index, step in enumerate(plan.steps):
@@ -2267,13 +2291,6 @@ def _preflight_blocked_shell_steps(
             continue
         argv = _argv_from_shell_args(step.args)
         if not argv:
-            continue
-        # v20-F1: a git mutation smuggled as purpose="verify" must be previewed
-        # for approval like any other mutation. Only skip verify steps that
-        # cannot mutate git state (pytest, read-only git, etc.).
-        if _shell_purpose_from_args(step.args) == "verify" and not is_git_mutation_argv(
-            _strip_git_chdir(argv)
-        ):
             continue
         try:
             decision = capabilities.shell_decision_preview(step.args)

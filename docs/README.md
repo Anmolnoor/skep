@@ -6,9 +6,13 @@ that), so if you can't find it below, it doesn't exist yet.
 ## Start here
 
 - [`quickstart.md`](quickstart.md) — first run in 5 minutes
+- [`onboarding.md`](onboarding.md) — `skep onboard`: model, work directory,
+  sandbox, locked policy baseline, role — and `--check`
 - [`how-to-use-on-new-machine.md`](how-to-use-on-new-machine.md) — full
   source, serve, and Docker setup notes
 - [`demo-gif.md`](demo-gif.md) — the reproducible terminal demo recording
+- [`agent-guide.md`](agent-guide.md) — for agents: explaining skep to a
+  human (the operating half is [`../SKILL.md`](../SKILL.md))
 
 ## Concepts
 
@@ -28,6 +32,9 @@ that), so if you can't find it below, it doesn't exist yet.
 - [`cli-reference.md`](cli-reference.md) — every command
 - [`policy-hook.md`](policy-hook.md) — the policy enforcement hook: `decide()`
   for outside agents (Claude Code PreToolUse), every verdict recorded
+- [`acp-governor.md`](acp-governor.md) — `skep acp govern`: skep answers an
+  ACP agent's permission asks inside another client (T3 Code), every verdict
+  recorded
 - [`configuration.md`](configuration.md) — home, worker, policy, and model
   settings
 - [`brain.md`](brain.md) — choosing the assistant model (the v72 dial:

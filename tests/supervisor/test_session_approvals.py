@@ -14,7 +14,15 @@ from skep.supervisor.store import RunStore
 
 
 def test_plain_approve_session_persists_eligible_commands(tmp_path: Path) -> None:
+    """P3-4 (ADR 0059 D4, B39): a session grant on the one learned list,
+    bound to the repo it was approved in — no longer the global tier."""
+    from skep.supervisor.policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        document_from_settings,
+    )
+
     store = RunStore(tmp_path / "s.sqlite3")
+    repo = tmp_path / "repo"
     try:
         added = remember_commands_for_session(
             store,
@@ -23,13 +31,19 @@ def test_plain_approve_session_persists_eligible_commands(tmp_path: Path) -> Non
                 ["git", "push", "origin", "main"],  # remote git: never
                 ["sudo", "rm", "-rf", "/"],  # dangerous prefix: never
             ],
+            repo=repo,
         )
         assert added == [["uv", "run", "pytest"]]
-        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) == [["uv", "run", "pytest"]]
+        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) is None  # never written
+        document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+        assert document is not None
+        [rule] = document.learned
+        assert (rule.pattern, rule.lifetime, rule.matcher, rule.bound) == (
+            "uv run pytest", "session", "prefix", {"repo": str(repo.resolve())},
+        )  # fmt: skip
 
         # Idempotent: approving the same command again adds nothing.
-        assert remember_commands_for_session(store, [["uv", "run", "pytest"]]) == []
-        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) == [["uv", "run", "pytest"]]
+        assert remember_commands_for_session(store, [["uv", "run", "pytest"]], repo=repo) == []
     finally:
         store.close()
 
@@ -37,12 +51,12 @@ def test_plain_approve_session_persists_eligible_commands(tmp_path: Path) -> Non
 def test_session_tier_reaches_the_resolved_allowlist_read_side_only() -> None:
     policy = {
         "allowed_shell_commands": [["git", "status"]],
-        "session_allowed_shell_commands": [["uv", "run", "pytest"], ["git", "status"]],
+        # P3-4 (B39): the old global tier is no longer read.
+        "session_allowed_shell_commands": [["make", "lint"]],
     }
-    resolved = resolved_shell_allowlist(policy, Path("/repo"), "sandbox")
-    assert ["git", "status"] in resolved
-    assert ["uv", "run", "pytest"] in resolved
-    assert len(resolved) == 2  # deduped, durable entries not doubled
+    granted = [["uv", "run", "pytest"], ["git", "status"]]
+    resolved = resolved_shell_allowlist(policy, Path("/repo"), "sandbox", granted)
+    assert resolved == [["git", "status"], ["uv", "run", "pytest"]]  # deduped
     # The durable key itself is untouched — a later remember/preset union
     # (which reads allowed_shell_commands) can never absorb a session grant.
     assert policy["allowed_shell_commands"] == [["git", "status"]]

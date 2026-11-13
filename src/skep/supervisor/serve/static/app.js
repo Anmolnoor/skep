@@ -242,6 +242,202 @@ function formatCompactDecision(decision, namespace) {
   return verdict && reason ? `${verdict} ${reason}` : "";
 }
 
+// first-run R3 (ADR 0055 D5): who delegated a run — roles.delegation_line's
+// twin: "queen@operator → manager@builder → worker@builder · team <id>".
+// R1: the role picker's options. A chat made before every chat recorded a role
+// has none stored and runs as assistant (ADR 0059 decision #4) — say so.
+function roleChoices(roles, legacyRoleLess) {
+  return [...(legacyRoleLess ? [{ value: "", label: "role: assistant (none stored)" }] : []),
+    ...roles.map(role => ({ value: role.name, label: `role: ${role.name}` }))];
+}
+
+function delegationText(delegation) {
+  if (!delegation || typeof delegation !== "object") return "";
+  const chain = Array.isArray(delegation.chain) ? delegation.chain.map(String) : [];
+  const worker = delegation.role ? `worker@${delegation.role}` : "worker";
+  const line = [...(chain.length ? chain : ["operator"]), worker].join(" → ");
+  return delegation.team ? `${line} · team ${delegation.team}` : line;
+}
+
+// first-run O4 (ADR 0056 D6): while first_run.json is active the server
+// puts a one-line `why` on every verdict card and ends the turn with a
+// `tally` event; dismissed, neither arrives and nothing renders.
+function whyLine(d) {
+  return d.why ? el("p", { class: "note card-why" }, `why: ${d.why}`) : null;
+}
+
+// v90-F3: a receipt — an action that ran WITHOUT asking because a grant the
+// operator already gave covers it. Same headline and risk as the approval
+// card would have shown, and deliberately no buttons: it is a record, not a
+// decision. Silence here used to be indistinguishable from nothing happening.
+// T3-2 (web twin of v115-F3): `decision` rides a denial too (v40-F10), and
+// the receipt said "ran without asking" on every refusal. The kicker follows
+// the verdict — the same set as AutonomyDecision.allows_execution().
+// v112-F1 → P3-4 (ADR 0059 D4): the server says which keep choices a card can
+// honour (card.keep); only a card with a real choice earns a keep selector —
+// everything else approves once, and the UI never offers a lifetime the
+// confirm would refuse (B32). A session keep holds in this chat only (B39).
+const KEEP_LABELS = { once: "once", session: "this chat, this session", always: "always" };
+
+function keepSelect(card) {
+  const keeps = (card && Array.isArray(card.keep)) ? card.keep : [];
+  if (keeps.length < 2) return null;
+  return el("select", { class: "card-keep", title: "How long this approval holds" },
+    ...keeps.map((k) => el("option",
+      k === "session" ? { value: k, selected: "" } : { value: k }, KEEP_LABELS[k] || k)));
+}
+
+// P4-1 (ADR 0059 D5): a tainted chat's card says why in plain words (the
+// server's card.taint), and a doubly tainted one is HIGH — it looks different.
+function taintNote(card) {
+  return card && card.taint ? el("p", { class: "note card-taint" }, card.taint) : null;
+}
+
+function cardClass(card) {
+  return card && card.tier === "high" ? "confirm-card card-high" : "confirm-card";
+}
+
+// P4-2 (ADR 0059 D6): a HIGH card says so in words, not only with a red
+// border — and why, and that it holds once and no messenger can confirm it.
+function tierNote(card) {
+  if (!card || card.tier !== "high") return null;
+  return el("p", { class: "card-high-label" },
+    el("strong", {}, "HIGH risk: "), card.high || "see details",
+    ". It holds once, and only the web UI or the CLI can confirm it.");
+}
+
+// P4-2 (ADR 0059 D6): a folded card lists every call one approval covers —
+// exactly what the server recorded; nothing beyond this list runs.
+function foldItems(card) {
+  if (!card || !Array.isArray(card.items) || card.items.length < 2) return null;
+  return el("div", { class: "card-items" },
+    el("p", { class: "note" }, `${card.items.length} items, one approval covers exactly these:`),
+    el("ul", {}, ...card.items.map((item) => el("li", { class: "mono" }, String(item)))));
+}
+
+// L11 (ADR 0059 D3, V7): a delegated ask is approve-once for that run — the
+// server refuses to remember it (409), so no "& remember" button offers it.
+function offersRemember(approval) {
+  return !(approval && approval.decision
+    && approval.decision.reason === "capability.require_approval.delegated_ask");
+}
+
+// P4-2 (ADR 0059 D6): the dispatch manifest — what the run will get, as the
+// server compiled it when the card was shown. Approving the card approves the
+// listed asks for that run only; anything else the run asks for cards then.
+function manifestNode(card) {
+  const m = card && card.manifest;
+  if (!m) return null;
+  if (m.error) {
+    return el("p", { class: "note card-manifest" }, `The run's envelope could not be compiled: ${m.error}`);
+  }
+  const list = (values) => (Array.isArray(values) && values.length
+    ? values.map((v) => (Array.isArray(v) ? v.join(" ") : String(v))).join(", ") : "none");
+  const row = (label, value) => el("div", { class: "arg-row" },
+    el("span", { class: "arg-key" }, `${label}:`), el("span", { class: "arg-value mono" }, value));
+  const asks = [...(m.network_ask || []), ...(m.shell_ask || [])];
+  return el("div", { class: "card-manifest" },
+    el("p", { class: "note" }, "What this run gets:"),
+    row("hosts", list(m.network)),
+    // L10: an explicit network replaces the project's hosts — name what goes
+    Array.isArray(m.network_dropped) && m.network_dropped.length
+      ? row("loses the project's own hosts for this run", list(m.network_dropped)) : null,
+    row("model provider", list(m.provider_hosts)),
+    row("commands it may run", list(m.shell_allowlist)),
+    row("may write", list(m.write)),
+    // W13: the other task grants; a key an older card did not record stays off
+    "read" in m ? row("may read", list(m.read)) : null,
+    "env_allowlist" in m ? row("environment", list(m.env_allowlist)) : null,
+    m.allow_git_mutation ? row("git", "may commit and branch in its own worktree") : null,
+    Array.isArray(m.allowed_plugin_risks) && m.allowed_plugin_risks.length
+      ? row("plugin risks allowed", list(m.allowed_plugin_risks)) : null,
+    "allowed_tools" in m
+      ? row("tools", m.allowed_tools === null ? "all its tools" : list(m.allowed_tools)) : null,
+    m.auto_apply_verified_patch
+      ? row("auto-apply", `a re-verified patch lands on ${m.auto_apply_branch || "a new skep/<task> branch"} without asking`)
+      : null,
+    row("engine · mode", `${m.engine} · ${m.execution_mode}`),
+    row("verify", m.verify_command || "the worker picks"),
+    asks.length ? row("also approved, this run only", list(asks)) : null,
+    Array.isArray(m.chain) && m.chain.length ? row("delegated by", m.chain.join(" → ")) : null,
+    Array.isArray(m.taint) && m.taint.length ? row("from a chat that has", m.taint.join(" + ")) : null);
+}
+
+// P4-2 (ADR 0059 D6, F3 lesson 1): a script, chained or replacing schedule
+// shows what it will really do — the server computed every line (the env the
+// script gets, the scheduler's next fire times), the card only lists them.
+function scheduleNode(card) {
+  const s = card && card.schedule;
+  if (!s) return null;
+  const row = (label, value) => el("div", { class: "arg-row" },
+    el("span", { class: "arg-key" }, `${label}:`), el("span", { class: "arg-value mono" }, value));
+  return el("div", { class: "card-schedule" },
+    s.command ? row("command", s.command) : null,
+    s.every ? row("every", s.every) : null,
+    Array.isArray(s.next) ? row("next runs", s.next.join(", ")) : null,
+    s.error ? row("will not save", s.error) : null,
+    Array.isArray(s.env) ? row("environment", s.env.join(", ") || "(empty)") : null,
+    Array.isArray(s.chain) ? row("reads the output of", s.chain.join(" ← ")) : null,
+    s.replaces ? row("replaces", s.replaces) : null,
+    s.runs ? el("p", { class: "card-risk" }, el("strong", {}, s.runs)) : null);
+}
+
+// P4-1 (ADR 0059 D5): a run dispatched from a tainted chat says so on its card.
+function taintChip(decision) {
+  const bits = decision?.constraints?.chat_taint;
+  if (!Array.isArray(bits) || !bits.length) return null;
+  return el("span", { class: "chip", title: "the dispatching chat's taint" },
+    `chat: ${bits.map(String).join(" + ")}`);
+}
+
+// P4-1 (B26, B37): a row you did not write says who did — a webhook, a
+// script, a worker (`from webhook:ci`), or skep's own prompt (`skep`).
+function authorLabel(message, fallback) {
+  const author = message.provenance || "";
+  if (message.role !== "user" || !author || author === "operator") return fallback;
+  return author === "queen" ? "skep" : `from ${author}`;
+}
+
+// What a keep would allow (card.keep_covers): each command of a compound line
+// on its own, or a whole URL directory — said on the card, not only "always".
+function keepCovers(card) {
+  if (!card || !card.keep_covers || keepSelect(card) === null) return null;
+  return el("p", { class: "card-keep-covers" }, card.keep_covers);
+}
+
+// P3-5 (V11): what a policy write would change, from the server's write-time
+// check — the replay of recent decisions, the grants it would shadow, and what
+// an "always" keep would flip (or why the card keeps only once).
+function cardReplay(card) {
+  if (!card) return null;
+  const lines = [card.replay, ...(card.policy_warnings || []), card.keep_refused,
+    keepSelect(card) === null ? null : card.keep_replay].filter(Boolean);
+  if (!lines.length) return null;
+  return el("div", { class: "card-replay" }, ...lines.map((line) => el("p", {}, line)));
+}
+
+function receiptNode(d) {
+  const card = d.card || {};
+  const decision = d.decision || {};
+  const allowed = ["allow", "allow_with_constraints"].includes(decision.verdict);
+  const covered = decision.detail || decision.reason;
+  const denied = decision.reason
+    ? `denied by ${decision.reason}${decision.detail ? ` (${decision.detail})` : ""}`
+    : "denied by policy";
+  return el("div", { class: "confirm-card receipt-card" },
+    el("p", { class: "card-kicker" },
+      allowed ? "Ran without asking — you approved this already" : "Denied — this did not run"),
+    el("p", { class: "card-headline mono" }, card.headline || d.tool),
+    card.risk ? el("p", { class: "card-risk" },
+      el("span", { class: "card-risk-label" }, "Risk: "), card.risk) : null,
+    !allowed ? el("p", { class: "card-purpose" }, denied)
+      : covered ? el("p", { class: "card-purpose" }, `covered by ${covered}`) : null,
+    whyLine(d),
+    // v106-F11 (v90-F3): which tier of grant, given when.
+    d.grant ? el("p", { class: "note" },
+      `${d.grant.tier} grant · given ${d.grant.granted_at}`) : null);
+}
+
 function formatRunAutonomy(run) {
   if (!run || typeof run !== "object") return "-";
   const parts = [];
@@ -1574,6 +1770,8 @@ async function viewSetup(main, setup) {
       ? el("p", { class: "note" }, `completed ${fmtTs(setup.completed_at)}`)
       : null));
 
+  main.append(await onboardCard());
+
   const llm = await api("GET", "/api/llm/config");
 
   const protocol = el("select", {},
@@ -1691,6 +1889,126 @@ async function viewSetup(main, setup) {
     } catch (e) { flash("bad", e.message); finish.disabled = false; }
   });
   main.append(el("div", { class: "actions" }, finish));
+}
+
+// first-run O3 (ADR 0056 D7): `skep onboard`'s five steps as a thin form over
+// the same step functions (POST /api/onboard/<step>). The CLI resumes from the
+// records these write, and the other way round.
+async function onboardCard() {
+  const { steps, relock } = await api("GET", "/api/onboard");
+  const summaries = {
+    model: r => `${r.provider} ${r.model} — ${r.egress}`,
+    workdir: r => `${r.path} (project ${r.project_id})`,
+    sandbox: r => `${r.backend} — ${r.rings}`,
+    template: r => `${r.template} locked, sha256 ${String(r.sha256).slice(0, 12)}`,
+    role: r => r.role,
+  };
+  // O3-F1: a sandbox switch after the lock re-opens step 4 — say why.
+  const state = name => el("p", { class: "note" },
+    steps[name] ? `done: ${summaries[name](steps[name])}`
+      : name === "template" && relock
+        ? `re-lock needed: the locked baseline is not what ${relock} locks under this sandbox`
+        : "not done yet");
+  const field = (label, input) => el("div", { class: "field grow" }, el("label", {}, label), input);
+  const select = (values, value) => {
+    const node = el("select", {}, ...values.map(v => el("option", { value: v }, v)));
+    node.value = value;
+    return node;
+  };
+  const post = async (step, body, button) => {
+    button.disabled = true;
+    try {
+      await api("POST", `/api/onboard/${step}`, body);
+      flash("ok", `${step} recorded`);
+      route();
+    } catch (e) { flash("bad", e.message); button.disabled = false; }
+  };
+
+  const model = steps.model || {};
+  const provider = el("input", { value: model.provider || "ollama" });
+  const modelName = el("input", { value: model.model || "", placeholder: "e.g. qwen3:14b" });
+  const endpoint = el("input", { value: model.endpoint || "", placeholder: "http://localhost:11434" });
+  const keyEnv = el("input", { value: model.api_key_env || "", placeholder: "env var NAME, never the key" });
+  const saveModel = el("button", { class: "primary" }, "Test and save");
+  saveModel.addEventListener("click", () => post("model", {
+    provider: provider.value.trim(),
+    model: modelName.value.trim(),
+    endpoint: endpoint.value.trim() || null,
+    api_key_env: keyEnv.value.trim() || null,
+  }, saveModel));
+
+  const workdir = el("input", { value: (steps.workdir || {}).path || "", placeholder: "~/workspace" });
+  const saveWorkdir = el("button", { class: "primary" }, "Register");
+  saveWorkdir.addEventListener("click", () => post("workdir", { path: workdir.value.trim() }, saveWorkdir));
+
+  const backend = select(["auto", "podman", "none"], (steps.sandbox || {}).backend || "auto");
+  const detected = el("p", { class: "note" }, "");
+  const detect = el("button", { class: "ghost" }, "Detect");
+  detect.addEventListener("click", async () => {
+    try {
+      const found = await api("GET", "/api/onboard/sandboxes");
+      backend.value = found.recommended;
+      detected.textContent = Object.entries(found.backends)
+        .map(([name, v]) => `${name}: ${v.usable ? "usable" : "unusable"} (${v.detail})`)
+        .concat(`docker: ${found.docker.detail}`).join(" · ");
+    } catch (e) { flash("bad", e.message); }
+  });
+  const saveSandbox = el("button", { class: "primary" }, "Save");
+  saveSandbox.addEventListener("click", () => post("sandbox", { backend: backend.value }, saveSandbox));
+
+  const template = select(["assistant", "builder", "operator"], (steps.template || {}).template || relock || "assistant");
+  const table = el("pre", { class: "mono worker-command-output onboard-table" }, "");
+  const typed = el("input", { placeholder: "type yes to lock this as the policy baseline" });
+  const lock = el("button", { class: "primary" }, "Lock baseline");
+  lock.disabled = true;
+  let shown = null;
+  const preview = el("button", { class: "ghost" }, "Preview");
+  preview.addEventListener("click", async () => {
+    try {
+      shown = await api("GET", `/api/onboard/template?template=${encodeURIComponent(template.value)}`);
+      table.textContent = shown.locked
+        ? "this is already the locked baseline"
+        : [shown.table, ...(shown.tightened || []), ...(shown.diff || [])].join("\n");
+      lock.disabled = false;
+    } catch (e) { flash("bad", e.message); }
+  });
+  template.addEventListener("change", () => { shown = null; lock.disabled = true; table.textContent = ""; });
+  lock.addEventListener("click", () => {
+    if (!shown || typed.value.trim() !== "yes") { flash("bad", "preview, then type yes"); return; }
+    post("template", { template: template.value, expect_sha256: shown.sha256, approved_by: "web" }, lock);
+  });
+
+  const role = select(["assistant", "builder", "operator"],
+    (steps.role || {}).role || (steps.template || {}).template || "assistant");
+  const saveRole = el("button", { class: "primary" }, "Save");
+  saveRole.addEventListener("click", () => post("role", { role: role.value }, saveRole));
+
+  const report = el("pre", { class: "mono worker-command-output onboard-table" }, "");
+  const check = el("button", { class: "ghost" }, "Run onboard --check");
+  check.addEventListener("click", async () => {
+    try {
+      const result = await api("GET", "/api/onboard/check");
+      report.textContent = result.report;
+      flash(result.ready ? "ok" : "bad", result.ready ? "ready" : "not ready yet");
+    } catch (e) { flash("bad", e.message); }
+  });
+
+  return el("div", { class: "card" },
+    el("h3", {}, "First run (skep onboard)"),
+    el("p", { class: "note" }, "The same five steps as `skep onboard` in a terminal."),
+    el("h4", {}, "1 · Model"), state("model"),
+    el("div", { class: "row" }, field("provider", provider), field("model", modelName),
+      field("endpoint", endpoint), field("API key env var", keyEnv), saveModel),
+    el("h4", {}, "2 · Work directory"), state("workdir"),
+    el("div", { class: "row" }, field("path", workdir), saveWorkdir),
+    el("h4", {}, "3 · Sandbox"), state("sandbox"),
+    el("div", { class: "row" }, field("backend", backend), detect, saveSandbox), detected,
+    el("h4", {}, "4 · Policy template"), state("template"),
+    el("div", { class: "row" }, field("template", template), preview, field("approval", typed), lock),
+    table,
+    el("h4", {}, "5 · Role"), state("role"),
+    el("div", { class: "row" }, field("role", role), saveRole),
+    el("div", { class: "row" }, check), report);
 }
 
 // ---------- Notes & Tasks (v76-F7: markdown notes + due-grouped tasks) ----------
@@ -2071,6 +2389,10 @@ const COMMANDS = {
     usage: "/schedule <name> <repo> <every> <instructions…>",
     desc: "create a recurring schedule the ticker dispatches — every takes 30m/6h/1d (confirm card)",
   },
+  role: {
+    usage: "/role <builder|operator|assistant|custom-role>",
+    desc: "switch this chat's role — prompt, voice and policy layer together; a role only tightens the baseline (confirm card)",
+  },
   personality: {
     usage: "/personality <concise|technical|friendly|custom:text|default>",
     desc: "set this chat's reply style — style only, never policy (confirm card)",
@@ -2094,6 +2416,10 @@ const COMMANDS = {
   browser: {
     usage: "/browser",
     desc: "register the built-in Playwright browser under the browse scope (confirm card)",
+  },
+  trust: {
+    usage: "/trust [private|untrusted]",
+    desc: "trust this chat again: clear its taint (both bits by default) — yours only, never the model's; outside content read later sets it again",
   },
 };
 
@@ -2123,11 +2449,35 @@ function projectIdForRepo(repo) {
 
 // ---------- Chat (v6: the Queen's own model) ----------
 
+// v110-F2 + ES-F1: the verdict a drawn card shows once its action left
+// 'proposed' — [label, verb]. A failed or interrupted card never reads as
+// approved, and an executing one (claimed by another tab or a messenger)
+// never reads as denied.
+function cardVerdict(action) {
+  const note = (action.result && (action.result.error || action.result.note)) || "";
+  switch (action.status) {
+    case "confirmed": return ["✓ Approved", "confirm"];
+    case "executing": return ["… Running — confirmed elsewhere", "confirm"];
+    case "failed": return [`✗ Failed — ${note || "the action did not complete"}`, "deny"];
+    case "interrupted": return [`⚠ Interrupted — ${note || "serve stopped mid-run"}`, "deny"];
+    case "superseded": return [`✗ Superseded — ${note || "replaced by a newer card"}`, "deny"];
+    default: return ["✗ Denied", "deny"];
+  }
+}
+
+// v25-F1 + ES-F5 (B98): operator commands AND gate mirrors resolve on the
+// commands endpoints — a gate's Deny denies the review there; on /actions it
+// was dismissed and the run sat in pending_approval with no card.
+function resolvesOnCommands(card) { return card.source !== "assistant"; }
+
 async function viewChat(main, chatId) {
   let activeChatId = chatId || null;
-  const [llm, chatList] = await Promise.all([
+  // R1 (ADR 0055 D3): the role picker's choices; a broken custom role file
+  // must not take the chat view down with it — no picker, server default.
+  const [llm, chatList, roleList] = await Promise.all([
     api("GET", "/api/llm/config"),
     api("GET", "/api/chats"),
+    api("GET", "/api/roles").catch(() => ({ roles: [], default: null })),
   ]);
   let chats = chatList.chats;
   const chatSidebar = el("nav", { class: "chat-sidebar", "aria-label": "Chats" });
@@ -2261,6 +2611,18 @@ async function viewChat(main, chatId) {
     : [el("option", { value: "" }, "No model")]);
   modelSelect.value = activeChat?.model || llm.default_model || "";
   modelSelect.disabled = Boolean(activeChatId);
+  // R1: a new chat opens with a role picker defaulting to the onboard choice
+  // (or `skep role use`, else assistant: ADR 0059 decision #4); an open chat
+  // switches with /role (a confirm card).
+  const legacyRoleLess = Boolean(activeChatId) && !activeChat?.role;
+  const roleSelect = el("select", {
+    class: "composer-model-select",
+    "aria-label": "chat role",
+    title: activeChatId ? "switch with /role <name>" : "role for the next new chat",
+  }, roleChoices(roleList.roles, legacyRoleLess).map(c => el("option", { value: c.value }, c.label)));
+  roleSelect.value = activeChatId ? (activeChat?.role || "") : (roleList.default || "assistant");
+  roleSelect.disabled = Boolean(activeChatId);
+  roleSelect.hidden = roleList.roles.length === 0;
   const contextPopover = el("div", { class: "context-popover" });
   let llmUsage = null; // v74-F6: the local token tally, fetched on hover
   const contextMeter = el("div", {
@@ -2422,6 +2784,7 @@ async function viewChat(main, chatId) {
       policy.policy_groups?.length
         ? `groups: ${policy.policy_groups.map(g => g.name).join(", ")}` : null,
       `network: ${policy.network?.length ? policy.network.join(", ") : "(none)"}`,
+      policy.provider_hosts?.length ? `provider: ${policy.provider_hosts.join(", ")}` : null,
       `shell allowlist: ${policy.shell_allowlist?.length || 0} commands`,
       policy.trust_root
         ? `trust root: ${policy.trust_root}`
@@ -2551,6 +2914,7 @@ async function viewChat(main, chatId) {
         attachInput,
         mic,
         voiceToggle,
+        roleSelect,
         modelSelect,
         send)),
     el("div", { class: "composer-status-row" },
@@ -2700,7 +3064,12 @@ async function viewChat(main, chatId) {
     const result = unwrapToolResult(raw);
     if (result && tool === "dispatch_run" && result.task_id) {
       const where = result.repo ? ` on ${result.repo}` : "";
-      return `dispatched worker ${shortTaskId(result.task_id)}${where}`;
+      const delegated = delegationText(result.delegation);
+      return `dispatched worker ${shortTaskId(result.task_id)}${where}${delegated ? ` — ${delegated}` : ""}`;
+    }
+    if (result && tool === "batch_dispatch" && result.team) {
+      const chain = (result.delegation_chain || []).join(" → ");
+      return `dispatched team ${shortTaskId(result.team)}: ${chain} → ${result.count} worker(s)`;
     }
     if (result && tool === "start_research" && result.task_id) {
       return `dispatched researcher ${shortTaskId(result.task_id)}`;
@@ -2775,12 +3144,17 @@ async function viewChat(main, chatId) {
     const args = renderArgs(d.args);
     if (args) details.push(args);
     return [
+      tierNote(card),
       el("p", { class: "card-headline mono" }, card.headline || d.tool),
+      foldItems(card),
+      scheduleNode(card),
+      manifestNode(card),
       card.purpose ? el("p", { class: "card-purpose" }, card.purpose) : null,
       card.risk
         ? el("p", { class: "card-risk" },
             el("span", { class: "card-risk-label" }, "Needs your attention: "), card.risk)
         : null,
+      taintNote(card),
       details.length
         ? el("details", { class: "card-details" },
             el("summary", {}, "details"), details)
@@ -2788,24 +3162,36 @@ async function viewChat(main, chatId) {
     ];
   };
 
-  // v112-F1: the tools whose approve can persist a grant (v90-F3's set) —
-  // only these cards earn a keep selector; everything else approves once.
-  const REMEMBERABLE_TOOLS = new Set(["read_url", "run_shell", "start_process"]);
+  // first-run O4: the turn's closing tally (whyLine is top-level, T3-1).
+  const tallyNote = (d) => {
+    const turnDown = d.offer ? el("button", {}, "Turn it down") : null;
+    if (turnDown) {
+      turnDown.addEventListener("click", async () => {
+        turnDown.disabled = true;
+        try {
+          await api("POST", "/api/onboard/transparency", { verbose: false });
+          flash("ok", "why-lines off — skep onboard --verbose brings them back");
+        } catch (e) { flash("bad", e.message); turnDown.disabled = false; }
+      });
+    }
+    log.append(el("div", { class: "turn-tally" },
+      el("p", { class: "note" }, d.line),
+      d.offer ? el("p", { class: "note" }, d.offer, " ", turnDown) : null));
+    scrollBottom();
+  };
 
   // A proposed mutation: the model never holds the trigger — you do.
   const actionCard = (d) => {
     const approve = el("button", { class: "primary" }, "Approve");
     const refuse = el("button", { class: "danger" }, "Deny");
     // v112-F1: the keep choice rides the confirm — session stays the default.
-    const keep = REMEMBERABLE_TOOLS.has(d.tool)
-      ? el("select", { class: "card-keep", title: "How long this approval holds" },
-          el("option", { value: "once" }, "once"),
-          el("option", { value: "session", selected: "" }, "this session"),
-          el("option", { value: "always" }, "always"))
-      : null;
+    const keep = keepSelect(d.card);
     // v81-F13: the id on the DOM lets reconcilers see which cards are drawn.
-    const card = el("div", { class: "confirm-card", "data-action-id": d.action_id },
+    const card = el("div", { class: cardClass(d.card), "data-action-id": d.action_id },
       ...cardBody(d),
+      whyLine(d),
+      keepCovers(d.card),
+      cardReplay(d.card),
       el("div", { class: "actions" }, approve, refuse, keep));
     const verdict = (verb) => async () => {
       approve.disabled = refuse.disabled = true; // double-click guard
@@ -2829,24 +3215,7 @@ async function viewChat(main, chatId) {
     return card;
   };
 
-  // v90-F3: a receipt — an action that ran WITHOUT asking because a grant the
-  // operator already gave covers it. Same headline and risk as the approval
-  // card would have shown, and deliberately no buttons: it is a record, not a
-  // decision. Silence here used to be indistinguishable from nothing happening.
-  const receiptCard = (d) => {
-    const card = d.card || {};
-    const covered = d.decision && (d.decision.detail || d.decision.reason);
-    log.append(el("div", { class: "confirm-card receipt-card" },
-      el("p", { class: "card-kicker" }, "Ran without asking — you approved this already"),
-      el("p", { class: "card-headline mono" }, card.headline || d.tool),
-      card.risk ? el("p", { class: "card-risk" },
-        el("span", { class: "card-risk-label" }, "Risk: "), card.risk) : null,
-      covered ? el("p", { class: "card-purpose" }, `covered by ${covered}`) : null,
-      // v106-F11 (v90-F3): which tier of grant, given when.
-      d.grant ? el("p", { class: "note" },
-        `${d.grant.tier} grant · given ${d.grant.granted_at}`) : null));
-    scrollBottom();
-  };
+  const receiptCard = (d) => { log.append(receiptNode(d)); scrollBottom(); };
 
   // v54-F2: a resolved card hides its buttons (CSS on .resolved) and shows
   // the verdict instead — done, not just dimmed.
@@ -2948,11 +3317,7 @@ async function viewChat(main, chatId) {
         // buttons: a live Approve on a dead action can only 409, which reads
         // as "approval is broken" (the Aug 9 five-close_pr field test).
         if (drawn && !drawn.classList.contains("resolved")) {
-          const label = action.status === "confirmed" ? "✓ Approved"
-            : action.status === "superseded"
-              ? `✗ Superseded — ${(action.result && action.result.note) || "replaced by a newer card"}`
-              : "✗ Denied";
-          resolveCardUI(drawn, label, action.status === "confirmed" ? "confirm" : "deny");
+          resolveCardUI(drawn, ...cardVerdict(action));
         }
         continue;
       }
@@ -2983,7 +3348,7 @@ async function viewChat(main, chatId) {
     const card = (detail.actions || []).find(
       a => a.action_id === id && a.status === "proposed");
     if (!card) return false;
-    if (card.source === "operator") {
+    if (resolvesOnCommands(card)) {
       const result = await api("POST", `/api/chats/${activeChatId}/commands/${id}/${verb}`);
       commandResult(verb === "confirm" ? `${card.tool}: result` : `${card.tool}: canceled`, result);
     } else {
@@ -3023,6 +3388,17 @@ async function viewChat(main, chatId) {
       }
       if (name === "browser") {
         await proposeCommand("setup_browser", {});
+        return;
+      }
+      if (name === "trust") {
+        // W20: typed by the operator — the decision itself, no card. The model
+        // has no tool for this and no channel reaches it.
+        if (args.some((bit) => !["private", "untrusted"].includes(bit))) {
+          commandHelp(`usage: ${spec.usage}`);
+          return;
+        }
+        commandResult("/trust",
+          await api("POST", `/api/chats/${activeChatId}/trust`, { bits: args }));
         return;
       }
       if (name === "phase") {
@@ -3089,6 +3465,11 @@ async function viewChat(main, chatId) {
         }
         await proposeCommand("propose_schedule",
           { name: schedName, repo, every, instructions });
+        return;
+      }
+      if (name === "role") {
+        if (args.length !== 1) { commandHelp(`usage: ${spec.usage}`); return; }
+        await proposeCommand("set_role", { name: args[0] });
         return;
       }
       if (name === "personality") {
@@ -3270,6 +3651,7 @@ async function viewChat(main, chatId) {
           showWorking(d.tool ? `Running ${d.tool}…` : "Thinking…");
         },
         action: (d) => { hideWorking(); group = null; finishReply(); cardOpen = true; actionCard(d); },
+        tally: (d) => { hideWorking(); group = null; finishReply(); tallyNote(d); },
         // v51-F7: the question text already arrived as a normal message
         // delta; this event only adds the clickable choice buttons.
         clarification: (d) => { hideWorking(); finishReply(); clarificationChoices(d); },
@@ -3328,11 +3710,13 @@ async function viewChat(main, chatId) {
     // tool call) — an empty bubble reads as a rendering bug.
     else if ((message.content && message.content.trim()) || message.thinking) {
       replayGroup = null;
+      const own = message.role === "user" && authorLabel(message, null) === null;
       renderChatMessage(log, message.role, message.content, {
-        label: message.role === "user" ? "You" : (activeChat?.model || llm.default_model || "skep"),
+        label: authorLabel(message,
+          message.role === "user" ? "You" : (activeChat?.model || llm.default_model || "skep")),
         createdAt: message.created_at,
         thinking: message.thinking,
-        onResend: message.role === "user" ? fillInput : null,
+        onResend: own ? fillInput : null,
         scroll: scrollBottom,
         attachments: message.attachments || [],
         chatId: activeChatId,
@@ -3345,12 +3729,16 @@ async function viewChat(main, chatId) {
 
   const ensureChat = async () => {
     if (activeChatId) return;
-    activeChat = await api("POST", "/api/chats", { model: modelSelect.value || null });
+    activeChat = await api("POST", "/api/chats",
+      { model: modelSelect.value || null, role: roleSelect.hidden ? null : roleSelect.value });
     activeChatId = activeChat.chat_id;
     chats = [activeChat, ...chats.filter(chat => chat.chat_id !== activeChatId)];
     modelSelect.value = activeChat.model || llm.default_model || "";
     modelSelect.disabled = true;
     modelSelect.title = "start a new chat to change model";
+    roleSelect.value = activeChat.role || "";
+    roleSelect.disabled = true;
+    roleSelect.title = "switch with /role <name>";
     history.replaceState(null, "", `#/chat/${activeChatId}`);
     setShellActiveRoute(location.hash);
     renderSidebarChats(chatSidebar, chats, activeChatId, llm.default_model);
@@ -3694,12 +4082,37 @@ function buildRunCard(run) {
       (run.summary || run.instructions || "—").slice(0, 120)),
     el("div", { class: "run-card-meta" },
       ...workerChips(run),
+      run.dispatch_decision?.delegation
+        ? el("span", { class: "chip", title: "delegated by" },
+          delegationText(run.dispatch_decision.delegation))
+        : null,
+      taintChip(run.dispatch_decision),
       project ? el("span", {}, project) : null,
       autonomy !== "-" ? el("span", { class: "run-card-autonomy mono" }, autonomy) : null));
 }
 
+// first-run L1: coding agents on this machine, governed or not — the same
+// presence_view as `skep agents` and the Queen's list_agents. Blocked and
+// ungoverned is the gap: an agent waiting on a prompt skep does not gate.
+async function buildAgentsSection() {
+  let view;
+  try { view = await api("GET", "/api/agents"); } catch { return null; }
+  if (!view.agents.length) return null;
+  return el("section", { class: "run-group" },
+    el("div", { class: "run-group-header" },
+      el("h3", {}, "Agents on this machine"),
+      el("span", { class: "run-group-count" }, String(view.agents.length))),
+    el("p", { class: "run-card-summary" }, view.summary),
+    el("ul", {}, view.agents.map(a => el("li", { class: "mono" },
+      `${a.agent} · pid ${a.pid} · ${a.state} · `,
+      a.governed ? `governed run ${a.task_id || "?"}${a.role ? ` (${a.role})` : ""}` : "ungoverned",
+      a.gap ? el("strong", {}, " — blocked and ungoverned") : null))));
+}
+
 async function viewRuns(main) {
   header(main, "Runs", "Everything the hive has done, newest first.");
+  const agents = await buildAgentsSection();
+  if (agents) main.append(agents);
   const { runs } = await api("GET", "/api/runs?limit=100");
   if (!runs.length) { main.append(el("p", { class: "empty-state" }, "No runs yet — assign one.")); return; }
   const cards = el("div", { class: "run-cards" });
@@ -3797,6 +4210,8 @@ async function viewRunDetail(main, taskId) {
     kv("binding", `${detail.project_context.binding_kind}: ${detail.project_context.binding_value}`);
   }
   kv("dispatch", formatDecision(detail.dispatch_decision) || "-");
+  const delegated = delegationText(detail.dispatch_decision?.delegation);
+  if (delegated) kv("delegated", el("span", { class: "mono" }, delegated));
   kv("landing", formatDecision(detail.landing_decision) || "-");
   kv("verification", run.verification_outcome || "-");
   if (detail.reverification) {
@@ -3857,7 +4272,7 @@ async function viewRunDetail(main, taskId) {
         await api("POST", `/api/approvals/${await ensureReview()}/deny`, { note: "denied from UI" });
         flash("ok", "denied");
       }));
-    if (pending[0]?.action === "shell.run") {
+    if (pending[0]?.action === "shell.run" && offersRemember(pending[0])) {
       actions.append(act(isBatch ? "Allow all & remember" : "Allow command", "ghost", async () => {
         const result = await api("POST", `/api/approvals/${await ensureReview()}/allow-command`, {});
         if (result.resumed_as) location.hash = `#/runs/${result.resumed_as}`;
@@ -4131,13 +4546,14 @@ async function viewApprovals(main) {
     actions.append(
       verdict(isBatch ? `Approve all ${batchCommands.length}` : "Approve", "primary", "approve", {}),
       verdict("Deny", "danger", "deny", { note: "denied from UI" }));
-    if (approval.action === "shell.run") {
+    if (approval.action === "shell.run" && offersRemember(approval)) {
       actions.append(
         verdict(isBatch ? "Allow all & remember" : "Allow command", "ghost", "allow-command", {}),
         verdict("Skip", "ghost", "deny", { note: "skipped from UI" }),
       );
     }
-    if (approval.action === "network.fetch" || approval.action === "network.read") {
+    if ((approval.action === "network.fetch" || approval.action === "network.read")
+        && offersRemember(approval)) {
       // v109-F7: the network twin of "Allow command" — remember the blocked
       // host for this repo's project and resume.
       actions.append(
@@ -5710,10 +6126,11 @@ async function renderChannelsTab(panel) {
     if (requireMention) requireMention.checked = !!channel.require_mention;
     const autoThread = name === "discord" ? el("input", { type: "checkbox" }) : null;
     if (autoThread) autoThread.checked = !!channel.auto_thread;
-    const users = name === "discord" ? el("input", {
+    // ES (B114): every channel authorizes a PERSON — empty admits nobody.
+    const users = el("input", {
       value: (channel.allowed_users || []).join(", "),
-      placeholder: "allow-listed user ids, comma-separated (empty = any user in an allowed channel)",
-    }) : null;
+      placeholder: "user ids who may drive skep, comma-separated (empty = nobody)",
+    });
     const saveChannel = el("button", { class: "primary" }, "Save channel");
     saveChannel.addEventListener("click", async () => {
       saveChannel.disabled = true;
@@ -5726,7 +6143,7 @@ async function renderChannelsTab(panel) {
         };
         if (requireMention) body.require_mention = requireMention.checked;
         if (autoThread) body.auto_thread = autoThread.checked;
-        if (users) body.allowed_users = users.value.split(",").map(s => s.trim()).filter(Boolean);
+        body.allowed_users = users.value.split(",").map(s => s.trim()).filter(Boolean);
         if (secret.value.trim()) body.secret = secret.value.trim();
         if (signingSecret && signingSecret.value.trim()) {
           body.signing_secret = signingSecret.value.trim();
@@ -5759,8 +6176,8 @@ async function renderChannelsTab(panel) {
           requireMention, " require @mention in servers"),
         el("label", { title: "each routed mention opens a thread; the conversation continues there" },
           autoThread, " auto-thread per mention")) : null,
-      users ? el("div", { class: "row" },
-        el("div", { class: "field grow" }, el("label", {}, "allowed users"), users)) : null,
+      el("div", { class: "row" },
+        el("div", { class: "field grow" }, el("label", {}, "allowed users"), users)),
       el("div", { class: "row" },
         el("div", { class: "field grow" }, el("label", {}, "bot token (write-only)"), secret),
         signingSecret

@@ -15,12 +15,12 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.base import RequestResponseEndpoint
 
 from skep.worker_contract import Event
@@ -35,12 +35,14 @@ from .actions import (
     apply_patch,
     approval_event_views_for_task,
     approval_views,
+    approve_policy_baseline,
     command_views_for_task,
     create_branch,
     created_event_view_for_task,
     created_transition_views_for_task,
     current_events,
     delete_policy_group,
+    deny_approval,
     diagnose_run,
     effective_policy_view,
     land_run,
@@ -54,12 +56,14 @@ from .actions import (
     pending_approval_or_409,
     policy_block_views,
     policy_decide,
+    policy_decisions,
     policy_why,
     preserved_resumable_hint,
     project_context_detail_view,
     refresh_repo,
     remember_ledger_entry,
     remember_suggestion_for_review,
+    remembered_where,
     repo_state_view,
     require_run,
     resume_past_gate,
@@ -70,12 +74,13 @@ from .actions import (
     run_summary_view,
     set_policy_group,
     submit_run,
+    submit_team,
     transition_detail_view,
     update_policy,
     workon,
     workon_preview,
 )
-from .auth import ensure_token, install_auth
+from .auth import annotate_claim, ensure_token, install_auth, principal
 from .channels.runtime import DiscordGateway, TelegramPoller, add_slack_routes
 from .chat import (
     GET_RUN_REPEAT_DELAY_SECONDS,
@@ -132,12 +137,36 @@ class RunRequest(BaseModel):
     # submit_run already took it; this route simply never passed it, so the
     # CLI/REST operator had no way to run one brief on a named engine.
     engine: str | None = None
+    # first-run R3 (ADR 0055 D5): the worker's own role, and who delegated
+    # (actor@role, outermost first) — the worker holds no more than either.
+    role: str | None = None
+    delegation_chain: list[str] = Field(default_factory=list)
+
+
+class TeamTask(BaseModel):
+    repo: str
+    instructions: str
+    caste: str = "coding"
+    role: str | None = None
+    execution_mode: Literal["workspace", "sandbox"] | None = None
+    engine: str | None = None
+
+
+class TeamRequest(BaseModel):
+    """Body of ``POST /api/teams`` (first-run R3) — the chat's
+    ``batch_dispatch`` with ``manager``."""
+
+    manager: str
+    tasks: list[TeamTask] = Field(min_length=1, max_length=3)
+    delegation_chain: list[str] = Field(default_factory=list)
 
 
 class ResolveRequest(BaseModel):
-    """Body of the approve/deny actions — who decided, and an optional note."""
+    """Body of the approve/deny actions — an optional note. ``actor`` is a
+    client's claim, kept as a note annotation only: the decider recorded is
+    the authenticated principal (ES-F1, B05/B51)."""
 
-    actor: str = "operator"
+    actor: str | None = None
     note: str | None = None
     # v20-F5: optional named landing branch on approve (default skep/<task_id>).
     branch: str | None = None
@@ -159,13 +188,13 @@ class SteerRequest(BaseModel):
     Input, never authority — it resolves no card, approval, or gate."""
 
     text: str = Field(min_length=1, max_length=4000)
-    actor: str = "operator"
+    actor: str | None = None  # ES-F1: ignored; the principal is recorded
 
 
 class PrRequest(BaseModel):
     """Body of the open-PR action."""
 
-    actor: str = "operator"
+    actor: str | None = None  # ES-F1: a claim, annotation only
     base: str = "main"
     note: str | None = None
 
@@ -184,7 +213,11 @@ class BranchMergeRequest(BaseModel):
 
 
 class PolicyUpdate(BaseModel):
-    """Body of ``PUT /api/policy`` — only provided fields are written."""
+    """Body of ``PUT /api/policy`` — only provided fields are written. B82: an
+    unknown key rides through to ``update_policy``, which answers 400 naming
+    it (it used to be dropped with a 200)."""
+
+    model_config = ConfigDict(extra="allow")
 
     auto_approve: bool | None = None
     worker_cmd: str | None = None
@@ -194,6 +227,7 @@ class PolicyUpdate(BaseModel):
     trusted_workspace_roots: list[str] | None = None
     sandbox_required_for: list[str] | None = None
     ticker_interval_seconds: int | None = Field(default=None, ge=1)
+    card_timeout_seconds: int | None = Field(default=None, ge=0)  # B82: was dropped
     default_wall_clock_seconds: int | None = Field(default=None, ge=1)
     default_max_iterations: int | None = Field(default=None, ge=1)
     default_max_actions: int | None = Field(default=None, ge=1)
@@ -201,7 +235,7 @@ class PolicyUpdate(BaseModel):
     allowed_shell_commands: list[list[str]] | None = None
     allowed_plugin_risks: list[str] | None = None
     # v44-F7: worker sandbox backend — "auto" (native Seatbelt/bwrap) | "podman".
-    sandbox_backend: Literal["auto", "podman"] | None = None
+    sandbox_backend: Literal["auto", "podman", "none"] | None = None
     # P1 (ADR 0053 D6): scopes routed through policy engine v2.
     policy_engine_v2_scopes: list[str] | None = None
 
@@ -215,6 +249,42 @@ class PolicyDecideRequest(BaseModel):
     value: str
     repo: str | None = None
     actor: str = "api"
+    role: str | None = None  # R1: decide under this role's layer
+    delegation_chain: list[str] = []  # R2: actor@role hops, outermost first
+    read_only: bool = False  # P3-3: the MCP / browse / email action reports itself read-only
+
+
+class BaselineApproveRequest(BaseModel):
+    """Body of ``POST /api/policy/baseline/approve`` (first-run O2): the
+    layer to lock — a template name or a layer file — or a re-lock."""
+
+    template: str | None = None
+    file: str | None = None
+    reapprove: bool = False
+    approved_by: str | None = None  # ES-F1: ignored; the principal is recorded
+
+
+class TransparencyRequest(BaseModel):
+    """Body of ``POST /api/onboard/transparency`` (first-run O4): false turns
+    the why-lines off, true brings them back."""
+
+    verbose: bool
+
+
+class OnboardStepRequest(BaseModel):
+    """Body of ``POST /api/onboard/{step}`` (first-run O3): that step's answers,
+    the same ones `skep onboard` takes as flags. The key is an env-var NAME."""
+
+    provider: str | None = None
+    model: str | None = None
+    endpoint: str | None = None
+    api_key_env: str | None = None
+    path: str | None = None
+    backend: str | None = None
+    template: str | None = None
+    expect_sha256: str | None = None
+    role: str | None = None
+    approved_by: str | None = None  # ES-F1: ignored; the principal is recorded
 
 
 class DefaultWorkspaceRequest(BaseModel):
@@ -276,7 +346,7 @@ def create_app(
     channels_on = start_ticker if start_channels is None else start_channels
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(started: FastAPI) -> AsyncIterator[None]:
         # v19-F10: truncate the WAL on startup so it does not grow unbounded.
         run_store.checkpoint()
         # v59-F10: reap runs stranded by a previous supervisor death — a valid
@@ -295,6 +365,24 @@ def create_app(
             )
         except Exception:
             logging.getLogger("skep.serve").exception("interrupted-run recovery failed")
+        try:
+            # ES-F1/F4: a card or landing claimed by a process that died
+            # mid-execute ends honestly — never re-run, never reopened (either
+            # could double a mutation whose effect is unknown).
+            interrupted = run_store.interrupt_executing_chat_actions()
+            if interrupted:
+                logging.getLogger("skep.serve").warning(
+                    "%d card(s) were executing when serve stopped; marked interrupted",
+                    interrupted,
+                )
+            landings = run_store.interrupt_applying_approvals()
+            if landings:
+                logging.getLogger("skep.serve").warning(
+                    "%d landing(s) were applying when serve stopped; denied as interrupted",
+                    landings,
+                )
+        except Exception:
+            logging.getLogger("skep.serve").exception("interrupted-card sweep failed")
         try:
             # v86-F1: a serve restart ends the approval session — drop the
             # session-tier shell grants the previous process collected.
@@ -320,6 +408,14 @@ def create_app(
                 )
         except Exception:
             logging.getLogger("skep.serve").exception("session-approval clear failed")
+        try:
+            # first-run O2 (ADR 0056 D1): verify the policy baseline before the
+            # first decision; a tampered one cards the operator once.
+            from .actions import baseline_alarm
+
+            baseline_alarm(holder, run_store)
+        except Exception:
+            logging.getLogger("skep.serve").exception("policy baseline check failed")
         try:
             # v83-F12 (ADR 0043): sync the shipped seed shelf — idempotent,
             # zero-grant only, operator copies and tombstones win.
@@ -364,6 +460,8 @@ def create_app(
         except Exception:
             logging.getLogger("skep.serve").exception("seed-skill sync failed")
         ticker = Ticker(holder, run_store, runner=runner) if start_ticker else None
+        # ES B119: serve_cmds' signal handler halts it before the drain.
+        started.state.ticker = ticker
         if ticker is not None:
             ticker.start()
         poller = (
@@ -444,6 +542,13 @@ def create_app(
             "runs": [run_summary_view(run_store, r) for r in run_store.recent_runs(min(limit, 500))]
         }
 
+    @app.get("/api/agents")
+    def list_agents() -> dict[str, Any]:
+        """first-run L1: the agent-presence table — the CLI's `skep agents`."""
+        from ..agent_presence import presence_view
+
+        return presence_view(run_store, holder.current.audit_dir)
+
     @app.post("/api/runs", status_code=202)
     def create_run(body: RunRequest) -> dict[str, str]:
         # v109-F6: same helper, same line as the chat face — a resumable prior
@@ -467,11 +572,30 @@ def create_app(
             requested_actions=body.requested_actions,
             protocol=body.protocol,
             engine=body.engine,
+            role=body.role,
+            delegation_chain=body.delegation_chain,
+            # V7: the operator's own face — its gate cards have a human.
+            deferred_asks=True,
         )
         response = {"task_id": task_id, "state": "dispatched"}
         if hint is not None:
             response["hint"] = hint
         return response
+
+    @app.post("/api/teams", status_code=202)
+    def create_team(body: TeamRequest) -> dict[str, Any]:
+        """first-run R3 (ADR 0055 D5): a team run — a manager in ``manager``'s
+        role dispatches every task; one ledger thread (the chat's
+        ``batch_dispatch manager=`` and ``skep team``)."""
+        return submit_team(
+            holder,
+            runner,
+            run_store,
+            manager=body.manager,
+            tasks=[task.model_dump(exclude_none=True) for task in body.tasks],
+            delegation_chain=body.delegation_chain,
+            deferred_asks=True,
+        )
 
     @app.get("/api/policy")
     def get_policy() -> dict[str, Any]:
@@ -504,12 +628,145 @@ def create_app(
         return registry_view()
 
     @app.get("/api/policy/why")
-    def get_policy_why(repo: str, scope: str, action: str, value: str) -> dict[str, Any]:
+    def get_policy_why(
+        repo: str,
+        scope: str,
+        action: str,
+        value: str,
+        role: str | None = None,
+        delegation_chain: Annotated[list[str] | None, Query()] = None,
+    ) -> dict[str, Any]:
         """P0-3 (ADR 0052): would <scope>.<action> <value> be allowed in <repo>?"""
         try:
-            return policy_why(holder, run_store, repo, scope, action, value)
+            return policy_why(
+                holder,
+                run_store,
+                repo,
+                scope,
+                action,
+                value,
+                role=role,
+                delegation_chain=delegation_chain or (),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/policy/explain")
+    def get_policy_explain(subject: str) -> dict[str, Any]:
+        """first-run O1 (ADR 0056 D3): a template, the baseline or a role as
+        the allow / ask / deny table — the CLI's `skep policy explain`."""
+        from ..policy_templates import explain_view
+
+        try:
+            return explain_view(subject, holder.current.home)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/policy/baseline")
+    def get_policy_baseline() -> dict[str, Any]:
+        """first-run O2: the baseline's state — ok, reapprove, tampered (with
+        the diff and since when) or none — the CLI's `policy baseline status`."""
+        from ..policy_baseline import baseline_status, status_line
+
+        return {**baseline_status(holder.current.home), "line": status_line(holder.current.home)}
+
+    @app.post("/api/policy/baseline/approve")
+    def post_policy_baseline_approve(
+        body: BaselineApproveRequest, request: Request
+    ) -> dict[str, Any]:
+        """first-run O2 (ADR 0056 D1): lock a layer as the approved baseline —
+        the CLI's `skep policy approve`, the chat card's verb."""
+        try:
+            return approve_policy_baseline(
+                holder.current.home,
+                template=body.template,
+                file=body.file,
+                reapprove=body.reapprove,
+                approved_by=principal(request),
+                store=run_store,
+                holder=holder,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # first-run R1 (ADR 0055 D3): the new-chat picker's choices and default.
+    @app.get("/api/roles")
+    def get_roles() -> dict[str, Any]:
+        from ..roles import roles_view
+
+        try:
+            return roles_view(run_store, holder.current.home)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # first-run O3 (ADR 0056 D7, ADR 0050): the web /setup form is a thin face
+    # over `skep onboard`'s step functions — these routes call exactly them.
+    @app.get("/api/onboard")
+    def get_onboard() -> dict[str, Any]:
+        from .. import onboard
+
+        return onboard.onboard_status(holder.current.home)
+
+    @app.get("/api/onboard/check")
+    def get_onboard_check() -> dict[str, Any]:
+        from .. import onboard
+
+        return onboard.onboard_check(holder.current.home)
+
+    @app.get("/api/onboard/sandboxes")
+    def get_onboard_sandboxes() -> dict[str, Any]:
+        from .. import onboard
+
+        return onboard.detect_sandboxes()
+
+    @app.get("/api/onboard/template")
+    def get_onboard_template(template: str) -> dict[str, Any]:
+        from .. import onboard
+
+        try:
+            return onboard.template_preview(holder, template=template)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/onboard/transparency")
+    def post_onboard_transparency(body: TransparencyRequest) -> dict[str, Any]:
+        """first-run O4 (ADR 0056 D6): `skep onboard --quiet | --verbose`."""
+        from .. import onboard
+
+        return onboard.onboard_transparency(holder.current.home, verbose=body.verbose)
+
+    @app.post("/api/onboard/{step}")
+    def post_onboard_step(step: str, body: OnboardStepRequest, request: Request) -> dict[str, Any]:
+        from .. import onboard
+
+        try:
+            if step == "model":
+                return onboard.onboard_model(
+                    holder,
+                    run_store,
+                    provider=body.provider or "ollama",
+                    model=body.model or "",
+                    endpoint=body.endpoint,
+                    api_key_env=body.api_key_env,
+                )
+            if step == "workdir":
+                return onboard.onboard_workdir(holder, run_store, path=body.path or "")
+            if step == "sandbox":
+                return onboard.onboard_sandbox(holder, run_store, backend=body.backend or "")
+            if step == "template":
+                return onboard.onboard_template(
+                    holder,
+                    template=body.template or onboard.DEFAULT_TEMPLATE,
+                    approved_by=principal(request),
+                    expect_sha256=body.expect_sha256,
+                )
+            if step == "role":
+                return onboard.onboard_role(holder, role=body.role or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=404, detail=f"no onboard step {step!r}; steps: {', '.join(onboard.STEPS)}"
+        )
 
     @app.post("/api/policy/decide")
     def post_policy_decide(body: PolicyDecideRequest) -> dict[str, Any]:
@@ -524,6 +781,24 @@ def create_app(
                 value=body.value,
                 repo=body.repo,
                 actor=body.actor,
+                role=body.role,
+                delegation_chain=body.delegation_chain,
+                read_only=body.read_only,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/policy/decisions")
+    def get_policy_decisions(
+        actor: str | None = None,
+        since: str | None = None,
+        limit: int = 200,
+        team: str | None = None,
+    ) -> dict[str, Any]:
+        """ADR 0054 A3: decisions.jsonl read back — what the governed agents did."""
+        try:
+            return policy_decisions(
+                holder.current.audit_dir, actor=actor, since=since, limit=limit, team=team
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -644,35 +919,34 @@ def create_app(
         """Open (or return) the pending review for a run — how a completed run's
         patch enters the approval queue (the CLI's pending-or-new semantics)."""
         run = _require_run(task_id)
-        pending = [a for a in run_store.approvals_for(task_id) if a.status == "pending"]
-        if pending:
-            return {"review_id": pending[0].review_id}
-        if run["state"] != "pending_approval" and patch_path(run_store, task_id) is None:
-            raise HTTPException(
-                status_code=409, detail="nothing to approve: no pending gate and no patch"
-            )
-        review_id = run_store.enqueue_approval(
+        # ES-F4 (B17): pending-or-new in one store call.
+        review_id = run_store.pending_or_enqueue_approval(
             task_id,
             action="apply_patch",
             reason=landing_reason(str(run.get("instructions") or ""), None),
+            create=run["state"] == "pending_approval" or patch_path(run_store, task_id) is not None,
         )
+        if review_id is None:
+            raise HTTPException(
+                status_code=409, detail="nothing to approve: no pending gate and no patch"
+            )
         return {"review_id": review_id}
 
     @app.post("/api/approvals/{review_id}/approve")
-    def approve(review_id: str, body: ResolveRequest) -> dict[str, str]:
+    def approve(review_id: str, body: ResolveRequest, request: Request) -> dict[str, str]:
+        actor = principal(request)
         approval = pending_approval_or_409(run_store, review_id)
         run = _require_run(str(approval["task_id"]))
         if run["state"] == "pending_approval":
-            resumed_id = resume_past_gate(
-                run_store, holder.current, runner, run, review_id, body.actor
-            )
+            resumed_id = resume_past_gate(run_store, holder.current, runner, run, review_id, actor)
             resumed = {"action": "resumed", "resumed_as": resumed_id}
             # v109-F8: the Nth identical approval says so (a hint, never a block).
-            suggestion = remember_suggestion_for_review(run_store, review_id)
+            suggestion = remember_suggestion_for_review(run_store, review_id, holder.current)
             if suggestion is not None:
                 resumed["suggestion"] = suggestion
             return resumed
-        branch = apply_patch(run_store, run, review_id, body.actor, body.note, branch=body.branch)
+        note = annotate_claim(body.note, body.actor)
+        branch = apply_patch(run_store, run, review_id, actor, note, branch=body.branch)
         applied = {"action": "applied", "branch": branch}
         # v20-F3: warn when landing a run the supervisor could not re-verify.
         warning = reverification_warning(run_store.reverification_for(str(run["task_id"])))
@@ -698,33 +972,44 @@ def create_app(
         )
 
     @app.post("/api/approvals/{review_id}/allow-command")
-    def allow_command(review_id: str, body: ResolveRequest) -> dict[str, str]:
+    def allow_command(review_id: str, body: ResolveRequest, request: Request) -> dict[str, str]:
         approval = pending_approval_or_409(run_store, review_id)
         run = _require_run(str(approval["task_id"]))
         resumed_id = allow_shell_command_and_resume(
-            run_store, holder, runner, run, approval, review_id, body.actor
+            run_store, holder, runner, run, approval, review_id, principal(request)
         )
-        return {"action": "allowed_command", "resumed_as": resumed_id}
+        # P3-4 (B18): the receipt names where the grant holds (I8).
+        return {
+            "action": "allowed_command",
+            "resumed_as": resumed_id,
+            "remembered": remembered_where(run_store, Path(str(run["repo"]))),
+        }
 
     @app.post("/api/approvals/{review_id}/allow-host")
-    def allow_host(review_id: str, body: ResolveRequest) -> dict[str, str]:
+    def allow_host(review_id: str, body: ResolveRequest, request: Request) -> dict[str, str]:
         """v109-F7: the network twin of allow-command — remember the blocked
         host for this repo's project and resume the gated run."""
         approval = pending_approval_or_409(run_store, review_id)
         run = _require_run(str(approval["task_id"]))
         resumed_id = allow_network_host_and_resume(
-            run_store, holder, runner, run, approval, review_id, body.actor
+            run_store, holder, runner, run, approval, review_id, principal(request)
         )
-        return {"action": "allowed_host", "resumed_as": resumed_id}
+        # W28 (B18): the host is a project grant; the receipt says where.
+        return {
+            "action": "allowed_host",
+            "resumed_as": resumed_id,
+            "remembered": remembered_where(run_store, Path(str(run["repo"]))),
+        }
 
     @app.post("/api/approvals/{review_id}/deny")
-    def deny(review_id: str, body: ResolveRequest) -> dict[str, str]:
-        pending_approval_or_409(run_store, review_id)
-        run_store.resolve_approval(review_id, approved=False, actor=body.actor, note=body.note)
+    def deny(review_id: str, body: ResolveRequest, request: Request) -> dict[str, str]:
+        deny_approval(
+            run_store, review_id, principal(request), annotate_claim(body.note, body.actor)
+        )
         return {"action": "denied"}
 
     @app.post("/api/approvals/{review_id}/pr")
-    def open_pr(review_id: str, body: PrRequest) -> dict[str, Any]:
+    def open_pr(review_id: str, body: PrRequest, request: Request) -> dict[str, Any]:
         """Open a GitHub PR from the applied branch — approves first if pending.
         The U1 'land': never a push to main."""
         approval = run_store.get_approval(review_id)
@@ -738,7 +1023,11 @@ def create_app(
             )
         if approval.status == "pending":
             branch = apply_patch(
-                run_store, run, review_id, body.actor, body.note or "approved via PR"
+                run_store,
+                run,
+                review_id,
+                principal(request),
+                annotate_claim(body.note or "approved via PR", body.actor),
             )
         elif approval.status == "approved":
             # v81-F4: the persisted landing branch is the truth — a maintain
@@ -753,12 +1042,18 @@ def create_app(
         )
 
     @app.post("/api/runs/{task_id}/land")
-    def land(task_id: str, body: ResolveRequest) -> dict[str, Any]:
+    def land(task_id: str, body: ResolveRequest, request: Request) -> dict[str, Any]:
         """v25-F1: the deck's /land — the land_run verb (v23-F7) over HTTP:
         opens the landing review if none exists and applies the patch, gated
         by the operator having initiated this exact call."""
         run = _require_run(task_id)
-        return land_run(run_store, run, body.actor, note=body.note, branch=body.branch)
+        return land_run(
+            run_store,
+            run,
+            principal(request),
+            note=annotate_claim(body.note, body.actor),
+            branch=body.branch,
+        )
 
     @app.post("/api/runs/{task_id}/diagnose")
     def diagnose_run_route(task_id: str, body: DiagnoseRequest) -> dict[str, Any]:
@@ -776,7 +1071,7 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/runs/{task_id}/steer", status_code=201)
-    def steer_run(task_id: str, body: SteerRequest) -> dict[str, Any]:
+    def steer_run(task_id: str, body: SteerRequest, request: Request) -> dict[str, Any]:
         """v69-F4 (R12a): drop a steering note into a RUNNING react loop.
 
         The note reaches the worker as an observation before its next action
@@ -812,10 +1107,11 @@ def create_app(
                 detail="the run's worktree is gone — the run is ending; too late to steer",
             )
         steering_dir.mkdir(parents=True, exist_ok=True)
-        line = {"actor": body.actor, "text": body.text}
+        actor = principal(request)
+        line = {"actor": actor, "text": body.text}
         with (steering_dir / "steering.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(line, ensure_ascii=True) + "\n")
-        run_store.add_run_steering(resolved_id, actor=body.actor, text=body.text)
+        run_store.add_run_steering(resolved_id, actor=actor, text=body.text)
         return {"task_id": resolved_id, "steered": True}
 
     @app.get("/api/runs/{task_id}")

@@ -560,6 +560,22 @@ class PersonalModeTests(unittest.TestCase):
             self.assertEqual(status["sandbox"]["backend"], "bubblewrap")
             self.assertIn("sandbox: ready", report)
             self.assertIn("bubblewrap", report)
+            # R5 (I12): the socket residual bubblewrap cannot close is stated
+            self.assertIn("abstract unix sockets", report)
+
+    def test_doctor_states_the_podman_socket_residual_and_not_bubblewraps(self) -> None:
+        """R5 (I12): podman binds /home read-only too, so an unlisted path
+        socket is reachable there; abstract ones are not (own netns)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            run_personal_setup(home, provider="mock", model="local-ready")
+            with mock.patch(
+                "skep.status.sandbox_availability",
+                return_value=SandboxAvailability(True, backend="podman"),
+            ):
+                report = format_doctor_report(build_status(home))
+            self.assertIn("mask list does not name", report)
+            self.assertNotIn("abstract", report)
 
     def test_unavailable_sandbox_is_reported_without_blocking_workspace_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

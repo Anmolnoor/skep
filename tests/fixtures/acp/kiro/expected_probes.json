@@ -1,0 +1,59 @@
+[
+  {
+    "fixture": "kiro_permission_modes-full_access.ndjson",
+    "line": 29,
+    "tool_call_id": "tooluse_nxQz7qPeqdYs95IznqIl1W",
+    "probe": {
+      "kind": "decided",
+      "items": [
+        [
+          "filesystem",
+          "write",
+          "workspace"
+        ]
+      ],
+      "cwd": "$REPO"
+    }
+  },
+  {
+    "fixture": "kiro_permission_modes-supervised.ndjson",
+    "line": 25,
+    "tool_call_id": "tooluse_mx8qFNt29VcYMEFvVuNoHz",
+    "probe": {
+      "kind": "decided",
+      "items": [
+        [
+          "filesystem",
+          "write",
+          "workspace"
+        ]
+      ],
+      "cwd": "$REPO"
+    }
+  },
+  {
+    "fixture": "kiro_permission_modes-supervised.ndjson",
+    "line": 29,
+    "tool_call_id": "turn_approval_1792442850111_1792442850111_845lqoed",
+    "probe": {
+      "kind": "no_opinion",
+      "reason": "toolCallId turn_approval_1792442850111_1792442850111_845lqoed was never announced"
+    }
+  },
+  {
+    "fixture": "turn_interrupt_mid_tool.ndjson",
+    "line": 26,
+    "tool_call_id": "run_command_tooluse_y1v4bBCwl4978KEjYmFWrP",
+    "probe": {
+      "kind": "decided",
+      "items": [
+        [
+          "shell",
+          "run",
+          "node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\""
+        ]
+      ],
+      "cwd": "$REPO"
+    }
+  }
+]

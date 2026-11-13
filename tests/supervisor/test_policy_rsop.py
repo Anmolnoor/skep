@@ -14,13 +14,13 @@ from skep.supervisor.serve.actions import policy_why, rsop_view
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_read_tool
 
-from .conftest import serve_client
+from .conftest import predating_home, serve_client
 
 
 def _seed(config: SupervisorConfig, repo: Path) -> None:
     """global default_network → group adds a host → project overrides a budget;
     maintain phase sets the landing branch; one key is never set anywhere."""
-    store = RunStore(config.db_path)
+    store = RunStore(predating_home(config.db_path))
     try:
         store.set_setting("default_network", ["pypi.org"])
         store.set_setting("default_execution_mode", "workspace")
@@ -101,6 +101,7 @@ def test_rsop_renders_unresolved_as_unresolved(repo: Path, config: SupervisorCon
     assert view["floor"] == [
         "floor.worker-git-hard-denies",
         "floor.never-grantable-prefixes",
+        "floor.secret-reads",
         "floor.outbound-content",
     ]
 
@@ -123,7 +124,7 @@ def test_rsop_attributes_compiled_rules_and_operator_rules_to_their_sources(
     assert operator["net:search"]["source"] == "operator_policy_document"
 
 
-def test_why_answers_with_the_rule_that_decided_or_the_default_deny(
+def test_why_answers_with_the_rule_that_decided_or_unmatched(
     repo: Path, config: SupervisorConfig
 ) -> None:
     _seed(config, repo)
@@ -142,8 +143,8 @@ def test_why_answers_with_the_rule_that_decided_or_the_default_deny(
     assert allowed["run"]["rule_id"] == "shell:uv sync"
     assert allowed["run"]["decided_by"].endswith("/shell:uv sync")
     assert [rule["rule_id"] for rule in allowed["run"]["considered"]] == ["shell:uv sync"]
-    assert denied["run"]["verdict"] == "deny"
-    assert denied["run"]["rule_id"] == "default-deny"
+    assert denied["run"]["verdict"] == "require_approval"  # ADR 0059 B77
+    assert denied["run"]["decided_by"] == "default/unmatched"
     # F1 (I4): the floor answers before any document, for the run AND the
     # Queen, naming the registry's floor key; a compound line does not hide it.
     assert floored["run"]["rule_id"] == "floor.worker-git-hard-denies"

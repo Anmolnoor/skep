@@ -107,7 +107,11 @@ def test_terminal_failure_lands_one_honest_line_and_pushes_out(
 
         notify_run_terminal(store, tmp_path, task.task_id)
         (message,) = store.chat_messages(chat.chat_id)
-        assert message.role == "assistant"
+        # W21c: the notice carries the worker's words (its failure reason, its
+        # summary) — an outside row, never the Queen's own, and it taints.
+        assert message.provenance == f"worker:{task.task_id}"
+        assert not message.trusted
+        assert store.get_chat_taint(chat.chat_id).untrusted == message.id
         assert "failed" in message.content
         assert "peer closed connection" in message.content
         # v78-F1: a plain failure is informational, not action-needed.

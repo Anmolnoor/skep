@@ -11,8 +11,10 @@ verbs as the buttons in the Approvals/Policies views, under actor
 
 from __future__ import annotations
 
+import functools
 import json
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, get_args
@@ -25,6 +27,7 @@ from ..engines import engine_names
 from ..memory import MEMORY_CLASSES, MemoryError
 from ..projects import list_projects, project_to_dict
 from ..providers import PROVIDER_COST_CLASSES, PROVIDER_PROTOCOLS
+from ..roles import Role, role_denies_every, role_for_chat
 from ..store import ChatSearchHit, RunStore
 from . import actions
 from .jobs import Dispatcher
@@ -62,6 +65,11 @@ _SCRIPT_RUN_POLL_SECONDS = 0.1
 # v51-F5 (ADR 0025): batch dispatch is N independent governed runs submitted
 # together, not a new execution model. The cap matches Hermes's batch size.
 BATCH_DISPATCH_CAP = 3
+# first-run R3 (ADR 0055 D5): the worker's own role on a dispatch.
+_WORKER_ROLE = {
+    "type": "string",
+    "description": "worker role, at most yours",
+}
 # v83-F7 (ADR 0041): reasoning-only analysts per delegate_analysis call — a
 # separate resource class from the worker cap above (raising either is its
 # own policy question).
@@ -147,11 +155,15 @@ def _forge_trial(
     source: str,
     repo: str,
     decision: AutonomyDecision | None,
+    delegation_chain: Sequence[str] = (),
 ) -> dict[str, Any]:
     """v71-F1: the forged tool's sandboxed trial — exactly the run_code lane
     (script caste, sandbox, deny-all egress), so plugin_can_run's
     sandboxed_no_network shape is literally what runs. Tests monkeypatch this
-    seam instead of standing up the dispatch pipeline."""
+    seam instead of standing up the dispatch pipeline.
+
+    R3-F2: the Queen's chain rides it like run_code's, so a role that may not
+    run a script gets no trial through a promote_tool card either (R2 ⊆)."""
     from skep.workers.script_worker import script_instructions
 
     from ..forge import trial_script
@@ -167,6 +179,7 @@ def _forge_trial(
         network=[],
         wall_clock_seconds=SCRIPT_RUN_WALL_CLOCK_SECONDS,
         dispatch_decision=decision,
+        delegation_chain=delegation_chain,
     )
     return _script_run_result(store, task_id)
 
@@ -193,6 +206,7 @@ COMMAND_TOOL_NAMES = (
             "workon",
             "propose_schedule",
             "set_personality",
+            "set_role",
             "set_persona",
             # v73-F2: crash recovery must not depend on a working model —
             # provider trouble is exactly when runs crash.
@@ -289,8 +303,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "list_mcp_servers",
         "Registered MCP servers (id, transport, command/url). MCP tools are "
-        "policy-gated: read-shaped tools run free, everything else needs a "
-        "confirmation or a learned allow rule.",
+        "policy-gated: a read (server-marked read-only AND named get_/list_/"
+        "read_/search_/describe_/show_/find_) runs free unless a policy rule "
+        "asks; everything else needs a confirmation or an allow rule.",
         {},
     ),
     _tool(
@@ -304,6 +319,12 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         "list_runs",
         "Recent runs, newest first: state, verification, summary.",
         {"limit": {"type": "integer", "description": "max runs to return (default 10)"}},
+    ),
+    _tool(
+        "list_agents",
+        "Coding agents running now (Claude Code, Codex, ...): working/idle/"
+        "blocked, and whether skep governs each (run, role).",
+        {},
     ),
     _tool(
         "get_run",
@@ -332,7 +353,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         "effective_policy",
         "What a run against this repo will ACTUALLY get: resolved project (or "
         "'global defaults'), execution mode, the shell allowlist as the worker "
-        "sees it, network post-provider-merge, and the landing posture. Check "
+        "sees it, network, provider_hosts (the worker's own LLM endpoint), "
+        "and the landing posture. Check "
         "this FIRST when a command was gated or before dispatching to a repo.",
         {"repo": {"type": "string", "description": "repo slug or path"}},
         ["repo"],
@@ -354,15 +376,46 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "policy_why",
         "Verdict and deciding rule for one action. Would <scope>.<action> <value> "
-        "be allowed in this repo? Answered for the run and for the Queen; "
-        "no dispatch.",
+        "be allowed in this repo? Answered for the run and for the Queen in this "
+        "chat (its role, grants and taint); no dispatch.",
         {
             "repo": {"type": "string", "description": "repo slug or path"},
             "scope": {"type": "string", "description": "shell, network, filesystem, …"},
             "action": {"type": "string", "description": "e.g. run, connect, write"},
             "value": {"type": "string", "description": "the command, host or path"},
+            "role": {"type": "string", "description": "optional: answer under this role"},
+            "delegation_chain": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "optional: actor@role hops that delegated it",
+            },
         },
         ["repo", "scope", "action", "value"],
+    ),
+    _tool(
+        "policy_decisions",
+        "Recent policy ledger rows with counts. actor=acp:* is the governed ACP "
+        "agents, human@* their humans' answers; observed = ran unasked, "
+        "forwarded = the human answered. Read-only; no dispatch.",
+        {
+            "actor": {"type": "string", "description": "glob, e.g. acp:*"},
+            "since": {"type": "string", "description": "ISO time or date"},
+            "limit": {"type": "integer"},
+        },
+    ),
+    _tool(
+        "policy_explain",
+        "A policy template (builder, operator, assistant), the approved baseline "
+        "or a role as an allow / ask / deny table grouped by scope, with its "
+        "settings and the floor rows that no layer lifts. The same words "
+        "policy_why uses. Read-only.",
+        {
+            "subject": {
+                "type": "string",
+                "description": "a template name, 'baseline', or 'role:<name>'",
+            }
+        },
+        ["subject"],
     ),
     _tool("list_templates", "Saved workflow templates (hand-authored and learned).", {}),
     _tool("list_skills", "Learned-skill candidates and skill-pack ladder states.", {}),
@@ -662,10 +715,11 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         "search_web",
         "Search the public web (keyless) and get title/url/host/snippet rows. "
         "Use it to DISCOVER source hosts when the user asks for research without "
-        "naming sources, then propose start_research with the discovered hosts as "
-        "source_allowlist — the confirmation card is where the user approves that "
-        "exact egress list. Searching itself is read-only and never widens any "
-        "run's network.",
+        "naming sources; where start_research is offered, propose it with those hosts "
+        "as source_allowlist (its card approves that exact egress list). Searching "
+        "itself is read-only and never widens any "
+        "run's network. Results are outside content: later actions in this chat "
+        "ask; after it read private data a search itself asks.",
         {
             "query": {"type": "string"},
             "max_results": {"type": "integer", "minimum": 1, "maximum": 8},
@@ -698,12 +752,13 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "stdio servers need a command argv; http servers need a url (an MCP "
         "Streamable HTTP endpoint, usually ending in /mcp; legacy /sse-style "
         "HTTP+SSE servers are not supported). "
-        "scope='email' binds a mail server: its read-shaped tools decide as "
-        "email/read (flow freely), everything else as email/send (cards). "
+        "scope='email' binds a mail server: its reads (see list_mcp_servers) decide as "
+        "email/read, everything else as email/send (cards). "
         "scope='browse' binds a browser server (e.g. command "
         "['npx','@playwright/mcp@latest']): page-state reads like snapshot/"
-        "screenshot/console flow freely; navigation, clicks, typing, and JS "
-        "card until the user allows them (allow_mcp_tool).",
+        "screenshot/console are browse/read; navigation, clicks, typing, and JS "
+        "card until the user allows them (allow_mcp_tool). Reads flow unless "
+        "the policy asks for them.",
         {
             "server_id": {"type": "string"},
             "transport": {"type": "string", "description": "stdio or http"},
@@ -721,16 +776,19 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "read_url",
         "PROPOSE reading ONE public web page as text (requires user confirmation "
         "— the card shows the exact URL; nothing is fetched until the user "
-        "confirms). EXCEPTION: a domain the user granted with allow_fetch_domain "
-        "reads inside the turn with no card (a cross-domain redirect still fails "
-        "closed) AND returns a 4x larger excerpt. Use after search_web when one "
+        "confirms). EXCEPTION: a host the policy allows (an allow_fetch_domain "
+        "grant, or a baseline rule naming it) reads inside the turn "
+        "with no card (a redirect off it still fails closed) AND returns a 4x "
+        "larger excerpt, as does a URL under one whose card was kept "
+        "session/always; a host a rule denies is refused, no card. Use after "
+        "search_web when one "
         "page would answer directly; the reply is a bounded markdown excerpt "
         "(headings/links/lists kept; pass mode='text' for flat text) and a cut "
         "is marked, never silent. On an ungranted domain every call is one card "
         "— NEVER chain read_url over several pages (that is a wall of cards): "
-        "for anything multi-page or multi-source, propose start_research "
-        "instead; for a domain the user reads daily, offer allow_fetch_domain "
-        "once.",
+        "for anything multi-page or multi-source, propose start_research where "
+        "offered; for a domain the user reads daily, offer allow_fetch_domain "
+        "once. A fetched page is outside content: later actions in this chat ask.",
         {
             "url": {"type": "string"},
             "mode": {
@@ -746,13 +804,21 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE running ONE shell command on the supervisor host with the "
         "operator's own standing (requires user confirmation — the card "
         "shows the exact command; a standing shell allow rule runs it "
-        "in-turn instead). For one-off diagnostics: 'what's on port 8765?', "
+        "in-turn instead). Approving a card with keep session (this chat "
+        "only) or always grants exactly that command (each command of a "
+        "&&/;/| line on its own), in a role chat "
+        "too; one extra argument or a trailing & cards again. A policy deny "
+        "refuses, no card. "
+        "For one-off diagnostics: 'what's on port 8765?', "
         "'df -h', 'systemd status'. NOT for repo work — a cwd inside a "
         "registered repo REFUSES (a shell there edits files with no patch "
         "card; use quick_edit or dispatch_run) — and git "
         "push/pull/fetch/commit/checkout and sudo never run from chat and "
-        "can never be granted. Output captured and bounded; 60s cap. For "
-        "something that must keep running, propose start_process instead.",
+        "can never be granted. A command naming a credential file (~/.ssh, "
+        "~/.aws, .env, skep's own tokens) refuses, no card — like read_file. "
+        "Output captured and bounded; 60s cap. For "
+        "something that must keep running, propose start_process instead. Its "
+        "output counts as private data: later search_web/read_url in this chat ask.",
         {
             "command": {"type": "string", "description": "the exact command, verbatim"},
             "cwd": {"type": "string", "description": "working directory (default: serve's)"},
@@ -766,7 +832,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "confirmation, once): the Playwright MCP server "
         "(npx @playwright/mcp@latest) under the 'browse' policy scope. "
         "After setup, page-STATE reads (snapshot, console, images) flow "
-        "free; every ACTING tool (navigate, click, type, press, JS) cards "
+        "free unless the policy asks (the builder and operator baselines "
+        "do); every ACTING tool (navigate, click, type, press, JS) cards "
         "until the user grants it by name with allow_mcp_tool — teach that "
         "ramp when the user starts browsing. Needs npx on the host; the "
         "result says if the handshake failed and why.",
@@ -887,14 +954,16 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "batch_dispatch",
-        "PROPOSE dispatching up to 3 worker runs IN PARALLEL — one card, one "
+        "PROPOSE 1-3 parallel worker runs, or a team. One card, one "
         "confirm for the whole batch (auto-resolves only when EVERY task "
         "matches its project's auto-dispatch policy). Each task is an "
         "independent, fully governed run: own worktree, own policy, own "
         "audit trail, own re-verification. Returns one task id per task; "
         "watch them with list_runs/get_run. Set a per-task 'engine' to run the "
         "SAME brief on different coding agents (see compare-coding-engines); "
-        "any explicit engine makes the whole batch card.",
+        "any explicit engine makes the whole batch card. Set 'manager' to run "
+        "them as a team: you → a manager in that role → the workers, each held "
+        "to the manager (and the manager to you); one ledger thread.",
         {
             "tasks": {
                 "type": "array",
@@ -905,6 +974,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                         "repo": {"type": "string"},
                         "instructions": {"type": "string"},
                         "caste": {"type": "string", "enum": caste_names()},
+                        "role": {"type": "string"},
                         "execution_mode": {"type": "string", "enum": ["workspace", "sandbox"]},
                         "engine": {
                             "type": "string",
@@ -917,7 +987,11 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                     },
                     "required": ["repo", "instructions"],
                 },
-            }
+            },
+            "manager": {
+                "type": "string",
+                "description": "the manager's role; task roles default to it",
+            },
         },
         ["tasks"],
     ),
@@ -1017,11 +1091,15 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "operator's roots (registered repos, workon'd projects, the skep home) "
         "read immediately; any other path becomes a confirmation card naming "
         "the exact resolved path. Explicit filesystem policy rules win either "
-        "way — a deny refuses outright. BRANCH-AWARE: landed work lives on "
+        "way — a deny refuses outright. Until a policy baseline is approved "
+        "(or while it fails to verify) every read cards. Credential files (~/.ssh, ~/.aws, "
+        ".env, skep's own tokens) are never readable — refused, no card. "
+        "BRANCH-AWARE: landed work lives on "
         "skep/ branches while the clone stays on its default checkout — pass "
         "ref to read a file from any branch/commit; with no ref, a miss falls "
         "back to the project's landing branch automatically (the result's "
-        "ref/note fields say where the content came from).",
+        "ref/note fields say where the content came from). A read outside the "
+        "roots counts as private data: later search_web/read_url in this chat ask.",
         {
             "path": {"type": "string", "description": "absolute or ~-relative file path"},
             "ref": {
@@ -1037,7 +1115,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "search_files",
         "Search file CONTENTS (ripgrep regex) or list matching FILE NAMES "
         "under one directory. Same governance as read_file: operator roots "
-        "run immediately, other paths card, filesystem deny rules refuse.",
+        "run immediately, other paths card, filesystem deny rules refuse. "
+        "Hits in credential files are left out (the result's note says so). "
+        "Symlinks are listed with their targets, never followed.",
         {
             "pattern": {
                 "type": "string",
@@ -1093,13 +1173,16 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "promote_tool",
-        "PROPOSE promoting a landed forged plugin to ACTIVE (requires user "
-        "confirmation). On confirm: a sandboxed NO-network trial must list "
+        "PROPOSE promoting a forged plugin to ACTIVE (requires user "
+        "confirmation): a landed forge_tool plugin, OR a shipped seed tool "
+        "(list_plugins shows provenance 'seed' — no authoring run or landing "
+        "needed). On confirm: a sandboxed NO-network trial must list "
         "the server's tools and pass its zero-argument self_test; only then "
-        "is the landed source installed and registered as a stdio MCP server "
-        "whose tools call_mcp_tool can reach. A suspended plugin reactivates "
-        "the same way. Fails honestly (and stays demoted) if the authoring "
-        "run has not landed or the trial fails.",
+        "is the source installed and registered as a stdio MCP server "
+        "whose tools call_mcp_tool can reach (every call runs sandboxed). A "
+        "suspended plugin reactivates the same way. Fails honestly (and stays "
+        "demoted) if a forged plugin's authoring run has not landed or the "
+        "trial fails.",
         {"plugin_id": {"type": "string", "description": "from list_plugins"}},
         ["plugin_id"],
     ),
@@ -1166,9 +1249,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "call_mcp_tool",
-        "Call one tool on a registered MCP server. Read-shaped tools and "
-        "tools covered by an allow rule run immediately; anything else "
-        "becomes a confirmation card; a policy deny rule refuses outright.",
+        "Call one tool on a registered MCP server. Reads (server-marked "
+        "read-only, read-verb name) run immediately unless a policy rule asks; "
+        "a tool an allow rule names runs too (a baseline rule like calendar:* "
+        "covers only its reads); anything else becomes a confirmation card; a "
+        "policy deny rule refuses outright. A reply is outside content: later "
+        "actions in this chat ask.",
         {
             "server_id": {"type": "string"},
             "tool": {"type": "string"},
@@ -1184,6 +1270,17 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "is rejected with the deny's rule id.",
         {"server_id": {"type": "string"}, "tool": {"type": "string"}},
         ["server_id", "tool"],
+    ),
+    _tool(
+        "approve_policy_baseline",
+        "PROPOSE locking the policy baseline (requires user confirmation). The "
+        "template becomes an enforced layer no later setting can loosen, "
+        "hash-checked before every decision. reapprove=true re-locks after a "
+        "change; the card shows the diff.",
+        {
+            "template": {"type": "string", "description": "builder, operator or assistant"},
+            "reapprove": {"type": "boolean"},
+        },
     ),
     _tool(
         "set_policy",
@@ -1232,14 +1329,21 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE adding one rule to the QUEEN's standing operator policy "
         "(requires user confirmation) — the document governing Queen-side "
         "scoped tools: read_file/search_files paths, search_web/read_url "
-        "network audit, and run_shell/start_process shell lanes. NOT "
+        "network (a fetch deny refuses read_url; a fetch allow is recorded "
+        "and shown by policy why but does not yet let read_url run), and "
+        "run_shell/start_process "
+        "shell lanes. NOT "
         "set_policy: run/worker policy is untouched. verdict 'allow' or "
-        "'deny'; deny wins ties; an allow reaching into denied space is "
-        "rejected with the deny's rule id. NOTE for shell allows: a granted "
-        "command can read and modify files in its working directory without "
-        "a patch card — say so when proposing one. shell actions: 'run' "
-        "(run_shell one-offs), 'run_repo' (repo cwds — the file-write pen), "
-        "'run_background' (start_process daemons); a grant for one never "
+        "'deny'; deny wins ties; an allow never lifts a baseline deny or "
+        "named ask; an allow is refused before any card when it reaches "
+        "into a deny (named), covers a credential file, or reads outside the "
+        "operator roots while search_web runs uncarded (deny search first); "
+        "a deny is always accepted. A shell allow is one exact command line "
+        "(each part of an && line its own rule) — never a prefix, an "
+        "interpreter, a network tool or an install — and can read and modify "
+        "files in its working directory with no patch card: say so. A shell deny may "
+        "be a prefix and beats every grant. shell actions: 'run' (run_shell), "
+        "'run_repo' (repo cwds), 'run_background' (start_process); one never "
         "covers the others.",
         {
             "scope": {"type": "string", "enum": ["filesystem", "network", "shell"]},
@@ -1253,8 +1357,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "pattern": {
                 "type": "string",
                 "description": (
-                    "path glob, domain, or command prefix — e.g. '/tmp/**', "
-                    "'docs.python.org', 'lsof -i'"
+                    "path glob, domain, or shell line (allow: the exact line; "
+                    "deny: a prefix) — e.g. '/tmp/**', 'docs.python.org', 'df -h'"
                 ),
             },
             "verdict": {"type": "string", "enum": ["allow", "deny"]},
@@ -1264,11 +1368,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "allow_shell_command",
         "PROPOSE adding ONE command prefix to the persistent shell allowlist "
-        "(requires user confirmation), e.g. 'npm install'. Worker VERIFY "
-        "commands (purpose 'verify': pytest, python running the tests) NEVER "
-        "need this — they are always auto-allowed (shell_verify); the "
-        "allowlist governs only non-verify steps, so do not propose grants "
-        "for a task's verification. git push, pull, "
+        "(requires user confirmation), e.g. 'npm install'. A worker VERIFY "
+        "step skips the allowlist ONLY when it is exactly the project's "
+        "pinned verify_command (shell_verify; project setup infers the pin) — "
+        "any other command labelled verify is gated like every step, so a "
+        "test runner a project keeps verifying with may need one prefix here; "
+        "pinning verify_command is the better fix. git push, pull, "
         "fetch, add, and commit can NEVER be allowlisted — no allowlist, grant, "
         "or override exists, so never propose one: refreshing a registered repo "
         "from its remote is refresh_repo (supervisor-side), and landing "
@@ -1276,10 +1381,11 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "prefixes are also always rejected. GRANTING MEANS: this command can "
         "read and modify files in its working directory without a patch card "
         "— the user grants with eyes open. TIERS: with `repo` (or a chat bound "
-        "to a project) the grant lands in that project's own allowlist; without "
-        "either it lands in the GLOBAL list, which a project's own list SHADOWS — "
+        "to a project) it is a standing grant for that project (that repo if it "
+        "has none); without either it lands in the GLOBAL list, which a "
+        "project's own list SHADOWS — "
         "so for project work always pass repo, or the gate stays shut. The "
-        "result's `tier` says which list was written.",
+        "result's `tier` says where it holds.",
         {
             "command": {
                 "type": "string",
@@ -1422,7 +1528,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE allowing a pending review and remembering it (requires user "
         "confirmation): a shell approval persists the command into allowed policy, "
         "a network.fetch/network.read approval persists the blocked host into the "
-        "project's network allowlist; either way the gated run resumes.",
+        "project's network allowlist; either way the gated run resumes. A "
+        "delegated ask (its card says 'which would itself ask') is approve-once: "
+        "use approve_review.",
         {"review_id": {"type": "string"}},
         ["review_id"],
     ),
@@ -1728,6 +1836,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "work that landed on a non-default branch",
             },
             "caste": {"type": "string", "enum": caste_names(), "description": _caste_guidance()},
+            "role": _WORKER_ROLE,
             "engine": {
                 "type": "string",
                 "enum": engine_names(),
@@ -1745,7 +1854,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "network": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "domain allowlist; omit for policy default, [] denies all",
+                "description": (
+                    "omit: project hosts; a list REPLACES them (registries too); []: own LLM"
+                ),
             },
             "wall_clock_seconds": {"type": "integer"},
             "max_iterations": {"type": "integer"},
@@ -1980,6 +2091,14 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         ["value"],
     ),
     _tool(
+        "set_role",
+        "PROPOSE switching THIS chat's role (requires user confirmation): its "
+        "prompt, voice and policy layer change together. A role only tightens "
+        "the approved baseline. builder, operator, assistant, or a custom role.",
+        {"name": {"type": "string"}},
+        ["name"],
+    ),
+    _tool(
         "set_persona",
         "PROPOSE setting the profile-level PERSONA (requires user "
         "confirmation): the identity every chat starts with — name, how to "
@@ -2095,6 +2214,188 @@ def tool_description(name: str) -> str:
 READ_TOOL_NAMES = {t["function"]["name"] for t in READ_TOOL_SPECS}
 MUTATING_TOOL_NAMES = {t["function"]["name"] for t in MUTATING_TOOL_SPECS}
 
+
+def _url_host(args: dict[str, Any]) -> str:
+    import urllib.parse
+
+    return urllib.parse.urlparse(str(args.get("url") or "")).hostname or ""
+
+
+def _workspace(_args: dict[str, Any]) -> str:
+    return "workspace"
+
+
+def _ddgs(_args: dict[str, Any]) -> str:
+    return "ddgs"  # search_web decides its lane, never the query
+
+
+# P3-6 (ADR 0059 D7, B32): the one map of what governs each Queen tool. A
+# tool here is decided by ``policy_v3.decide()`` on ``(scope, action,
+# value(args))`` (stop_process names a proc_id: its lane decides the command
+# that started it; the dispatchers: the workspace write every worker makes,
+# decided through the chat's delegation chain). Every other mutating tool is
+# in ALWAYS_CARDS, with why no rule or keep can govern it — the reason a refused keep shows. A test
+# fails on a mutating tool in neither (test_tool_surface_v3).
+TOOL_SCOPES: dict[str, tuple[str, str, Callable[[dict[str, Any]], str]]] = {
+    "read_file": ("filesystem", "read", lambda args: str(args.get("path") or "")),
+    "search_files": ("filesystem", "read", lambda args: str(args.get("path") or "")),
+    "run_shell": ("shell", "run", lambda args: str(args.get("command") or "")),
+    "start_process": ("shell", "run_background", lambda args: str(args.get("command") or "")),
+    "stop_process": ("shell", "run_background", lambda args: str(args.get("proc_id") or "")),
+    "read_url": ("network", "fetch", _url_host),
+    "search_web": ("network", "search", _ddgs),
+    "call_mcp_tool": (
+        "mcp",
+        "call",
+        lambda args: f"{args.get('server_id') or ''}:{args.get('tool') or ''}",
+    ),
+    **{
+        tool: ("filesystem", "write", _workspace)
+        for tool in (
+            "dispatch_run",
+            "quick_edit",
+            "run_code",
+            "batch_dispatch",
+            "start_research",
+            "forge_tool",
+        )
+    },
+}
+_ALWAYS_CARD_GROUPS: dict[str, tuple[str, ...]] = {
+    "it changes standing policy, and a human reads every policy write": (
+        "allow_command_review", "allow_env_bootstrap", "allow_fetch_domain", "allow_mcp_tool",
+        "allow_shell_command", "apply_policy_preset", "approve_policy_baseline",
+        "attach_policy_group", "copy_project_policy", "delete_policy_group",
+        "detach_policy_group", "revoke_policy_rule", "set_operator_policy", "set_policy",
+        "set_policy_group", "set_role",
+    ),
+    "it acts on a run's approval or landing, which only a human decides": (
+        "approve_review", "deny_review", "land_run", "resume_run", "diagnose_run",
+    ),
+    "it moves a branch or a pull request": (
+        "close_pr", "create_branch", "delete_branch", "merge_branch", "merge_pr", "open_pr",
+        "push_baseline", "push_branch",
+    ),
+    "it changes which repos and projects skep manages": (
+        "register_repo", "unregister_repo", "refresh_repo", "setup_project", "workon",
+    ),
+    "it changes what runs unattended": (
+        "propose_schedule", "delete_schedule", "set_schedule_enabled", "run_schedule_now",
+    ),
+    "it edits your notes, tasks or memory, which no policy scope covers": (
+        "delete_note", "delete_task", "set_task_due", "sync_notes", "forget_memory",
+        "approve_memory_proposal", "reject_memory_proposal",
+    ),
+    "it never cards: it files an inert proposal, and approving that is the gate": ("remember",),
+    "it changes what the Queen can run or load": (
+        "create_skill", "patch_skill", "delete_skill", "set_skill_observer",
+        "promote_skill_pack", "suspend_skill_pack", "promote_tool", "suspend_tool",
+    ),
+    "it changes which servers the Queen reaches": (
+        "register_mcp_server", "unregister_mcp_server", "setup_browser",
+    ),
+    "it changes skep's own settings, which no policy scope covers": (
+        "add_provider", "remove_provider", "use_provider", "set_assistant_model", "set_persona",
+        "set_personality", "set_tts_provider", "set_run_completion_notify",
+    ),
+    "it acts on another person in a channel": ("discord_delete_message", "discord_timeout_member"),
+    "it opens analyst chats, which no policy scope covers": ("delegate_analysis",),
+}  # fmt: skip
+ALWAYS_CARDS: dict[str, str] = {
+    tool: reason for reason, tools in _ALWAYS_CARD_GROUPS.items() for tool in tools
+}
+
+
+def hidden_tools(role: Role | None) -> dict[str, str]:
+    """P3-6 (ADR 0059 D7, B22): tool -> the role rule that denies every call
+    of it. Such a tool is not offered to the chat, and is refused if the
+    model calls it anyway. Role-only — never taint or per-turn state — so a
+    chat's tool list is the same on every turn. An ask hides nothing."""
+    return {} if role is None else _hidden_tools(role)
+
+
+@functools.lru_cache(maxsize=32)
+def _hidden_tools(role: Role) -> dict[str, str]:
+    hidden = {}
+    for tool, (scope, action, value) in TOOL_SCOPES.items():
+        if value is _workspace and role.layer() is None:
+            # decision #7: a hop whose role has no rule delegates nothing — the
+            # chain refuses every worker write, so no dispatcher can succeed.
+            hidden[tool] = f"delegation:queen@{role.name}/unset"
+            continue
+        constant = value({}) if value in (_workspace, _ddgs) else None
+        hit = role_denies_every(role, scope, action, constant)
+        if hit is not None:
+            hidden[tool] = hit.decided_by
+    return hidden
+
+
+_LINE_WORDS = {"allow": "run", "require_approval": "ask first", "deny": "are refused"}
+POLICY_LINE_TOOLS = frozenset(
+    {"read_file", "search_files", "run_shell", "start_process", "read_url", "search_web",
+     "call_mcp_tool"}
+)  # fmt: skip
+_SHELL_PROBE = "skep-probe --no-rule-names-this"  # a line no rule can name
+
+
+def chat_policy_lines(holder: ConfigHolder, store: RunStore, role: Role | None) -> dict[str, str]:
+    """P3-6 (ADR 0059 D7, the B33 class): the "In this chat:" line of each
+    tool where a wrong belief cost the most (f1-15/f1-17: five or six calls
+    asking policy_why after a card that could not succeed), rendered from
+    ``decide()`` for this chat's role and home. No chat is passed — no taint,
+    no chat-bound grant — so the line is the same on every turn until the
+    role or the home's policy changes. Pure: nothing is logged."""
+    from ..policy_v3 import Request, decide, load_stack
+
+    stack = load_stack(holder, store)
+
+    def says(scope: str, action: str, value: str, *, read_only: bool = False) -> str:
+        verdict = decide(Request(scope, action, value), stack=stack, role=role, read_only=read_only)
+        return _LINE_WORDS[verdict.verdict]
+
+    roots = [rule.pattern.removesuffix("/**") for rule in stack.roots]
+    credential = str(Path.home() / ".ssh" / "id_rsa")
+    reads = (
+        (
+            f"reads inside your folders {says('filesystem', 'read', roots[0] + '/x')}; "
+            if roots
+            else ""
+        )
+        + f"elsewhere {says('filesystem', 'read', '/skep-probe/outside')}; "
+        + f"credential files {says('filesystem', 'read', credential)}"
+    )
+    hidden = hidden_tools(role)
+    research = "; start_research is not available here" if "start_research" in hidden else ""
+    lines = {
+        "read_file": reads,
+        "search_files": reads,
+        "run_shell": f"a command no rule names: {says('shell', 'run', _SHELL_PROBE)}; "
+        f"git push and sudo {says('shell', 'run', 'git push')}",
+        "start_process": f"a daemon no rule names: {says('shell', 'run_background', _SHELL_PROBE)}",
+        "read_url": f"a page no rule names: {says('network', 'fetch', 'x.invalid')}{research}",
+        # no chat: taint is invisible here, so the one "run" taint can move says so
+        "search_web": f"searches {says('network', 'search', 'ddgs')}"
+        + (
+            " until this chat reads private data, then ask first"
+            if says("network", "search", "ddgs") == "run"
+            else ""
+        )
+        + research,
+        "call_mcp_tool": f"a tool no rule names: {says('mcp', 'call', 'probe:act')} if it acts, "
+        f"{says('mcp', 'call', 'probe:list', read_only=True)} if read-only",
+    }
+    return {tool: f"In this chat: {line}." for tool, line in lines.items()}
+
+
+def hidden_refusal(tool: str, role: Role, decided_by: str) -> str:
+    """What the model hears when it calls a tool its chat's role hides."""
+    return (
+        f"{tool} is not available in this chat: its role {role.name} never allows it "
+        f"({decided_by}). Tell the user what you would do; the operator can switch this "
+        "chat's role with /role <name> (e.g. builder) or `skep role use <name> --chat <id>`."
+    )
+
+
 # v83-F5 (ADR 0042): read tools with NETWORK egress, refused in unattended
 # (scheduled) turns. Nobody is watching a scheduled turn, so it reads the
 # store only — an injected page chaining further granted fetches every
@@ -2105,6 +2406,18 @@ UNATTENDED_READ_REFUSAL = (
     "does not run in a scheduled turn — nobody is watching, so scheduled "
     "turns read the store only (runs, approvals, chats, notes, memory). "
     "Do web reads in a live chat instead."
+)
+# ES B121: the store writes that ride READ_TOOL_SPECS (they never card), so
+# read_only alone let a scheduled turn — possibly fed a chained script's
+# output — write notes and tasks unattended. Digests and note ticks deliver
+# through the tick itself, never through these tools.
+UNATTENDED_BLOCKED_STORE_WRITES: frozenset[str] = frozenset(
+    {"add_note", "add_task", "complete_task", "reopen_task"}
+)
+UNATTENDED_WRITE_REFUSAL = (
+    "does not run unattended — this turn (a schedule tick or a run-finished "
+    "follow-up) fires whether or not anyone is watching, so it may read the "
+    "store but never write to it. Put what you would note in your reply."
 )
 
 # -- v74-F3: progressive tool disclosure --------------------------------------
@@ -2141,6 +2454,7 @@ CORE_TOOL_NAMES = frozenset(
 TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "runs": (
         "list_runs",
+        "list_agents",
         "get_run",
         "list_approvals",
         "await_runs",
@@ -2190,6 +2504,9 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "policy_registry",
         "policy_rsop",
         "policy_why",
+        "policy_explain",
+        "policy_decisions",
+        "approve_policy_baseline",
         "set_policy",
         "apply_policy_preset",
         "set_operator_policy",
@@ -2274,6 +2591,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "use_provider",
         "remove_provider",
         "set_personality",
+        "set_role",
         "set_persona",
         "set_tts_provider",
     ),
@@ -2383,9 +2701,13 @@ def _index_line(spec: dict[str, Any]) -> str:
     return f"{name}{mark}({args})" + (f" — {gloss}" if gloss else "")
 
 
-def _tool_index_block() -> str:
+@functools.lru_cache(maxsize=32)
+def tool_index_block(hidden: frozenset[str] = frozenset()) -> str:
+    """The index, less the tools this chat's role hides (P3-6)."""
     grouped: dict[str, list[str]] = {category: [] for category in TOOL_CATEGORIES}
     for spec in TOOL_SPECS:
+        if spec["function"]["name"] in hidden:
+            continue
         category = _TOOL_CATEGORY_BY_NAME.get(spec["function"]["name"], "other")
         grouped.setdefault(category, []).append(_index_line(spec))
     lines = [_TOOL_INDEX_HEADER]
@@ -2398,18 +2720,22 @@ def _tool_index_block() -> str:
 
 
 # Generated from the registry at import time — the index CANNOT drift.
-TOOL_INDEX_BLOCK = _tool_index_block()
+TOOL_INDEX_BLOCK = tool_index_block()
 
 
 def advertised_tool_specs(
-    active: list[str] | tuple[str, ...], *, read_only: bool = False
+    active: list[str] | tuple[str, ...],
+    *,
+    read_only: bool = False,
+    hidden: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """The specs an indexed-delivery round advertises: core + this chat's
     described-active tools, in registry order. read_only turns (v67 /btw)
-    keep only the read-shaped part."""
-    names = CORE_TOOL_NAMES | set(active)
+    keep only the read-shaped part. ``hidden`` (P3-6): the tools the chat's
+    role hides — never advertised."""
     source = READ_TOOL_SPECS if read_only else TOOL_SPECS
-    return [t for t in source if t["function"]["name"] in names]
+    names = CORE_TOOL_NAMES | set(active)
+    return [t for t in source if t["function"]["name"] in names - hidden]
 
 
 def _run_view(record: Any, *, store: RunStore | None = None) -> dict[str, Any]:
@@ -2460,45 +2786,188 @@ def _schedule_summary(schedule: Any) -> dict[str, Any]:
     }
 
 
-def fetch_grant_decision(store: RunStore, host: str) -> AutonomyDecision | None:
-    """v72-F7: the granted-domain read_url lane. An explicit ``network/fetch``
-    rule decides — allow runs in-turn, deny refuses without a card; no
-    matching rule returns None and the per-URL card stays exactly as it was.
-    Domain matching is ``domain_allowed`` (the run-egress matcher): EXACT
-    host only — a grant on example.com does NOT cover docs.example.com;
-    each host is its own operator decision (fail closed)."""
-    from ..policy_schema import (
-        DEFAULT_DENY_RULE_ID,
-        POLICY_DOCUMENT_SETTINGS_KEY,
-        PolicyDocument,
-        decide,
-        document_from_settings,
-        resolve,
-    )
+def _chat_role(store: RunStore, holder: ConfigHolder, chat_id: str | None) -> Role | None:
+    """R1: the chat's role for the Queen's lanes; no chat, no role layer."""
+    return role_for_chat(store, holder.current.home, chat_id) if chat_id else None
 
-    raw = store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)
-    document = document_from_settings(raw) or PolicyDocument()
-    from ..policy_resolver import engine_v2_scopes
 
-    resolved = resolve(document, v2_scopes=engine_v2_scopes(store))
-    decision = decide(resolved, "network", "fetch", host, template=document.template)
-    if decision.rule_id == DEFAULT_DENY_RULE_ID:
-        return None
-    if decision.verdict == "allow":
+def _queen_chain(
+    store: RunStore, holder: ConfigHolder, chat_id: str | None, actor: str
+) -> list[str]:
+    """R2 (ADR 0055 D5): the Queen dispatches with its role — a chat in a role
+    passes ``queen@<role>`` and its worker gets no grant beyond that role. An
+    operator-typed /command (``chat.COMMAND_ACTOR``) is the human's own
+    dispatch, and no chat has no role layer: both pass []."""
+    if actor == "operator-command":
+        return []
+    role = _chat_role(store, holder, chat_id)
+    return [f"queen@{role.name}"] if role else []
+
+
+def _human_answers(store: RunStore, chat_id: str | None) -> bool:
+    """ADR 0059 D3 (V7): can a human answer the gate cards of a run this
+    chat dispatches? Not with no chat, nor in a messenger chat whose channel
+    cannot confirm (I6) — there a grant the chain makes an ask is dropped
+    (deny) instead of carding. Unattended turns never reach here: they card
+    every mutation, and a human confirming that card is present."""
+    chat = store.get_chat(chat_id) if chat_id else None
+    if chat is None:
+        return False
+    channel = store.get_channel_config(chat.source) if chat.source else None
+    return channel is None or channel.channel_can_confirm
+
+
+def dispatch_manifest_for(
+    store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
+) -> dict[str, Any]:
+    """P4-2 (ADR 0059 D6): the manifest of a ``dispatch_run`` this chat
+    proposes — compiled exactly as the confirm will compile it. A
+    ``start_research`` call (its ``source_allowlist``) compiles as the
+    sandboxed researcher run its confirm submits (L23)."""
+    if "source_allowlist" in args:
+        args = {
+            "repo": args.get("repo"),
+            "caste": "researcher",
+            "execution_mode": "sandbox",
+            "network": args["source_allowlist"],
+        }
+    try:
+        return actions.dispatch_manifest(
+            holder,
+            store,
+            repo=str(args.get("repo") or ""),
+            caste=str(args.get("caste") or "coding"),
+            execution_mode=(
+                None if args.get("execution_mode") is None else str(args["execution_mode"])
+            ),
+            network=None if args.get("network") is None else [str(d) for d in args["network"]],
+            wall_clock_seconds=_optional_int(args, "wall_clock_seconds"),
+            max_iterations=_optional_int(args, "max_iterations"),
+            max_actions=_optional_int(args, "max_actions"),
+            max_provider_calls=_optional_int(args, "max_provider_calls"),
+            engine=None if args.get("engine") is None else str(args["engine"]),
+            delegation_chain=_queen_chain(store, holder, chat_id, "chat-user"),
+            role=None if args.get("role") is None else str(args["role"]),
+            deferred_asks=_human_answers(store, chat_id),
+            chat_taint=chat_taint_bits(store, chat_id),
+        )
+    except (ValueError, TypeError) as exc:  # malformed args: the confirm says so too
+        return {"error": f"bad arguments: {exc}"}
+
+
+def fetch_grant_decision(
+    store: RunStore,
+    holder: ConfigHolder,
+    host: str,
+    *,
+    role: Role | None = None,
+    chat_id: str | None = None,
+    url: str | None = None,
+) -> AutonomyDecision:
+    """read_url's ``network.fetch <host>``, decided by ``policy_v3.decide()``
+    with the chat's role (ADR 0059 P3-3) — the verdict and ``decided_by``
+    REST and the CLI give for the same host and role with no repo. Every
+    layer reaches it: the baseline's allows and denies (B29: an operator
+    template's ``net-fetch-github`` runs in-turn, a baseline deny refuses),
+    the setup document (tighten-only under a locked baseline, B30), the
+    operator overlay's denies and asks (its fetch allows are recorded and
+    shown by ``policy why`` but do not yet let read_url run — operator
+    decision, ``policy_v3.operator_lane``), and the learned grants — which also answer a role's
+    catch-all ``net-fetch-gated *`` ask (decision #1, B56). allow → in-turn
+    on the granted lane; deny → refused, no card; ask → the per-URL card
+    naming the rule that asked. A read_url keep covers its URL's directory on
+    that scheme and host only, with no other query (P3-4, B74 — ``url``); a
+    grant from before P3-4 or ``allow_fetch_domain`` matches the host exactly
+    (``domain_allowed``: example.com never covers docs.example.com). A session
+    grant applies only in the chat that made it (``chat_id``, B39). A policy
+    that will not load refuses (fail closed)."""
+    from ..policy_v3 import Request, queen_decide
+
+    try:
+        verdict = queen_decide(
+            holder, store, Request("network", "fetch", host), role=role, chat_id=chat_id, url=url
+        )
+    except Exception as exc:  # I4/I9: a policy that will not load never fetches
+        return AutonomyDecision(
+            verdict="deny",
+            reason="network.deny.policy_unloadable",
+            detail=f"the policy did not load, so nothing is fetched: {exc}",
+            decided_by="policy/unloadable",
+        )
+    if verdict.verdict == "allow":
         return AutonomyDecision(
             verdict="allow",
             reason="network.allow.fetch_grant",
             detail=host,
-            decided_by=decision.decided_by,
+            decided_by=verdict.decided_by,
         )
-    if decision.verdict == "deny":
+    if verdict.verdict == "deny":
         return AutonomyDecision(
             verdict="deny",
             reason="network.deny.fetch_rule",
-            detail=f"an explicit deny covers {host!r}",
-            decided_by=decision.decided_by,
+            detail=f"a policy rule denies fetching {host!r} ({verdict.decided_by})",
+            decided_by=verdict.decided_by,
         )
-    return None  # require_approval → the ordinary per-URL card
+    if verdict.layer == "taint":
+        return taint_decision(verdict)
+    asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
+    return AutonomyDecision(
+        verdict="require_approval",
+        reason=f"network.require_approval.{asked}",
+        detail=host,
+        decided_by=verdict.decided_by,
+    )
+
+
+def search_web_verdict(store: RunStore, holder: ConfigHolder, chat_id: str | None) -> Any:
+    """search_web's ``network.search`` (P3-3, B78: with the chat's role; P4-1:
+    with its taint). The value is the backend, never the query: the decision
+    log keeps no query text."""
+    from ..policy_v3 import Request, queen_decide
+
+    return queen_decide(
+        holder,
+        store,
+        Request("network", "search", "ddgs"),
+        role=_chat_role(store, holder, chat_id),
+        chat_id=chat_id,
+    )
+
+
+def chat_taint_bits(store: RunStore, chat_id: str | None) -> list[str]:
+    """P4-1 (ADR 0059 D5): the dispatching chat's taint bits, which the run's
+    dispatch decision records — none for a dispatch from no chat."""
+    return [] if chat_id is None else store.get_chat_taint(chat_id).bits()
+
+
+# W21: the store writes that ride READ_TOOL_SPECS and never card — but under
+# ``untrusted`` they are actions like any other and ask (a note or a task an
+# injected page wrote reaches every chat that later reads it).
+TAINT_ASKED_STORE_WRITES = frozenset({"add_note", "add_task"})
+
+
+def store_write_taint_ask(store: RunStore, chat_id: str) -> AutonomyDecision | None:
+    """The taint ask for a TAINT_ASKED_STORE_WRITES call in ``chat_id``, or
+    None (it runs in-turn, as before)."""
+    from ..policy_v3 import ACTION_REQUEST, Verdict, taint_asks, taint_verdict
+
+    taint = store.get_chat_taint(chat_id)
+    if taint_asks(taint, *ACTION_REQUEST) is None:
+        return None
+    held = Verdict("allow", "", "", "notes/inert", "operator")
+    return taint_decision(taint_verdict(held, taint, *ACTION_REQUEST, read_only=False))
+
+
+def taint_decision(verdict: Any) -> AutonomyDecision:
+    """P4-1 (ADR 0059 D5): a ``taint/<rule>`` ask as the card's decision —
+    the why-line on ``detail``, so the card says in plain words why a granted
+    thing is asking again (I8)."""
+    return AutonomyDecision(
+        verdict="require_approval",
+        reason=f"taint.require_approval.{verdict.rule_id}",
+        detail=verdict.note,
+        decided_by=verdict.decided_by,
+    )
 
 
 # v83-F9: one-off Queen-side shell — bounds.
@@ -2572,35 +3041,39 @@ def queen_shell_decision(
     command: str,
     cwd: str | None,
     background: bool = False,
+    role: Role | None = None,
+    chat_id: str | None = None,
 ) -> AutonomyDecision | None:
-    """v83-F9: the run_shell lane. Hard guards first (git/sudo — deny,
-    ungrantable); a repo cwd needs an explicit ``shell/run_repo`` allow and
-    otherwise REFUSES (a shell in a checkout is a file-write pen with no
-    patch card — review item 2); elsewhere ``shell/run``: allow → in-turn,
-    explicit deny → refuse, default → the per-command card.
+    """The run_shell / start_process / stop_process lane, decided by
+    ``policy_v3.decide()`` with the chat's role (ADR 0059 P3-2) — the verdict
+    and ``decided_by`` REST and the CLI give for the same line with no repo.
 
-    v83-F8: ``background=True`` (start_process) decides on the
-    ``run_background`` action instead — a daemon is a different promise
-    than a 60s one-off, so a 'run' grant never covers it (review item 3);
-    repo cwds refuse flat (daemons do not belong in checkouts)."""
-    from ..policy_resolver import resolve_operator_policy
-    from ..policy_schema import DEFAULT_DENY_RULE_ID
-    from ..shell_prefixes import queen_command_line_refusal
+    The floor first, judged per segment (v109-F1): git push/pull/fetch/switch,
+    sudo and the catastrophic commands (v83-F9), and a line naming a credential
+    path (ES-F8, B73) — deny, ungrantable. A line that runs in or reaches a
+    registered repo is ``shell.run_repo``, which REFUSES unless a rule allows
+    it (a shell in a checkout is a file-write pen with no patch card — review
+    item 2). Elsewhere ``shell.run``: allow → in-turn, deny → refuse, ask →
+    the per-command card naming the rule that asked.
+
+    v83-F8: ``background=True`` (start_process) decides on ``run_background``
+    instead — a daemon is a different promise than a 60s one-off, so a 'run'
+    grant never covers it (review item 3); repo cwds refuse flat (daemons do
+    not belong in checkouts). ``chat_id``: the chat asking — its own session
+    grants apply, no other chat's (P3-4, B39)."""
+    from ..policy_v3 import Request, floor_verdict, queen_decide
 
     if not command.strip():
         return None
-    # v109-F1: judged per segment — `cd <repo> && git checkout <branch>` ran
-    # from chat because argv[0] was `cd`. Malformed lines still fall to the
-    # card so the honest error surfaces on confirm.
-    reason = queen_command_line_refusal(command)
-    if reason is not None:
+    floor = floor_verdict("shell", command, home=holder.current.home, cwd=cwd)
+    if floor is not None:
+        secret = floor["rule_id"] == "floor.secret-reads"
         return AutonomyDecision(
             verdict="deny",
-            reason="shell.deny.queen_guard",
-            detail=reason,
-            decided_by="queen-shell-guard",
+            reason="shell.deny.secret_floor" if secret else "shell.deny.queen_guard",
+            detail=floor["reason"],
+            decided_by=floor["decided_by"],
         )
-    policy = resolve_operator_policy(store)
     repo = _cwd_registered_repo(store, holder, cwd)
     reached = None if repo is not None else _command_registered_repo(store, holder, command, cwd)
     target = repo if repo is not None else reached
@@ -2613,6 +3086,12 @@ def queen_shell_decision(
             if via_cwd
             else f"the command reaches into registered repo {target!r} (a path, cd, or git -C)"
         )
+        # P3-6: never point a chat at a dispatcher its role hides
+        change = (
+            "this chat's role cannot change a repo (the operator can switch it with /role builder)"
+            if "dispatch_run" in hidden_tools(role)
+            else "quick_edit for one file, dispatch_run for more"
+        )
         if background:
             return AutonomyDecision(
                 verdict="deny",
@@ -2624,18 +3103,23 @@ def queen_shell_decision(
                 detail=(
                     f"{how} — daemons do not run in checkouts (a background process "
                     "there could modify files with no patch card, forever). Run it from "
-                    "a non-repo directory, or use dispatch_run for repo work."
+                    f"a non-repo directory. To change the repo: {change}."
                 ),
                 decided_by="queen-shell-guard",
             )
-        repo_decision = policy.decision("shell", "run_repo", command)
-        if repo_decision.verdict == "allow":
+        verdict = queen_decide(
+            holder, store, Request("shell", "run_repo", command), role=role, cwd=cwd,
+            chat_id=chat_id,
+        )  # fmt: skip
+        if verdict.verdict == "allow":
             return AutonomyDecision(
                 verdict="allow",
                 reason="shell.allow.run_repo_rule",
                 detail=command,
-                decided_by=repo_decision.decided_by,
+                decided_by=verdict.decided_by,
             )
+        if verdict.layer == "taint":  # P4-1: a rule allowed it; taint only asks
+            return taint_decision(verdict)
         return AutonomyDecision(
             verdict="deny",
             reason="shell.deny.repo_cwd" if via_cwd else "shell.deny.repo_target",
@@ -2648,29 +3132,49 @@ def queen_shell_decision(
                 f"{how} — a shell command there can modify files with no patch card, "
                 "so it refuses by default. To look: repo_state, search_files, "
                 "read_file, git_log, git_diff run in-turn with no card. To change "
-                "something: quick_edit for one file, dispatch_run for more. Only to "
+                f"something: {change}. Only to "
                 "open repo shells deliberately: set_operator_policy scope='shell' "
-                "action='run_repo' with the command prefix — a standing rule, not "
-                "a one-off."
+                "action='run_repo' with the exact command line — a standing rule, "
+                "not a one-off."
             ),
-            decided_by="queen-shell-guard",
+            decided_by=verdict.decided_by,
         )
-    run_decision = policy.decision("shell", "run_background" if background else "run", command)
-    if run_decision.verdict == "allow":
+    action = "run_background" if background else "run"
+    verdict = queen_decide(
+        holder, store, Request("shell", action, command), role=role, cwd=cwd, chat_id=chat_id
+    )
+    if verdict.verdict == "allow":
         return AutonomyDecision(
             verdict="allow",
             reason="shell.allow.run_rule",
             detail=command,
-            decided_by=run_decision.decided_by,
+            decided_by=verdict.decided_by,
         )
-    if run_decision.verdict == "deny" and run_decision.rule_id != DEFAULT_DENY_RULE_ID:
+    if verdict.verdict == "deny":
         return AutonomyDecision(
             verdict="deny",
             reason="shell.deny.rule",
-            detail="an explicit operator deny covers this command",
-            decided_by=run_decision.decided_by,
+            detail=f"a policy rule denies this command ({verdict.decided_by})",
+            decided_by=verdict.decided_by,
         )
-    return None  # default → the ordinary per-command card
+    if verdict.layer == "taint":
+        return taint_decision(verdict)
+    if verdict.note is not None and verdict.layer == "default":
+        # L13: an unreadable line under a deny — the card's risk line says so
+        return AutonomyDecision(
+            verdict="require_approval",
+            reason="shell.require_approval.unreadable_under_deny",
+            detail=verdict.note,
+            decided_by=verdict.decided_by,
+        )
+    # B79: the card names the rule that asked — never "no rule covers this".
+    asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
+    return AutonomyDecision(
+        verdict="require_approval",
+        reason=f"shell.require_approval.{asked}",
+        detail=command,
+        decided_by=verdict.decided_by,
+    )
 
 
 def _draft_excerpt(artifacts: list[dict[str, Any]]) -> str | None:
@@ -2743,8 +3247,18 @@ def _get_run_guidance(
 
 
 def execute_read_tool(
-    name: str, args: dict[str, Any], *, store: RunStore, holder: ConfigHolder
+    name: str,
+    args: dict[str, Any],
+    *,
+    store: RunStore,
+    holder: ConfigHolder,
+    chat_id: str | None = None,
 ) -> Any:
+    hidden = hidden_tools(_chat_role(store, holder, chat_id)) if chat_id else {}
+    if name in hidden:
+        role = _chat_role(store, holder, chat_id)
+        assert role is not None
+        return {"ok": False, "error": hidden_refusal(name, role, hidden[name])}
     if name == DESCRIBE_TOOL_NAME:
         # v74-F3: on-demand schema fetch. The chat engine persists the
         # described names as the chat's active tools (it holds the chat_id);
@@ -2764,15 +3278,17 @@ def execute_read_tool(
             )
             requested = requested[:DESCRIBE_TOOLS_MAX]
         described["tools"] = [
-            dict(_SPEC_BY_NAME[n]["function"]) for n in requested if n in _SPEC_BY_NAME
+            dict(_SPEC_BY_NAME[n]["function"])
+            for n in requested
+            if n in _SPEC_BY_NAME and n not in hidden
         ]
-        unknown = [n for n in requested if n not in _SPEC_BY_NAME]
+        unknown = [n for n in requested if n not in _SPEC_BY_NAME or n in hidden]
         if unknown:
             described["unknown"] = {
                 "names": unknown,
                 "note": (
-                    "no tools by these names — the tool index in the system "
-                    "prompt lists everything that exists"
+                    "no tools by these names in this chat — the tool index in "
+                    "the system prompt lists everything it can use"
                 ),
             }
         return described
@@ -2827,14 +3343,19 @@ def execute_read_tool(
         if config is None:
             return {"error": f"no MCP server {server_id!r}; register_mcp_server first"}
         try:
-            tools = MCPClient(config, runner=runner_for_config(config)).list_tools()
+            tools = MCPClient(
+                config, runner=runner_for_config(config, skep_home=holder.current.home.parent)
+            ).list_tools()
         except MCPError as exc:
             return {"error": str(exc)}
         from ..mcp_client import classify_browse_action
 
         views = []
+        # ES (B122): the policy column is the verdict a call from THIS chat
+        # gets — the role layer included.
+        role = _chat_role(store, holder, chat_id)
         for tool in tools:
-            decision = mcp_scope_decision(store, tool)
+            decision = mcp_scope_decision(store, holder, tool, role=role, chat_id=chat_id)
             views.append(
                 {
                     "name": tool.name,
@@ -2842,7 +3363,7 @@ def execute_read_tool(
                     # v71-F2: a browse-bound tool's honest label is its browse
                     # action — the generic ladder would misread browser_* names.
                     "risk": (
-                        classify_browse_action(tool.name)
+                        classify_browse_action(tool)
                         if config.scope == "browse"
                         else classify_mcp_risk(tool)
                     ),
@@ -3050,8 +3571,25 @@ def execute_read_tool(
 
         return registry_view()
     if name == "policy_rsop":
-        return actions.rsop_view(holder, store, str(args["repo"]))
+        rsop = actions.rsop_view(holder, store, str(args["repo"]))
+        if chat_id is not None:  # W22: what this chat adds on top
+            from .taint import taint_line
+
+            role = _chat_role(store, holder, chat_id)
+            taint = store.get_chat_taint(chat_id)
+            rsop["this_chat"] = {
+                "role": role.name if role else None,
+                "taint": taint.bits(),
+                "taint_line": taint_line(store, chat_id, taint),
+                "note": "this chat's own grants and taint apply on top of the rules "
+                "above — policy_why answers with them",
+            }
+        return rsop
     if name == "policy_why":
+        role_name = None if args.get("role") is None else str(args["role"])
+        if role_name is None and chat_id is not None:
+            chat_role = _chat_role(store, holder, chat_id)  # W22: the lane's own role
+            role_name = chat_role.name if chat_role else None
         return actions.policy_why(
             holder,
             store,
@@ -3059,6 +3597,20 @@ def execute_read_tool(
             str(args["scope"]),
             str(args["action"]),
             str(args["value"]),
+            role=role_name,
+            delegation_chain=[str(hop) for hop in args.get("delegation_chain") or []],
+            chat_id=chat_id,
+        )
+    if name == "policy_explain":
+        from ..policy_templates import explain_view
+
+        return explain_view(str(args["subject"]), holder.current.home)
+    if name == "policy_decisions":
+        return actions.policy_decisions(
+            holder.current.audit_dir,
+            actor=None if args.get("actor") is None else str(args["actor"]),
+            since=None if args.get("since") is None else str(args["since"]),
+            limit=int(args.get("limit") or 200),
         )
     if name == "list_approvals":
         approvals = []
@@ -3204,10 +3756,19 @@ def execute_read_tool(
     if name == "list_tasks":
         return {"tasks": [asdict(task) for task in store.list_tasks()]}
     if name == "add_note":
-        note = store.create_note(str(args["content"]).strip(), actor=CHAT_TOOL_ACTOR)
+        # W21: the row carries the writing chat's taint to every later reader
+        note = store.create_note(
+            str(args["content"]).strip(),
+            actor=CHAT_TOOL_ACTOR,
+            taint=chat_taint_bits(store, chat_id),
+        )
         return {"note": asdict(note)}
     if name == "add_task":
-        task = store.create_task(str(args["title"]).strip(), actor=CHAT_TOOL_ACTOR)
+        task = store.create_task(
+            str(args["title"]).strip(),
+            actor=CHAT_TOOL_ACTOR,
+            taint=chat_taint_bits(store, chat_id),
+        )
         return {"task": asdict(task)}
     if name == "complete_task":
         task_id = str(args["task_id"])
@@ -3279,6 +3840,10 @@ def execute_read_tool(
                 for record in records
             ]
         }
+    if name == "list_agents":
+        from ..agent_presence import presence_view
+
+        return presence_view(store, holder.current.audit_dir)
     if name == "list_processes":
         from . import processes
 
@@ -3320,17 +3885,30 @@ def execute_read_tool(
     if name == "search_web":
         # v44-F8: Queen-side discovery — a failed search is a clean tool error,
         # never an exception into the turn loop (the small model handles text).
-        # v52-F3: the operator policy decides first (network/search — allowed
-        # by the default net:search rule; an operator deny stops search here).
-        # Read tools never card: anything but allow is a clean policy error.
-        from ..policy_resolver import resolve_operator_policy
+        # P3-3 (B78): ``network.search`` through decide() WITH the chat's role.
+        # The value is the backend, never the query: the decision log keeps no
+        # query text. Read tools never card: anything but allow is a clean
+        # policy error, and so is a policy that will not load.
         from . import websearch
 
-        search_decision = resolve_operator_policy(store).decision("network", "search", "ddgs")
+        try:
+            search_decision = search_web_verdict(store, holder, chat_id)
+        except Exception as exc:  # fail closed: no decision, no search
+            return {"error": f"web search refused: the policy did not load ({exc})", "results": []}
+        if search_decision.layer == "taint":
+            # P4-1: a live turn cards this (chat.py); a turn that cannot card
+            # (/btw, unattended) refuses and says why.
+            return {
+                "error": f"web search needs the operator's OK here: {search_decision.note} — "
+                "ask in a live turn",
+                "decided_by": search_decision.decided_by,
+                "results": [],
+            }
         if search_decision.verdict != "allow":
             return {
-                "error": "web search is not allowed by the operator policy "
+                "error": "web search is not allowed by policy "
                 f"(decided_by: {search_decision.decided_by})",
+                "decided_by": search_decision.decided_by,
                 "results": [],
             }
         try:
@@ -3433,6 +4011,111 @@ def _queen_landing_branch(store: RunStore, run: dict[str, Any], raw: Any) -> str
     return branch
 
 
+def _learned_grant(store: RunStore, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """The learned rule an allow_fetch_domain / allow_mcp_tool confirm stores."""
+    if name == "allow_fetch_domain":
+        # v72-F7: the allow_mcp_tool pattern, for the read_url lane — one
+        # vetted learned rule in the one engine; deny always wins (v40).
+        domain = str(args["domain"]).strip().lower().rstrip(".")
+        if not domain or "*" in domain or any(ch in domain for ch in "/:@ ") or "." not in domain:
+            raise ValueError(
+                "domain must be a bare hostname like 'docs.python.org' — no scheme, "
+                "path, port, or wildcard"
+            )
+        return {
+            "rule_id": f"network:fetch:{domain}",
+            "action": "fetch",
+            "pattern": domain,
+            "scope": "network",
+        }
+    from ..mcp_client import MCPTool, mcp_tool_scope_action
+
+    server_id = str(args["server_id"])
+    tool_name = str(args["tool"])
+    # v41-F3: the rule lands in the scope the tool actually decides under
+    # (email/read or email/send for a mail-bound server, else mcp/call).
+    rule_scope, rule_action = mcp_tool_scope_action(
+        store, MCPTool(server_id=server_id, name=tool_name, description="")
+    )
+    return {
+        "rule_id": f"{rule_scope}:{server_id}:{tool_name}",
+        "action": rule_action,
+        "pattern": f"{server_id}:{tool_name}",
+        "scope": rule_scope,
+    }
+
+
+def policy_write_preview(
+    store: RunStore, holder: ConfigHolder, name: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    """P3-5 (V11, ADR 0059 D6): the card fields a policy-write proposal
+    carries — ``replay`` (what its confirm would flip among recent decisions)
+    and ``policy_warnings`` (grants it would shadow) — from the one
+    write-time check at PROPOSAL, nothing written. A proposal the check
+    refuses raises ``PolicyWriteRejected``: no card is shown whose confirm can
+    only fail (the B22 lesson). A keep-able card (read_url / run_shell /
+    start_process) offers only ``once``, with ``keep_refused``, when the
+    check refuses its grants; it carries no replay — these cards are raised
+    on every ask, and a replay costs seconds on a full log. Bad arguments
+    yield nothing here: the confirm reports them as it always has."""
+    from ..policy_schema import LearnedRule
+    from ..policy_write import PolicyWriteRejected, vet_write
+
+    def check() -> dict[str, Any]:
+        if name in actions.REMEMBERABLE_TOOLS:
+            if len(actions.keep_options(name, args)) < 2:
+                return {}
+            refused = actions.keep_refusal(name, args, "always", store=store)
+            if refused is not None:
+                return {"keep": ["once"], "keep_refused": refused}
+            return {}
+        if name == "set_operator_policy":
+            return actions.set_operator_policy_rule(
+                store, scope=str(args["scope"]), action=str(args["action"]),
+                pattern=str(args["pattern"]), verdict=str(args["verdict"]), holder=holder,
+                dry_run=True,
+            )  # fmt: skip
+        if name in ("allow_fetch_domain", "allow_mcp_tool"):
+            rule = LearnedRule(**_learned_grant(store, name, args), provenance="card")
+            rule, _status, updated = actions._grant_plan(store, rule, None)
+            if updated is None:
+                return {"replay": f"already granted by {rule.rule_id!r} — nothing changes"}
+            return actions._write_report(actions._vet_grant(store, rule, updated))
+        if name == "approve_policy_baseline":
+            layer, _view = actions.baseline_preview(
+                holder.current.home,
+                template=None if args.get("template") is None else str(args["template"]),
+                reapprove=bool(args.get("reapprove")),
+            )
+            return actions._write_report(vet_write(store, holder=holder, baseline=layer))
+        if name == "set_policy":
+            return actions.update_policy(store, holder, dict(args), dry_run=True)
+        if name in ("set_policy_group", "attach_policy_group"):
+            # Run-lane knobs only: the operator stack is unchanged (the check
+            # still runs; the replay says nothing flips).
+            return actions._write_report(vet_write(store, holder=holder))
+        return {}
+
+    try:
+        found = check()
+    except PolicyWriteRejected:
+        raise
+    except HTTPException as exc:
+        if isinstance(exc.__cause__, PolicyWriteRejected):
+            raise exc.__cause__ from None
+        return {}
+    except (KeyError, TypeError, ValueError):
+        return {}
+    fields = {
+        key: found[key]
+        for key in ("replay", "keep", "keep_refused", "keep_replay")
+        if found.get(key)
+    }
+    if found.get("warnings"):
+        fields["policy_warnings"] = found["warnings"]
+    return fields
+
+
 def execute_mutation(
     name: str,
     args: dict[str, Any],
@@ -3443,11 +4126,14 @@ def execute_mutation(
     actor: str,
     decision: AutonomyDecision | None = None,
     chat_id: str | None = None,
+    preanswered: dict[str, Any] | None = None,
 ) -> Any:
     """Run one confirmed mutation through the shared supervisor verbs.
 
     ``chat_id`` is the chat the mutation was confirmed in, when there is one —
     note schedules bind to it so their ticks deliver into that chat (v43-F6).
+    ``preanswered`` (P4-2): the manifest the operator approved on a
+    dispatch card — only ``chat.verdict_events`` passes it.
     """
     result = _execute_mutation(
         name,
@@ -3458,6 +4144,7 @@ def execute_mutation(
         actor=actor,
         decision=decision,
         chat_id=chat_id,
+        preanswered=preanswered,
     )
     if chat_id is not None:
         _bind_chat_project(store, holder, chat_id, name, args, result)
@@ -3474,7 +4161,26 @@ def _execute_mutation(
     actor: str,
     decision: AutonomyDecision | None = None,
     chat_id: str | None = None,
+    preanswered: dict[str, Any] | None = None,
 ) -> Any:
+    if name == "search_web":
+        # P4-1: a taint card the operator confirmed (chat.py cards search_web
+        # only for a taint ask) — the human's OK answers the ask; a deny that
+        # landed since still refuses (denied space unreachable by confirmation).
+        from . import websearch
+
+        last_guard = search_web_verdict(store, holder, chat_id)
+        if last_guard.verdict == "deny":
+            raise ValueError(f"denied by policy: {last_guard.decided_by}")
+        return {
+            "results": websearch.search_web(
+                str(args["query"]), max_results=int(args.get("max_results") or 5)
+            ),
+            "decided_by": "operator/confirmed",
+        }
+    if name in TAINT_ASKED_STORE_WRITES:
+        # W21: a store write an untrusted chat had to ask for, now confirmed
+        return execute_read_tool(name, args, store=store, holder=holder, chat_id=chat_id)
     if name == "register_mcp_server":
         from ..mcp_client import MCPError, MCPServerConfig, save_mcp_server
 
@@ -3499,43 +4205,53 @@ def _execute_mutation(
     if name == "read_url":
         # v47-F4: Queen search ≠ Queen fetch — the fetch happens HERE, strictly
         # after the card confirm; a failed read degrades to a clean tool error.
-        # v52-F3 (Option A): the card IS the human gate; the operator policy is
-        # consulted for AUDIT only — an explicit allow's rule id rides the
-        # result, otherwise decided_by names the card. Never blocks a confirm.
+        # P3-3: the fetch decision is re-made here (the last guard): a host a
+        # rule denies is refused even on a confirmed card, and nothing is
+        # fetched (f1-27). The card IS the human gate for an ask.
         import urllib.parse
 
-        from ..policy_resolver import resolve_operator_policy
         from . import websearch
 
         url = str(args["url"])
         host = urllib.parse.urlparse(url).hostname or ""
+        fetch_role = _chat_role(store, holder, chat_id)
+        now = (
+            fetch_grant_decision(store, holder, host, role=fetch_role, chat_id=chat_id, url=url)
+            if host
+            else None
+        )
+        if now is not None and now.verdict == "deny":
+            raise ValueError(f"denied by policy: {now.detail}")
         # v72-F7: on the granted-domain lane the standing grant is the gate —
         # every redirect hop re-decides against it (a redirect must never
-        # widen a grant; fail closed off-domain).
+        # widen a grant; fail closed off-domain). P3-3: on the card lane a hop
+        # re-decides too, and one a rule denies is refused.
         granted = (
             decision is not None
             and decision.reason == "network.allow.fetch_grant"
             and decision.allows_execution()
         )
-        redirect_guard = None
+
+        def _hop_allowed(candidate_host: str) -> bool:
+            # A hop is known by its host only: a url_prefix grant never covers it.
+            hop = fetch_grant_decision(
+                store, holder, candidate_host, role=fetch_role, chat_id=chat_id
+            )
+            return hop.allows_execution() if granted else hop.verdict != "deny"
+
         if granted:
-
-            def _hop_allowed(candidate_host: str) -> bool:
-                hop = fetch_grant_decision(store, candidate_host)
-                return hop is not None and hop.allows_execution()
-
-            redirect_guard = _hop_allowed
             decided_by = decision.decided_by if decision is not None else "operator-card"
         else:
-            connect = resolve_operator_policy(store).decision("network", "connect", host)
-            decided_by = connect.decided_by if connect.verdict == "allow" else "operator-card"
+            decided_by = "operator-card"
+            if now is not None and now.verdict == "allow":
+                decided_by = now.decided_by or decided_by
         # v83-F1: the granted lane earned the bigger budget; the card lane
         # stays small so a card review stays cheap. Markdown by default.
         try:
             return {
                 **websearch.fetch_url_text(
                     url,
-                    redirect_guard=redirect_guard,
+                    redirect_guard=_hop_allowed,
                     markdown=str(args.get("mode") or "markdown") != "text",
                     max_bytes=websearch.GRANTED_READ_MAX_BYTES
                     if granted
@@ -3567,7 +4283,12 @@ def _execute_mutation(
         except ValueError as exc:
             raise ValueError(f"command could not be parsed: {exc}") from exc
         last_guard = decision or queen_shell_decision(
-            store, holder, command=shell_command, cwd=shell_cwd
+            store,
+            holder,
+            command=shell_command,
+            cwd=shell_cwd,
+            role=_chat_role(store, holder, chat_id),
+            chat_id=chat_id,
         )
         if last_guard is not None and last_guard.verdict == "deny":
             raise ValueError(last_guard.detail or "denied by policy")
@@ -3640,7 +4361,8 @@ def _execute_mutation(
         }
         try:
             handshake = MCPClient(
-                browser_config, runner=runner_for_config(browser_config)
+                browser_config,
+                runner=runner_for_config(browser_config, skep_home=holder.current.home.parent),
             ).list_tools()
             result_view["tools"] = [tool.name for tool in handshake]
         except MCPError as exc:
@@ -3672,6 +4394,9 @@ def _execute_mutation(
             ),
             caste="coding",
             dispatch_decision=decision,
+            delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            deferred_asks=_human_answers(store, chat_id),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         return {
             "task_id": task_id,
@@ -3686,7 +4411,13 @@ def _execute_mutation(
         start_command = str(args["command"])
         start_cwd = None if args.get("cwd") is None else str(args["cwd"])
         start_guard = decision or queen_shell_decision(
-            store, holder, command=start_command, cwd=start_cwd, background=True
+            store,
+            holder,
+            command=start_command,
+            cwd=start_cwd,
+            background=True,
+            role=_chat_role(store, holder, chat_id),
+            chat_id=chat_id,
         )
         if start_guard is not None and start_guard.verdict == "deny":
             raise ValueError(start_guard.detail or "denied by policy")
@@ -3741,6 +4472,7 @@ def _execute_mutation(
             holder.current.home,
             analysis_tasks,
             None if args.get("context") is None else str(args["context"]),
+            parent_chat_id=chat_id,
         )
     if name == "batch_dispatch":
         # v51-F5 (ADR 0025): N independent dispatch_runs submitted together.
@@ -3756,6 +4488,18 @@ def _execute_mutation(
             if not isinstance(entry, dict) or "repo" not in entry or "instructions" not in entry:
                 raise ValueError("each task must be an object with repo and instructions")
             entries.append(entry)
+        if args.get("manager"):
+            # R3 (ADR 0055 D5): the batch as a team — Queen → manager → workers.
+            return actions.submit_team(
+                holder,
+                runner,
+                store,
+                manager=str(args["manager"]),
+                tasks=entries,
+                delegation_chain=_queen_chain(store, holder, chat_id, actor),
+                dispatch_decision=decision,
+                deferred_asks=_human_answers(store, chat_id),
+            )
         task_ids = [
             actions.submit_run(
                 holder,
@@ -3772,6 +4516,10 @@ def _execute_mutation(
                 # member — the batch takes the single-dispatch path, unchanged.
                 engine=(None if entry.get("engine") is None else str(entry["engine"])),
                 dispatch_decision=decision,
+                delegation_chain=_queen_chain(store, holder, chat_id, actor),
+                role=None if entry.get("role") is None else str(entry["role"]),
+                deferred_asks=_human_answers(store, chat_id),
+                chat_taint=chat_taint_bits(store, chat_id),
             )
             for entry in entries
         ]
@@ -3850,7 +4598,7 @@ def _execute_mutation(
         if fast_requested:
             from .fastlane import run_code_fast
 
-            fast = run_code_fast(language, str(args["code"]))
+            fast = run_code_fast(language, str(args["code"]), skep_home=holder.current.home.parent)
             if fast is not None:
                 return fast
         # v106-F7: the caller may raise the wall clock up to the ceiling —
@@ -3872,6 +4620,8 @@ def _execute_mutation(
             network=[],  # deny-all egress: a script computes, it never phones out
             wall_clock_seconds=wall_clock,
             dispatch_decision=decision,
+            delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         result = _script_run_result(store, task_id, wall_clock_seconds=wall_clock)
         if fast_requested:
@@ -3890,7 +4640,11 @@ def _execute_mutation(
         )
 
         last_guard = queen_filesystem_decision(
-            store, holder, action="read", path=str(args.get("path") or "")
+            store,
+            holder,
+            action="read",
+            path=str(args.get("path") or ""),
+            role=_chat_role(store, holder, chat_id),
         )
         if last_guard.verdict == "deny":
             raise ValueError(f"denied by policy: {last_guard.decided_by or last_guard.reason}")
@@ -3915,6 +4669,7 @@ def _execute_mutation(
                 path=str(args["path"]),
                 target=str(args.get("target") or "content"),
                 file_glob=None if args.get("file_glob") is None else str(args["file_glob"]),
+                skep_home=holder.current.home,
             ),
             "decided_by": last_guard.decided_by,
         }
@@ -3970,6 +4725,9 @@ def _execute_mutation(
             instructions=forge.authoring_instructions(tool_title, purpose, rel_path),
             caste="coding",
             dispatch_decision=decision,
+            delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            deferred_asks=_human_answers(store, chat_id),
+            chat_taint=chat_taint_bits(store, chat_id),
         )
         forge.save_plugin(
             store,
@@ -4048,7 +4806,13 @@ def _execute_mutation(
                 record = dataclasses.replace(record, state="sandboxed")
                 forge.save_plugin(store, record)
             trial_result = _forge_trial(
-                store, holder, runner, source=source, repo=trial_repo, decision=decision
+                store,
+                holder,
+                runner,
+                source=source,
+                repo=trial_repo,
+                decision=decision,
+                delegation_chain=_queen_chain(store, holder, chat_id, actor),
             )
             ok, reason, evidence = forge.trial_verdict(trial_result)
             record = dataclasses.replace(record, trial=evidence)
@@ -4183,68 +4947,53 @@ def _execute_mutation(
         # Last guard: a deny rule refuses even on a confirmed card — denied
         # space stays unreachable by confirmation.
         last_guard = mcp_scope_decision(
-            store, MCPTool(server_id=server_id, name=tool_name, description="")
+            store,
+            holder,
+            MCPTool(server_id=server_id, name=tool_name, description=""),
+            role=_chat_role(store, holder, chat_id),
         )
         if last_guard.verdict == "deny":
             raise ValueError(f"denied by policy: {last_guard.decided_by or last_guard.reason}")
         try:
-            client = MCPClient(server_config, runner=runner_for_config(server_config))
+            client = MCPClient(
+                server_config,
+                runner=runner_for_config(server_config, skep_home=holder.current.home.parent),
+            )
             call = client.call_tool(tool_name, _object_arg(args, "arguments"))
         except MCPError as exc:
             raise ValueError(str(exc)) from exc
         if not call.ok:
             return {"server_id": server_id, "tool": tool_name, "ok": False, "error": call.error}
         return {"server_id": server_id, "tool": tool_name, "ok": True, "content": call.content}
-    if name == "allow_fetch_domain":
-        # v72-F7: the allow_mcp_tool pattern, for the read_url lane — one
-        # vetted learned rule in the one engine; deny always wins (v40).
-
-        domain = str(args["domain"]).strip().lower().rstrip(".")
-        if not domain or "*" in domain or any(ch in domain for ch in "/:@ ") or "." not in domain:
-            raise ValueError(
-                "domain must be a bare hostname like 'docs.python.org' — no scheme, "
-                "path, port, or wildcard"
-            )
-        # v90-F3: one shared writer (it vets against every deny before storing).
+    if name in ("allow_fetch_domain", "allow_mcp_tool"):
+        # v90-F3: one shared writer; P3-5: it runs the write-time check first.
+        grant = _learned_grant(store, name, args)
+        checked: dict[str, Any] = {}
         rule_id = actions.learn_policy_rule(
-            store,
-            rule_id=f"network:fetch:{domain}",
-            action="fetch",
-            pattern=domain,
-            scope="network",
-            provenance=f"allow-always:{actor}",
+            store, **grant, provenance=f"allow-always:{actor}", report=checked
         )
-        return {"allowed_fetch_domain": domain, "rule_id": rule_id or f"network:fetch:{domain}"}
-    if name == "allow_mcp_tool":
-        from ..mcp_client import MCPTool, mcp_tool_scope_action
-
-        server_id = str(args["server_id"])
-        tool_name = str(args["tool"])
-        # v41-F3: the rule lands in the scope the tool actually decides under
-        # (email/read or email/send for a mail-bound server, else mcp/call).
-        rule_scope, rule_action = mcp_tool_scope_action(
-            store, MCPTool(server_id=server_id, name=tool_name, description="")
-        )
-        pattern = f"{server_id}:{tool_name}"
-        # v90-F3: one shared writer (it vets against every deny before storing).
-        rule_id = actions.learn_policy_rule(
-            store,
-            rule_id=f"{rule_scope}:{server_id}:{tool_name}",
-            action=rule_action,
-            pattern=pattern,
-            scope=rule_scope,
-            provenance=f"allow-always:{actor}",
-        )
-        return {
-            "allowed": pattern,
-            "rule_id": rule_id or f"{rule_scope}:{server_id}:{tool_name}",
-            "scope": rule_scope,
-        }
+        rule_id = rule_id or str(grant["rule_id"])
+        if name == "allow_fetch_domain":
+            answer = {"allowed_fetch_domain": grant["pattern"], "rule_id": rule_id}
+        else:
+            answer = {"allowed": grant["pattern"], "rule_id": rule_id, "scope": grant["scope"]}
+        return {**answer, **actions._write_report(checked)}
     if name == "revoke_policy_rule":
         # v109-F9: the narrowing half of allow_fetch_domain / allow_mcp_tool /
         # the session grants — one shared verb; the REST DELETE is the
         # operator-direct face of the same function (I5).
         return actions.revoke_policy_rule(store, rule_id=str(args["rule_id"]))
+    if name == "approve_policy_baseline":
+        # first-run O2: the card is the typed `yes`; a tamper card carries
+        # reapprove=true plus its reason/diff, which the verb ignores.
+        return actions.approve_policy_baseline(
+            holder.current.home,
+            template=None if args.get("template") is None else str(args["template"]),
+            reapprove=bool(args.get("reapprove")),
+            approved_by=actor,
+            store=store,
+            holder=holder,
+        )
     if name == "set_policy":
         return actions.update_policy(store, holder, args)
     if name == "apply_policy_preset":
@@ -4274,6 +5023,7 @@ def _execute_mutation(
             action=str(args["action"]),
             pattern=str(args["pattern"]),
             verdict=str(args["verdict"]),
+            holder=holder,
         )
     if name == "approve_review":
         review_id = str(args["review_id"])
@@ -4284,7 +5034,7 @@ def _execute_mutation(
             resumed_result: dict[str, Any] = {"action": "resumed", "resumed_as": resumed}
             # v109-F8: the Nth identical approval says so — the model relays
             # the nudge instead of silently re-approving forever.
-            suggestion = actions.remember_suggestion_for_review(store, review_id)
+            suggestion = actions.remember_suggestion_for_review(store, review_id, holder.current)
             if suggestion is not None:
                 resumed_result["suggestion"] = suggestion
             return resumed_result
@@ -4384,16 +5134,18 @@ def _execute_mutation(
             resumed = actions.allow_network_host_and_resume(
                 store, holder, runner, run, approval, review_id, actor
             )
-            return {"action": "allowed_host", "resumed_as": resumed}
+            where = actions.remembered_where(store, str(run["repo"]))  # W28: a grant
+            return {"action": "allowed_host", "resumed_as": resumed, "remembered": where}
         resumed = actions.allow_shell_command_and_resume(
             store, holder, runner, run, approval, review_id, actor
         )
-        return {"action": "allowed_command", "resumed_as": resumed}
+        # P3-4 (B18): say where the grant holds — a project grant, not a knob.
+        where = actions.remembered_where(store, str(run["repo"]))
+        return {"action": "allowed_command", "resumed_as": resumed, "remembered": where}
     if name == "deny_review":
         review_id = str(args["review_id"])
-        actions.pending_approval_or_409(store, review_id)
         note = None if args.get("note") is None else str(args["note"])
-        store.resolve_approval(review_id, approved=False, actor=actor, note=note)
+        actions.deny_approval(store, review_id, actor, note)
         return {"action": "denied"}
     if name == "register_repo":
         return register_repo(
@@ -4522,6 +5274,8 @@ def _execute_mutation(
             repo=str(args["repo"]),
             ref=None if args.get("ref") is None else str(args["ref"]),
         )
+        chain = _queen_chain(store, holder, chat_id, actor)
+        role = None if args.get("role") is None else str(args["role"])
         task_id = actions.submit_run(
             holder,
             runner,
@@ -4539,8 +5293,13 @@ def _execute_mutation(
             max_provider_calls=_optional_int(args, "max_provider_calls"),
             ref=None if args.get("ref") is None else str(args["ref"]),
             dispatch_decision=decision,
+            delegation_chain=chain,
+            role=role,
+            deferred_asks=_human_answers(store, chat_id),
             protocol=None if args.get("protocol") is None else str(args["protocol"]),
             engine=None if args.get("engine") is None else str(args["engine"]),
+            chat_taint=chat_taint_bits(store, chat_id),
+            preanswered=preanswered,
         )
         # v40-F2 (v35): repo + caste ride the result so both the live SSE tool
         # event and the stored transcript row can render a human summary —
@@ -4551,6 +5310,9 @@ def _execute_mutation(
             "repo": str(args["repo"]),
             "caste": str(args.get("caste") or "coding"),
         }
+        if chain or role:
+            # R3: the chat card shows who delegated, under which role.
+            result_view["delegation"] = {"chain": chain, "role": role}
         if hint is not None:
             result_view["hint"] = hint
         return result_view
@@ -4581,6 +5343,12 @@ def _execute_mutation(
             execution_mode="sandbox",  # research runs are sandboxed
             network=source_allowlist,
             dispatch_decision=decision,
+            delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            # L23: the role's asks on the source hosts ride as deferred asks;
+            # the card's manifest listed them, and the desk confirm answers them.
+            deferred_asks=_human_answers(store, chat_id),
+            chat_taint=chat_taint_bits(store, chat_id),
+            preanswered=preanswered,
         )
         return {"task_id": task_id, "state": "research_dispatched"}
     if name == "propose_schedule":
@@ -4611,6 +5379,16 @@ def _execute_mutation(
                     f"a {caste} schedule needs instructions "
                     f"(the {'shell command' if caste == 'script' else 'text to run'})"
                 )
+            if caste == "script":
+                from ..shell_prefixes import (
+                    SKEP_TRUST_REFUSAL,
+                    command_line_segments,
+                    is_skep_trust_command,
+                )
+
+                segments = command_line_segments(str(args["instructions"])) or []
+                if any(is_skep_trust_command(segment) for segment in segments):
+                    raise ValueError(SKEP_TRUST_REFUSAL)  # W20 review: nor on a timer
             if caste == "prompt" and chat_id is None:
                 raise ValueError(
                     "a prompt schedule runs its Queen turn in the chat that "
@@ -4802,6 +5580,13 @@ def _execute_mutation(
         normalized = validate_personality(str(args["value"]))
         store.set_chat_personality(chat_id, normalized or None)
         return {"personality": normalized or "default"}
+    if name == "set_role":
+        # R1 (ADR 0055 D3): the chat's role — prompt, voice and layer together.
+        from ..roles import use_role
+
+        if chat_id is None:
+            raise ValueError("set_role only makes sense inside a chat")
+        return use_role(store, holder.current.home, str(args["name"]), chat_id=chat_id)
     if name == "set_persona":
         # v53-F4 (ADR 0028): profile-level identity, one capped file in the
         # personal home; 'default' clears. Oversize is a clean tool error.
@@ -4903,6 +5688,7 @@ def _execute_mutation(
             actor=actor,
             rationale=None if args.get("rationale") is None else str(args["rationale"]),
             project_id=None if args.get("project") is None else str(args["project"]),
+            taint=chat_taint_bits(store, chat_id),  # W21: approval carries it on
         )
         return {
             "proposal_id": proposal.proposal_id,
@@ -4922,9 +5708,111 @@ def mutation_executes_in_turn(
     return decision is not None and decision.allows_execution()
 
 
+# P4-1: the mutating tools whose lane is ``policy_v3.decide()`` — it applies
+# the chat's taint itself (and knows a read from an act). Every other allow a
+# mutation gets (a project's auto-dispatch, an inert proposal, any lane added
+# later) is a consequential action the ``untrusted`` bit sends to a card.
+_DECIDED_LANES = frozenset(
+    {"run_shell", "start_process", "stop_process", "read_file", "search_files", "read_url",
+     "call_mcp_tool"}
+)  # fmt: skip
+
+
 def mutation_execution_decision(
-    name: str, args: dict[str, Any], *, store: RunStore, holder: ConfigHolder
+    name: str,
+    args: dict[str, Any],
+    *,
+    store: RunStore,
+    holder: ConfigHolder,
+    chat_id: str | None = None,
 ) -> AutonomyDecision | None:
+    """The gate for one Queen tool call: allow runs in-turn, deny refuses
+    with no card, anything else (None too) is the card. P4-1 (ADR 0059 D5):
+    in a chat with the ``untrusted`` bit an allow from outside decide() is a
+    consequential action and asks (``taint/untrusted-action``, or
+    ``taint/trifecta`` when the chat has both bits)."""
+    from ..policy_v3 import ACTION_REQUEST, Verdict, taint_asks, taint_verdict
+
+    decision = _mutation_execution_decision(name, args, store=store, holder=holder, chat_id=chat_id)
+    if decision is None or decision.verdict != "deny":
+        # P3-6 (D7, B22): a tool the chat's role hides is refused at proposal on
+        # every home — hiding is advertisement, this is the boundary. A lane
+        # that refuses (the dispatch lanes consult the chain) keeps its own
+        # words; one that would card (a run policy that cannot resolve: a
+        # tampered baseline, a gated repo) or allow is overruled (W2).
+        decision = _hidden_decision(name, store=store, holder=holder, chat_id=chat_id) or decision
+    if (
+        chat_id is None
+        or name in _DECIDED_LANES
+        or decision is None
+        or not decision.allows_execution()
+    ):
+        return decision
+    taint = store.get_chat_taint(chat_id)
+    # ADR 0059 D1 names a dispatch ``dispatch.delegate``; every allow here is
+    # an action of that weight (a run, a proposal, a later lane).
+    if taint_asks(taint, *ACTION_REQUEST) is None:
+        return decision
+    held = Verdict("allow", "", "", decision.decided_by or "", "operator")
+    return taint_decision(taint_verdict(held, taint, *ACTION_REQUEST, read_only=False))
+
+
+def _hidden_decision(
+    name: str, *, store: RunStore, holder: ConfigHolder, chat_id: str | None
+) -> AutonomyDecision | None:
+    try:
+        role = _chat_role(store, holder, chat_id)
+    except ValueError:
+        return None  # the lane already refused: role.deny.unloadable
+    rule = hidden_tools(role).get(name)
+    if role is None or rule is None:
+        return None
+    return AutonomyDecision(
+        verdict="deny",
+        reason="role.deny.tool_hidden",
+        detail=hidden_refusal(name, role, rule),
+        decided_by=rule,
+    )
+
+
+def _mutation_execution_decision(
+    name: str,
+    args: dict[str, Any],
+    *,
+    store: RunStore,
+    holder: ConfigHolder,
+    chat_id: str | None = None,
+) -> AutonomyDecision | None:
+    # R1 (ADR 0055 D3): the chat's role layer tightens the Queen's own lanes.
+    # A role file that no longer loads refuses rather than dropping the layer.
+    try:
+        role = _chat_role(store, holder, chat_id)
+    except ValueError as exc:
+        return AutonomyDecision(verdict="deny", reason="role.deny.unloadable", detail=str(exc))
+    # B22: the Queen's own hop (``_queen_chain``) — a dispatch its role can
+    # never delegate refuses here, before a card exists to confirm.
+    chain = [f"queen@{role.name}"] if role else []
+    if name == "run_schedule_now":
+        # ES (B122): a disabled/unknown schedule can only fail on confirm —
+        # refuse now, without a card, and tell the model why.
+        schedule = store.get_schedule(str(args.get("name") or ""))
+        if schedule is None or not schedule.enabled:
+            return AutonomyDecision(
+                verdict="deny",
+                reason="schedule.deny.not_runnable",
+                detail=(
+                    f"no schedule named {args.get('name')!r} — list_schedules shows them"
+                    if schedule is None
+                    else f"schedule {schedule.name!r} is disabled — set_schedule_enabled first"
+                ),
+            )
+    if name == "resume_run":
+        # L17: a resume that can only fail on confirm is answered now, no card
+        task_id = str(args.get("task_id") or "")
+        why = actions.resume_refusal(store, holder.current, task_id)
+        # an unknown id still cards (the frozen tool-surface grid holds that cell)
+        if why is not None and store.get_run(task_id) is not None:
+            return AutonomyDecision(verdict="deny", reason="resume.deny.not_resumable", detail=why)
     if name == "call_mcp_tool":
         # v40-F10: the resolved mcp scope decides — allow runs inside the
         # turn, require_approval cards, deny refuses without a card.
@@ -4932,25 +5820,29 @@ def mutation_execution_decision(
 
         return mcp_scope_decision(
             store,
+            holder,
             MCPTool(
                 server_id=str(args.get("server_id") or ""),
                 name=str(args.get("tool") or ""),
                 description="",
             ),
+            role=role,
+            chat_id=chat_id,
         )
+
     if name == "run_code":
         # v51-F3: run_code auto-resolves exactly where a plain dispatch_run
         # would — the project's own auto-dispatch posture decides, and the
         # script envelope (sandbox, deny-all egress, no landing path) is
         # strictly TIGHTER than what that posture already trusts.
         return actions.dispatch_run_decision(
-            holder, store, repo=str(args.get("repo") or ""), caste="script"
+            holder, store, repo=str(args.get("repo") or ""), caste="script", delegation_chain=chain
         )
     if name == "quick_edit":
         # v83-F10: a quick_edit IS a coding dispatch — same posture, same
         # gate as dispatch_run on this repo.
         return actions.dispatch_run_decision(
-            holder, store, repo=str(args.get("repo") or ""), caste="coding"
+            holder, store, repo=str(args.get("repo") or ""), caste="coding", delegation_chain=chain
         )
     if name == "batch_dispatch":
         # v51-F5: auto-resolve only when EVERY member matches its project's
@@ -4974,7 +5866,11 @@ def mutation_execution_decision(
                 # v98-F1: an explicit engine is an explicit run override, so
                 # this member gates the batch (actions.py explicit_run_overrides).
                 engine=(None if entry.get("engine") is None else str(entry["engine"])),
+                delegation_chain=chain,
+                role=None if entry.get("role") is None else str(entry["role"]),
             )
+            if member.verdict == "deny" and member.reason == "dispatch.deny.exceeds_delegator":
+                return member  # B22: a member the chain can never dispatch refuses the batch
             if not member.allows_execution():
                 return AutonomyDecision(
                     verdict="require_approval",
@@ -4995,6 +5891,8 @@ def mutation_execution_decision(
             holder,
             command=str(args.get("command") or ""),
             cwd=None if args.get("cwd") is None else str(args["cwd"]),
+            role=role,
+            chat_id=chat_id,
         )
     if name == "start_process":
         # v83-F8: the run_background action — a 'run' grant never covers a
@@ -5005,6 +5903,8 @@ def mutation_execution_decision(
             command=str(args.get("command") or ""),
             cwd=None if args.get("cwd") is None else str(args["cwd"]),
             background=True,
+            role=role,
+            chat_id=chat_id,
         )
     if name == "stop_process":
         # v83-F8 (review item 3): stopping CARDS by default — the operator
@@ -5016,8 +5916,9 @@ def mutation_execution_decision(
         if record is None:
             return None  # the honest not-found error surfaces on confirm
         stop_decision = queen_shell_decision(
-            store, holder, command=record.command, cwd=None, background=True
-        )
+            store, holder, command=record.command, cwd=None, background=True, role=role,
+            chat_id=chat_id,
+        )  # fmt: skip
         if stop_decision is not None and stop_decision.allows_execution():
             return AutonomyDecision(
                 verdict="allow",
@@ -5042,7 +5943,7 @@ def mutation_execution_decision(
         from .fileio import queen_filesystem_decision
 
         return queen_filesystem_decision(
-            store, holder, action="read", path=str(args.get("path") or "")
+            store, holder, action="read", path=str(args.get("path") or ""), role=role
         )
     if name == "read_url":
         # v72-F7: a standing network/fetch grant runs the read in-turn;
@@ -5050,12 +5951,24 @@ def mutation_execution_decision(
         # URL cards too — the honest error surfaces on confirm.
         import urllib.parse
 
-        host = urllib.parse.urlparse(str(args.get("url") or "")).hostname or ""
+        from .websearch import known_non_public
+
+        url = str(args.get("url") or "")
+        host = urllib.parse.urlparse(url).hostname or ""
         if not host:
             return None
-        return fetch_grant_decision(store, host)
+        local = known_non_public(url)
+        if local is not None:  # L22: a card here could only be refused
+            return AutonomyDecision(verdict="deny", reason="network.deny.non_public", detail=local)
+        return fetch_grant_decision(store, holder, host, role=role, chat_id=chat_id, url=url)
     if name != "dispatch_run":
         return None
+    if not str(args.get("repo") or "").strip():
+        return AutonomyDecision(
+            verdict="deny",
+            reason="dispatch.deny.no_repo",
+            detail="dispatch_run needs repo: a registered repo slug or host path (list_repos)",
+        )
     return actions.dispatch_run_decision(
         holder,
         store,
@@ -5070,4 +5983,6 @@ def mutation_execution_decision(
         max_actions=_optional_int(args, "max_actions"),
         max_provider_calls=_optional_int(args, "max_provider_calls"),
         engine=None if args.get("engine") is None else str(args["engine"]),
+        delegation_chain=chain,
+        role=None if args.get("role") is None else str(args["role"]),
     )

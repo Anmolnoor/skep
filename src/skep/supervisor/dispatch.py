@@ -23,12 +23,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -41,6 +44,7 @@ from skep.worker_contract import (
     ApprovalVerdict,
     AutonomyDecisionPayload,
     Budget,
+    CodingWorkerResult,
     CodingWorkerTask,
     EventType,
     Permissions,
@@ -53,15 +57,23 @@ from skep.worker_contract import (
 from .apply import RefreshError, refresh_clone, repo_default_branch, resolve_commit
 from .autonomy import AutonomyDecision, AutonomyVerdict
 from .config import SupervisorConfig
-from .contracts_io import mint_task, read_event_log, read_result, write_task_file
+from .contracts_io import (
+    DEFAULT_PERMISSIONS,
+    mint_task,
+    read_event_log,
+    read_result,
+    write_task_file,
+)
 from .ingest import IngestOutcome, ingest_run
-from .monitor import MonitorVerdict, synthesize_terminal, watch_worker
-from .netproxy import FilteringProxy
+from .monitor import MonitorVerdict, kill_session, synthesize_terminal, watch_worker
+from .netproxy import FilteringProxy, control_plane_ports
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
+from .provider_hosts import provider_hosts_for
 from .providers import ProviderProfile
 from .reverify import reverify_run
+from .sandbox import NetworkPolicy, SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
-from .spawner import effective_network_domains, spawn_worker
+from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
 from .store import RunStore
 from .worker_state import (
     prior_task_from_audit,
@@ -74,6 +86,7 @@ from .worktree import (
     cleanup_orphans,
     create_worktree,
     is_linked_worktree,
+    pin_git_protocols,
     remove_worktree,
 )
 
@@ -152,12 +165,6 @@ def _decision_payload(decision: AutonomyDecision | AutoApplyDecision) -> Autonom
     )
 
 
-def _worktrees_root(config: SupervisorConfig, repo: Path, execution_mode: str) -> Path:
-    if execution_mode == "workspace":
-        return repo.parent / ".skep" / "worktrees"
-    return config.worktrees_root
-
-
 def _keep_worktree_names(store: RunStore) -> set[str]:
     """In-flight worktrees plus preserved pending-gate worktrees (durable, so
     preserved trees survive sweeps by later runs and supervisor restarts).
@@ -210,12 +217,16 @@ def salvaged_checkpoint_version(config: SupervisorConfig, task_id: str) -> int:
 def _resume_workspace(
     store: RunStore, repo: Path, worktrees_root: Path, resume_of: str
 ) -> Path | None:
-    """The suspended run's preserved worktree, when intact and safe to reuse."""
+    """The suspended run's preserved worktree, when intact and safe to reuse.
+
+    ES-F4 (B07) migration: workspace-mode runs recorded before the move kept
+    their worktree at ``<repo parent>/.skep/worktrees`` — still reusable."""
     record = store.get_run(resume_of)
     if record is None or not record.workspace:
         return None
     workspace = Path(record.workspace)
-    if workspace.parent != worktrees_root or not is_linked_worktree(repo, workspace):
+    roots = (worktrees_root, repo.parent / ".skep" / "worktrees")
+    if workspace.parent not in roots or not is_linked_worktree(repo, workspace):
         return None
     return workspace
 
@@ -242,6 +253,9 @@ def _toolchain_env(workspace: Path, engine: CodingEngine, cache_root: Path) -> d
     env = {
         "npm_config_cache": str(cache_root / "npm"),
         "UV_CACHE_DIR": str(cache_root / "uv"),
+        # Mac finding B: clang -fmodules and swiftc ignore TMPDIR and write
+        # their module cache under /var/folders — outside the Seatbelt wall.
+        "CLANG_MODULE_CACHE_PATH": str(cache_root / "clang"),
     }
     # v107-F3: TMPDIR lives inside the wall too. Unset, Python and every
     # tool fall back to /tmp — which any NESTED bwrap the run spawns (skep's
@@ -282,8 +296,11 @@ def _resolve_provider_routing(
     domains = set(effective_network_domains(task))
 
     def host_granted(profile: ProviderProfile) -> bool:
-        host = urlparse(profile.base_url).hostname or ""
-        return "*" in domains or host in domains
+        url = urlparse(profile.base_url)
+        host = url.hostname or ""
+        port = url.port or (443 if url.scheme == "https" else 80)
+        # ADR 0059 D3: the provider rides provider_hosts as host:port.
+        return "*" in domains or host in domains or f"{host}:{port}" in domains
 
     allow_remote = any(p.cost_class != "local" and host_granted(p) for p in profiles)
     decision = resolve_routed_provider(
@@ -341,7 +358,10 @@ def run_task(
     proxy: FilteringProxy | None = None
     proxy_socket_dir: str | None = None
     active_names: tuple[str, ...] = ()
-    worktrees_root = _worktrees_root(config, repo, execution_mode)
+    # ES-F4 (B07): every mode's worktrees live under the active SKEP_HOME.
+    # Workspace mode used `<repo parent>/.skep/worktrees` — the real ~/.skep
+    # for a repo in $HOME, and outside the run's SKEP_HOME always.
+    worktrees_root = config.worktrees_root
     # v55-F2 (ADR 0035): a managed clone fetches before the baseline resolves —
     # the "is it on the latest code?" step. Managed clones only; workon dirs
     # are the operator's own. Offline dispatch keeps working from the clone.
@@ -355,6 +375,7 @@ def run_task(
     # the operator's checkout happens to sit on — otherwise a stray `git
     # checkout` silently changes what every future run sees. Detached HEAD
     # (default_branch → None) keeps the old HEAD behavior.
+    caller_chose_ref = ref is not None
     if ref is None:
         ref = repo_default_branch(repo)
     # v88-F4 (I2): resolve the project's pinned verification command HERE, not
@@ -369,28 +390,55 @@ def run_task(
     from .engines import engine_available, resolve_engine
 
     engine = resolve_engine(coding_engine or None)
+    # ADR 0059 D3 (V6a): the one place a worker's provider_hosts is set. Every
+    # face (chat, REST, CLI, scheduler, resume, batch, templates) reaches it,
+    # and a caller's value is never trusted: it is recomputed from the
+    # supervisor's own registry for the engine that actually runs (I5).
+    permissions = (permissions or DEFAULT_PERMISSIONS).model_copy(
+        update={
+            "provider_hosts": provider_hosts_for(
+                run_store, config.home.parent, caste=worker_kind, engine=engine.name
+            )
+        }
+    )
+    # ADR 0059 D3 (V7): a deferred ask exists only on a delegated dispatch —
+    # its one writer is the chain narrowing (``_within_delegation``), and a
+    # resume carries the delegation with it. Any other envelope naming one
+    # (a hand-edited task, a stray caller) loses it here.
+    if dispatch_decision is None or dispatch_decision.delegation is None:
+        permissions = permissions.model_copy(update={"network_ask": [], "shell_ask": []})
     # Only an EXTERNAL engine replaces the worker argv. "builtin" defers to
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
     worker_argv = engine.argv if (worker_kind == "coding" and engine.external) else None
+    if execution_mode == "sandbox" and config.sandbox:
+        # ES-F1 (B47, I12): every sandbox-mode run, not only external engines
+        # (v94-F4) — the builtin worker and run_code's script caste took the
+        # spawner's silent unsandboxed fallback while the record said
+        # "sandbox". Refuse before any run record or worktree exists.
+        backend = resolve_sandbox_backend(
+            config,
+            NetworkPolicy(allow=tuple(permissions.egress())),
+        )
+        probe = sandbox_availability(backend)
+        if not probe.usable:
+            raise ValueError(
+                "execution mode 'sandbox' needs a usable sandbox backend and this host "
+                f"has none ({probe.reason}: {probe.detail}) — skep never runs it "
+                "unconfined; fix the backend (`skep doctor`), or dispatch the builtin "
+                "worker with execution mode 'workspace'"
+            )
     if worker_argv is not None:
         # v94-F4: an external agent's commands never pass the capability layer —
         # the sandbox is its ONLY wall (ADR 0047). The resolver coerces the mode
         # on the policy path; this chokepoint covers every other caller (resume,
-        # explicit flags) and the spawner's silent unsandboxed fallback, failing
-        # closed before any run record or worktree exists.
+        # explicit flags), failing closed before any run record or worktree
+        # exists (the sandbox-availability half is ES-F1's guard above).
         if execution_mode != "sandbox":
             raise ValueError(
                 f"coding_engine {engine.name!r} is an external agent confined by "
                 "the sandbox, not the capability layer — it never runs in "
                 f"{execution_mode!r} mode; dispatch it with execution mode 'sandbox'"
-            )
-        if not sandbox_availability().usable:
-            raise ValueError(
-                f"coding_engine {engine.name!r} requires a usable sandbox and this "
-                "host has none — running it unsandboxed would put an unconfined "
-                "agent on the host; fix the sandbox backend (`skep doctor`) or "
-                "switch the project to the builtin engine"
             )
         # v116-F1: a present binary with a way to log in, BEFORE any run
         # record exists. Three claude_code runs died in 1.2 s ("Not logged
@@ -437,6 +485,18 @@ def run_task(
             # here, beside the verify pin, so every face lands the same way.
             raw_branch = project_policy.get("auto_apply_branch")
             auto_apply_branch = raw_branch if isinstance(raw_branch, str) else None
+    # ES-F6 (B132, I1): the auto lane accumulates on ONE integration branch
+    # (v30), so a run that will land there must START there — based on main it
+    # never sees the branch's earlier landings, and the second nearby task
+    # conflicts. Only when the caller named no ref and the branch exists.
+    if (
+        not caller_chose_ref
+        and auto_apply_branch
+        and resolve_commit(repo, f"refs/heads/{auto_apply_branch}") is not None
+        and auto_apply_decision(config.auto_approval_rules, auto_apply_verified_patch).verdict
+        == "allow"
+    ):
+        ref = auto_apply_branch
     try:
         landing_decision = auto_apply_decision(
             config.auto_approval_rules, auto_apply_verified_patch
@@ -444,6 +504,15 @@ def run_task(
         effective_worker_state = worker_state
         if effective_worker_state is None and resume_of is not None:
             effective_worker_state = resume_worker_state_from_audit(config.audit_dir, resume_of)
+        if resume_of is not None and effective_worker_state is not None:
+            # The checkpoint is the worker's own file: a grants key in it is
+            # not a grant (the proxy admits approved asked hosts from it, V7).
+            # Only the merge below, from the supervisor's audit copies, writes it.
+            effective_worker_state = {
+                key: value
+                for key, value in effective_worker_state.items()
+                if key != APPROVAL_GRANTS_STATE_KEY
+            }
         if resume_of is not None:
             # Carry every grant the chain has collected so far (prior grants +
             # the verdict the suspended run held) into the resumed envelope;
@@ -456,6 +525,17 @@ def run_task(
                         **(effective_worker_state or {}),
                         APPROVAL_GRANTS_STATE_KEY: grants,
                     }
+                # R3-F1 (ADR 0055 D5): every resume keeps the chain — the
+                # crash resume rebuilt its decision without it, so the
+                # successor's next allow-command took the un-narrowed
+                # allowlist. One seam, so no resume path can drop it.
+                delegation = getattr(prior_task.dispatch_decision, "delegation", None)
+                if (
+                    isinstance(delegation, dict)
+                    and dispatch_decision is not None
+                    and dispatch_decision.delegation is None
+                ):
+                    dispatch_decision = replace(dispatch_decision, delegation=delegation)
         # Resume in the suspended run's preserved worktree when possible: the
         # step cursor is only valid there. Fresh-tree fallback replays from
         # step 0, so the cursor must be stripped (grants make replay converge).
@@ -572,7 +652,7 @@ def run_task(
         task_path = write_task_file(task, workspace / ".events" / "task.json")
         audit_task_dir = config.audit_dir / task.task_id
         write_task_file(task, audit_task_dir / "task.json")
-        result_path = config.results_dir / f"{task.task_id}.json"
+        result_path = config.result_path(task.task_id)
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
         def finish_before_worker(*, reason: str, summary: str) -> IngestOutcome:
@@ -620,7 +700,15 @@ def run_task(
                 proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
                 proxy_unix_path = str(Path(proxy_socket_dir) / "p.sock")
             try:
-                proxy = FilteringProxy(domains, unix_socket_path=proxy_unix_path).start()
+                # ES-F6 (B05): loopback stays open for the project's own test
+                # servers, never for skep serve's port (the control plane).
+                proxy = FilteringProxy(
+                    domains,
+                    unix_socket_path=proxy_unix_path,
+                    denied_loopback_ports=control_plane_ports(config.home),
+                    # W30: named in the 403 as needing approval, never admitted.
+                    asks=task.permissions.network_ask,
+                ).start()
             except OSError as exc:
                 return finish_before_worker(
                     reason="proxy_start_failed",
@@ -659,6 +747,10 @@ def run_task(
         routed_env.update(_toolchain_env(workspace, engine, cache_root))
         run_store.transition(task.task_id, "dispatched", dispatched_detail)
         log_path = audit_task_dir / "worker.log"
+        # W31: the second carrier of GIT_ALLOW_PROTOCOL=file — git config only
+        # task worktrees include, which an emptied env still meets; read-only
+        # in the sandbox, editable in workspace mode (there is no wall).
+        git_pin = pin_git_protocols(workspace)
         try:
             process = spawn_worker(
                 config,
@@ -674,7 +766,13 @@ def run_task(
                 # v109-F4: the cache is OUTSIDE the workspace by design (it
                 # must outlive the worktree), so the wall needs a door for it.
                 extra_writable=(cache_root,),
+                write_denied=() if git_pin is None else (git_pin,),
             )
+        except SandboxUnavailableError as exc:
+            # ES-F1 backstop: the up-front check passed but the backend the
+            # spawner resolved (e.g. podman → native for a resumed host grant)
+            # is unusable. Never retried unconfined.
+            return finish_before_worker(reason="sandbox_unavailable", summary=str(exc))
         except OSError as exc:
             return finish_before_worker(
                 reason="spawn_failed",
@@ -694,12 +792,7 @@ def run_task(
             startup_seconds=config.startup_seconds,
         )
 
-        result = None
-        if result_path.is_file():
-            try:
-                result = read_result(result_path)
-            except ValidationError:
-                result = None  # treated as crash-grade: evidence wins over claims
+        result = _run_result(run_store, task.task_id, result_path)
 
         outcome = ingest_run(
             store=run_store,
@@ -878,9 +971,59 @@ def dispatch_parallel(
             run_store.close()
 
 
+def _live_worker_pid(run_store: RunStore, task_id: str) -> int | None:
+    """The recorded worker pid when that process is still THIS run's worker.
+
+    ES-F5 (B10): a pid outlives a reboot as a number only — it is ours when
+    its command line still names this task (the worker argv carries the task
+    file path); a zombie's or a stranger's does not."""
+    pid = next(
+        (
+            int(detail.split()[1])
+            for state, detail, _ in reversed(run_store.transitions_for(task_id))
+            if state == "running" and detail and re.fullmatch(r"pid \d+", detail)
+        ),
+        None,
+    )
+    if pid is None:
+        return None
+    probe = subprocess.run(
+        ["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True, check=False
+    )
+    return pid if task_id in probe.stdout else None
+
+
 # v59-F10: the states a supervisor death can strand a run in. pending_approval
 # is NOT here — it is a legitimate persistent state (worktree kept for resume).
 _INTERRUPTED_STATES = ("created", "dispatched", "running")
+
+
+_RESULT_MAX_BYTES = 16 * 1024 * 1024  # a result is a few KB of metadata
+
+
+def _run_result(store: RunStore, task_id: str, path: Path) -> CodingWorkerResult | None:
+    """The run's own result envelope, or None: absent, malformed (crash-grade,
+    evidence wins over claims), or naming another task — W26: a deposit for
+    someone else is rejected and the rejection recorded on this run. The
+    worker owns the file: bytes that are not UTF-8, an unreadable path or an
+    envelope past any honest size are crash-grade too, never an exception."""
+    if not path.is_file():
+        return None
+    try:
+        if path.stat().st_size > _RESULT_MAX_BYTES:
+            return None
+        result = read_result(path)
+    except (ValueError, OSError):  # ValidationError and UnicodeDecodeError are ValueErrors
+        return None
+    if result.task_id != task_id:
+        record = store.get_run(task_id)
+        store.transition(
+            task_id,
+            record.state if record is not None else "running",
+            f"result rejected: {path} names task {result.task_id!r}, not this run",
+        )
+        return None
+    return result
 
 
 def recover_interrupted_runs(
@@ -903,6 +1046,23 @@ def recover_interrupted_runs(
     recovered: list[str] = []
     for record in run_store.runs_with_states(_INTERRUPTED_STATES):
         task_id = record.task_id
+        # ES-F5 (B10, I1 I12): the detached worker may still be alive — with no
+        # babysitter, no budget, and the proxy gone. Kill its whole session
+        # BEFORE reading its evidence or touching its worktree: nothing may
+        # write there once recovery decides. (Re-adopting would need a monitor
+        # for a non-child; the kill is the smaller honest answer.)
+        live_pid = _live_worker_pid(run_store, task_id)
+        if live_pid is not None:
+            kill_session(live_pid)
+            deadline = time.monotonic() + 5.0
+            while _live_worker_pid(run_store, task_id) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            run_store.transition(
+                task_id,
+                record.state,
+                f"supervisor restart: worker pid {live_pid} was still running "
+                "unsupervised; killed with its session",
+            )
         task = _task_from_audit(config, task_id)
         workspace = Path(record.workspace) if record.workspace else None
         if task is None or workspace is None:
@@ -916,13 +1076,13 @@ def recover_interrupted_runs(
             if on_run_finished is not None:
                 on_run_finished(task_id)
             continue
-        result = None
-        result_path = config.results_dir / f"{task_id}.json"
-        if result_path.is_file():
-            try:
-                result = read_result(result_path)
-            except ValidationError:
-                result = None  # crash-grade: evidence wins over claims
+        result_path = config.result_path(task_id)
+        legacy_path = config.results_dir / f"{task_id}.json"
+        if not result_path.is_file() and legacy_path.is_file():
+            # A run dispatched before W26 deposited here; no sandboxed run can
+            # write this directory any more (only its own subdirectory).
+            result_path = legacy_path
+        result = _run_result(run_store, task_id, result_path)
         events = read_event_log(workspace / ".events" / f"{task_id}.ndjson")
         worker_reported = bool(events) and events[-1].type is EventType.TASK_TERMINAL
         if result is not None and worker_reported:

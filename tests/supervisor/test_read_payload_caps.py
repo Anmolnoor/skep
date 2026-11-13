@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from skep.supervisor import RunStore, SupervisorConfig, mint_task
 from skep.supervisor.scheduler import make_schedule
 from skep.supervisor.serve.chat import (
@@ -103,13 +105,51 @@ def test_json_safe_chop_yields_parseable_json_with_the_marker() -> None:
     assert chopped == _truncate_tool_result(payload, CURRENT_TOOL_REPLAY_CAP, "list_schedules")
 
 
-def test_json_safe_chop_drops_whole_keys_when_no_list_remains() -> None:
+def test_json_safe_chop_trims_a_long_string_instead_of_dropping_it() -> None:
     payload = json.dumps({"log": "y" * 5000, "state": "completed"})
     chopped = _truncate_tool_result(payload, TOOL_REPLAY_CAP, "get_run")
+    assert len(chopped) <= TOOL_REPLAY_CAP
     data = json.loads(chopped)
     assert data["truncated"] is True
-    assert "log" not in data  # the oversized key dropped whole
+    assert data["log"].startswith("y" * 1000)  # ES-F11 (B83): the head survives
     assert data["state"] == "completed"
+
+
+def test_json_safe_chop_still_drops_keys_when_trimming_cannot_fit() -> None:
+    payload = json.dumps({f"k{i}": "z" * 40 for i in range(200)})
+    data = json.loads(_truncate_tool_result(payload, TOOL_REPLAY_CAP, None))
+    assert data["truncated"] is True
+    assert 0 < len(data) < 200
+
+
+@pytest.mark.parametrize("card_confirmed", [False, True])
+def test_a_default_read_file_replays_with_its_content(card_confirmed: bool) -> None:
+    """ES-F11 (B83): read_file's payload is one big string, and a
+    card-confirmed read nests it under ``result``. The chop popped lists
+    only, then deleted the largest key whole — a 200-line read (its own
+    default) reached the model with NO content and no path (lane M1-06)."""
+    lines = [f"{n}\tline {n:06d} " + "x" * 70 for n in range(1, 201)]
+    text = "\n".join(lines)
+    read: dict[str, Any] = {
+        "path": "/repo/big.log",
+        "content": text,
+        "lines_shown": 200,
+        "total_lines": 60000,
+        "offset": 1,
+    }
+    payload = json.dumps({"ok": True, "result": read} if card_confirmed else read)
+    assert len(payload) > CURRENT_TOOL_REPLAY_CAP
+
+    chopped = _truncate_tool_result(payload, CURRENT_TOOL_REPLAY_CAP, "read_file")
+
+    assert len(chopped) <= CURRENT_TOOL_REPLAY_CAP
+    data = json.loads(chopped)
+    shown = data["result"] if card_confirmed else data
+    assert shown["path"] == "/repo/big.log"
+    assert shown["content"].startswith(lines[0])
+    assert "line 000050" in shown["content"]
+    cut = len(text) - len(shown["content"].split("… [")[0])
+    assert f"[{cut} chars cut" in shown["content"]  # says how much is missing
 
 
 def test_non_json_content_keeps_the_plain_chop() -> None:
