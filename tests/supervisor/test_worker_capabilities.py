@@ -2126,3 +2126,29 @@ def test_es_f9_a_timed_out_command_takes_its_children_with_it(tmp_path: Path) ->
     result = registry.invoke("shell.run", {"argv": [sys.executable, "-c", script]})
     assert result.exit_code == 124
     assert _pid_gone(int((tmp_path / "gc.pid").read_text()))
+
+
+def test_a_successful_commit_drops_only_the_packed_refs_lock_line(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W35 (B108): git >= 2.45's commit deletes the AUTO_MERGE pseudoref after
+    the commit lands, which locks the common dir's packed-refs — read-only in
+    a sandbox (ES-F3), so every commit printed an error it did not have. The
+    line goes from a successful commit's output; a failed commit keeps it."""
+    import subprocess as sp
+
+    common = (repo / ".git").resolve()
+    noise = f"error: Unable to create '{common}/packed-refs.lock': Operation not permitted\n"
+    other = "warning: something real\n"
+    for code in (0, 1):
+        monkeypatch.setattr(
+            "skep.workers.capabilities.subprocess.run",
+            lambda argv, code=code, **_kw: sp.CompletedProcess(
+                argv, code, "[x] y\n", noise + other
+            ),
+        )
+        registry = CapabilityRegistry(
+            repo, emit=lambda _t, _p: None, approved_capability_ids=("git.commit",)
+        )
+        commit = registry.invoke("git.commit", {"message": "m"})
+        assert commit.error == (other if code == 0 else noise + other)

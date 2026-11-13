@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -16,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
@@ -183,6 +184,20 @@ class CapabilityDecision:
             "reason": self.reason,
             "detail": self.detail,
         }
+
+
+# W35 (B108): after a commit lands, git >= 2.45 deletes the AUTO_MERGE
+# pseudoref through the refs API, and the files backend locks packed-refs in
+# the COMMON dir for any deletion — read-only to a sandboxed worker (ES-F3),
+# so every commit printed this error while succeeding. No config skips the
+# cleanup, and letting the worker create that lock would let it swap the
+# file the host's git later renames into packed-refs. The commit capability
+# drops the line from a successful commit instead.
+_PACKED_REFS_NOISE = re.compile(
+    r"^error: Unable to create '[^'\n]*/packed-refs\.lock': "
+    r"(?:Operation not permitted|Read-only file system)\n?",
+    re.MULTILINE,
+)
 
 
 @dataclass(frozen=True)
@@ -1679,7 +1694,7 @@ class CapabilityRegistry:
             if decision.verdict == "deny":
                 raise CapabilityDenied(error, policy_blocked=True)
             raise CapabilityApprovalRequired("git.commit", error, decision=decision)
-        return self._git_mutation(
+        result = self._git_mutation(
             "git.commit",
             [
                 "-c",
@@ -1694,6 +1709,9 @@ class CapabilityRegistry:
             command,
             decision=decision,
         )
+        if result.exit_code != 0 or not result.error:
+            return result
+        return replace(result, error=_PACKED_REFS_NOISE.sub("", result.error))
 
     def _git_restore(self, arguments: Mapping[str, Any]) -> CapabilityResult:
         paths = self._git_paths(arguments.get("paths"))

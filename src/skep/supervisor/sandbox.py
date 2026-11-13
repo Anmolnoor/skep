@@ -342,11 +342,12 @@ def available() -> bool:
 # into the proxy. The store (supervisor.sqlite3) stays readable: that same
 # worker reads its provider settings from it. Checked when the profile is
 # built, so a secret file created mid-run is not covered.
+# W33: the engine logins (~/Library/Keychains, ~/.claude/.credentials.json,
+# ~/.codex/auth.json) are masked too — each external engine's config dir is
+# redirected per run and a dispatch without its auth env is refused (NO AUTH
+# ENV), so no run authenticates from them.
 SANDBOX_READABLE_SECRETS: dict[str, str] = {
     ".npmrc": "npm install reads registry auth from it",
-    ".claude/.credentials.json": "claude_code's file login (v94-F3)",
-    ".codex/auth.json": "codex's file login",
-    "Library/Keychains": "claude_code authenticates through the macOS keychain (v94-F3)",
 }
 _HOME_SECRET_PATHS = tuple(rel for rel in HOME_SECRETS if rel not in SANDBOX_READABLE_SECRETS)
 
@@ -437,12 +438,29 @@ _LOOPBACK_RULES = (
     # v115-F14: Unix-domain sockets are files, and "(deny network*)" covers
     # them too — skep's own netshim/netproxy tests bind one and died with
     # EPERM inside the re-verify wall. Creating one still needs a writable
-    # root (file-write says where); connecting reaches any socket on THIS
-    # host the worker can read — the same stated wall as "localhost" above.
+    # root (file-write says where); which ones it may CONNECT to is
+    # _unix_socket_rules (W34).
     "(allow network-bind (local unix-socket))",
     "(allow network-inbound (local unix-socket))",
-    "(allow network-outbound (remote unix-socket))",
 )
+
+# W34: a connect to any unix socket on the host reached the operator's
+# ssh-agent (it listed the keys), Docker, gpg-agent. Every network mode now
+# denies it and allows only the run's own roots, plus mDNSResponder where the
+# run may reach the network. Seatbelt matches the resolved path.
+# getaddrinfo asks mDNSResponder for every name but /etc/hosts ones, and it
+# sends the query on: a deny-all or proxied worker (the proxy resolves for
+# it) must not, or a name becomes a DNS channel out.
+_DNS_SOCKET = "/private/var/run/mDNSResponder"
+
+
+def _unix_socket_rules(roots: Iterable[Path], network: NetworkPolicy) -> list[str]:
+    allowed = [f'(literal "{_DNS_SOCKET}")'] if network.is_allow_all else []
+    allowed += [f'(subpath "{_sbpl_quote(Path(root).resolve())}")' for root in roots]
+    rules = ["(deny network-outbound (remote unix-socket))"]
+    if allowed:  # an unfiltered "(allow network-outbound)" would open all egress
+        rules.append(f"(allow network-outbound {' '.join(allowed)})")
+    return rules
 
 
 def _network_rules(network: NetworkPolicy, proxy_port: int | None) -> list[str]:
@@ -661,6 +679,7 @@ def build_profile(
         "(version 1)",
         "(allow default)",
         *_network_rules(network, proxy_port),
+        *_unix_socket_rules(roots, network),
         "(deny file-write*)",
     ]
     if roots:

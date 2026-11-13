@@ -50,16 +50,26 @@ worker whose caste calls the LLM (coding, document, reviewer) reads
 `llm-secret` and the active provider profile's `llm-secret-<id>`, its own
 model credential; external engines and every other sandboxed lane see no LLM
 key. `supervisor/supervisor.sqlite3` stays readable (that worker reads its
-provider settings from it). So do `~/.npmrc` (npm install), `~/.claude/.credentials.json`,
-`~/.codex/auth.json` and `~/Library/Keychains` (engine logins): the sandbox
-leaves them readable, while the policy floor still refuses every Queen and
-worker read tool on them (`sandbox.SANDBOX_READABLE_SECRETS`).
+provider settings from it). So does `~/.npmrc` (npm install): the sandbox
+leaves it readable, while the policy floor still refuses every Queen and
+worker read tool on it (`sandbox.SANDBOX_READABLE_SECRETS`). The engine
+logins — `~/Library/Keychains`, `~/.claude/.credentials.json`,
+`~/.codex/auth.json` — are masked like every other credential (W33): an
+external engine's config dir is redirected per run and it authenticates only
+from its auth env (`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`); a dispatch without one is refused (NO AUTH ENV).
 
 On Linux the worker also gets its own PID and IPC namespaces and an empty
 `/run` (no host D-Bus or systemd sockets). On macOS the profile allows
 loopback (a worker's own test servers) except serve's port: 8765,
 `$SKEP_SERVE_URL`'s port, and the port `skep serve` records in
 `supervisor/serve-port` under the same home, so a CLI `skep run` denies it too.
+A Seatbelt worker connects only to unix sockets under its own writable roots
+(W34): the operator's ssh-agent, Docker, gpg-agent and other local daemons are
+refused in every network mode. An allow-all run may also reach
+`/var/run/mDNSResponder` (name lookups); a deny-all or proxied run may not, so
+a name cannot carry data out through the system resolver (the proxy resolves
+for it; `localhost` resolves from `/etc/hosts`).
 
 ## Network Modes
 

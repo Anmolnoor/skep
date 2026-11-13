@@ -11,8 +11,8 @@ normalize case, so a case-sensitive compare was a bypass (over-blocking
 
 Policy half only. The sandbox half (tmpfs/deny over these paths, so a
 worker's own ``cat ~/.ssh/id_rsa`` fails too) is ``sandbox.secret_paths``: it
-masks HOME_SECRETS minus ``sandbox.SANDBOX_READABLE_SECRETS`` (engine logins
-and ``~/.npmrc``), which stay on this floor.
+masks HOME_SECRETS minus ``sandbox.SANDBOX_READABLE_SECRETS`` (``~/.npmrc``),
+which stays on this floor.
 """
 
 from __future__ import annotations
@@ -103,14 +103,21 @@ def _reason(path: Path, user_homes: tuple[Path, ...], skep_homes: tuple[Path, ..
     return None
 
 
-def secret_floor_reason(path: str | Path, *, skep_home: Path | None = None) -> str | None:
-    """Why ``path`` is never readable, or None. Judges the requested path
-    (``~`` expanded, made absolute without following links) and its realpath."""
+def path_spellings(path: str | Path) -> tuple[Path, Path]:
+    """The requested path (``~`` expanded, made absolute without following
+    links) and its realpath — the two spellings every path judge compares."""
     requested = Path(os.path.abspath(Path(path).expanduser()))
     try:
         real = requested.resolve()
     except (OSError, RuntimeError):  # pragma: no cover - a loop resolves nowhere
         real = requested
+    return requested, real
+
+
+def secret_floor_reason(path: str | Path, *, skep_home: Path | None = None) -> str | None:
+    """Why ``path`` is never readable, or None. Judges the requested path
+    (``~`` expanded, made absolute without following links) and its realpath."""
+    requested, real = path_spellings(path)
     user_home = Path(os.path.abspath(Path.home()))
     user_homes = tuple({user_home, user_home.resolve()})
     skep_homes: tuple[Path, ...] = ()

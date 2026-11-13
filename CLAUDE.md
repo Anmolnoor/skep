@@ -106,8 +106,11 @@ gitignored on the public tree: plans stay local, only the fix commits push
   (v95-F3/F4). An external agent's own commands do NOT pass the capability layer —
   the sandbox confines it — so it requires a project-pinned `verify_command`
   (its built-in verify is `git diff --check`), is FORCED into sandbox execution
-  (v94-F4), and declares the env it needs in the engine registry (v94-F3:
-  claude_code needs USER/LOGNAME for keychain auth). `skep doctor` probes each
+  (v94-F4), and declares the env it needs in the engine registry (v94-F3,
+  v111-F3): it authenticates ONLY from its auth env (claude_code:
+  CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY; codex: OPENAI_API_KEY) — the
+  keychain and file logins are masked in the sandbox (W33) and a dispatch
+  without the env is refused (NO AUTH ENV). `skep doctor` probes each
   binary. Re-verify primes uv deps from the baseline before applying the patch
   so the default `uv run pytest` pin confirms offline (v94-F7).
 - The command deck (v25): chat messages starting with `/` are parsed client-side

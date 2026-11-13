@@ -98,7 +98,9 @@ def git_metadata_writable_roots(workspace: Path) -> tuple[Path, ...]:
     or ``core.fsmonitor`` executed unsandboxed on the next supervisor-side
     git call), and ``refs/`` is the operator's branches (I1). The old "whole
     common dir, for fetch/push" reason never applied: workers can never
-    fetch or push (v19-F3). Cost, stated: ``git stash`` (refs/stash) fails.
+    fetch or push (v19-F3). Cost, stated: ``git stash`` (refs/stash) fails,
+    and git's post-commit AUTO_MERGE cleanup cannot lock ``packed-refs``
+    (the commit capability drops that error line, W35).
     A non-linked checkout (git dir == common dir) gets ``objects/`` only.
     """
     dirs = _git_dirs(workspace)

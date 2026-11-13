@@ -23,6 +23,14 @@ import pytest
 
 from skep.supervisor import sandbox
 
+# W33: the engine login stores, masked like every other credential since the
+# per-run config redirect and the NO AUTH ENV refusal made them dead weight.
+LOGINS = (
+    "Library/Keychains/login.keychain-db",
+    ".claude/.credentials.json",
+    ".codex/auth.json",
+)
+
 
 @pytest.fixture(autouse=True)
 def clear_sandbox_probe_cache() -> Iterator[None]:
@@ -35,7 +43,7 @@ def clear_sandbox_probe_cache() -> Iterator[None]:
 def fake_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     """A fake HOME with canary credential files, and a skep home with secrets."""
     home = tmp_path / "fakehome"
-    for rel in (".ssh/id_rsa", ".aws/credentials", ".config/gh/hosts.yml", ".netrc"):
+    for rel in (".ssh/id_rsa", ".aws/credentials", ".config/gh/hosts.yml", ".netrc", *LOGINS):
         path = home / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"CANARY {rel}\n", encoding="utf-8")
@@ -61,6 +69,9 @@ def test_secret_paths_cover_the_floor_and_skip_the_worker_llm_key(
         home / ".aws",
         home / ".config" / "gh",
         home / ".netrc",
+        home / "Library" / "Keychains",
+        home / ".claude" / ".credentials.json",
+        home / ".codex" / "auth.json",
         skep_home / "serve.env",
         sup / "serve-token",
         sup / "mail-secret",
@@ -259,6 +270,7 @@ def test_a_real_sandboxed_worker_cannot_read_the_canaries(
         sup / "serve-token",
         sup / "mail-secret",
         skep_home / "serve.env",
+        *(home / rel for rel in LOGINS),
     ]
     proc = subprocess.run(
         sandbox.wrap_command(
@@ -339,6 +351,7 @@ def test_a_real_seatbelt_worker_cannot_read_the_canaries(
         home / ".cargo" / "credentials.toml",
         home / ".claude.json",
         home / ".netrc",
+        *(home / rel for rel in LOGINS),
         sup / "serve-token",
         skep_home / "serve.env",
         sup / "mail-secret",
@@ -353,9 +366,8 @@ def test_a_real_seatbelt_worker_cannot_read_the_canaries(
     readable = [workspace / "plain.txt"]
     own_keys = [sup / "llm-secret", sup / "llm-secret-p1"]  # the active profile's key
     (readable if worker_llm_key else refused).extend(own_keys)
-    # Not pinned either way: Library/Keychains, .claude/.credentials.json,
-    # .codex/auth.json, .npmrc and supervisor.sqlite3 stay readable on purpose
-    # today (SANDBOX_READABLE_SECRETS) and are an open operator decision.
+    # Not pinned either way: .npmrc and supervisor.sqlite3 stay readable on
+    # purpose today (SANDBOX_READABLE_SECRETS) and are an open operator decision.
     proc = subprocess.run(
         sandbox.wrap_command(
             [sys.executable, "-c", _SEATBELT_PROBE, *map(str, refused + readable)], profile
@@ -459,9 +471,10 @@ def test_the_sandbox_masks_the_policy_floor_minus_what_engines_and_installs_read
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """PR #64 review: the sandbox masks every HOME_SECRETS path except the
-    declared exemptions — engine logins (claude_code's keychain/credential
-    file, codex's auth.json) and ~/.npmrc for `npm install` — which stay on
-    the policy floor. A new policy entry is masked unless exempted on purpose."""
+    declared exemption — ~/.npmrc for `npm install` — which stays on the
+    policy floor. W33: the engine logins (keychain, claude_code's credential
+    file, codex's auth.json) are masked: an engine authenticates from its env.
+    A new policy entry is masked unless exempted on purpose."""
     from skep.supervisor.secret_floor import HOME_SECRETS
 
     home = tmp_path / "fakehome"
@@ -469,7 +482,7 @@ def test_the_sandbox_masks_the_policy_floor_minus_what_engines_and_installs_read
         (home / rel).mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
     masked = set(sandbox.secret_paths(tmp_path / "skep"))
-    readable = {".npmrc", ".claude/.credentials.json", ".codex/auth.json", "Library/Keychains"}
+    readable = {".npmrc"}
     assert set(sandbox.SANDBOX_READABLE_SECRETS) == readable
     assert readable < set(HOME_SECRETS)
     assert masked == {(home / rel).resolve() for rel in HOME_SECRETS if rel not in readable}
