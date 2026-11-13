@@ -36,6 +36,12 @@ SKEP_SPELLINGS = [
     "cd /x && skep status",
     "echo hi | skep chat c1",
     "SKEP",  # APFS runs SKEP as skep
+    # a runner's own options before skep (ES-F80 review)
+    "uv run --frozen skep status",
+    "uv run --with httpx skep status",
+    "uvx --from skep skep doctor",
+    "pipx run --spec skep skep status",
+    "python3 -m skep.__main__ status",
 ]
 
 
@@ -83,8 +89,10 @@ def test_a_relative_name_inside_the_home_counts(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "line", ["ls -la", "echo skep", "grep skep notes.txt", "git log --grep skep", "cat a/skep"]
-)
+    "line",
+    ["ls -la", "echo skep", "grep skep notes.txt", "git log --grep skep", "cat a/skep",
+     "uv run --with skep pytest", "uv run --frozen pytest tests/skep", "python3 -m pytest -k skep"],
+)  # fmt: skip
 def test_lines_that_do_not_run_skep_or_name_its_home_are_untouched(
     tmp_path: Path, line: str
 ) -> None:

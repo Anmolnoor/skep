@@ -455,16 +455,35 @@ def references_dead_worktree(argv: Sequence[str]) -> bool:
 # What runs the word after it as a program: ``python3 -m skep``, ``uv run
 # skep``, ``uvx skep``, ``pipx run skep``.
 _SKEP_RUNNERS = frozenset({"-m", "run", "exec", "uvx", "pipx"})
+# A runner's options that take the next word as their value (`uvx --from skep
+# skep`, `uv run --with httpx skep`); any other option takes none.
+_RUNNER_VALUE_OPTIONS = frozenset(
+    {"--with", "-w", "--with-editable", "--with-requirements", "--from", "--spec", "--python",
+     "-p", "--project", "--directory", "--package", "--extra", "--group", "--index",
+     "--index-url", "--env-file"}
+)  # fmt: skip
 
 
 def _skep_subcommands(argv: Sequence[str]) -> list[list[str]]:
     """What follows each ``skep`` this argv runs, past skep's own options:
-    ``uv run skep trust c1`` → ``[["trust", "c1"]]``; ``[]`` when it runs none."""
+    ``uv run skep trust c1`` → ``[["trust", "c1"]]``; ``[]`` when it runs none.
+    A runner's own options may stand between it and skep (``uv run --frozen
+    skep``); ``python3 -m skep.__main__`` is skep too."""
     tokens = [str(token) for token in argv]
     found: list[list[str]] = []
+    runner, value = True, False  # the word at index 0 is a program
     for index, token in enumerate(tokens):
-        runner = index == 0 or program_name(tokens[index - 1]) in _SKEP_RUNNERS
-        if program_name(token) != "skep" or not runner:
+        name = program_name(token)
+        is_skep = runner and not value and name in ("skep", "skep.__main__")
+        if value:
+            value = False
+        elif name in _SKEP_RUNNERS:
+            runner = True
+        elif runner and index and token.startswith("-"):
+            value = token in _RUNNER_VALUE_OPTIONS
+        else:
+            runner = False
+        if not is_skep:
             continue
         rest = tokens[index + 1 :]
         while rest and rest[0].startswith("-"):  # skep's own options
