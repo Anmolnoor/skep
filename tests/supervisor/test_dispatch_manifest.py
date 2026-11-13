@@ -577,3 +577,29 @@ def test_a_role_run_on_a_star_project_says_it_holds_no_hosts_and_why(
         assert "network_note" not in plain and plain["network"] == ["*"]
     finally:
         store.close()
+
+
+def test_a_role_run_card_adds_only_hosts_the_run_holds(tmp_path: Path, repo: Path) -> None:
+    """ES-F90 follow-up: ``network_added`` was computed before the role chain
+    narrowed the run, so a builder dispatch naming ``*`` or a host its role
+    drops carded "adds to the project's hosts for this run: *" for a run
+    that holds neither."""
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"default_network": ["pypi.org"]},
+        )
+        holder = ConfigHolder(config, store)
+        for network in (["*"], ["*", "api.example.org"], ["api.example.org"]):
+            manifest = dispatch_manifest_for(
+                store, holder, {"repo": str(repo), "role": "builder", "network": network}, None
+            )
+            assert set(manifest["network_added"]) <= set(manifest["network"]), network
+    finally:
+        store.close()
+

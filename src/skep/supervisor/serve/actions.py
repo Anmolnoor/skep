@@ -4809,7 +4809,7 @@ def dispatch_manifest(
         "repo": str(compiled.repo),
         "network": list(permissions.network),
         # D5: a named network adds to the project's hosts; [] drops them
-        "network_added": list(resolved_policy.network_added),
+        "network_added": [h for h in resolved_policy.network_added if h in permissions.network],
         "network_dropped": list(resolved_policy.network_dropped),
         "provider_hosts": provider_hosts,
         # D6: the only loopback ports the run reaches (project list + local provider)
