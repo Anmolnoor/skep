@@ -4655,6 +4655,12 @@ def submit_run(
         effective_dispatch_decision = delegated_decision(
             effective_dispatch_decision, delegation, delegation_note
         )
+        if resolved_policy.network_dropped:  # L32: the terminal notice says it too
+            constraints = {**(effective_dispatch_decision.constraints or {})}
+            constraints["network_dropped"] = list(resolved_policy.network_dropped)
+            effective_dispatch_decision = replace(
+                effective_dispatch_decision, constraints=constraints
+            )
         if chat_taint:
             constraints = {**(effective_dispatch_decision.constraints or {})}
             constraints["chat_taint"] = list(chat_taint)

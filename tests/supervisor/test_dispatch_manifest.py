@@ -665,3 +665,47 @@ def test_an_open_pr_card_names_the_remote_and_the_branch_it_pushes(desk: Desk) -
     lone = pr_push_target(desk.holder, desk.store, {"branch": "feat", "repo": str(bare)})
     assert "no origin remote" in lone
     assert card_summary("open_pr", {}, recorded={"push": line})["risk"].startswith(line)
+
+
+def test_a_run_that_lost_the_project_hosts_says_so_on_its_terminal_notice(desk: Desk) -> None:
+    """L32: the start card names the project hosts a dispatch's network list
+    drops (L10); the terminal notice did not, so a run that failed for want
+    of pypi.org never said why. The run records them; the notice says so."""
+    from skep.supervisor.serve import actions
+    from skep.supervisor.serve.run_status import run_terminal_text
+    from skep.worker_contract.task import AutonomyDecisionPayload
+
+    class _Recording:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        def submit(self, repo: Path, instructions: str, **kwargs: Any) -> str:
+            self.kwargs = kwargs
+            from skep.supervisor import mint_task
+
+            task = mint_task(workspace=repo, instructions=instructions)
+            payload = AutonomyDecisionPayload.model_validate(
+                kwargs["dispatch_decision"].to_payload()
+            )
+            task = task.model_copy(update={"dispatch_decision": payload})
+            desk.store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+            return task.task_id
+
+    runner = _Recording()
+    task_id = actions.submit_run(
+        desk.holder, runner, desk.store, repo=str(desk.repo), instructions="x",  # type: ignore[arg-type]
+        network=["example.com"],
+    )  # fmt: skip
+    dropped = runner.kwargs["dispatch_decision"].constraints["network_dropped"]
+    assert "pypi.org" in dropped
+    desk.store.transition(task_id, "failed", "pip could not reach its index")
+    notice = run_terminal_text(desk.store, task_id)
+    assert notice is not None
+    assert f"lost the project's own hosts for this run: {', '.join(dropped)}" in notice[0]
+
+    kept = actions.submit_run(
+        desk.holder, runner, desk.store, repo=str(desk.repo), instructions="y",  # type: ignore[arg-type]
+    )  # fmt: skip
+    assert "network_dropped" not in (runner.kwargs["dispatch_decision"].constraints or {})
+    desk.store.transition(kept, "failed", "boom")
+    assert "lost the project" not in run_terminal_text(desk.store, kept)[0]  # type: ignore[index]
