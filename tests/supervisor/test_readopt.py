@@ -7,6 +7,7 @@ without waitpid, and lands its work exactly as the old serve would have.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -14,7 +15,9 @@ from pathlib import Path
 
 from skep.supervisor import RunStore, SupervisorConfig, run_task
 from skep.supervisor.dispatch import recover_interrupted_runs
+from skep.supervisor.monitor import AdoptedWorker, synthesize_terminal, watch_worker
 from skep.supervisor.store import process_owner
+from skep.worker_contract import TaskState
 
 
 def test_dispatch_records_the_worker_start_time_and_its_supervisor(
@@ -99,3 +102,78 @@ def test_recovery_neither_kills_nor_adopts_a_reused_pid(
             stranger.kill()
             stranger.wait()
         store.close()
+
+
+def _orphan(code: str, *args: str) -> int:
+    """Start ``python -c code`` as a NON-child (reparented to init once the
+    middle process exits) — what a worker is to the serve that adopts it."""
+    middle = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess, sys; d = subprocess.DEVNULL; print(subprocess.Popen("
+            "sys.argv[1:], start_new_session=True, stdin=d, stdout=d, stderr=d).pid)",
+            sys.executable,
+            "-c",
+            code,
+            *args,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(middle.stdout)
+
+
+def _adopted(pid: int) -> AdoptedWorker:
+    owner = process_owner(pid)
+    assert owner is not None
+    return AdoptedWorker(pid, json.loads(owner)["started"])
+
+
+def test_watch_worker_follows_a_non_child_to_its_terminal_event(tmp_path: Path) -> None:
+    """ES-F134 (ADR 0060 §3): no waitpid for an adopted worker — the monitor
+    polls the W27 owner pair and reads the event log the worker writes."""
+    events = tmp_path / "events.ndjson"
+    terminal = synthesize_terminal(
+        task_id="t1", trace_id="tr", seq=1, status=TaskState.COMPLETED, summary="ok", reason="done"
+    )
+    line = json.dumps(terminal.model_dump(mode="json"))
+    pid = _orphan(
+        "import sys, time; time.sleep(1); open(sys.argv[1], 'a').write(sys.argv[2] + '\\n')",
+        str(events),
+        line,
+    )
+    verdict = watch_worker(
+        _adopted(pid),
+        events,
+        task_id="t1",
+        trace_id="tr",
+        wall_clock_seconds=30,
+        grace_seconds=1,
+        heartbeat_seconds=2,
+        poll_seconds=0.05,
+    )
+    assert verdict.kind == "worker_reported" and verdict.exit_code is None
+
+
+def test_watch_worker_counts_an_adopted_worker_budget_from_its_own_start(
+    tmp_path: Path,
+) -> None:
+    """ES-F134 (ADR 0060 §4): a restart never extends a budget — a worker
+    already past wall clock + grace is killed on adoption."""
+    pid = _orphan("import time; time.sleep(60)")
+    worker = _adopted(pid)
+    verdict = watch_worker(
+        worker,
+        tmp_path / "events.ndjson",
+        task_id="t1",
+        trace_id="tr",
+        wall_clock_seconds=30,
+        grace_seconds=1,
+        heartbeat_seconds=2,
+        poll_seconds=0.05,
+        elapsed_seconds=40,
+    )
+    assert verdict.kind == "wall_clock"
+    assert worker.exited
