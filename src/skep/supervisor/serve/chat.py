@@ -1487,7 +1487,7 @@ class ChatEngine:
         if (
             UNTRUSTED_OPEN in system
             or UNTRUSTED_OPEN in summary
-            or any(str(m.get("content") or "").startswith(UNTRUSTED_OPEN) for m in replay)
+            or any(UNTRUSTED_OPEN in str(m.get("content") or "") for m in replay)
         ):
             system = f"{system}\n\n{UNTRUSTED_NOTE}"
         if summary or dropped:
