@@ -72,3 +72,30 @@ def test_recovery_leaves_a_run_whose_supervisor_is_still_alive(
             worker.kill()
             worker.wait()
         store.close()
+
+
+def test_recovery_neither_kills_nor_adopts_a_reused_pid(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F133 (ADR 0060 §2): the recorded pid is alive and even names the
+    task, but its start time is not the recorded one — a stranger. It is left
+    alone and the run takes the dead-worker path."""
+    store = RunStore(config.db_path)
+    stranger = None
+    try:
+        task_id, _workspace = _strand(store, config, repo)
+        stranger = _sleeper(task_id)
+        store.transition(task_id, "running", f"pid {stranger.pid} started Thu Jan 1 00:00:00 1970")
+
+        recover_interrupted_runs(store, config)
+
+        assert stranger.poll() is None  # not killed
+        record = store.get_run(task_id)
+        assert record is not None and record.state == "worker_crashed"
+        details = " ".join(d or "" for _, d, _ in store.transitions_for(task_id))
+        assert "killed" not in details and "adopted" not in details
+    finally:
+        if stranger is not None:
+            stranger.kill()
+            stranger.wait()
+        store.close()

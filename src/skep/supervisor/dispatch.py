@@ -984,21 +984,29 @@ def dispatch_parallel(
 _WORKER_DETAIL = re.compile(r"pid (\d+)(?: started (.+?))?(?: proxy port (\d+))?")
 
 
+def _recorded_worker(run_store: RunStore, task_id: str) -> re.Match[str] | None:
+    """The run's last ``running`` transition parsed (ADR 0060): pid, start
+    time (None on rows written before ES-F131) and proxy port."""
+    for state, detail, _ in reversed(run_store.transitions_for(task_id)):
+        match = _WORKER_DETAIL.fullmatch(detail or "") if state == "running" else None
+        if match is not None:
+            return match
+    return None
+
+
 def _live_worker_pid(run_store: RunStore, task_id: str) -> int | None:
     """The recorded worker pid when that process is still THIS run's worker.
 
     ES-F5 (B10): a pid outlives a reboot as a number only — it is ours when
     its command line still names this task (the worker argv carries the task
-    file path); a zombie's or a stranger's does not."""
-    pid = next(
-        (
-            int(detail.split()[1])
-            for state, detail, _ in reversed(run_store.transitions_for(task_id))
-            if state == "running" and detail and _WORKER_DETAIL.fullmatch(detail)
-        ),
-        None,
-    )
-    if pid is None:
+    file path); a zombie's or a stranger's does not. ADR 0060: when the start
+    time was recorded, the process must also have started then (W27's pair) —
+    a reused pid is a stranger even if its argv happens to match."""
+    worker = _recorded_worker(run_store, task_id)
+    if worker is None:
+        return None
+    pid, started = int(worker[1]), worker[2]
+    if started is not None and not owner_alive(json.dumps({"pid": pid, "started": started})):
         return None
     probe = subprocess.run(
         ["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True, check=False
