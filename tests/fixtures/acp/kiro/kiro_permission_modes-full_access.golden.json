@@ -1,0 +1,34 @@
+{
+  "to_agent": [
+    {
+      "jsonrpc": "2.0",
+      "id": 9028,
+      "result": {
+        "outcome": {
+          "outcome": "selected",
+          "optionId": "accept"
+        }
+      }
+    }
+  ],
+  "ledger": [
+    {
+      "actor": "acp:kiro",
+      "repo": "$REPO",
+      "scope": "filesystem",
+      "action": "write",
+      "value": "workspace",
+      "project": {
+        "project_id": "demo",
+        "name": "demo",
+        "strategy": "trusted_local_dev",
+        "phase": "build"
+      },
+      "source": "run",
+      "verdict": "allow",
+      "rule_id": "fs:workspace",
+      "decided_by": "dispatch/fs:workspace",
+      "layer": "dispatch"
+    }
+  ]
+}

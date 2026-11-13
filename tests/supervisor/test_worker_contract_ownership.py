@@ -9,7 +9,7 @@ import pytest
 def test_worker_contract_is_owned_inside_skep() -> None:
     from skep.worker_contract import CONTRACT_VERSION, CodingWorkerTask, Permissions
 
-    assert CONTRACT_VERSION == "0.3.5"
+    assert CONTRACT_VERSION == "0.3.7"
     assert CodingWorkerTask.__module__.startswith("skep.worker_contract")
     assert (
         Permissions.model_validate(

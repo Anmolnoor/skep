@@ -24,7 +24,8 @@ purpose and keeps the worker-nominated fallback.
 ## Gates (run after every fix commit, all green before moving on)
 
 ```sh
-TMPDIR=$HOME/.cache/skep-test-tmp uv run --with pytest-xdist pytest -q -n auto
+TMPDIR=$HOME/.cache/skep-test-tmp uv run --with pytest-xdist --with pytest-cov pytest -q -n auto --cov=skep --cov-report=xml
+uvx diff-cover coverage.xml --compare-branch=origin/main --fail-under=90  # changed lines run under test
 uv run ruff check .                               # TMPDIR outside /tmp is
 uv run ruff format --check src/skep tests scripts # MANDATORY on Linux: bwrap
 uv run mypy                                       # tmpfs-masks /tmp
@@ -35,7 +36,11 @@ TMPDIR=$HOME/.cache/skep-test-tmp uv run python scripts/scorecard.py  # Overall:
 local ritual never did, and 174 files drifted before the public repo's first
 CI run caught it. Parallel pytest joined with the v106 port: the suite is
 xdist-safe, ~1min vs ~10min serial, and CI runs the same `-n auto` line —
-xdist is injected per-run by `--with`, never a project dependency. The G10
+xdist is injected per-run by `--with`, never a project dependency. Diff
+coverage joined at T3-4 for the same reason: the first-run timeline shipped
+71 changed lines no test ran, the web UI's JS ran in no test at all, and
+nothing measured either. `tests/web/` runs app.js under `node --test` with a
+fake DOM — no npm — wrapped by `test_web_js.py` so this pytest line covers it. The G10
 re-verify default pin stays plain `uv run pytest`; that pin is a project
 policy, not this ritual.)
 
@@ -101,8 +106,11 @@ gitignored on the public tree: plans stay local, only the fix commits push
   (v95-F3/F4). An external agent's own commands do NOT pass the capability layer —
   the sandbox confines it — so it requires a project-pinned `verify_command`
   (its built-in verify is `git diff --check`), is FORCED into sandbox execution
-  (v94-F4), and declares the env it needs in the engine registry (v94-F3:
-  claude_code needs USER/LOGNAME for keychain auth). `skep doctor` probes each
+  (v94-F4), and declares the env it needs in the engine registry (v94-F3,
+  v111-F3): it authenticates ONLY from its auth env (claude_code:
+  CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY; codex: OPENAI_API_KEY) — the
+  keychain and file logins are masked in the sandbox (W33) and a dispatch
+  without the env is refused (NO AUTH ENV). `skep doctor` probes each
   binary. Re-verify primes uv deps from the baseline before applying the patch
   so the default `uv run pytest` pin confirms offline (v94-F7).
 - The command deck (v25): chat messages starting with `/` are parsed client-side
@@ -113,9 +121,13 @@ gitignored on the public tree: plans stay local, only the fix commits push
   baseline, then project setup). Keep `COMMANDS`, the executor, and `/help` in
   lockstep — a test pins the table against the parser branches.
 
+## Required design context before acting
+
+Before making a design decision, writing or changing a plan, or modifying SKEP behavior, consult the private [SKEP design archive](https://github.com/Anmolnoor/skep-design). Read its `README.md`, `RECOVERY.md`, relevant ADRs and plans, plus `rules/invariants.md` and applicable `.10x/` decisions. Treat that archive as the canonical source for internal decisions and planning; public code/docs describe the implementation and user-facing contract. Check whether referenced plans/status notes are current before relying on them. If the private repo is inaccessible, state that clearly and do not invent or silently assume its contents; continue only with work that does not depend on missing internal context.
+
 ## Where to look first
 
-`plans/` (all plans + `EXECUTION_LEDGER.md`), `docs/version-history.md`,
+Private design archive first (see above); then `plans/` if present, `docs/version-history.md`,
 `src/skep/supervisor/policy_resolver.py` (run policy), `serve/actions.py`
 (shared verbs), `serve/tools.py` (chat tool surface), `workers/capabilities.py`
 (worker-side gates), `apply.py` (landing).

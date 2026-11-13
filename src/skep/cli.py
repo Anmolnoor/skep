@@ -5,6 +5,7 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .profile import run_personal_setup
@@ -73,7 +74,7 @@ def _parser() -> argparse.ArgumentParser:
         "--template",
         default=None,
         metavar="NAME",
-        help="apply a policy template (locked-down, personal-dev, homelab-ops, assistant)",
+        help="apply a policy template (builder, operator, assistant)",
     )
     setup.add_argument(
         "--dry-run",
@@ -86,6 +87,48 @@ def _parser() -> argparse.ArgumentParser:
         help="with --template: confirm switching an existing policy document",
     )
     setup.set_defaults(func=_setup)
+
+    # first-run O3 (ADR 0056 D7): the guided form of setup, five resumable steps.
+    onboard = subcommands.add_parser(
+        "onboard",
+        help="guided first run: model, work directory, sandbox, policy baseline, role",
+    )
+    onboard.add_argument(
+        "--provider", default=None, help="mock, ollama, openai-compatible, or a preset id"
+    )
+    onboard.add_argument("--model", default=None, help="model name")
+    onboard.add_argument("--endpoint", default=None, help="provider API endpoint URL")
+    onboard.add_argument(
+        "--api-key-env",
+        default=None,
+        help="environment variable that holds the provider API key (its NAME, never the key)",
+    )
+    onboard.add_argument("--workdir", default=None, help="work directory (created if missing)")
+    onboard.add_argument("--sandbox", default=None, help="auto, podman or none")
+    onboard.add_argument(
+        "--template", default=None, help="builder, operator or assistant (default: assistant)"
+    )
+    onboard.add_argument(
+        "--role", default=None, help="builder, operator or assistant (default: the template)"
+    )
+    onboard.add_argument(
+        "--yes", action="store_true", help="take the defaults and skip the typed `yes`"
+    )
+    onboard.add_argument("--no-chat", action="store_true", help="stop before opening skep chat")
+    onboard.add_argument(
+        "--check",
+        action="store_true",
+        help="doctor plus the baseline, engine, sandbox, workdir and egress checks (read-only)",
+    )
+    # first-run O4 (ADR 0056 D6): the why-lines under every verdict card.
+    loudness = onboard.add_mutually_exclusive_group()
+    loudness.add_argument(
+        "--quiet", action="store_true", help="turn the first-run why-lines and tally off"
+    )
+    loudness.add_argument(
+        "--verbose", action="store_true", help="turn the first-run why-lines and tally back on"
+    )
+    onboard.set_defaults(func=_onboard)
 
     doctor = subcommands.add_parser(
         "doctor",
@@ -117,7 +160,8 @@ def _parser() -> argparse.ArgumentParser:
     chat.add_argument(
         "--url",
         default=None,
-        help="serve base URL (default: $SKEP_SERVE_URL or http://127.0.0.1:8765)",
+        help="serve base URL (default: $SKEP_SERVE_URL, else the port this home's serve "
+        "recorded, else http://127.0.0.1:8765)",
     )
     chat.add_argument("--chat", dest="chat_id", default=None, help="resume this chat id")
     chat.add_argument(
@@ -127,6 +171,9 @@ def _parser() -> argparse.ArgumentParser:
         help="resume the most recent chat",
     )
     chat.add_argument("--thinking", action="store_true", help="show the model's thinking, dim")
+    chat.add_argument(
+        "--role", default=None, help="open the new chat in this role (default: skep role list's *)"
+    )
     chat.add_argument(
         "--oneshot",
         metavar="MESSAGE",
@@ -214,57 +261,339 @@ def _setup_template(args: argparse.Namespace) -> int:
         document_from_settings,
     )
     from .supervisor.policy_templates import (
-        derived_global_knobs,
+        deprecation_line,
         diff_resolved_views,
+        explain_view,
         load_policy_template,
-        render_policy_table,
         resolved_view,
     )
     from .supervisor.store import RunStore
 
     try:
-        document = load_policy_template(args.template)
+        template = load_policy_template(args.template)
+        explained = explain_view(args.template)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    if explained["deprecated_alias"]:
+        print(deprecation_line(explained["deprecated_alias"]), file=sys.stderr)
+    document = template.document()
     view = resolved_view(document)
-    print(
-        f"policy template: {document.template}"
-        + (f"  (pack: {document.pack})" if document.pack else "")
-    )
-    print(render_policy_table(view))
+    print(explained["table"])
     if args.dry_run:
         print("dry run — nothing written")
         return 0
 
+    from .supervisor.policy_write import PolicyWriteRejected, keep_grants, vet_write, write_setting
+    from .supervisor.serve.actions import update_policy
+    from .supervisor.serve.settings import ConfigHolder
+
     config = build_config(args.home, None)
     store = RunStore(config.db_path)
     try:
+        holder = ConfigHolder(config, store)
         existing = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+        # B38: the learned grants survive the switch (a colliding one is
+        # dropped, with a line), and the diff says so.
+        template_document = document
+        document, grant_lines = keep_grants(holder, store, document)
         if existing is not None and existing.template != document.template:
             diff = diff_resolved_views(resolved_view(existing), view)
-            if diff and not args.apply:
+            if (diff or grant_lines) and not args.apply:
                 print(f"switching {existing.template} -> {document.template} would change:")
-                for line in diff:
+                for line in [*diff, *grant_lines]:
                     print(f"  {line}")
                 print("re-run with --apply to switch", file=sys.stderr)
                 return 1
-        store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, document.model_dump_json())
-        # The legacy knobs the compiled run policy reads (F7) follow the
-        # template; machine-specific knobs (trusted roots, execution mode)
-        # stay the operator's.
-        from .supervisor.serve.actions import update_policy
-        from .supervisor.serve.settings import ConfigHolder
 
-        update_policy(store, ConfigHolder(config, store), derived_global_knobs(document))
+        def plan() -> tuple[str, tuple[list[str], dict[str, Any]]]:
+            # W14: grants learned meanwhile (serve keeps them) are re-kept
+            kept, lines = keep_grants(holder, store, template_document)
+            # P3-5 (V11): the one write-time check, before the document is written.
+            checked = vet_write(
+                store,
+                holder=holder,
+                settings={POLICY_DOCUMENT_SETTINGS_KEY: kept.model_dump_json()},
+            )
+            return kept.model_dump_json(), (lines, checked)
+
+        try:
+            grant_lines, report = write_setting(store, POLICY_DOCUMENT_SETTINGS_KEY, plan)
+        except PolicyWriteRejected as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        # The template's knobs (O1: stated in the file, no longer derived from
+        # its rules) are written beside the document so the compiled run
+        # policy (F7) reflects the template too; machine-specific knobs
+        # (trusted roots, execution mode) stay the operator's.
+        update_policy(store, holder, dict(template.settings))
     finally:
         store.close()
     print(f"applied template {document.template!r}")
+    for line in [*grant_lines, *report["warnings"], report["replay_line"]]:
+        print(f"  {line}")
     print("next steps:")
     print("  skep serve     # the daemon + web UI")
     print("  skep chat      # talk to the Queen right here in the terminal")
     print(f"  skep setup --template {document.template} --dry-run   # review any time")
     return 0
+
+
+def _onboard(args: argparse.Namespace) -> int:
+    """first-run O3: `skep onboard` — resume at the first incomplete step;
+    a flag that differs from a step's record re-runs that step."""
+    from fastapi import HTTPException
+
+    from .supervisor import onboard
+    from .supervisor.cli_cmds import build_config
+    from .supervisor.serve.settings import ConfigHolder
+    from .supervisor.store import RunStore
+
+    config = build_config(args.home, None)
+    if args.quiet or args.verbose:
+        onboard.onboard_transparency(config.home, verbose=args.verbose)
+        state = "on — a why-line under every verdict card" if args.verbose else "off"
+        print(f"first-run why-lines: {state} (flip with skep onboard --quiet | --verbose)")
+        return 0
+    if args.check:
+        result = onboard.onboard_check(config.home)
+        print(result["report"], end="")
+        return 0 if result["ready"] else 1
+    store = RunStore(config.db_path)
+    try:
+        code = _onboard_steps(args, ConfigHolder(config, store), store)
+    except HTTPException as exc:
+        print(f"error: {exc.detail}", file=sys.stderr)
+        code = 1
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        code = 1
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        code = 130
+    finally:
+        store.close()
+    if code:
+        print("finished steps are kept; run skep onboard again to resume", file=sys.stderr)
+        return code
+    print("onboarded — check any time: skep onboard --check")
+    if args.no_chat:
+        return 0
+    role = onboard.onboard_status(config.home)["steps"]["role"]["role"]
+    return _onboard_chat(config.home, role)
+
+
+def _onboard_steps(args: argparse.Namespace, holder: Any, store: Any) -> int:
+    import getpass
+
+    from .supervisor import onboard
+    from .supervisor.policy_templates import TEMPLATE_NAMES, explain_view
+    from .supervisor.serve.setup import default_workspace_path
+
+    home = holder.current.home.parent
+    records = onboard.onboard_status(holder.current.home)["steps"]
+
+    def ask(prompt: str, default: str) -> str:
+        if args.yes:
+            return default
+        try:
+            return input(f"{prompt} [{default}]: ").strip() or default
+        except EOFError:
+            return default
+
+    # ① model
+    given = {
+        key: value
+        for key, value in (
+            ("provider", args.provider),
+            ("model", args.model),
+            ("endpoint", args.endpoint),
+            ("api_key_env", args.api_key_env),
+        )
+        if value is not None
+    }
+    record = records["model"]
+    if record and all(record.get(key) == value for key, value in given.items()):
+        print(f"① model: done — {record['provider']} {record['model']}")
+    else:
+        print("① model")
+        if not given:
+            found = onboard.detect_ollama()
+            if found is not None:
+                print(
+                    f"  local Ollama at {onboard.OLLAMA_LOCAL}: {', '.join(found) or 'no models'}"
+                )
+            if args.yes:
+                if not found:
+                    raise ValueError("no local Ollama with a model — pass --provider and --model")
+                given = {"provider": "ollama", "model": found[0]}
+            else:
+                answers = argparse.Namespace()
+                _setup_wizard(answers)
+                given = {key: value for key, value in vars(answers).items() if value}
+                if not given.get("model") and found:
+                    given["model"] = found[0]
+        record = onboard.onboard_model(
+            holder,
+            store,
+            provider=given.get("provider", "ollama"),
+            model=given.get("model", ""),
+            endpoint=given.get("endpoint"),
+            api_key_env=given.get("api_key_env"),
+        )
+        print(f"  test: {record['test']}")
+        print(f"  egress: {record['egress']}")
+
+    # ② work directory
+    record = records["workdir"]
+    wanted = Path(args.workdir).expanduser().resolve() if args.workdir else None
+    if record and wanted in (None, Path(record["path"])):
+        print(f"② work directory: done — {record['path']}")
+    else:
+        print("② work directory")
+        path = args.workdir or ask("  work directory", str(default_workspace_path()))
+        record = onboard.onboard_workdir(holder, store, path=path)
+        print(f"  {'created' if record['created'] else 'using'} {record['path']}")
+        print(f"  registered as project {record['project_id']}")
+        if record["verify_command"]:
+            print(f"  verify_command (inferred, pinned): {record['verify_command']}")
+        else:
+            print("  verify_command: none inferred (no entry point) — re-verify falls back")
+            print("  to the worker's own command until one is pinned")
+        if not record["git"]:
+            print("  not a git repository — dispatch needs one (`git init` it, or /workon)")
+
+    # ③ sandbox
+    record = records["sandbox"]
+    if record and args.sandbox in (None, record["backend"]):
+        print(f"③ sandbox: done — {record['backend']}")
+    else:
+        print("③ sandbox")
+        backend = args.sandbox
+        if backend is None:
+            detected = onboard.detect_sandboxes()
+            for name, view in detected["backends"].items():
+                state = "usable" if view["usable"] else "unusable"
+                print(f"  {name}: {state} — {view['detail']}")
+            print(f"  docker: {detected['docker']['detail']}")
+            backend = ask("  sandbox backend (auto / podman / none)", detected["recommended"])
+        record = onboard.onboard_sandbox(holder, store, backend=backend)
+        print(f"  {backend}: {record['rings']}")
+
+    # ④ template — re-read: ③ may have just switched the sandbox (O3-F1)
+    status = onboard.onboard_status(holder.current.home)
+    record = status["steps"]["template"]
+    if record and args.template in (None, record["template"]):
+        print(f"④ template: done — {record['template']} locked")
+    else:
+        print("④ template")
+        if status["relock"]:
+            print(
+                f"  the locked baseline is not what {status['relock']} locks under this "
+                "sandbox — approve the candidate to re-lock"
+            )
+        template = args.template or status["relock"]
+        shown = False
+        if template is None:
+            if not args.yes:
+                for name in TEMPLATE_NAMES:
+                    print(explain_view(name)["table"])
+                    print()
+                shown = True
+            template = ask("  template (builder / operator / assistant)", onboard.DEFAULT_TEMPLATE)
+        preview = onboard.template_preview(holder, template=template)
+        if not preview["locked"]:
+            if not shown or preview["tightened"]:
+                print(preview["table"])
+            for heading, lines in (
+                ("no sandbox ring — the template is tightened:", preview["tightened"]),
+                ("changes against the locked baseline:", preview["diff"]),
+            ):
+                if lines:
+                    print(f"  {heading}")
+                    print("\n".join(f"    {line}" for line in lines))
+            if not args.yes:
+                try:
+                    answer = input("type yes to lock this as the policy baseline: ")
+                except EOFError:
+                    answer = ""
+                if answer.strip() != "yes":
+                    print("not approved — nothing was locked", file=sys.stderr)
+                    return 1
+        record = onboard.onboard_template(
+            holder,
+            template=template,
+            approved_by=getpass.getuser(),
+            expect_sha256=preview["sha256"],
+        )
+        print(f"  baseline locked: {record['template']} sha256 {record['sha256'][:12]}")
+
+    # ⑤ role
+    record = records["role"]
+    if record and args.role in (None, record["role"]):
+        print(f"⑤ role: done — {record['role']}")
+    else:
+        print("⑤ role")
+        locked = onboard.onboard_status(holder.current.home)["steps"]["template"] or {}
+        role = args.role or ask(
+            "  role (builder / operator / assistant)",
+            str(locked.get("template") or onboard.DEFAULT_TEMPLATE),
+        )
+        onboard.onboard_role(holder, role=role)
+        print(f"  role: {role} (recorded in {home / onboard.FIRST_RUN_FILE})")
+    return 0
+
+
+def _onboard_chat(supervisor_home: Path, role: str) -> int:
+    """⑤'s hand-off: attach to a running daemon, or start `skep serve`
+    detached and wait for it, then open `skep chat` with the role noted."""
+    import subprocess
+    import time
+    from urllib.parse import urlparse
+
+    import httpx
+
+    from .cli_chat import TOKEN_HEADER, run_chat, serve_url
+    from .supervisor.serve.auth import TOKEN_FILE
+
+    url = serve_url(supervisor_home)
+
+    def up() -> bool:
+        token = supervisor_home / TOKEN_FILE
+        if not token.is_file():
+            return False
+        try:
+            response = httpx.get(
+                f"{url}/api/status",
+                headers={TOKEN_HEADER: token.read_text(encoding="utf-8").strip()},
+                timeout=1.0,
+            )
+        except httpx.HTTPError:
+            return False
+        return response.status_code == 200
+
+    if not up():
+        port = str(urlparse(url).port or 8765)
+        log = supervisor_home.parent / "serve.log"
+        print(f"starting the daemon: skep serve --port {port} (log: {log})")
+        argv = [sys.executable, "-m", "skep", "--home", str(supervisor_home.parent), "serve"]
+        subprocess.Popen(
+            [*argv, "--port", port],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 30
+        while not up():
+            if time.monotonic() > deadline:
+                print(
+                    "the daemon did not come up — run skep serve, then skep chat", file=sys.stderr
+                )
+                return 1
+            time.sleep(0.5)
+    print(f"role: {role} — your first chat opens in role:{role} (skep role list)")
+    return run_chat(home=supervisor_home, url=url, role=role)
 
 
 def _doctor(args: argparse.Namespace) -> int:

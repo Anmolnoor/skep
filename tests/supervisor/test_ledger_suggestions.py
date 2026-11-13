@@ -140,7 +140,9 @@ def test_remember_ledger_entry_persists_and_marks(repo: Path, config: Supervisor
         assert result["remembered"] is True
         project = store.project_for_binding("repo_path", str(repo))
         assert project is not None
-        assert PIP.split() in project.policy["allowed_shell_commands"]
+        # P3-4 (B18): a project grant, not the knob a baseline enforces.
+        assert "allowed_shell_commands" not in project.policy
+        assert actions.granted_commands(store, holder, repo) == [PIP.split()]
         # Every historical row now says so, and the suggestion is gone.
         assert all(entry.remembered for entry in store.ledger_for_repo(repo))
         assert actions.ledger_remember_suggestions(store) == []
@@ -172,11 +174,11 @@ def test_the_nth_approval_carries_the_nudge(repo: Path, config: SupervisorConfig
     store = RunStore(config.db_path)
     try:
         review_ids = _seed_approvals(store, repo, count=3)
-        suggestion = actions.remember_suggestion_for_review(store, review_ids[-1])
+        suggestion = actions.remember_suggestion_for_review(store, review_ids[-1], config)
         assert suggestion is not None and "approval #3" in suggestion
         # Below the threshold there is no nudge.
         other = _seed_approvals(store, repo, count=1, resource="pytest -q")
-        assert actions.remember_suggestion_for_review(store, other[0]) is None
+        assert actions.remember_suggestion_for_review(store, other[0], config) is None
     finally:
         store.close()
 

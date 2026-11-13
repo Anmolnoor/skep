@@ -22,7 +22,7 @@ from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation
 from skep.supervisor.store import RunStore
 
-from .conftest import FAKE_WORKER, git, wait_terminal
+from .conftest import FAKE_WORKER, git, predating_home, wait_terminal
 from .conftest import serve_client as _client
 from .fake_openai import FakeOpenAI
 
@@ -1022,21 +1022,20 @@ def test_maintain_phase_lands_on_one_integration_branch_and_freezes_main(
     assert _wait_applied_branch(client, run1["task_id"]) == "skep/maintain"
     tip_after_one = git(repo, "rev-parse", "skep/maintain").stdout.strip()
 
-    # A second run's identical patch cannot append onto the diverged branch;
-    # v81-F2: the failed auto-apply is DENIED with the failure on record —
-    # approving again would fail identically, so a pending row would lie (I8).
+    # A second run of the same fix conflicts with the integration branch it
+    # now starts from (ES-F6); its re-verify cannot confirm, so the auto lane
+    # blocks — named on the run's trail, no approval row (ES-F3: a pending one
+    # would fail identically; a denied one reads as policy).
     run2 = _run_to_terminal(client, repo, "Fix the bug. MODE:happy")
     assert run2["state"] == "completed"
     assert _wait_applied_branch(client, run2["task_id"]) is None
-    pending = client.get("/api/approvals").json()["approvals"]
-    assert not any(a["run"]["task_id"] == run2["task_id"] for a in pending)
     store = RunStore(config.db_path)
     try:
-        failed = [a for a in store.approvals_for(str(run2["task_id"]))]
+        assert store.approvals_for(str(run2["task_id"])) == []
+        trail = [d or "" for _, d, _ in store.transitions_for(str(run2["task_id"]))]
     finally:
         store.close()
-    assert failed and failed[0].status == "denied"
-    assert (failed[0].resolution_note or "").startswith("apply failed:")
+    assert any("auto_apply_blocked" in detail for detail in trail)
 
     # The integration branch was not corrupted, there are no per-task branches,
     # and main never advanced.
@@ -1447,7 +1446,10 @@ def test_ask_execution_policy_requires_explicit_mode(repo: Path, config: Supervi
     assert detail["state"] == "completed"
     run = client.get(f"/api/runs/{task_id}").json()["run"]
     assert run["execution_mode"] == "workspace"
-    assert Path(run["workspace"]).parent == repo.parent / ".skep" / "worktrees"
+    # ES-F4 (B07): under the active SKEP_HOME like sandbox mode — never
+    # `<repo parent>/.skep/worktrees` (the real ~/.skep for a repo in $HOME).
+    assert Path(run["workspace"]).parent == config.worktrees_root
+    assert not (repo.parent / ".skep").exists()
 
 
 def test_workspace_execution_must_match_trusted_root(
@@ -1561,7 +1563,9 @@ def test_dispatch_adds_configured_llm_host_when_network_is_omitted(
 
     task_json = config.audit_dir / str(run["task_id"]) / "task.json"
     permissions = json.loads(task_json.read_text())["permissions"]
-    assert permissions["network"] == ["127.0.0.1"]
+    # ADR 0059 D3: the endpoint rides provider_hosts at its exact port.
+    assert permissions["network"] == []
+    assert permissions["provider_hosts"] == [server.base_url.split("//")[1].split("/")[0]]
 
 
 def test_auto_approve_write_returns_deprecation_notice(
@@ -1583,7 +1587,9 @@ def test_set_operator_policy_rule_takes_effect_and_guards_denied_space(
 ) -> None:
     """v52-F4: a confirmed rule governs the next Queen decision; an allow
     into composed deny space is rejected with the deny's rule id; the tool
-    is carded (never free)."""
+    is carded (never free). P3-5: the read sits inside an operator root (the
+    skep home) — outside one, beside the default search allow, it is §5.4
+    check 2 (test_policy_write_v3)."""
     from fastapi import HTTPException
     from pytest import raises
 
@@ -1591,21 +1597,29 @@ def test_set_operator_policy_rule_takes_effect_and_guards_denied_space(
     from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY, PolicyDocument
     from skep.supervisor.serve.tools import MUTATING_TOOL_SPECS
 
-    store = RunStore(config.db_path)
+    store = RunStore(predating_home(config.db_path))
     try:
         result = actions.set_operator_policy_rule(
-            store, scope="filesystem", action="read", pattern=f"{tmp_path}/data/*", verdict="allow"
+            store,
+            scope="filesystem",
+            action="read",
+            pattern=f"{config.home}/data/*",
+            verdict="allow",
         )
-        assert result["rule"]["rule_id"] == f"op:filesystem:read:{tmp_path}/data/*"
+        assert result["rule"]["rule_id"] == f"op:filesystem:read:{config.home}/data/*"
         decision = resolve_operator_policy(store).decision(
-            "filesystem", "read", f"{tmp_path}/data/report.csv"
+            "filesystem", "read", f"{config.home}/data/report.csv"
         )
         assert decision.verdict == "allow"
-        assert decision.decided_by.endswith(f"op:filesystem:read:{tmp_path}/data/*")
+        assert decision.decided_by.endswith(f"op:filesystem:read:{config.home}/data/*")
 
         # Idempotent: the same rule again does not duplicate.
         again = actions.set_operator_policy_rule(
-            store, scope="filesystem", action="read", pattern=f"{tmp_path}/data/*", verdict="allow"
+            store,
+            scope="filesystem",
+            action="read",
+            pattern=f"{config.home}/data/*",
+            verdict="allow",
         )
         assert len(again["allow"]) == len(result["allow"])
 
@@ -1636,10 +1650,10 @@ def test_set_operator_policy_rule_takes_effect_and_guards_denied_space(
             )
         assert "no-vault" in str(excinfo.value.detail)
 
-        # Unknown scope/action are clean errors.
+        # Unknown scope/action are clean errors (shell is a scope since P3-6, B20).
         with raises(HTTPException):
             actions.set_operator_policy_rule(
-                store, scope="shell", action="run", pattern="ls", verdict="allow"
+                store, scope="email", action="send", pattern="*", verdict="allow"
             )
         with raises(HTTPException):
             actions.set_operator_policy_rule(
@@ -1746,3 +1760,46 @@ def test_an_unknown_caste_is_refused_by_name_not_run_as_coding(
     detail = refused.json()["detail"]
     assert "archivist" in detail
     assert "researcher" in detail and "reviewer" in detail  # names what IS valid
+
+
+def test_es_f6_maintain_workers_start_from_the_integration_branch(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F6 (B132, I1 I8): maintain workers based on main never saw what
+    skep/maintain had accumulated — the second nearby task conflicted and was
+    recorded `denied`. A run with no explicit ref starts from the project's
+    integration branch once it exists, so the second task builds on the first."""
+    (repo / "other.py").write_text("value = 0\n")
+    git(repo, "add", "other.py")
+    git(repo, "commit", "-qm", "second file")
+    seeded = RunStore(config.db_path)
+    try:
+        seeded.add_project_policy(
+            project_id="acc",
+            name="trusted repo",
+            strategy="trusted_local_dev",
+            phase="maintain",
+            policy={
+                "default_execution_mode": "workspace",
+                "verify_command": 'grep -q "value = 1" existing.py',
+            },
+        )
+        seeded.add_project_binding(
+            project_id="acc", binding_kind="repo_path", binding_value=str(repo)
+        )
+    finally:
+        seeded.close()
+    client = _client(config)
+    run1 = _run_to_terminal(client, repo, "Fix the bug. MODE:happy")
+    assert _wait_applied_branch(client, run1["task_id"]) == "skep/maintain"
+    # Run 2's pin only passes on a base that already has run 1's fix.
+    run2 = _run_to_terminal(client, repo, "Fix more. MODE:happy FILE:other.py")
+    assert _wait_applied_branch(client, run2["task_id"]) == "skep/maintain"
+    store = RunStore(config.db_path)
+    try:
+        assert store.get_run(str(run2["task_id"])).ref == "skep/maintain"  # type: ignore[union-attr]
+    finally:
+        store.close()
+    shown = git(repo, "show", "skep/maintain:other.py").stdout
+    assert shown == "value = 1\n"
+    assert git(repo, "show", "skep/maintain:existing.py").stdout == "value = 1\n"

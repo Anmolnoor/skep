@@ -29,7 +29,15 @@ from typing import Any, Protocol
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
-from ..chat import ATTACHMENT_MAX_BYTES, ChatEngine, save_chat_attachment
+from ...roles import ROLE_LESS_CHAT_ROLE
+from ..chat import (
+    ATTACHMENT_MAX_BYTES,
+    TURN_BUSY,
+    ChatEngine,
+    blocking_cards,
+    chat_turn_lock,
+    save_chat_attachment,
+)
 from . import (
     ChannelConfig,
     ChannelIdentity,
@@ -39,6 +47,7 @@ from . import (
     channel_confirmation_decision,
     identity_allowlisted,
     resolve_channel_secret,
+    user_allowlisted,
 )
 from . import (
     discord as discord_adapter,
@@ -172,6 +181,7 @@ def run_channel_turn(
             title=f"{message.channel} {message.identity.identity_id}",
             model=None,
             source=message.channel,
+            role=ROLE_LESS_CHAT_ROLE,  # decision #4 (B55): never the widest lanes
         )
         store.bind_channel_session(
             session_key=message.session_key,
@@ -186,7 +196,30 @@ def run_channel_turn(
             f"skep: configure the assistant first in the web UI (Settings): {web_ui_url}",
             [],
         )
-    if store.pending_chat_actions(chat.chat_id):
+    # ES-F2 (B13 B14): one turn at a time per chat — the web and a messenger
+    # bound to the same chat share the lock.
+    lock = chat_turn_lock(chat.chat_id)
+    if not lock.acquire(blocking=False):
+        return (f"skep: {TURN_BUSY}", [])
+    try:
+        return _channel_turn(
+            engine, chat, message, (base_url, api_key, model, protocol), web_ui_url=web_ui_url
+        )
+    finally:
+        lock.release()
+
+
+def _channel_turn(
+    engine: ChatEngine,
+    chat: Any,
+    message: ChannelMessage,
+    llm: tuple[str, str | None, str, Any],
+    *,
+    web_ui_url: str,
+) -> tuple[str, list[dict[str, object]]]:
+    store = engine.store
+    base_url, api_key, model, protocol = llm
+    if blocking_cards(store, chat.chat_id):  # ES-F5: a gate never holds the chat
         # v66-F3: buttons can resolve low-risk cards in-channel now — say so.
         return (
             "skep: a confirmation is pending for this conversation — confirm or "
@@ -289,7 +322,7 @@ class TelegramPoller(threading.Thread):
                 # the shared gate could allow it; anything else keeps the v16
                 # web-UI pointer text.
                 card_text, keyboard = telegram_adapter.confirmation_card(
-                    str(action.get("tool")), (), config, self._web_ui_url
+                    str(action.get("tool")), (), config, self._web_ui_url, _card_of(action)
                 )
                 if keyboard is not None:
                     keyboard = _telegram_action_keyboard(keyboard, str(action.get("action_id")))
@@ -466,13 +499,19 @@ def _text_blocks(text: str) -> list[dict[str, object]]:
     return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
+def _card_of(action: dict[str, object]) -> dict[str, Any] | None:
+    """P4-2: the server's card on an action event (HIGH, taint, items)."""
+    card = action.get("card")
+    return card if isinstance(card, dict) else None
+
+
 def _slack_action_blocks(
-    action_id: str, tool: str, config: ChannelConfig
+    action_id: str, tool: str, config: ChannelConfig, card: dict[str, Any] | None = None
 ) -> list[dict[str, object]]:
     """The adapter's confirm-card blocks, with the chat-action id stamped onto
     the buttons so the interact callback knows what it is resolving. The
     adapter itself stays pure (its tests pin the block shapes)."""
-    blocks = slack_adapter.confirmation_blocks(tool, (), config)
+    blocks = slack_adapter.confirmation_blocks(tool, (), config, card)
     for block in blocks:
         elements = block.get("elements")
         if block.get("type") == "actions" and isinstance(elements, list):
@@ -551,7 +590,7 @@ def add_slack_routes(
             _deliver(bot_token, message.identity.identity_id, _text_blocks(text))
         for action in actions:
             blocks = _slack_action_blocks(
-                str(action.get("action_id")), str(action.get("tool")), config
+                str(action.get("action_id")), str(action.get("tool")), config, _card_of(action)
             )
             _deliver(bot_token, message.identity.identity_id, blocks)
 
@@ -593,8 +632,13 @@ def add_slack_routes(
         if action is None or action.status != "proposed":
             _deliver(bot_token, channel_id, _text_blocks("skep: that card is gone or resolved."))
             return
+        user = payload.get("user")
         decision = slack_adapter.handle_button(
-            action_id=click, action_class=action.tool, identity=identity, config=config
+            action_id=click,
+            action_class=action.tool,
+            identity=identity,
+            config=config,
+            user_id=str(user.get("id") or "") if isinstance(user, dict) else "",
         )
         if not decision.allowed:
             _deliver(
@@ -791,6 +835,15 @@ SKEP_COMMAND_TREE: list[dict[str, object]] = [
 ]
 
 
+def _several_cards(count: int, web_ui_url: str) -> str:
+    """W19: a reaction or a bare /skep verdict names no card."""
+    return (
+        f"skep: {count} cards are waiting in this conversation, so a reaction or "
+        "/skep approve|deny cannot tell which one you mean — nothing was resolved. "
+        f"Use the buttons on the card you mean, or the web UI: {web_ui_url}"
+    )
+
+
 def register_slash_commands(token: str, application_id: str, register: RegisterCommands) -> None:
     """v78-F4: one bulk-overwrite PUT after READY. Registration failure never
     breaks the session; a 403 names the fix (I9)."""
@@ -855,12 +908,16 @@ def _default_gateway_connect(url: str) -> Any:
 
 
 def _discord_action_payload(
-    action_id: str, tool: str, config: ChannelConfig, web_ui_url: str = ""
+    action_id: str,
+    tool: str,
+    config: ChannelConfig,
+    web_ui_url: str = "",
+    card: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     """The adapter's confirm-card embed, with the chat-action id stamped onto
     the button custom_ids so INTERACTION_CREATE knows what it is resolving.
     The adapter itself stays pure (its tests pin the embed shape)."""
-    payload = discord_adapter.confirmation_embed(tool, (), config, web_ui_url)
+    payload = discord_adapter.confirmation_embed(tool, (), config, web_ui_url, card)
     rows = payload.get("components")
     if isinstance(rows, list):
         for row in rows:
@@ -870,6 +927,13 @@ def _discord_action_payload(
                     if isinstance(component, dict) and "custom_id" in component:
                         component["custom_id"] = f"{component['custom_id']}:{action_id}"
     return payload
+
+
+def _interaction_user(data: dict[str, Any]) -> str:
+    """The invoking user's id: ``member.user`` in a guild, ``user`` in a DM."""
+    member = data.get("member")
+    user = member.get("user") if isinstance(member, dict) else data.get("user")
+    return str(user.get("id") or "") if isinstance(user, dict) else ""
 
 
 def _spawn_daemon_thread(work: Callable[[], None]) -> None:
@@ -1155,7 +1219,11 @@ class DiscordGateway(threading.Thread):
             self._deliver(token, channel_id, text)
         for action in actions:
             payload = _discord_action_payload(
-                str(action.get("action_id")), str(action.get("tool")), config, self._web_ui_url
+                str(action.get("action_id")),
+                str(action.get("tool")),
+                config,
+                self._web_ui_url,
+                _card_of(action),
             )
             if not self._send(token, channel_id, payload):
                 logger.warning("discord card delivery failed")
@@ -1215,7 +1283,9 @@ class DiscordGateway(threading.Thread):
             session_key=f"{discord_adapter.CHANNEL}:{thread_id}",
         )
 
-    def _resolve_verdict(self, action_id: str, *, confirm: bool, identity: ChannelIdentity) -> str:
+    def _resolve_verdict(
+        self, action_id: str, *, confirm: bool, identity: ChannelIdentity, user_id: str
+    ) -> str:
         """Resolve a pending card through the shared gate; returns the reply text.
         Mirrors the Slack ``_resolve_button`` flow — one posture, two transports."""
         action = self._store.get_chat_action(action_id) if action_id else None
@@ -1234,6 +1304,9 @@ class DiscordGateway(threading.Thread):
                 f"{discord_adapter.CHANNEL}:{identity.identity_id}"
             )
             identity_ok = binding is not None and binding.chat_id == action.chat_id
+        # ES (B114): the room is not the operator — the person must be listed
+        # too, for buttons, reactions and /skep verdicts alike.
+        identity_ok = identity_ok and user_allowlisted(user_id, config)
         decision = channel_confirmation_decision(
             action_class=action.tool,
             channel_can_confirm=config.channel_can_confirm,
@@ -1304,7 +1377,9 @@ class DiscordGateway(threading.Thread):
             interaction_token=interaction_token,
             channel_id=str(data.get("channel_id") or ""),
             token=token,
-            resolve=lambda: self._resolve_verdict(action_id, confirm=confirm, identity=identity),
+            resolve=lambda: self._resolve_verdict(
+                action_id, confirm=confirm, identity=identity, user_id=_interaction_user(data)
+            ),
         )
 
     def _defer_and_finish(
@@ -1344,7 +1419,7 @@ class DiscordGateway(threading.Thread):
     def _slash_admitted(self, data: dict[str, Any], config: ChannelConfig) -> bool:
         """Admission first, fail closed — the same rules ``normalize_inbound``
         applies to messages: channel allow-listed OR session-bound, and
-        ``allowed_users`` (when set) must list the invoker."""
+        ``allowed_users`` must list the invoker (B114: empty = nobody)."""
         channel_id = str(data.get("channel_id") or "")
         if not channel_id:
             return False
@@ -1354,13 +1429,7 @@ class DiscordGateway(threading.Thread):
         )
         if not (identity_allowlisted(identity, config.allowed_identities) or session_bound):
             return False
-        if config.allowed_users:
-            member = data.get("member")
-            user = member.get("user") if isinstance(member, dict) else data.get("user")
-            author_id = str(user.get("id") or "") if isinstance(user, dict) else ""
-            if author_id not in set(config.allowed_users):
-                return False
-        return True
+        return user_allowlisted(_interaction_user(data), config)
 
     def _handle_slash_command(
         self, data: dict[str, Any], config: ChannelConfig, token: str
@@ -1388,7 +1457,9 @@ class DiscordGateway(threading.Thread):
                 interaction_token=str(data.get("token") or ""),
                 channel_id=channel_id,
                 token=token,
-                resolve=lambda: self._slash_verdict(channel_id, confirm=sub == "approve"),
+                resolve=lambda: self._slash_verdict(
+                    channel_id, confirm=sub == "approve", user_id=_interaction_user(data)
+                ),
             )
             return
         if sub == "status":
@@ -1427,19 +1498,23 @@ class DiscordGateway(threading.Thread):
             lines.append(line)
         return "\n".join(lines)
 
-    def _slash_verdict(self, channel_id: str, *, confirm: bool) -> str:
+    def _slash_verdict(self, channel_id: str, *, confirm: bool, user_id: str) -> str:
         """The typed command IS the decision, asked once (I7): resolve the
         bound chat's single pending card through the EXACT gate the ✅ button
         uses (``_resolve_verdict`` → ``channel_confirmation_decision``) — no id
-        argument, because the bound chat holds at most one actionable card by
-        construction (``run_channel_turn`` refuses new turns while one waits),
-        and the v51 field test showed id-typing is where approvals go to die."""
+        argument: the v51 field test showed id-typing is where approvals go to
+        die. W19: one turn can still leave several cards, and then this
+        resolves none (``_several_cards``)."""
         binding = self._store.channel_session(f"{discord_adapter.CHANNEL}:{channel_id}")
         pending = self._store.pending_chat_actions(binding.chat_id) if binding else []
         if not pending:
             return "skep: no card is waiting in this conversation."
+        if len(pending) > 1:
+            return _several_cards(len(pending), self._web_ui_url)
         identity = ChannelIdentity(channel=discord_adapter.CHANNEL, identity_id=channel_id)
-        return self._resolve_verdict(pending[0].action_id, confirm=confirm, identity=identity)
+        return self._resolve_verdict(
+            pending[0].action_id, confirm=confirm, identity=identity, user_id=user_id
+        )
 
     def _handle_reaction(self, data: dict[str, Any], config: ChannelConfig, token: str) -> None:
         emoji = data.get("emoji")
@@ -1454,9 +1529,11 @@ class DiscordGateway(threading.Thread):
         pending = self._store.pending_chat_actions(binding.chat_id)
         if not pending:
             return
-        # ponytail: a reaction resolves the (single) waiting card —
-        # run_channel_turn refuses new turns while one waits, so there is at
-        # most one card a reaction can sensibly mean.
+        if len(pending) > 1:
+            # W19: one turn can leave several cards; a reaction cannot say
+            # which one it means, so it resolves none.
+            self._deliver(token, channel_id, _several_cards(len(pending), self._web_ui_url))
+            return
         action = pending[0]
         decision = discord_adapter.handle_reaction(
             reaction=reaction,
@@ -1476,5 +1553,10 @@ class DiscordGateway(threading.Thread):
                 f"Review it in the web UI: {self._web_ui_url}",
             )
             return
-        text = self._resolve_verdict(action.action_id, confirm=reaction == "✅", identity=identity)
+        text = self._resolve_verdict(
+            action.action_id,
+            confirm=reaction == "✅",
+            identity=identity,
+            user_id=str(data.get("user_id") or ""),
+        )
         self._deliver(token, channel_id, text)

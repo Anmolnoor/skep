@@ -12,14 +12,16 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+import os
 import sqlite3
+import subprocess
 import threading
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from skep.worker_contract import TERMINAL_STATES, CodingWorkerResult, CodingWorkerTask, Event
 
@@ -34,6 +36,7 @@ from .memory import (
     validate_source_kind,
 )
 from .nodes import Node, validate_node
+from .policy_schema import SCOPES
 from .providers import ProviderHealth, ProviderProfile, validate_provider_profile
 from .serve.channels import (
     CHANNELS,
@@ -56,6 +59,11 @@ def _created_transition_detail(task: CodingWorkerTask) -> str | None:
     if not detail:
         return None
     return json.dumps(detail, ensure_ascii=True)
+
+
+# ES-F13 (B86): the settings that pick the chat provider (serve/llm.py's
+# LLM_BASE_URL, LLM_PROTOCOL, LLM_DEFAULT_MODEL — store cannot import serve).
+_PROVIDER_SETTINGS = frozenset({"llm_base_url", "llm_protocol", "llm_default_model"})
 
 
 def _locked[F: Callable[..., Any]](method: F) -> F:
@@ -148,7 +156,10 @@ CREATE TABLE IF NOT EXISTS approvals (
     landing_branch TEXT,
     -- v40-F8 (v36-F4): the policy rule that routed this gate,
     -- "<template>/<rule_id>" (or "auto/<rule>" for auto-approvals).
-    decided_by TEXT
+    decided_by TEXT,
+    -- W27: who holds an 'applying' claim, {"pid", "started"} (process_owner);
+    -- the serve-start sweep takes only claims whose owner is gone.
+    claim_owner TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals (status, requested_at);
 CREATE TABLE IF NOT EXISTS approval_ledger (
@@ -369,7 +380,11 @@ CREATE TABLE IF NOT EXISTS chat_actions (
     -- v106-F4 (v101-F15): the model's own call id. A card resolves minutes
     -- after its call, in a different request — the id must survive on the
     -- action row so the result row can carry it back.
-    tool_call_id TEXT
+    tool_call_id TEXT,
+    -- P4-2 (ADR 0059 D6): what the server recorded on the card when it was
+    -- proposed — the HIGH tier, the folded items, the dispatch manifest. A
+    -- confirm acts on exactly this, never on a later recomputation.
+    card_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_actions_pending ON chat_actions (chat_id, status);
 -- v7 Stage B: inert notes and tasks the assistant may append to freely; due
@@ -586,6 +601,8 @@ class ReverifyRecord:
     exit_codes: list[int]
     detail: str
     created_at: str
+    # ES-F3 (B131): the commit G10 applied the patch to — landing builds on it.
+    base_commit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -650,6 +667,9 @@ class ChatRecord:
     # request wall after a 4xx — replay and compaction stay under
     # min(num_ctx budget, this). None = the provider has never pushed back.
     provider_ceiling_chars: int | None = None
+    # first-run R1 (ADR 0055 D3): the role this chat runs in; None (a chat from
+    # before every chat recorded one) reads as assistant (ADR 0059 decision #4).
+    role: str | None = None
     # v74-F3: tools this chat described via describe_tools — their full
     # schemas ride the advertised tools array from then on. Advertisement
     # only, never permission (the executor accepts any registered tool).
@@ -671,6 +691,48 @@ class ChatMessageRecord:
     # v106-F4 (v101-F15): which call this tool result answers. NULL on rows
     # older than the column — those replay by position, as they always did.
     tool_call_id: str | None = None
+    # ADR 0059 D5 (B26): who wrote it — ``operator``, ``queen``, ``tool``,
+    # ``webhook:<name>``, ``channel:<platform>:<user>``, ``schedule:<name>``,
+    # ``worker:<task>``. A row older than the column reads as its role's author.
+    provenance: str = ""
+
+    @property
+    def trusted(self) -> bool:
+        """Written by the operator, the Queen, or a tool the Queen called —
+        anything else is outside content (replayed wrapped, sets ``untrusted``)."""
+        return self.provenance in TRUSTED_PROVENANCE
+
+
+TRUSTED_PROVENANCE = frozenset({"operator", "queen", "tool"})
+# The author a row's role implies when nothing recorded one (rows older than
+# the column, and every writer that is the operator, the Queen or a tool).
+_ROLE_AUTHOR = {"user": "operator", "tool": "tool"}
+TAINT_BITS = ("private", "untrusted")
+
+
+def _taint_json(taint: Sequence[str]) -> str | None:
+    return json.dumps(sorted(set(taint))) if taint else None
+
+
+# A taint bit set where no message id says which (an unreadable taint, a
+# missing chat): it still counts as set.
+UNKNOWN_TAINT_ORIGIN = 0
+
+
+@dataclass(frozen=True)
+class ChatTaint:
+    """ADR 0059 D5 (V9): the chat's two trifecta bits, each the id of the
+    first message that set it (None = unset). Sticky: nothing clears them."""
+
+    private: int | None = None
+    untrusted: int | None = None
+
+    @property
+    def any(self) -> bool:
+        return self.private is not None or self.untrusted is not None
+
+    def bits(self) -> list[str]:
+        return [name for name in ("private", "untrusted") if getattr(self, name) is not None]
 
 
 @dataclass(frozen=True)
@@ -694,13 +756,24 @@ class ChatActionRecord:
     chat_id: str
     tool: str
     args: dict[str, Any]
-    status: str  # 'proposed' | 'confirmed' | 'denied' | 'superseded' (v63-F2)
+    # 'proposed' | 'executing' (claimed, ES-F1) | 'confirmed' | 'failed' | 'denied'
+    # | 'superseded' (v63-F2) | 'interrupted' (serve died mid-execute)
+    status: str
     result: Any | None
     created_at: str
     resolved_at: str | None
     source: str = "assistant"  # 'assistant' (model-proposed) | 'operator' (/command)
     decided_by: str | None = None  # v40-F8: the routing policy decision, when any
     tool_call_id: str | None = None  # v106-F4: the model's call id, for the result row
+    # P4-2 (ADR 0059 D6): the server's record of the card at proposal time:
+    # ``tier``/``high`` (HIGH and why), ``items`` (folded calls beyond this
+    # row's own: ``{"args", "tool_call_id"}``), ``manifest`` (a dispatch's).
+    card: dict[str, Any] | None = None
+
+    def fold_items(self) -> list[dict[str, Any]]:
+        """Every call this card answers: its own first, then the folded ones."""
+        extra = (self.card or {}).get("items") or []
+        return [{"args": self.args, "tool_call_id": self.tool_call_id}, *extra]
 
 
 @dataclass(frozen=True)
@@ -831,16 +904,71 @@ class ProjectBindingRecord:
     created_at: str
 
 
+_THIS_PROCESS = object()
+
+
+def _process_started(pid: int) -> str | None:
+    """The process's start time as ``ps`` prints it (C locale, UTC), or None."""
+    try:
+        probe = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},  # lstart is local time
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return " ".join(probe.stdout.split()) or None
+
+
+@functools.cache
+def _own_owner(pid: int) -> str | None:
+    started = _process_started(pid)
+    return None if started is None else json.dumps({"pid": pid, "started": started})
+
+
+def process_owner(pid: int | None = None) -> str | None:
+    """W27: a claim's owner — the pid and its start time (a pid outlives its
+    process as a number; the pair does not). None when ``ps`` cannot say."""
+    if pid is None:
+        return _own_owner(os.getpid())  # keyed by pid: a fork recomputes
+    started = _process_started(pid)
+    return None if started is None else json.dumps({"pid": pid, "started": started})
+
+
+def owner_alive(owner: str | None) -> bool:
+    """W27: the recorded claimer still runs — same pid, same start time."""
+    try:
+        record = json.loads(owner) if owner else None
+        pid = int(record["pid"]) if isinstance(record, dict) else 0
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return False
+    if pid <= 0 or not isinstance(record, dict):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # alive, another user's
+    return bool(_process_started(pid) == record.get("started"))
+
+
 class RunStore:
     """Single-writer SQLite store for runs, events, artifacts, and approvals."""
 
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        # O2: the reader finds the home's policy baseline beside the database.
+        self.db_path = db_path
         # G4: SQLite-WAL, single writer. The connection is shared across dispatch
         # threads (check_same_thread=False) and serialized by self._lock; WAL keeps
         # readers (a concurrent `skep status`, in another process) non-blocking, and
         # busy_timeout makes a cross-process writer wait its turn instead of raising.
         self._lock = threading.RLock()
+        fresh = not db_path.exists()  # before connect: the connect creates the file
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
@@ -851,6 +979,18 @@ class RunStore:
         ).fetchone()[0]
         self._conn.executescript(_SCHEMA)
         self._migrate(rebuild_chat_fts=chat_fts_is_new)
+        if fresh:
+            # ADR 0056 D2 (O5): a home that never existed starts with every scope on
+            # engine v2, and remembers it was born here, so later code can tell it
+            # from a home that existed before this skep (an upgrade).
+            now = _now()
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
+                [
+                    ("policy_engine_v2_scopes", json.dumps(list(SCOPES)), now),
+                    ("fresh_home_seeded_at", json.dumps(now), now),
+                ],
+            )
         self._conn.commit()
 
     def _migrate(self, *, rebuild_chat_fts: bool = False) -> None:
@@ -859,6 +999,12 @@ class RunStore:
         column check. v3.5 adds the template binding to ``schedules``; v4 adds
         ``provenance`` to ``templates`` (an existing v3.5 DB has the table already)."""
         schedule_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(schedules)")}
+        reverify_columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(reverifications)")
+        }
+        if "base_commit" not in reverify_columns:
+            # ES-F3 (B131): the commit G10 verified on; NULL for older rows.
+            self._conn.execute("ALTER TABLE reverifications ADD COLUMN base_commit TEXT")
         if "template_name" not in schedule_columns:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN template_name TEXT")
         if "params_json" not in schedule_columns:
@@ -953,6 +1099,11 @@ class RunStore:
             # whatever position it landed in. Old rows keep NULL — replay falls
             # back to arrival order for them, never for new rows (I11).
             self._conn.execute("ALTER TABLE chat_messages ADD COLUMN tool_call_id TEXT")
+        if "provenance" not in chat_message_columns:
+            # ADR 0059 D5 (B26): who wrote the row. NULL on rows older than the
+            # column reads as its role's own author (operator / queen / tool):
+            # an old chat is never retroactively tainted.
+            self._conn.execute("ALTER TABLE chat_messages ADD COLUMN provenance TEXT")
         project_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(project_policies)")
         }
@@ -970,6 +1121,9 @@ class RunStore:
         if "decided_by" not in approval_columns:
             # v40-F8: the policy rule that routed this gate.
             self._conn.execute("ALTER TABLE approvals ADD COLUMN decided_by TEXT")
+        if "claim_owner" not in approval_columns:
+            # W27: the claimer's pid and start time (NULL: claimed before W27).
+            self._conn.execute("ALTER TABLE approvals ADD COLUMN claim_owner TEXT")
         action_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(chat_actions)")}
         if "source" not in action_columns:
             # v25-F1: operator-typed /commands audit beside model proposals.
@@ -983,6 +1137,10 @@ class RunStore:
             # v106-F4 (v101-F15): a card resolves in a later request — the
             # call id survives on the action row so the result row carries it.
             self._conn.execute("ALTER TABLE chat_actions ADD COLUMN tool_call_id TEXT")
+        if "card_json" not in action_columns:
+            # P4-2 (ADR 0059 D6): the card as the server recorded it (tier,
+            # folded items, manifest). NULL = a card from before P4-2.
+            self._conn.execute("ALTER TABLE chat_actions ADD COLUMN card_json TEXT")
         chat_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(chats)")}
         if "personality" not in chat_columns:
             # v44-F10: per-chat style preamble.
@@ -1002,6 +1160,18 @@ class RunStore:
         if "active_tools_json" not in chat_columns:
             # v74-F3: tools described via describe_tools, advertised in full.
             self._conn.execute("ALTER TABLE chats ADD COLUMN active_tools_json TEXT")
+        if "role" not in chat_columns:
+            # first-run R1 (ADR 0055 D3): the chat's role, beside personality.
+            self._conn.execute("ALTER TABLE chats ADD COLUMN role TEXT")
+        if "taint" not in chat_columns:
+            # ADR 0059 D5 (V9): the trifecta guard's two bits; NULL = no taint.
+            self._conn.execute("ALTER TABLE chats ADD COLUMN taint TEXT")
+        for table in ("notes", "tasks", "memory_proposals"):
+            columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            if "taint" not in columns:
+                # W21: the bits of the chat that wrote the row (a JSON list,
+                # NULL = none); a chat that reads the row takes them on.
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN taint TEXT")
         if "source" not in chat_columns:
             # v44-F1: which face opened the chat — 'web', 'terminal', or a channel name.
             self._conn.execute("ALTER TABLE chats ADD COLUMN source TEXT NOT NULL DEFAULT 'web'")
@@ -1291,11 +1461,12 @@ class RunStore:
         commands: list[str],
         exit_codes: list[int],
         detail: str,
+        base_commit: str | None = None,
     ) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO reverifications (task_id, outcome, worker_outcome,"
-            " confirmed, commands_json, exit_codes_json, detail, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " confirmed, commands_json, exit_codes_json, detail, created_at, base_commit)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id,
                 outcome,
@@ -1305,15 +1476,34 @@ class RunStore:
                 json.dumps(exit_codes),
                 detail,
                 _now(),
+                base_commit,
             ),
         )
         self._conn.commit()
 
     @_locked
+    def unconfirm_reverification(self, task_id: str, note: str) -> None:
+        """ES-F3 (B131): the patch landed past the commit G10 verified it on —
+        the landed tree is not the confirmed one, so the row stops saying so."""
+        self._conn.execute(
+            "UPDATE reverifications SET confirmed = 0, detail = detail || ' — ' || ?"
+            " WHERE task_id = ?",
+            (note, task_id),
+        )
+        self._conn.commit()
+
+    def verified_base(self, task_id: str) -> str | None:
+        """The commit a CONFIRMED re-verify ran on (ES-F3) — what landing
+        must build on — or None when nothing was confirmed."""
+        record = self.reverification_for(task_id)
+        return record.base_commit if record is not None and record.confirmed else None
+
+    @_locked
     def reverification_for(self, task_id: str) -> ReverifyRecord | None:
         row = self._conn.execute(
             "SELECT task_id, outcome, worker_outcome, confirmed, commands_json,"
-            " exit_codes_json, detail, created_at FROM reverifications WHERE task_id = ?",
+            " exit_codes_json, detail, created_at, base_commit FROM reverifications"
+            " WHERE task_id = ?",
             (task_id,),
         ).fetchone()
         if row is None:
@@ -1327,6 +1517,7 @@ class RunStore:
             exit_codes=list(json.loads(row[5])),
             detail=row[6],
             created_at=row[7],
+            base_commit=row[8],
         )
 
     # -- usage accounting (G8: cost is answerable) ----------------------------
@@ -1397,6 +1588,96 @@ class RunStore:
         return review_id
 
     @_locked
+    def pending_or_enqueue_approval(
+        self, task_id: str, *, action: str, reason: str, create: bool = True
+    ) -> str | None:
+        """ES-F4 (B17): the task's open review — pending, or mid-landing — or
+        a new one, in ONE locked call. Read-then-enqueue as two calls let
+        three concurrent lands mint two reviews for one patch, and the
+        second's failed apply left a phantom 'denied' in the ledger.
+        ``create=False`` (nothing to land) returns None instead of minting."""
+        row = self._conn.execute(
+            "SELECT review_id FROM approvals WHERE task_id = ?"
+            " AND status IN ('pending', 'applying') ORDER BY requested_at LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is not None:
+            return str(row[0])
+        if not create:
+            return None
+        return self.enqueue_approval(task_id, action=action, reason=reason)
+
+    @_locked
+    def claim_approval(self, review_id: str, *, owner: str | None | object = _THIS_PROCESS) -> bool:
+        """ES-F4 (B17): pending → applying in ONE conditional UPDATE — the
+        card claim (ES-F1) for landings. Only the winner runs git. W27: the
+        claim records its owner (this process unless given), so a restart
+        sweep can tell a live claimer — a CLI mid-resume — from a dead one."""
+        holder = process_owner() if owner is _THIS_PROCESS else owner
+        cursor = self._conn.execute(
+            "UPDATE approvals SET status = 'applying', claim_owner = ?"
+            " WHERE review_id = ? AND status = 'pending'",
+            (holder, review_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
+    def approval_claim_owner(self, review_id: str) -> dict[str, Any] | None:
+        """W27: who holds this review's claim ({"pid", "started"}), or None."""
+        row = self._conn.execute(
+            "SELECT claim_owner FROM approvals WHERE review_id = ? AND status = 'applying'",
+            (review_id,),
+        ).fetchone()
+        try:
+            owner = json.loads(row[0]) if row is not None and row[0] else None
+        except json.JSONDecodeError:
+            return None
+        return owner if isinstance(owner, dict) else None
+
+    @_locked
+    def unclaim_approval(self, review_id: str) -> None:
+        """An apply that blew up unexpectedly hands the review back, pending."""
+        self._conn.execute(
+            "UPDATE approvals SET status = 'pending', claim_owner = NULL"
+            " WHERE review_id = ? AND status = 'applying'",
+            (review_id,),
+        )
+        self._conn.commit()
+
+    @_locked
+    def interrupt_applying_approvals(self) -> int:
+        """ES-F4 restart safety: a review still 'applying' at serve start was
+        claimed by a process that died mid-git. Whether a commit landed is
+        unknown, so it ends 'denied' with a note saying so — never quietly
+        pending again, where a retry could stack a second commit (I8).
+        W27: only a claim whose owner is gone (or that predates owners); a
+        live claimer — the CLI's foreground resume — keeps its claim."""
+        rows = [
+            (review_id, action)
+            for review_id, action, owner in self._conn.execute(
+                "SELECT review_id, action, claim_owner FROM approvals WHERE status = 'applying'"
+            ).fetchall()
+            if not owner_alive(owner)
+        ]
+        for review_id, action in rows:
+            self.resolve_approval(
+                str(review_id),
+                approved=False,
+                actor="skep-serve-restart",
+                note="interrupted: skep serve stopped while this landing was being "
+                "applied — check the repo for this task's skep/ branch or commit "
+                "before landing it again"
+                if action == "apply_patch"
+                # B142: a mid-run gate is claimed while its resume dispatches.
+                else "interrupted: skep serve stopped while this gate's resume was "
+                "being dispatched — check list_runs for a run resumed from this "
+                "task before dispatching it again",
+                claimed=True,
+            )
+        return len(rows)
+
+    @_locked
     def approval_commands(self, review_id: str) -> list[list[str]] | None:
         """The batch-approval command list stored with an approval (v19-F1)."""
         row = self._conn.execute(
@@ -1426,19 +1707,22 @@ class RunStore:
         note: str | None = None,
         remembered: bool = False,
         landing_branch: str | None = None,
+        claimed: bool = False,
     ) -> None:
         """Record the verdict with actor + timestamp; resolution is final.
 
         v30: ``landing_branch`` records where an apply_patch approval actually
         landed (default skep/<task_id>, a named branch, or an integration
         branch) so the applied-branch view is accurate for every landing path.
+        ES-F4: a ``claimed`` landing resolves from 'applying' (only its
+        claimer holds it there); everything else from 'pending'.
         """
         row = self._conn.execute(
             "SELECT status FROM approvals WHERE review_id = ?", (review_id,)
         ).fetchone()
         if row is None:
             raise KeyError(f"no approval {review_id!r}")
-        if row[0] != "pending":
+        if row[0] != ("applying" if claimed else "pending"):
             raise ValueError(f"approval {review_id!r} already resolved as {row[0]!r}")
         resolved_at = _now()
         self._conn.execute(
@@ -2313,11 +2597,44 @@ class RunStore:
 
     @_locked
     def set_setting(self, key: str, value: Any) -> None:
+        encoded = json.dumps(value, ensure_ascii=True)
+        if key in _PROVIDER_SETTINGS:
+            # ES-F13 (B86): a provider ceiling measured ONE provider+model —
+            # a new one re-measures (every writer of these keys lands here).
+            row = self._conn.execute(
+                "SELECT value_json FROM settings WHERE key = ?", (key,)
+            ).fetchone()
+            if row is None or row[0] != encoded:
+                self._conn.execute(
+                    "UPDATE chats SET provider_ceiling_chars = NULL"
+                    + (" WHERE model IS NULL" if key == "llm_default_model" else "")
+                )
         self._conn.execute(
             "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
-            (key, json.dumps(value, ensure_ascii=True), _now()),
+            (key, encoded, _now()),
         )
         self._conn.commit()
+
+    @_locked
+    def compare_and_set_setting(self, key: str, expected: Any | None, value: Any) -> bool:
+        """W14: write ``value`` only if ``key`` still holds ``expected``
+        (None: no row). One conditional statement, so a second connection on
+        the same file (the CLI racing serve) loses the same way; False when
+        the value changed since it was read."""
+        encoded = json.dumps(value, ensure_ascii=True)
+        if expected is None:
+            cursor = self._conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
+                (key, encoded, _now()),
+            )
+        else:
+            cursor = self._conn.execute(
+                "UPDATE settings SET value_json = ?, updated_at = ?"
+                " WHERE key = ? AND value_json = ?",
+                (encoded, _now(), key, json.dumps(expected, ensure_ascii=True)),
+            )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     @_locked
     def all_settings(self) -> dict[str, Any]:
@@ -2539,12 +2856,13 @@ class RunStore:
         )
 
     @_locked
-    def create_note(self, content: str, *, actor: str) -> NoteRecord:
+    def create_note(self, content: str, *, actor: str, taint: Sequence[str] = ()) -> NoteRecord:
         now = _now()
         note = NoteRecord(str(uuid.uuid4()), content, now, now)
         self._conn.execute(
-            "INSERT INTO notes (note_id, content, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (note.note_id, note.content, note.created_at, note.updated_at),
+            "INSERT INTO notes (note_id, content, created_at, updated_at, taint)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (note.note_id, note.content, note.created_at, note.updated_at, _taint_json(taint)),
         )
         self._record_note_task_event(
             kind="note", item_id=note.note_id, action="created", actor=actor, detail={}
@@ -2596,13 +2914,15 @@ class RunStore:
         return removed
 
     @_locked
-    def create_task(self, title: str, *, actor: str, due_at: str | None = None) -> TaskRecord:
+    def create_task(
+        self, title: str, *, actor: str, due_at: str | None = None, taint: Sequence[str] = ()
+    ) -> TaskRecord:
         now = _now()
         task_id = str(uuid.uuid4())
         self._conn.execute(
-            "INSERT INTO tasks (task_id, title, status, due_at, created_at, updated_at)"
-            " VALUES (?, ?, 'todo', ?, ?, ?)",
-            (task_id, title, due_at, now, now),
+            "INSERT INTO tasks (task_id, title, status, due_at, created_at, updated_at, taint)"
+            " VALUES (?, ?, 'todo', ?, ?, ?, ?)",
+            (task_id, title, due_at, now, now, _taint_json(taint)),
         )
         self._record_note_task_event(
             kind="task", item_id=task_id, action="created", actor=actor, detail={}
@@ -2620,6 +2940,28 @@ class RunStore:
             " ORDER BY status, due_at IS NULL, due_at, updated_at DESC, task_id"
         ).fetchall()
         return [self._row_to_task(row) for row in rows]
+
+    _CONTENT_TAINT: ClassVar[dict[str, str]] = {
+        "note": "SELECT taint FROM notes WHERE note_id = ?",
+        "task": "SELECT taint FROM tasks WHERE task_id = ?",
+        "proposal": "SELECT taint FROM memory_proposals WHERE proposal_id = ?",
+    }
+
+    @_locked
+    def content_taint(self, kind: str, ids: Iterable[str]) -> set[str]:
+        """W21: the taint bits the ``kind`` rows ``ids`` carry from the chat
+        that wrote them. A value that does not read counts as both bits."""
+        bits: set[str] = set()
+        for item_id in ids:
+            row = self._conn.execute(self._CONTENT_TAINT[kind], (item_id,)).fetchone()
+            if row is None or row[0] is None:
+                continue
+            try:
+                raw = json.loads(str(row[0]))
+                bits |= set(raw) & set(TAINT_BITS) if isinstance(raw, list) else set(TAINT_BITS)
+            except ValueError:
+                bits |= set(TAINT_BITS)
+        return bits
 
     @_locked
     def get_task(self, task_id: str) -> TaskRecord | None:
@@ -2731,6 +3073,7 @@ class RunStore:
         rationale: str | None = None,
         project_id: str | None = None,
         sources: Sequence[MemorySource] = (),
+        taint: Sequence[str] = (),
     ) -> MemoryProposal:
         validate_memory_class(memory_class)
         validate_proposal_state(state)
@@ -2740,10 +3083,13 @@ class RunStore:
         now = _now()
         self._conn.execute(
             "INSERT INTO memory_proposals (proposal_id, memory_class, content, state, actor,"
-            " rationale, project_id, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (proposal_id, memory_class, content, state, actor, rationale, project_id, now, now),
-        )
+            " rationale, project_id, created_at, updated_at, taint)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                proposal_id, memory_class, content, state, actor, rationale, project_id,
+                now, now, _taint_json(taint),
+            ),
+        )  # fmt: skip
         for source in sources:
             self._conn.execute(
                 "INSERT INTO memory_sources (proposal_id, source_kind, source_id, created_at)"
@@ -3516,7 +3862,9 @@ class RunStore:
     # -- chats (v6: sessions with the Queen's own model) -----------------------
 
     @_locked
-    def create_chat(self, *, title: str, model: str | None, source: str = "web") -> ChatRecord:
+    def create_chat(
+        self, *, title: str, model: str | None, source: str = "web", role: str | None = None
+    ) -> ChatRecord:
         now = _now()
         chat = ChatRecord(
             chat_id=str(uuid.uuid4()),
@@ -3525,11 +3873,20 @@ class RunStore:
             created_at=now,
             updated_at=now,
             source=source,
+            role=role,
         )
         self._conn.execute(
-            "INSERT INTO chats (chat_id, title, model, created_at, updated_at, source)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (chat.chat_id, chat.title, chat.model, chat.created_at, chat.updated_at, chat.source),
+            "INSERT INTO chats (chat_id, title, model, created_at, updated_at, source, role)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                chat.chat_id,
+                chat.title,
+                chat.model,
+                chat.created_at,
+                chat.updated_at,
+                chat.source,
+                chat.role,
+            ),
         )
         self._conn.commit()
         return chat
@@ -3537,7 +3894,7 @@ class RunStore:
     _CHAT_COLUMNS = (
         "chat_id, title, model, created_at, updated_at, source, personality,"
         " context_summary, COALESCE(compacted_through, 0), project_id,"
-        " provider_ceiling_chars, active_tools_json"
+        " provider_ceiling_chars, role, active_tools_json"
     )
 
     @staticmethod
@@ -3608,10 +3965,19 @@ class RunStore:
         return cursor.rowcount > 0
 
     @_locked
+    def set_chat_role(self, chat_id: str, role: str | None) -> bool:
+        cursor = self._conn.execute("UPDATE chats SET role = ? WHERE chat_id = ?", (role, chat_id))
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    @_locked
     def set_chat_model(self, chat_id: str, model: str | None) -> bool:
         """v72-F1: per-chat model override; None falls back to the saved default."""
+        # ES-F13 (B86): a different model re-measures the provider ceiling.
         cursor = self._conn.execute(
-            "UPDATE chats SET model = ? WHERE chat_id = ?", (model, chat_id)
+            "UPDATE chats SET provider_ceiling_chars = CASE WHEN model IS ?"
+            " THEN provider_ceiling_chars END, model = ? WHERE chat_id = ?",
+            (model, model, chat_id),
         )
         self._conn.commit()
         return cursor.rowcount > 0
@@ -3690,12 +4056,17 @@ class RunStore:
         tool_name: str | None = None,
         attachments: list[str] | None = None,
         tool_call_id: str | None = None,
+        provenance: str | None = None,
     ) -> int:
+        """Append one transcript row. ``provenance`` names its author when that
+        is not the one its role implies (ADR 0059 D5): a row from outside —
+        a webhook, a script, a worker — also sets the chat's ``untrusted`` bit,
+        in the same write, so no reader can see the row before the bit."""
         now = _now()
         cursor = self._conn.execute(
             "INSERT INTO chat_messages (chat_id, role, content, thinking, tool_calls_json,"
-            " tool_name, tool_call_id, created_at, attachments_json)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " tool_name, tool_call_id, created_at, attachments_json, provenance)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 chat_id,
                 role,
@@ -3706,15 +4077,102 @@ class RunStore:
                 tool_call_id,
                 now,
                 None if not attachments else json.dumps(attachments),
+                provenance,
             ),
         )
+        message_id = int(cursor.lastrowid or 0)
         self._conn.execute("UPDATE chats SET updated_at = ? WHERE chat_id = ?", (now, chat_id))
+        if provenance is not None and provenance not in TRUSTED_PROVENANCE:
+            self._add_chat_taint(chat_id, untrusted=message_id)
         self._conn.commit()
-        return int(cursor.lastrowid or 0)
+        return message_id
+
+    @_locked
+    def get_chat_taint(self, chat_id: str) -> ChatTaint:
+        """The chat's taint (ADR 0059 D5). Fail closed: a chat that is not
+        there, or a value that does not read, counts as BOTH bits set — never
+        as clean."""
+        unknown = ChatTaint(UNKNOWN_TAINT_ORIGIN, UNKNOWN_TAINT_ORIGIN)
+        try:
+            row = self._conn.execute(
+                "SELECT taint FROM chats WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
+        except sqlite3.Error:
+            return unknown
+        if row is None:
+            return unknown
+        if row[0] is None:
+            return ChatTaint()
+        try:
+            raw = json.loads(str(row[0]))
+            if not isinstance(raw, dict):
+                return unknown
+            bits = {key: raw.get(key) for key in ("private", "untrusted")}
+            if any(value is not None and type(value) is not int for value in bits.values()):
+                return unknown
+            return ChatTaint(**bits)
+        except ValueError:
+            return unknown
+
+    @_locked
+    def add_chat_taint(
+        self, chat_id: str, *, private: int | None = None, untrusted: int | None = None
+    ) -> ChatTaint:
+        """Set taint bits that are not yet set (the first message that set a
+        bit keeps it); returns the chat's taint after. Nothing clears a bit."""
+        taint = self._add_chat_taint(chat_id, private=private, untrusted=untrusted)
+        self._conn.commit()
+        return taint
+
+    def _add_chat_taint(
+        self, chat_id: str, *, private: int | None = None, untrusted: int | None = None
+    ) -> ChatTaint:
+        current = self.get_chat_taint(chat_id)
+        merged = ChatTaint(
+            private=current.private if current.private is not None else private,
+            untrusted=current.untrusted if current.untrusted is not None else untrusted,
+        )
+        if merged != current:
+            self._write_taint(chat_id, merged, self.chat_trusted_through(chat_id))
+        return merged
+
+    def _write_taint(self, chat_id: str, taint: ChatTaint, through: int) -> None:
+        payload: dict[str, int | None] = {"private": taint.private, "untrusted": taint.untrusted}
+        if through:
+            payload["trusted_through"] = through
+        self._conn.execute(
+            "UPDATE chats SET taint = ? WHERE chat_id = ?", (json.dumps(payload), chat_id)
+        )
+
+    @_locked
+    def chat_trusted_through(self, chat_id: str) -> int:
+        """W20: the newest row an operator's /trust covered (0 = none). The
+        rows up to it stay wrapped on replay but never set a bit again."""
+        row = self._conn.execute("SELECT taint FROM chats WHERE chat_id = ?", (chat_id,)).fetchone()
+        try:
+            raw = json.loads(str(row[0])) if row and row[0] else {}
+        except ValueError:
+            return 0
+        through = raw.get("trusted_through") if isinstance(raw, dict) else None
+        return through if type(through) is int else 0
+
+    @_locked
+    def clear_chat_taint(self, chat_id: str, bits: Sequence[str], *, through: int) -> ChatTaint:
+        """W20: the one way a bit is cleared — ``taint.trust_chat``, the
+        operator's /trust (never a model tool). ``through`` is the newest row
+        it covers. Returns the chat's taint after."""
+        current = self.get_chat_taint(chat_id)
+        cleared = ChatTaint(
+            private=None if "private" in bits else current.private,
+            untrusted=None if "untrusted" in bits else current.untrusted,
+        )
+        self._write_taint(chat_id, cleared, through)
+        self._conn.commit()
+        return cleared
 
     _ACTION_COLS = (
         "action_id, chat_id, tool, args_json, status, result_json, created_at, resolved_at,"
-        " source, decided_by, tool_call_id"
+        " source, decided_by, tool_call_id, card_json"
     )
 
     @staticmethod
@@ -3731,6 +4189,7 @@ class RunStore:
             source=str(row[8]),
             decided_by=None if row[9] is None else str(row[9]),
             tool_call_id=None if row[10] is None else str(row[10]),
+            card=None if row[11] is None else dict(json.loads(str(row[11]))),
         )
 
     @_locked
@@ -3743,13 +4202,14 @@ class RunStore:
         source: str = "assistant",
         decided_by: str | None = None,
         tool_call_id: str | None = None,
+        card: dict[str, Any] | None = None,
     ) -> str:
         action_id = str(uuid.uuid4())
         self._conn.execute(
             "INSERT INTO chat_actions"
             " (action_id, chat_id, tool, args_json, status, created_at, source, decided_by,"
-            "  tool_call_id)"
-            " VALUES (?, ?, ?, ?, 'proposed', ?, ?, ?, ?)",
+            "  tool_call_id, card_json)"
+            " VALUES (?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)",
             (
                 action_id,
                 chat_id,
@@ -3759,10 +4219,35 @@ class RunStore:
                 source,
                 decided_by,
                 tool_call_id,
+                None if card is None else json.dumps(card, ensure_ascii=True),
             ),
         )
         self._conn.commit()
         return action_id
+
+    @_locked
+    def fold_into_chat_action(
+        self, action_id: str, *, args: dict[str, Any], tool_call_id: str | None
+    ) -> bool:
+        """P4-2 (ADR 0059 D6): add one call to a pending card's item list.
+
+        Only while the card is still 'proposed' — one conditional UPDATE, so
+        a card a confirm already claimed never gains an item it did not show.
+        False when the card is gone or no longer pending."""
+        row = self._conn.execute(
+            "SELECT card_json FROM chat_actions WHERE action_id = ? AND status = 'proposed'",
+            (action_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        card = {} if row[0] is None else dict(json.loads(str(row[0])))
+        card["items"] = [*(card.get("items") or []), {"args": args, "tool_call_id": tool_call_id}]
+        cursor = self._conn.execute(
+            "UPDATE chat_actions SET card_json = ? WHERE action_id = ? AND status = 'proposed'",
+            (json.dumps(card, ensure_ascii=True), action_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     @_locked
     def record_resolved_chat_action(
@@ -3937,33 +4422,97 @@ class RunStore:
         return str(row[0]) if row is not None else None
 
     @_locked
-    def resolve_chat_action(self, action_id: str, *, status: str, result: Any) -> None:
+    def claim_chat_action(self, action_id: str) -> bool:
+        """ES-F1 (B15 B16 B97): proposed → executing in ONE conditional UPDATE.
+
+        Exactly one caller wins, and only the winner executes the card. A
+        second confirm, a Deny, or the timeout sweep arriving while it runs
+        finds the card no longer 'proposed' and loses — before this, each
+        checked the status, then acted, and two confirms both executed.
+        A conditional UPDATE, not the store lock, so a second connection on
+        the same file loses the same way."""
+        cursor = self._conn.execute(
+            "UPDATE chat_actions SET status = 'executing'"
+            " WHERE action_id = ? AND status = 'proposed'",
+            (action_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
+    def unclaim_chat_action(self, action_id: str) -> None:
+        """v54-F2 kept under ES-F1: an executor that blew up unexpectedly hands
+        the card back as 'proposed' — buttons return, as they always did."""
+        self._conn.execute(
+            "UPDATE chat_actions SET status = 'proposed'"
+            " WHERE action_id = ? AND status = 'executing'",
+            (action_id,),
+        )
+        self._conn.commit()
+
+    @_locked
+    def resolve_chat_action(
+        self, action_id: str, *, status: str, result: Any, claimed: bool = False
+    ) -> None:
         """Record the verdict; like approvals, resolution is final.
 
-        v63-F2, the one exception: confirming an approve_review/land_run card
-        executes resolve_approval, whose reconciliation supersedes cards for
-        that decision — including the card mid-confirm (both executors gate on
-        'proposed' BEFORE executing, so no other path arrives here on a
-        superseded row). The executed verdict is the truer record; every
-        other transition stays final. v87-F2 widens the exception to 'denied'
-        for the same reason: a gate mirror's Deny executes deny_review, whose
-        reconciliation supersedes the very card mid-deny.
+        ES-F1: a ``claimed`` card resolves from 'executing' (only its claimer
+        holds it there); anything else resolves from 'proposed'. One
+        conditional UPDATE either way, so a sweep or a Deny that lost the
+        race gets ValueError instead of overwriting the executed verdict.
+        (The v63-F2/v87-F2 superseded→confirmed exception is gone: the
+        reconciliation only supersedes 'proposed' cards, and a card being
+        executed is 'executing'.)
         """
+        expected = "executing" if claimed else "proposed"
+        cursor = self._conn.execute(
+            "UPDATE chat_actions SET status = ?, result_json = ?, resolved_at = ?"
+            " WHERE action_id = ? AND status = ?",
+            (status, json.dumps(result, ensure_ascii=True), _now(), action_id, expected),
+        )
+        self._conn.commit()
+        if cursor.rowcount == 1:
+            return
         row = self._conn.execute(
             "SELECT status FROM chat_actions WHERE action_id = ?", (action_id,)
         ).fetchone()
         if row is None:
             raise KeyError(f"no chat action {action_id!r}")
-        if row[0] != "proposed" and not (
-            row[0] == "superseded" and status in ("confirmed", "denied")
-        ):
-            raise ValueError(f"chat action {action_id!r} already resolved as {row[0]!r}")
-        self._conn.execute(
-            "UPDATE chat_actions SET status = ?, result_json = ?, resolved_at = ?"
-            " WHERE action_id = ?",
-            (status, json.dumps(result, ensure_ascii=True), _now(), action_id),
-        )
+        raise ValueError(f"chat action {action_id!r} already resolved as {row[0]!r}")
+
+    @_locked
+    def interrupt_executing_chat_actions(self) -> int:
+        """ES-F1 restart safety: a card still 'executing' at serve start was
+        claimed by a process that died before its verdict. Whether the
+        mutation took effect is unknown, so it is never re-run or reopened
+        (either could double it); it ends 'interrupted' with a tool row the
+        model reads, saying exactly that (I8). Returns how many."""
+        payload = {
+            "ok": False,
+            "interrupted": True,
+            "note": "skep serve stopped while this card was executing — it may or "
+            "may not have taken effect; check its effect before proposing it again",
+        }
+        rows = self._conn.execute(
+            f"SELECT {self._ACTION_COLS} FROM chat_actions WHERE status = 'executing'"
+        ).fetchall()
+        for row in rows:
+            action = self._row_to_action(row)
+            self._conn.execute(
+                "UPDATE chat_actions SET status = 'interrupted', result_json = ?,"
+                " resolved_at = ? WHERE action_id = ?",
+                (json.dumps(payload, ensure_ascii=True), _now(), action.action_id),
+            )
+            for item in action.fold_items():  # P4-2: every item of a folded card
+                self.add_chat_message(
+                    action.chat_id,
+                    role="tool",
+                    tool_name=action.tool,
+                    tool_call_id=item.get("tool_call_id"),
+                    content=json.dumps(payload, ensure_ascii=True),
+                )
         self._conn.commit()
+        return len(rows)
 
     @staticmethod
     def _row_to_chat_message(row: Any) -> ChatMessageRecord:
@@ -3978,11 +4527,12 @@ class RunStore:
             created_at=str(row[7]),
             attachments=None if row[8] is None else list(json.loads(str(row[8]))),
             tool_call_id=None if row[9] is None else str(row[9]),
+            provenance=str(row[10]) if row[10] else _ROLE_AUTHOR.get(str(row[2]), "queen"),
         )
 
     _CHAT_MESSAGE_COLS = (
         "id, chat_id, role, content, thinking, tool_calls_json, tool_name,"
-        " created_at, attachments_json, tool_call_id"
+        " created_at, attachments_json, tool_call_id, provenance"
     )
 
     @_locked

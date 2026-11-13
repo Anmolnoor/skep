@@ -74,7 +74,7 @@ def test_active_provider_host_rides_the_v19f2_merge_path(store: RunStore) -> Non
     store.upsert_provider_profile(_p("remote", "paid", 0, "https://provider.registry.example"))
     store.set_active_provider("remote")
     hosts = configured_provider_hosts(store, Path("/nonexistent-home"))
-    assert "provider.registry.example" in hosts
+    assert "provider.registry.example:443" in hosts
 
 
 def test_profile_auxiliary_hosts_ride_the_merge_too(store: RunStore) -> None:
@@ -92,8 +92,8 @@ def test_profile_auxiliary_hosts_ride_the_merge_too(store: RunStore) -> None:
     store.upsert_provider_profile(profile)
     store.set_active_provider("copilot")
     hosts = configured_provider_hosts(store, Path("/nonexistent-home"))
-    assert "api.githubcopilot.com" in hosts
-    assert "api.github.com" in hosts
+    assert "api.githubcopilot.com:443" in hosts
+    assert "api.github.com:443" in hosts
 
 
 def test_no_providers_is_explicit() -> None:

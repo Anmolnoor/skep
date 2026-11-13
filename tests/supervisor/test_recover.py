@@ -13,6 +13,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from skep.supervisor import RunStore, SupervisorConfig, mint_task
 from skep.supervisor.contracts_io import write_task_file
 from skep.supervisor.dispatch import recover_interrupted_runs
@@ -35,9 +37,17 @@ def _strand_run(store: RunStore, config: SupervisorConfig, repo: Path) -> tuple[
 
 
 def _deposit_completed_result(
-    store: RunStore, config: SupervisorConfig, task_id: str, workspace: Path
+    store: RunStore,
+    config: SupervisorConfig,
+    task_id: str,
+    workspace: Path,
+    *,
+    legacy: bool = True,
+    named: str | None = None,
 ) -> None:
-    """What a detached worker leaves behind: terminal event log + envelope."""
+    """What a detached worker leaves behind: terminal event log + envelope —
+    at the pre-W26 flat path (a run dispatched before the change) or in the
+    run's own directory; ``named`` forges the envelope's task id."""
     run = store.get_run(task_id)
     assert run is not None
     events_path = workspace / ".events" / f"{task_id}.ndjson"
@@ -72,12 +82,17 @@ def _deposit_completed_result(
         ],
         "usage": {"provider_calls": 1, "input_tokens": 0, "output_tokens": 0},
     }
-    result_path = config.results_dir / f"{task_id}.json"
+    if named is not None:
+        envelope["task_id"] = named
+    result_path = config.results_dir / f"{task_id}.json" if legacy else config.result_path(task_id)
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(envelope))
 
 
-def test_recovery_ingests_a_late_deposited_result(repo: Path, config: SupervisorConfig) -> None:
+@pytest.mark.parametrize("legacy", [True, False])
+def test_recovery_ingests_a_late_deposited_result(
+    repo: Path, config: SupervisorConfig, legacy: bool
+) -> None:
     """A valid envelope on disk is a deposit — the run completes with its
     evidence and gets re-verified (G10). This deposit claims changed files
     without a patch (the v65-F1 suspicious shape), so its re-verification is
@@ -86,7 +101,7 @@ def test_recovery_ingests_a_late_deposited_result(repo: Path, config: Supervisor
     notified: list[str] = []
     try:
         task_id, workspace = _strand_run(store, config, repo)
-        _deposit_completed_result(store, config, task_id, workspace)
+        _deposit_completed_result(store, config, task_id, workspace, legacy=legacy)
 
         recovered = recover_interrupted_runs(store, config, on_run_finished=notified.append)
 
@@ -188,5 +203,84 @@ def test_recovery_leaves_terminal_and_pending_approval_runs_alone(
         pending = store.get_run(gated.task_id)
         assert completed is not None and completed.state == "completed"
         assert pending is not None and pending.state == "pending_approval"
+    finally:
+        store.close()
+
+
+def _gone(pid: int, seconds: float = 5.0) -> bool:
+    import os
+    import time
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_es_f5_recovery_kills_a_live_worker_before_marking_it_crashed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """ES-F5 (B10, I1 I12): serve died, the detached worker lived on past its
+    budget, recovery marked it crashed and deleted the worktree it was still
+    writing; its late result was never ingested and its `sleep 330` grandchild
+    leaked (lane M2-35). A live worker is killed with its whole session first."""
+    import subprocess
+    import sys
+
+    store = RunStore(config.db_path)
+    try:
+        task_id, _workspace = _strand_run(store, config, repo)
+        grandchild_file = tmp_path / "grandchild.pid"
+        worker = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess, sys, time; "
+                "p = subprocess.Popen(['sleep', '61']); "
+                "open(sys.argv[1], 'w').write(str(p.pid)); time.sleep(60)",
+                str(grandchild_file),
+                f"--task={task_id}",
+            ],
+            start_new_session=True,
+        )
+        while not grandchild_file.is_file() or not grandchild_file.read_text():
+            pass
+        grandchild = int(grandchild_file.read_text())
+        store.transition(task_id, "running", f"pid {worker.pid}")
+
+        recover_interrupted_runs(store, config)
+
+        assert worker.wait(timeout=5) != 0
+        assert _gone(grandchild)
+        record = store.get_run(task_id)
+        assert record is not None and record.state == "worker_crashed"
+        details = " ".join(d or "" for _, d, _ in store.transitions_for(task_id))
+        assert f"pid {worker.pid}" in details and "killed" in details
+    finally:
+        store.close()
+
+
+def test_recovery_rejects_a_deposit_naming_another_task(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """W26: an envelope in this run's directory that names another task is
+    not this run's evidence — rejected, recorded, the run crash-grade."""
+    store = RunStore(config.db_path)
+    try:
+        task_id, workspace = _strand_run(store, config, repo)
+        _deposit_completed_result(
+            store, config, task_id, workspace, legacy=False, named="other-task"
+        )
+        recover_interrupted_runs(store, config)
+        record = store.get_run(task_id)
+        assert record is not None and record.state != "completed"
+        assert any(
+            "result rejected" in (detail or "") and "other-task" in (detail or "")
+            for _, detail, _ in store.transitions_for(task_id)
+        )
     finally:
         store.close()

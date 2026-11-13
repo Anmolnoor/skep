@@ -26,8 +26,16 @@ from skep.supervisor.mcp_client import (
 )
 from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
 
+from .conftest import no_layer_role, predating_home
 from .conftest import serve_client as _client
 from .fake_ollama import FakeOllama
+
+
+@pytest.fixture(autouse=True)
+def _rules_home(config: SupervisorConfig) -> None:
+    """P3-3: these tests are about the rules; a fresh (O5 zero-state) home now
+    asks for every MCP call until a baseline is approved."""
+    predating_home(config.db_path)
 
 
 @pytest.fixture()
@@ -47,15 +55,20 @@ def fake_runner(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, An
         if method == "tools/list":
             return {
                 "tools": [
-                    {"name": "list_issues", "description": "read the issues"},
+                    {
+                        "name": "list_issues",
+                        "description": "read the issues",
+                        "annotations": {"readOnlyHint": True},
+                    },
                     {"name": "frobnicate_gizmo", "description": "who knows"},
+                    {"name": "read_inbox", "annotations": {"readOnlyHint": True}},
                 ]
             }
         if method == "tools/call":
             return {"content": f"ran {params.get('name')}"}
         return {}
 
-    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", lambda config: runner)
+    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", lambda config, **_: runner)
     return calls
 
 
@@ -65,8 +78,16 @@ def chat_client(config: SupervisorConfig, ollama: FakeOllama) -> tuple[TestClien
         "/api/llm/config",
         json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
     )
-    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
-    return client, str(chat_id)
+    chat_id = str(client.post("/api/chats", json={}).json()["chat_id"])
+    # The MCP lane on its own: a chat in a role with no layer (ADR 0059 P3-6) —
+    # a new chat, and one whose stored role is NULL, is an assistant chat,
+    # whose mcp-gated ask would answer every probe here.
+    store = RunStore(config.db_path)
+    try:
+        store.set_chat_role(chat_id, no_layer_role(config.home))
+    finally:
+        store.close()
+    return client, chat_id
 
 
 def _seed_server(config: SupervisorConfig) -> None:
@@ -156,7 +177,7 @@ def test_unknown_tool_cards_then_executes_on_confirm(
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "frobnicate it"})
     (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
     assert action["status"] == "proposed"
-    assert action["decided_by"] == "policy/risk:unknown"  # v39-F1 fail-closed
+    assert action["decided_by"] == "default/unmatched"  # v39-F1 fail-closed (P3-3 label)
     assert fake_runner == []  # nothing ran before the human said so
 
     ollama.script_reply("done frobnicating")
@@ -248,13 +269,11 @@ def test_learned_rule_into_denied_space_is_rejected_with_the_denys_rule_id(
     )
     client, chat_id = chat_client(config, ollama)
     ollama.script_tool_call("allow_mcp_tool", {"server_id": "issues", "tool": "frobnicate_gizmo"})
-    client.post(f"/api/chats/{chat_id}/messages", json={"content": "always allow it"})
-    (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
     ollama.script_reply("could not remember that")
-    client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
-    (resolved,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
-    assert resolved["result"]["ok"] is False
-    assert "no-gizmos" in resolved["result"]["error"]
+    response = client.post(f"/api/chats/{chat_id}/messages", json={"content": "always allow it"})
+    # P3-5: refused at proposal — no card whose confirm could only fail (B22).
+    assert client.get(f"/api/chats/{chat_id}").json()["actions"] == []
+    assert "no-gizmos" in response.text
     # The document did not gain the rule.
     store = RunStore(config.db_path)
     try:
@@ -293,7 +312,7 @@ def test_email_server_reads_flow_and_sends_card(
         if a["status"] == "proposed"
     ]
     assert action["status"] == "proposed"
-    assert action["decided_by"] == "policy/risk:external_side_effect"
+    assert action["decided_by"] == "default/unmatched"  # a send is never a read
     assert ("tools/call", {"name": "send_message", "arguments": {"to": "x"}}) not in fake_runner
 
     ollama.script_reply("sent")
@@ -307,7 +326,8 @@ def test_email_deny_rule_refuses_inline_and_blocks_learned_allows(
     fake_runner: list[tuple[str, dict[str, Any]]],
 ) -> None:
     """An explicit email deny is a hard deny: no card, and a learned allow
-    into that space is rejected with the deny's rule id."""
+    into that space is rejected with the deny's rule id — P3-5: at proposal,
+    so no card is shown whose confirm could only fail (B22)."""
     _seed_email_server(config)
     _seed_document(
         config,
@@ -330,13 +350,10 @@ def test_email_deny_rule_refuses_inline_and_blocks_learned_allows(
     assert fake_runner == []
 
     ollama.script_tool_call("allow_mcp_tool", {"server_id": "mail", "tool": "send_message"})
-    client.post(f"/api/chats/{chat_id}/messages", json={"content": "always allow sending"})
-    (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
     ollama.script_reply("could not remember that")
-    client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
-    (resolved,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
-    assert resolved["result"]["ok"] is False
-    assert "no-sending" in resolved["result"]["error"]
+    response = client.post(f"/api/chats/{chat_id}/messages", json={"content": "always allow"})
+    assert client.get(f"/api/chats/{chat_id}").json()["actions"] == []  # NO card
+    assert "no-sending" in response.text
 
 
 def test_email_allow_always_writes_an_email_scope_rule(
@@ -457,3 +474,54 @@ def test_unregister_mcp_server_is_carded_and_removes_the_config(
             remove_mcp_server(store, "ghost")
     finally:
         store.close()
+
+
+def test_b09_destructive_name_cards_in_a_roleless_chat(
+    config: SupervisorConfig,
+    ollama: FakeOllama,
+    fake_runner: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """ES-F (B09, P0, live repro f3-30): `target_account_purge` contains
+    "get" and ran on the host with no card. It must card."""
+    _seed_server(config)
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_call(
+        "call_mcp_tool",
+        {"server_id": "issues", "tool": "target_account_purge", "arguments": {"account": "acme"}},
+    )
+    ollama.script_reply("asked")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "purge acme"})
+    calls = [params.get("name") for method, params in fake_runner if method == "tools/call"]
+    assert "target_account_purge" not in calls
+    (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
+    assert action["status"] == "proposed"
+
+
+def test_b122_list_mcp_tools_shows_the_role_chats_own_verdict(
+    config: SupervisorConfig,
+    ollama: FakeOllama,
+    fake_runner: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """ES (B122): in a role chat every MCP call cards (role mcp-gated), but
+    list_mcp_tools computed its policy column WITHOUT the role and said
+    `allow` — the Queen was told a call would run that then carded."""
+    _seed_server(config)
+    client, _ = chat_client(config, ollama)
+    chat_id = client.post("/api/chats", json={"role": "assistant"}).json()["chat_id"]
+    ollama.script_tool_call("list_mcp_tools", {"server_id": "issues"})
+    ollama.script_reply("listed")
+    response = client.post(f"/api/chats/{chat_id}/messages", json={"content": "what tools?"})
+    tool_event = next(
+        line for line in response.text.splitlines() if "list_issues" in line and "policy" in line
+    )
+    view = json.loads(tool_event.removeprefix("data: "))["result"]["tools"]
+    listed = next(entry for entry in view if entry["name"] == "list_issues")
+    assert listed["policy"] == "require_approval"
+
+
+def test_b122_promote_tool_description_names_seed_tools() -> None:
+    """ES (B122): the description said "a landed forged plugin", so the
+    model refused to promote a shipped seed tool until told otherwise."""
+    from skep.supervisor.serve.tools import tool_description
+
+    assert "seed" in tool_description("promote_tool")

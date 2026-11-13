@@ -27,12 +27,22 @@ import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from pydantic import BaseModel, Field, model_validator
 
 from .netproxy import domain_allowed
-from .shell_prefixes import dangerous_prefix_reason
+from .secret_floor import path_spellings
+from .shell_prefixes import (
+    command_line_segments,
+    dangerous_prefix_reason,
+    program_name,
+    sh_command_list,
+)
+
+if TYPE_CHECKING:
+    from .policy_engine import Layer
 
 Scope = Literal["coding", "shell", "filesystem", "network", "mcp", "email", "browse"]
 Verdict = Literal["allow", "require_approval", "deny"]
@@ -65,6 +75,16 @@ SCOPE_ACTIONS: dict[str, frozenset[str]] = {
     "browse": frozenset({"read", "act"}),
 }
 
+# ADR 0059 D1 (policy_v3.SCOPE_ACTIONS): every (scope, action) with what "no
+# rule matched" means on the decide faces. Ask everywhere — a human answers
+# what nobody wrote a rule for — except a shell in a repo cwd: that is a
+# file-write pen with no patch card (v83-F9).
+UNMATCHED_VERDICT: dict[tuple[str, str], Verdict] = {
+    (scope, action): "deny" if (scope, action) == ("shell", "run_repo") else "require_approval"
+    for scope, actions in SCOPE_ACTIONS.items()
+    for action in actions
+}
+
 # The settings key holding the global PolicyDocument (JSON-in-settings, the
 # house storage pattern — no new table).
 POLICY_DOCUMENT_SETTINGS_KEY = "policy_document"
@@ -80,7 +100,49 @@ SESSION_PROVENANCE_PREFIX = "session:"
 
 def is_session_rule(rule: LearnedRule) -> bool:
     """True for a learned rule that lasts only this serve session (v90-F3)."""
-    return rule.provenance.startswith(SESSION_PROVENANCE_PREFIX)
+    return lifetime_of(rule) == "session"
+
+
+# ADR 0059 D4 (P3-4): a grant's lifetime, matcher and binding. A row stored
+# before P3-4 has none of the three and loads as it always matched: session
+# by its provenance, else global; a shell row ``exact_argv`` (ES-F4), a
+# network row ``host`` (labelled legacy-host), anything else a glob.
+Lifetime = Literal["session", "project", "global"]
+Matcher = Literal["exact_argv", "prefix", "host", "url_prefix", "glob"]
+LIFETIME_RANK: dict[str, int] = {"session": 0, "project": 1, "global": 2}
+
+
+def lifetime_of(rule: LearnedRule) -> str:
+    if rule.lifetime is not None:
+        return rule.lifetime
+    return "session" if rule.provenance.startswith(SESSION_PROVENANCE_PREFIX) else "global"
+
+
+def matcher_of(rule: LearnedRule) -> str:
+    if rule.matcher is not None:
+        return rule.matcher
+    return {"shell": "exact_argv", "network": "host"}.get(rule.scope, "glob")
+
+
+def is_legacy_host(rule: LearnedRule) -> bool:
+    """A host-wide fetch grant from before P3-4 (B74): it still covers its
+    whole host — narrowing it silently would break operators — and doctor
+    lists it."""
+    return rule.scope == "network" and rule.matcher is None
+
+
+def applies(
+    rule: LearnedRule,
+    *,
+    repo: str | None = None,
+    project_id: str | None = None,
+    chat_id: str | None = None,
+) -> bool:
+    """Does this grant apply where the request is? An unbound grant applies
+    everywhere it did before P3-4; a bound one only in its own repo, project
+    or chat (B39) — so with no context it applies nowhere."""
+    here = {"repo": repo, "project_id": project_id, "chat_id": chat_id}
+    return all(here[key] is not None and here[key] == value for key, value in rule.bound.items())
 
 
 # v52-F1: Queen-only rules live in their OWN document. The global document
@@ -106,6 +168,11 @@ class LearnedRule(PolicyRule):
     # v106-F11 (v90-F3's unkept clause): when the operator granted it. None on
     # rules written before the field existed — the receipt says so honestly.
     created_at: str | None = None
+    # ADR 0059 D4 (P3-4): None on a row from before P3-4 (``lifetime_of`` /
+    # ``matcher_of`` give what it always meant). ``bound`` empty = everywhere.
+    lifetime: Lifetime | None = None
+    matcher: Matcher | None = None
+    bound: dict[Literal["repo", "project_id", "chat_id"], str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _action_fits_scope(self) -> LearnedRule:
@@ -159,6 +226,17 @@ class ResolvedRule:
     rule_id: str
     action: str
     pattern: str
+    # ES-F4 (V8, B04): a learned shell grant covers the exact command line
+    # the operator approved, not every line that starts with it. Deliberate
+    # prefix rules (operator document, templates, run allowlists) stay False.
+    exact: bool = False
+    # ES-F5 (B34): the layer that stated a rule when it is not the document
+    # ``decide()`` is labelled by — the approved baseline (``template:<name>``).
+    # None keeps the document label, so v1 and v2 answer alike.
+    layer: str | None = None
+    # P3-4 (B74): ``url_prefix`` — the rule's pattern is a URL prefix that a
+    # host-only value never matches; None for every other rule.
+    matcher: str | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +255,9 @@ class PolicyDecision:
 
 
 DEFAULT_DENY_RULE_ID = "default-deny"
+# ADR 0059 D1: what policy_v3 names "no rule matched" (``default/unmatched``);
+# its verdict is the scope action's own (policy_v3.SCOPE_ACTIONS).
+UNMATCHED_RULE_ID = "unmatched"
 
 
 def _require_scope_action(scope: str, action: str) -> None:
@@ -195,9 +276,70 @@ def _shell_tokens(text: str) -> list[str]:
 
 shell_tokens = _shell_tokens  # P1: the v2 engine vets every layer's shell rules with it
 
+_SHELL_OPAQUE = ("$(", "`", "<(", ">(")  # a second command line hides inside
+_SHELL_C_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 
-def pattern_matches(scope: str, pattern: str, value: str) -> bool:
-    """Does ``pattern`` cover ``value`` under this scope's matcher?"""
+
+def shell_segments(value: str) -> list[str] | None:
+    """The simple commands a shell would run for ``value``, in order.
+
+    B3-F7 (T3 field test): ``allowed_shell_commands`` entries are argv prefixes,
+    and a prefix matcher saw ``ls -la; rm -rf x`` as ``ls``. A worker runs its
+    argv without a shell, so ``;`` was an argument there; the PreToolUse hook
+    and the ACP governor hand the string to a real shell. ``None`` means part
+    of the line is opaque to a prefix matcher — command substitution, a
+    ``sh -c`` string, ``eval`` — and decides as unmatched.
+    """
+    if any(mark in value for mark in _SHELL_OPAQUE):
+        return None
+    # Non-POSIX keeps quotes on the tokens, so a worker's literal '&&' argument
+    # (shlex.join quotes it) stays a word and only bare operators split.
+    lexer = shlex.shlex(sh_command_list(value), posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""  # sh_command_list dropped the comments sh drops
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if set(token) <= set(";&|"):
+            segments.append([])
+        elif token not in ("(", ")"):  # grouping changes nothing about what runs
+            segments[-1].append(token)
+    found = [seg for seg in segments if seg]
+    for seg in found:
+        # L13: a variable as the program (`$P x`) names no command a rule can read
+        if (
+            seg[0] == "eval"
+            or seg[0].startswith("$")
+            or (seg[0] in _SHELL_C_SHELLS and "-c" in seg)
+        ):
+            return None
+    # ponytail: wrappers that run a command named later (xargs, env, nohup,
+    # sudo, find -exec) still match on the wrapper; list them here when a
+    # policy needs to see through them.
+    return [" ".join(seg) for seg in found] or [value]
+
+
+def backgrounds(value: str) -> bool:
+    """B21: does the line send a command to the background (a lone ``&``)?
+    A ``run`` grant never covers that: a daemon is ``run_background``."""
+    lexer = shlex.shlex(sh_command_list(value), posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        return "&" in list(lexer)
+    except ValueError:
+        return False
+
+
+def pattern_matches(
+    scope: str, pattern: str, value: str, *, exact: bool = False, grants: bool = False
+) -> bool:
+    """Does ``pattern`` cover ``value`` under this scope's matcher?
+    ``exact`` (learned shell grants, ES-F4): the whole argv, not a prefix.
+    ``grants`` (an allow rule): a filesystem path counts only as resolved."""
     if pattern == "*":
         return True
     if scope == "network":
@@ -205,15 +347,184 @@ def pattern_matches(scope: str, pattern: str, value: str) -> bool:
     if scope == "shell":
         want = _shell_tokens(pattern)
         got = _shell_tokens(value)
+        if exact:
+            return got == want
         return len(got) >= len(want) and got[: len(want)] == want
-    # coding / filesystem / mcp / email: glob over paths and tool names.
+    if scope == "filesystem":
+        # W32: a deny or ask binds either spelling of the path; an allow grants
+        # only the file a read or write really opens — a link inside an allowed
+        # directory pointing out of it is the file outside.
+        paths = {_real_path(value)} if grants else _path_spellings(value)
+        return any(fnmatch(path, glob) for path in paths for glob in _rule_spellings(pattern))
+    # coding / mcp / email: glob over paths and tool names.
     return fnmatch(value, pattern)
+
+
+def _path_spellings(value: str) -> set[str]:
+    """W32 (B44): an absolute path as typed and resolved — ``/tmp/x`` and
+    ``/private/tmp/x`` on macOS — so a rule binds whichever one a face
+    passes (read_file resolves, REST / the CLI / the hook do not)."""
+    if not value.startswith("/"):
+        return {value}
+    return {value, *(str(p) for p in path_spellings(value))}
+
+
+def _real_path(value: str) -> str:
+    return str(path_spellings(value)[1]) if value.startswith("/") else value
+
+
+def _rule_spellings(pattern: str) -> set[str]:
+    """W32: the pattern as written and with its literal prefix resolved."""
+    return {pattern, _resolved_rule(pattern)}
+
+
+def _resolved_rule(pattern: str) -> str:
+    """The pattern with its literal prefix (the components before the first
+    glob) resolved, the glob tail kept — the directory it really names."""
+    if not pattern.startswith("/"):
+        return pattern
+    parts = pattern.split("/")
+    cut = next((i for i, part in enumerate(parts) if any(c in part for c in "*?[")), len(parts))
+    literal, tail = "/".join(parts[:cut]) or "/", "/".join(parts[cut:])
+    real = str(path_spellings(literal)[1])
+    return f"{real.rstrip('/')}/{tail}" if tail else real
+
+
+def rule_matches(rule: ResolvedRule, scope: str, value: str, *, url: str | None = None) -> bool:
+    """Does ``rule`` cover the request? A ``url_prefix`` grant needs the URL
+    itself (B74): a host-only value — a redirect hop, a REST probe — never
+    matches it. A shell deny or named ask also binds its program by path or
+    launcher (W5)."""
+    if rule.matcher == "url_prefix":
+        return url is not None and url_prefix_matches(rule.pattern, url)
+    # W32 (filesystem): an allow judges the resolved path only, a deny or ask
+    # either spelling. W5 (shell): a deny or named ask also reads the launch.
+    if pattern_matches(
+        scope, rule.pattern, value, exact=rule.exact, grants=rule.verdict == "allow"
+    ):
+        return True
+    return (
+        scope == "shell"
+        and _binding(rule.verdict, rule.pattern)
+        and shell_deny_binds(rule.pattern, value)
+    )
+
+
+def _binding(verdict: str, pattern: str) -> bool:
+    """A deny, or a named (non-``*``) ask: the rules that bind across layers
+    (D2), so a spelling or an action an allow can answer must not walk past
+    them (ES-F49 review: an exact grant on ``/usr/bin/curl x`` answered a
+    named ``curl`` ask)."""
+    return verdict == "deny" or (verdict == "require_approval" and pattern != "*")
+
+
+def shell_deny_binds(pattern: str, value: str) -> bool:
+    """W5 (PR #73): a deny on ``curl`` binds ``/usr/bin/curl x``, ``env curl
+    x`` and ``timeout 5 curl x`` — every argv the floor reads in the line
+    (``command_line_segments``: launchers, ``env``, assignments, wrappers),
+    its program compared as the floor compares it (``program_name``). A word
+    a known launcher's command takes as an argument is not a program
+    (``exact``): ``timeout 60 grep curl x`` runs grep."""
+    want = _shell_tokens(pattern)
+    if not want:
+        return False
+    want = [program_name(want[0]), *want[1:]]
+    for argv in command_line_segments(value, exact=True) or [_shell_tokens(value)]:
+        if argv and [program_name(argv[0]), *argv[1 : len(want)]] == want:
+            return True
+    return False
+
+
+# W5: a deny (or named ask) on ``run`` binds the same program in the
+# background or in a repo; one on either of those does not bind a foreground
+# ``run``.
+_RUN_BINDS = frozenset({"run_background", "run_repo"})
+
+
+def action_binds(
+    scope: str, verdict: str, rule_action: str, action: str, pattern: str = ""
+) -> bool:
+    """Does a rule on ``rule_action`` speak to a request for ``action``?"""
+    if rule_action == action:
+        return True
+    return (
+        (scope, rule_action) == ("shell", "run")
+        and action in _RUN_BINDS
+        and _binding(verdict, pattern)
+    )
+
+
+def deny_reaches(
+    scope: str, deny_action: str, deny_pattern: str, action: str, pattern: str
+) -> bool:
+    """Write-time (§5.4 check 6) and resolution: would a deny bind an allow
+    on ``action``/``pattern``? Agrees with ``rule_matches`` and ``action_binds``."""
+    if not action_binds(scope, "deny", deny_action, action):
+        return False
+    if patterns_intersect(scope, pattern, deny_pattern):
+        return True
+    return scope == "shell" and shell_deny_binds(deny_pattern, pattern)
+
+
+def _url_parts(url: str) -> tuple[str, str, str, str] | None:
+    """``(scheme, host[:port], path, query)`` normalized, or None for a URL a
+    grant can never cover: not http(s), userinfo, a bad port, dot segments or a
+    backslash in the path (a server may resolve them out of the prefix)."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    host = (parts.hostname or "").rstrip(".")
+    if parts.scheme not in ("http", "https") or not host or parts.username is not None:
+        return None
+    path = parts.path or "/"
+    if "\\" in path or {".", ".."} & set(unquote(path).split("/")):
+        return None
+    default = {"http": 80, "https": 443}[parts.scheme]
+    netloc = host if port in (None, default) else f"{host}:{port}"
+    return parts.scheme, netloc, path, parts.query
+
+
+def url_prefix_of(url: str) -> str | None:
+    """B74: what a read_url keep stores — scheme + host + the path up to its
+    last ``/`` (a directory boundary), plus the card's query if it had one.
+    None when no grant may be made on ``url``."""
+    found = _url_parts(url)
+    if found is None:
+        return None
+    scheme, netloc, path, query = found
+    return urlunsplit((scheme, netloc, path[: path.rfind("/") + 1], query, ""))
+
+
+def logged_url(url: str) -> tuple[str, bool] | None:
+    """W18: what the decision log keeps of a fetched URL — scheme, host and
+    the path up to its last ``/`` (all a ``url_prefix`` grant matches on, see
+    ``url_prefix_matches``), and whether a query was dropped. Never the
+    query, never userinfo (None: no grant could match it either)."""
+    found = _url_parts(url)
+    if found is None:
+        return None
+    scheme, netloc, path, query = found
+    return urlunsplit((scheme, netloc, path[: path.rfind("/") + 1], "", "")), bool(query)
+
+
+def url_prefix_matches(pattern: str, url: str) -> bool:
+    """Same scheme and host[:port], the path under the stored directory, and a
+    query that is empty or identical to the card's: a grant made on
+    ``example.com/docs/page`` never covers ``example.com/collect?data=…``."""
+    want, got = _url_parts(pattern), _url_parts(url)
+    if want is None or got is None:
+        return False
+    return got[:2] == want[:2] and got[2].startswith(want[2]) and got[3] in ("", want[3])
 
 
 def patterns_intersect(scope: str, first: str, second: str) -> bool:
     """Conservative overlap check for write-time learned-rule vetting."""
     if first == "*" or second == "*":
         return True
+    if scope == "network":  # a url_prefix grant (P3-4) overlaps through its host
+        first, second = (urlsplit(p).hostname or p if "://" in p else p for p in (first, second))
     if scope == "shell":
         a = _shell_tokens(first)
         b = _shell_tokens(second)
@@ -226,8 +537,12 @@ def _specificity(scope: str, pattern: str) -> tuple[int, int]:
     """Higher sorts more specific: exact beats glob; longer beats shorter."""
     if scope == "shell":
         return (0 if "*" in pattern else 1, len(_shell_tokens(pattern)))
+    if scope == "filesystem":  # W32: rank the directory the rule really names, not
+        pattern = _resolved_rule(pattern)  # its longest spelling (a link may be longer)
     return (0 if any(ch in pattern for ch in "*?[") else 1, len(pattern))
 
+
+specificity = _specificity  # P3-2: policy_v3 ranks rules inside one layer with it
 
 _VERDICT_RANK: dict[str, int] = {"deny": 2, "require_approval": 1, "allow": 0}
 
@@ -238,6 +553,7 @@ def resolve(
     learned: tuple[LearnedRule, ...] = (),
     *,
     v2_scopes: Sequence[str] = (),
+    template: Layer | None = None,
 ) -> dict[str, ResolvedScopePolicy]:
     """Compose base → overlays → learned into per-scope rule sets.
 
@@ -249,6 +565,8 @@ def resolve(
     ``v2_scopes`` (P1, ADR 0053 D6): the scopes the ``policy_engine_v2_scopes``
     setting routes through the v2 stack answer from it; every other scope
     keeps this path. Same signature, same callers — the strangler seam.
+    ``template`` (first-run O2) is the approved baseline layer; like every
+    layer it is v2-only, so it answers in the routed scopes.
     """
     rules: dict[str, list[ResolvedRule]] = {scope: [] for scope in SCOPES}
     for document in (base, *overlays):
@@ -271,13 +589,11 @@ def resolve(
     all_learned = tuple(
         rule for document in (base, *overlays) for rule in document.learned
     ) + tuple(learned)
-    for rule in all_learned:
+    # P3-4 (B39): a grant bound to a repo, project or chat has no place in a
+    # composition that knows none of them — only unbound grants compose here.
+    for rule in (rule for rule in all_learned if applies(rule)):
         vet_learned_rule(rule, rules[rule.scope])
-        rules[rule.scope].append(
-            ResolvedRule(
-                verdict="allow", rule_id=rule.rule_id, action=rule.action, pattern=rule.pattern
-            )
-        )
+        rules[rule.scope].append(learned_resolved(rule))
     result = {
         scope: ResolvedScopePolicy(scope=scope, rules=tuple(bucket))
         for scope, bucket in rules.items()
@@ -285,11 +601,25 @@ def resolve(
     if v2_scopes:
         from .policy_engine import document_layers, resolve_stack
 
-        v2 = resolve_stack(document_layers(base, overlays, learned)).scopes()
+        v2 = resolve_stack(document_layers(base, overlays, learned, template=template)).scopes()
         for scope in v2_scopes:
             if scope in result:
                 result[scope] = v2[scope]
     return result
+
+
+def learned_resolved(rule: LearnedRule, layer: str | None = None) -> ResolvedRule:
+    """A learned rule as the allow it resolves to, with its matcher (P3-4)."""
+    matcher = matcher_of(rule)
+    return ResolvedRule(
+        verdict="allow",
+        rule_id=rule.rule_id,
+        action=rule.action,
+        pattern=rule.pattern,
+        exact=matcher == "exact_argv",
+        layer=layer,
+        matcher="url_prefix" if matcher == "url_prefix" else None,
+    )
 
 
 def vet_learned_rule(rule: LearnedRule, existing: list[ResolvedRule]) -> None:
@@ -322,11 +652,29 @@ def decide(
     anything unmatched is denied."""
     _require_scope_action(scope, action)
     label = template or "policy"
+    if scope == "shell" and action == "run":
+        segments = shell_segments(value)
+        if segments is None:
+            segments = []  # opaque: nothing can match it
+        if len(segments) != 1 or segments[0] != value:
+            # B3-F7: a chained line is decided one simple command at a time and
+            # the least favourable segment decides; opaque text matches nothing.
+            parts = [decide(resolved, scope, action, seg, template=template) for seg in segments]
+            if not parts:
+                return PolicyDecision(
+                    verdict="deny",
+                    rule_id=DEFAULT_DENY_RULE_ID,
+                    decided_by=f"{label}/{DEFAULT_DENY_RULE_ID}",
+                    scope=scope,
+                    action=action,
+                )
+            return max(parts, key=lambda part: _VERDICT_RANK[part.verdict])
     scope_policy = resolved.get(scope)
     matches = [
         rule
         for rule in (scope_policy.rules if scope_policy else ())
-        if rule.action == action and pattern_matches(scope, rule.pattern, value)
+        if action_binds(scope, rule.verdict, rule.action, action, rule.pattern)
+        and rule_matches(rule, scope, value)
     ]
     if not matches:
         return PolicyDecision(
@@ -342,7 +690,7 @@ def decide(
     return PolicyDecision(
         verdict=winner.verdict,
         rule_id=winner.rule_id,
-        decided_by=f"{label}/{winner.rule_id}",
+        decided_by=f"{winner.layer or label}/{winner.rule_id}",
         scope=scope,
         action=action,
     )

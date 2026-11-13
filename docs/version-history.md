@@ -2674,7 +2674,8 @@ through skep's own cards — A0 found the provider key dead for inference
 while `doctor` said ready (fixed as v115-F5); A4, the starlette bump, was
 the first real self-maintenance run and took eight attempts, each one a
 v115 fix (PR #29 is the patch skep landed on itself). The ACP adapter
-(Part B) stays open on the Restart Plan; A7/A8 hygiene and record
+(Part B) stayed open on the Restart Plan — it shipped as the ACP governor
+(`acp-governor B0–B2` and v1.2.0 below); A7/A8 hygiene and record
 catch-up land with this release.
 
 ## v114 — the policy engine under a hostile operator (2026-10-21, F1–F5)
@@ -2751,3 +2752,277 @@ flip `shell` first, after the golden parity suite is green; install the
 Claude Code hook from `docs/policy-hook.md`. Linux/macOS CI gates stay
 the same, with job timeouts so an unreachable apt mirror fails in minutes.
 
+## acp-governor B0–B2 — skep governs agents inside other clients (2026-11-06)
+
+ADR draft 0054 (Restart Plan Part B, re-scoped against P3): skep ships as
+a transparent ACP proxy any ACP client spawns in place of the agent,
+answering the permission hop from `decide()`. B0: T3 Code's recorded
+transcripts vendored with notice, and eight live taps of
+`@agentclientprotocol/claude-agent-acp` 0.101.0 and `codex-acp` 2.5.0 (v1
+and v2, default and asking modes) written up as the wire table in
+`tests/fixtures/acp/README.md` — both adapters speak v2 when offered, the
+default modes (Claude `auto`, Codex `agent`) never ask, Claude's first
+announce has an empty `rawInput`, Codex's v2 request shell-quotes the
+command, a shell redirect is a write the `filesystem` scope never sees,
+and options are chosen by kind, never position (grok lists
+`allow_always` first). B1-1: the I/O-free proxy core — every unclaimed
+line relayed as its original bytes, ids never renumbered, cancels bound to
+their direction. B1-2: `workspace_value` lifted to `policy_paths` with the
+symlink escape pinned, and the mapper — session state joined on
+`toolCallId`, per-agent presets as data rows, an unreadable call forwarded
+with the missing field named. B1-3: `skep acp govern` (allow selects
+`allow_once`, explicit or floor deny `reject_once`, everything else
+forwarded to the human, never an "always") and `skep acp doctor`; on ACP v1
+with a client that advertised `fs`/`terminal` the hard ring passes only
+`allow` (A10, no human hop to forward to). B1-4: `skep policy decisions`
+on three faces, `observed` and `forwarded` rows counted apart from
+decisions (A9). The Day 5 live smoke under T3-shaped asking modes: Claude's
+Write allowed from `fs: workspace`, Codex's `rm -rf build` forwarded to the
+human, `git push` floor-denied for both before the client saw it, and
+read-only commands observed unasked. Review findings folded in before each
+commit (cancel direction, a shutdown abort when the agent exits first, a
+floor bypass through unquoted hard-ring args, observed rows only for calls
+that ran unasked). B2: fresh homes start with `shell`+`filesystem` on
+engine v2 (A6), `skep acp install-hint` prints T3's Local ACP command
+rows, and `docs/acp-governor.md` says what each ring does and does not see.
+
+## acp-governor B3 — the field test in T3 Code (2026-11-06)
+
+T3 Code (Beta) with two Local ACP command providers on the branch binary,
+a throwaway repo bound to a demo group. Findings and fixes, on the same
+branch since 1.2.0 is untagged: B3-F1 `install-hint` prints one argument
+per line (the `a | b | c` line was pasted into one T3 row). B3-F2 every
+session opener binds `cwd` — T3 respawns the agent after idle and
+continues with `session/load`, so resumed turns decided against repo "" —
+and a v1 load's replayed history is not written as observed rows (A11).
+B3-F7 a chained shell line (`ls -la; rm -rf build`) is decided one simple
+command at a time with the least favourable segment deciding; command
+substitution and `sh -c` are opaque and match nothing — the prefix
+matcher had allowed the whole line by its first word for the hook and the
+governor, where a real shell runs it. B3-F8 `SKEP_ACP_TRACE` records the
+wire inside a client in the fixture envelope. Observed on the wire: in
+Claude's `auto` (T3's default) the agent never asks, so skep only
+observes; T3's **Manual** mode is Claude's `default` and asks; the agent
+bundled `rm -rf build && … git push` into one command and the floor
+denied the lot before T3 saw it. B3-F9 the replay window runs from any
+continuing opener to the client's next `session/prompt` — T3 races the
+opener's answer against two seconds of replay silence and may send its
+config and prompt first. B3-F10 a run-detail read tolerates a worktree
+swept under it (CI macOS). B3-F11 the first turn recorded inside T3 with
+the trace on (2026-11-09, `tests/fixtures/acp/claude-agent-acp/t3-v2-resume-ask.ndjson`,
+a golden): T3 speaks v2 and continues a thread with `session/resume`, and
+claude-agent-acp replays the thread's history on it too — seven replayed
+calls, zero observed rows; then `git status` observed, `rm -rf build`
+forwarded to the human (allow once), `git push` floor-denied.
+
+## v1.2.0 — the ACP governor (2026-11-06)
+
+The `acp-governor` B0–B2 work above: `skep acp govern|doctor|install-hint`
+and `skep policy decisions`. Operator notes: a fresh home starts with
+`shell` and `filesystem` on engine v2; an existing home keeps its switch.
+Install with `pipx install skep && skep acp doctor -- npx -y
+@agentclientprotocol/claude-agent-acp`. ADR draft 0054 moves to
+`docs/adr/` on acceptance.
+
+## first-run O1 — three templates in the layer format + `skep policy explain` (2026-11-09)
+
+ADR 0056 D3. `src/skep/supervisor/policy_templates/{builder,operator,assistant}.json`
+are engine v2 layers — rules AND knobs (`default_network`,
+`allowed_shell_commands`, which the registry now lets the `template` layer
+carry) — each a complete baseline candidate for O2. `personal-dev` →
+`builder`, `homelab-ops` → `operator` (read-only inspection instead of the
+developer toolchain; GitHub fetch allowlist), `assistant` reshaped (calendar
+and notes MCP tools and mail reads flow, sends ask, repo writes denied);
+`locked-down` has no file — it is the `no_baseline` zero state O2/O5 ship.
+The four old names are aliases until 1.3.0 and print a deprecation line;
+`skep setup --template` writes the template's own knobs instead of deriving
+them from its rules. `skep policy explain <template|baseline|role:NAME>`
+renders the layer as a Markdown allow / ask / deny table grouped by scope —
+the rule ids `why` prints, the floor rows labelled "always denied", a
+settings block per scope — on three faces: the CLI, `GET
+/api/policy/explain`, and the chat `policy_explain` read. The harness
+(`tests/supervisor/test_policy_templates.py`) proves golden parity with each
+template as the baseline, catalogue membership, no floor grant, the B3 demo
+sequence under `builder` (`pnpm test` allow · `rm` ask · `git push` deny)
+and every alias.
+
+## first-run O2 — the locked baseline (2026-11-09)
+
+ADR 0056 D1/D2, the one new mechanism of the first-run plan.
+`skep policy approve [--template NAME | --file PATH] [--reapprove] [--yes]`
+shows the explain table, takes a typed `yes`, and writes
+`<home>/policy/baseline.json` (`0444`, a courtesy), `baseline.lock` and a
+`baseline_approved` row in `<audit>/policy/baseline-approvals.jsonl` —
+SHA-256 over the loaded layer as sorted-key JSON carrying `schema_version`
+(`policy_baseline.py`). The baseline populates the registry's existing
+`template` layer with every set setting enforced (ADR 0053 D4); its rules
+ride the same slot. `verify()` runs in the v2 reader (`policy_layers.py`),
+mtime-cached, so `policy_decide`, the hook, `acp govern` and serve startup
+share it: Tampered (or a missing lock, or both files gone with an approval
+on record) fails closed with `baseline_tampered` — `ask` on the advisory
+ring, `deny` on the governor's hard ring, dispatch refused, the Queen's own
+lanes asking — with one card per tamper event (debounced through the
+ledger) and `why` printing `baseline: TAMPERED since <time>`. A schema bump
+with unchanged content cards a re-approval instead of tripping.
+`skep policy baseline status|diff`, `skep policy explain baseline`; REST
+`POST /api/policy/baseline/approve`, `GET /api/policy/baseline`; chat
+`approve_policy_baseline` (always cards) and `policy_explain baseline`.
+No baseline: byte-identical goldens; the `no_baseline` zero state is one
+constant (`policy_baseline.NO_BASELINE_REASON`) for O5 to flip.
+
+## first-run O3 — `skep onboard` (2026-11-09)
+
+ADR 0056 D7/D8. `skep onboard` is the guided form of `skep setup`: ① model
+(local-Ollama probe, the v37-F3 wizard, a test call, the preset's egress
+line) → ② work directory (created if missing, registered through project
+setup with its inferred `verify_command`) → ③ sandbox backend (`auto`,
+`podman` or `none`; docker is reported, not offered — skep has no docker
+backend) → ④ template (the three `explain` tables, default `assistant`,
+locked through O2's approve path after a typed `yes`) → ⑤ role (the three
+template names until R1), recorded in `~/.skep/first_run.json`
+`{started_at, turns_seen, verdicts_seen, dismissed, role}`; then it attaches
+to (or starts) `skep serve` and opens `skep chat` unless `--no-chat`. Each
+step is a function in `supervisor/onboard.py` writing its record to
+`~/.skep/onboard.json`; re-running resumes at the first incomplete step (a
+tampered baseline sends it back to ④), and a flag that differs from a
+finished step re-runs it. `sandbox_backend` accepts `none`: runtime treats it
+like `auto` (never weaker), and the baseline onboard locks turns every
+allowed write/edit into an ask (`fs-workspace-unsandboxed`,
+`coding-workspace-unsandboxed`). `skep onboard --check` is `skep doctor` plus
+baseline hash, engine v2 scopes, sandbox backend, workdir, model, steps, and
+the egress-truth block ending `telemetry: none`; exit 0 only when all are
+ready. Web face: a "First run" card on the `/setup` page over
+`GET /api/onboard`, `/api/onboard/check|sandboxes|template` and
+`POST /api/onboard/{step}` — the same functions (`test_surface_parity`
+`ONBOARD_VERBS`).
+
+## first-run O5 — fresh homes ask until a baseline is approved (2026-11-09)
+
+ADR 0056 D2 "Zero state". A home whose sqlite file did not exist is seeded
+with every scope in `SCOPES` on engine v2 (was `shell` + `filesystem`) and a
+`fresh_home_seeded_at` setting. `policy_layers.zero_state_home` is the one
+rule: a home the store seeded itself, or one where `skep onboard` has started
+(`onboard.json`), answers every decision in an engine-v2 scope `ask` with
+reason `no_baseline` while nothing is approved — on all four paths
+(`policy_decide`, `skep policy hook`, `skep acp govern`, the Queen's standing
+policy), through the same fail-closed guard O2 built (`baseline_guard`, now a
+scope → reason map). The floor stays above it. A home that predates O5 keeps
+today's behaviour exactly — an upgrade must not turn a running daily driver
+into a wall of asks — and `skep doctor` / `skep onboard --check` print `no
+baseline approved — run skep policy approve --template <name> or skep
+onboard`. `why` names `no_baseline`. `skep acp install-hint` opens with the
+locked baseline (template, approval time, short sha256) or `run skep onboard
+first — the governor answers from an approved baseline`; `onboard --check`'s
+engine v2 probe is ready only with every scope routed. The golden files
+re-froze with only the seeded switch list moving.
+
+## v1.2.1 — first-run: onboard onto a locked baseline (2026-11-09)
+
+The first-run O1, O2, O3 and O5 work above, as a patch release. What an
+operator sees:
+
+- `skep onboard` (or `skep onboard --template builder --yes`) takes a fresh
+  install from nothing to a locked policy baseline in five resumable steps;
+  `skep onboard --check` is `skep doctor` plus the onboard rings and the
+  egress truth.
+- Three templates — `builder`, `operator`, `assistant` — replace the four
+  old documents (aliases until 1.3.0); `skep policy explain <name>` prints
+  each as an allow / ask / deny table.
+- `skep policy approve --template NAME` locks the baseline
+  (`<home>/policy/baseline.json` + `baseline.lock` + the approvals ledger);
+  an edit fails closed with `baseline_tampered` until `skep policy approve
+  --reapprove`.
+- A fresh install asks for everything until a baseline is approved
+  (`no_baseline`); an existing home keeps deciding as before and is told
+  how to approve one.
+- `skep acp install-hint` names the baseline the governor answers from.
+
+Air smoke (`docs/acp-governor.md`): `pipx install skep && skep onboard
+--template builder --yes`, then `skep acp install-hint`.
+
+## first-run O4 — first-run transparency (2026-11-09)
+
+ADR 0056 D6. While `~/.skep/first_run.json` (O3's record, extended) is not
+dismissed, `serve/chat.py` `first_run_events` — wrapped around the one SSE
+choke point every chat turn and card verdict streams through — adds a
+one-line `why` to every verdict card (receipt, denial, confirm card), read
+off the decision the card already carries (rule, layer, reason), and ends
+each turn with a `tally` event (`skep: N allowed · N asked · N denied`)
+that bumps `turns_seen` / `verdicts_seen`. The turn that first crosses 10
+turns or 25 verdicts carries the offer to turn it down. `skep chat` and the
+web chat render both; `skep onboard --quiet | --verbose` and
+`POST /api/onboard/transparency` flip `dismissed` (operator faces only,
+`ONBOARD_VERBS`). Rendering only: no new rows, no new verdicts. The tally
+counts the turn's own decisions, because the Queen's chat verdicts are not
+in `decisions.jsonl`. A home with no `first_run.json` streams exactly as
+before.
+
+## first-run R1 — roles as records (2026-11-09)
+
+ADR 0055 D1–D3. A role is a record — `{name, policy_layer, system_prompt,
+default_castes, voice}` in `supervisor/roles.py` — and a policy context:
+`builder`, `operator` and `assistant` ship bound 1:1 to the templates of the
+same name; custom roles load from `~/.skep/roles/*.json`. `LAYERS` gains
+`role` after `template`; the role layer only tightens (the stricter of the
+stack's verdict and the role's own stands) and the floor is above every role.
+`policy_decide` / `policy_why` take `role` on all three faces and `decided_by`
+names `role:<name>`. A chat runs in one role — its prompt, its voice, and the
+Queen's own tool lanes (`mutation_execution_decision` tightens run_shell,
+read_file, read_url, MCP calls under it); `set_role` card, `/role` on both
+decks, `skep role list|show|use`, and a role picker on new chats defaulting
+to the role `skep onboard` recorded.
+
+## first-run R2 — delegation is subset-only (2026-11-09)
+
+ADR 0055 D4. `policy_decide(delegation_chain=["actor@role", …])`, outermost
+first: the innermost delegator's own effective verdict — down the same path,
+under its role, bounded by the hops above it — is one more tightening; when
+it decides, the row says `exceeds_delegator` and `decided_by` names the hop.
+A delegator that would itself ask passes on an ask; one whose role has no
+rule for the action (`unset`) holds nothing (decision #7). The floor is above
+every chain; an empty chain is today byte for byte. `submit_run` drops the
+worker's shell prefixes and egress hosts beyond the delegator (each drop a
+ledger row) and refuses a writer the delegator may not be; the Queen's
+dispatch lanes pass `queen@<chat role>`. `why --delegated-by` shows the
+chain.
+
+## first-run R3 — the Queen delegates: manager → team under roles (2026-11-09)
+
+ADR 0055 D5. A worker is dispatched with its own role — `role` on the chat's
+`dispatch_run` and per task in `batch_dispatch`, on `POST /api/runs` beside
+`delegation_chain`, and `skep run --role NAME --delegated-by ACTOR@ROLE` —
+and holds its role ∩ its delegator's, the drops recorded under its role.
+Every delegated or role-bearing dispatch writes one `source: delegated` row
+(the delegator, `worker@<role>`, `role`, the chain, the task) and carries
+`delegation` (`chain`, `role`, `team`) on its dispatch decision; the web run
+card and detail, the chat lines, `skep chat`'s `/runs` and `skep review`
+show `queen@operator → worker@builder`. A **team run** is v51's batch with a
+manager as the dispatcher — the chat's `batch_dispatch manager=`, `POST
+/api/teams`, `skep team --manager ROLE --task REPO INSTRUCTIONS`: members run
+under `[<dispatcher>, manager@<role>]`, the one two-hop chain a dispatch
+accepts; deeper chains, a manager not innermost and any `worker@` hop refuse.
+The team is one ledger thread (`skep policy decisions --team ID`). A delegated
+run's remembered-approval resume keeps its narrowing and its chain. The
+operator's dependabot loop (Queen `operator` → worker `builder`) is pinned end
+to end with the fake worker; the live run is the operator's.
+
+## v1.3.0 — first-run: roles and delegation (2026-11-09)
+
+The first-run O4, R1, R2 and R3 work above, as a minor release. What an
+operator sees:
+
+- A chat runs in a role (`builder`, `operator`, `assistant`, or a custom
+  one): the picker on a new chat, `/role`, `skep role use`. The role is a
+  policy layer that only tightens the approved baseline, and `skep policy
+  why --role` names it.
+- The Queen dispatches under its role, and a worker it dispatches holds no
+  more than it does: `exceeds_delegator` rows, `why --delegated-by`.
+- Workers take an explicit role (`skep run --role`, `dispatch_run role=`)
+  and a team run — a manager in a role fanning out to up to three workers —
+  is `skep team` / `batch_dispatch manager=` / `POST /api/teams`, one ledger
+  thread. Run cards show the chain.
+- New chats show a one-line `why` on every verdict card and a turn tally
+  until dismissed (`skep onboard --quiet`).
+
+The four pre-1.2.1 template names are still accepted as aliases in 1.3.0
+(ADR 0056 open question 3 proposed retiring them here; not done in R3).

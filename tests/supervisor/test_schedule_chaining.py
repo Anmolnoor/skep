@@ -117,3 +117,25 @@ def test_chain_round_trips_through_the_store(store: RunStore) -> None:
     reloaded = store.get_schedule("src")
     assert reloaded is not None and reloaded.last_output is not None
     assert len(reloaded.last_output) == 4096  # capped
+
+
+def test_a_chained_schedule_due_in_the_same_tick_runs_after_its_source(
+    store: RunStore, config: SupervisorConfig
+) -> None:
+    """L14: the digest fired in the same tick as its source, BEFORE it, and
+    summarised the previous tick ("produced no output"). A schedule whose
+    source is due in the same tick now runs after it, whatever their
+    next_run_at order."""
+    _add(store, "disk-check", caste="script", text="echo disk 42% full")
+    _add(store, "morning-digest", caste="digest", text="", chain="disk-check")
+    for name, at in (
+        ("morning-digest", "2000-01-01T00:00:00Z"),
+        ("disk-check", "2000-01-01T00:00:01Z"),
+    ):
+        record = store.get_schedule(name)
+        assert record is not None
+        store.add_schedule(ScheduleRecord(**{**record.__dict__, "next_run_at": at}))
+    run_due(store=store, config=config, notify=lambda chat, text, kind: None)
+    digest_texts = [n.content for n in store.list_notes() if "skep digest" in n.content]
+    assert len(digest_texts) == 1
+    assert "disk 42% full" in digest_texts[0]

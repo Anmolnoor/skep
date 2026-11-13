@@ -27,6 +27,7 @@ import json
 from pathlib import Path
 
 from .memory import MemoryError
+from .roles import ROLE_LESS_CHAT_ROLE
 from .skill_md import parse_skill_md, template_from_skill_md
 from .skills import DRAFT, SkillCandidate, candidate_signature
 from .store import RunStore
@@ -230,7 +231,9 @@ def cmd_hermes_import(args: argparse.Namespace) -> int:
         for title, messages in sessions:
             if title in existing_titles:
                 continue
-            chat = store.create_chat(title=title, model=None, source=CHAT_SOURCE)
+            chat = store.create_chat(
+                title=title, model=None, source=CHAT_SOURCE, role=ROLE_LESS_CHAT_ROLE
+            )
             for role, content in messages:
                 store.add_chat_message(chat.chat_id, role=role, content=content)
             imported_chats += 1

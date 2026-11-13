@@ -1,0 +1,48 @@
+{
+  "to_agent": [],
+  "ledger": [
+    {
+      "actor": "acp:codex-acp",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "git status",
+      "source": "observed",
+      "agent": "codex-acp",
+      "session_id": "01a1b0a5-be60-7551-a909-af2fc4e54c84",
+      "tool_call_id": "exec-a71924b6-dd75-4c59-9474-af9036fbd502"
+    },
+    {
+      "actor": "acp:codex-acp",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "printf 'hello' > probe.txt",
+      "project": {
+        "project_id": "demo",
+        "name": "demo",
+        "strategy": "trusted_local_dev",
+        "phase": "build"
+      },
+      "source": "run",
+      "verdict": "require_approval",
+      "rule_id": "unmatched",
+      "decided_by": "default/unmatched",
+      "layer": "default"
+    },
+    {
+      "actor": "human@skep-acp-tap",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "printf 'hello' > probe.txt",
+      "source": "forwarded",
+      "agent": "codex-acp",
+      "session_id": "01a1b0a5-be60-7551-a909-af2fc4e54c84",
+      "tool_call_id": "exec-6769909f-ebf3-4a89-a4ad-9fe4a95ebc4c",
+      "request_id": 0,
+      "outcome": "allow_once",
+      "note": "unmatched"
+    }
+  ]
+}

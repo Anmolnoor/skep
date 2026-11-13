@@ -29,6 +29,7 @@ from skep.supervisor.serve.fileio import (
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import MUTATING_TOOL_NAMES
 
+from .conftest import predating_home
 from .fake_ollama import FakeOllama
 from .test_serve_chat import sse_events
 from .test_serve_chat_tools import chat_client
@@ -39,6 +40,12 @@ def ollama() -> Iterator[FakeOllama]:
     server = FakeOllama(api_key="sk-fake").start()
     yield server
     server.stop()
+
+
+@pytest.fixture(autouse=True)
+def _predates_baseline(config: SupervisorConfig) -> None:
+    """These tests are about the Queen's read rules, not the O5 zero state."""
+    predating_home(config.db_path)
 
 
 @pytest.fixture()
@@ -73,14 +80,14 @@ def test_home_allows_and_elsewhere_cards(
     assert inside.reason == "filesystem.allow.operator_root"
     # v52-F3: decisions resolve through the composed operator policy; with no
     # global template the label is the operator default's.
-    assert inside.decided_by == "operator-default/operator-root"
+    assert inside.decided_by == "global/operator-root"
 
     elsewhere = tmp_path / "elsewhere.txt"
     elsewhere.write_text("real file")  # v59-F9: only an EXISTING path cards
     outside = queen_filesystem_decision(store, holder, action="read", path=str(elsewhere))
     assert outside.verdict == "require_approval"
     assert outside.reason == "filesystem.require_approval.outside_operator_roots"
-    assert outside.decided_by == "operator-default/outside-operator-roots"
+    assert outside.decided_by == "default/unmatched"
 
 
 def test_nonexistent_outside_path_fails_fast_without_a_card(
@@ -94,7 +101,7 @@ def test_nonexistent_outside_path_fails_fast_without_a_card(
     )
     assert decision.verdict == "deny"
     assert decision.reason == "filesystem.deny.no_such_path"
-    assert decision.decided_by == "operator-default/no-such-path"
+    assert decision.decided_by == "default/no-such-path"
     assert decision.detail == str(tmp_path / "SKEP_HOME" / "repos" / "docs")
 
 
@@ -150,13 +157,13 @@ def test_explicit_filesystem_rules_beat_the_root_fallback(
         store, holder, action="read", path=str(config.home / "vault" / "token")
     )
     assert denied.verdict == "deny"
-    assert denied.decided_by == "operator-default/no-vault"
+    assert denied.decided_by == "global/no-vault"
 
     allowed = queen_filesystem_decision(
         store, holder, action="read", path=str(tmp_path / "datasets" / "a.csv")
     )
     assert allowed.verdict == "allow"
-    assert allowed.decided_by == "operator-default/datasets"
+    assert allowed.decided_by == "global/datasets"
 
 
 def test_operator_document_rules_now_govern_queen_reads(
@@ -188,7 +195,57 @@ def test_operator_document_rules_now_govern_queen_reads(
         store, holder, action="read", path=str(tmp_path / "scratch" / "notes.md")
     )
     assert decision.verdict == "allow"
-    assert decision.decided_by == "operator-default/op:scratch"
+    assert decision.decided_by == "global/op:scratch"
+
+
+@pytest.mark.parametrize("template", ["builder", "operator", "assistant"])
+def test_a_shipped_baseline_leaves_reads_to_the_operator_roots(
+    template: str,
+    config: SupervisorConfig,
+    store: RunStore,
+    holder: ConfigHolder,
+    tmp_path: Path,
+) -> None:
+    """ES-F2 (V4, B01 B33): the templates shipped ``fs-read *``, so under an
+    approved baseline every host path read in-turn and the read_file
+    description ("any other path becomes a card") was false. With the rule
+    gone the operator-roots fallback decides: inside allow, outside card."""
+    from skep.supervisor import policy_baseline as pb
+    from skep.supervisor.policy_schema import SCOPES
+    from skep.supervisor.policy_templates import load_policy_template
+
+    store.set_setting("policy_engine_v2_scopes", list(SCOPES))
+    pb.write_lock(config.home, load_policy_template(template), approved_by="op")
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("real file")
+    outside = queen_filesystem_decision(store, holder, action="read", path=str(elsewhere))
+    assert (outside.verdict, outside.reason) == (
+        "require_approval",
+        "filesystem.require_approval.outside_operator_roots",
+    )
+    inside = queen_filesystem_decision(
+        store, holder, action="read", path=str(config.home / "notes.txt")
+    )
+    assert (inside.verdict, inside.reason) == ("allow", "filesystem.allow.operator_root")
+
+
+def test_the_zero_state_cards_every_read_as_the_description_says(
+    config: SupervisorConfig, store: RunStore, holder: ConfigHolder
+) -> None:
+    """ES-F2 (B33): read_file's description promises roots read in-turn —
+    except on a home with no approved baseline, where every read asks."""
+    from skep.supervisor.policy_schema import SCOPES
+    from skep.supervisor.serve.settings import FRESH_HOME_SEEDED_AT
+    from skep.supervisor.serve.tools import MUTATING_TOOL_SPECS
+
+    store.set_setting("policy_engine_v2_scopes", list(SCOPES))
+    store.set_setting(FRESH_HOME_SEEDED_AT, "2026-11-10T00:00:00Z")
+    decision = queen_filesystem_decision(
+        store, holder, action="read", path=str(config.home / "notes.txt")
+    )
+    assert (decision.verdict, decision.decided_by) == ("require_approval", "baseline/no_baseline")
+    (read_file,) = [t for t in MUTATING_TOOL_SPECS if t["function"]["name"] == "read_file"]
+    assert "Until a policy baseline is approved" in read_file["function"]["description"]
 
 
 def test_workon_bound_project_path_is_an_operator_root(
@@ -268,7 +325,7 @@ def test_read_inside_root_executes_in_turn(config: SupervisorConfig, ollama: Fak
     assert tools[0]["result"]["ok"] is True
     assert "1\talpha" in tools[0]["result"]["result"]["content"]
     # v52-F5: the admitting rule rides the result — the transcript is the audit.
-    assert tools[0]["result"]["result"]["decided_by"] == "operator-default/operator-root"
+    assert tools[0]["result"]["result"]["decided_by"] == "global/operator-root"
     assert tools[0]["decision"]["reason"] == "filesystem.allow.operator_root"
     assert [d for name, d in events if name == "action"] == []  # no card
     assert events[-1] == ("done", {"state": "complete"})
@@ -462,3 +519,19 @@ def test_deny_rule_still_denies_a_ref_read(config: SupervisorConfig, ollama: Fak
     )
     tools = [d for name, d in events if name == "tool"]
     assert tools[0]["result"]["ok"] is False
+
+
+def test_a_search_cut_at_the_per_file_cap_says_so_and_how_to_see_more(tmp_path: Path) -> None:
+    """L20: rg stopped at 10 matches per file and the result said
+    ``truncated: false`` (11 shown, 15 real). It now says it was cut, names
+    the file, and a search with ``path`` set to that one file lists them all."""
+    from skep.supervisor.serve.fileio import search_files_result
+
+    (tmp_path / "big.txt").write_text("".join(f"name {i}\n" for i in range(14)))
+    (tmp_path / "small.txt").write_text("name\n")
+    result = search_files_result("name", path=str(tmp_path))
+    assert result["truncated"] is True
+    assert "big.txt" in result["note"] and "small.txt" not in result["note"]
+    assert "path" in result["note"]
+    one = search_files_result("name", path=str(tmp_path / "big.txt"))
+    assert len(one["matches"]) == 14 and one["truncated"] is False

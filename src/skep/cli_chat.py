@@ -31,10 +31,25 @@ from urllib.parse import quote
 
 import httpx
 
+from .supervisor.roles import delegation_line
 from .supervisor.serve.auth import TOKEN_FILE
 
 DEFAULT_URL = "http://127.0.0.1:8765"
 TOKEN_HEADER = "X-Skep-Token"
+
+
+def serve_url(home: Path) -> str:
+    """L25: the serve of THIS home — ``$SKEP_SERVE_URL``, else the port
+    ``skep serve`` recorded in ``<home>/serve-port``, else the default."""
+    from .supervisor.netproxy import SERVE_PORT_FILE
+
+    if env := os.environ.get("SKEP_SERVE_URL"):
+        return env
+    with contextlib.suppress(OSError, ValueError):
+        return f"http://127.0.0.1:{int((home / SERVE_PORT_FILE).read_text().strip())}"
+    return DEFAULT_URL
+
+
 PROMPT = "you › "  # noqa: RUF001 - the deliberate Hermes-style prompt glyph
 REPLAY_MESSAGES = 20
 DAEMON_HINT = "skep chat needs the daemon — run: skep serve"
@@ -125,8 +140,7 @@ class ServeClient:
     """Thin httpx wrapper for the daemon's /api surface (header-token auth).
 
     Tests inject an ASGI-backed ``httpx.Client`` (the FastAPI ``TestClient``);
-    the real REPL builds one against ``--url`` / ``SKEP_SERVE_URL`` /
-    ``http://127.0.0.1:8765``.
+    the real REPL builds one against ``--url`` / ``serve_url(home)``.
     """
 
     def __init__(self, base_url: str, token: str, *, client: HttpxClientLike | None = None) -> None:
@@ -245,6 +259,11 @@ COMMANDS: dict[str, dict[str, str]] = {
         "desc": "set the profile-level identity every chat starts with — "
         "identity only, never policy (confirm card)",
     },
+    "role": {
+        "usage": "/role <builder|operator|assistant|custom-role>",
+        "desc": "switch this chat's role — prompt, voice and policy layer together; "
+        "a role only tightens the baseline (confirm card)",
+    },
     "personality": {
         "usage": "/personality <concise|technical|friendly|custom:text|default>",
         "desc": "set this chat's reply style — style only, never policy (confirm card)",
@@ -253,6 +272,11 @@ COMMANDS: dict[str, dict[str, str]] = {
         "usage": "/btw <question…>",
         "desc": "ask a side question WITHOUT touching running work — "
         "read-only turn: no cards, no mutations, runs beside a pending card",
+    },
+    "trust": {
+        "usage": "/trust [private|untrusted]",
+        "desc": "trust this chat again: clear its taint (both bits by default) — "
+        "yours only, never the model's; outside content read later sets it again",
     },
     "steer": {
         "usage": "/steer <task-id> <text…>",
@@ -384,6 +408,13 @@ def _render_card(action: dict[str, Any]) -> None:
         if detail:
             parts.append(f"({detail})")
         lines.append(_c(DIM, "  " + " ".join(part for part in parts if part)))
+    if action.get("why"):
+        lines.append(_c(DIM, f"  why: {action['why']}"))  # first-run O4 (ADR 0056 D6)
+    from .supervisor.serve.channels import card_notes
+
+    card = action.get("card")
+    for note in card_notes(card if isinstance(card, dict) else None, messenger=False):
+        lines.append(f"  {note}")  # P4-2: HIGH and why, the taint, folded items
     _box(lines)
 
 
@@ -403,6 +434,10 @@ def _tool_summary(tool: str, result: Any, url: str = "") -> str:
         if result.get("ok") is True and isinstance(result.get("result"), dict):
             # Mutation payloads ride an {ok, result} wrapper — summarize the meat.
             return _tool_summary(tool, result["result"], url)
+        if result.get("team"):
+            # first-run R3: a team run — the chain down to its workers.
+            chain = " → ".join(str(hop) for hop in result.get("delegation_chain") or [])
+            return f"✓ team {result['team']}: {chain} → {result.get('count', '?')} worker(s)"
         lists = [(key, value) for key, value in result.items() if isinstance(value, list)]
         if len(lists) == 1:
             key, value = lists[0]
@@ -411,7 +446,9 @@ def _tool_summary(tool: str, result: Any, url: str = "") -> str:
         if task_id:
             # v77-F5: the id is clickable where the terminal supports OSC 8.
             tid = str(task_id)
-            return f"✓ run {_link(tid, f'{url}/#/runs/{tid}') if url else tid}"
+            line = f"✓ run {_link(tid, f'{url}/#/runs/{tid}') if url else tid}"
+            delegated = delegation_line(result.get("delegation"))
+            return f"{line}  ({delegated})" if delegated else line
     text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=True)
     return f"✓ ok ({len(text)} chars)"
 
@@ -464,7 +501,8 @@ class _TurnPrinter:
                 reason = str(decision.get("reason") or "")
                 detail = decision.get("detail")
                 where = f" ({detail})" if detail else ""
-                if decision.get("verdict") == "allow":
+                # T3-2: the set AutonomyDecision.allows_execution() runs.
+                if decision.get("verdict") in {"allow", "allow_with_constraints"}:
                     note = f"ran without asking — covered by {reason or 'a standing grant'}{where}"
                 else:
                     note = f"denied — {reason or 'policy'}{where}"
@@ -472,6 +510,8 @@ class _TurnPrinter:
                 risk = (data.get("card") or {}).get("risk")
                 if risk:
                     self._write("    " + _c(DIM, f"risk: {risk}") + "\n")
+                if data.get("why"):
+                    self._write("    " + _c(DIM, f"why: {data['why']}") + "\n")
             elif data.get("kind") == "read":
                 self._write("    " + _c(DIM, "ran in-turn — read tool") + "\n")
         elif event == "turn_status":
@@ -485,6 +525,12 @@ class _TurnPrinter:
         elif event == "action":
             self._break_line()
             self.actions.append(data)
+        elif event == "tally":
+            # first-run O4 (ADR 0056 D6): the per-turn tally, and once the offer.
+            self._break_line()
+            for key in ("line", "offer"):
+                if data.get(key):
+                    self._write(_c(DIM, str(data[key])) + "\n")
         elif event == "error":
             self._break_line()
             self._write(_c(RED, f"error: {data.get('detail', '')}") + "\n")
@@ -640,6 +686,17 @@ class ChatRepl:
                     )
                 )
                 return
+            if (action.get("card") or {}).get("tier") == "high":
+                # P4-2 (ADR 0059 D6): a HIGH card is confirmed by name, never
+                # by a flag given before it existed.
+                print(
+                    _c(
+                        DIM,
+                        f"--yes does not cover a HIGH card ({action.get('tool', '?')}) — "
+                        f"left pending ({action_id}): /approve {action_id} confirms it by name",
+                    )
+                )
+                return
             # v81-F12: the operator consented up front (--yes); no prompt.
             print(_c(DIM, f"--yes: confirming card {action_id}"))
             self._apply_card_verb(action, "confirm")
@@ -667,8 +724,9 @@ class ChatRepl:
         action_id = str(action.get("action_id"))
         # v63-F1: a card found by cross-chat lookup resolves on ITS chat.
         chat_id = str(action.get("chat_id") or self.chat_id)
-        if action.get("source") == "operator":
+        if action.get("source") in ("operator", "gate"):
             # Deck commands resolve on the commands endpoints — JSON, no stream.
+            # ES-F5 (B98): so do gate mirrors — their Deny denies the review.
             result = self.client.post(f"/api/chats/{chat_id}/commands/{action_id}/{verb}")
             _print_command_result(result)
             if result.get("ok"):
@@ -851,6 +909,9 @@ class ChatRepl:
                 summary = str(run.get("summary") or "")[:60]
                 task_ref = self._task_ref(str(run.get("task_id", "?")))
                 print(f"{task_ref}  {run.get('state', '?'):<18}  {summary}")
+                delegated = delegation_line((run.get("dispatch_decision") or {}).get("delegation"))
+                if delegated:
+                    print(_c(DIM, f"  {delegated}"))
             return
         if name == "approvals":
             approvals = self.client.get("/api/approvals")["approvals"]
@@ -887,6 +948,19 @@ class ChatRepl:
             if len(args) > 1:
                 body["branch"] = args[1]
             self._propose_command("land_run", body)
+            return
+        if name == "trust":
+            if any(bit not in ("private", "untrusted") for bit in args):
+                print(usage)
+                return
+            if not sys.stdin.isatty():
+                # `echo /trust | skep chat` is a script, not the operator (W20 review)
+                print(_c(RED, "/trust needs you at a terminal; it never runs from a pipe"))
+                return
+            # W20: typed by the operator — the decision itself, no card.
+            trusted = self.client.post(f"/api/chats/{self.chat_id}/trust", {"bits": args})
+            cleared = ", ".join(sorted(trusted.get("cleared") or {})) or "nothing"
+            print(_c(DIM, f"trusted again — cleared: {cleared}"))
             return
         if name == "steer":
             if len(args) < 2:
@@ -1007,6 +1081,12 @@ class ChatRepl:
                 print(usage)
                 return
             self._propose_command("set_persona", {"text": " ".join(args)})
+            return
+        if name == "role":
+            if len(args) != 1:
+                print(usage)
+                return
+            self._propose_command("set_role", {"name": args[0]})
             return
         if name == "personality":
             if not args:
@@ -1207,6 +1287,7 @@ def _run_oneshot(
     continue_latest: bool = False,
     url: str = DEFAULT_URL,
     yes: bool = False,
+    role: str | None = None,
 ) -> int:
     """The scripting face: one message, stream the reply, exit 0.
 
@@ -1224,7 +1305,9 @@ def _run_oneshot(
     exchange keeps ONE transcript instead of re-asking from scratch. The
     flagless default stays a fresh chat per invocation — right for cron.
     """
-    chat, _resumed = _resolve_chat(serve, chat_id=chat_id, continue_latest=continue_latest)
+    chat, _resumed = _resolve_chat(
+        serve, chat_id=chat_id, continue_latest=continue_latest, role=role
+    )
     repl = ChatRepl(serve, chat, show_thinking=show_thinking, url=url)
     repl.auto_confirm = yes
     # v48-F5: /commands are deck, never model — the same interception as the
@@ -1236,8 +1319,29 @@ def _run_oneshot(
     return 0
 
 
+def _pick_role(client: ServeClient) -> str | None:
+    """R1 (ADR 0055 D3): a new interactive chat opens with a role picker,
+    Enter taking the default (`skep role use`, else onboard's). Off a TTY the
+    server applies the default — None."""
+    if not _tty() or not sys.stdin.isatty():
+        return None
+    view = client.get("/api/roles")
+    names = [str(role["name"]) for role in view["roles"]]
+    default = view.get("default") or "none"
+    while True:
+        answer = input(f"role ({' / '.join(names)}) [{default}]: ").strip()
+        if not answer or answer in names:
+            return answer or None
+        print(_c(DIM, f"no role {answer!r} — pick one of {', '.join(names)}"))
+
+
 def _resolve_chat(
-    client: ServeClient, *, chat_id: str | None, continue_latest: bool
+    client: ServeClient,
+    *,
+    chat_id: str | None,
+    continue_latest: bool,
+    role: str | None = None,
+    pick_role: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     """(chat record, is_resumed) for the requested session."""
     if chat_id:
@@ -1249,7 +1353,11 @@ def _resolve_chat(
             return dict(chats[0]), True
         print(_c(DIM, "no chats yet — starting a new one"))
     title = f"terminal {datetime.now():%Y-%m-%d %H:%M}"
-    return dict(client.post("/api/chats", {"title": title, "source": "terminal"})), False
+    body: dict[str, Any] = {"title": title, "source": "terminal"}
+    chosen = role or (_pick_role(client) if pick_role else None)
+    if chosen:
+        body["role"] = chosen
+    return dict(client.post("/api/chats", body)), False
 
 
 def run_chat(
@@ -1262,6 +1370,7 @@ def run_chat(
     oneshot: str | None = None,
     yes: bool = False,
     client: HttpxClientLike | None = None,
+    role: str | None = None,
 ) -> int:
     token_path = home / TOKEN_FILE
     if not token_path.is_file():
@@ -1278,10 +1387,15 @@ def run_chat(
                 continue_latest=continue_latest,
                 url=url,
                 yes=yes,
+                role=role,
             )
         _print_banner(serve)
-        chat, resumed = _resolve_chat(serve, chat_id=chat_id, continue_latest=continue_latest)
+        chat, resumed = _resolve_chat(
+            serve, chat_id=chat_id, continue_latest=continue_latest, role=role, pick_role=True
+        )
         repl = ChatRepl(serve, chat, show_thinking=show_thinking, url=url)
+        if not resumed and chat.get("role"):
+            print(_c(DIM, f"this chat runs in role:{chat['role']} — /role switches it"))
         if resumed:
             # v77-F5: one summary line instead of twenty messages of scroll —
             # what was withheld and the command that shows it are both named.
@@ -1318,10 +1432,11 @@ def cmd_chat(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     return run_chat(
         home=config.home,
-        url=args.url or os.environ.get("SKEP_SERVE_URL") or DEFAULT_URL,
+        url=args.url or serve_url(config.home),
         chat_id=args.chat_id,
         continue_latest=args.continue_latest,
         show_thinking=args.thinking,
         oneshot=args.oneshot,
         yes=bool(getattr(args, "yes", False)),
+        role=args.role,
     )

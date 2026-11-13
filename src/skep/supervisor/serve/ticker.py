@@ -2,9 +2,10 @@
 
 ``skep tick`` is cron-shaped, and cron does not translate into a container.
 The ticker is the same ``run_due`` call on a timer thread owned by the serve
-process: killable on shutdown, never two ticks concurrently (one thread, one
-sequential loop), and it re-reads its interval every cycle so a policy edit
-takes effect without a restart.
+process: killable on shutdown, never two schedule passes concurrently, and it
+re-reads its interval every cycle so a policy edit takes effect without a
+restart. ES B27: the ticker thread itself only expires cards; the schedule
+pass (model turns, scripts, worker runs) runs on its own thread.
 """
 
 from __future__ import annotations
@@ -17,7 +18,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..providers import ProviderProfile
-from ..scheduler import run_due, run_provider_health_checks
+from ..scheduler import (
+    kill_running_scripts,
+    reconcile_interrupted_scripts,
+    run_due,
+    run_provider_health_checks,
+)
 from ..store import RunStore
 from .settings import (
     CARD_TIMEOUT_SECONDS,
@@ -74,6 +80,10 @@ class Ticker(threading.Thread):
         # pushes. In-memory on purpose: a restart re-alarms only while the
         # provider is STILL down — a fresh reminder, not a duplicate.
         self._provider_ok: dict[str, bool] = {}
+        # first-run L1: pids last seen blocked, for once-per-transition pushes.
+        self._presence_blocked: set[int] = set()
+        # ES B27: the in-flight schedule pass (see run()).
+        self._pass: threading.Thread | None = None
 
     def _interval(self) -> float:
         value = self._store.get_setting(TICKER_INTERVAL_SECONDS)
@@ -146,6 +156,14 @@ class Ticker(threading.Thread):
                 tool_name=card.tool,
                 content=json.dumps(payload, ensure_ascii=True),
             )
+            for item in card.fold_items()[1:]:  # P4-2: a folded card denies every item
+                self._store.add_chat_message(
+                    card.chat_id,
+                    role="tool",
+                    tool_name=card.tool,
+                    tool_call_id=item.get("tool_call_id"),
+                    content=json.dumps(payload, ensure_ascii=True),
+                )
             self._notify(
                 card.chat_id,
                 f"⏰ card auto-denied: {card.tool} — timed out after {timeout}s",
@@ -193,6 +211,31 @@ class Ticker(threading.Thread):
         else:  # no messenger has ever bound a chat — the durable note is the record
             self._store.create_note(text, actor="provider-health")
 
+    def _push_presence_blocked(self) -> None:
+        """first-run L1: an agent turning ``blocked`` is "come to me" news, so
+        it rides the gate's channel — a chat line plus the outbound push with
+        ``kind='action_needed'`` (what notification_level=approvals lets
+        through) — once per transition, never per tick (I8). A governed
+        agent's line lands in the chat that dispatched its run; any other in
+        the newest messenger chat. No chat to speak in → the presence row is
+        the record."""
+        from ..agent_presence import blocked_line, presence_view
+
+        rows = presence_view(self._store, self._holder.current.audit_dir)["agents"]
+        blocked = {row["pid"]: row for row in rows if row["state"] == "blocked"}
+        for pid, row in blocked.items():
+            if pid in self._presence_blocked:
+                continue
+            chat_id = (
+                self._store.chat_for_task(row["task_id"]) if row["task_id"] else None
+            ) or self._store.latest_channel_chat()
+            if chat_id is None:
+                continue
+            text = blocked_line(row)
+            self._store.add_chat_message(chat_id, role="assistant", content=text)
+            self._notify(chat_id, text, kind="action_needed")
+        self._presence_blocked = set(blocked)
+
     def _prompt_turn(self) -> Callable[..., tuple[str, bool]] | None:
         """v83-F5: the run_due hook for 'prompt' schedules — a read-only Queen
         turn in the bound chat. Lazy import keeps the core scheduler
@@ -218,73 +261,107 @@ class Ticker(threading.Thread):
         return _turn
 
     def run(self) -> None:
+        try:
+            # ES B120: a script the last shutdown cut off is recorded, once.
+            for name in reconcile_interrupted_scripts(self._store):
+                logger.warning("schedule %r was interrupted mid-script by a restart", name)
+        except Exception:
+            logger.exception("interrupted-script reconcile failed")
         # wait() doubles as the kill switch: it returns True the moment stop()
         # sets the event, so shutdown never waits out a full interval.
         while not self._stop_event.wait(self._interval()):
             try:
-                # v54-F1: stale-card sweep before schedules; a broken sweep
-                # must not break ticking.
+                # v54-F1: stale-card sweep. ES B27: it is the ONLY job on this
+                # thread — I6's timeout default must not wait on a model turn,
+                # a script or a worker run, so everything else rides the
+                # schedule pass below.
                 self._expire_cards()
             except Exception:
                 logger.exception("card timeout sweep failed")
-            try:
-                # v59-F6: provider health rides the tick (throttled inside).
-                self._probe_provider_health()
-            except Exception:
-                logger.exception("provider health sweep failed")
-            try:
-                # v71-F5: observations expire on the tick — the fluid memory
-                # lane earns its no-proposal write by never outliving its TTL.
-                from ..memory import OBSERVATION_TTL_DAYS
-
-                expired = self._store.expire_observations(ttl_days=OBSERVATION_TTL_DAYS)
-                if expired:
-                    logger.info("expired %d observation(s)", len(expired))
-            except Exception:
-                logger.exception("observation TTL sweep failed")
-            try:
-                # v72-F4: the harvest — observation-shaped chat lines and run
-                # terminals feed the lane the TTL sweep above empties.
-                from ..observe import harvest_observations
-
-                for harvested in harvest_observations(self._store):
-                    logger.info("harvested observation: %s", harvested)
-            except Exception:
-                logger.exception("observation harvest sweep failed")
-            try:
-                # v107-F1: preserved worktrees (failed/unconfirmed runs) are
-                # collected once their TTL passes — kept trees are a warm
-                # workspace and diagnosis evidence, never tenure.
-                from ..dispatch import sweep_expired_preserved_worktrees
-
-                swept = sweep_expired_preserved_worktrees(self._store, self._holder.current)
-                if swept:
-                    logger.info("swept %d expired preserved worktree(s)", swept)
-            except Exception:
-                logger.exception("preserved worktree TTL sweep failed")
-            try:
-                results = run_due(
-                    store=self._store,
-                    config=self._holder.current,
-                    notify=self._notify,
-                    prompt_turn=self._prompt_turn(),
+            # ES B27: at most one schedule pass in flight; a slow one makes the
+            # next tick skip it, never queue behind it. Each job inside has its
+            # own ceiling: scripts SCRIPT_TIMEOUT_SECONDS, prompt turns
+            # PROMPT_TICK_TIMEOUT_SECONDS, worker runs their budget's wall clock.
+            if self._pass is None or not self._pass.is_alive():
+                self._pass = threading.Thread(
+                    target=self._schedule_pass, name="serve-schedules", daemon=True
                 )
-            except Exception:  # one broken tick must never kill the daemon
-                logger.exception("scheduler tick failed")
-                continue
-            for result in results:
-                logger.info("tick ran %r: %s (%s)", result.name, result.task_id, result.state)
-            try:
-                # v53-F1: the conversation-skill observer rides the tick —
-                # opt-in (checked inside), heuristic-only, never in the
-                # request path. A broken sweep must not break ticking.
-                from ..observe import observe_conversations
+                self._pass.start()
 
-                for draft in observe_conversations(self._store):
-                    logger.info("observer proposed skill draft %r", draft)
-            except Exception:
-                logger.exception("conversation-skill sweep failed")
+    def _schedule_pass(self) -> None:
+        try:
+            # v59-F6: provider health rides the tick (throttled inside).
+            self._probe_provider_health()
+        except Exception:
+            logger.exception("provider health sweep failed")
+        try:
+            self._push_presence_blocked()
+        except Exception:
+            logger.exception("agent presence sweep failed")
+        try:
+            # v71-F5: observations expire on the tick — the fluid memory
+            # lane earns its no-proposal write by never outliving its TTL.
+            from ..memory import OBSERVATION_TTL_DAYS
+
+            expired = self._store.expire_observations(ttl_days=OBSERVATION_TTL_DAYS)
+            if expired:
+                logger.info("expired %d observation(s)", len(expired))
+        except Exception:
+            logger.exception("observation TTL sweep failed")
+        try:
+            # v72-F4: the harvest — observation-shaped chat lines and run
+            # terminals feed the lane the TTL sweep above empties.
+            from ..observe import harvest_observations
+
+            for harvested in harvest_observations(self._store):
+                logger.info("harvested observation: %s", harvested)
+        except Exception:
+            logger.exception("observation harvest sweep failed")
+        try:
+            # v107-F1: preserved worktrees (failed/unconfirmed runs) are
+            # collected once their TTL passes — kept trees are a warm
+            # workspace and diagnosis evidence, never tenure.
+            from ..dispatch import sweep_expired_preserved_worktrees
+
+            swept = sweep_expired_preserved_worktrees(self._store, self._holder.current)
+            if swept:
+                logger.info("swept %d expired preserved worktree(s)", swept)
+        except Exception:
+            logger.exception("preserved worktree TTL sweep failed")
+        try:
+            results = run_due(
+                store=self._store,
+                config=self._holder.current,
+                notify=self._notify,
+                prompt_turn=self._prompt_turn(),
+            )
+        except Exception:  # one broken tick must never kill the daemon
+            logger.exception("scheduler tick failed")
+            return
+        for result in results:
+            logger.info("tick ran %r: %s (%s)", result.name, result.task_id, result.state)
+        try:
+            # v53-F1: the conversation-skill observer rides the tick —
+            # opt-in (checked inside), heuristic-only, never in the
+            # request path. A broken sweep must not break ticking.
+            from ..observe import observe_conversations
+
+            for draft in observe_conversations(self._store):
+                logger.info("observer proposed skill draft %r", draft)
+        except Exception:
+            logger.exception("conversation-skill sweep failed")
+
+    def halt(self) -> None:
+        """ES B119: stop ticking now, without waiting — safe from a signal
+        handler. ES B120: no script outlives its supervisor."""
+        self._stop_event.set()
+        kill_running_scripts()
 
     def stop(self) -> None:
-        self._stop_event.set()
+        self.halt()
         self.join(timeout=5.0)
+        # ES B119: the store closes right after this — give an in-flight pass
+        # a bounded chance to finish (scripts were just killed; a prompt turn
+        # is bounded by PROMPT_TICK_TIMEOUT_SECONDS, which we do not wait out).
+        if self._pass is not None:
+            self._pass.join(timeout=5.0)

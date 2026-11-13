@@ -89,9 +89,8 @@ def write_boot_banner(log_path: Path, banner: str) -> None:
 def cmd_serve(args: argparse.Namespace) -> int:
     # Lazy imports: registering the parser must not pay the FastAPI import cost
     # for every other CLI invocation.
-    import uvicorn
-
     from ..cli_cmds import build_config
+    from ..netproxy import record_serve_port
     from .app import create_app
     from .auth import ensure_token
 
@@ -111,14 +110,40 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"  access token: {ensure_token(config.home)}", flush=True)
     log_path = config.home.parent / SERVE_LOG_FILE
     write_boot_banner(log_path, banner)
-    uvicorn.run(
+    # ES-F6 (B05) + #58 ES-F4: every run's proxy and every Seatbelt profile for
+    # this home refuse this port on loopback (both read <home>/serve-port).
+    record_serve_port(config.home, args.port)
+    server = make_server(
         app,
         host=args.host,
         port=args.port,
         log_level="info",
         log_config=serve_log_config(log_path),
     )
-    return 0
+    server.run()
+    return 0 if server.started else 3  # uvicorn.run's startup-failure code
+
+
+# ES B119: how long shutdown waits for in-flight requests before uvicorn
+# cancels them. A hung chat turn held SIGTERM for 139 s; streaming turns
+# resume from the store, so a short grace loses nothing durable.
+SHUTDOWN_GRACE_SECONDS = 10
+
+
+def make_server(app: Any, **config: Any) -> Any:
+    """``uvicorn.run`` with two shutdown changes (ES B119): the FIRST signal
+    halts the ticker before uvicorn drains requests (it kept firing schedules
+    through the drain), and the drain is bounded by SHUTDOWN_GRACE_SECONDS."""
+    import uvicorn
+
+    class _Server(uvicorn.Server):
+        def handle_exit(self, sig: int, frame: Any) -> None:
+            ticker = getattr(app.state, "ticker", None)
+            if ticker is not None:
+                ticker.halt()
+            super().handle_exit(sig, frame)
+
+    return _Server(uvicorn.Config(app, timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS, **config))
 
 
 def register_serve_command(

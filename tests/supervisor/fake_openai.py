@@ -12,6 +12,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from tests.supervisor.strict_wire import check, openai_chat_errors
+
 
 class FakeOpenAI:
     def __init__(self, *, api_key: str | None = None, models: list[str] | None = None) -> None:
@@ -19,6 +21,8 @@ class FakeOpenAI:
         self.models = models if models is not None else ["gpt-oss", "qwen3"]
         self.chat_scripts: list[list[dict[str, Any]]] = []
         self.requests: list[dict[str, Any]] = []
+        # ES-F1 (B43): refuse what the real API refuses (strict_wire).
+        self.strict = True
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
@@ -43,13 +47,27 @@ class FakeOpenAI:
         chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
         self.chat_scripts.append(chunks)
 
+    def script_stream_error(self, message: str, *, after: str = "") -> None:
+        """ES-F14 (B90): a failure after the 200 rides the SSE stream as a
+        ``data: {"error": {...}}`` line (the OpenAI/vLLM/OpenRouter shape)."""
+        chunks: list[dict[str, Any]] = []
+        if after:
+            chunks.append({"choices": [{"delta": {"content": after}}]})
+        chunks.append({"error": {"message": message, "type": "server_error"}})
+        self.chat_scripts.append(chunks)
+
     def script_drop(self) -> None:
         """v59-F4: the next chat call sends a partial body then slams the
         connection — the client sees a transport-class incomplete read."""
         self.chat_scripts.append([{"__drop__": True}])
 
-    def script_tool_call(self, name: str, arguments: dict[str, Any]) -> None:
-        encoded = json.dumps(arguments, separators=(",", ":"))
+    def script_tool_call(self, name: str, arguments: dict[str, Any] | str) -> None:
+        # ES-F8: a str is sent verbatim — how a model's malformed JSON arrives.
+        encoded = (
+            arguments
+            if isinstance(arguments, str)
+            else json.dumps(arguments, separators=(",", ":"))
+        )
         split = max(1, len(encoded) // 2)
         self.chat_scripts.append(
             [
@@ -137,6 +155,15 @@ class FakeOpenAI:
                 if not self._authorized():
                     self._send(401, b'{"error": "unauthorized"}')
                 elif self.path == "/v1/chat/completions":
+                    problem = fake.strict and check("openai", openai_chat_errors(body))
+                    if problem:
+                        self._send(
+                            400,
+                            json.dumps(
+                                {"error": {"message": problem, "type": "invalid_request_error"}}
+                            ).encode(),
+                        )
+                        return
                     if not fake.chat_scripts:
                         self._send(500, b'{"error": "no scripted reply left"}')
                         return

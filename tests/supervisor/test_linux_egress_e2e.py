@@ -66,6 +66,7 @@ def _run_in_sandbox(
         profile = sandbox.write_profile(
             work / "sandbox.profile",
             workspace=work,
+            skep_home=Path("/nonexistent/skep-home"),
             network=network,
             proxy_port=proxy.port if network.is_domain_list else None,
             unix_socket_path=proxy.unix_socket_path if network.is_domain_list else None,
@@ -103,9 +104,11 @@ def test_allowlisted_host_reachable_denied_host_403_direct_egress_blocked(origin
                 return opener.open(f"http://{{host}}:{origin}/", timeout=8)
             # allowed origin answers
             print("ALLOWED", via_proxy("localhost").read().decode())
-            # denied origin -> proxy 403
+            # v115-F9: loopback is not egress — the proxy admits 127.0.0.1 too
+            print("LOOPBACK", via_proxy("127.0.0.1").read().decode())
+            # a host outside the allowlist -> proxy 403, decided on the name before any DNS
             try:
-                via_proxy("127.0.0.1")
+                via_proxy("denied.example")
                 print("DENIED-REACHED")
             except urllib.error.HTTPError as e:
                 print("DENIED-STATUS", e.code)
@@ -120,6 +123,7 @@ def test_allowlisted_host_reachable_denied_host_403_direct_egress_blocked(origin
         code, out = _run_in_sandbox(sandbox.NetworkPolicy(allow=("localhost",)), proxy, probe)
         assert code == 0, out
         assert "ALLOWED ORIGIN-OK" in out
+        assert "LOOPBACK ORIGIN-OK" in out
         assert "DENIED-STATUS 403" in out
         assert "DIRECT-BLOCKED" in out
         assert "DIRECT-REACHED" not in out

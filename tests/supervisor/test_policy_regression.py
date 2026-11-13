@@ -121,15 +121,20 @@ def _check_shell_guard(fixture: dict[str, Any]) -> None:
 
 
 def _check_network_merge(fixture: dict[str, Any], tmp_path: Path) -> None:
-    """v19-F2/F11: the configured provider host is merged into a run's network
-    allowlist on every creation path (for the castes that declare
-    ``needs_provider`` — v108-F1), driven by the real ``resolve_run_policy``."""
+    """v19-F2/F11 → ADR 0059 D3: the configured provider reaches a run on every
+    creation path (for the castes that declare ``needs_provider`` — v108-F1)
+    as ``provider_hosts``, never merged into ``network``; driven by the real
+    ``resolve_run_policy`` reading the registry."""
+    from skep.supervisor.serve.llm import LLM_BASE_URL
+
     config = SupervisorConfig(home=tmp_path / "home", worker_command=("false",))
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     store = RunStore(config.db_path)
     try:
         for case in fixture["cases"]:
+            for host in case.get("provider_hosts", ()):
+                store.set_setting(LLM_BASE_URL, f"https://{host}")
             resolved = resolve_run_policy(
                 store=store,
                 config=config,
@@ -142,9 +147,9 @@ def _check_network_merge(fixture: dict[str, Any], tmp_path: Path) -> None:
                 max_actions=None,
                 max_provider_calls=None,
                 execution_mode=fixture.get("execution_mode", "sandbox"),
-                extra_network_hosts=tuple(case.get("provider_hosts", ())),
             )
             assert resolved.permissions.network == case["network_out"], case
+            assert resolved.permissions.provider_hosts == case["provider_hosts_out"], case
     finally:
         store.close()
 

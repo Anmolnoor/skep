@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .profile import PersonalProfile, load_profile, profile_path
+from .supervisor.sandbox import SOCKET_GAP
 from .supervisor.sandbox import availability as sandbox_availability
 
 _STALE_PENDING_DAYS = 7
@@ -51,6 +52,12 @@ def build_status(
             + _repo_registry_advisories(home)
             + _stale_store_advisories(home)
             + _model_truth_advisories(home)
+            + _baseline_advisories(home)
+            + _policy_v3_advisories(home)
+            + _legacy_host_advisories(home)
+            + _role_less_chat_advisories(home)
+            + _policy_migration_advisories(home)
+            + _channel_user_advisories(home)
         )
         payload["stale_pending"] = stale_pending
         return payload
@@ -80,6 +87,12 @@ def build_status(
         + _repo_registry_advisories(home)
         + _stale_store_advisories(home)
         + _model_truth_advisories(home)
+        + _baseline_advisories(home)
+        + _policy_v3_advisories(home)
+        + _legacy_host_advisories(home)
+        + _role_less_chat_advisories(home)
+        + _policy_migration_advisories(home)
+        + _channel_user_advisories(home)
     )
     payload["stale_pending"] = stale_pending
     return payload
@@ -214,6 +227,29 @@ def _auto_approve_advisories(home: Path) -> list[str]:
     return [_AUTO_APPROVE_DEPRECATION] if enabled else []
 
 
+def _channel_user_advisories(home: Path) -> list[str]:
+    """ES (B114): an enabled channel with no ``allowed_users`` admits nobody —
+    channels authorize a PERSON now, so say why it went quiet."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        configs = store.list_channel_configs()
+    finally:
+        store.close()
+    return [
+        f"channel {config.channel} is enabled with no allowed_users — it ignores every "
+        "message and button (fail closed). List the people who may drive skep: "
+        f'PUT /api/channels/{config.channel} {{"allowed_users": ["<user id>"]}} '
+        "or the web UI's channel panel."
+        for config in configs
+        if config.enabled and not config.allowed_users
+    ]
+
+
 # v111-F5: store files from retired layouts. Each migration left its sqlite
 # behind silently; two independent investigations (doctor's own memory check
 # pre-F2, and the 2026-08-12 forensics session) opened a dead store first.
@@ -269,6 +305,149 @@ def _stale_store_advisories(home: Path) -> list[str]:
         f"only live store is {home / 'supervisor' / 'supervisor.sqlite3'}; "
         "archive or delete the rest."
     ]
+
+
+NO_BASELINE_WARNING = (
+    "no baseline approved — run skep policy approve --template <name> or skep onboard"
+)
+
+
+def _baseline_advisories(home: Path) -> list[str]:
+    """first-run O5 (ADR 0056 D2): a home the zero state does not bind (it
+    predates the baseline) keeps deciding as before — say so in one line."""
+    from .supervisor.policy_baseline import NoBaseline, baseline_status, relock_note, verify
+
+    if not isinstance(verify(home / "supervisor"), NoBaseline):
+        # ES-F2 (B51): a re-lock from a non-shipped layer (a file, or
+        # baseline.json edited in place) is a change event doctor names.
+        relock = baseline_status(home / "supervisor")["relock"]
+        source = str((relock or {}).get("source") or "")
+        if relock and not source.startswith(("template:", "onboard:")):
+            return [f"baseline re-locked {relock.get('approved_at')}{relock_note(relock)}"]
+        return []
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []  # opening a store here would create (and seed) a fresh home
+    from .supervisor.policy_layers import zero_state_home
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        return [] if zero_state_home(store) else [NO_BASELINE_WARNING]
+    finally:
+        store.close()
+
+
+def _policy_v3_advisories(home: Path) -> list[str]:
+    """ADR 0059 P3-2: the two verdicts an already-onboarded home sees change
+    — a legacy ``filesystem read *`` dropped from the baseline (B01-upgraded)
+    and a ``skep setup`` document whose allows stopped granting under the
+    locked baseline (decision #2, B30). Silent otherwise."""
+    from .supervisor.policy_baseline import Ok, verify
+    from .supervisor.policy_layers import legacy_fs_read_dropped
+
+    state = verify(home / "supervisor")
+    if not isinstance(state, Ok):
+        return []
+    lines: list[str] = []
+    template = legacy_fs_read_dropped(state)
+    if template is not None:
+        lines.append(
+            f"baseline: its legacy `filesystem read *` allow no longer applies — Queen "
+            f"reads outside the operator roots card; `skep policy approve --reapprove "
+            f"--template {template}` adopts the shipped file"
+        )
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return lines
+    from .supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY, document_from_settings
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    finally:
+        store.close()
+    allows = sum(len(scope.allow) for scope in document.scopes) if document else 0
+    if document is not None and allows:
+        lines.append(
+            f"policy document (skep setup --template {document.template or '?'}): "
+            f"{allows} allow rule(s) no longer grant under the locked "
+            f"{state.layer.template} baseline — only its denies and asks bind for "
+            "read_file, run_shell and `skep policy decide`/`why`; approve what you "
+            "still want into the baseline (skep policy approve --reapprove)"
+        )
+    return lines
+
+
+def _legacy_host_advisories(home: Path) -> list[str]:
+    """ADR 0059 P3-4 (B74): a read_url grant from before P3-4 covers its
+    whole host (any path, any query) — kept so operators are not broken,
+    named here so they can revoke it; a new keep covers one URL directory."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        document_from_settings,
+        is_legacy_host,
+    )
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    finally:
+        store.close()
+    hosts = [r.pattern for r in (document.learned if document else []) if is_legacy_host(r)]
+    if not hosts:
+        return []
+    return [
+        f"{len(hosts)} legacy-host fetch grant(s) cover every path and query of "
+        f"{', '.join(hosts)} — revoke on the Policies page (DELETE /api/policy/rules/<id>); "
+        "a new read_url keep covers one URL directory"
+    ]
+
+
+def _role_less_chat_advisories(home: Path) -> list[str]:
+    """ADR 0059 P3-6 (B55, decision #4): every new chat records a role; a chat
+    made before that has none stored and runs as ``assistant`` (the row is not
+    rewritten) — named here, with the one command that gives it another."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        role_less = [chat for chat in store.list_chats() if not chat.role]
+    finally:
+        store.close()
+    if not role_less:
+        return []
+    return [
+        f"{len(role_less)} chat(s) have no stored role (made before every chat recorded one) "
+        "and run as assistant: no dispatch, quick edit, run code, research or forge — to give "
+        f"one back, `skep role use builder --chat {role_less[0].chat_id}` or /role builder"
+    ]
+
+
+def _policy_migration_advisories(home: Path) -> list[str]:
+    """ADR 0059 P3-5: ``skep policy migrate --dry-run``'s one line — logged
+    decisions that decide differently now, §5.4 combinations the home already
+    holds, the B31 upgrade. Silent when there is none."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.policy_write import holder_for, migration_line, migration_report
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        line = migration_line(migration_report(holder_for(store), store))
+    finally:
+        store.close()
+    return [] if line is None else [line]
 
 
 def _browse_advisories(home: Path) -> list[str]:
@@ -688,9 +867,10 @@ def _sandbox_check() -> dict[str, Any]:
     probe = sandbox_availability()
     if probe.usable:
         backend = probe.backend or "native"
+        gap = f" {SOCKET_GAP[backend]}" if backend in SOCKET_GAP else ""
         return {
             "status": "ready",
-            "detail": f"{backend} backend is usable.",
+            "detail": f"{backend} backend is usable.{gap}",
             "backend": probe.backend,
         }
 

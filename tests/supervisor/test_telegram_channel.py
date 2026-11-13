@@ -13,14 +13,22 @@ from skep.supervisor.serve.channels.telegram import (
     poll_updates,
 )
 
-_CONFIG = ChannelConfig(channel="telegram", enabled=True, allowed_identities=("42",))
+_CONFIG = ChannelConfig(
+    channel="telegram", enabled=True, allowed_identities=("42",), allowed_users=("42",)
+)
 _CONFIRM_CONFIG = ChannelConfig(
-    channel="telegram", enabled=True, channel_can_confirm=True, allowed_identities=("42",)
+    channel="telegram",
+    enabled=True,
+    channel_can_confirm=True,
+    allowed_identities=("42",),
+    allowed_users=("42",),
 )
 
 
 def test_allowlisted_update_normalizes() -> None:
-    result = normalize_inbound({"message": {"chat": {"id": 42}, "text": "audit my repo"}}, _CONFIG)
+    result = normalize_inbound(
+        {"message": {"chat": {"id": 42}, "from": {"id": 42}, "text": "audit my repo"}}, _CONFIG
+    )
     assert result.message is not None
     assert result.message.session_key == "telegram:42"
 
@@ -34,7 +42,7 @@ def test_unknown_chat_fails_closed() -> None:
 def test_poll_drops_unlisted_updates() -> None:
     routed = poll_updates(
         [
-            {"message": {"chat": {"id": 42}, "text": "ok"}},
+            {"message": {"chat": {"id": 42}, "from": {"id": 42}, "text": "ok"}},
             {"message": {"chat": {"id": 99}, "text": "blocked"}},
             {"edited_message": {"chat": {"id": 42}}},  # not a message -> dropped
         ],

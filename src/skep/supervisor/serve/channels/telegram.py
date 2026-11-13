@@ -12,7 +12,8 @@ getUpdates/send in tests; no live Telegram.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from . import (
     ChannelConfig,
@@ -24,6 +25,7 @@ from . import (
     channel_confirmation_decision,
     identity_allowlisted,
     render_confirm_card,
+    user_allowlisted,
 )
 
 CHANNEL = "telegram"
@@ -45,6 +47,14 @@ def normalize_inbound(update: dict[str, object], config: ChannelConfig) -> Norma
             "channel.reject.identity_not_allowlisted",
             audit={"channel": CHANNEL, "identity": chat_id},
         )
+    sender = message.get("from")
+    from_id = str(sender.get("id") or "") if isinstance(sender, dict) else ""
+    if not user_allowlisted(from_id, config):
+        return NormalizedInbound(
+            None,
+            "channel.reject.user_not_allowlisted",
+            audit={"channel": CHANNEL, "identity": chat_id, "user": from_id},
+        )
     return NormalizedInbound(
         ChannelMessage(
             channel=CHANNEL, identity=identity, text=text, session_key=f"{CHANNEL}:{chat_id}"
@@ -65,14 +75,20 @@ def poll_updates(
     return routed
 
 
-def confirmation_text(action_class: str, commands: Sequence[Sequence[str]], web_ui_url: str) -> str:
+def confirmation_text(
+    action_class: str,
+    commands: Sequence[Sequence[str]],
+    web_ui_url: str,
+    card: Mapping[str, Any] | None = None,
+) -> str:
     """The web-UI pointer text — the v16 default, and the fallback whenever the
     shared gate would not allow an inline verdict."""
-    card = render_confirm_card(action_class, commands)
-    lines = "\n".join(f"  {line}" for line in card.commands)
+    view = render_confirm_card(action_class, commands, card)
     body = f"Action '{action_class}' needs confirmation."
-    if lines:
-        body += f"\nCommands:\n{lines}"
+    if view.commands:
+        body += "\nCommands:\n" + "\n".join(f"  {line}" for line in view.commands)
+    if view.notes:  # P4-2: HIGH and why, the taint, folded items
+        body += "\n" + "\n".join(view.notes)
     return f"{body}\nOpen the skep web UI to review and confirm: {web_ui_url}"
 
 
@@ -81,17 +97,20 @@ def confirmation_card(
     commands: Sequence[Sequence[str]],
     config: ChannelConfig,
     web_ui_url: str,
+    card: Mapping[str, Any] | None = None,
 ) -> tuple[str, dict[str, object] | None]:
     """v41-F2: the confirm-card text and, only when the shared gate could allow
     an inline verdict, a Confirm/Deny inline keyboard. Web-UI-only action
     classes and channels without ``channel_can_confirm`` keep the v16 text."""
-    card = render_confirm_card(action_class, commands)
-    if card.web_ui_only or not config.channel_can_confirm:
-        return confirmation_text(action_class, commands, web_ui_url), None
-    lines = "\n".join(f"  {line}" for line in card.commands)
+    view = render_confirm_card(action_class, commands, card)
+    if view.web_ui_only or not config.channel_can_confirm:
+        return confirmation_text(action_class, commands, web_ui_url, card), None
+    lines = "\n".join(f"  {line}" for line in view.commands)
     body = f"Action '{action_class}' needs confirmation."
     if lines:
         body += f"\nCommands:\n{lines}"
+    if view.notes:
+        body += "\n" + "\n".join(view.notes)
     keyboard: dict[str, object] = {
         "inline_keyboard": [
             [
@@ -126,18 +145,13 @@ def handle_callback(
     config: ChannelConfig,
 ) -> ChannelConfirmationDecision:
     """The shared fail-closed gate for a button press — ``slack.handle_button``'s
-    twin. BOTH the chat the card lives in AND the pressing user must be
-    allow-listed: in the operator's DM they are the same id, so existing
-    configs work unchanged; an unlisted group member fails closed."""
+    twin. The chat the card lives in must be allow-listed AND the pressing
+    user must be in ``allowed_users`` (B114); an unlisted member fails closed."""
     if click not in {"confirm", "deny"}:
         return ChannelConfirmationDecision(False, "channel.confirm.denied.unknown_action")
-    both_listed = all(
-        identity_allowlisted(
-            ChannelIdentity(channel=CHANNEL, identity_id=candidate),
-            config.allowed_identities,
-        )
-        for candidate in (chat_id, from_id)
-    )
+    both_listed = identity_allowlisted(
+        ChannelIdentity(channel=CHANNEL, identity_id=chat_id), config.allowed_identities
+    ) and user_allowlisted(from_id, config)
     return channel_confirmation_decision(
         action_class=action_class,
         channel_can_confirm=config.channel_can_confirm,

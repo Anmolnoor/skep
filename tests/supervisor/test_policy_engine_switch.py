@@ -1,5 +1,6 @@
-"""P1-3 (ADR 0053 draft D6): the per-scope kill switch — off by default, a
-flipped scope really answers from engine v2, every flip is a ledger line."""
+"""P1-3 (ADR 0053 draft D6): the per-scope kill switch — a fresh home starts with
+filesystem+shell on (ADR 0054 A6), a flipped scope really answers from engine v2,
+every flip is a ledger line."""
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from skep.supervisor.policy_resolver import (
     run_policy_for_repo,
 )
 from skep.supervisor.policy_schema import (
+    SCOPES,
     LearnedRule,
     LearnedRuleRejected,
     PolicyDocument,
@@ -24,7 +26,7 @@ from skep.supervisor.projects import save_policy_group
 from skep.supervisor.serve.actions import rsop_view
 from skep.supervisor.serve.settings import ConfigHolder
 
-from .conftest import serve_client
+from .conftest import predating_home, serve_client
 
 
 def _seed(store: RunStore, repo: Path) -> None:
@@ -55,12 +57,14 @@ def _knobs(effective: dict[str, object]) -> dict[str, object]:
     }
 
 
-def test_the_switch_is_off_by_default_and_a_flipped_scope_answers_from_v2(
+def test_a_fresh_home_seeds_the_switch_and_a_flipped_scope_answers_from_v2(
     config: SupervisorConfig, repo: Path
 ) -> None:
     store = RunStore(config.db_path)
     try:
+        assert engine_v2_scopes(store) == tuple(sorted(SCOPES))
         _seed(store, repo)
+        store.set_setting("policy_engine_v2_scopes", [])  # all-v1: the parity baseline
         before = run_policy_for_repo(store, config, repo)
         assert before["_engine"] == {"v2_scopes": []}
         assert engine_v2_scopes(store) == ()
@@ -135,11 +139,15 @@ def test_update_policy_validates_the_scopes_and_records_each_flip(
     back = client.put("/api/policy", json={"policy_engine_v2_scopes": []})
     assert back.status_code == 200 and back.json()["policy_engine_v2_scopes"] == []
     lines = [json.loads(line) for line in ledger.read_text().splitlines()]
-    assert [(line["from"], line["to"]) for line in lines] == [([], ["shell"]), (["shell"], [])]
+    assert [(line["from"], line["to"]) for line in lines] == [
+        (sorted(SCOPES), ["shell"]),
+        (["shell"], []),
+    ]
     assert all(line["at"].endswith("Z") for line in lines)
 
-    # The Queen's standing policy composes through the same switch.
-    store = RunStore(config.db_path)
+    # The Queen's standing policy composes through the same switch (on a home
+    # that predates O5: the zero state would answer no_baseline here).
+    store = RunStore(predating_home(config.db_path))
     try:
         _seed(store, repo)
         store.set_setting("policy_engine_v2_scopes", ["network"])

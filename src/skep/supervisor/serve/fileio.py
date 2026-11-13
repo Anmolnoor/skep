@@ -1,12 +1,14 @@
 """Queen-side governed file reads (v51-F2, ADR 0023).
 
 The Queen is an operator-trust process — the OS sandbox is for workers. What
-governs Queen file access is the policy engine: explicit ``filesystem``-scope
-rules in the stored policy document win (a deny is a hard deny — no card),
-and an unmatched path falls back to the operator roots — the skep home, the
-registered-repos root, and every workon-bound project path. Inside a root a
-read executes in the turn; outside, the call becomes a confirmation card
-naming the exact resolved path (the ``call_mcp_tool`` precedent, v40-F10).
+governs Queen file access is ``policy_v3.decide()`` (ADR 0059 P3-2), the
+same decision REST and the CLI give with no repo: the secret floor first,
+then explicit ``filesystem`` rules (a deny is a hard deny — no card), then
+the operator roots — the skep home, the registered-repos root, and every
+workon-bound project path — as generated ``global/operator-root`` allows.
+Inside a root a read executes in the turn; outside, the call becomes a
+confirmation card naming the exact resolved path (the ``call_mcp_tool``
+precedent, v40-F10).
 
 Writes intentionally do not exist here: no observed demand, and a Queen
 writing into a repo's working tree needs a dirty-worktree design answer
@@ -15,13 +17,16 @@ first (plans/v51 — deferred).
 
 from __future__ import annotations
 
+import os
 import subprocess
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
 from ..autonomy import AutonomyDecision
-from ..policy_resolver import resolve_operator_policy
-from ..policy_schema import DEFAULT_DENY_RULE_ID
+from ..policy_v3 import OPERATOR_ROOT, Request, floor_verdict, queen_decide
+from ..roles import Role
+from ..secret_floor import secret_floor_reason
 from ..store import RunStore
 from .registry import repos_root
 from .settings import ConfigHolder
@@ -30,6 +35,7 @@ DEFAULT_READ_LINES = 200
 MAX_READ_LINES = 1000
 MAX_LINE_CHARS = 500
 MAX_SEARCH_HITS = 100
+MAX_MATCHES_PER_FILE = 10  # a directory search; one file searched lists them all
 SEARCH_TIMEOUT_SECONDS = 30
 
 
@@ -51,14 +57,19 @@ def operator_roots(store: RunStore, holder: ConfigHolder) -> list[Path]:
 
 
 def queen_filesystem_decision(
-    store: RunStore, holder: ConfigHolder, *, action: str, path: str
+    store: RunStore,
+    holder: ConfigHolder,
+    *,
+    action: str,
+    path: str,
+    role: Role | None = None,
 ) -> AutonomyDecision:
-    """Decide one Queen-side filesystem access against the filesystem scope.
+    """One Queen-side filesystem access, decided by ``policy_v3.decide()`` as
+    ``filesystem.<action>`` with the chat's role (ADR 0059 P3-2).
 
     Path resolution happens BEFORE the decision (symlinks cannot smuggle a
-    read out of a root), explicit scope rules win, and the unmatched
-    fallback is: operator roots allow, everything else cards.
-    """
+    read out of a root); the secret floor judges the requested path and its
+    realpath before any document is read (ES-F1)."""
     if not path.strip():
         return AutonomyDecision(verdict="deny", reason="filesystem.deny.missing_path", detail=path)
     try:
@@ -67,42 +78,37 @@ def queen_filesystem_decision(
         return AutonomyDecision(
             verdict="deny", reason="filesystem.deny.unresolvable_path", detail=f"{path}: {exc}"
         )
-    # v52-F3: the standing operator policy decides — the global document's
-    # rules keep their effect, composed with the Queen-only operator overlay.
-    policy = resolve_operator_policy(store)
-    decision = policy.decision("filesystem", action, str(target))
-    if decision.rule_id != DEFAULT_DENY_RULE_ID:
+    floor = floor_verdict("filesystem", path, action=action, home=holder.current.home)
+    if floor is not None:
         return AutonomyDecision(
-            verdict=decision.verdict,
-            reason=f"filesystem.{decision.verdict}.scope_rule",
-            detail=str(target),
-            decided_by=decision.decided_by,
+            verdict="deny",
+            reason="filesystem.deny.secret_floor",
+            detail=floor["reason"],
+            decided_by=floor["decided_by"],
         )
-    label = policy.template or "policy"
-    for root in operator_roots(store, holder):
-        if target == root or root in target.parents:
-            return AutonomyDecision(
-                verdict="allow",
-                reason="filesystem.allow.operator_root",
-                detail=str(target),
-                decided_by=f"{label}/operator-root",
-            )
-    # v59-F9: a nonexistent path outside the roots gets no card — the card
-    # protects reading a real file, and a probe of an invented path (field
-    # test 2026-07-18: ~15 SKEP_HOME/… cards, some auto-denied minutes later)
-    # interrupts the operator while protecting nothing. Fail fast instead.
-    if not target.exists():
+    verdict = queen_decide(holder, store, Request("filesystem", action, str(target)), role=role)
+    unmatched = verdict.layer == "default" or verdict.layer.startswith("role:")
+    if verdict.verdict == "require_approval" and unmatched and not target.exists():
+        # v59-F9: a nonexistent path no rule covers gets no card — the card
+        # protects reading a real file, and a probe of an invented path (field
+        # test 2026-07-18: ~15 SKEP_HOME/… cards) interrupts the operator while
+        # protecting nothing. A validity check, so it sits outside decide().
         return AutonomyDecision(
             verdict="deny",
             reason="filesystem.deny.no_such_path",
             detail=str(target),
-            decided_by=f"{label}/no-such-path",
+            decided_by="default/no-such-path",
         )
+    if verdict.rule_id == OPERATOR_ROOT:
+        reason = "filesystem.allow.operator_root"
+    elif verdict.layer == "default":
+        reason = "filesystem.require_approval.outside_operator_roots"
+    elif verdict.layer.startswith("role:"):
+        reason = f"filesystem.{verdict.verdict}.role_layer"
+    else:
+        reason = f"filesystem.{verdict.verdict}.scope_rule"
     return AutonomyDecision(
-        verdict="require_approval",
-        reason="filesystem.require_approval.outside_operator_roots",
-        detail=str(target),
-        decided_by=f"{label}/outside-operator-roots",
+        verdict=verdict.verdict, reason=reason, detail=str(target), decided_by=verdict.decided_by
     )
 
 
@@ -236,6 +242,45 @@ def read_file_branch_aware(
     return {"error": (f"not a file on the checked-out branch ({checked_out!r}): {target}{hint}")}
 
 
+def resolves_elsewhere(path: str) -> str | None:
+    """W38: where ``path`` really leads when a link makes it differ from the
+    path as written (``~`` expanded, made absolute) — None when it does not."""
+    try:
+        written = Path(os.path.abspath(Path(path).expanduser()))
+        real = written.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return None if real == written else str(real)
+
+
+# W38: how many symlinks a search lists, and how many directory entries it
+# walks to find them.
+MAX_SYMLINKS = 20
+SYMLINK_WALK_LIMIT = 20_000
+
+
+def _symlinks(root: Path, name_glob: str | None, skep_home: Path | None) -> list[dict[str, str]]:
+    """The symlinks under ``root`` (not followed — rg skips them too), each
+    with where it leads; a link into a credential file is left out.
+    ponytail: a bounded os.walk that ignores .gitignore; skips dot dirs."""
+    found: list[dict[str, str]] = []
+    seen = 0
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in [*files, *dirs]:
+            seen += 1
+            link = Path(directory) / name
+            if not link.is_symlink() or (name_glob and not fnmatch(name, name_glob)):
+                continue
+            if secret_floor_reason(link, skep_home=skep_home) is None:
+                found.append({"path": str(link), "target": str(link.resolve())})
+            if len(found) >= MAX_SYMLINKS:
+                return found
+        if seen > SYMLINK_WALK_LIMIT:
+            break
+    return found
+
+
 def read_file_result(
     path: str, *, offset: int | None = None, limit: int | None = None
 ) -> dict[str, Any]:
@@ -274,8 +319,12 @@ def search_files_result(
     path: str,
     target: str = "content",
     file_glob: str | None = None,
+    skep_home: Path | None = None,
 ) -> dict[str, Any]:
-    """ripgrep under one directory: content matches (``rg -n``) or file names."""
+    """ripgrep under one directory: content matches (``rg -n``) or file names.
+
+    ES-F1: hits in secret-floor files are dropped and the result's ``note``
+    says so — the search still answers, it just never quotes a credential."""
     root = Path(path).expanduser().resolve()
     if not root.exists():
         return {"error": f"no such path: {root}"}
@@ -285,7 +334,12 @@ def search_files_result(
             argv += ["--glob", file_glob]
         argv.append(str(root))
     else:
-        argv = ["rg", "--line-number", "--no-heading", "--max-count", "10"]
+        # --null: a NUL after each path, so the floor filter splits it exactly.
+        # --with-filename: a single-file search names the file too (the floor
+        # filter reads it). L20: the per-file cap is for a directory only.
+        argv = ["rg", "--null", "--with-filename", "--line-number", "--no-heading"]
+        if root.is_dir():
+            argv += ["--max-count", str(MAX_MATCHES_PER_FILE)]
         if file_glob:
             argv += ["--glob", file_glob]
         argv += ["-e", pattern, str(root)]
@@ -304,9 +358,56 @@ def search_files_result(
 
         wanted = pattern if any(ch in pattern for ch in "*?[") else f"*{pattern}*"
         hits = [hit for hit in hits if fnmatch(Path(hit).name, wanted)]
-    return {
+    found = len(hits)
+    per_file: dict[str, int] = {}
+    if target == "files":
+        hits = [hit for hit in hits if secret_floor_reason(hit, skep_home=skep_home) is None]
+    else:
+        kept: list[str] = []
+        for hit in hits:
+            name, sep, rest = hit.partition("\0")
+            if sep and secret_floor_reason(name, skep_home=skep_home) is not None:
+                continue
+            per_file[name] = per_file.get(name, 0) + 1
+            kept.append(f"{name}:{rest}" if sep else hit)
+        hits = kept
+    skipped = found - len(hits)
+    capped = (
+        sorted(n for n, c in per_file.items() if c >= MAX_MATCHES_PER_FILE) if root.is_dir() else []
+    )
+    result: dict[str, Any] = {
         "path": str(root),
         "target": target,
         "matches": hits[:MAX_SEARCH_HITS],
-        "truncated": len(hits) > MAX_SEARCH_HITS,
+        "truncated": len(hits) > MAX_SEARCH_HITS or bool(capped),
     }
+    notes: list[str] = []
+    if capped:
+        notes.append(
+            f"cut: only the first {MAX_MATCHES_PER_FILE} matches per file are shown, and "
+            f"{', '.join(capped[:5])}{' and more' if len(capped) > 5 else ''} may have more — "
+            "to see all of a file's matches, call search_files again with path set to that file"
+        )
+    if skipped:
+        notes.append(
+            f"{skipped} hit(s) in credential files were left out — the secret floor "
+            "(.env files, ~/.ssh and friends, skep's own tokens) is never searched or read"
+        )
+    if root.is_dir():
+        name_glob: str | None
+        if target == "files" and pattern.strip():
+            name_glob = pattern if any(ch in pattern for ch in "*?[") else f"*{pattern}*"
+        else:
+            name_glob = file_glob
+        links = _symlinks(root, name_glob, skep_home)
+        if links:
+            # W38: a link is listed, never followed — the model must not report
+            # "no such file" for one, nor read through it without a card
+            result["symlinks"] = links
+            notes.append(
+                "symlinks are listed with their targets, not followed or searched — "
+                "read_file a link to read it (a card names where it resolves)"
+            )
+    if notes:
+        result["note"] = "; ".join(notes)
+    return result

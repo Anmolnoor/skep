@@ -16,10 +16,15 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from skep.worker_contract import CodingWorkerTask
+from skep.worker_contract.worker_state import (
+    approval_grants_from_state,
+    approved_network_hosts_from_verdict,
+)
 
 from . import sandbox
+from .castes import CASTES
 from .config import SupervisorConfig
-from .worktree import git_metadata_writable_roots
+from .worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
 logger = logging.getLogger("skep.spawner")
 
@@ -32,7 +37,7 @@ def resolve_sandbox_backend(config: SupervisorConfig, network: sandbox.NetworkPo
     (the filtering-proxy bridge is bubblewrap-specific). Fail-open toward the
     STRICTER native backend, never toward no sandbox.
     """
-    if config.sandbox_backend in ("auto", ""):
+    if config.sandbox_backend in ("auto", "", "none"):
         return None
     backend = config.sandbox_backend
     if backend == sandbox.PODMAN and network.is_domain_list:
@@ -82,44 +87,71 @@ def build_worker_env(
     return env
 
 
+# B144: git inside a worker may use only its local ``file`` transport. The
+# git floor reads command lines, so a script's own ``subprocess.run(['git',
+# 'push'])`` slipped past it; this env reaches every git the worker tree
+# starts (engines, scripts, grandchildren via the capability passthrough) and
+# outranks ``-c protocol.*.allow``. https, ssh, git:// and ext:: all fail with
+# "transport not allowed"; worktree, commit, diff and local clones still work.
+# Supervisor-side pushes (open_pr, push) never run in this env.
+# ponytail: env, so a script that rebuilds its env from scratch drops it; the
+# sandbox's network policy is the wall, this closes the inherited-env path.
+WORKER_GIT_ENV = {"GIT_ALLOW_PROTOCOL": "file"}
+
+
 _LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
 
 
-def _proxy_env(port: int) -> dict[str, str]:
+def _proxy_env(port: int, *, loopback_direct: bool = True) -> dict[str, str]:
     """Env that routes the worker's HTTP(S) tooling through the D1 filtering proxy.
 
     pip / git / curl / requests all honour these. Combined with the Seatbelt pin
     to ``localhost:port`` (the worker's only allowed egress), the proxy is the
     sole path out — so the domain allowlist is enforced, not merely suggested.
+
+    ``loopback_direct`` is for a sandbox whose loopback IS the host's (Seatbelt):
+    v115-F9 — loopback is not egress, so a worker's own test server on 127.0.0.1
+    is reached directly, not through the proxy, which answered a dead loopback
+    port with "502 Bad Gateway" where a test expected a connection error. Under
+    bubblewrap ``--unshare-net`` the sandbox loopback is a different namespace:
+    a host loopback server is reachable only through the netshim bridge, and
+    the proxy admits loopback (v115-F9 too) — so there the exemption must be off.
     """
     url = f"http://127.0.0.1:{port}"
-    return {
+    env = {
         "HTTP_PROXY": url,
         "HTTPS_PROXY": url,
         "ALL_PROXY": url,
         "http_proxy": url,
         "https_proxy": url,
         "all_proxy": url,
-        # v115-F9: loopback is not egress — a worker's own test servers on
-        # 127.0.0.1 are reached directly (Seatbelt now permits it), not through
-        # the proxy, which answered a dead loopback port with "502 Bad Gateway"
-        # where a test expected a connection error.
-        "NO_PROXY": _LOOPBACK_NO_PROXY,
-        "no_proxy": _LOOPBACK_NO_PROXY,
     }
+    if loopback_direct:
+        env["NO_PROXY"] = env["no_proxy"] = _LOOPBACK_NO_PROXY
+    return env
 
 
 def effective_network_domains(task: CodingWorkerTask) -> tuple[str, ...]:
     """Return the worker's effective network grant for this run.
 
-    Normal runs use the task's declared network allowlist directly. A resumed
+    Normal runs use the task's egress — its network allowlist plus its
+    ``provider_hosts`` (ADR 0059 D3), so a provider-only run gets one filtered
+    pipe to its provider instead of deny-all. A resumed
     approved ``network.fetch`` is the one case where the worker must regain a
     narrow host grant that was intentionally absent from ``permissions.network``
     on the suspended run: the approval decision names the allowed host.
     """
-    domains = tuple(task.permissions.network)
+    domains = tuple(task.permissions.egress())
     if domains:
-        return domains
+        # ADR 0059 D3 (V7): a deferred ask a human approved for THIS run's
+        # resume chain joins its egress — only hosts the dispatch named as
+        # asks, never another approved host (the proxy is the wall).
+        approved = (
+            approved_network_hosts_from_verdict(task.approval_verdict)
+            | (approval_grants_from_state(task.worker_state)[3])
+        )
+        asked = tuple(host for host in task.permissions.network_ask if host in approved)
+        return domains if domains == ("*",) else (*domains, *asked)
     verdict = task.approval_verdict
     if (
         verdict is not None
@@ -146,16 +178,20 @@ def spawn_worker(
     extra_env: dict[str, str] | None = None,
     worker_argv: tuple[str, ...] | None = None,
     extra_writable: Iterable[Path] = (),
+    write_denied: Iterable[Path] = (),
 ) -> subprocess.Popen[bytes]:
     """Start the headless worker in its own session (so the whole tree is killable).
 
     When enabled (Q1), the worker argv is wrapped in the host sandbox backend:
     Seatbelt on macOS, Bubblewrap on Linux. Writes are physically confined to
-    the workspace, result-file dir, and temp. Network follows
+    the workspace, the run's own result dir (W26), and temp. Network follows
     ``permissions.network`` (D1): an empty list denies all, ``["*"]`` allows all,
     and concrete domain lists use the loopback filtering proxy only on backends
     that can physically pin egress to it. The generated profile/evidence is kept
     beside the worker log as proof of exactly what was enforced.
+
+    ``write_denied`` (W31): files inside a writable root the sandbox keeps
+    read-only — the run's git protocol pin (``worktree.pin_git_protocols``).
     """
     argv = [
         # D2: route by caste. v90-F1: a coding run may override this with a
@@ -178,7 +214,11 @@ def spawn_worker(
     else:
         network = sandbox.NetworkPolicy(allow=domains)
     backend = resolve_sandbox_backend(config, network) if use_sandbox else None
-    if use_sandbox and sandbox.availability(backend).usable:
+    own_netns = False  # bubblewrap --unshare-net: the sandbox loopback is not the host's
+    if use_sandbox:
+        # ES-F1 (B47): no usable backend raises here — the worker never starts
+        # unconfined under a "sandbox" record.
+        own_netns = sandbox.require_usable(backend).backend == "bubblewrap"
         workspace = Path(task.workspace)
         # v109-F4: ``extra_writable`` is per-run (the project dependency-cache
         # root); every backend consumes this one list (Seatbelt subpaths,
@@ -193,20 +233,32 @@ def spawn_worker(
             log_path.parent / "sandbox.profile.sb",
             workspace=workspace,
             extra_writable=writable,
+            extra_readable=git_metadata_readable_roots(workspace),
             network=network,
             proxy_port=proxy_port,
             unix_socket_path=network_proxy_unix_path if proxy_port is not None else None,
             backend=backend,
+            skep_home=config.home.parent,
+            # B125: only skep's own LLM-calling workers read the LLM key; an
+            # external engine (worker_argv) authenticates from its env, and an
+            # unregistered caste falls back to the coding worker.
+            worker_llm_key=worker_argv is None
+            and getattr(CASTES.get(task.worker_kind), "needs_provider", True),
+            write_denied=write_denied,
         )
         argv = sandbox.wrap_command(argv, profile_path, backend=backend)
     env = build_worker_env(task.permissions.env_allowlist, baseline=config.env_baseline)
+    # Needed: the builtin worker reads its provider profile, LLM key and
+    # plugin shelf from here (llm_plan.py, capabilities.py). The control-plane
+    # secrets under it are hidden by the profile (ES-F4), not by omission.
     env["SKEP_HOME"] = str(config.home.parent)
     if extra_env:
         # Supervisor-injected, non-secret config (v39-F4: the routed provider's
         # endpoint/model) — same class as SKEP_HOME and the proxy env below.
         env.update(extra_env)
     if proxy_port is not None:
-        env.update(_proxy_env(proxy_port))
+        env.update(_proxy_env(proxy_port, loopback_direct=not own_netns))
+    env.update(WORKER_GIT_ENV)  # last: nothing above may loosen it
     log_handle = log_path.open("ab")
     try:
         return subprocess.Popen(

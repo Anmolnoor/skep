@@ -23,6 +23,7 @@ from skep.supervisor.autonomy import AutonomyDecision
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.dispatch import run_task
 from skep.supervisor.scheduler import make_schedule, make_template_schedule, run_due
+from skep.supervisor.serve import actions
 from skep.supervisor.serve.chat import MAX_TOOL_ROUNDS, _strip_inline_think
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
@@ -60,14 +61,17 @@ def openai() -> Iterator[FakeOpenAI]:
 
 
 def chat_client(
-    config: SupervisorConfig, ollama: FakeOllama, **app_kwargs: Any
+    config: SupervisorConfig, ollama: FakeOllama, role: str | None = None, **app_kwargs: Any
 ) -> tuple[TestClient, str]:
+    """A configured client and a new chat — in ``role``, or the default
+    (assistant: ADR 0059 decision #4); a chat that dispatches needs a role
+    that may (builder)."""
     client = _client(config, **app_kwargs)
     client.put(
         "/api/llm/config",
         json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
     )
-    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    chat_id = client.post("/api/chats", json={"role": role}).json()["chat_id"]
     return client, str(chat_id)
 
 
@@ -168,6 +172,45 @@ def test_read_tool_budget_allows_final_answer_from_last_result(
     assert bodies[-1]["messages"][-1]["role"] == "system"
     assert "one or two short lines" in bodies[-1]["messages"][-1]["content"]
     assert bodies[-1]["messages"][-2]["role"] == "tool"
+
+
+def test_split_tool_calls_and_native_thinking_both_land(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F5: ollama streams each call of a burst in its own chunk and its
+    reasoning in the native thinking field — every call runs, and the
+    thinking streams as thinking, not as the reply."""
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_calls(("list_runs", {"limit": 1}), ("list_runs", {"limit": 2}))
+    ollama.script_reply("both checked", thinking="weighing the runs")
+
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "runs?"}).text
+    )
+
+    assert len([d for name, d in events if name == "tool"]) == 2
+    assert ("thinking", {"thinking": "weighing the runs"}) in events
+    assert "".join(d["content"] for name, d in events if name is None) == "both checked"
+    assert events[-1] == ("done", {"state": "complete"})
+
+
+def test_mid_stream_ollama_error_ends_the_turn_honestly(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F6 (B24): an {"error"} line mid-stream is an error with the
+    provider's words — never an empty round answered by a stall nudge."""
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_call("list_runs", {"limit": 1})
+    ollama.script_stream_error("model runner has unexpectedly stopped", after="Checking")
+
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "runs?"}).text
+    )
+
+    assert events[-1] == ("error", {"detail": "model runner has unexpectedly stopped"})
+    assert len(ollama.chat_bodies()) == 2  # no nudged third round
+    stored = client.get(f"/api/chats/{chat_id}").json()["messages"]
+    assert stored[-1]["content"] == "Checking"  # the half-reply is kept
 
 
 def test_reasoning_only_stall_mid_tools_is_nudged_back_into_action(
@@ -337,9 +380,10 @@ def test_provider_drop_mid_turn_persists_an_honest_line(
     assert events[-1][0] == "error"
     final = client.get(f"/api/chats/{chat_id}").json()["messages"][-1]
     assert final["role"] == "assistant"
-    assert "the provider dropped before any reply arrived" in final["content"]
+    # ES-F12 (B85): a 401 says what to fix, not "dropped" or "too big".
+    assert "check the API key" in final["content"]
     # The live stream carried the same line — reload and stream agree.
-    assert any(name is None and "provider dropped" in d["content"] for name, d in events)
+    assert any(name is None and "check the API key" in d["content"] for name, d in events)
 
 
 def test_inline_think_markup_never_reaches_the_visible_reply(
@@ -481,6 +525,35 @@ def test_malformed_tool_args_feed_back_and_the_turn_continues(
     assert events[-1] == ("done", {"state": "complete"})
     streamed = "".join(d.get("content", "") for name, d in events if name is None)
     assert "here is what I know instead" in streamed
+
+
+def test_malformed_tool_call_json_is_a_tool_error_not_an_empty_call(
+    config: SupervisorConfig, openai: FakeOpenAI
+) -> None:
+    """ES-F8 (B35): arguments that are not a JSON object used to become {} —
+    the call then ran with no arguments and the model never learned why.
+    Now the model reads an error row quoting what it sent, and goes on."""
+    client, chat_id = openai_chat_client(config, openai)
+    openai.script_tool_call("list_runs", '{"limit": 5')  # truncated JSON
+    openai.script_reply("let me retry that properly")
+
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "runs?"}).text
+    )
+
+    tool_rows = [d for name, d in events if name == "tool"]
+    assert len(tool_rows) == 1
+    assert tool_rows[0]["result"]["ok"] is False
+    assert "not a JSON object" in tool_rows[0]["result"]["error"]
+    assert '{"limit": 5' in tool_rows[0]["result"]["error"]
+    assert events[-1] == ("done", {"state": "complete"})
+    # ES-F10 (B84): the replay sends a valid empty object (the garbled text
+    # drew a 400 on every later turn); the raw text rides the error row.
+    replayed = openai.chat_bodies()[1]["messages"]
+    call = next(m for m in replayed if m.get("tool_calls"))["tool_calls"][0]
+    assert call["function"]["arguments"] == "{}"
+    result = next(m for m in replayed if m["role"] == "tool")
+    assert '{\\"limit\\": 5' in result["content"]
 
 
 # ---------- v67-F3 (R12b): read-only side questions (/btw) ----------
@@ -712,30 +785,19 @@ def test_run_schedule_now_is_carded_and_marks_due(
     client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm")
     assert next_run_at("ritual") <= now_ts()  # due: the next tick dispatches it
 
-    # A disabled schedule refuses cleanly and stays un-due.
-    ollama.script_tool_call("run_schedule_now", {"name": "paused"})
-    client.post(f"/api/chats/{chat_id}/messages", json={"content": "run paused now"})
-    proposed = [
-        a
-        for a in client.get(f"/api/chats/{chat_id}").json()["actions"]
-        if a["status"] == "proposed"
-    ]
-    ollama.script_reply("noted")
-    confirm = client.post(f"/api/chats/{chat_id}/actions/{proposed[0]['action_id']}/confirm")
-    assert confirm.status_code == 200
+    # ES (B122): a disabled or unknown schedule is refused WITHOUT a card —
+    # a card that can only fail teaches the operator to click blindly.
+    for name in ("paused", "ghost"):
+        ollama.script_tool_call("run_schedule_now", {"name": name})
+        ollama.script_reply("noted")
+        reply = client.post(f"/api/chats/{chat_id}/messages", json={"content": f"run {name}"})
+        assert "set_schedule_enabled" in reply.text or "no schedule named" in reply.text
+        assert not [
+            a
+            for a in client.get(f"/api/chats/{chat_id}").json()["actions"]
+            if a["status"] == "proposed"
+        ]
     assert next_run_at("paused") == far_future
-
-    # Unknown name degrades to a clean tool error on the card too.
-    ollama.script_tool_call("run_schedule_now", {"name": "ghost"})
-    client.post(f"/api/chats/{chat_id}/messages", json={"content": "run ghost now"})
-    proposed = [
-        a
-        for a in client.get(f"/api/chats/{chat_id}").json()["actions"]
-        if a["status"] == "proposed"
-    ]
-    ollama.script_reply("noted")
-    confirm = client.post(f"/api/chats/{chat_id}/actions/{proposed[0]['action_id']}/confirm")
-    assert confirm.status_code == 200
 
 
 def test_schedule_delete_and_disable_are_carded_crud(
@@ -871,7 +933,7 @@ def test_confirmed_one_shot_reminder_pins_once_and_start_at(
 def test_confirmed_dispatch_run_really_dispatches(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call(
         "dispatch_run",
         {
@@ -909,7 +971,7 @@ def test_confirmed_dispatch_run_really_dispatches(
 def test_trusted_project_dispatch_run_executes_inside_the_turn_without_confirmation(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     created = client.post(
         "/api/projects",
         json={
@@ -963,7 +1025,7 @@ def test_trusted_project_dispatch_run_executes_inside_the_turn_without_confirmat
 def test_trusted_project_dispatch_run_with_explicit_override_stays_confirmation_gated(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     created = client.post(
         "/api/projects",
         json={
@@ -1040,6 +1102,8 @@ def test_get_run_tool_reports_patch_artifact_without_claiming_apply(
         # did (I8). The pin moved with the change.
         "detail": "re-ran clean: all exit 0 [command from the worker's own verify step]",
         "created_at": detail["reverification"]["created_at"],
+        # ES-F3: the commit G10 verified on — what landing builds on.
+        "base_commit": detail["reverification"]["base_commit"],
     }
     assert any(artifact["kind"] == "patch" for artifact in detail["artifacts"])
     assert detail["transitions"][0]["detail"] == {
@@ -1806,7 +1870,7 @@ def test_confirmed_register_repo_initializes_empty_clone_then_dispatches_by_slug
     empty.mkdir()
     git(empty, "init", "-q")
 
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call("register_repo", {"url": str(empty), "name": "empty-fixture"})
     client.post(
         f"/api/chats/{chat_id}/messages",
@@ -1842,7 +1906,7 @@ def test_confirmed_register_repo_initializes_empty_clone_then_dispatches_by_slug
 def test_dispatch_run_with_git_url_tells_chat_to_register_first(
     config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call(
         "dispatch_run",
         {
@@ -1982,8 +2046,13 @@ def test_confirmed_allow_command_review_persists_shell_command_and_resumes_pendi
             actor="chat-user",
         )
 
-        assert result == {"action": "allowed_command", "resumed_as": "resumed-1"}
-        assert store.get_setting("allowed_shell_commands") == [write_argv]
+        assert result == {
+            "action": "allowed_command",
+            "resumed_as": "resumed-1",
+            "remembered": f"repo:{repo.resolve()}",  # P3-4 (B18): where it holds
+        }
+        assert store.get_setting("allowed_shell_commands") is None
+        assert actions.granted_commands(store, holder, repo) == [write_argv]
         approval = store.get_approval(review_id)
         assert approval is not None
         assert approval.status == "approved"
@@ -2114,7 +2183,7 @@ def test_start_research_is_confirm_carded(config: SupervisorConfig, ollama: Fake
 
     assert "start_research" in MUTATING_TOOL_NAMES  # a mutating (carded) tool
 
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call(
         "start_research",
         {
@@ -2271,21 +2340,21 @@ def test_effective_policy_tool_surfaces_silent_gaps(repo: Path, tmp_path: Path) 
     assert view["shell_allowlist"] == []
     assert "NOT applied" in view["shell_allowlist_note"]
     assert view["landing"] == "landing approval gate"
-    # v64-F2: the view teaches that verify steps bypass the allowlist.
+    # v64-F2 / ES-F3: the view teaches that only the pinned verify bypasses it.
     assert "shell_verify" in view["shell_verify_note"]
-    assert "non-verify" in view["shell_verify_note"]
+    assert "pinned verify_command" in view["shell_verify_note"]
 
 
 def test_allow_shell_command_description_teaches_shell_verify() -> None:
     """v64-F2: the Queen burned four approval rounds granting pytest — the
-    description must say verify commands never gate; descriptions are
-    load-bearing for the small model."""
+    description must say which verify skips the gate (ES-F3: only the pinned
+    verify_command); descriptions are load-bearing for the small model."""
     from skep.supervisor.serve.tools import TOOL_SPECS
 
     spec = next(s for s in TOOL_SPECS if s["function"]["name"] == "allow_shell_command")
     description = spec["function"]["description"]
     assert "shell_verify" in description
-    assert "NEVER need this" in description
+    assert "pinned verify_command" in description
     # The old example was 'python3 -m pytest' — the exact command that never
     # needs the grant; it must not be the description's example.
     assert "pytest'" not in description

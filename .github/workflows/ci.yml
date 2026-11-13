@@ -28,6 +28,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # T3-4: diff-cover needs the merge base with the PR's base branch
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
@@ -55,10 +57,20 @@ jobs:
         # TMPDIR outside /tmp is mandatory wherever bubblewrap runs: bwrap
         # tmpfs-masks /tmp, which eats sandbox evidence files and wedges
         # dispatched test runs into worker_timeout (same rule as CLAUDE.md's
-        # local gates).
+        # local gates). T3-4: the Linux leg also measures coverage; macOS is
+        # the slow leg (v114 timeouts) and stays plain.
         run: |
           mkdir -p "$HOME/.cache/skep-test-tmp"
-          TMPDIR="$HOME/.cache/skep-test-tmp" uv run --with pytest-xdist pytest -n auto -m "not smoke and not container"
+          if [ "$RUNNER_OS" = Linux ]; then
+            TMPDIR="$HOME/.cache/skep-test-tmp" uv run --with pytest-xdist --with pytest-cov pytest -n auto -m "not smoke and not container" --cov=skep --cov-report=xml
+          else
+            TMPDIR="$HOME/.cache/skep-test-tmp" uv run --with pytest-xdist pytest -n auto -m "not smoke and not container"
+          fi
+      - name: Diff coverage
+        # T3-4: the lines a PR changes must run under test — the first-run
+        # timeline shipped 71 unrun lines and nothing measured it.
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
+        run: uvx diff-cover coverage.xml --compare-branch="origin/${{ github.base_ref }}" --fail-under=90
       - name: First-party smoke
         run: make smoke
       - name: Linux sandbox smoke

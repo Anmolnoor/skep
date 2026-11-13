@@ -215,3 +215,31 @@ def test_the_worker_runs_as_a_module(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert read_result(out_path).status is TaskState.COMPLETED
+
+
+def test_es_f7_a_branch_dispatch_reviews_the_branch_against_the_default(
+    tmp_path: Path,
+) -> None:
+    """ES-F7 (B134, I8): every dispatch makes a fresh worktree at `ref`, so a
+    HEAD baseline is always an empty diff — "Review this branch before I land
+    it" completed as "nothing to review" with the provider never called. A
+    branch is reviewed against its merge-base with the repo's default."""
+    repo = _repo(tmp_path, dirty=False)
+    default = subprocess.run(
+        ["git", "-C", str(repo), "branch", "--show-current"], capture_output=True, text=True
+    ).stdout.strip()
+    _git(repo, "checkout", "-qb", "feature")
+    (repo / "app.py").write_text("def add(a, b):\n    return a - b  # oops\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "branch work")
+    _git(repo, "checkout", "-q", default)
+    workspace = tmp_path / "wt"
+    _git(repo, "worktree", "add", "--detach", str(workspace), "feature")
+    seen: list[str] = []
+
+    def generate(task: CodingWorkerTask, messages: list[dict[str, Any]]) -> str:
+        seen.append(messages[1]["content"])
+        return "app.py:2 — subtraction — breaks add()\n\nVerdict: do not ship"
+
+    code, result = _run(workspace, tmp_path, generate)
+    assert code == 0 and result.status is TaskState.COMPLETED
+    assert seen and "return a - b" in seen[0]

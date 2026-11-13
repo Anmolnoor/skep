@@ -1,0 +1,37 @@
+{
+  "to_agent": [],
+  "ledger": [
+    {
+      "actor": "acp:kiro",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"",
+      "project": {
+        "project_id": "demo",
+        "name": "demo",
+        "strategy": "trusted_local_dev",
+        "phase": "build"
+      },
+      "source": "run",
+      "verdict": "require_approval",
+      "rule_id": "unmatched",
+      "decided_by": "default/unmatched",
+      "layer": "default"
+    },
+    {
+      "actor": "human@client",
+      "repo": "$REPO",
+      "scope": "shell",
+      "action": "run",
+      "value": "node -e \"console.log('interrupt fixture tool started'); setTimeout(() => {}, 30000)\"",
+      "source": "forwarded",
+      "agent": "kiro",
+      "session_id": "sess_00000000-0000-4000-8000-000000000001",
+      "tool_call_id": "run_command_tooluse_y1v4bBCwl4978KEjYmFWrP",
+      "request_id": 9025,
+      "outcome": "allow_once",
+      "note": "unmatched"
+    }
+  ]
+}

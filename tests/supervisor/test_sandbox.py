@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -140,9 +141,22 @@ def test_deny_all_profile_denies_network_text() -> None:
     # v115-F9: loopback is not egress — a test suite's own servers stay reachable.
     assert '(allow network-bind (local ip "localhost:*"))' in text
     assert '(allow network-outbound (remote ip "localhost:*"))' in text
-    # v115-F14: Unix-domain sockets are files on this host, not egress.
+    # v115-F14: a worker binds its own Unix-domain sockets; W34: it connects
+    # only to those under its roots and the system sockets a run needs.
     assert "(allow network-bind (local unix-socket))" in text
-    assert "(allow network-outbound (remote unix-socket))" in text
+    assert "(allow network-outbound (remote unix-socket))" not in text
+    lines = text.splitlines()
+    deny = lines.index("(deny network-outbound (remote unix-socket))")
+    assert lines[deny + 1] == f'(allow network-outbound (subpath "{Path("/tmp/ws").resolve()}"))'
+
+
+def test_a_profile_with_no_roots_opens_no_socket_and_no_egress() -> None:
+    """W34: the availability probe builds a profile with no writable root;
+    an empty connect allow would be an unfiltered (allow network-outbound)."""
+    for network in (sandbox.DENY_ALL_NETWORK, sandbox.NetworkPolicy(allow=("pypi.org",))):
+        text = sandbox.build_profile(writable_roots=[], network=network, proxy_port=40000)
+        assert "(allow network-outbound)" not in text.replace(" )", ")")
+        assert "(deny network-outbound (remote unix-socket))" in text
 
 
 def test_allow_all_profile_omits_network_deny() -> None:
@@ -266,6 +280,7 @@ def test_network_allowlist_enforced_end_to_end(tmp_path: Path, origin_port: int)
         profile = sandbox.write_profile(
             tmp_path / "allow.sb",
             workspace=workspace,
+            skep_home=tmp_path / "skep-home",
             network=sandbox.NetworkPolicy(allow=("localhost",)),
             proxy_port=allow_proxy.port,
         )
@@ -284,6 +299,7 @@ def test_network_allowlist_enforced_end_to_end(tmp_path: Path, origin_port: int)
         profile = sandbox.write_profile(
             tmp_path / "deny.sb",
             workspace=workspace,
+            skep_home=tmp_path / "skep-home",
             network=sandbox.NetworkPolicy(allow=("pypi.org",)),
             proxy_port=deny_proxy.port,
         )
@@ -294,3 +310,169 @@ def test_network_allowlist_enforced_end_to_end(tmp_path: Path, origin_port: int)
         assert deny_proxy.denied_count >= 1
     finally:
         deny_proxy.stop()
+
+
+@pytest.fixture()
+def listeners(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """W34: two throwaway unix-socket listeners standing in for an ssh-agent —
+    one under a fake HOME (bound by a relative path: AF_UNIX caps a path at
+    104 bytes), one under /tmp. Absolute paths are returned for the child."""
+    home = tmp_path / "fakehome"
+    (home / ".ssh").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="skep-w34-", dir="/tmp")).resolve()
+    servers = []
+    paths = []
+    for directory in (home / ".ssh", tmp_dir):
+        with monkeypatch.context() as patch:
+            patch.chdir(directory)
+            srv = socket.socket(socket.AF_UNIX)
+            srv.bind("agent.sock")
+        srv.listen(8)
+        threading.Thread(target=lambda s=srv: [s.accept() for _ in range(8)], daemon=True).start()
+        servers.append(srv)
+        paths.append(str(directory.resolve() / "agent.sock"))
+    try:
+        yield paths
+    finally:
+        for srv in servers:
+            srv.close()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+_CONNECT = """
+import os, socket, sys
+for path in sys.argv[1:]:
+    c = socket.socket(socket.AF_UNIX)
+    head, name = os.path.split(path)
+    try:
+        os.chdir(head)
+        c.connect(name)
+        print("CONNECTED", path)
+    except OSError as exc:
+        print("REFUSED", path, type(exc).__name__)
+"""
+
+
+@pytest.mark.parametrize(
+    ("network", "proxy_port"),
+    [
+        (sandbox.DENY_ALL_NETWORK, None),
+        (sandbox.ALLOW_ALL_NETWORK, None),
+        (sandbox.NetworkPolicy(allow=("pypi.org",)), 40000),
+    ],
+)
+def test_a_worker_cannot_connect_to_a_unix_socket_outside_its_roots(
+    tmp_path: Path, listeners: list[str], network: sandbox.NetworkPolicy, proxy_port: int | None
+) -> None:
+    """W34: an agent socket (the operator's ssh-agent, Docker, gpg-agent) is
+    refused in every network mode; before, a Seatbelt worker listed the keys
+    of a throwaway ssh-agent from inside the wall."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    profile = tmp_path / "p.sb"
+    profile.write_text(
+        sandbox.build_profile(writable_roots=[workspace], network=network, proxy_port=proxy_port)
+    )
+    argv = sandbox.wrap_command([sys.executable, "-c", _CONNECT, *listeners], profile)
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split("\n")[:2] == [f"REFUSED {p} PermissionError" for p in listeners]
+
+
+@pytest.mark.parametrize(
+    ("network", "dns"),
+    [
+        (sandbox.ALLOW_ALL_NETWORK, "CONNECTED"),
+        (sandbox.DENY_ALL_NETWORK, "REFUSED"),
+        (sandbox.NetworkPolicy(allow=("pypi.org",)), "REFUSED"),
+    ],
+)
+def test_only_an_allow_all_run_reaches_the_name_resolver(
+    tmp_path: Path, network: sandbox.NetworkPolicy, dns: str
+) -> None:
+    """W34: getaddrinfo on macOS asks mDNSResponder over its unix socket, which
+    sends the query on. An allow-all run needs it; a deny-all or proxied run
+    must not have it (the proxy resolves for it); localhost resolves from
+    /etc/hosts either way."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    profile = tmp_path / "p.sb"
+    port = None if network.is_deny_all or network.is_allow_all else 40000
+    profile.write_text(
+        sandbox.build_profile(writable_roots=[workspace], network=network, proxy_port=port)
+    )
+    code = (
+        "import socket\n"
+        "print(socket.getaddrinfo('localhost', 80, type=socket.SOCK_STREAM)[0][4][1])\n" + _CONNECT
+    )
+    argv = sandbox.wrap_command([sys.executable, "-c", code, "/var/run/mDNSResponder"], profile)
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split("\n")[0] == "80"
+    assert proc.stdout.split("\n")[1].startswith(f"{dns} /var/run/mDNSResponder")
+
+
+_COMMIT_IN_THE_WALL = """
+import json, sys
+from pathlib import Path
+from skep.workers.capabilities import CapabilityRegistry
+registry = CapabilityRegistry(
+    Path(sys.argv[1]), emit=lambda _t, _p: None, allow_git_mutation=True,
+    approved_capability_ids=("git.commit",),
+)
+registry.invoke("git.stage", {"paths": ["b.txt"]})
+commit = registry.invoke("git.commit", {"message": "from the wall"})
+print(json.dumps({"exit": commit.exit_code, "error": commit.error}))
+"""
+
+
+def test_a_worker_commits_in_its_worktree_and_reads_no_packed_refs_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W35 (B108) and W34: the worker's git.commit inside a real Seatbelt wall
+    on a linked worktree succeeds, moves only the worktree's HEAD, and its
+    output carries no ``packed-refs.lock: Operation not permitted`` — git's
+    AUTO_MERGE cleanup trying to lock the read-only common dir (ES-F3)."""
+    import json
+
+    from skep.supervisor.worktree import (
+        create_worktree,
+        git_metadata_readable_roots,
+        git_metadata_writable_roots,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str, cwd: Path = repo) -> str:
+        argv = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args]
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=True).stdout
+
+    git("init", "-q", "-b", "main")
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    git("add", "a.txt")
+    git("commit", "-qm", "init")
+    main_before = git("rev-parse", "refs/heads/main")
+    workspace = create_worktree(repo, tmp_path / "wts", "t1")
+    (workspace / "b.txt").write_text("b\n", encoding="utf-8")
+    profile = sandbox.write_profile(
+        tmp_path / "p.sb",
+        workspace=workspace,
+        extra_writable=git_metadata_writable_roots(workspace),
+        extra_readable=git_metadata_readable_roots(workspace),
+        skep_home=tmp_path / "skep",
+    )
+    argv = sandbox.wrap_command(
+        [sys.executable, "-c", _COMMIT_IN_THE_WALL, str(workspace)], profile
+    )
+    env = {**os.environ, "TMPDIR": str(workspace)}
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["exit"] == 0, result
+    assert "packed-refs" not in result["error"], result
+    assert git("log", "-1", "--pretty=%s", cwd=workspace).strip() == "from the wall"
+    assert git("rev-parse", "refs/heads/main") == main_before  # refs/ stayed read-only
+    assert not (repo / ".git" / "packed-refs.lock").exists()

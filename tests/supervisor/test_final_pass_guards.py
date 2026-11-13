@@ -136,3 +136,22 @@ def test_a_legitimate_json_answer_passes_through(
 
     assert events[-1] == ("done", {"state": "complete"})
     assert _last_assistant_content(config, chat_id) == answer
+
+
+def test_a_size_refusal_in_the_final_pass_halves_once_then_says_outgrown(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F12 (B85): the final pass shares the main loop's classifier — a
+    body that names size halves once; a second refusal ends on the line."""
+    client, chat_id = chat_client(config, ollama)
+    _exhaust_tool_rounds(ollama)
+    ollama.script_refusal(400, "prompt is too long")
+    ollama.script_refusal(400, "prompt is too long")
+
+    events = sse_events(
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "status?"}).text
+    )
+
+    assert events[-1][0] == "error"
+    assert len(ollama.chat_bodies()) == MAX_TOOL_ROUNDS + 2
+    assert "outgrown the provider" in _last_assistant_content(config, chat_id)

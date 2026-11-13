@@ -45,11 +45,17 @@ ALLOWED_SHELL_COMMANDS = "allowed_shell_commands"
 # presets, allow_shell_command) never absorb it.
 SESSION_ALLOWED_SHELL_COMMANDS = "session_allowed_shell_commands"
 ALLOWED_PLUGIN_RISKS = "allowed_plugin_risks"
-SANDBOX_BACKEND = "sandbox_backend"  # v44-F7: "auto" (native) | "podman"
+SANDBOX_BACKEND = "sandbox_backend"  # v44-F7: "auto" (native) | "podman"; O3: | "none"
 # P1 (ADR 0053 D6): the per-scope kill switch — scopes routed through engine v2.
 POLICY_ENGINE_V2_SCOPES = "policy_engine_v2_scopes"
+# first-run O5 (ADR 0056 D2): when the store seeded a home that did not exist.
+FRESH_HOME_SEEDED_AT = "fresh_home_seeded_at"
 
-SANDBOX_BACKENDS = ("auto", "podman")
+# first-run O3 (ADR 0056 D8): "none" is the operator saying no sandbox ring is
+# counted on. Runtime treats it like "auto" (a run that asks for the sandbox
+# still gets the native backend when the host has one — never weaker); what
+# changes is the baseline onboard locks: allow-writes become asks.
+SANDBOX_BACKENDS = ("auto", "podman", "none")
 
 
 def engine_v2_scopes_from(raw: object) -> list[str]:

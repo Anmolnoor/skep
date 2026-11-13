@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,12 +34,14 @@ def test_setup_browser_registers_playwright_under_browse(
 
     monkeypatch.setattr(mc, "MCPClient", _DeadClient)
     store = RunStore(tmp_path / "s.sqlite3")
+    # The handshake runner is told its skep home (B149); browser is never forged.
+    holder = SimpleNamespace(current=SimpleNamespace(home=tmp_path / "supervisor"))
     try:
         result = execute_mutation(
             "setup_browser",
             {},
             store=store,
-            holder=None,  # type: ignore[arg-type]
+            holder=holder,  # type: ignore[arg-type]
             runner=None,  # type: ignore[arg-type]
             actor="tester",
         )
@@ -57,7 +60,7 @@ def test_setup_browser_registers_playwright_under_browse(
             "setup_browser",
             {},
             store=store,
-            holder=None,  # type: ignore[arg-type]
+            holder=holder,  # type: ignore[arg-type]
             runner=None,  # type: ignore[arg-type]
             actor="tester",
         )

@@ -15,12 +15,13 @@ _CONFIG = ChannelConfig(
     enabled=True,
     channel_can_confirm=True,
     allowed_identities=("chan-1",),
+    allowed_users=("u1",),
 )
 
 
 def test_allowlisted_message_normalizes_to_a_session() -> None:
     result = normalize_inbound(
-        {"channel_id": "chan-1", "content": "audit my repo", "author": {"id": "u1"}}, _CONFIG
+        {"channel_id": "chan-1", "content": "audit my repo", "author_id": "u1"}, _CONFIG
     )
     assert result.message is not None
     assert result.message.session_key == "discord:chan-1"

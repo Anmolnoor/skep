@@ -22,8 +22,10 @@ something the engine would not is worse than no card.
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
+import urllib.parse
 from typing import Any
 
 from ..shell_prefixes import (
@@ -32,6 +34,7 @@ from ..shell_prefixes import (
     queen_command_line_refusal,
     queen_shell_refusal,
 )
+from ..store import ChatTaint, RunStore
 
 # The "thing" a card is about, in priority order. One generic rule beats a
 # 69-entry per-tool table: every mutating tool names its subject with one of
@@ -98,6 +101,138 @@ _DESTRUCTIVE_TOOLS = frozenset(
 )
 _NETWORK_TOOLS = frozenset({"read_url", "register_mcp_server", "call_mcp_tool", "setup_browser"})
 
+# P4-2 (ADR 0059 D6): the policy writes a HIGH card covers — every verb that
+# widens or reshapes standing policy. ``revoke_policy_rule`` only narrows and
+# stays an ordinary card; a card keep=always is the operator's choice on an
+# ordinary card in the web UI or CLI (a channel confirm never names a keep).
+_HIGH_POLICY_TOOLS = _POLICY_TOOLS | {
+    "approve_policy_baseline",
+    "detach_policy_group",  # a group can carry denies: detaching it widens
+    "set_policy_group",
+    "set_role",  # the chat's role is a ceiling on the Queen's own lanes
+}
+_DISPATCH_TOOLS = frozenset({"dispatch_run", "quick_edit", "setup_project", "batch_dispatch"})
+
+
+def _wildcard_network(args: dict[str, Any]) -> bool:
+    for key in ("network", "source_allowlist"):
+        value = args.get(key)
+        if isinstance(value, list) and any(str(host).strip() == "*" for host in value):
+            return True
+    return False
+
+
+_TRIFECTA = "this chat has read private data and taken in outside content"
+
+
+def _named_by_operator(store: RunStore, server: str, name: str) -> bool:
+    """No per-server MCP trust flag exists. The one trust mark there is: the
+    operator's ``allow_mcp_tool`` grant naming exactly this ``server:tool``
+    (itself a HIGH card). A glob grant (``bank:*``) is not a name."""
+    from ..policy_schema import POLICY_DOCUMENT_SETTINGS_KEY, document_from_settings
+
+    document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    exact = f"{server}:{name}"
+    return document is not None and any(
+        rule.scope in ("mcp", "email", "browse") and rule.pattern == exact
+        for rule in document.learned
+    )
+
+
+def _changes_provider(args: dict[str, Any], store: RunStore | None) -> bool:
+    """W11: ``set_assistant_model`` that carries a base URL or another
+    protocol (scope 'chat' applies neither). No store: fail closed."""
+    if args.get("scope") == "chat":
+        return False
+    if str(args.get("base_url") or "").strip():
+        return True
+    if args.get("protocol") in (None, ""):
+        return False
+    from .llm import LLM_PROTOCOL
+
+    return store is None or args["protocol"] != store.get_setting(LLM_PROTOCOL)
+
+
+def _doubly_tainted(taint: ChatTaint | None) -> bool:
+    return taint is not None and taint.private is not None and taint.untrusted is not None
+
+
+def high_tier(
+    tool: str,
+    args: Any,
+    *,
+    taint: ChatTaint | None = None,
+    store: RunStore | None = None,
+    manifest: dict[str, Any] | None = None,
+) -> str | None:
+    """P4-2 (ADR 0059 D6): why this action is a HIGH card, or None.
+
+    The one place the tier is decided — the card renders it and every
+    confirm path re-asks it (``chat.verdict_events``). A HIGH card looks
+    different, holds once, never folds, is never auto-allowed and is never
+    confirmable from a messenger channel. Without ``store`` an MCP call
+    cannot be shown to be a read, so it is HIGH (fail closed). A dispatch's
+    ``manifest`` (``actions.dispatch_manifest``) is HIGH when its run would
+    reach any host, whatever the call's own args said."""
+    safe: dict[str, Any] = args if isinstance(args, dict) else {}
+    if _doubly_tainted(taint):
+        return _TRIFECTA
+    if tool == "propose_schedule":
+        if safe.get("caste") == "script":
+            return "a script schedule runs a command as you, on this host, unattended"
+        if safe.get("chain"):
+            return "a chained schedule feeds another schedule's output into this one"
+        existing = None if store is None else store.get_schedule(str(safe.get("name") or ""))
+        if existing is not None and existing.worker_kind == "script":
+            return f"it replaces your script schedule {existing.name!r}"
+        return None
+    if tool == "call_mcp_tool":
+        from ..mcp_client import mcp_call_is_read
+
+        server, name = str(safe.get("server_id") or ""), str(safe.get("tool") or "")
+        if store is not None and (
+            mcp_call_is_read(store, server, name) or _named_by_operator(store, server, name)
+        ):
+            return None
+        return "an MCP tool that acts (not a read), and you have not allowed it by name"
+    if tool == "register_mcp_server" or tool == "setup_browser":
+        return "it adds an MCP server whose tools can act as you"
+    if tool == "promote_tool":
+        return "it installs a forged tool: its code runs on this host"
+    if tool == "promote_skill_pack":
+        return "it activates a skill pack's scripts"
+    if tool in _HIGH_POLICY_TOOLS:
+        return "it changes standing policy"
+    if tool in ("add_provider", "use_provider") or (
+        tool == "set_assistant_model" and _changes_provider(safe, store)
+    ):
+        # W11: every later turn, private data included, goes to that endpoint
+        return "it points the assistant at another LLM endpoint: every later turn goes there"
+    if tool in ("set_schedule_enabled", "run_schedule_now") and (
+        tool == "run_schedule_now" or safe.get("enabled") is not False  # executor: bool(...)
+    ):
+        existing = None if store is None else store.get_schedule(str(safe.get("name") or ""))
+        if existing is None or existing.worker_kind == "script":  # unknown: fail closed
+            return f"a script schedule {SCRIPT_SENTENCE}"
+    if tool == "setup_project" and (safe.get("policy_overrides") or safe.get("groups")):
+        # the overlay spells any knob (coding_engine, default_network, …) and
+        # groups= is attach_policy_group: both write the project's policy
+        return "it writes the project's policy (policy_overrides or groups)"
+    if manifest is not None and "*" in (manifest.get("network") or []):
+        return "the run may reach any host on the internet (network '*')"
+    if tool in _DISPATCH_TOOLS:
+        tasks = safe.get("tasks") if tool == "batch_dispatch" else [safe]
+        for task in tasks if isinstance(tasks, list) else []:
+            if not isinstance(task, dict):
+                continue
+            if _wildcard_network(task):
+                return "the run may reach any host on the internet (network '*')"
+            if task.get("engine") not in (None, ""):
+                return f"it picks the coding agent itself (engine {task['engine']!r})"
+    if tool == "start_research" and _wildcard_network(safe):
+        return "the run may reach any host on the internet (network '*')"
+    return None
+
 
 def _argv_of(args: dict[str, Any]) -> list[str]:
     """The argv a shell-ish card is about, however the tool spells it."""
@@ -122,8 +257,9 @@ def _render_value(value: Any) -> str:
     return str(value)
 
 
-def headline(tool: str, args: dict[str, Any]) -> str:
-    """One line: the verb and the thing it acts on, verbatim."""
+def headline(tool: str, args: dict[str, Any], *, limit: int | None = 160) -> str:
+    """One line: the verb and the thing it acts on, verbatim. ``limit`` None:
+    never shortened (a folded card's items — each is what one approval runs)."""
     # v106-F5 (v101-F16): a PR verb names WHICH PR. "close_pr — repo" made two
     # cards in one batch indistinguishable, and the first subject key (repo)
     # swallowed the number that mattered. One branch, not a per-tool table —
@@ -141,6 +277,15 @@ def headline(tool: str, args: dict[str, Any]) -> str:
             if len(reason) > 160:
                 reason = f"{reason[:157]}…"
             return f"{tool} — {reason}"
+    if tool == "call_mcp_tool":
+        # L16: which tool, on which server, with what — an amount is the point
+        rendered = f"{args.get('server_id')}:{args.get('tool')}"
+        if args.get("arguments"):
+            rendered += " " + json.dumps(args["arguments"], ensure_ascii=False)
+        rendered = rendered.replace("\n", " ")
+        if limit is not None and len(rendered) > limit:
+            rendered = f"{rendered[: limit - 3]}…"
+        return f"{tool} — {rendered}"
     for key in _SUBJECT_KEYS:
         value = args.get(key)
         if value in (None, "", [], {}):
@@ -148,8 +293,8 @@ def headline(tool: str, args: dict[str, Any]) -> str:
         rendered = _render_value(value).strip().replace("\n", " ")
         if not rendered:
             continue
-        if len(rendered) > 160:
-            rendered = f"{rendered[:157]}…"
+        if limit is not None and len(rendered) > limit:
+            rendered = f"{rendered[: limit - 3]}…"
         return f"{tool} — {rendered}"
     return tool
 
@@ -219,6 +364,14 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
             # path ever proposes one, say the engine's own reason, not a guess.
             return refusal
         return "runs a command on this machine"
+    if tool == "propose_schedule" and args.get("caste") == "script":
+        # ES (lane F3): one click grants recurring host shell as the operator;
+        # the card has to say so, with the exact command and interval.
+        command = _render_value(args.get("instructions") or "").strip()
+        return (
+            f"runs `{command}` every {args.get('every')} as you on this host, "
+            "unattended, until disabled"
+        )
     if tool == "set_policy_group":
         # v97-F3 (I8): the two shapes carry opposite blast radii — say which.
         if args.get("fork_from"):
@@ -239,8 +392,17 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
         )
     if tool in _PUBLISHING_TOOLS:
         return "publishes to the remote — visible outside this machine, and not undone by a revert"
+    if tool == "deny_review":
+        return None  # refusing applies nothing
+    reason = str(args.get("reason") or "")
+    if tool == "approve_review" and reason and not reason.startswith("land "):
+        # L9: a worker gate, not a landing (landing reasons read 'land "…"')
+        return "lets the paused run go past this gate and do what it names, once"
     if tool in _LANDING_TOOLS:
         return "applies a patch to a real branch — landing IS the commit"
+    if tool == "set_operator_policy" and args.get("verdict") in ("deny", "require_approval"):
+        # L12: a deny or ask narrows; the _POLICY_TOOLS line would be a lie
+        return "adds a standing rule that makes matching actions ask or be refused"
     if tool == "revoke_policy_rule":
         # v109-F9: the one policy verb that NARROWS — the _POLICY_TOOLS line
         # ("widens…") would be a lie on this card.
@@ -252,6 +414,13 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
         return "widens what future runs may do without asking you again"
     if tool in _DESTRUCTIVE_TOOLS:
         return "removes state that cannot be restored from here"
+    if tool == "call_mcp_tool":
+        return (
+            f"runs {args.get('server_id')}:{args.get('tool')} as you with these arguments; "
+            "its reply comes into this conversation"
+        )
+    if tool == "register_mcp_server":
+        return "starts an MCP server whose tools can act as you"
     if tool in _NETWORK_TOOLS:
         host = _host_of(args)
         target = f" from {host}" if host else ""
@@ -259,22 +428,173 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
     return None
 
 
-def card_summary(tool: str, args: Any, description: str = "") -> dict[str, Any]:
+SCRIPT_SENTENCE = "runs as you, on this host, unattended, until disabled"
+
+
+def schedule_facts(args: dict[str, Any], store: RunStore | None = None) -> dict[str, Any] | None:
+    """P4-2 (ADR 0059 D6, F3 lesson 1): what a script, chained or replacing
+    schedule will really do — the command, the interval, the env names the
+    script really gets (``scheduler.script_env``), the next three fire times
+    (``scheduler.next_fire_times``), the chain it reads from, what it
+    replaces. None for any other schedule. With no ``store`` (a resolved
+    card) the chain is the one named, not walked."""
+    from ..scheduler import next_fire_times, parse_interval, script_env
+
+    caste = args.get("caste")
+    existing = None if store is None else store.get_schedule(str(args.get("name") or ""))
+    if caste != "script" and not args.get("chain") and existing is None:
+        return None
+    facts: dict[str, Any] = {"name": str(args.get("name") or ""), "caste": caste}
+    if caste == "script":
+        facts["command"] = str(args.get("instructions") or "")
+        facts["env"] = sorted(script_env())
+        facts["runs"] = SCRIPT_SENTENCE
+    facts["every"] = str(args.get("every") or "")
+    try:
+        start = None if args.get("start_at") is None else str(args["start_at"])
+        facts["next"] = next_fire_times(
+            start, parse_interval(facts["every"]), once=bool(args.get("once"))
+        )
+    except ValueError as exc:
+        facts["error"] = str(exc)  # the confirm refuses the same way
+    chain: list[str] = []
+    current = args.get("chain")
+    while current and str(current) not in chain and len(chain) < 4:
+        chain.append(str(current))
+        source = None if store is None else store.get_schedule(str(current))
+        current = None if source is None else source.chain
+    if chain:
+        facts["chain"] = chain  # this one reads chain[0]'s output, which reads chain[1]'s…
+    if existing is not None:
+        facts["replaces"] = f"your {existing.worker_kind} schedule {existing.name!r}"
+    return facts
+
+
+def recorded_card(
+    tool: str,
+    args: dict[str, Any],
+    high: str | None,
+    store: RunStore,
+    manifest: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """What the server records on a card when it is proposed (P4-2): its
+    HIGH tier, a dispatch's manifest, and for a schedule the facts the card
+    shows."""
+    record: dict[str, Any] = {} if high is None else {"tier": "high", "high": high}
+    if manifest is not None:
+        record["manifest"] = manifest
+    if tool == "propose_schedule":
+        facts = schedule_facts(args, store)
+        if facts is not None:
+            record["schedule"] = facts
+    return record or None
+
+
+def fold_subject(tool: str, args: Any, decided_by: str | None) -> str | None:
+    """P4-2 (ADR 0059 D6): when two cards are one question — ``(tool, scope,
+    matcher subject)`` plus the rule that asked, so a folded card's why-line
+    is true of every item. None: this call never folds (when in doubt).
+
+    - ``read_url``: the origin (scheme, host, port). Several pages of one host
+      in a round are one card; another host, port or scheme is another card.
+      A URL carrying credentials never folds.
+    - ``search_web`` (a taint ask): the search lane itself — every query of a
+      round asks the same thing ("may this chat send text out?").
+    - everything else: never (a command, a path, a dispatch is its own
+      question; identical calls are already deduplicated)."""
+    safe: dict[str, Any] = args if isinstance(args, dict) else {}
+    if tool == "search_web":
+        return json.dumps([tool, "network.search", "ddgs", decided_by])
+    if tool != "read_url":
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(str(safe.get("url") or ""))
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or "@" in parsed.netloc:
+        return None
+    port = port or (443 if parsed.scheme == "https" else 80)
+    origin = f"{parsed.scheme}://{parsed.hostname}:{port}"
+    return json.dumps([tool, "network.fetch", origin, decided_by])
+
+
+def card_summary(
+    tool: str,
+    args: Any,
+    description: str = "",
+    *,
+    taint: ChatTaint | None = None,
+    taint_line: str | None = None,
+    store: RunStore | None = None,
+    recorded: dict[str, Any] | None = None,
+    live_tier: bool = True,
+) -> dict[str, Any]:
     """The human-facing three lines for one proposed action.
 
     ``risk`` is omitted entirely when there is nothing notable, so the card
-    stays quiet about quiet things.
+    stays quiet about quiet things. P4-1 (ADR 0059 D5): in a tainted chat
+    (``taint``) the card says why in plain words (``taint_line``), offers
+    only the keeps that chat may store. P4-2 (D6): a HIGH action
+    (``high_tier``, or HIGH as ``recorded`` when it was proposed) is
+    ``tier: high`` with ``high`` saying why, and offers ``once`` only. A
+    resolved card (``live_tier`` False) asks no server or schedule again.
     """
     safe_args: dict[str, Any] = args if isinstance(args, dict) else {}
+    high = (recorded or {}).get("high")
+    if high is None and live_tier:
+        high = high_tier(tool, safe_args, taint=taint, store=store)
+    elif high is None and _doubly_tainted(taint):
+        high = _TRIFECTA
+    # P4-2: a folded card is every call it answers — the confirm acts on
+    # exactly these (the server's record), never on one more.
+    folded = [safe_args] + [item.get("args") or {} for item in (recorded or {}).get("items") or []]
     summary: dict[str, Any] = {"headline": headline(tool, safe_args)}
     why = purpose(description)
     if why is not None:
         summary["purpose"] = why
-    danger = risk(tool, safe_args)
+    held = None
+    if tool == "approve_review" and store is not None:
+        # L9: landing or gate is the approval's, never the model's ``reason`` arg
+        held = store.get_approval(str(safe_args.get("review_id") or ""))
+    danger = risk(tool, safe_args if held is None else {**safe_args, "reason": held.reason})
+    decision = (recorded or {}).get("decision") or {}
+    if decision.get("reason") == "shell.require_approval.unreadable_under_deny":
+        danger = str(decision.get("detail"))  # L13: the deny this line may get around
     if danger is not None:
         summary["risk"] = danger
     if tool in _POLICY_TOOLS:
         # v114-F3: a standing change, not a one-off — clients that pre-confirm
         # (`skep chat --yes`) must leave it for a named confirm.
         summary["policy"] = True
+    from .actions import REMEMBERABLE_TOOLS, keep_covers, keep_options
+
+    if tool in REMEMBERABLE_TOOLS:
+        # P3-4 (ADR 0059 D4): the keep choices the server will honour — the
+        # card never offers a lifetime the confirm would refuse (B32).
+        offered = [keep_options(tool, item, taint, high=high is not None) for item in folded]
+        summary["keep"] = [keep for keep in offered[0] if all(keep in o for o in offered)]
+        covers = [found for item in folded if (found := keep_covers(tool, item)) is not None]
+        if covers:
+            # what "session"/"always" would allow — for every item of a fold
+            summary["keep_covers"] = "; ".join(dict.fromkeys(covers))
+    manifest = (recorded or {}).get("manifest")
+    if manifest is not None:
+        # P4-2 (D6): what the run gets, as compiled when the card was shown —
+        # approving it answers the listed asks for that run.
+        summary["manifest"] = manifest
+    if tool == "propose_schedule":
+        # a pending card says what confirming NOW does; a resolved one what
+        # the server recorded when it was proposed
+        facts = schedule_facts(safe_args, store) if live_tier else (recorded or {}).get("schedule")
+        if facts is not None:
+            summary["schedule"] = facts
+    if len(folded) > 1:
+        summary["items"] = [headline(tool, item, limit=None) for item in folded]
+        summary["headline"] = f"{summary['headline']} (+{len(folded) - 1} more)"
+    if taint_line:
+        summary["taint"] = taint_line
+    if high is not None:
+        summary["tier"] = "high"
+        summary["high"] = high
     return summary

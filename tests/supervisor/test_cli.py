@@ -17,6 +17,8 @@ from skep.supervisor.autonomy import AutonomyDecision
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.ingest import IngestOutcome
 from skep.supervisor.scheduler import make_schedule, run_due
+from skep.supervisor.serve.actions import granted_commands
+from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.store import RunRecord
 from skep.worker_contract import (
     CONTRACT_VERSION,
@@ -251,11 +253,84 @@ def test_run_status_review_approve_full_loop(
     finally:
         store.close()
 
-    # Approving twice fails loudly: the branch already exists.
+    # Approving twice fails loudly: the task already landed (ES-F4).
     code = _run_cli(home, "review", task_id, "--approve", "--actor", "tester")
     captured = capsys.readouterr()
     assert code == 2
-    assert "already exists" in captured.err
+    assert f"already landed on skep/{task_id}" in captured.err
+
+
+def test_review_approve_never_lands_a_review_serve_is_already_applying(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B150: the CLI applied the patch without claiming the review, so while
+    serve was mid-landing it applied it again, then died in resolve_approval
+    ("already resolved as 'applying'"). It now takes the same claim."""
+    home = tmp_path / "home"
+    db = home / "supervisor" / "supervisor.sqlite3"
+    db.parent.mkdir(parents=True)
+    store = RunStore(db)
+    try:
+        task = mint_task(workspace=repo, instructions="land me")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "completed")
+        patch = tmp_path / "task.patch"
+        patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
+        store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+        review_id = store.enqueue_approval(task.task_id, action="apply_patch", reason="land")
+        assert store.claim_approval(review_id)  # serve is mid-landing
+    finally:
+        store.close()
+    applied: list[object] = []
+    monkeypatch.setattr(cli_cmds, "land_patch", lambda *a, **k: applied.append(a))
+
+    code = _run_cli(home, "review", task.task_id, "--approve", "--actor", "tester")
+
+    assert code == 2
+    assert "already being applied" in capsys.readouterr().err
+    assert applied == []
+    store = RunStore(db)
+    try:
+        [approval] = store.approvals_for(task.task_id)
+        assert approval.status == "applying"  # serve's landing still owns it
+    finally:
+        store.close()
+
+
+def test_review_approve_hands_the_review_back_when_git_blows_up(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    db = home / "supervisor" / "supervisor.sqlite3"
+    db.parent.mkdir(parents=True)
+    store = RunStore(db)
+    try:
+        task = mint_task(workspace=repo, instructions="land me")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "completed")
+        patch = tmp_path / "task.patch"
+        patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
+        store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+    finally:
+        store.close()
+
+    def boom(*_: object, **__: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli_cmds, "land_patch", boom)
+    with pytest.raises(OSError):
+        _run_cli(home, "review", task.task_id, "--approve", "--actor", "tester")
+    monkeypatch.setattr(cli_cmds, "land_patch", lambda *a, **k: "patch does not apply")
+    assert _run_cli(home, "review", task.task_id, "--approve", "--actor", "tester") == 2
+    store = RunStore(db)
+    try:
+        # The blow-up handed the review back; the clean failure denied it
+        # with its reason, as serve does (v81-F2) — no stray pending review.
+        [approval] = store.approvals_for(task.task_id)
+        assert approval.status == "denied"
+        assert approval.resolution_note == "apply failed: patch does not apply"
+    finally:
+        store.close()
 
 
 def test_review_approve_lands_on_named_branch(
@@ -363,7 +438,8 @@ def test_doctor_flags_deprecated_global_auto_approve(tmp_path: Path) -> None:
 def test_cli_run_merges_configured_provider_host_into_network(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """v19-F2: a run minted via the CLI carries the configured provider host."""
+    """v19-F2: a run minted via the CLI carries the configured provider host —
+    as provider_hosts (ADR 0059 D3), not in its network grant."""
     from skep.profile import run_personal_setup
 
     home = tmp_path / "home"
@@ -392,7 +468,8 @@ def test_cli_run_merges_configured_provider_host_into_network(
     task = json.loads(
         (home / "supervisor" / "audit" / task_id / "task.json").read_text(encoding="utf-8")
     )
-    assert "provider.example" in task["permissions"]["network"]
+    assert task["permissions"]["provider_hosts"] == ["provider.example:11434"]
+    assert "provider.example" not in task["permissions"]["network"]
 
 
 def test_status_personal_moves_superseded_runs_out_of_the_table(
@@ -587,7 +664,9 @@ def test_pending_shell_run_can_be_allowed_and_resumed(
 
     store = RunStore(config.db_path)
     try:
-        assert store.get_setting("allowed_shell_commands") == [write_argv]
+        # P3-4 (B18): a grant bound to the repo, never the global knob.
+        assert store.get_setting("allowed_shell_commands") is None
+        assert granted_commands(store, ConfigHolder(config, store), repo) == [write_argv]
         approvals = store.approvals_for(task.task_id)
         assert len(approvals) == 1
         assert approvals[0].status == "approved"
@@ -719,7 +798,8 @@ def test_inline_shell_approval_can_be_remembered(
 
     store = RunStore(config.db_path)
     try:
-        assert store.get_setting("allowed_shell_commands") == [write_argv]
+        assert store.get_setting("allowed_shell_commands") is None  # P3-4: a repo grant
+        assert granted_commands(store, ConfigHolder(config, store), repo) == [write_argv]
         approvals = store.approvals_for(task.task_id)
         assert [approval.status for approval in approvals] == ["approved"]
         ledger = store.ledger_for_repo(repo)
@@ -2804,3 +2884,68 @@ def test_every_parser_group_is_in_the_cli_reference() -> None:
     doc = (Path(__file__).parents[2] / "docs" / "cli-reference.md").read_text()
     missing = [group for group in groups if f"skep {group}" not in doc]
     assert not missing, f"CLI groups absent from docs/cli-reference.md: {missing}"
+
+
+def test_cli_run_honours_the_stored_sandbox_backend(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F7 (B57, fedora-p1-08): after `skep onboard --sandbox podman`, serve
+    ran podman and `skep run` built its config without the setting — the two
+    faces ran different sandboxes for the same home."""
+    home = tmp_path / "home"
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting("sandbox_backend", "podman")
+    finally:
+        store.close()
+    seen: list[str] = []
+
+    def fake_run_task(*args: object, **kwargs: object) -> object:
+        seen.append(kwargs["config"].sandbox_backend)  # type: ignore[attr-defined]
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli_cmds, "run_task", fake_run_task)
+    with pytest.raises(SystemExit):
+        _run_cli(home, "run", str(repo), "Fix the bug.", "--execution-mode", "sandbox")
+    assert seen == ["podman"]
+
+
+def test_cli_run_network_help_says_what_an_omitted_flag_does(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ES-F7 (B60): the help said an omitted --network denies all egress; on
+    builder/operator homes it applies the baseline's default_network and
+    starts the proxy (the path that made B05 reachable by default)."""
+    with pytest.raises(SystemExit):
+        main(["run", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "omit to deny all outbound" not in out
+    assert "default_network applies" in out and "--minimal denies all" in out
+
+
+def test_cli_run_minimal_help_says_the_llm_still_reaches_its_provider(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR 0059 D3: run_task gives every run that calls the LLM its
+    provider_hosts, --minimal included — "deny-all" alone is no longer true."""
+    with pytest.raises(SystemExit):
+        main(["run", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "start with deny-all permissions and learn" not in out
+    assert "--minimal start with deny-all grants (a worker that calls the LLM" in out
+
+
+def test_es_f4_cli_refuses_a_second_landing(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ES-F4 (B128): `skep review --approve --branch other` on a landed task."""
+    home = tmp_path / "home"
+    args = ("Fix the bug. MODE:happy", "--execution-mode", "workspace")
+    assert _run_cli(home, "run", str(repo), *args, "--worker-cmd", _worker_cmd(), "--quiet") == 0
+    task_id = _only_task_id(home)
+    assert _run_cli(home, "review", task_id, "--approve") == 0
+    capsys.readouterr()
+    assert _run_cli(home, "review", task_id, "--approve", "--branch", "other") != 0
+    assert "already landed on" in capsys.readouterr().err
+    assert not git(repo, "branch", "--list", "other").stdout.strip()

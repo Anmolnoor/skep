@@ -1,0 +1,18 @@
+[
+  {
+    "fixture": "live-v2-ask.ndjson",
+    "line": 86,
+    "tool_call_id": "exec-6769909f-ebf3-4a89-a4ad-9fe4a95ebc4c",
+    "probe": {
+      "kind": "decided",
+      "items": [
+        [
+          "shell",
+          "run",
+          "printf 'hello' > probe.txt"
+        ]
+      ],
+      "cwd": "$REPO"
+    }
+  }
+]

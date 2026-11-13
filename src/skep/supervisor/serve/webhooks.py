@@ -147,8 +147,13 @@ def add_webhook_routes(
         payload: dict[str, Any] = parsed if isinstance(parsed, dict) else {}
         text = render_template(hook.template, payload)
         if hook.chat_id and run_store.get_chat(hook.chat_id) is not None:
-            run_store.add_chat_message(hook.chat_id, role="assistant", content=text)
+            # ADR 0059 D5 (B26): outside text, never the Queen's own words — a
+            # user row from webhook:<name>, replayed wrapped; it sets ``untrusted``.
+            run_store.add_chat_message(
+                hook.chat_id, role="user", content=text, provenance=f"webhook:{name}"
+            )
             push(run_store, home, hook.chat_id, text)
             return {"ok": True, "delivered": "chat"}
-        run_store.create_note(text, actor=f"webhook:{name}")
+        # W21 review: outside text — a chat that lists the note takes ``untrusted``
+        run_store.create_note(text, actor=f"webhook:{name}", taint=("untrusted",))
         return {"ok": True, "delivered": "note"}

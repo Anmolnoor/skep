@@ -200,7 +200,14 @@ def test_forge_lifecycle_end_to_end(
 
         # The real trial (actual subprocesses) passes and activation registers.
         def real_trial(
-            store_: Any, holder_: Any, runner_: Any, *, source: str, repo: str, decision: Any
+            store_: Any,
+            holder_: Any,
+            runner_: Any,
+            *,
+            source: str,
+            repo: str,
+            decision: Any,
+            delegation_chain: Any = (),
         ) -> dict[str, Any]:
             return _run_harness(source, tmp_path)
 

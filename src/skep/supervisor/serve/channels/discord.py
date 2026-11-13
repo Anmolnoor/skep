@@ -9,7 +9,8 @@ live Discord). ✅/❌ confirm/deny only through the shared, fail-closed
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from . import (
     ChannelConfig,
@@ -39,8 +40,8 @@ def normalize_inbound(payload: dict[str, object], config: ChannelConfig) -> Norm
     Admission (fail closed): the channel id is allow-listed, OR the gateway
     marked the conversation ``session_bound`` (a thread skep itself created
     under an allow-listed parent), OR it is a DM from an allow-listed user
-    (DM channel ids cannot be known in advance). When ``allowed_users`` is
-    set, the author must additionally be listed — everywhere.
+    (DM channel ids cannot be known in advance). The author must be in
+    ``allowed_users`` — everywhere; an empty list admits nobody (B114).
 
     Mention gating applies only to guild messages arriving via the channel
     allowlist: threads skep created and DMs never need a mention.
@@ -67,7 +68,7 @@ def normalize_inbound(payload: dict[str, object], config: ChannelConfig) -> Norm
             "channel.reject.identity_not_allowlisted",
             audit={"channel": CHANNEL, "identity": channel_id},
         )
-    if config.allowed_users and not user_listed:
+    if not user_listed:  # ES (B114): empty allowed_users admits nobody
         return NormalizedInbound(
             None,
             "channel.reject.user_not_allowlisted",
@@ -94,10 +95,12 @@ def confirmation_embed(
     commands: Sequence[Sequence[str]],
     config: ChannelConfig,
     web_ui_url: str = "",
+    card: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
-    card = render_confirm_card(action_class, commands)
-    fields = [{"name": "command", "value": line} for line in card.commands]
-    if card.web_ui_only or not config.channel_can_confirm:
+    view = render_confirm_card(action_class, commands, card)
+    fields = [{"name": "command", "value": line} for line in view.commands]
+    fields += [{"name": "note", "value": line} for line in view.notes]
+    if view.web_ui_only or not config.channel_can_confirm:
         # v66-F3: name the link the card points at (Telegram always did).
         description = "This action can only be confirmed from the skep web UI."
         if web_ui_url:
@@ -105,7 +108,8 @@ def confirmation_embed(
         return {
             "embeds": [
                 {
-                    "title": "Review in the web UI",
+                    # P4-2: a HIGH card says so in words, not only by colour.
+                    "title": "HIGH risk: needs the web UI" if view.high else "Review in the web UI",
                     "description": description,
                     "fields": fields,
                 }

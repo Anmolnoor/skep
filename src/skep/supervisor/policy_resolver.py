@@ -27,7 +27,6 @@ from skep.worker_contract import (
     ProjectContextPayload,
 )
 
-from .castes import CASTES
 from .config import SupervisorConfig
 from .policy_registry import registry_keys
 from .policy_schema import (
@@ -38,8 +37,12 @@ from .policy_schema import (
     PolicyRule,
     ResolvedScopePolicy,
     ScopePolicy,
+    applies,
     decide,
+    deny_reaches,
     document_from_settings,
+    lifetime_of,
+    matcher_of,
     operator_document_from_settings,
     resolve,
 )
@@ -49,6 +52,7 @@ from .projects import (
     phase_default_policy,
     stored_policy_groups,
 )
+from .provider_hosts import provider_hosts_for
 from .serve.settings import (
     POLICY_ENGINE_V2_SCOPES,
     RUN_EXECUTION_MODES,
@@ -88,6 +92,8 @@ class ResolvedRunPolicy:
     # and the final resolved allowlist that landed in permissions.network.
     network_requested: list[str] | None = None
     network_resolved: list[str] | None = None
+    # L10: the hosts an explicit network took away from the project's own.
+    network_dropped: list[str] = field(default_factory=list)
     # v23-F1: which trusted root satisfied workspace trust for this repo
     # (an operator root, the project binding, or the managed repos dir); None
     # when nothing did — i.e. the shell allowlist resolved to [].
@@ -115,6 +121,9 @@ class ResolvedRunPolicy:
     # P1 (ADR 0053 D6): which scopes answered from policy engine v2, which
     # knobs that routed, and the rule refusals the v2 stack recorded (D5).
     policy_engine: dict[str, Any] = field(default_factory=dict)
+    # P3-4: the worker grants in the shell allowlist — pattern → its layer
+    # label (``grant:session`` / ``grant:project``), for decided_by.
+    shell_grants: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -589,7 +598,6 @@ def resolve_run_policy(
     max_actions: int | None,
     max_provider_calls: int | None,
     execution_mode: str | None,
-    extra_network_hosts: Sequence[str] = (),
     binding_candidates: Sequence[tuple[str, str]] = (),
     engine: str | None = None,
 ) -> ResolvedRunPolicy:
@@ -611,6 +619,17 @@ def resolve_run_policy(
     # silently running without the grants the project thinks it has would be
     # a policy the record cannot explain (I8), so the refusal teaches (I9).
     missing_groups = policy.pop("_missing_policy_groups", None)
+    # first-run O2 (ADR 0056 D1): a baseline that does not verify contributes
+    # no layer, so resolving on would run under the looser stack beneath it.
+    # The dispatch fails closed and says how to get out (I9).
+    from .policy_layers import baseline_tampered
+
+    if baseline_tampered(config.home):
+        raise PolicyResolutionError(
+            "baseline_tampered: the approved policy baseline no longer matches its lock — "
+            "`skep policy baseline diff` shows what changed; `skep policy approve "
+            "--reapprove` re-locks it"
+        )
     if missing_groups:
         raise PolicyResolutionError(
             f"project policy attaches unknown policy group(s) {missing_groups!r} — "
@@ -675,33 +694,21 @@ def resolve_run_policy(
     # every surface shows (I8); dispatch backs this with a hard refusal.
     if chosen_engine.external:
         resolved_execution_mode = "sandbox"
-    default_network = list(policy["default_network"])
-    chosen_network = list(default_network if network is None else network)
-    # v19-F2: a coding worker that cannot reach its LLM provider cannot work at
-    # all, so the provider host is merged into the allowlist on every creation
-    # path (not only when network was left unspecified). ``["*"]`` already allows
-    # everything; leave it untouched. Deny-all ``[]`` becomes ``[<provider-host>]``.
-    # v72-F2: the document caste drafts through the same provider — same rule.
-    # v108-F1: the gate reads the caste registry's needs_provider flag — the
-    # field always claimed to drive this merge (castes.py) while a hardcoded
-    # tuple here starved the reviewer caste, which hard-fails without its host.
-    caste_spec = CASTES.get(caste)
-    if caste_spec is not None and caste_spec.needs_provider and chosen_network != ["*"]:
-        seen = set(chosen_network)
-        for host in extra_network_hosts:
-            if host not in seen:
-                chosen_network.append(host)
-                seen.add(host)
-        # v90-F1: the same rule for a CLI engine's own API host — an agent that
-        # cannot reach its provider cannot work at all, and without this the
-        # failure is a confusing timeout instead of a stated denial (I12).
-        if (
-            caste == "coding"
-            and chosen_engine.network_host
-            and chosen_engine.network_host not in seen
-        ):
-            chosen_network.append(chosen_engine.network_host)
-            seen.add(chosen_engine.network_host)
+    # L10: what the run gets with no explicit network — the project's default,
+    # its registries and remembered hosts. An explicit list REPLACES it (the
+    # documented override, frozen in the policy regression fixtures); the
+    # card names what that drops (``network_dropped``), never silently.
+    omitted_network = list(policy["default_network"])
+    # v19-F2 → ADR 0059 D3 (V6a): a worker that cannot reach its LLM provider
+    # cannot work at all, so every needs_provider caste gets the provider on
+    # every creation path — as provider_hosts (host:port), NOT merged into
+    # network: skep's own endpoint is a supervisor resource, so the delegation
+    # narrowing never drops it (B12) and an explicit network cannot lose it. An
+    # external engine (v90-F1) gets its own API host and nothing else (B140).
+    # run_task recomputes it with the same call, so this copy is what faces show.
+    provider_hosts = provider_hosts_for(
+        store, config.home.parent, caste=caste, engine=chosen_engine.name
+    )
     # v23-F5: a trusted local dev run with no explicit network gets the package
     # registries — wherever the sandbox can actually enforce the list. Workspace
     # mode always enforces via the proxy; sandbox mode enforces since v28 on both
@@ -710,30 +717,52 @@ def resolve_run_policy(
         resolved_execution_mode == "sandbox" and per_domain_egress_enforceable()
     )
     if (
-        network is None
-        and chosen_network != ["*"]
+        omitted_network != ["*"]
         and registry_merge_enforced
         and project_context is not None
         and project_context.strategy == "trusted_local_dev"
     ):
-        seen = set(chosen_network)
+        seen = set(omitted_network)
         for host in TRUSTED_DEV_REGISTRY_HOSTS:
             if host not in seen:
-                chosen_network.append(host)
+                omitted_network.append(host)
                 seen.add(host)
+    if omitted_network != ["*"]:
+        # W28: hosts a human remembered for this project (or repo) — a grant,
+        # so a locked baseline's enforced default_network does not shadow it.
+        omitted_network.extend(
+            worker_network_grants(
+                store,
+                config.home,
+                repo,
+                project_context.project_id if project_context is not None else None,
+            )
+        )
     # v19-F11: sort + dedupe so equal inputs give a byte-equal task.json
     # allowlist regardless of creation path or merge order. ``["*"]`` is left
     # as-is (a single element sorts to itself anyway).
-    chosen_network = sorted(dict.fromkeys(chosen_network))
+    omitted_network = sorted(dict.fromkeys(omitted_network))
+    chosen_network = omitted_network if network is None else sorted(dict.fromkeys(network))
+    network_dropped = (
+        [] if "*" in chosen_network else [h for h in omitted_network if h not in chosen_network]
+    )
     # v40-F7 (v36-F3): compile the resolved knobs into ONE policy document and
     # read the legacy fields back out of it — Permissions is the compiled
     # artifact of resolved policy, which is why this needs no contract bump
     # and no worker change (they keep reading task.permissions).
     trusted_roots = [str(root) for root in policy.get("trusted_workspace_roots") or []]
+    shell_grants = worker_shell_grants(
+        store,
+        config.home,
+        repo,
+        project_context.project_id if project_context is not None else None,
+    )
     document = compile_policy_document(
         template=(project_context.strategy if project_context is not None else "global"),
         network=chosen_network,
-        shell_allowlist=_shell_allowlist_for(policy, repo, resolved_execution_mode),
+        shell_allowlist=_shell_allowlist_for(
+            policy, repo, resolved_execution_mode, [shlex.split(p) for p in shell_grants]
+        ),
         trusted_roots=trusted_roots,
     )
     resolved_scopes = resolve(document, v2_scopes=tuple(policy_engine.get("v2_scopes") or ()))
@@ -753,6 +782,7 @@ def resolve_run_policy(
         shell_allowlist=_shell_scope_view(resolved_scopes),
         allowed_plugin_risks=list(policy.get("allowed_plugin_risks") or []),
         allow_git_mutation=bool(policy.get("allow_git_mutation") is True),
+        provider_hosts=provider_hosts,
     )
     budget = Budget(
         wall_clock_seconds=(
@@ -778,6 +808,7 @@ def resolve_run_policy(
         project_context=project_context,
         network_requested=None if network is None else list(network),
         network_resolved=list(chosen_network),
+        network_dropped=network_dropped,
         trust_root=granting_root(repo, trusted_roots),
         document=document,
         resolved_scopes=resolved_scopes,
@@ -787,6 +818,7 @@ def resolve_run_policy(
         provenance=provenance,
         provenance_chain=provenance_chain,
         policy_engine=policy_engine,
+        shell_grants=shell_grants,
     )
 
 
@@ -815,13 +847,21 @@ def _resolve_execution_mode(policy: dict[str, Any], repo: Path, requested: str |
 
 
 def _shell_allowlist_for(
-    policy: dict[str, Any], repo: Path, execution_mode: str
+    policy: dict[str, Any],
+    repo: Path,
+    execution_mode: str,
+    granted: Sequence[Sequence[str]] = (),
 ) -> list[list[str]]:
     """The shell allowlist a run under this policy is entitled to.
 
     Workspace mode requires the repo under a trusted root; sandbox mode honors
     the allowlist as-is because the seatbelt profile already bounds writes and
     network egress — an allowlisted command cannot escape the sandbox.
+
+    ``granted`` (P3-4, ADR 0059 D4): the worker grants bound to this repo or
+    its project (``worker_shell_grants``) — argv prefixes, as every allowlist
+    entry is. They replace the v86-F1 session tier, which was one list every
+    repo's runs read (B39): that setting is no longer read or written.
     """
     if execution_mode == "workspace":
         trusted_roots = policy.get("trusted_workspace_roots")
@@ -831,23 +871,108 @@ def _shell_allowlist_for(
         return []
     allowed = policy.get("allowed_shell_commands")
     result = [list(command) for command in allowed] if isinstance(allowed, list) else []
-    # v86-F1: the session tier — operator-approved for this serve session
-    # (cleared at serve startup), merged read-side only so the durable
-    # write paths never absorb it.
-    session = policy.get("session_allowed_shell_commands")
-    if isinstance(session, list):
-        for command in session:
-            entry = list(command)
-            if entry not in result:
-                result.append(entry)
+    # Merged read-side only, so the durable knob never absorbs a grant.
+    for command in granted:
+        entry = list(command)
+        if entry not in result:
+            result.append(entry)
     return result
 
 
 def resolved_shell_allowlist(
-    policy: dict[str, Any], repo: Path, execution_mode: str
+    policy: dict[str, Any],
+    repo: Path,
+    execution_mode: str,
+    granted: Sequence[Sequence[str]] = (),
 ) -> list[list[str]]:
     """Public wrapper so resume paths can re-resolve a run's shell allowlist."""
-    return _shell_allowlist_for(policy, repo, execution_mode)
+    return _shell_allowlist_for(policy, repo, execution_mode, granted)
+
+
+def grant_repo(repo: Path | str) -> str:
+    """The one spelling a repo binding is stored and matched under."""
+    return str(Path(repo).expanduser().resolve())
+
+
+def worker_shell_grants(
+    store: RunStore, home: Path, repo: Path, project_id: str | None
+) -> dict[str, str]:
+    """ADR 0059 D4: the worker grants a run in ``repo`` holds — pattern →
+    ``grant:session`` (a plain approve, bound to this repo, B39) or
+    ``grant:project`` (an "Allow & remember", bound to the project, else the
+    repo; B18). From the one learned list. Never one in denied space: a
+    guarded prefix, or one a shell deny of the setup document or the approved
+    baseline intersects, is left out (B23's decide-time half)."""
+    from .policy_layers import template_layer
+    from .shell_prefixes import dangerous_prefix_reason, is_remote_git_command
+
+    document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    if document is None or not document.learned:
+        return {}
+    template = template_layer(home)
+    denies = [
+        rule.pattern
+        for rule in (template.rules if template is not None else ())
+        if (rule.scope, rule.verdict, rule.action) == ("shell", "deny", "run")
+    ] + [
+        rule.pattern
+        for scope in document.scopes
+        if scope.scope == "shell"
+        for rule in scope.deny
+        if rule.action == "run"
+    ]
+    granted: dict[str, str] = {}
+    for rule in document.learned:
+        if (rule.scope, rule.action, matcher_of(rule)) != ("shell", "run", "prefix"):
+            continue
+        if not applies(rule, repo=grant_repo(repo), project_id=project_id):
+            continue
+        argv = shlex.split(rule.pattern)
+        if dangerous_prefix_reason(argv) is not None or is_remote_git_command(argv):
+            continue
+        if any(deny_reaches("shell", "run", deny, "run", rule.pattern) for deny in denies):
+            continue
+        label = "grant:session" if lifetime_of(rule) == "session" else "grant:project"
+        if granted.get(rule.pattern) != "grant:project":
+            granted[rule.pattern] = label
+    return granted
+
+
+def worker_network_grants(
+    store: RunStore, home: Path, repo: Path, project_id: str | None
+) -> list[str]:
+    """W28 (B18's network half): the hosts an "Allow host & remember" granted
+    a run in ``repo`` — ``project`` grants on ``network.connect``, bound to the
+    project, else the repo. Never one in denied space: a host a network
+    connect deny of the setup document or the approved baseline covers is
+    left out, as ``worker_shell_grants`` leaves out a denied prefix."""
+    from .policy_layers import template_layer
+
+    document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    if document is None or not document.learned:
+        return []
+    template = template_layer(home)
+    denies = [
+        rule.pattern
+        for rule in (template.rules if template is not None else ())
+        if (rule.scope, rule.verdict, rule.action) == ("network", "deny", "connect")
+    ] + [
+        rule.pattern
+        for scope in document.scopes
+        if scope.scope == "network"
+        for rule in scope.deny
+        if rule.action == "connect"
+    ]
+    return [
+        rule.pattern
+        for rule in document.learned
+        if (rule.scope, rule.action, matcher_of(rule), lifetime_of(rule))
+        == ("network", "connect", "host", "project")
+        and applies(rule, repo=grant_repo(repo), project_id=project_id)
+        and not any(
+            deny_reaches("network", "connect", deny, "connect", rule.pattern) for deny in denies
+        )
+    ]
 
 
 # -- the operator policy: the Queen's standing rules (v52-F2) ------------------
@@ -860,16 +985,49 @@ class ResolvedOperatorPolicy:
     Not a run policy: no repo, no caste, no Permissions/Budget — the Queen is
     a persistent in-process agent, not a contract-governed worker. The
     resolution composes the stored GLOBAL document (templates + learned
-    rules keep their effect) with the operator document overlay (Queen-only
-    rules workers never read); deny wins ties across both.
+    rules keep their effect — except a template's worker shell allows, ES-F3)
+    with the operator document overlay (Queen-only rules workers never
+    read); deny wins ties across both.
     """
 
     template: str | None
     resolved_scopes: dict[str, ResolvedScopePolicy]
+    # first-run O2/O5: scope → ``baseline_tampered`` (a baseline that does not
+    # verify) or ``no_baseline`` (the zero state) — a Queen-side decision in
+    # such a scope asks, never allows. ``policy_layers.baseline_guard``.
+    fail_closed: dict[str, str] = field(default_factory=dict)
 
     def decision(self, scope: str, action: str, value: str) -> PolicyDecision:
         """What the standing policy says about one Queen-side scoped action."""
-        return decide(self.resolved_scopes, scope, action, value, template=self.template)
+        decision = decide(self.resolved_scopes, scope, action, value, template=self.template)
+        reason = self.fail_closed.get(scope)
+        if reason is None:
+            return decision
+        return PolicyDecision(
+            verdict="require_approval",
+            rule_id=reason,
+            decided_by=f"baseline/{reason}",
+            scope=scope,
+            action=action,
+        )
+
+
+def queen_global_document(document: PolicyDocument) -> PolicyDocument:
+    """ES-F3 (V5, B03): the global document as the Queen's host lane sees it.
+
+    Its ``shell`` allows are a template's (``skep setup --template`` writes
+    them) and were written for sandboxed workers in a disposable worktree —
+    npm/uv/pytest on the operator's host is a different promise. ES-F7
+    (B72): only the allows leave; a shell deny or ask there still binds the
+    Queen. Learned rules stay: those are grants the operator gave the Queen."""
+    return document.model_copy(
+        update={
+            "scopes": [
+                s.model_copy(update={"allow": []}) if s.scope == "shell" else s
+                for s in document.scopes
+            ]
+        }
+    )
 
 
 def resolve_operator_policy(store: RunStore) -> ResolvedOperatorPolicy:
@@ -883,7 +1041,15 @@ def resolve_operator_policy(store: RunStore) -> ResolvedOperatorPolicy:
         document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
     )
     operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
+    from .policy_layers import baseline_guard, queen_template_layer, store_home
+
     return ResolvedOperatorPolicy(
         template=base.template or operator.template,
-        resolved_scopes=resolve(base, overlays=(operator,), v2_scopes=engine_v2_scopes(store)),
+        resolved_scopes=resolve(
+            queen_global_document(base),
+            overlays=(operator,),
+            v2_scopes=engine_v2_scopes(store),
+            template=queen_template_layer(store_home(store)),
+        ),
+        fail_closed=baseline_guard(store),
     )

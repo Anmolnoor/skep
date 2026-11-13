@@ -1,12 +1,15 @@
 """v40-F12 (v36-F8): skep setup --template — preview, apply, switch diffs.
 
-Plus the v19 replay pin: the add-README task under personal-dev completes in
-one run with zero mid-run approvals and one landing approval — templates may
+first-run O1: the templates are `builder` / `operator` / `assistant` in the
+layer format; the table printed is `skep policy explain`'s and the knobs
+written are the template's own.
+
+Plus the v19 replay pin: the add-README task under builder completes in one
+run with zero mid-run approvals and one landing approval — templates may
 never regress the v19-F1 batch-gate economy."""
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -27,7 +30,9 @@ from .conftest import serve_client as _client
 from .conftest import wait_terminal as _wait_terminal
 from .fake_openai import FakeOpenAI
 
-_VERIFY = [sys.executable, "-c", "import os; assert os.path.exists('README.md')"]
+# ES-F3: a verify label is no grant — under builder, the economy holds for a
+# verify the template allowlists (its test runners and read-only git).
+_VERIFY = ["git", "status", "--porcelain"]
 
 
 def _run_cli(home: Path, *argv: str) -> int:
@@ -42,20 +47,21 @@ def _stored_document(home: Path) -> Any:
         store.close()
 
 
-def test_template_round_trip_writes_document_and_derived_knobs(
+def test_template_round_trip_writes_document_and_its_knobs(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     home = tmp_path / "home"
-    assert _run_cli(home, "setup", "--template", "personal-dev") == 0
+    assert _run_cli(home, "setup", "--template", "builder") == 0
     out = capsys.readouterr().out
-    assert "policy template: personal-dev" in out
+    assert "policy template: builder" in out
     assert "(pack: trusted_local_dev)" in out
     assert "net-pypi" in out  # the preview table IS the feature
-    assert "applied template 'personal-dev'" in out
+    assert "floor.worker-git-hard-denies — always denied" in out
+    assert "applied template 'builder'" in out
     assert "next steps:" in out
 
     document = _stored_document(home)
-    assert document is not None and document.template == "personal-dev"
+    assert document is not None and document.template == "builder"
     store = RunStore(build_config(home, None).db_path)
     try:
         assert store.get_setting("default_network") == [
@@ -64,7 +70,8 @@ def test_template_round_trip_writes_document_and_derived_knobs(
             "registry.npmjs.org",
             "proxy.golang.org",
         ]
-        assert store.get_setting("allowed_shell_commands") == []
+        commands = list(store.get_setting("allowed_shell_commands") or [])
+        assert ["pnpm", "test"] in commands and ["git", "push"] not in commands
     finally:
         store.close()
 
@@ -73,7 +80,7 @@ def test_dry_run_prints_the_table_and_writes_nothing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     home = tmp_path / "home"
-    assert _run_cli(home, "setup", "--template", "locked-down", "--dry-run") == 0
+    assert _run_cli(home, "setup", "--template", "assistant", "--dry-run") == 0
     out = capsys.readouterr().out
     assert "dry run — nothing written" in out
     assert "shell-gated" in out
@@ -84,19 +91,23 @@ def test_switching_templates_diffs_first_and_requires_apply(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     home = tmp_path / "home"
-    assert _run_cli(home, "setup", "--template", "personal-dev") == 0
+    assert _run_cli(home, "setup", "--template", "builder") == 0
     capsys.readouterr()
 
-    refused = _run_cli(home, "setup", "--template", "locked-down")
+    refused = _run_cli(home, "setup", "--template", "assistant")
     captured = capsys.readouterr()
     assert refused == 1
-    assert "switching personal-dev -> locked-down would change:" in captured.out
+    assert "switching builder -> assistant would change:" in captured.out
     assert "- coding: allow edit workspace (coding-workspace)" in captured.out
+    assert "+ coding: deny edit * (coding-denied)" in captured.out
     assert "re-run with --apply" in captured.err
-    assert _stored_document(home).template == "personal-dev"  # unchanged
+    assert _stored_document(home).template == "builder"  # unchanged
 
-    assert _run_cli(home, "setup", "--template", "locked-down", "--apply") == 0
-    assert _stored_document(home).template == "locked-down"
+    assert _run_cli(home, "setup", "--template", "assistant", "--apply") == 0
+    assert _stored_document(home).template == "assistant"
+    # An alias of the applied template is the same template: no diff, no card.
+    assert _run_cli(home, "setup", "--template", "locked-down") == 0
+    assert "'locked-down' is now 'assistant'" in capsys.readouterr().err
 
 
 def test_unknown_template_teaches_the_known_names(
@@ -105,7 +116,7 @@ def test_unknown_template_teaches_the_known_names(
     assert _run_cli(tmp_path / "home", "setup", "--template", "warp") == 2
     err = capsys.readouterr().err
     assert "no policy template 'warp'" in err
-    assert "personal-dev" in err
+    assert "builder, operator, assistant" in err
 
 
 def _plan(steps: Sequence[dict[str, Any]], summary: str) -> str:
@@ -121,12 +132,12 @@ def _plan(steps: Sequence[dict[str, Any]], summary: str) -> str:
     )
 
 
-def test_v19_replay_under_personal_dev_one_run_one_approval(
+def test_v19_replay_under_builder_one_run_one_approval(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The DoD pin: templates never regress the one-run-one-approval economy."""
     home = tmp_path / "home"
-    assert _run_cli(home, "setup", "--template", "personal-dev") == 0
+    assert _run_cli(home, "setup", "--template", "builder") == 0
     config = build_config(home, None)
     client = _client(config)
     server = FakeOpenAI(api_key="sk-fake").start()

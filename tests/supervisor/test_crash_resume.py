@@ -171,6 +171,38 @@ def test_resume_refuses_wrong_state_and_missing_checkpoint(
         store.close()
 
 
+def test_l17_a_resume_that_can_only_be_refused_is_answered_at_proposal(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """L17 (field test): after a crash with no checkpoint the continuation
+    proposed resume_run, and the card could only be refused after the
+    operator confirmed it. The proposal gate gives the same refusal, no card."""
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import mutation_execution_decision
+
+    store = RunStore(config.db_path)
+    try:
+        task_id, _workspace = _strand_run(store, config, repo)
+        recover_interrupted_runs(store, config)
+        holder = ConfigHolder(config, store)
+        refused = mutation_execution_decision(
+            "resume_run", {"task_id": task_id}, store=store, holder=holder
+        )
+        assert refused is not None and refused.verdict == "deny"
+        assert "left no resume checkpoint" in str(refused.detail)
+        missing = mutation_execution_decision(
+            "resume_run", {"task_id": "nope"}, store=store, holder=holder
+        )
+        assert missing is None or missing.verdict != "deny"  # the confirm says "no run"
+        _salvage_checkpoint(config, task_id)
+        offered = mutation_execution_decision(
+            "resume_run", {"task_id": task_id}, store=store, holder=holder
+        )
+        assert offered is None or offered.verdict != "deny"
+    finally:
+        store.close()
+
+
 def test_resume_command_route_resumes_a_crashed_run_without_a_model(
     config: SupervisorConfig, repo: Path
 ) -> None:
@@ -417,5 +449,26 @@ def test_preserved_worktree_ttl_expires_and_sweeps(repo: Path, config: Superviso
         assert (str(repo), str(workspace)) in pairs
         assert sweep_expired_preserved_worktrees(store, config) == 1
         assert not workspace.exists()
+    finally:
+        store.close()
+
+
+def test_a_legacy_workspace_worktree_still_resumes(repo: Path, config: SupervisorConfig) -> None:
+    """ES-F4 (B07) migration: workspace-mode runs recorded before the move
+    keep their `<repo parent>/.skep/worktrees/<id>` path — a resume still
+    reuses that preserved tree; anything else outside the home's root does not."""
+    from skep.supervisor.dispatch import _resume_workspace
+    from skep.supervisor.worktree import create_worktree
+
+    store = RunStore(config.db_path)
+    try:
+        legacy = create_worktree(repo, repo.parent / ".skep" / "worktrees", "01legacy")
+        stray = create_worktree(repo, repo.parent / "elsewhere", "01stray")
+        for workspace in (legacy, stray):
+            task = mint_task(workspace=workspace, instructions="x", budget=DEFAULT_BUDGET)
+            store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+            assert workspace.name in (legacy.name, stray.name)
+            resumed = _resume_workspace(store, repo, config.worktrees_root, task.task_id)
+            assert resumed == (legacy if workspace == legacy else None)
     finally:
         store.close()

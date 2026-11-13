@@ -18,26 +18,42 @@ proves parity against v1 on the committed golden seed.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from .config import SupervisorConfig
-from .policy_engine import Layer, Setting, document_layers
-from .policy_resolver import _match_project_for_repo, _under_root, managed_repos_root
+from .policy_baseline import (
+    BASELINE_TAMPERED,
+    NO_BASELINE_REASON,
+    Ok,
+    fail_closed_reason,
+    verify,
+)
+from .policy_engine import Layer, LayerRule, Setting, document_layers
+from .policy_resolver import (
+    _match_project_for_repo,
+    _under_root,
+    engine_v2_scopes,
+    managed_repos_root,
+    queen_global_document,
+)
 from .policy_schema import (
     OPERATOR_POLICY_SETTINGS_KEY,
     POLICY_DOCUMENT_SETTINGS_KEY,
+    SCOPES,
     PolicyDocument,
     document_from_settings,
     operator_document_from_settings,
 )
+from .policy_templates import TEMPLATE_NAMES, PolicyTemplate
 from .projects import (
     GROUP_LIST_KEYS,
     PROJECT_POLICY_KEYS,
     phase_default_policy,
     stored_policy_groups,
 )
-from .serve.settings import policy_view
+from .serve.settings import FRESH_HOME_SEEDED_AT, policy_view
 from .store import RunStore
 
 
@@ -54,6 +70,9 @@ def layers_for_repo(
     layers = [
         Layer("global", "global", tuple(Setting(key, value) for key, value in policy.items()))
     ]
+    template = template_layer(config.home)
+    if template is not None:
+        layers.append(template)
     missing: list[str] = []
     match = _match_project_for_repo(store, repo, binding_candidates=binding_candidates)
     trusted_roots = [str(root) for root in policy.get("trusted_workspace_roots") or []]
@@ -115,6 +134,116 @@ def layers_for_repo(
     return layers, missing
 
 
+def store_home(store: RunStore) -> Path:
+    """The home a store belongs to: ``SupervisorConfig.db_path`` is
+    ``<home>/supervisor.sqlite3``, so every policy consult that holds only a
+    store still reaches the home's baseline."""
+    return store.db_path.parent
+
+
+def template_layer(home: Path) -> Layer | None:
+    """first-run O2 (ADR 0056 D2): the approved baseline as the registry's
+    ``template`` layer, every set setting enforced — later layers can no
+    longer change what was approved; ``unset`` passes through. ``verify``
+    runs here, the one chokepoint every decide path loads through, and is
+    re-run whenever a baseline file's mtime changes. Anything but Ok is no
+    layer: ``baseline_guard`` says what a decision does instead."""
+    state = verify(home)
+    if not isinstance(state, Ok):
+        return None
+    layer = state.enforced_layer()
+    if legacy_fs_read_dropped(state) is None:
+        return layer
+    return replace(layer, rules=tuple(r for r in layer.rules if not _legacy_fs_read(r)))
+
+
+def _legacy_fs_read(rule: LayerRule) -> bool:
+    return (rule.scope, rule.verdict, rule.action, rule.pattern) == (
+        "filesystem",
+        "allow",
+        "read",
+        "*",
+    )
+
+
+def legacy_fs_read_dropped(state: object) -> str | None:
+    """ADR 0059 Migration (B01-upgraded): a baseline approved before ES-F2
+    that names a shipped template still carries that template's old
+    ``filesystem read *`` allow — the Queen read any file with no card.
+    ``template_layer`` drops exactly that allow (narrowing only: reads outside
+    the operator roots card again); this names the template when it does, so
+    doctor can say so. ``skep policy approve --reapprove --template <name>``
+    adopts the shipped file."""
+    if not isinstance(state, Ok) or state.layer.template not in TEMPLATE_NAMES:
+        return None
+    return state.layer.template if any(map(_legacy_fs_read, state.layer.layer().rules)) else None
+
+
+def queen_template_layer(home: Path) -> Layer | None:
+    """ES-F3 (V5, B03): the baseline as the Queen's host lane composes it —
+    without its ``shell`` ALLOWS, which trust workers in a sandboxed worktree
+    and never the operator's host. ES-F7 (B72): its shell denies and asks
+    still bind the Queen. Knobs and every other scope ride as-is."""
+    layer = template_layer(home)
+    return None if layer is None else queen_view(layer)
+
+
+def queen_view(layer: Layer) -> Layer:
+    """``queen_template_layer``'s narrowing of one baseline layer."""
+    return replace(
+        layer,
+        rules=tuple(r for r in layer.rules if r.scope != "shell" or r.verdict != "allow"),
+    )
+
+
+def candidate_layer(layer: PolicyTemplate) -> Layer:
+    """P3-5 (V11): the layer ``template_layer`` will compose once ``layer`` is
+    locked — so a write-time check judges a candidate baseline exactly as
+    decide() will (a shipped template's legacy ``filesystem read *`` drops)."""
+    built = layer.layer()
+    if layer.template not in TEMPLATE_NAMES:
+        return built
+    return replace(built, rules=tuple(r for r in built.rules if not _legacy_fs_read(r)))
+
+
+def zero_state_home(store: RunStore) -> bool:
+    """first-run O5 (ADR 0056 D2): does this home answer ``no_baseline`` while
+    nothing is approved? Yes for a home the store seeded itself (the
+    ``fresh_home_seeded_at`` row, written only when the sqlite file did not
+    exist) or one where ``skep onboard`` has started (``onboard.json``);
+    no for every other home.
+
+    The line is drawn at "born here or opted in" because an upgrade must not
+    turn the operator's running daily driver into a wall of asks: a home that
+    predates the baseline has been deciding from its own stored policy, and
+    flipping it to ask-everything on ``pipx upgrade`` would break the work in
+    flight and teach the operator to click through cards. That home keeps
+    today's behaviour exactly, and ``skep doctor`` / ``skep onboard --check``
+    say in one line how to approve a baseline. A fresh home has nothing to
+    break, so its first answer is "ask until approved", never "allow by seed"."""
+    if store.get_setting(FRESH_HOME_SEEDED_AT) is not None:
+        return True
+    from .onboard import STATE_FILE  # local: onboard imports the serve layer
+
+    return (store_home(store).parent / STATE_FILE).is_file()
+
+
+def baseline_guard(store: RunStore) -> dict[str, str]:
+    """Scope → the reason its every verdict fails closed; empty when none do.
+    ``baseline_tampered`` binds every scope; ``no_baseline`` binds the scopes
+    routed to engine v2, on a ``zero_state_home`` only (I9: unreadable → ask)."""
+    reason = fail_closed_reason(verify(store_home(store)))
+    if reason is None:
+        return {}
+    if reason != NO_BASELINE_REASON:
+        return dict.fromkeys(SCOPES, reason)
+    return dict.fromkeys(engine_v2_scopes(store), reason) if zero_state_home(store) else {}
+
+
+def baseline_tampered(home: Path) -> bool:
+    return fail_closed_reason(verify(home)) == BASELINE_TAMPERED
+
+
 def operator_layers(store: RunStore) -> list[Layer]:
     """The Queen's standing policy as layers: the global document, then the
     operator overlay (v52-F2), labelled by document."""
@@ -123,7 +252,10 @@ def operator_layers(store: RunStore) -> list[Layer]:
     )
     operator = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
     return document_layers(
-        base, (operator,), labels=("policy_document", "operator_policy_document")
+        queen_global_document(base),
+        (operator,),
+        labels=("policy_document", "operator_policy_document"),
+        template=queen_template_layer(store_home(store)),
     )
 
 
@@ -134,4 +266,18 @@ def flatten(values: dict[str, Any], sources: dict[str, str]) -> dict[str, Any]:
     return out
 
 
-__all__ = ["document_layers", "flatten", "layers_for_repo", "operator_layers"]
+__all__ = [
+    "baseline_guard",
+    "baseline_tampered",
+    "candidate_layer",
+    "document_layers",
+    "flatten",
+    "layers_for_repo",
+    "legacy_fs_read_dropped",
+    "operator_layers",
+    "queen_template_layer",
+    "queen_view",
+    "store_home",
+    "template_layer",
+    "zero_state_home",
+]
