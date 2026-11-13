@@ -72,7 +72,7 @@ from .provider_hosts import provider_hosts_for
 from .provider_relay import provider_relay_for_run, relay_worker_env
 from .providers import ProviderProfile
 from .reverify import reverify_run
-from .sandbox import NetworkPolicy, SandboxUnavailableError
+from .sandbox import PODMAN, NetworkPolicy, SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
 from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
 from .store import RunStore
@@ -704,6 +704,16 @@ def run_task(
         )
         if relay is not None and not domains:
             relay, relay_note = None, "not used: the run has no network"
+        if (
+            relay is not None
+            and domains == ("*",)
+            and execution_mode == "sandbox"
+            and config.sandbox
+            and resolve_sandbox_backend(config, NetworkPolicy(allow=domains)) == PODMAN
+        ):
+            # A podman run has its own network namespace; a domain-list run
+            # already falls back to the native backend, an allow-all one not.
+            relay, relay_note = None, "not used: a podman run cannot reach the host loopback"
         if (domains and domains != ("*",)) or relay is not None:
             if (
                 execution_mode == "sandbox"

@@ -411,3 +411,65 @@ def test_doctor_says_whether_workers_hold_the_key_and_that_engines_are_not_relay
     assert line.startswith("- " + expected), line
     assert "claude_code, codex, aider and pi authenticate from their own auth env" in line
     assert os.environ["SKEP_TEST_RELAY_KEY"] not in report
+
+
+def test_a_podman_allow_all_run_is_not_relayed_because_it_cannot_reach_host_loopback(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """podman gives every run its own network namespace, so a relay on the
+    host's loopback is unreachable; that run keeps today's path and says so."""
+    from skep.profile import run_personal_setup
+    from skep.supervisor import dispatch, sandbox
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.store import RunStore
+    from skep.worker_contract import Permissions
+
+    started: list[object] = []
+
+    class _Proxy:
+        def __init__(self, *_: object, **kwargs: object) -> None:
+            started.append(kwargs.get("relay"))
+            self.port = 1
+
+        def start(self) -> _Proxy:
+            raise OSError("stop after proxy start")
+
+    monkeypatch.setenv("SKEP_TEST_RELAY_KEY", _fake_key())
+    monkeypatch.setattr(dispatch, "FilteringProxy", _Proxy)
+    monkeypatch.setattr(dispatch, "resolve_sandbox_backend", lambda *_a, **_k: sandbox.PODMAN)
+    monkeypatch.setattr(
+        dispatch,
+        "sandbox_availability",
+        lambda backend=None: sandbox.SandboxAvailability(True, backend=backend),
+    )
+    config = build_config(tmp_path / "home", None)
+    run_personal_setup(
+        config.home.parent,
+        provider="openai-compat",
+        model="m",
+        endpoint="http://127.0.0.1:9",
+        api_key_env="SKEP_TEST_RELAY_KEY",
+    )
+    store = RunStore(config.db_path)
+    store.set_setting("provider_key_relay", True)
+    store.close()
+    outcome = dispatch.run_task(
+        repo,
+        "x",
+        config=config,
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
+        ),
+        execution_mode="sandbox",
+    )
+    assert started == []  # no relay-only proxy for a run that could not reach it
+    store = RunStore(config.db_path)
+    try:
+        dispatched = [
+            d
+            for state, d, _ in store.transitions_for(outcome.record.task_id)
+            if state == "dispatched"
+        ]
+    finally:
+        store.close()
+    assert "a podman run cannot reach the host loopback" in (dispatched[0] or "")

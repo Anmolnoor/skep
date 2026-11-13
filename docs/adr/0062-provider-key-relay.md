@@ -54,7 +54,10 @@ the upstream is `https`, refusing a path outside the upstream base path.
 A run whose network is allow-all has no proxy today. With the relay ON it
 gets a relay-only proxy (empty allowlist); the worker reaches its port
 because allow-all permits loopback. A deny-all run never needs one: a caste
-that calls a provider always has `provider_hosts`.
+that calls a provider always has `provider_hosts`. A podman allow-all run
+is not relayed: podman gives every run its own network namespace, so the
+host's loopback is out of reach (a podman domain-list run already falls
+back to the native backend); it keeps today's path and its record says so.
 
 Rejected:
 
