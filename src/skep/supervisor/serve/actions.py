@@ -2935,7 +2935,7 @@ def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) 
     except (HTTPException, IndexError, TypeError, ValueError, OSError):
         return f"pushes to origin and opens a PR into {base}"
     probe = subprocess.run(
-        ["git", "-C", str(repo), "remote", "get-url", "origin"],
+        ["git", "-C", str(repo), "remote", "get-url", "--push", "origin"],  # what push uses
         capture_output=True,
         text=True,
         check=False,

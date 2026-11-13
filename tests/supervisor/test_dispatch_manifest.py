@@ -709,3 +709,22 @@ def test_a_run_that_lost_the_project_hosts_says_so_on_its_terminal_notice(desk: 
     assert "network_dropped" not in (runner.kwargs["dispatch_decision"].constraints or {})
     desk.store.transition(kept, "failed", "boom")
     assert "lost the project" not in run_terminal_text(desk.store, kept)[0]  # type: ignore[index]
+
+
+def test_an_open_pr_card_names_the_push_url_git_push_uses(desk: Desk) -> None:
+    """L30 follow-up: open_pr runs `git push origin`, which goes to origin's
+    pushurl when one is set — the card named the fetch URL, a host the push
+    never reaches. It now names the push URL (any login stripped)."""
+    import subprocess
+
+    from skep.supervisor.serve.actions import pr_push_target
+
+    login = "u" + ":" + "p" * 3  # built, never a literal
+    git = ["git", "-C", str(desk.repo)]
+    subprocess.run([*git, "remote", "add", "origin", "https://fetch.invalid/x.git"], check=True)
+    subprocess.run(
+        [*git, "config", "remote.origin.pushurl", f"https://{login}@push.invalid/x.git"],
+        check=True,
+    )
+    line = pr_push_target(desk.holder, desk.store, {"branch": "feat", "repo": str(desk.repo)})
+    assert "(https://push.invalid/x.git)" in line and login not in line, line
