@@ -589,6 +589,35 @@ def test_an_adopted_runs_finish_reaches_its_chat_as_a_live_runs_does(
         store.close()
 
 
+def test_a_run_adopted_once_is_adopted_again_by_the_next_serve(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ADR 0060 §3: serve dies again mid-adoption; the third serve finds the
+    worker through the original running record (the adoption line is not
+    one) and the dead second serve's claim, and adopts it again."""
+    store = RunStore(config.db_path)
+    try:
+        task_id, pid = _strand_with_live_worker(store, config, repo, worker="time.sleep(1)")
+        started = json.loads(process_owner(pid) or "{}")["started"]
+        store.transition(
+            task_id, "running", f"supervisor restart: adopted live worker pid {pid} ({started})"
+        )
+        dead_serve = json.dumps({"pid": pid, "started": "Thu Jan 1 00:00:00 1970"})
+        assert store.claim_run_supervisor(task_id, expected=None, owner=dead_serve)
+        finished = threading.Event()
+
+        assert recover_interrupted_runs(
+            store, config, on_run_finished=lambda _t: finished.set()
+        ) == [task_id]
+
+        assert finished.wait(30)
+        details = [d or "" for _, d, _ in store.transitions_for(task_id)]
+        assert sum("adopted live worker" in d for d in details) == 2
+        assert not any("killed" in d for d in details)
+    finally:
+        store.close()
+
+
 def test_restart_kills_a_worker_whose_proxy_port_is_taken(
     repo: Path, config: SupervisorConfig
 ) -> None:
