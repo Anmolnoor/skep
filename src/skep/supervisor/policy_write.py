@@ -13,7 +13,10 @@ forbidden-combination checks on it before anything is stored:
 6. a NEW allow — a grant or an overlay rule — lands inside a deny at any
    layer (setup document, overlay, baseline, the chat's role) or the floor.
 
-A finding the current stack does not already hold rejects the write
+Check 2 only warns (W16, the operator's choice): the write lands and its
+answer (and card, ``policy_warnings``) says that a chat reading there will
+ask before it searches or fetches — the trifecta guard does that at decide
+time. Any other finding the current stack does not already hold rejects the write
 (``PolicyWriteRejected``) naming the rule and its layer, and nothing is
 stored. One the current stack already holds — a home that predates this
 check — is not this write's doing: decide() still handles it, and doctor
@@ -81,8 +84,6 @@ EGRESS_PROBES = {
 }
 _HINTS = {
     1: "allow (or bind) a narrower path that misses the credential files",
-    2: "a read inside the operator roots (the skep home, the repos root, a /workon "
-    "directory), or deny the egress first (set_operator_policy deny network search *)",
     3: "keep the exact command from its card instead (an exact-argv grant)",
     6: "the deny wins: narrow the allow so it misses the deny, or remove the deny first",
 }
@@ -281,9 +282,9 @@ def findings(
                 Finding(
                     2,
                     f"2:{_name(read)}+{by}",
-                    f"{_name(read)} allows reading outside the workspace ({read.pattern}) and "
-                    f"{by} allows network {action} to any host — together they can carry a "
-                    "private file off this machine (§5.4 check 2)",
+                    f"{_name(read)} allows reading outside the operator roots ({read.pattern}) "
+                    f"while {by} allows network {action} to any host: a chat that reads there "
+                    "will ask before it searches or fetches",
                 )
             )
     shell: dict[str, Finding] = {}
@@ -388,13 +389,17 @@ def vet_write(
 
         after = replace(after, roots=(*after.roots, *root_rules(roots)))
     fresh = [f for f in findings(after, new, role, roots) if f.key not in held]
-    if fresh:
-        raise PolicyWriteRejected(rejection(fresh))
+    # W16 (the operator's choice): check 2 warns. The trifecta guard makes a
+    # chat that read outside the roots ask before any search or fetch.
+    refused = [f for f in fresh if f.check != 2]
+    if refused:
+        raise PolicyWriteRejected(rejection(refused))
     warnings = [
         f"grant {entry} now lands inside a deny and is ignored — revoke it or narrow the deny"
         for entry in after.ignored
         if entry not in before.ignored
     ]
+    warnings += list(dict.fromkeys(f.message for f in fresh if f.check == 2))
     report: dict[str, Any] = {"warnings": warnings}
     if not replay:
         return report
@@ -573,7 +578,7 @@ def migration_report(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
     return {
         "replay": summary,
         "replay_line": line,
-        "held": [f.message for f in findings(stack)],
+        "held": [f.message for f in findings(stack) if f.check != 2],  # W16: 2 only warns
         "b31": b31,
     }
 

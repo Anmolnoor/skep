@@ -206,42 +206,39 @@ def test_check_1_a_secret_floor_read_allow_is_refused(home: Home) -> None:
     )
 
 
-def test_check_2_an_outside_read_beside_egress_to_any_host_is_refused(
+def test_check_2_an_outside_read_beside_egress_to_any_host_is_a_warning(
     home: Home, tmp_path: Path
 ) -> None:
-    """The default operator document allows ``network search *`` (search_web),
-    so an outside-the-workspace read allow is the f1-07 pair — refused; after
-    the operator denies the search, the same read lands."""
+    """W16 (the operator's choice): the default operator document allows
+    ``network search *`` (search_web), so an outside-the-workspace read allow
+    is the f1-07 pair. It lands with a warning saying what happens instead:
+    reads there make the chat ask before it searches or fetches (the trifecta
+    guard, at decide time). No advice to deny search or /workon the folder."""
     outside = f"{tmp_path}/data/*"
-    with pytest.raises(HTTPException) as refused:
-        actions.set_operator_policy_rule(
-            home.store, scope="filesystem", action="read", pattern=outside, verdict="allow"
-        )
-    detail = str(refused.value.detail)
-    assert "§5.4 check 2" in detail and "global/net:search" in detail
-    assert "deny network search" in detail  # what would be accepted (I9)
-    actions.set_operator_policy_rule(
-        home.store, scope="network", action="search", pattern="*", verdict="deny"
-    )
-    actions.set_operator_policy_rule(
+    landed = actions.set_operator_policy_rule(
         home.store, scope="filesystem", action="read", pattern=outside, verdict="allow"
     )
+    (warning,) = landed["warnings"]
+    assert "global/net:search" in warning and outside in warning
+    assert "ask before it searches or fetches" in warning
+    assert "deny" not in warning and "/workon" not in warning
+    assert outside in str(home.store.get_setting("operator_policy_document"))
 
 
 def test_check_2_on_a_baseline_write(home: Home, tmp_path: Path) -> None:
     """A custom layer that adds an outside read to the builder template (which
-    allows search) is refused before anything is locked."""
+    allows search) locks, and its answer carries the warning (W16)."""
     layer = load_policy_template("builder").model_dump(mode="json")
     layer["template"] = "custom"
     layer["rules"].append({"scope": "filesystem", "verdict": "allow", "action": "read",
                            "pattern": f"{tmp_path}/data/*", "rule_id": "data-read"})  # fmt: skip
     path = tmp_path / "layer.json"
     path.write_text(json.dumps(layer))
-    with pytest.raises(PolicyWriteRejected, match="template:custom/data-read"):
-        actions.approve_policy_baseline(
-            home.config.home, file=str(path), approved_by="op", store=home.store
-        )
-    assert not pb.lock_path(home.config.home).exists()
+    approved = actions.approve_policy_baseline(
+        home.config.home, file=str(path), approved_by="op", store=home.store
+    )
+    assert any("template:custom/data-read" in w for w in approved["warnings"])
+    assert pb.lock_path(home.config.home).exists()
 
 
 def test_check_3_a_rule_that_lets_the_host_shell_install_is_refused(home: Home) -> None:
@@ -438,10 +435,16 @@ def test_a_policy_write_card_carries_the_replay_and_a_refused_one_gets_no_card(
     )  # fmt: skip
     assert "now denies 1 past allows" in card["replay"]
     assert home.store.get_setting("operator_policy_document") is None  # nothing written
-    with pytest.raises(PolicyWriteRejected, match=r"§5\.4 check 2"):
+    warned = policy_write_preview(
+        home.store, home.holder, "set_operator_policy",
+        {"scope": "filesystem", "action": "read", "pattern": f"{tmp_path}/x/*",
+         "verdict": "allow"},
+    )  # fmt: skip
+    assert any("ask before it searches" in w for w in warned["policy_warnings"])  # W16
+    with pytest.raises(PolicyWriteRejected, match=r"§5\.4 check 1"):
         policy_write_preview(
             home.store, home.holder, "set_operator_policy",
-            {"scope": "filesystem", "action": "read", "pattern": f"{tmp_path}/x/*",
+            {"scope": "filesystem", "action": "read", "pattern": f"{Path.home()}/.ssh/*",
              "verdict": "allow"},
         )  # fmt: skip
     keep = policy_write_preview(home.store, home.holder, "run_shell", {"command": "ls -la"})
@@ -588,7 +591,8 @@ def test_an_already_held_combination_is_listed_not_refused(home: Home) -> None:
     )  # fmt: skip
     home.store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, document.model_dump_json())
     held = policy_write.migration_report(home.holder, home.store)["held"]
-    assert any("§5.4 check 1" in h for h in held) and any("§5.4 check 2" in h for h in held)
+    assert any("§5.4 check 1" in h for h in held)
+    assert not any("check 2" in h for h in held)  # W16: a warning, not a forbidden pair
     _keep(home, "ls -la")  # the next write still lands
 
 
@@ -605,7 +609,7 @@ def test_reapprove_diff_shows_the_replay_before_it_relocks(
     layer = load_policy_template("builder").model_dump(mode="json")
     layer["template"] = "custom"
     layer["rules"].append({"scope": "filesystem", "verdict": "allow", "action": "read",
-                           "pattern": f"{tmp_path}/data/*", "rule_id": "data-read"})  # fmt: skip
+                           "pattern": f"{Path.home()}/.ssh/*", "rule_id": "data-read"})  # fmt: skip
     path = tmp_path / "layer.json"
     path.write_text(json.dumps(layer))
     before = home.snapshot()
@@ -662,11 +666,11 @@ def test_a_deny_on_a_home_that_already_holds_a_combination_is_accepted(
     actions.set_operator_policy_rule(
         home.store, scope="network", action="connect", pattern="*", verdict="deny"
     )
-    with pytest.raises(HTTPException, match=r"§5\.4 check 2"):
-        actions.set_operator_policy_rule(
-            home.store, scope="filesystem", action="read", pattern=f"{tmp_path}/more/**",
-            verdict="allow",
-        )  # fmt: skip
+    more = actions.set_operator_policy_rule(
+        home.store, scope="filesystem", action="read", pattern=f"{tmp_path}/more/**",
+        verdict="allow",
+    )  # fmt: skip
+    assert any("ask before it searches" in w for w in more["warnings"])  # W16: lands
 
 
 def test_a_stricter_baseline_over_held_shell_grants_is_accepted(home: Home) -> None:
