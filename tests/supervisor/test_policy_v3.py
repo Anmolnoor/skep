@@ -887,7 +887,8 @@ def test_w5_a_named_run_ask_binds_a_background_grant(tmp_path: Path) -> None:
     "line",
     ["{ curl https://x.example/y; }", "! curl https://x.example/y",
      "if curl https://x.example/y; then :; fi", "function f { curl https://x.example/y; }; f",
-     "xargs --max-procs 4 curl https://x.example/y"],
+     "xargs --max-procs 4 curl https://x.example/y", "nohup -- curl https://x.example/y",
+     "timeout --signal=KILL 5 curl https://x.example/y"],
 )  # fmt: skip
 def test_w5_a_deny_binds_through_reserved_words_and_unknown_launcher_options(
     line: str, tmp_path: Path
