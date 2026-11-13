@@ -170,7 +170,9 @@ def _default_generate(task: CodingWorkerTask, messages: list[dict[str, Any]]) ->
             "the document caste needs the saved assistant LLM"
         )
     endpoint = _endpoint(provider.profile)
-    _ensure_network_allowed(endpoint, list(task.permissions.network))
+    _ensure_network_allowed(
+        endpoint, list(task.permissions.network), task.permissions.provider_hosts
+    )
     return "".join(_provider_chunks(provider, endpoint=endpoint, messages=messages))
 
 

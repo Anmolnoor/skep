@@ -57,6 +57,7 @@
         "pypi.org",
         "registry.npmjs.org"
       ],
+      "provider_hosts": [],
       "read": [
         "workspace"
       ],

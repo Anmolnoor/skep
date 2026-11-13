@@ -94,7 +94,6 @@ from ..projects import (
     project_to_dict,
     validate_allowed_plugin_risks,
 )
-from ..provider_hosts import configured_provider_hosts
 from ..roles import (
     EXCEEDS_DELEGATOR,
     Delegator,
@@ -1722,7 +1721,6 @@ def _resolve_for_view(
         max_actions=None,
         max_provider_calls=None,
         execution_mode=None,
-        extra_network_hosts=_configured_provider_hosts(store, holder.current.home.parent),
         binding_candidates=binding_candidates,
     )
 
@@ -2366,6 +2364,20 @@ def policy_why(
                 )
             ],
         }
+        endpoints = [
+            entry
+            for entry in resolved.permissions.provider_hosts
+            if scope == "network"
+            and value.strip().lower().rstrip(".") in (entry, entry.rpartition(":")[0].strip("[]"))
+        ]
+        if endpoints:
+            # ADR 0059 D3 (I8): this decision is about a grant; skep's own
+            # endpoint is not one, and a run reaches it either way.
+            view["provider_host"] = (
+                f"{', '.join(endpoints)} is skep's own LLM endpoint: every run that calls "
+                "the provider reaches it as provider_hosts, outside this decision and "
+                "the delegation narrowing — the verdict above is for anything else"
+            )
     if baseline_guard(store).get(scope) == NO_BASELINE_REASON:
         # O5: say what policy_decide answers here, not what the stack beneath would.
         view["baseline"] += f" — {NO_BASELINE_REASON}: every decision asks until one is"
@@ -2421,6 +2433,8 @@ def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> d
                 "needs this allowlist or an approval"
             ),
             "network": list(resolved.permissions.network),
+            # ADR 0059 D3 (I8): skep's own LLM endpoint, apart from the grants.
+            "provider_hosts": list(resolved.permissions.provider_hosts),
             "allow_git_mutation": resolved.permissions.allow_git_mutation,
             "landing": "auto-apply verified patch" if landing_auto else "landing approval gate",
             "budget": resolved.budget.model_dump(mode="json"),
@@ -3373,14 +3387,10 @@ def resume_crashed_run(
             "dispatch a fresh run instead"
         )
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
+    # v19-F2 held on resume: run_task recomputes provider_hosts from the
+    # registry (ADR 0059 D3), so a run created before the provider was
+    # configured — or before contract 0.3.6 — still reaches it.
     permissions = original.permissions
-    # v19-F2 held on resume: re-merge the configured provider host.
-    merged_network = list(permissions.network)
-    if merged_network != ["*"]:
-        for host in configured_provider_hosts(store, config.home.parent):
-            if host not in merged_network:
-                merged_network.append(host)
-        permissions = permissions.model_copy(update={"network": merged_network})
     repo = Path(record.repo)
     execution_mode = str(record.execution_mode or "sandbox")
     preserved = _resume_workspace(store, repo, config.worktrees_root, task_id)
@@ -3541,14 +3551,8 @@ def resume_past_gate(
     if shell_allowlist is not None:
         permissions = permissions.model_copy(update={"shell_allowlist": shell_allowlist})
     # v19-F2: a run created before the provider was configured froze a stale
-    # allowlist. Re-merge the configured provider host on resume so the resumed
-    # worker can always reach its LLM (``["*"]`` already allows everything).
-    merged_network = list(permissions.network)
-    if merged_network != ["*"]:
-        for host in configured_provider_hosts(store, config.home.parent):
-            if host not in merged_network:
-                merged_network.append(host)
-        permissions = permissions.model_copy(update={"network": merged_network})
+    # allowlist; run_task recomputes provider_hosts from the registry on every
+    # resume (ADR 0059 D3), so the resumed worker always reaches its LLM.
     approval = store.get_approval(review_id)
     decision = None
     action = None
@@ -4285,7 +4289,6 @@ def submit_run(
             max_actions=max_actions,
             max_provider_calls=max_provider_calls,
             execution_mode=execution_mode,
-            extra_network_hosts=_configured_provider_hosts(store, holder.current.home.parent),
             binding_candidates=binding_candidates,
             engine=engine,
         )
@@ -4763,7 +4766,6 @@ def dispatch_run_decision(
             max_actions=max_actions,
             max_provider_calls=max_provider_calls,
             execution_mode=effective_mode,
-            extra_network_hosts=_configured_provider_hosts(store, holder.current.home.parent),
             binding_candidates=binding_candidates,
         )
     except PolicyResolutionError as exc:
@@ -4778,11 +4780,6 @@ def dispatch_run_decision(
         requested_execution_mode=execution_mode,
         explicit_run_overrides=False,
     ).with_project_context(resolved_policy.project_context)
-
-
-def _configured_provider_hosts(store: RunStore, home: Path) -> list[str]:
-    # Thin alias kept for in-module call sites; logic lives in provider_hosts.
-    return configured_provider_hosts(store, home)
 
 
 def learn_policy_rule(

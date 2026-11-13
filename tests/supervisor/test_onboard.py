@@ -534,10 +534,10 @@ def test_check_tells_the_egress_truth_and_each_blocked_reason(tmp_path: Path) ->
         "telemetry: none",
     ]
     set_base_url("http://127.0.0.1:11434")
-    assert check()["egress"][0] == "model: LOCAL (127.0.0.1) — nothing leaves this machine"
+    assert check()["egress"][0] == "model: LOCAL (127.0.0.1:11434) — nothing leaves this machine"
     set_base_url("https://api.example.com/v1")
     assert check()["egress"][0] == (
-        "model: CLOUD — every assistant/worker prompt leaves this machine for api.example.com"
+        "model: CLOUD — every assistant/worker prompt leaves this machine for api.example.com:443"
     )
     builder = load_policy_template("builder")
     write_lock(supervisor, builder, approved_by="t", schema_version=0)

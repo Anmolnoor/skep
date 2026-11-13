@@ -247,11 +247,10 @@ def test_approving_a_suspended_run_resumes_it_past_the_gate(
     assert str(payload["resumed_as"]) in original["resolution_note"]
 
 
-def test_resume_remerges_configured_provider_host_into_network(
-    repo: Path, config: SupervisorConfig
-) -> None:
+def test_resume_gives_the_configured_provider_host(repo: Path, config: SupervisorConfig) -> None:
     """v19-F2: a run created before the provider was configured must still get
-    the provider host in its allowlist when it resumes past the gate."""
+    the provider host when it resumes past the gate — as provider_hosts
+    (ADR 0059 D3), not merged into its network grant."""
     from skep.supervisor.serve.llm import LLM_BASE_URL
 
     client = _client(config)
@@ -275,7 +274,41 @@ def test_resume_remerges_configured_provider_host_into_network(
     resumed_id = str(response.json()["resumed_as"])
     _wait_terminal(client, resumed_id)
     resumed_task = json.loads((config.audit_dir / resumed_id / "task.json").read_text())
-    assert resumed_task["permissions"]["network"] == ["provider.example"]
+    assert resumed_task["permissions"]["network"] == []
+    assert resumed_task["permissions"]["provider_hosts"] == ["provider.example:11434"]
+
+
+def test_a_run_persisted_before_provider_hosts_still_resumes(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ADR 0059 D3: a contract-0.3.5 task.json has no provider_hosts and its
+    provider host in network. It loads, resumes past its gate, and the
+    successor gets provider_hosts from the registry (its old network kept)."""
+    from skep.supervisor.serve.llm import LLM_BASE_URL
+
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting(LLM_BASE_URL, "http://provider.example:11434")
+    finally:
+        store.close()
+    client = _client(config)
+    task_id = _dispatch(client, repo, "Commit this. MODE:pending")
+    assert _wait_terminal(client, task_id)["state"] == "pending_approval"
+    path = config.audit_dir / task_id / "task.json"
+    old = json.loads(path.read_text())
+    old["contract_version"] = "0.3.5"
+    del old["permissions"]["provider_hosts"]
+    old["permissions"]["network"] = ["provider.example"]
+    path.write_text(json.dumps(old))
+
+    review_id = client.get("/api/approvals").json()["approvals"][0]["review_id"]
+    response = client.post(f"/api/approvals/{review_id}/approve", json={"actor": "tester"})
+    assert response.status_code == 200
+    resumed_id = str(response.json()["resumed_as"])
+    assert _wait_terminal(client, resumed_id)["state"] == "completed"
+    resumed = json.loads((config.audit_dir / resumed_id / "task.json").read_text())
+    assert resumed["permissions"]["network"] == ["provider.example"]
+    assert resumed["permissions"]["provider_hosts"] == ["provider.example:11434"]
 
 
 def test_batch_shell_approval_is_one_gate_and_one_resume(

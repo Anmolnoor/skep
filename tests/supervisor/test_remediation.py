@@ -42,8 +42,13 @@ from skep.supervisor.serve.remediation import remediation_for
             "exit-code based",
         ),
         (
-            "provider calls require a task network allowlist",
-            "No network allowlist was set",
+            "provider calls require a task network allowlist",  # pre-0.3.6 records
+            "No LLM provider reached this run",
+        ),
+        (
+            "real LLM provider calls require a provider host or a task network allowlist; "
+            "this task has neither",
+            "No LLM provider reached this run",
         ),
         (
             "command failed with exit 128: git push: fatal: refusing to push",

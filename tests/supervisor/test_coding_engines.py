@@ -133,7 +133,8 @@ def test_a_pinned_cli_engine_resolves_and_gets_its_api_host(
     resolved = _resolve(config, repo)
     assert resolved.coding_engine == "claude_code"
     assert resolved.verify_command == "pytest -q"
-    assert "api.anthropic.com" in (resolved.network_resolved or [])
+    # ADR 0059 D3: the engine's own host rides provider_hosts, not network.
+    assert resolved.permissions.provider_hosts == ["api.anthropic.com:443"]
 
 
 def test_the_builtin_engine_needs_no_pin_and_adds_no_host(
@@ -145,7 +146,7 @@ def test_the_builtin_engine_needs_no_pin_and_adds_no_host(
     resolved = _resolve(config, repo)
     assert resolved.coding_engine == BUILTIN_ENGINE
     assert resolved.verify_command == ""
-    assert "api.anthropic.com" not in (resolved.network_resolved or [])
+    assert "api.anthropic.com:443" not in resolved.permissions.provider_hosts
 
 
 def test_an_unknown_engine_in_project_policy_is_rejected_at_resolve(
@@ -222,7 +223,8 @@ def test_a_request_engine_overrides_the_project_policy(
     resolved = _resolve(config, repo, engine="claude_code")
     assert resolved.coding_engine == "claude_code"
     assert resolved.execution_mode == "sandbox"
-    assert "api.anthropic.com" in (resolved.network_resolved or [])
+    # ADR 0059 D3: the engine's own host rides provider_hosts, not network.
+    assert resolved.permissions.provider_hosts == ["api.anthropic.com:443"]
 
 
 def test_a_request_engine_still_requires_the_pinned_verify_command(

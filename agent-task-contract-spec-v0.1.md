@@ -50,6 +50,12 @@ Notes:
   true resume with zero schema change.
 Forward-compatibility commitments (D1/D2 from the decision record — design constraints today,
 fields tomorrow):
+- **`permissions.provider_hosts`** (v0.3.6, additive, ADR 0059 D3): `list[str]` of
+  `host:port` entries naming the supervisor's own LLM endpoint(s). Filled by the supervisor
+  from its configured provider registry (an external engine gets only its own API host),
+  never from a request; it is a supervisor resource, not a grant, so delegation never narrows
+  it. Egress = `network` ∪ `provider_hosts` (`["*"]` already allows all); the proxy admits a
+  provider entry on that exact port only. Absent ≡ `[]`.
 - **`permissions.network` will evolve from `bool` to a domain allowlist** (`list[str]`, where
   `false` ≡ `[]`). Planned minor bump (target v0.2). Consequence now: Q1's sandbox enforcement
   must be designed around *allowlists*, not an on/off switch, even though v1 only ever passes

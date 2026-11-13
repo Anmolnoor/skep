@@ -52,10 +52,11 @@ class CodingEngine:
     # The binary probed by ``skep doctor``. None for the built-in worker, which
     # is this interpreter and always present.
     binary: str | None = None
-    # The host the engine must reach to function at all. Merged into the run's
-    # network allowlist the way v19-F2 merges the LLM provider host: an agent
-    # that cannot reach its API cannot work, and the failure without this is a
-    # confusing timeout instead of a stated denial (I12).
+    # The host the engine must reach to function at all: the run's ONLY
+    # provider_hosts entry (ADR 0059 D3, B140), as host:443 — never the builtin
+    # provider's. An agent that cannot reach its API cannot work, and the
+    # failure without this is a confusing timeout instead of a stated denial
+    # (I12). None = the engine talks to the operator's configured provider.
     network_host: str | None = None
     # v94-F3: the env vars the engine cannot function without, merged into the
     # run's env allowlist the same way. The worker baseline is PATH+HOME only;
@@ -140,7 +141,7 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         name="pi",
         argv=(sys.executable, "-m", "skep.workers.pi"),
         binary="pi",
-        network_host=None,  # multi-provider; the operator's provider host rides v19-F2
+        network_host=None,  # multi-provider; gets the operator's provider_hosts
         # pi reads whichever provider key matches its configured model; unset
         # names are inert allowlist entries (G2 — names, never secrets).
         env_vars=("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"),

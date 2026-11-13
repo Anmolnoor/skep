@@ -745,6 +745,7 @@ def _execute(
         emit=stream.emit,
         env_allowlist=task.permissions.env_allowlist,
         network_allowlist=task.permissions.network,
+        provider_hosts=task.permissions.provider_hosts,
         approved_network_hosts=_approved_network_hosts(
             task.approval_verdict, granted_network_hosts
         ),
@@ -1030,6 +1031,7 @@ def _execute_llm_plan(
                     workspace=workspace,
                     instructions=task.instructions,
                     network_allowlist=task.permissions.network,
+                    provider_hosts=task.permissions.provider_hosts,
                     tool_manifest=capabilities.tool_manifest(),
                     repair_context=repair_context,
                     memory=task.memory,

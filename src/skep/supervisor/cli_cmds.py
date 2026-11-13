@@ -44,7 +44,6 @@ from .projects import (
     project_from_store,
     project_to_dict,
 )
-from .provider_hosts import configured_provider_hosts
 from .roles import delegation_line
 from .scheduler import make_schedule, make_template_schedule, parse_interval, run_due
 from .store import RunRecord, RunStore, UsageRecord
@@ -778,7 +777,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                     max_actions=budget.max_actions,
                     max_provider_calls=budget.max_provider_calls,
                     execution_mode=execution_mode,
-                    extra_network_hosts=configured_provider_hosts(store, config.home.parent),
                     binding_candidates=[("template_name", args.template)],
                     engine=args.engine,
                 )
@@ -844,7 +842,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                         max_actions=args.budget_max_actions,
                         max_provider_calls=args.budget_max_provider_calls,
                         execution_mode=execution_mode,
-                        extra_network_hosts=configured_provider_hosts(store, config.home.parent),
                         engine=args.engine,
                     )
                     permissions = resolved_policy.permissions
@@ -3019,7 +3016,8 @@ def register_supervisor_commands(
     run.add_argument(
         "--minimal",
         action="store_true",
-        help="start with deny-all permissions and learn through approvals",
+        help="start with deny-all grants (a worker that calls the LLM still reaches its "
+        "configured provider) and learn through approvals",
     )
     run.add_argument(
         "--param",
@@ -3062,8 +3060,9 @@ def register_supervisor_commands(
         help="domain the worker may reach, e.g. pypi.org (repeatable, D1). Omitted, "
         "the policy's default_network applies: the builder and operator baselines "
         "allow their package-registry hosts (and start the filtering proxy); the "
-        "assistant baseline and a bare home allow none. A coding worker's LLM "
-        "provider host is always added; --minimal denies all. A concrete list is "
+        "assistant baseline and a bare home allow none. A worker that calls the LLM "
+        "reaches its configured provider on its own (provider_hosts), whatever "
+        "this list says; --minimal denies all else. A concrete list is "
         "enforced by a loopback filtering proxy.",
     )
     run.add_argument(

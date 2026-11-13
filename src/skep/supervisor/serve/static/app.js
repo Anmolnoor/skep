@@ -2629,6 +2629,7 @@ async function viewChat(main, chatId) {
       policy.policy_groups?.length
         ? `groups: ${policy.policy_groups.map(g => g.name).join(", ")}` : null,
       `network: ${policy.network?.length ? policy.network.join(", ") : "(none)"}`,
+      policy.provider_hosts?.length ? `provider: ${policy.provider_hosts.join(", ")}` : null,
       `shell allowlist: ${policy.shell_allowlist?.length || 0} commands`,
       policy.trust_root
         ? `trust root: ${policy.trust_root}`
