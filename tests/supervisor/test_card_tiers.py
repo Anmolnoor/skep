@@ -408,6 +408,21 @@ def test_l3_a_doubly_tainted_chat_still_reads_inside_its_roots_with_no_card(live
     assert json.loads(readme.content)["ok"] is True
 
 
+def test_l7_a_confirmed_result_tells_the_model_a_person_approved_it(live: Any) -> None:
+    """L7 (field test): after the operator confirmed a card the model read
+    ``{"ok": true, "result": …}`` — and a run_shell result naming the rule
+    that ASKED — and told the user "no card was needed". The confirmed row
+    says a person approved it; a denied one already says so."""
+    env = live("builder")
+    chat = env.chat()
+    env.ollama.script_tool_call("run_shell", {"command": "uname -a"})
+    (card,) = cards(env.turn(chat, "what kernel is this"))
+    env.ollama.script_reply("ok")
+    env.verdict(chat, card["action_id"], confirm=True)
+    row = next(r for r in env.store.chat_messages(chat) if r.tool_name == "run_shell")
+    assert json.loads(row.content)["approved"] == chat_module.APPROVED_NOTE
+
+
 def test_an_mcp_tool_the_operator_allowed_by_name_is_not_high(live: Any) -> None:
     from skep.supervisor.serve import actions
 

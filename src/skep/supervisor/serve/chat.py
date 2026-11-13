@@ -398,6 +398,9 @@ def duplicate_proposal_result(action_id: str) -> dict[str, Any]:
 _SUPERSEDED_BY_NEWER = "superseded by a newer proposal for the same subject"
 
 
+APPROVED_NOTE = "the operator confirmed this on a card; it was not auto-allowed"
+
+
 def high_tier_decision(high: str, allowed: Any) -> Any:
     """P4-2 (ADR 0059 D6): the card a HIGH action gets where policy would
     have run it unasked — it says what allowed it and why it asks anyway."""
@@ -2890,6 +2893,10 @@ class ChatEngine:
                 if not payloads:
                     self.store.unclaim_chat_action(action_id)
                 raise  # something ran: it stays claimed (restart marks it interrupted)
+            # L7: the model reads this row — say a person approved it, or it
+            # tells the user no card was needed (a run_shell result names the
+            # rule that ASKED as its decided_by)
+            payloads = [{**p, "approved": APPROVED_NOTE} for p in payloads]
             payload = (
                 payloads[0]
                 if len(payloads) == 1
