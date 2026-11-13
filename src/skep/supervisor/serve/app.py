@@ -566,6 +566,8 @@ def create_app(
             engine=body.engine,
             role=body.role,
             delegation_chain=body.delegation_chain,
+            # V7: the operator's own face — its gate cards have a human.
+            deferred_asks=True,
         )
         response = {"task_id": task_id, "state": "dispatched"}
         if hint is not None:
@@ -584,6 +586,7 @@ def create_app(
             manager=body.manager,
             tasks=[task.model_dump(exclude_none=True) for task in body.tasks],
             delegation_chain=body.delegation_chain,
+            deferred_asks=True,
         )
 
     @app.get("/api/policy")
@@ -927,7 +930,7 @@ def create_app(
             resumed_id = resume_past_gate(run_store, holder.current, runner, run, review_id, actor)
             resumed = {"action": "resumed", "resumed_as": resumed_id}
             # v109-F8: the Nth identical approval says so (a hint, never a block).
-            suggestion = remember_suggestion_for_review(run_store, review_id)
+            suggestion = remember_suggestion_for_review(run_store, review_id, holder.current)
             if suggestion is not None:
                 resumed["suggestion"] = suggestion
             return resumed

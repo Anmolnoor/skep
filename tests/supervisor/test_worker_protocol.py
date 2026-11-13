@@ -105,7 +105,7 @@ def test_react_knob_rides_the_serve_dispatch_into_the_envelope(
 
     envelope = json.loads((config.audit_dir / task_id / "task.json").read_text(encoding="utf-8"))
     assert envelope["planning_protocol"] == "react"
-    assert envelope["contract_version"] == "0.3.6"
+    assert envelope["contract_version"] == "0.3.7"
 
 
 def test_per_run_protocol_overrides_the_policy_default(

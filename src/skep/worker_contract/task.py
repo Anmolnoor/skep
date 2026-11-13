@@ -37,6 +37,9 @@ PATCH_EXCLUDE_PATHSPECS: tuple[str, ...] = tuple(f":!{d}" for d in BOOKKEEPING_D
 # ADR 0059 D3 (V6a): one provider endpoint, ``host:port`` or ``[v6]:port`` —
 # never a wildcard, scheme or bare host (that would be a grant, not an endpoint).
 _PROVIDER_HOST_RE = re.compile(r"^(?:[A-Za-z0-9._-]+|\[[0-9A-Fa-f:.]+\]):(\d{1,5})$")
+# ADR 0059 D3 (V7): a deferred ask names one bare host — never a wildcard,
+# scheme, port or path (ADR 0059 D4: `*` is never offered).
+ASK_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class Permissions(BaseModel):
@@ -53,6 +56,12 @@ class Permissions(BaseModel):
     # provider/engine registry at dispatch — never a grant, never narrowed by
     # delegation, never from a request. Absent on older tasks (= []).
     provider_hosts: list[str] = Field(default_factory=list)
+    # ADR 0059 D3 (V7, contract 0.3.7, additive): grants the delegation chain
+    # made an ask. Filled only by the supervisor at a dispatch a human can
+    # answer; the worker cards each one (approve-once, this run only). Never
+    # egress, never an allow. Absent on older tasks (= []).
+    network_ask: list[str] = Field(default_factory=list)
+    shell_ask: list[list[str]] = Field(default_factory=list)
 
     def egress(self) -> list[str]:
         """Everything the run may reach: ``network`` plus ``provider_hosts``
@@ -77,6 +86,22 @@ class Permissions(BaseModel):
             match = _PROVIDER_HOST_RE.match(entry)
             if match is None or not 0 < int(match.group(1)) < 65536:
                 raise ValueError(f"provider_hosts entries must be host:port; got {entry!r}")
+        return value
+
+    @field_validator("network_ask")
+    @classmethod
+    def _validate_network_ask(cls, value: list[str]) -> list[str]:
+        for entry in value:
+            if ASK_HOST_RE.match(entry) is None:
+                raise ValueError(f"network_ask entries must be bare hostnames; got {entry!r}")
+        return value
+
+    @field_validator("shell_ask")
+    @classmethod
+    def _validate_shell_ask(cls, value: list[list[str]]) -> list[list[str]]:
+        for entry in value:
+            if not entry or not all(entry):
+                raise ValueError(f"shell_ask entries must be non-empty argv lists; got {entry!r}")
         return value
 
     @field_validator("allowed_plugin_risks")

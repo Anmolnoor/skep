@@ -1503,7 +1503,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE allowing a pending review and remembering it (requires user "
         "confirmation): a shell approval persists the command into allowed policy, "
         "a network.fetch/network.read approval persists the blocked host into the "
-        "project's network allowlist; either way the gated run resumes.",
+        "project's network allowlist; either way the gated run resumes. A "
+        "delegated ask (its card says 'which would itself ask') is approve-once: "
+        "use approve_review.",
         {"review_id": {"type": "string"}},
         ["review_id"],
     ),
@@ -2585,6 +2587,19 @@ def _queen_chain(
         return []
     role = _chat_role(store, holder, chat_id)
     return [f"queen@{role.name}"] if role else []
+
+
+def _human_answers(store: RunStore, chat_id: str | None) -> bool:
+    """ADR 0059 D3 (V7): can a human answer the gate cards of a run this
+    chat dispatches? Not with no chat, nor in a messenger chat whose channel
+    cannot confirm (I6) — there a grant the chain makes an ask is dropped
+    (deny) instead of carding. Unattended turns never reach here: they card
+    every mutation, and a human confirming that card is present."""
+    chat = store.get_chat(chat_id) if chat_id else None
+    if chat is None:
+        return False
+    channel = store.get_channel_config(chat.source) if chat.source else None
+    return channel is None or channel.channel_can_confirm
 
 
 def fetch_grant_decision(
@@ -3867,6 +3882,7 @@ def _execute_mutation(
             caste="coding",
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            deferred_asks=_human_answers(store, chat_id),
         )
         return {
             "task_id": task_id,
@@ -3966,6 +3982,7 @@ def _execute_mutation(
                 tasks=entries,
                 delegation_chain=_queen_chain(store, holder, chat_id, actor),
                 dispatch_decision=decision,
+                deferred_asks=_human_answers(store, chat_id),
             )
         task_ids = [
             actions.submit_run(
@@ -3985,6 +4002,7 @@ def _execute_mutation(
                 dispatch_decision=decision,
                 delegation_chain=_queen_chain(store, holder, chat_id, actor),
                 role=None if entry.get("role") is None else str(entry["role"]),
+                deferred_asks=_human_answers(store, chat_id),
             )
             for entry in entries
         ]
@@ -4190,6 +4208,7 @@ def _execute_mutation(
             caste="coding",
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            deferred_asks=_human_answers(store, chat_id),
         )
         forge.save_plugin(
             store,
@@ -4524,7 +4543,7 @@ def _execute_mutation(
             resumed_result: dict[str, Any] = {"action": "resumed", "resumed_as": resumed}
             # v109-F8: the Nth identical approval says so — the model relays
             # the nudge instead of silently re-approving forever.
-            suggestion = actions.remember_suggestion_for_review(store, review_id)
+            suggestion = actions.remember_suggestion_for_review(store, review_id, holder.current)
             if suggestion is not None:
                 resumed_result["suggestion"] = suggestion
             return resumed_result
@@ -4783,6 +4802,7 @@ def _execute_mutation(
             dispatch_decision=decision,
             delegation_chain=chain,
             role=role,
+            deferred_asks=_human_answers(store, chat_id),
             protocol=None if args.get("protocol") is None else str(args["protocol"]),
             engine=None if args.get("engine") is None else str(args["engine"]),
         )
@@ -5191,6 +5211,9 @@ def mutation_execution_decision(
         role = _chat_role(store, holder, chat_id)
     except ValueError as exc:
         return AutonomyDecision(verdict="deny", reason="role.deny.unloadable", detail=str(exc))
+    # B22: the Queen's own hop (``_queen_chain``) — a dispatch its role can
+    # never delegate refuses here, before a card exists to confirm.
+    chain = [f"queen@{role.name}"] if role else []
     if name == "run_schedule_now":
         # ES (B122): a disabled/unknown schedule can only fail on confirm —
         # refuse now, without a card, and tell the model why.
@@ -5225,13 +5248,13 @@ def mutation_execution_decision(
         # script envelope (sandbox, deny-all egress, no landing path) is
         # strictly TIGHTER than what that posture already trusts.
         return actions.dispatch_run_decision(
-            holder, store, repo=str(args.get("repo") or ""), caste="script"
+            holder, store, repo=str(args.get("repo") or ""), caste="script", delegation_chain=chain
         )
     if name == "quick_edit":
         # v83-F10: a quick_edit IS a coding dispatch — same posture, same
         # gate as dispatch_run on this repo.
         return actions.dispatch_run_decision(
-            holder, store, repo=str(args.get("repo") or ""), caste="coding"
+            holder, store, repo=str(args.get("repo") or ""), caste="coding", delegation_chain=chain
         )
     if name == "batch_dispatch":
         # v51-F5: auto-resolve only when EVERY member matches its project's
@@ -5255,7 +5278,10 @@ def mutation_execution_decision(
                 # v98-F1: an explicit engine is an explicit run override, so
                 # this member gates the batch (actions.py explicit_run_overrides).
                 engine=(None if entry.get("engine") is None else str(entry["engine"])),
+                delegation_chain=chain,
             )
+            if member.verdict == "deny" and member.reason == "dispatch.deny.exceeds_delegator":
+                return member  # B22: a member the chain can never dispatch refuses the batch
             if not member.allows_execution():
                 return AutonomyDecision(
                     verdict="require_approval",
@@ -5353,4 +5379,5 @@ def mutation_execution_decision(
         max_actions=_optional_int(args, "max_actions"),
         max_provider_calls=_optional_int(args, "max_provider_calls"),
         engine=None if args.get("engine") is None else str(args["engine"]),
+        delegation_chain=chain,
     )

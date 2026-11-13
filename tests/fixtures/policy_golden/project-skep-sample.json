@@ -57,6 +57,7 @@
         "pypi.org",
         "registry.npmjs.org"
       ],
+      "network_ask": [],
       "provider_hosts": [],
       "read": [
         "workspace"
@@ -71,6 +72,7 @@
           "pytest"
         ]
       ],
+      "shell_ask": [],
       "write": [
         "workspace"
       ]

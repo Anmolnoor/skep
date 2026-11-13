@@ -16,6 +16,10 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from skep.worker_contract import CodingWorkerTask
+from skep.worker_contract.worker_state import (
+    approval_grants_from_state,
+    approved_network_hosts_from_verdict,
+)
 
 from . import sandbox
 from .castes import CASTES
@@ -139,7 +143,15 @@ def effective_network_domains(task: CodingWorkerTask) -> tuple[str, ...]:
     """
     domains = tuple(task.permissions.egress())
     if domains:
-        return domains
+        # ADR 0059 D3 (V7): a deferred ask a human approved for THIS run's
+        # resume chain joins its egress — only hosts the dispatch named as
+        # asks, never another approved host (the proxy is the wall).
+        approved = (
+            approved_network_hosts_from_verdict(task.approval_verdict)
+            | (approval_grants_from_state(task.worker_state)[3])
+        )
+        asked = tuple(host for host in task.permissions.network_ask if host in approved)
+        return domains if domains == ("*",) else (*domains, *asked)
     verdict = task.approval_verdict
     if (
         verdict is not None

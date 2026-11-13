@@ -96,9 +96,13 @@ def test_b12_a_delegated_coding_run_keeps_its_provider(
     assert permissions.provider_hosts == [entry]
     _reaches(url, permissions)
     # skep's own endpoint is no host grant the chain dropped (I8: the note
-    # names only what really was dropped).
+    # names only what really was dropped). An explicit `localhost` IS a
+    # grant, and one the delegator never holds (the run policy has no rule
+    # for it, so its own verdict is deny): ES-F11 drops it rather than let
+    # the worker keep an allow its delegator lacks (ADR 0059 §5.4 check 5).
     detail = submitted["dispatch_decision"].detail or ""
-    assert "network.connect localhost" not in detail
+    assert entry not in detail
+    assert ("network.connect localhost" in detail) == (network is not None)
     assert "network.connect ollama.com" not in detail
 
 

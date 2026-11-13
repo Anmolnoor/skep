@@ -399,6 +399,12 @@ def run_task(
             )
         }
     )
+    # ADR 0059 D3 (V7): a deferred ask exists only on a delegated dispatch —
+    # its one writer is the chain narrowing (``_within_delegation``), and a
+    # resume carries the delegation with it. Any other envelope naming one
+    # (a hand-edited task, a stray caller) loses it here.
+    if dispatch_decision is None or dispatch_decision.delegation is None:
+        permissions = permissions.model_copy(update={"network_ask": [], "shell_ask": []})
     # Only an EXTERNAL engine replaces the worker argv. "builtin" defers to
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
@@ -496,6 +502,15 @@ def run_task(
         effective_worker_state = worker_state
         if effective_worker_state is None and resume_of is not None:
             effective_worker_state = resume_worker_state_from_audit(config.audit_dir, resume_of)
+        if resume_of is not None and effective_worker_state is not None:
+            # The checkpoint is the worker's own file: a grants key in it is
+            # not a grant (the proxy admits approved asked hosts from it, V7).
+            # Only the merge below, from the supervisor's audit copies, writes it.
+            effective_worker_state = {
+                key: value
+                for key, value in effective_worker_state.items()
+                if key != APPROVAL_GRANTS_STATE_KEY
+            }
         if resume_of is not None:
             # Carry every grant the chain has collected so far (prior grants +
             # the verdict the suspended run held) into the resumed envelope;
