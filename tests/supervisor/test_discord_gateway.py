@@ -1354,3 +1354,56 @@ def test_discord_never_confirms_a_high_card(
             harness.close()
     finally:
         ollama.stop()
+
+
+@pytest.mark.parametrize("path", ["reaction", "slash"])
+def test_with_two_cards_waiting_a_reaction_or_slash_verdict_resolves_neither(
+    repo: object, config: SupervisorConfig, path: str
+) -> None:
+    """W19: one turn can leave several cards; a reaction (or a bare /skep
+    approve) used to confirm the oldest. With more than one waiting it
+    resolves none and says to use the card's own buttons or the web UI."""
+    from skep.supervisor import RunStore
+
+    from .fake_ollama import FakeOllama
+
+    ollama = FakeOllama(api_key="sk-fake").start()
+    try:
+        _enable_discord(config, ollama, can_confirm=True)
+        store = RunStore(config.db_path)
+        try:
+            chat = store.create_chat(title="discord 42", model=None)
+            store.bind_channel_session(
+                session_key="discord:42", channel="discord", identity_id="42", chat_id=chat.chat_id
+            )
+            ids = [
+                store.add_chat_action(
+                    chat.chat_id,
+                    tool="dispatch_run",
+                    args={
+                        "repo": str(repo),
+                        "instructions": f"{v} MODE:happy",
+                        "execution_mode": "sandbox",
+                    },
+                )
+                for v in ("Fix the bug.", "Add a test.")
+            ]
+        finally:
+            store.close()
+        harness = _DiscordHarness(config)
+        try:
+            ollama.script_reply("on it")
+            frame = {"reaction": _HIGH_REACTION, "slash": _slash("approve")}[path]
+            harness.script(HELLO, READY_APP, frame)
+            assert harness.gateway.session_once() is True
+            reply = str(
+                harness.sent[-1][2]["content"] if path == "reaction" else harness.followups[-1][2]
+            )
+            assert "2 cards are waiting" in reply and "buttons" in reply
+            for action_id in ids:
+                waiting = harness.store.get_chat_action(action_id)
+                assert waiting is not None and waiting.status == "proposed"
+        finally:
+            harness.close()
+    finally:
+        ollama.stop()

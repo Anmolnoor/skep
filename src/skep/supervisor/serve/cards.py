@@ -139,6 +139,20 @@ def _named_by_operator(store: RunStore, server: str, name: str) -> bool:
     )
 
 
+def _changes_provider(args: dict[str, Any], store: RunStore | None) -> bool:
+    """W11: ``set_assistant_model`` that carries a base URL or another
+    protocol (scope 'chat' applies neither). No store: fail closed."""
+    if args.get("scope") == "chat":
+        return False
+    if str(args.get("base_url") or "").strip():
+        return True
+    if args.get("protocol") in (None, ""):
+        return False
+    from .llm import LLM_PROTOCOL
+
+    return store is None or args["protocol"] != store.get_setting(LLM_PROTOCOL)
+
+
 def _doubly_tainted(taint: ChatTaint | None) -> bool:
     return taint is not None and taint.private is not None and taint.untrusted is not None
 
@@ -189,6 +203,17 @@ def high_tier(
         return "it activates a skill pack's scripts"
     if tool in _HIGH_POLICY_TOOLS:
         return "it changes standing policy"
+    if tool in ("add_provider", "use_provider") or (
+        tool == "set_assistant_model" and _changes_provider(safe, store)
+    ):
+        # W11: every later turn, private data included, goes to that endpoint
+        return "it points the assistant at another LLM endpoint: every later turn goes there"
+    if tool in ("set_schedule_enabled", "run_schedule_now") and (
+        tool == "run_schedule_now" or safe.get("enabled") is not False  # executor: bool(...)
+    ):
+        existing = None if store is None else store.get_schedule(str(safe.get("name") or ""))
+        if existing is None or existing.worker_kind == "script":  # unknown: fail closed
+            return f"a script schedule {SCRIPT_SENTENCE}"
     if tool == "setup_project" and (safe.get("policy_overrides") or safe.get("groups")):
         # the overlay spells any knob (coding_engine, default_network, …) and
         # groups= is attach_policy_group: both write the project's policy

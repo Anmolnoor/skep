@@ -492,6 +492,18 @@ def url_prefix_of(url: str) -> str | None:
     return urlunsplit((scheme, netloc, path[: path.rfind("/") + 1], query, ""))
 
 
+def logged_url(url: str) -> tuple[str, bool] | None:
+    """W18: what the decision log keeps of a fetched URL — scheme, host and
+    the path up to its last ``/`` (all a ``url_prefix`` grant matches on, see
+    ``url_prefix_matches``), and whether a query was dropped. Never the
+    query, never userinfo (None: no grant could match it either)."""
+    found = _url_parts(url)
+    if found is None:
+        return None
+    scheme, netloc, path, query = found
+    return urlunsplit((scheme, netloc, path[: path.rfind("/") + 1], "", "")), bool(query)
+
+
 def url_prefix_matches(pattern: str, url: str) -> bool:
     """Same scheme and host[:port], the path under the stored directory, and a
     query that is empty or identical to the card's: a grant made on

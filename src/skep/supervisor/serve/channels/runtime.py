@@ -835,6 +835,15 @@ SKEP_COMMAND_TREE: list[dict[str, object]] = [
 ]
 
 
+def _several_cards(count: int, web_ui_url: str) -> str:
+    """W19: a reaction or a bare /skep verdict names no card."""
+    return (
+        f"skep: {count} cards are waiting in this conversation, so a reaction or "
+        "/skep approve|deny cannot tell which one you mean — nothing was resolved. "
+        f"Use the buttons on the card you mean, or the web UI: {web_ui_url}"
+    )
+
+
 def register_slash_commands(token: str, application_id: str, register: RegisterCommands) -> None:
     """v78-F4: one bulk-overwrite PUT after READY. Registration failure never
     breaks the session; a 403 names the fix (I9)."""
@@ -1493,13 +1502,15 @@ class DiscordGateway(threading.Thread):
         """The typed command IS the decision, asked once (I7): resolve the
         bound chat's single pending card through the EXACT gate the ✅ button
         uses (``_resolve_verdict`` → ``channel_confirmation_decision``) — no id
-        argument, because the bound chat holds at most one actionable card by
-        construction (``run_channel_turn`` refuses new turns while one waits),
-        and the v51 field test showed id-typing is where approvals go to die."""
+        argument: the v51 field test showed id-typing is where approvals go to
+        die. W19: one turn can still leave several cards, and then this
+        resolves none (``_several_cards``)."""
         binding = self._store.channel_session(f"{discord_adapter.CHANNEL}:{channel_id}")
         pending = self._store.pending_chat_actions(binding.chat_id) if binding else []
         if not pending:
             return "skep: no card is waiting in this conversation."
+        if len(pending) > 1:
+            return _several_cards(len(pending), self._web_ui_url)
         identity = ChannelIdentity(channel=discord_adapter.CHANNEL, identity_id=channel_id)
         return self._resolve_verdict(
             pending[0].action_id, confirm=confirm, identity=identity, user_id=user_id
@@ -1518,9 +1529,11 @@ class DiscordGateway(threading.Thread):
         pending = self._store.pending_chat_actions(binding.chat_id)
         if not pending:
             return
-        # ponytail: a reaction resolves the (single) waiting card —
-        # run_channel_turn refuses new turns while one waits, so there is at
-        # most one card a reaction can sensibly mean.
+        if len(pending) > 1:
+            # W19: one turn can leave several cards; a reaction cannot say
+            # which one it means, so it resolves none.
+            self._deliver(token, channel_id, _several_cards(len(pending), self._web_ui_url))
+            return
         action = pending[0]
         decision = discord_adapter.handle_reaction(
             reaction=reaction,

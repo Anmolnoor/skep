@@ -109,6 +109,19 @@ def test_the_manifest_lists_what_the_compiled_task_holds(desk: Desk) -> None:
     assert perms.shell_allowlist == [*manifest["shell_allowlist"], *manifest["shell_ask"]]
     assert perms.shell_ask == []
     assert perms.write == manifest["write"]
+    # W13: every permission field the run gets is on the card, or excluded
+    # here with the reason. A field added to Permissions later fails this
+    # until it is shown or excluded.
+    answered = {"network", "network_ask", "shell_allowlist", "shell_ask"}  # pinned above
+    not_shown = {"provider_hosts": "filled at spawn from the provider registry; shown"
+                 " from provider_hosts_for, not from the task"}  # fmt: skip
+    for field in Permissions.model_fields:
+        if field in answered or field in not_shown:
+            continue
+        assert field in manifest, f"the manifest leaves out {field}"
+        assert manifest[field] == getattr(perms, field), field
+    assert manifest["auto_apply_verified_patch"] == submitted["auto_apply_verified_patch"]
+    assert manifest["auto_apply_branch"] == submitted["auto_apply_branch"]
     assert submitted["execution_mode"] == manifest["execution_mode"]
     assert submitted["coding_engine"] == manifest["engine"]
     assert submitted["verify_command"] == manifest["verify_command"]
@@ -210,6 +223,22 @@ def test_a_wildcard_manifest_is_high_and_the_lines_say_what_the_run_gets() -> No
     assert "(+2 more)" in lines[2]
     assert "verify: the worker picks" in lines[4]
     assert "approving this also approves, for this run only: x.org, npm ci" in lines
+    full = manifest_lines(
+        {"network": [], "read": ["/r"], "env_allowlist": [], "allow_git_mutation": True,
+         "allowed_plugin_risks": ["filesystem"], "allowed_tools": None,
+         "auto_apply_verified_patch": True, "auto_apply_branch": "skep/maintain"}
+    )  # fmt: skip
+    expected = (
+        "may read: /r",
+        "environment: none",
+        "git: may commit and branch in its own worktree",
+        "plugin risks allowed: filesystem",
+        "tools: all its tools",
+        "auto-apply: a re-verified patch lands on skep/maintain without asking",
+    )
+    for line in expected:
+        assert line in full, line
+    assert not any(line.startswith(("may read", "tools")) for line in lines)
     assert manifest_lines({"error": "no repo"}) == [
         "the run's envelope could not be compiled: no repo"
     ]
@@ -222,3 +251,77 @@ def test_an_uncompilable_dispatch_says_so_on_the_card(desk: Desk) -> None:
     assert "error" in manifest
     bad = dispatch_manifest_for(desk.store, desk.holder, {"repo": "r", "max_actions": "x"}, None)
     assert bad["error"].startswith("bad arguments")
+
+
+@pytest.mark.parametrize(
+    ("actor", "source", "status"),
+    [("channel:discord:42", "discord", 403), ("chat-user", "web", 409)],
+)
+def test_a_project_widened_between_card_and_confirm_is_refused_as_stale(
+    desk: Desk, actor: str, source: str, status: int
+) -> None:
+    """W13: the tier and the envelope are judged again at confirm. A project
+    that opened every host after the card was shown: a channel cannot
+    confirm it (fresh HIGH), and the web refuses it as stale, so nothing
+    runs on an envelope nobody saw."""
+    from fastapi import HTTPException
+
+    from skep.supervisor.serve import actions
+
+    desk.store.upsert_channel_config(
+        ChannelConfig(channel="discord", enabled=True, channel_can_confirm=True)
+    )
+    chat, card = desk.propose(source=source)
+    assert "tier" not in card["card"]
+    original = actions.dispatch_manifest
+
+    def widened(*a: Any, **kw: Any) -> dict[str, Any]:
+        return {**original(*a, **kw), "network": ["*"]}
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(actions, "dispatch_manifest", widened)
+        with pytest.raises(HTTPException) as refused:
+            desk.confirm(chat, card["action_id"], actor=actor)
+    assert refused.value.status_code == status
+    if status == 409:
+        assert "Propose the dispatch again" in str(refused.value.detail)
+        assert "network gained *" in str(refused.value.detail)
+    assert desk.runner.submitted == []
+    (pending,) = desk.store.pending_chat_actions(chat)
+    assert pending.status == "proposed"
+
+
+def test_a_narrower_envelope_at_confirm_still_runs(desk: Desk) -> None:
+    from skep.supervisor.serve import actions
+
+    chat, card = desk.propose()
+    original = actions.dispatch_manifest
+
+    def narrowed(*a: Any, **kw: Any) -> dict[str, Any]:
+        return {**original(*a, **kw), "network": [], "allow_git_mutation": False}
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(actions, "dispatch_manifest", narrowed)
+        desk.confirm(chat, card["action_id"])
+    assert len(desk.runner.submitted) == 1
+
+
+def test_manifest_widening_per_field() -> None:
+    from skep.supervisor.serve.actions import manifest_widening
+
+    shown = {"network": ["a"], "read": ["/r"], "allow_git_mutation": False,
+             "allowed_tools": ["x"], "engine": "builtin", "auto_apply_branch": None}  # fmt: skip
+    assert manifest_widening(shown, dict(shown)) is None
+    assert manifest_widening(shown, {**shown, "network": []}) is None
+    assert "network" in (manifest_widening(shown, {**shown, "network": ["a", "b"]}) or "")
+    assert "read" in (manifest_widening(shown, {**shown, "read": ["/"]}) or "")
+    assert "allow_git_mutation" in (
+        manifest_widening(shown, {**shown, "allow_git_mutation": True}) or ""
+    )
+    assert "allowed_tools" in (manifest_widening(shown, {**shown, "allowed_tools": None}) or "")
+    assert "engine" in (manifest_widening(shown, {**shown, "engine": "codex"}) or "")
+    assert manifest_widening({"network": ["a"]}, {"network": ["a"], "read": ["/"]}) is None
+    # a card that showed no envelope runs nothing it compiles to later
+    assert "no envelope" in (manifest_widening({"error": "x"}, shown) or "")
+    assert manifest_widening({"error": "x"}, {"error": "y"}) is None  # fails the same way
+    assert manifest_widening(shown, {"error": "y"}) is None

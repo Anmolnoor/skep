@@ -79,6 +79,23 @@ HIGH_KINDS: list[tuple[str, str, dict[str, Any], str]] = [
     ("register MCP", "setup_browser", {}, "none"),
     ("forge install", "promote_tool", {"name": "t"}, "none"),
     ("skill-pack promotion", "promote_skill_pack", {"name": "p"}, "none"),
+    # W11: a provider change points every later turn at a new endpoint
+    ("provider change", "set_assistant_model",
+     {"model": "m", "base_url": "https://llm.example.com/v1"}, "none"),
+    ("provider change", "set_assistant_model", {"model": "m", "protocol": "anthropic"}, "none"),
+    ("provider change", "add_provider", {"preset": "openrouter"}, "none"),
+    ("provider change", "use_provider", {"provider_id": "openrouter"}, "none"),
+    # W11: they bring back "runs as you, on this host, unattended"
+    ("script schedule back on", "set_schedule_enabled",
+     {"name": "old-script", "enabled": True}, "none"),
+    # the executor reads bool(enabled): any truthy spelling turns it on
+    ("script schedule back on", "set_schedule_enabled",
+     {"name": "old-script", "enabled": "true"}, "none"),
+    ("script schedule back on", "set_schedule_enabled",
+     {"name": "old-script", "enabled": "false"}, "none"),
+    ("script schedule back on", "set_schedule_enabled", {"name": "old-script", "enabled": 1},
+     "none"),
+    ("script schedule now", "run_schedule_now", {"name": "old-script"}, "none"),
 ]  # fmt: skip
 
 MEDIUM_KINDS: list[tuple[str, dict[str, Any], str]] = [
@@ -92,6 +109,13 @@ MEDIUM_KINDS: list[tuple[str, dict[str, Any], str]] = [
     ("forge_tool", {"name": "t", "purpose": "p"}, "none"),  # lands as a patch first
     ("setup_project", {"project_id": "p", "name": "p", "strategy": "trusted_local_dev",
                        "policy_overrides": {}, "groups": []}, "none"),
+    ("workon", {"path": "/x"}, "none"),
+    ("set_assistant_model", {"model": "m"}, "none"),  # same provider, another model
+    ("set_assistant_model", {"model": "m", "scope": "chat"}, "none"),
+    ("set_schedule_enabled", {"name": "old-script", "enabled": False}, "none"),
+    ("set_schedule_enabled", {"name": "note-1", "enabled": True}, "none"),
+    ("run_schedule_now", {"name": "note-1"}, "none"),
+    ("remove_provider", {"provider_id": "x"}, "none"),
 ]  # fmt: skip
 
 
@@ -124,6 +148,9 @@ def rig(config: SupervisorConfig) -> Iterator[Rig]:
             worker_kind="script",
         )
     )  # fmt: skip
+    store.add_schedule(
+        make_schedule(name="note-1", repo="", instructions="hi", interval_seconds=60)
+    )
     yield Rig(store, engine, ollama, holder)
     store.close()
     ollama.stop()

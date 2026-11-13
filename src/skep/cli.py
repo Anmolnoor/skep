@@ -283,7 +283,7 @@ def _setup_template(args: argparse.Namespace) -> int:
         print("dry run — nothing written")
         return 0
 
-    from .supervisor.policy_write import PolicyWriteRejected, keep_grants, vet_write
+    from .supervisor.policy_write import PolicyWriteRejected, keep_grants, vet_write, write_setting
     from .supervisor.serve.actions import update_policy
     from .supervisor.serve.settings import ConfigHolder
 
@@ -294,6 +294,7 @@ def _setup_template(args: argparse.Namespace) -> int:
         existing = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
         # B38: the learned grants survive the switch (a colliding one is
         # dropped, with a line), and the diff says so.
+        template_document = document
         document, grant_lines = keep_grants(holder, store, document)
         if existing is not None and existing.template != document.template:
             diff = diff_resolved_views(resolved_view(existing), view)
@@ -303,17 +304,23 @@ def _setup_template(args: argparse.Namespace) -> int:
                     print(f"  {line}")
                 print("re-run with --apply to switch", file=sys.stderr)
                 return 1
-        try:
+
+        def plan() -> tuple[str, tuple[list[str], dict[str, Any]]]:
+            # W14: grants learned meanwhile (serve keeps them) are re-kept
+            kept, lines = keep_grants(holder, store, template_document)
             # P3-5 (V11): the one write-time check, before the document is written.
-            report = vet_write(
+            checked = vet_write(
                 store,
                 holder=holder,
-                settings={POLICY_DOCUMENT_SETTINGS_KEY: document.model_dump_json()},
+                settings={POLICY_DOCUMENT_SETTINGS_KEY: kept.model_dump_json()},
             )
+            return kept.model_dump_json(), (lines, checked)
+
+        try:
+            grant_lines, report = write_setting(store, POLICY_DOCUMENT_SETTINGS_KEY, plan)
         except PolicyWriteRejected as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
-        store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, document.model_dump_json())
         # The template's knobs (O1: stated in the file, no longer derived from
         # its rules) are written beside the document so the compiled run
         # policy (F7) reflects the template too; machine-specific knobs
