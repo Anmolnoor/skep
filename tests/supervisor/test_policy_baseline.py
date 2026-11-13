@@ -505,8 +505,10 @@ def test_the_floor_wins_over_an_approved_baseline_that_reaches_for_it(
          "rule_id": "shell-everything"}
     )  # fmt: skip
     pb.write_lock(config.home, pb._load_layer(wide), approved_by="op")
-    # ES-F3: a baseline's shell rules bind workers, not the Queen's host lane.
-    assert _decide(config, scope="shell", action="run", value="make")["verdict"] == "deny"
+    # ES-F3: a baseline's shell rules bind workers, not the Queen's host lane
+    # (unmatched there: ask, ADR 0059 B77).
+    make = _decide(config, scope="shell", action="run", value="make")
+    assert (make["verdict"], make["decided_by"]) == ("require_approval", "default/unmatched")
     for command, key in (
         ("git push origin main", "floor.worker-git-hard-denies"),
         ("sudo make install", "floor.never-grantable-prefixes"),

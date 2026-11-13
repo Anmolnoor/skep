@@ -30,7 +30,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from .policy_schema import SCOPE_ACTIONS
+from .policy_schema import SCOPE_ACTIONS, UNMATCHED_VERDICT
 
 LAYERS: tuple[str, ...] = (
     "floor",
@@ -386,17 +386,21 @@ def _rule_keys() -> tuple[PolicyKey, ...]:
     keys: list[PolicyKey] = []
     for scope in sorted(SCOPE_ACTIONS):
         for action in sorted(SCOPE_ACTIONS[scope]):
+            unmatched = UNMATCHED_VERDICT[(scope, action)]
             keys.append(
                 PolicyKey(
                     name=f"{scope}.{action}",
                     system="scope_document",
                     kind="rule",
                     type="rule",
-                    default="deny",
+                    default=unmatched,
                     layers=("template", "global", "project", "session"),
                     invariant="I5",
                     doc=_RULE_DOCS.get((scope, action), "")
-                    + " — most specific pattern wins, deny wins ties, unmatched denies",
+                    + " — most specific pattern wins, deny wins ties, unmatched "
+                    + ("denies" if unmatched == "deny" else "asks")
+                    + " (ADR 0059: policy decide/why, the hook, acp govern); a run is "
+                    "granted only what a rule allows",
                 )
             )
     return tuple(keys)

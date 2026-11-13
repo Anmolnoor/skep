@@ -25,7 +25,6 @@ from typing import IO, Any, Literal
 
 from ... import __version__
 from ..policy_paths import workspace_value
-from ..policy_schema import DEFAULT_DENY_RULE_ID
 from ..serve.actions import policy_decide, policy_note
 from ..serve.settings import ConfigHolder
 from ..store import RunStore
@@ -157,9 +156,7 @@ class Governor:
             else:
                 cwd, item = pr.cwd, pr.items[0]
                 records = [self._decide(i, cwd) for i in pr.items]
-                if any(
-                    r["verdict"] == "deny" and r["rule_id"] != DEFAULT_DENY_RULE_ID for r in records
-                ):
+                if any(r["verdict"] == "deny" for r in records):
                     if "reject_once" in kinds:
                         return _selected(kinds["reject_once"])
                     return Reply({"outcome": {"outcome": "cancelled"}})
@@ -217,7 +214,10 @@ class Governor:
         record = self._decide(item, cwd, ring="hard")
         if record["verdict"] == "allow":
             return None
-        return _refuse(f"{record['verdict']} by {record.get('decided_by') or record['rule_id']}")
+        reason = f"{record['verdict']} by {record.get('decided_by') or record['rule_id']}"
+        if record["verdict"] != "deny":
+            reason += " — this ring has no human to ask, so it refuses"
+        return _refuse(reason)
 
 
 def _selected(option_id: Any) -> Reply:

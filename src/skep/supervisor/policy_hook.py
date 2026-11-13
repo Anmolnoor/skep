@@ -22,10 +22,11 @@ Mapping, and why:
   contract permission (``read: ["workspace"]``), not a document rule, and
   a hook that denied every read would be inventing policy (I5).
 
-Verdict → hook decision: ``allow`` → ``allow``; an explicit ``deny`` rule →
-``deny``; ``require_approval`` → ``ask``; the unmatched ``default-deny`` →
-``ask`` too — the same shape skep gives its own workers, where an unlisted
-command cards rather than fails, and an explicit deny refuses.
+Verdict → hook decision: ``allow`` → ``allow``; ``deny`` → ``deny``;
+``require_approval`` → ``ask``, and anything else → ``ask`` — never a silent
+allow. ADR 0059 P3-1: "no rule matched" is ``decide()``'s own answer
+(``default/unmatched``, ask for ``shell.run`` and every lane the hook maps),
+so the hook no longer remaps a deny it cannot tell from an explicit one.
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .policy_paths import workspace_value
-from .policy_schema import DEFAULT_DENY_RULE_ID
 
 _WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 _HOOK_DECISIONS = {"allow": "allow", "require_approval": "ask", "deny": "deny"}
@@ -66,17 +66,12 @@ def hook_output(record: dict[str, Any] | None, *, error: str | None = None) -> d
         decision, reason = "ask", f"skep could not decide: {error or 'unknown error'}"
     else:
         decision = _HOOK_DECISIONS.get(str(record.get("verdict")), "ask")
-        if record.get("rule_id") == DEFAULT_DENY_RULE_ID:
-            decision = "ask"
-            reason = (
-                f"skep: no rule matches in the {record.get('source')} policy — asking you "
-                "(an unlisted command cards for skep's own workers too)"
-            )
-        else:
-            reason = (
-                f"skep: {record.get('verdict')} by {record.get('decided_by')} "
-                f"({record.get('source')} policy)"
-            )
+        reason = (
+            f"skep: {record.get('verdict')} by {record.get('decided_by')} "
+            f"({record.get('source')} policy)"
+        )
+        if record.get("layer") == "default":
+            reason += " — no rule matches, so a human answers"
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

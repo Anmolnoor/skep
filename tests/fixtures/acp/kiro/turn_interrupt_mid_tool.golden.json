@@ -14,9 +14,10 @@
         "phase": "build"
       },
       "source": "run",
-      "verdict": "deny",
-      "rule_id": "default-deny",
-      "decided_by": "trusted_local_dev/default-deny"
+      "verdict": "require_approval",
+      "rule_id": "unmatched",
+      "decided_by": "default/unmatched",
+      "layer": "default"
     },
     {
       "actor": "human@client",
@@ -30,7 +31,7 @@
       "tool_call_id": "run_command_tooluse_y1v4bBCwl4978KEjYmFWrP",
       "request_id": 9025,
       "outcome": "allow_once",
-      "note": "default-deny"
+      "note": "unmatched"
     }
   ]
 }

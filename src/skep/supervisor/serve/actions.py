@@ -58,7 +58,7 @@ from ..contracts_io import read_event_log
 from ..ids import mint_uuid7
 from ..memory import MemoryError, MemoryProposal, MemorySource
 from ..netproxy import domain_allowed
-from ..policy_baseline import BASELINE_TAMPERED, NO_BASELINE_REASON, NoBaseline, status_line
+from ..policy_baseline import NO_BASELINE_REASON, NoBaseline
 from ..policy_baseline import current_layer as current_baseline_layer
 from ..policy_baseline import layer_diff as baseline_layer_diff
 from ..policy_baseline import locked_layer as locked_baseline_layer
@@ -78,18 +78,20 @@ from ..policy_resolver import (
     run_policy_for_repo,
 )
 from ..policy_schema import (
+    _VERDICT_RANK,
     OPERATOR_POLICY_SETTINGS_KEY,
     POLICY_DOCUMENT_SETTINGS_KEY,
     SCOPE_ACTIONS,
     SCOPES,
     PolicyDocument,
-    decide,
     document_from_settings,
     operator_document_from_settings,
     pattern_matches,
     shell_segments,
 )
 from ..policy_templates import PolicyTemplate, layer_view, load_policy_template
+from ..policy_v3 import Request, Stack, Verdict, floor_verdict, load_stack, log_decision
+from ..policy_v3 import decide as decide_v3
 from ..projects import (
     PROJECT_PHASES,
     PROJECT_POLICY_KEYS,
@@ -105,19 +107,11 @@ from ..roles import (
     resolve_role,
     role_covers,
     role_decision,
-    tighten,
-    within_delegator,
 )
-from ..secret_floor import secret_floor_reason, shell_secret_floor_reason
 from ..shell_prefixes import (
-    command_line_segments,
     dangerous_prefix_reason,
-    is_branch_switch_command,
-    is_history_rewrite_command,
     is_remote_git_command,
-    is_worker_commit_command,
     normalize_remembered_command,
-    queen_command_line_refusal,
     worker_allowlist_reason,
 )
 from ..store import RunStore
@@ -1865,60 +1859,6 @@ def _check_scope_action(scope: str, action: str) -> None:
         raise ValueError(f"scope {scope!r} has no action {action!r}; known: {known}")
 
 
-def _floor_verdict(
-    scope: str,
-    value: str,
-    *,
-    action: str = "",
-    home: Path | None = None,
-    cwd: str | None = None,
-) -> dict[str, Any] | None:
-    """I4: the floor sits ABOVE every document, so it is consulted before
-    ``decide()`` ever runs (F1 of the P3 review: the hook answered `ask` for
-    `git push`, the one command it exists to refuse). For a shell value the
-    floor is the Queen's own refusal set (v83-F9: the worker git guards
-    applied to the Queen's hands, privilege escalation, the catastrophic
-    commands) over every segment of the raw command line, and the verdict
-    names the registry's floor key — so RSoP, the why-query and the hook all
-    say the same thing. Not a rule: nothing in any layer can lift it.
-
-    ES-F1 (V3): a filesystem read of a credential file is the secret floor,
-    and so is a shell line naming one (B123: run_shell's ES-F8 floor, judged
-    against ``cwd`` — the hook said ask where the lane refused)."""
-    if scope == "filesystem" and action == "read":
-        secret = secret_floor_reason(value, skep_home=home)
-        if secret is None:
-            return None
-        key = "floor.secret-reads"
-        return {"verdict": "deny", "rule_id": key, "decided_by": f"floor/{key}", "reason": secret}
-    if scope != "shell":
-        return None
-    reason = queen_command_line_refusal(value)
-    if reason is None:
-        secret = shell_secret_floor_reason(value, cwd=cwd, skep_home=home)
-        if secret is None:
-            return None
-        key = "floor.secret-reads"
-        return {"verdict": "deny", "rule_id": key, "decided_by": f"floor/{key}", "reason": secret}
-    git_floor = any(
-        is_remote_git_command(argv)
-        or is_worker_commit_command(argv)
-        or is_branch_switch_command(argv)
-        or is_history_rewrite_command(argv)
-        for argv in command_line_segments(value) or []
-    )
-    key = "floor.worker-git-hard-denies" if git_floor else "floor.never-grantable-prefixes"
-    return {"verdict": "deny", "rule_id": key, "decided_by": f"floor/{key}", "reason": reason}
-
-
-# The Queen-side lanes by definition (policy_schema.SCOPE_ACTIONS): search is
-# the Queen's keyless discovery, fetch the read_url granted-domain lane. An
-# outside agent asking about them is asking what the operator document says.
-_OPERATOR_LANES: frozenset[tuple[str, str]] = frozenset(
-    {("network", "search"), ("network", "fetch")}
-)
-
-
 def policy_decide(
     holder: ConfigHolder,
     store: RunStore,
@@ -1932,67 +1872,68 @@ def policy_decide(
     role: str | None = None,
     delegation_chain: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """P3 (ADR 0053; the CTO record's enforcement hook): ``decide()`` reachable
-    from outside, and RECORDED. With a repo, the run policy decides — the
-    engine a dispatch there would run under (the why-query, P0-3); without
-    one, for the Queen-side lanes, or when the repo is unknown or will not
-    resolve, the operator document decides and the record says which (I8).
-    Every call appends a line to ``<audit>/policy/decisions.jsonl`` — the
-    CTO success criterion "Claude Code runs produce decide() verdicts in the
-    audit trail". No second decision path (I5): it is the why-query, kept.
+    """P3 (ADR 0053): ``decide()`` reachable from outside, and RECORDED —
+    REST ``policy/decide``, ``skep policy decide``, the Claude Code hook and
+    ``skep acp govern`` all answer here. ADR 0059 P3-1: the answer is
+    ``policy_v3.decide()`` over a stack loaded once (I5). With a repo, the
+    run policy decides — the engine a dispatch there would run under; without
+    one, for the Queen-side lanes, or when the repo will not resolve, the
+    operator document decides and the record says which (I8). Every call
+    appends a line to ``<audit>/policy/decisions.jsonl``.
 
-    first-run O2: after the floor, the baseline. One that does not verify
-    answers every call ``baseline_tampered`` — ``ask`` where a human answers
-    (the advisory ring: the hook, the ACP permission hop), ``deny`` where
-    none does (``ring="hard"``: the governor's terminal and fs writes).
-    O5: on a fresh home with nothing approved, every call in a scope routed
-    to engine v2 answers ``ask`` with ``no_baseline`` (``baseline_guard``).
+    The floor first (I4). Then the baseline: one that does not verify answers
+    ``baseline_tampered`` — ``ask`` where a human answers (the advisory ring:
+    the hook, the ACP permission hop), ``deny`` where none does
+    (``ring="hard"``: the governor's terminal and fs writes). O5: on a fresh
+    home with nothing approved, every call in a scope routed to engine v2
+    answers ``ask`` with ``no_baseline``. No rule matched: ``default/
+    unmatched``, whose verdict is ``policy_v3.SCOPE_ACTIONS`` — ask, except
+    ``shell.run_repo`` (B77: it was deny here while the Queen carded).
 
     R1 (ADR 0055 D2): ``role`` adds the role layer under the baseline — the
-    stricter verdict stands (``roles.tighten``) and ``decided_by`` names
-    ``role:<name>`` when it decided. A row decided under a role carries
-    ``role``; a row without one had no role layer — today's behaviour, byte
-    for byte.
-
-    R2 (ADR 0055 D4): ``delegation_chain`` (``actor@role`` hops, outermost
-    first) holds the verdict to what the innermost delegator itself holds —
-    its effective verdict down this same path, under its role, bounded by the
-    hops above it (``roles.within_delegator``). Beyond it: ``exceeds_delegator``
-    and the row carries the chain. The floor stays above every chain (I4).
-    An empty chain — the hook, ``acp govern``, the operator — is today."""
+    stricter verdict stands and ``decided_by`` names ``role:<name>``. R2 (D4):
+    ``delegation_chain`` (``actor@role`` hops, outermost first) holds the
+    verdict to what the innermost delegator itself holds; beyond it,
+    ``exceeds_delegator`` and the row carries the chain."""
     _check_scope_action(scope, action)
     home = holder.current.home
-    record = _decision_record(
-        holder,
-        store,
-        scope=scope,
-        action=action,
-        value=value,
-        repo=repo,
-        actor=actor,
-        ring=ring,
-        role_record=resolve_role(role, home) if role is not None else None,
-        chain=parse_delegation_chain(delegation_chain, home),
+    role_record = resolve_role(role, home) if role is not None else None
+    chain = parse_delegation_chain(delegation_chain, home)
+    try:
+        baseline_alarm(holder, store)  # O2: a NEW tamper event cards the operator
+        try:
+            stack = load_stack(holder, store, repo=repo)
+        except HTTPException as exc:
+            stack = replace(
+                load_stack(holder, store), cwd=repo, run_note=f"repo not resolvable: {exc.detail}"
+            )
+    except Exception:
+        # I4: the floor reads no document, so one that will not load cannot lift it.
+        if floor_verdict(scope, value, action=action, home=home, cwd=repo) is None:
+            raise
+        stack = Stack(home=home, cwd=repo, guard={}, baseline="", operator={})
+    verdict = decide_v3(
+        Request(scope, action, value), stack=stack, role=role_record, chain=chain, face=ring
     )
-    _append_policy_ledger(holder.current.audit_dir, "decisions", record)
+    record = _decision_row(
+        verdict, stack, actor=actor, repo=repo, req=(scope, action, value), role=role_record
+    )
+    log_decision(holder.current.audit_dir, record)
     return record
 
 
-def _decision_record(
-    holder: ConfigHolder,
-    store: RunStore,
+def _decision_row(
+    verdict: Verdict,
+    stack: Stack,
     *,
-    scope: str,
-    action: str,
-    value: str,
-    repo: str | None,
     actor: str,
-    ring: Literal["advisory", "hard"],
-    role_record: Role | None,
-    chain: Sequence[Delegator],
+    repo: str | None,
+    req: tuple[str, str, str],
+    role: Role | None,
 ) -> dict[str, Any]:
-    """``policy_decide``'s verdict, unrecorded — the one path a delegator's
-    effective verdict is computed down too (I5: no second evaluator)."""
+    """One ``decisions.jsonl`` row for a v3 verdict. A row decided under a
+    role carries ``role``; one without had no role layer."""
+    scope, action, value = req
     record: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "actor": actor,
@@ -2000,70 +1941,24 @@ def _decision_record(
         "scope": scope,
         "action": action,
         "value": value,
+        "source": verdict.source,
     }
-    if role_record is not None:
-        record["role"] = role_record.name
-    if chain:
-        record["delegation_chain"] = [hop.entry for hop in chain]
-    decision: dict[str, Any] | None = None
-    floor = _floor_verdict(scope, value, action=action, home=holder.current.home, cwd=repo)
-    if floor is not None:
-        decision = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
-        record["source"] = "floor"
-        record["note"] = floor["reason"]
-    elif (reason := baseline_alarm(holder, store).get(scope)) is not None:
-        hard = ring == "hard" and reason == BASELINE_TAMPERED
-        decision = {
-            "verdict": "deny" if hard else "require_approval",
-            "rule_id": reason,
-            "decided_by": f"baseline/{reason}",
-        }
-        record["source"] = "baseline"
-        record["note"] = status_line(holder.current.home)
-    elif repo and (scope, action) not in _OPERATOR_LANES:
-        try:
-            why = policy_why(holder, store, repo, scope, action, value)
-        except HTTPException as exc:
-            record["note"] = f"repo not resolvable: {exc.detail}"
-        else:
-            run = why["run"]
-            if "verdict" in run:
-                decision = {key: run[key] for key in ("verdict", "rule_id", "decided_by")}
-                record["project"] = why["project"]
-                record["source"] = "run"
-                if why["project"] is None:
-                    record["note"] = "repo is not bound to a project — the global run policy"
-            else:
-                record["note"] = f"run policy did not resolve: {run['error']}"
-    if decision is None:
-        operator = resolve_operator_policy(store).decision(scope, action, value)
-        decision = {
-            "verdict": operator.verdict,
-            "rule_id": operator.rule_id,
-            "decided_by": operator.decided_by,
-        }
-        record["source"] = "operator"
-    verdict = tighten(decision, role_record, scope, action, value)
-    if chain:
-        *outer, delegator = chain
-        bound = (
-            _decision_record(
-                holder,
-                store,
-                scope=scope,
-                action=action,
-                value=value,
-                repo=repo,
-                actor=delegator.entry,
-                ring=ring,
-                role_record=delegator.role,
-                chain=outer,
-            )
-            if role_covers(delegator.role, scope, action, value)
-            else None
-        )
-        verdict = within_delegator(verdict, delegator, bound)
-    record.update(verdict)
+    if role is not None:
+        record["role"] = role.name
+    if verdict.chain:
+        record["delegation_chain"] = list(verdict.chain)
+    if verdict.source == "run":
+        record["project"] = stack.project
+    if verdict.note is not None:
+        record["note"] = verdict.note
+    record.update(
+        verdict=verdict.verdict,
+        rule_id=verdict.rule_id,
+        decided_by=verdict.decided_by,
+        layer=verdict.layer,
+    )
+    if verdict.deferred:
+        record["deferred"] = True
     return record
 
 
@@ -2225,9 +2120,7 @@ def policy_note(
         "source": source,
         **fields,
     }
-    # ponytail: the append is unlocked; concurrent governors interleave whole <4 KiB
-    # writes on POSIX — lock when a home gets a second writer
-    _append_policy_ledger(audit_dir, "decisions", row)
+    log_decision(audit_dir, row)
     return row
 
 
@@ -2242,68 +2135,61 @@ def policy_why(
     role: str | None = None,
     delegation_chain: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """P0-3 (ADR 0052 D4): would <scope>.<action> <value> in <repo> be allowed?
-    The same resolve_run_policy a dispatch runs, then decide() on the compiled
-    run document, plus the Queen's operator document — no dispatch, no record.
-    Unknown scope or action refuses naming the known set (I9).
+    """P0-3 (ADR 0052 D4): would <scope>.<action> <value> be allowed in <repo>?
+    No dispatch, no record. Unknown scope or action refuses naming the known
+    set (I9). ADR 0059 P3-1: both faces are ``policy_v3.decide()`` over one
+    stack (I5) — ``run`` is the run policy a dispatch there would run under,
+    ``operator`` the Queen's operator document — so ``why`` names the same
+    verdict and layer ``policy_decide`` records.
 
     R1 (ADR 0055 D2, done-criterion 4): with a ``role`` the answer names the
     role layer — ``role`` says what ``role:<name>`` alone decides (or that it
-    has no rule here) and both verdicts are tightened by it, exactly as
-    ``policy_decide`` does.
+    has no rule here) and both faces are tightened by it.
 
-    R2 (ADR 0055 D4): with a ``delegation_chain`` the answer shows it — a
-    ``delegation`` block names the chain and what the innermost delegator
-    itself holds on each face (its own ``why``, bounded by the hops above),
-    and both faces are held to it exactly as ``policy_decide`` holds them."""
+    R2 (ADR 0055 D4): with a ``delegation_chain`` both faces are held to the
+    chain, and a ``delegation`` block names it and what the innermost
+    delegator itself holds on each face (bounded by the hops above)."""
     _check_scope_action(scope, action)
-    if delegation_chain:
-        *outer, delegator = parse_delegation_chain(delegation_chain, holder.current.home)
-        answer = policy_why(holder, store, repo, scope, action, value, role=role)
-        covered = role_covers(delegator.role, scope, action, value)
-        bound = (
-            policy_why(
-                holder,
-                store,
-                repo,
-                scope,
-                action,
-                value,
-                role=delegator.role.name,
-                delegation_chain=[hop.entry for hop in outer],
-            )
-            if covered
-            else None
-        )
-        held: dict[str, Any] = {}
-        for face in ("run", "operator"):
-            own = None if bound is None else bound[face]
-            if own is not None and "verdict" not in own:
-                own = None  # a delegator face that did not resolve holds nothing (#7)
-            held[face] = None if own is None else {k: own[k] for k in ("verdict", "decided_by")}
-            if "verdict" in answer[face]:
-                answer[face] = within_delegator(answer[face], delegator, own)
-        answer["delegation"] = {
-            "chain": list(delegation_chain),
-            "delegator": delegator.entry,
-            "held": held,
-            "note": (
-                f"delegated by {' → '.join(delegation_chain)}: the delegatee holds no more "
-                f"than {delegator.entry} does — "
-                + (
-                    "the stricter verdict stands; beyond it is exceeds_delegator"
-                    if covered
-                    else f"role:{delegator.role.name} has no rule for this, so it holds "
-                    "nothing to pass on (unset is not granted)"
+    home = holder.current.home
+    chain = parse_delegation_chain(delegation_chain, home)
+    role_record = resolve_role(role, home) if role is not None else None
+    stack = load_stack(holder, store, repo=repo)
+    req = Request(scope, action, value)
+    run, operator = _why_faces(req, stack, role_record, chain)
+    view: dict[str, Any] = {
+        "repo": stack.repo,
+        "project": stack.project,
+        "scope": scope,
+        "action": action,
+        "value": value,
+        "baseline": stack.baseline,
+        "operator": _face(operator),
+    }
+    if run is None:
+        view["run"] = {"error": stack.run_note}
+    else:
+        considered: list[dict[str, Any]] = []
+        if stack.run is not None and run.source not in ("floor", "baseline"):
+            # B3-F7: a chained shell line is decided per simple command; `why`
+            # shows the rules any of them touched (none, when the line is opaque).
+            parts = (shell_segments(value) or []) if scope == "shell" else [value]
+            scope_policy = stack.run.get(scope)
+            considered = [
+                asdict(rule)
+                for rule in (scope_policy.rules if scope_policy else ())
+                if rule.action == action
+                and any(
+                    pattern_matches(scope, rule.pattern, part, exact=rule.exact) for part in parts
                 )
-            ),
-        }
-        return answer
-    if role is not None:
-        role_record = resolve_role(role, holder.current.home)
-        answer = policy_why(holder, store, repo, scope, action, value)
+            ]
+        view["run"] = {**_face(run), "considered": considered}
+    if operator.source == "floor":
+        view["floor"] = operator.note  # the floor binds workers AND the Queen (v83-F9)
+    if stack.guard.get(scope) == NO_BASELINE_REASON:
+        view["baseline"] += f" — {NO_BASELINE_REASON}: every decision asks until one is"
+    if role_record is not None:
         hit = role_decision(role_record, scope, action, value)
-        answer["role"] = {
+        view["role"] = {
             "name": role_record.name,
             "layer": role_record.label,
             "binds": role_record.policy_layer,
@@ -2318,85 +2204,63 @@ def policy_why(
                 )
             ),
         }
-        for face in ("run", "operator"):
-            if "verdict" in answer[face]:
-                answer[face] = tighten(answer[face], role_record, scope, action, value)
-        return answer
-    resolved_repo, binding_candidates, project = _repo_project_for_view(holder, store, repo)
-    view: dict[str, Any] = {
-        "repo": str(resolved_repo),
-        "project": _project_summary(project),
-        "scope": scope,
-        "action": action,
-        "value": value,
-        "baseline": status_line(holder.current.home),
-    }
-    # B123: a shell line is judged from the repo the arg names (a slug is
-    # not a path under the process cwd, v87-F1).
-    floor = _floor_verdict(
-        scope, value, action=action, home=holder.current.home, cwd=str(resolved_repo)
-    )
-    if floor is not None:
-        # The floor binds workers AND the Queen (v83-F9): one answer, twice.
-        verdict = {key: floor[key] for key in ("verdict", "rule_id", "decided_by")}
-        view["run"] = {**verdict, "considered": []}
-        view["operator"] = dict(verdict)
-        view["floor"] = floor["reason"]
-        return view
-    try:
-        resolved = _resolve_for_view(holder, store, resolved_repo, binding_candidates)
-    except PolicyResolutionError as exc:
-        view["run"] = {"error": str(exc)}
-    else:
-        template = resolved.document.template if resolved.document is not None else None
-        decision = decide(resolved.resolved_scopes, scope, action, value, template=template)
-        scope_policy = resolved.resolved_scopes.get(scope)
-        # B3-F7: a chained shell line is decided per simple command; `why` shows
-        # the rules any of them touched (none, when the line is opaque).
-        parts = (shell_segments(value) or []) if scope == "shell" else [value]
-        view["run"] = {
-            "verdict": decision.verdict,
-            "rule_id": decision.rule_id,
-            "decided_by": decision.decided_by,
-            "considered": [
-                asdict(rule)
-                for rule in (scope_policy.rules if scope_policy else ())
-                if rule.action == action
-                and any(
-                    pattern_matches(scope, rule.pattern, part, exact=rule.exact) for part in parts
+    if chain:
+        *outer, delegator = chain
+        covered = role_covers(delegator.role, scope, action, value)
+        own = _why_faces(req, stack, delegator.role, outer) if covered else (None, None)
+        view["delegation"] = {
+            "chain": list(delegation_chain),
+            "delegator": delegator.entry,
+            "held": {
+                face: None
+                if held is None
+                else {k: _face(held)[k] for k in ("verdict", "decided_by")}
+                for face, held in zip(("run", "operator"), own, strict=True)
+            },
+            "note": (
+                f"delegated by {' → '.join(delegation_chain)}: the delegatee holds no more "
+                f"than {delegator.entry} does — "
+                + (
+                    "the stricter verdict stands; beyond it is exceeds_delegator"
+                    if covered
+                    else f"role:{delegator.role.name} has no rule for this, so it holds "
+                    "nothing to pass on (unset is not granted)"
                 )
-            ],
+            ),
         }
-        endpoints = [
-            entry
-            for entry in resolved.permissions.provider_hosts
-            if scope == "network"
-            and value.strip().lower().rstrip(".") in (entry, entry.rpartition(":")[0].strip("[]"))
-        ]
-        if endpoints:
-            # ADR 0059 D3 (I8): this decision is about a grant; skep's own
-            # endpoint is not one, and a run reaches it either way.
-            view["provider_host"] = (
-                f"{', '.join(endpoints)} is skep's own LLM endpoint: every run that calls "
-                "the provider reaches it as provider_hosts, outside this decision and "
-                "the delegation narrowing — the verdict above is for anything else"
-            )
-    if baseline_guard(store).get(scope) == NO_BASELINE_REASON:
-        # O5: say what policy_decide answers here, not what the stack beneath would.
-        view["baseline"] += f" — {NO_BASELINE_REASON}: every decision asks until one is"
-        view["run"] = {
-            "verdict": "require_approval",
-            "rule_id": NO_BASELINE_REASON,
-            "decided_by": f"baseline/{NO_BASELINE_REASON}",
-            "considered": [],
-        }
-    operator = resolve_operator_policy(store).decision(scope, action, value)
-    view["operator"] = {
-        "verdict": operator.verdict,
-        "rule_id": operator.rule_id,
-        "decided_by": operator.decided_by,
-    }
+    endpoints = [
+        entry
+        for entry in stack.provider_hosts
+        if scope == "network"
+        and value.strip().lower().rstrip(".") in (entry, entry.rpartition(":")[0].strip("[]"))
+    ]
+    if endpoints:
+        # ADR 0059 D3 (I8): this decision is about a grant; skep's own
+        # endpoint is not one, and a run reaches it either way.
+        view["provider_host"] = (
+            f"{', '.join(endpoints)} is skep's own LLM endpoint: every run that calls "
+            "the provider reaches it as provider_hosts, outside this decision and "
+            "the delegation narrowing — the verdict above is for anything else"
+        )
     return view
+
+
+def _why_faces(
+    req: Request, stack: Stack, role: Role | None, chain: Sequence[Delegator]
+) -> tuple[Verdict | None, Verdict]:
+    """``why``'s two faces: the run policy's answer (None when it did not
+    resolve and neither the floor nor the baseline answered) and the
+    operator document's. The run face reads the run lane even on a
+    Queen-side lane — it says what a dispatch there would get."""
+    operator = decide_v3(req, stack=replace(stack, run=None, run_note=None), role=role, chain=chain)
+    if stack.run is None:
+        return (operator if operator.source in ("floor", "baseline") else None), operator
+    run = decide_v3(req, stack=replace(stack, operator=stack.run), role=role, chain=chain)
+    return run, operator
+
+
+def _face(verdict: Verdict) -> dict[str, Any]:
+    return {key: getattr(verdict, key) for key in ("verdict", "rule_id", "decided_by")}
 
 
 def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> dict[str, Any]:
@@ -4604,7 +4468,7 @@ def _within_delegation(
 ) -> tuple[Permissions, dict[str, Any], str]:
     """R2 (ADR 0055 D4): a worker a bot dispatched gets no grant beyond its
     delegator. Every shell prefix and egress host the run policy granted is
-    decided under the chain (``_decision_record``, I5); one beyond the
+    decided under the chain (``policy_v3.decide``, I5); one beyond the
     delegator leaves the grants and its ``exceeds_delegator`` row is
     recorded. Workspace writes the delegator is denied refuse the dispatch
     outright: the worker exists to write.
@@ -4631,28 +4495,15 @@ def _within_delegation(
     # the prefix (allow `P`, deny `P --x`) is invisible to the worker, which
     # matches prefixes. Upgrade: the worker asks decide() per command.
     rows: list[dict[str, Any]] = []
+    baseline_alarm(holder, store)
+    stack = load_stack(holder, store, repo=str(repo))
 
     def row_for(scope: str, action: str, value: str) -> dict[str, Any]:
-        row = _decision_record(
-            holder,
-            store,
-            scope=scope,
-            action=action,
-            value=value,
-            repo=str(repo),
-            actor="dispatch",
-            ring="advisory",
-            role_record=role,
-            chain=chain,
+        verdict = decide_v3(Request(scope, action, value), stack=stack, role=role, chain=chain)
+        row = _decision_row(
+            verdict, stack, actor="dispatch", repo=str(repo), req=(scope, action, value), role=role
         )
         return {**row, "team": team} if team else row
-
-    def narrowed_by(row: dict[str, Any]) -> bool:
-        """The chain or the worker's role made this stricter than the run
-        policy that granted it."""
-        return row["rule_id"] == EXCEEDS_DELEGATOR or (
-            role is not None and str(row["decided_by"]).startswith(f"{role.label}/")
-        )
 
     asks: list[dict[str, Any]] = []
 
@@ -4667,13 +4518,13 @@ def _within_delegation(
             return True
         ask = deferred_asks and askable and row["verdict"] == "require_approval"
         row = {**row, "delegated": "ask" if ask else "dropped"}
-        _append_policy_ledger(holder.current.audit_dir, "decisions", row)
+        log_decision(holder.current.audit_dir, row)
         (asks if ask else rows).append(row)
         return None if ask else False
 
     who = _delegation_who(chain, role)
     refusal = _delegated_write_refusal(
-        holder, store, repo, chain, permissions.write, role=role, team=team
+        holder, store, repo, chain, permissions.write, role=role, team=team, stack=stack
     )
     if refusal is not None:
         raise HTTPException(status_code=403, detail=refusal)
@@ -4723,6 +4574,18 @@ def _delegation_who(chain: Sequence[Delegator], role: Role | None) -> str:
     )
 
 
+def _narrowed_by(row: dict[str, Any], stack: Stack, role: Role | None) -> bool:
+    """The chain or the worker's role made this stricter than the run policy
+    alone. A role rule only as strict as an unmatched verdict names the role
+    (D2's tie) but narrows nothing."""
+    if row["rule_id"] == EXCEEDS_DELEGATOR:
+        return True
+    if role is None or not str(row["decided_by"]).startswith(f"{role.label}/"):
+        return False
+    base = decide_v3(Request(row["scope"], row["action"], row["value"]), stack=stack)
+    return _VERDICT_RANK[row["verdict"]] > _VERDICT_RANK[base.verdict]
+
+
 def _delegated_write_refusal(
     holder: ConfigHolder,
     store: RunStore,
@@ -4732,32 +4595,30 @@ def _delegated_write_refusal(
     *,
     role: Role | None = None,
     team: str | None = None,
+    stack: Stack | None = None,
 ) -> str | None:
     """Why a worker this chain (or role) dispatches may not write — the
     workspace write its delegator is denied — recorded; None when it may.
     ``_within_delegation`` refuses the dispatch with it (403) and
     ``dispatch_run_decision`` refuses the proposal (B22: before a card)."""
+    if stack is None:
+        baseline_alarm(holder, store)
+        stack = load_stack(holder, store, repo=str(repo))
     for path in write:
         # An ask stays: the patch card is already the human's gate (I1).
-        row = _decision_record(
-            holder,
-            store,
-            scope="filesystem",
-            action="write",
-            value=path,
-            repo=str(repo),
+        verdict = decide_v3(
+            Request("filesystem", "write", path), stack=stack, role=role, chain=chain
+        )
+        row = _decision_row(
+            verdict,
+            stack,
             actor="dispatch",
-            ring="advisory",
-            role_record=role,
-            chain=chain,
+            repo=str(repo),
+            req=("filesystem", "write", path),
+            role=role,
         )
-        narrowed = row["rule_id"] == EXCEEDS_DELEGATOR or (
-            role is not None and str(row["decided_by"]).startswith(f"{role.label}/")
-        )
-        if narrowed and row["verdict"] == "deny":
-            _append_policy_ledger(
-                holder.current.audit_dir, "decisions", {**row, "team": team} if team else row
-            )
+        if _narrowed_by(row, stack, role) and row["verdict"] == "deny":
+            log_decision(holder.current.audit_dir, {**row, "team": team} if team else row)
             beyond = "the delegator" if row["rule_id"] == EXCEEDS_DELEGATOR else "the role"
             return (
                 f"{_delegation_who(chain, role)}: filesystem.write {path} exceeds {beyond} "
@@ -5318,7 +5179,8 @@ def clear_session_policy_rules(store: RunStore) -> int:
 
 def _append_policy_ledger(audit_dir: Path, name: str, payload: dict[str, Any]) -> None:
     """One JSON line under ``<audit>/policy/<name>.jsonl`` — the policy
-    engine's own record (I8): engine flips (P1) and outside decisions (P3)."""
+    engine's own record (I8): engine flips (P1). Decisions go through
+    ``policy_v3.log_decision`` (redacted, rotated)."""
     path = audit_dir / "policy" / f"{name}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -5347,8 +5209,13 @@ def policy_decisions(
     notes = ("observed", "forwarded", "delegated")
     summary = dict.fromkeys(("allow", "deny", "require_approval", *notes), 0)
     rows: list[dict[str, Any]] = []
-    # ponytail: reads the whole file; tail-seek when a ledger outgrows memory
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    # ponytail: reads both generations whole (at most 2 x 10 MB); tail-seek if that hurts
+    lines = [
+        line
+        for file in (path.with_name(path.name + ".1"), path)
+        if file.exists()
+        for line in file.read_text(encoding="utf-8").splitlines()
+    ]
     for line in lines:
         try:
             row = json.loads(line)

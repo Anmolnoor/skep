@@ -36,9 +36,10 @@
         "phase": "build"
       },
       "source": "run",
-      "verdict": "deny",
-      "rule_id": "default-deny",
-      "decided_by": "trusted_local_dev/default-deny"
+      "verdict": "require_approval",
+      "rule_id": "unmatched",
+      "decided_by": "default/unmatched",
+      "layer": "default"
     },
     {
       "actor": "human@t3-code",
@@ -52,7 +53,7 @@
       "tool_call_id": "toolu_01M1dv3u6ZVPVzzqhPgZ8a97",
       "request_id": 0,
       "outcome": "allow_once",
-      "note": "default-deny"
+      "note": "unmatched"
     },
     {
       "actor": "acp:claude-agent-acp",
@@ -64,7 +65,8 @@
       "note": "remote git commands never run from chat \u2014 skep lands patches after approval; use push_branch/open_pr for the governed remote surface",
       "verdict": "deny",
       "rule_id": "floor.worker-git-hard-denies",
-      "decided_by": "floor/floor.worker-git-hard-denies"
+      "decided_by": "floor/floor.worker-git-hard-denies",
+      "layer": "floor"
     }
   ]
 }

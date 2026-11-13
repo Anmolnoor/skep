@@ -27,7 +27,8 @@
       "source": "run",
       "verdict": "allow",
       "rule_id": "fs:workspace",
-      "decided_by": "trusted_local_dev/fs:workspace"
+      "decided_by": "dispatch/fs:workspace",
+      "layer": "dispatch"
     },
     {
       "actor": "human@client",
