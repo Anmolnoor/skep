@@ -24,7 +24,7 @@ from skep.supervisor.roles import (
     roles_dir,
 )
 from skep.supervisor.serve import actions
-from skep.supervisor.serve.actions import submit_run
+from skep.supervisor.serve.actions import remember_action_for_session, submit_run
 from skep.supervisor.serve.chat import COMMAND_ACTOR
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation, execute_read_tool
@@ -202,6 +202,30 @@ def test_unset_in_the_delegator_is_not_granted(config: SupervisorConfig, repo: P
     assert not role_covers(operator, "shell", "run_background", "git status")
     _custom_role(config, "hollow")  # no policy layer: acts as assistant (D14)
     assert role_covers(resolve_role("hollow", config.home), "shell", "run", "ls")
+
+
+def test_unset_in_the_delegator_is_not_granted_even_where_a_grant_allows(
+    config: SupervisorConfig,
+) -> None:
+    """Decision #7, against an allow: a standing grant lets every role start
+    `uv sync` in the background on its own, but no shipped template has a
+    shell.run_background rule — so a delegator in any of them passes nothing on."""
+    store = RunStore(config.db_path)
+    try:
+        remember_action_for_session(
+            store, tool="start_process", args={"command": "uv sync"}, actor="op", tier="always"
+        )
+    finally:
+        store.close()
+    ask = {"scope": "shell", "action": "run_background", "value": "uv sync"}
+    for role in DELEGATEES:
+        assert _decide(config, role=role, **ask)["verdict"] == "allow"
+    for delegator in ROLES:
+        row = _decide(config, delegation_chain=[f"queen@{delegator}"], **ask)
+        assert (row["verdict"], row["decided_by"]) == (
+            "deny",
+            f"delegation:queen@{delegator}/unset",
+        )
 
 
 def test_an_empty_chain_is_todays_row_byte_for_byte(config: SupervisorConfig, repo: Path) -> None:
