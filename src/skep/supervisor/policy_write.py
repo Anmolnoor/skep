@@ -510,6 +510,8 @@ def _unreplayable(row: dict[str, Any] | None) -> str | None:
             return "query not logged"
     if str(row.get("decided_by") or "").startswith("grant:session") and not row.get("chat"):
         return "chat-bound grant (chat not logged)"
+    if str(row.get("decided_by") or "").startswith("taint/") and not row.get("chat"):
+        return "taint ask (chat not logged)"  # L1: decided untainted it reads as now allowed
     return None
 
 
