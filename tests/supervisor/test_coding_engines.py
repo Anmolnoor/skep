@@ -406,3 +406,152 @@ def test_an_invalid_verify_command_is_rejected_at_resolve_time(
     message = str(excinfo.value)
     assert "verify_command must be a string" in message
     assert "list" in message
+
+
+def _capture_spawn(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Stand in for the worker spawn: record what the run was handed, then
+    fail the spawn so the run ends before any agent starts."""
+    import json
+    import stat
+
+    import skep.supervisor.dispatch as dispatch_module
+
+    seen: dict[str, object] = {}
+
+    def fake_spawn(config: object, task: object, *_: object, **kw: object) -> object:
+        env = kw["extra_env"]
+        assert isinstance(env, dict)
+        logins = sorted(Path(task.workspace, ".toolchain").rglob("auth.json"))  # type: ignore[attr-defined]
+        seen["logins"] = logins
+        seen["provider_hosts"] = list(task.permissions.provider_hosts)  # type: ignore[attr-defined]
+        if logins:
+            seen["mode"] = stat.S_IMODE(logins[0].stat().st_mode)
+            seen["doc"] = json.loads(logins[0].read_text(encoding="utf-8"))
+            seen["codex_home"] = env.get("CODEX_HOME")
+        raise OSError("test stops the run before the agent")
+
+    monkeypatch.setattr(dispatch_module, "spawn_worker", fake_spawn)
+    return seen
+
+
+def _chatgpt_login_project(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch, engine: str = "codex"
+) -> None:
+    import os
+
+    import skep.supervisor.engines as engines_module
+    from tests.supervisor.test_codex_login import write_fake_login
+
+    _usable_sandbox(monkeypatch)
+    monkeypatch.setattr(engines_module, "engine_available", lambda e: (True, "/usr/bin/agent"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    write_fake_login(Path(os.environ["CODEX_HOME"]))
+    _bind(
+        config,
+        repo,
+        {"coding_engine": engine, "verify_command": "true", "codex_chatgpt_login": True},
+    )
+
+
+def test_an_opted_in_codex_run_gets_its_own_refresh_free_login_until_it_ends(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F122 (D20): no OPENAI_API_KEY, the project opted in, a ChatGPT login
+    on the host — the run gets an access-token-only copy in its OWN
+    CODEX_HOME, reaches chatgpt.com, and the copy is gone when the run ends.
+    The run record names the auth source, never a value."""
+    from skep.supervisor.dispatch import run_task
+
+    _chatgpt_login_project(config, repo, monkeypatch)
+    seen = _capture_spawn(monkeypatch)
+    outcome = run_task(repo, "add a docstring", config=config, coding_engine="codex")
+    logins = seen["logins"]
+    assert isinstance(logins, list) and len(logins) == 1
+    assert str(logins[0].parent) == seen["codex_home"]
+    assert seen["mode"] == 0o400
+    doc = seen["doc"]
+    assert isinstance(doc, dict) and doc["auth_mode"] == "chatgptAuthTokens"
+    assert doc["tokens"]["refresh_token"] == ""
+    assert seen["provider_hosts"] == ["chatgpt.com:443"]
+    assert not logins[0].exists(), "the run's login copy outlived the run"
+    store = RunStore(config.db_path)
+    try:
+        details = [d or "" for _, d, _ in store.transitions_for(outcome.record.task_id)]
+    finally:
+        store.close()
+    dispatched = next(d for d in details if "codex_auth" in d)
+    assert "chatgpt_login" in dispatched
+    assert doc["tokens"]["access_token"] not in "".join(details)
+    log = (config.audit_dir / outcome.record.task_id / "worker.log").read_text(encoding="utf-8")
+    assert "codex_auth=chatgpt_login" in log
+    assert doc["tokens"]["access_token"] not in log
+
+
+def test_the_chatgpt_login_never_reaches_another_engine(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F122: the opt-in is codex-only — claude_code on the same project
+    gets no copy of anything (W33 unchanged for every other engine)."""
+    from skep.supervisor.dispatch import run_task
+
+    _chatgpt_login_project(config, repo, monkeypatch, engine="claude_code")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-value")
+    seen = _capture_spawn(monkeypatch)
+    run_task(repo, "add a docstring", config=config, coding_engine="claude_code")
+    assert seen["logins"] == []
+    assert seen["provider_hosts"] == ["api.anthropic.com:443"]
+
+
+def test_an_api_key_still_wins_over_the_chatgpt_login(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.dispatch import run_task
+
+    _chatgpt_login_project(config, repo, monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-value")
+    seen = _capture_spawn(monkeypatch)
+    run_task(repo, "add a docstring", config=config, coding_engine="codex")
+    assert seen["logins"] == []
+    assert seen["provider_hosts"] == ["api.openai.com:443"]
+
+
+def test_an_opted_in_project_whose_login_cannot_last_the_run_is_refused(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from skep.supervisor.dispatch import run_task
+    from tests.supervisor.test_codex_login import write_fake_login
+
+    _chatgpt_login_project(config, repo, monkeypatch)
+    write_fake_login(Path(os.environ["CODEX_HOME"]), expires_in=60)
+    with pytest.raises(ValueError, match="expires") as excinfo:
+        run_task(repo, "add a docstring", config=config, coding_engine="codex")
+    assert "ChatGPT plan login" in str(excinfo.value)
+    store = RunStore(config.db_path)
+    try:
+        assert store.recent_runs(5) == []
+    finally:
+        store.close()
+
+
+def test_a_login_that_fails_at_spawn_time_ends_the_run_honestly(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F122: the token expired between the pre-check and the spawn — the
+    run ends before any agent starts, saying why (I8), with no copy left."""
+    import skep.supervisor.codex_login as codex_login_module
+    from skep.supervisor.dispatch import run_task
+
+    _chatgpt_login_project(config, repo, monkeypatch)
+    seen = _capture_spawn(monkeypatch)
+
+    def expired(*_: object, **__: object) -> Path:
+        raise ValueError("the Codex login's access token expires now")
+
+    monkeypatch.setattr(codex_login_module, "write_run_login", expired)
+    outcome = run_task(repo, "add a docstring", config=config, coding_engine="codex")
+    assert seen == {}, "the agent must never start"
+    assert outcome.record.state == "worker_crashed"
+    log = (config.audit_dir / outcome.record.task_id / "worker.log").read_text(encoding="utf-8")
+    assert "codex_login_unusable" in log

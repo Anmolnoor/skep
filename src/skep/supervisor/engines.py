@@ -58,6 +58,10 @@ class CodingEngine:
     # failure without this is a confusing timeout instead of a stated denial
     # (I12). None = the engine talks to the operator's configured provider.
     network_host: str | None = None
+    # ES-F122 (D20): the host a run that signs in with the operator's ChatGPT
+    # plan login talks to INSTEAD of network_host (codex: chatgpt.com/backend-
+    # api/codex, not api.openai.com). None = the engine has no such login.
+    login_host: str | None = None
     # v94-F3: the env vars the engine cannot function without, merged into the
     # run's env allowlist the same way. The worker baseline is PATH+HOME only;
     # claude_code/codex also get USER/LOGNAME (v94-F3 added them for a
@@ -116,6 +120,7 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         argv=(sys.executable, "-m", "skep.workers.codex"),
         binary="codex",
         network_host="api.openai.com",
+        login_host="chatgpt.com",
         # v111-F4: the entry predated the v94-F3/v106-F1 hardening and never
         # got it — zero codex runs ever completed. ~/.codex/auth.json (the
         # ChatGPT login) is file-based and can never reach the sandbox once

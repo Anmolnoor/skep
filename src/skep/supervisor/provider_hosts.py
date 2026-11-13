@@ -22,7 +22,12 @@ _AUX_HOST_RE = re.compile(r"^[A-Za-z0-9.-]+(?::\d{1,5})?$")
 
 
 def provider_hosts_for(
-    store: RunStore, home: Path, *, caste: str, engine: str | None = None
+    store: RunStore,
+    home: Path,
+    *,
+    caste: str,
+    engine: str | None = None,
+    chatgpt_login: bool = False,
 ) -> list[str]:
     """The ``provider_hosts`` a run of ``caste`` gets: none for a caste that
     never calls the provider; an external coding engine's own API host and
@@ -38,7 +43,10 @@ def provider_hosts_for(
     # An engine with no host of its own (aider, pi) talks to the operator's
     # provider, so it keeps the configured endpoints.
     if caste == "coding" and chosen.external and chosen.network_host:
-        return [f"{chosen.network_host}:443"]
+        # ES-F122: a run on the operator's ChatGPT plan login reaches the
+        # login's host in place of the API host — never both.
+        host = chosen.login_host if chatgpt_login and chosen.login_host else chosen.network_host
+        return [f"{host}:443"]
     return sorted(set(configured_provider_hosts(store, home)))
 
 
