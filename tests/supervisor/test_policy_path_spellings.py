@@ -150,3 +150,20 @@ def test_the_real_tmp_and_private_tmp_are_one_directory_to_a_rule(
                     assert got == {"deny"}, (rule_root, path_root, action)
     finally:
         shutil.rmtree(made, ignore_errors=True)
+
+
+def test_a_rule_spelled_through_a_long_link_does_not_outrank_a_narrower_deny(
+    store: RunStore, holder: ConfigHolder, tmp_path: Path
+) -> None:
+    """Specificity ranks the directory a rule really names: an allow written
+    through a long link to a short directory is the wider rule, and a deny on
+    a subdirectory of it still wins — it used to lose on length."""
+    short = tmp_path / "s"
+    (short / "x").mkdir(parents=True)
+    (short / "x" / "f.txt").write_text("CANARY-short\n", encoding="utf-8")
+    long_dir = tmp_path / ("a-long-directory-name-" * 4)
+    long_dir.mkdir()
+    (long_dir / "lnk").symlink_to(short, target_is_directory=True)
+    for path in (f"{short}/x/f.txt", f"{long_dir}/lnk/x/f.txt"):
+        _rules(store, allow=[f"{long_dir}/lnk/**"], deny=[f"{short}/x/**"])
+        assert _every_face(store, holder, "read", path) == {"deny"}, path

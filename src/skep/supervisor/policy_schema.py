@@ -357,15 +357,20 @@ def _path_spellings(value: str) -> set[str]:
 
 
 def _rule_spellings(pattern: str) -> set[str]:
-    """W32: the pattern as written and with its literal prefix (the
-    components before the first glob) resolved, the glob tail kept."""
+    """W32: the pattern as written and with its literal prefix resolved."""
+    return {pattern, _resolved_rule(pattern)}
+
+
+def _resolved_rule(pattern: str) -> str:
+    """The pattern with its literal prefix (the components before the first
+    glob) resolved, the glob tail kept — the directory it really names."""
     if not pattern.startswith("/"):
-        return {pattern}
+        return pattern
     parts = pattern.split("/")
     cut = next((i for i, part in enumerate(parts) if any(c in part for c in "*?[")), len(parts))
     literal, tail = "/".join(parts[:cut]) or "/", "/".join(parts[cut:])
     real = str(path_spellings(literal)[1])
-    return {pattern, f"{real.rstrip('/')}/{tail}" if tail else real}
+    return f"{real.rstrip('/')}/{tail}" if tail else real
 
 
 def rule_matches(rule: ResolvedRule, scope: str, value: str, *, url: str | None = None) -> bool:
@@ -436,8 +441,8 @@ def _specificity(scope: str, pattern: str) -> tuple[int, int]:
     """Higher sorts more specific: exact beats glob; longer beats shorter."""
     if scope == "shell":
         return (0 if "*" in pattern else 1, len(_shell_tokens(pattern)))
-    if scope == "filesystem":  # W32: a longer spelling of one directory is not narrower
-        pattern = max(_rule_spellings(pattern), key=len)
+    if scope == "filesystem":  # W32: rank the directory the rule really names, not
+        pattern = _resolved_rule(pattern)  # its longest spelling (a link may be longer)
     return (0 if any(ch in pattern for ch in "*?[") else 1, len(pattern))
 
 
