@@ -1105,3 +1105,25 @@ def test_a_claim_whose_owner_died_says_how_to_release_it(rig: Rig, repo: Any) ->
     _run2, live = _gated_run(rig, repo)
     assert rig.store.claim_approval(live)  # this live process holds it
     assert "no longer running" not in str(actions.gate_taken(rig.store, live).detail)
+
+
+def test_a_claim_owner_reads_the_same_under_another_time_zone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ps lstart`` prints local time: a CLI with TZ set and a serve (a
+    launchd/systemd service) without it disagreed on a live claimer's start
+    time, and the restart sweep took the CLI's claim mid-resume."""
+    import subprocess
+    import sys
+
+    from skep.supervisor.store import owner_alive, process_owner
+
+    alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        monkeypatch.setenv("TZ", "Asia/Tokyo")
+        owner = process_owner(alive.pid)
+        monkeypatch.setenv("TZ", "America/Los_Angeles")
+        assert owner_alive(owner)
+    finally:
+        alive.kill()
+        alive.wait()

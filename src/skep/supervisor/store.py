@@ -900,14 +900,14 @@ _THIS_PROCESS = object()
 
 
 def _process_started(pid: int) -> str | None:
-    """The process's start time as ``ps`` prints it (C locale), or None."""
+    """The process's start time as ``ps`` prints it (C locale, UTC), or None."""
     try:
         probe = subprocess.run(
             ["ps", "-p", str(pid), "-o", "lstart="],
             capture_output=True,
             text=True,
             check=False,
-            env={**os.environ, "LC_ALL": "C"},
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},  # lstart is local time
             timeout=5,
         )
     except (OSError, subprocess.TimeoutExpired):
