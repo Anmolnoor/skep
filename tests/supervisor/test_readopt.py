@@ -220,19 +220,28 @@ import sys
 from pathlib import Path
 from skep.supervisor import SupervisorConfig, run_task
 from skep.supervisor.contracts_io import DEFAULT_PERMISSIONS
-home, worker, repo, instructions, mode, readopt = sys.argv[1:7]
+home, worker, repo, instructions, mode, readopt, loopback = sys.argv[1:8]
 config = SupervisorConfig(
     home=Path(home), worker_command=(sys.executable, worker),
     grace_seconds=0.5, heartbeat_seconds=2.0, poll_seconds=0.01,
     readopt_workers=readopt == "1",
 )
 run_task(Path(repo), instructions, config=config, execution_mode=mode,
-         permissions=DEFAULT_PERMISSIONS.model_copy(update={"network": ["example.com"]}))
+         permissions=DEFAULT_PERMISSIONS.model_copy(update={
+             "network": ["example.com"],
+             "loopback_ports": [int(p) for p in loopback.split(",") if p],
+         }))
 """
 
 
 def _kill_serve_mid_run(
-    config: SupervisorConfig, repo: Path, instructions: str, mode: str, *, readopt: bool = True
+    config: SupervisorConfig,
+    repo: Path,
+    instructions: str,
+    mode: str,
+    *,
+    readopt: bool = True,
+    loopback_ports: tuple[int, ...] = (),
 ) -> tuple[str, int]:
     """Start the old serve, wait until its worker runs (pid + start time
     recorded), SIGKILL the serve. Returns the task id and the worker pid."""
@@ -253,6 +262,7 @@ def _kill_serve_mid_run(
             instructions,
             mode,
             "1" if readopt else "0",
+            ",".join(map(str, loopback_ports)),
         ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -388,7 +398,9 @@ def test_an_adopted_run_lands_exactly_as_an_uninterrupted_one(
     record, re-verification, patch, approval (the gated run) and commands —
     and its proxy was
     built from the same arguments (a filter argument added to the live path
-    and not to the adopter fails here, not in the field)."""
+    and not to the adopter fails here, not in the field). ES-INT (D6 x ADR
+    0060): the run holds a project loopback port, so the adopted proxy must
+    admit it as the live one does."""
     from skep.supervisor import dispatch
     from skep.supervisor.contracts_io import DEFAULT_PERMISSIONS
     from skep.supervisor.netproxy import FilteringProxy
@@ -419,7 +431,9 @@ def test_an_adopted_run_lands_exactly_as_an_uninterrupted_one(
             instructions,
             config=config,
             execution_mode="workspace",
-            permissions=DEFAULT_PERMISSIONS.model_copy(update={"network": ["example.com"]}),
+            permissions=DEFAULT_PERMISSIONS.model_copy(
+                update={"network": ["example.com"], "loopback_ports": [5432]}
+            ),
         ).record.task_id
     finally:
         done.set()
@@ -430,12 +444,15 @@ def test_an_adopted_run_lands_exactly_as_an_uninterrupted_one(
     finally:
         store.close()
 
-    adopted, _pid = _kill_serve_mid_run(config, repo, instructions, "workspace")
+    adopted, _pid = _kill_serve_mid_run(
+        config, repo, instructions, "workspace", loopback_ports=(5432,)
+    )
     store, _ = _adopt_and_finish(config, adopted)
     try:
         assert _landing_view(store, adopted) == expected
         assert expected["approvals" if "pending" in instructions else "patches"]  # compared
         assert len(proxies) == 2 and proxies[0] == proxies[1]
+        assert 5432 in proxies[1]["loopback_ports"]  # type: ignore[operator]
     finally:
         store.close()
 

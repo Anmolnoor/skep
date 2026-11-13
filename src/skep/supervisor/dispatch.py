@@ -1387,6 +1387,10 @@ def _adopt_worker(
                 unix_socket_path=unix_path,
                 denied_loopback_ports=control_plane_ports(config.home),
                 asks=task.permissions.network_ask,
+                # D6: the run's loopback ports, as the live path's proxy had them
+                loopback_ports=run_loopback_ports(
+                    task.permissions.loopback_ports, task.permissions.provider_hosts, config.home
+                ),
                 port=int(port),
             ).start()
         except OSError as exc:
