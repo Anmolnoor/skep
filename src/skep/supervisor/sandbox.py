@@ -383,6 +383,19 @@ def _env_sockets() -> list[Path]:
     return found
 
 
+def _sockets_under(roots: Iterable[Path]) -> list[Path]:
+    """R5: the sockets inside a read-only root (git's fsmonitor socket in the
+    common dir): bound read-only they stay connectable, so each gets
+    /dev/null laid over it. ponytail: ``objects/`` is skipped — git keeps
+    only object files there, and it is the one big subtree."""
+    found = []
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [name for name in dirnames if name != "objects"]
+            found += [path for name in filenames if _is_socket(path := Path(dirpath, name))]
+    return found
+
+
 def _is_socket(path: Path) -> bool:
     try:
         return path.is_socket()
@@ -814,6 +827,9 @@ def write_profile(
     probe = require_usable(backend)
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
+    if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
+        extra_readable = list(extra_readable)
+        read_denied += _sockets_under(extra_readable)
     if probe.backend == PODMAN:
         return _write_argv_profile(
             profile_path,
