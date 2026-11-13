@@ -87,8 +87,9 @@ def alias_key(path: Path) -> Path:
     """One spelling for every name APFS opens as ``path``: case folded, the
     macOS data-volume prefix dropped (over-matching on Linux is harmless)."""
     folded = _fold(path)
-    if folded != _DATA_VOLUME and _under(folded, _DATA_VOLUME):
-        return Path("/") / folded.relative_to(_DATA_VOLUME)
+    parts, volume = folded.parts, _DATA_VOLUME.parts
+    if len(parts) > len(volume) and parts[: len(volume)] == volume:
+        return Path("/", *parts[len(volume) :])
     return folded
 
 
