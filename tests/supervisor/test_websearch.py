@@ -485,3 +485,47 @@ def test_w6_a_redirect_into_a_private_address_is_refused_on_both_lanes(
                 "https://site.example/hop", redirect_guard=guard, resolve=_resolver(names)
             )
         assert [host for _url, host, _sni in web.sent] == ["site.example"]
+
+
+def test_w6_an_unresolvable_name_fails_the_read_and_a_dead_address_falls_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A name that does not resolve is a plain read failure (not the private-
+    address refusal); a dead first address falls over to the next vetted one,
+    keeping the URL's port and the name in Host."""
+    import socket
+
+    import httpx
+
+    from skep.supervisor.serve.websearch import fetch_url_text
+
+    def nowhere(*_a: object, **_kw: object) -> list[Any]:
+        raise socket.gaierror("no such name")
+
+    with pytest.raises(httpx.ConnectError, match="does not resolve"):
+        fetch_url_text("https://gone.example/", resolve=nowhere)
+
+    second = "93.184.216.35"
+
+    def two(host: str, port: int, **_kw: object) -> list[Any]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in (_PUBLIC_IP, second)
+        ]
+
+    sent: list[str] = []
+
+    def send(_client: object, request: httpx.Request, **_kw: object) -> httpx.Response:
+        sent.append(f"{request.url} {request.headers['host']}")
+        if _PUBLIC_IP in str(request.url):
+            raise httpx.ConnectError("refused")
+        return httpx.Response(200, text="<p>up</p>", request=request)
+
+    monkeypatch.setattr(httpx.Client, "send", send)
+    got = fetch_url_text("http://u:p@site.example:8080/x", resolve=two)
+    assert "up" in got["text"]
+    assert sent == [f"http://u:p@{_PUBLIC_IP}:8080/x site.example:8080",
+                    f"http://u:p@{second}:8080/x site.example:8080"]  # fmt: skip
+    monkeypatch.setattr(httpx.Client, "send", lambda *_a, **_k: (_ for _ in ()).throw(
+        httpx.ConnectError("refused")))  # fmt: skip
+    with pytest.raises(httpx.ConnectError):
+        fetch_url_text("http://site.example/", resolve=two)
