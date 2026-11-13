@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import socketserver
+import sys
 import tempfile
 import textwrap
 import threading
@@ -21,13 +22,14 @@ from pathlib import Path
 
 import pytest
 
-from skep.supervisor import sandbox
+from skep.supervisor import SupervisorConfig, sandbox
 from skep.supervisor.netproxy import (
     SERVE_PORT_FILE,
     FilteringProxy,
     control_plane_ports,
     run_loopback_ports,
 )
+from skep.supervisor.reverify import reverify
 
 pytestmark = pytest.mark.skipif(
     sandbox.availability().backend != "bubblewrap",
@@ -308,3 +310,36 @@ def test_an_allow_all_run_shares_the_host_loopback_as_documented(
     finally:
         proxy.stop()
         shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def test_reverify_reaches_the_projects_loopback_port_and_nothing_else(
+    listeners: Callable[[], int], repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """D6 + I2: re-verification gets the project's loopback ports, as the
+    worker did (docs/sandboxing.md) - on bubblewrap too, where its deny-all
+    netns has no host loopback of its own."""
+    listed, unlisted = listeners(), listeners()
+    probe = _raw_probe([listed, unlisted])
+    patch = tmp_path / "t.patch"
+    lines = probe.splitlines()
+    patch.write_text(
+        "diff --git a/probe.py b/probe.py\nnew file mode 100644\n--- /dev/null\n"
+        f"+++ b/probe.py\n@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{line}\n" for line in lines),
+        encoding="utf-8",
+    )
+    check = (
+        f'out=$({sys.executable} probe.py) && echo "$out" && '
+        f"echo \"$out\" | grep -q '{listed} GOT ECHO:ping' && "
+        f"echo \"$out\" | grep -q '{unlisted} REFUSED'"
+    )
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=patch,
+        commands=[check],
+        config=config,
+        profile_path=tmp_path / "audit" / "reverify.profile.sb",
+        env={"PATH": "/usr/bin:/bin"},
+        loopback_ports=(listed,),
+    )
+    assert outcome.outcome == "passed", outcome.detail

@@ -21,7 +21,9 @@ the worker's nomination, and the outcome detail always says which was used (I8).
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -30,6 +32,7 @@ from skep.worker_contract import Event, EventType
 from . import sandbox
 from .apply import resolve_commit
 from .config import SupervisorConfig
+from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
 from .store import RunStore
 from .worktree import (
     TREE_LOCK,
@@ -206,6 +209,7 @@ def reverify(
     # skips the lock is the shape of the bug, not a special case.
     with TREE_LOCK:
         worktree = create_worktree(repo, config.worktrees_root, f"reverify-{patch_path.stem}", ref)
+    proxy: FilteringProxy | None = None
     try:
         env = dict(env)
         # v107-F3: TMPDIR inside the wall — unset, tools fall back to /tmp,
@@ -262,15 +266,34 @@ def reverify(
             env["UV_CACHE_DIR"] = str(cache_dir)
             env["UV_NO_SYNC"] = "1"
             primed = "; deps primed from the baseline (uv sync), verify ran offline"
+        network = sandbox.DENY_ALL_NETWORK
+        ports = run_loopback_ports(loopback_ports, (), config.home)
+        if profile_path is not None and ports and sandbox.availability().backend == "bubblewrap":
+            # D6 + I2: bubblewrap's deny-all netns has no host loopback, so the
+            # project's ports come in over the netshim bridge, through a proxy
+            # that admits those ports alone (empty allowlist: still offline).
+            from .dispatch import _proxy_socket_root  # runtime: dispatch imports us
+
+            proxy = FilteringProxy(
+                (),
+                unix_socket_path=str(
+                    Path(tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())) / "p.sock"
+                ),
+                denied_loopback_ports=control_plane_ports(config.home),
+                loopback_ports=ports,
+            ).start()
+            network = sandbox.NetworkPolicy(allow=("localhost",))
         if profile_path is not None:
             sandbox.write_profile(
                 profile_path,
                 workspace=worktree,
                 extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
                 extra_readable=git_metadata_readable_roots(worktree),
-                network=sandbox.DENY_ALL_NETWORK,
+                network=network,
+                proxy_port=proxy.port if proxy is not None else None,
+                unix_socket_path=proxy.unix_socket_path if proxy is not None else None,
                 skep_home=config.home.parent,
-                loopback_ports=loopback_ports,
+                loopback_ports=ports,
             )
         applied = subprocess.run(
             ["git", "-C", str(worktree), "apply", str(patch_path)],
@@ -357,6 +380,9 @@ def reverify(
             f"--- re-run output (tail) ---\n{failed_tail or '(no output)'}",
         )
     finally:
+        if proxy is not None:
+            proxy.stop()
+            shutil.rmtree(Path(str(proxy.unix_socket_path)).parent, ignore_errors=True)
         remove_worktree(repo, worktree)
 
 
