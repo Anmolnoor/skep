@@ -738,7 +738,7 @@ def test_confirmed_dispatch_auto_tails_to_the_terminal_state(
     )
     ollama.script_reply("dispatched — watching it for you")
     script_input(monkeypatch, ["fix the bug", "y"])
-    assert run_chat(home=config.home, url="http://unused", client=client) == 0
+    assert run_chat(home=config.home, url="http://unused", client=client, role="builder") == 0
     out = capsys.readouterr().out
     assert "confirm: dispatch_run" in out
     assert "watching" in out
@@ -767,7 +767,7 @@ def test_gated_run_prompts_and_approve_tails_the_successor(
     )
     ollama.script_reply("dispatched the gated run")
     script_input(monkeypatch, ["do the gated work", "y", "a"])
-    assert run_chat(home=config.home, url="http://unused", client=client) == 0
+    assert run_chat(home=config.home, url="http://unused", client=client, role="builder") == 0
     out = capsys.readouterr().out
     assert "approval needed: git_commit" in out
     assert "resuming as" in out
@@ -796,7 +796,7 @@ def test_gated_run_deny_returns_to_the_prompt(
     )
     ollama.script_reply("dispatched")
     script_input(monkeypatch, ["do the gated work", "y", "d"])
-    assert run_chat(home=config.home, url="http://unused", client=client) == 0
+    assert run_chat(home=config.home, url="http://unused", client=client, role="builder") == 0
     assert "denied: task" in capsys.readouterr().out
     approvals = client.get("/api/approvals").json()["approvals"]
     assert approvals == []  # resolved — nothing left pending

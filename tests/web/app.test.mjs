@@ -8,6 +8,18 @@ const byText = (root, tag, text) =>
 const byPlaceholder = (root, placeholder) =>
   root.querySelectorAll("input").find(n => n.getAttribute("placeholder") === placeholder);
 
+// ---------- R1 / ADR 0059 decision #4: the role picker ----------
+
+test("roleChoices: a chat with no stored role says it runs as assistant", () => {
+  const app = loadApp();
+  const roles = [{ name: "builder" }, { name: "assistant" }];
+  const labels = choices => Array.from(choices, c => c.label); // a host array (vm realm)
+  assert.deepEqual(labels(app.roleChoices(roles, false)), ["role: builder", "role: assistant"]);
+  const legacy = app.roleChoices(roles, true);
+  assert.deepEqual({ ...legacy[0] }, { value: "", label: "role: assistant (none stored)" });
+  assert.ok(!legacy.some(c => c.label.includes("no role")));
+});
+
 // ---------- R3: delegationText ----------
 
 test("delegationText names the chain, the worker role and the team", () => {

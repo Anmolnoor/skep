@@ -33,8 +33,6 @@ def cmd_role_list(args: argparse.Namespace) -> int:
         layer = role["policy_layer"] or "(no layer)"
         castes = ", ".join(role["default_castes"])
         print(f"{mark} {role['name']:<12} layer: {layer:<10} castes: {castes}")
-    if view["default"] is None:
-        print("no default role — new chats open with no role layer (skep role use NAME)")
     return 0
 
 

@@ -425,7 +425,9 @@ def test_a_project_wide_network_is_high_for_every_dispatch_verb(
             ("quick_edit", {"repo": str(repo), "file": "hello.py", "instruction": "b"}),
             ("batch_dispatch", {"tasks": [{"repo": str(repo), "instructions": "c"}]}),
         ):
-            chat = client.post("/api/chats", json={}).json()["chat_id"]
+            # A builder chat: a new chat with no role picked opens as assistant
+            # (P3-6), which cannot dispatch at all.
+            chat = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
             ollama.script_tool_call(tool, args)
             events = sse_events(
                 client.post(f"/api/chats/{chat}/messages", json={"content": "go"}).text

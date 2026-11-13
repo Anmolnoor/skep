@@ -17,6 +17,7 @@ from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.roles import SHIPPED_ROLES
 from skep.supervisor.serve.chat import PERSONALITIES, SYSTEM_PROMPT
 
+from .conftest import no_layer_role
 from .fake_ollama import FakeOllama
 from .test_serve_chat_tools import chat_client
 
@@ -44,7 +45,7 @@ def test_confirmed_set_role_changes_prompt_and_voice_together(
     client, chat_id = chat_client(config, ollama)
     ollama.script_tool_call("set_role", {"name": "operator"})
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "switch to ops"})
-    assert _chat_role(config, chat_id) is None  # a card, not a switch
+    assert _chat_role(config, chat_id) == "assistant"  # a card, not a switch
     action = client.get(f"/api/chats/{chat_id}").json()["actions"][0]
     assert action["tool"] == "set_role"
     ollama.script_reply("ok.")
@@ -85,7 +86,7 @@ def test_an_unknown_role_never_switches_the_chat(
     action = client.get(f"/api/chats/{chat_id}").json()["actions"][0]
     ollama.script_reply("ok.")
     client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
-    assert _chat_role(config, chat_id) is None
+    assert _chat_role(config, chat_id) == "assistant"
 
 
 def test_role_command_is_on_both_decks() -> None:
@@ -107,7 +108,7 @@ def test_cli_role_list_show_use(tmp_path: Path, capsys: pytest.CaptureFixture[st
         store.close()
     home = ["--home", str(tmp_path)]
     assert main([*home, "role", "list"]) == 0  # T3-3: before any default is set
-    assert "no default role — new chats open with no role layer" in capsys.readouterr().out
+    assert "* assistant" in capsys.readouterr().out  # no pick: assistant (decision #4)
     assert main([*home, "role", "use", "builder"]) == 0
     assert main([*home, "role", "list"]) == 0
     out = capsys.readouterr().out
@@ -123,7 +124,7 @@ def test_cli_role_list_show_use(tmp_path: Path, capsys: pytest.CaptureFixture[st
 
 def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> None:
     """D3: a role is a policy context inside the chat too. With a standing
-    Queen grant `uv sync` runs in-turn for a chat with no role — and, since
+    Queen grant `uv sync` runs in-turn for a chat with no role layer — and, since
     ADR 0059 decision #1 (B56), in an operator chat too: the role's catch-all
     ask is a default the operator's grant answers. A command nobody granted
     cards there (role:operator asks), and the floor still denies."""
@@ -144,7 +145,10 @@ def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> 
         remember_action_for_session(
             store, tool="run_shell", args={"command": "uv sync"}, actor="op", tier="always"
         )
-        plain = store.create_chat(title="plain", model=None).chat_id
+        # no role layer: a NULL role reads as assistant since P3-6
+        plain = store.create_chat(
+            title="plain", model=None, role=no_layer_role(config.home)
+        ).chat_id
         ops = store.create_chat(title="ops", model=None, role="operator").chat_id
         args = {"command": "uv sync"}
 
@@ -190,7 +194,8 @@ def test_new_chats_open_in_the_default_role_and_the_picker_can_change_it(
     config: SupervisorConfig,
 ) -> None:
     """D3: the picker defaults to the onboard choice; `skep role use` wins
-    over it; "" is an explicit no-role; an unknown role refuses."""
+    over it; "" is no pick (ADR 0059 decision #4: never no role); an unknown
+    role refuses."""
     from .conftest import serve_client
 
     (config.home.parent / "first_run.json").write_text('{"role": "assistant"}')
@@ -200,7 +205,7 @@ def test_new_chats_open_in_the_default_role_and_the_picker_can_change_it(
         assert [r["name"] for r in roles["roles"]] == ["builder", "operator", "assistant"]
         assert client.post("/api/chats", json={}).json()["role"] == "assistant"
         assert client.post("/api/chats", json={"role": "builder"}).json()["role"] == "builder"
-        assert client.post("/api/chats", json={"role": ""}).json()["role"] is None
+        assert client.post("/api/chats", json={"role": ""}).json()["role"] == "assistant"
         refused = client.post("/api/chats", json={"role": "warp"})
         assert refused.status_code == 400 and "no role 'warp'" in refused.json()["detail"]
         store = RunStore(config.db_path)

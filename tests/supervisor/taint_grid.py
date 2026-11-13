@@ -34,6 +34,7 @@ from skep.supervisor.serve import actions
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_read_tool, mutation_execution_decision
 
+from .conftest import no_layer_role
 from .net_lane_grid import GRANTED_TOOL, GRANTED_URL, build_net_home, fakes, show, show_search
 
 HOMES = ("legacy", "zero", "builder", "assistant", "operator", "tampered")
@@ -148,7 +149,9 @@ def rows(root: Path, kind: str) -> Iterator[tuple[str, str]]:
             project_id="auto", binding_kind="repo_path", binding_value=str(auto.resolve())
         )
         chats = {
-            (role, taint): store.create_chat(title=f"{role}-{taint}", model=None, role=role).chat_id
+            (role, taint): store.create_chat(  # "-": a role with no layer (``no_layer_role``)
+                title=f"{role}-{taint}", model=None, role=role or no_layer_role(config.home)
+            ).chat_id
             for role in ROLES
             for taint in TAINTS
         }

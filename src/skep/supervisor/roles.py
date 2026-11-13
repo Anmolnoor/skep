@@ -18,7 +18,9 @@ decides on its own and the stricter of the two verdicts stands
 passes through, as it does for the baseline (ADR 0056 D2). The floor is above
 all of it (I4): it is already ``deny``, and nothing is stricter.
 
-No role means no role layer — exactly today's behaviour.
+No chat (REST, the CLI, the hook) means no role layer. A chat whose stored
+role is NULL — from before every chat recorded one — is an ``assistant`` chat
+(ADR 0059 decision #4, ``role_for_chat``).
 
 **Delegation is subset-only (R2, ADR 0055 D4).** A bot that dispatches a bot
 passes ``delegation_chain`` — ``actor@role`` hops, outermost first. The
@@ -58,6 +60,10 @@ ROLES_DIR = "roles"  # under the personal home (``<supervisor home>/..``)
 # `skep role use NAME` (no --chat): the operator's pick for new chats, which
 # wins over the role `skep onboard` recorded in first_run.json.
 DEFAULT_ROLE_SETTING = "default_role"
+# ADR 0059 operator decision #4 (B55): a chat that would otherwise have no
+# role — channel, analysis, hermes-import, or no pick and no default — is an
+# assistant chat, the strictest shipped role.
+ROLE_LESS_CHAT_ROLE = "assistant"
 
 
 class Role(BaseModel):
@@ -175,9 +181,9 @@ def resolve_role(name: str, home: Path) -> Role:
     return roles[name]
 
 
-def default_role(store: RunStore, home: Path) -> str | None:
+def default_role(store: RunStore, home: Path) -> str:
     """The role a new chat opens in: `skep role use`'s pick, else the role
-    `skep onboard` recorded, else none (no role layer)."""
+    `skep onboard` recorded, else ``assistant`` (decision #4, B55)."""
     chosen = store.get_setting(DEFAULT_ROLE_SETTING)
     if isinstance(chosen, str) and chosen:
         return chosen
@@ -186,9 +192,9 @@ def default_role(store: RunStore, home: Path) -> str | None:
     try:
         recorded = json.loads((home.parent / FIRST_RUN_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        return ROLE_LESS_CHAT_ROLE
     role = recorded.get("role") if isinstance(recorded, dict) else None
-    return role if isinstance(role, str) and role else None
+    return role if isinstance(role, str) and role else ROLE_LESS_CHAT_ROLE
 
 
 def roles_view(store: RunStore, home: Path) -> dict[str, Any]:
@@ -231,6 +237,23 @@ def role_decision(role: Role, scope: str, action: str, value: str) -> PolicyDeci
     the least favourable matched part deciding."""
     hits = [hit for hit in _role_hits(role, scope, action, value) if hit is not None]
     return max(hits, key=lambda hit: _VERDICT_RANK[hit.verdict], default=None)
+
+
+def role_denies_every(
+    role: Role, scope: str, action: str, value: str | None = None
+) -> PolicyDecision | None:
+    """P3-6 (ADR 0059 D7): the role rule that denies every call — of
+    ``value``, when the tool's value never varies, else of any value (a ``*``
+    deny with no allow or ask beside it). None when some call could pass the
+    role layer. Role-only, so it is the same for a chat on every turn."""
+    if value is not None:
+        hit = role_decision(role, scope, action, value)
+        return hit if hit is not None and hit.verdict == "deny" else None
+    layer = role.layer()
+    rules = [r for r in layer.rules if (r.scope, r.action) == (scope, action)] if layer else []
+    if not any(r.pattern == "*" for r in rules) or any(r.verdict != "deny" for r in rules):
+        return None
+    return role_decision(role, scope, action, "*")
 
 
 def role_covers(role: Role, scope: str, action: str, value: str) -> bool:
@@ -277,9 +300,12 @@ def tighten(
 def role_for_chat(store: RunStore, home: Path, chat_id: str | None) -> Role | None:
     """The role a chat runs in, for the Queen's own tool lane. A chat whose
     custom role no longer loads raises (I9) — its tools fail closed rather
-    than quietly running with no role layer."""
+    than quietly running with no role layer. A stored NULL — a chat from
+    before every chat recorded one — reads as ``assistant`` (decision #4,
+    B55); the row is not rewritten, so giving it a role undoes it. No chat
+    (REST, the CLI, the hook) is no role."""
     chat = store.get_chat(chat_id) if chat_id else None
-    return resolve_role(chat.role, home) if chat is not None and chat.role else None
+    return None if chat is None else resolve_role(chat.role or ROLE_LESS_CHAT_ROLE, home)
 
 
 EXCEEDS_DELEGATOR = "exceeds_delegator"

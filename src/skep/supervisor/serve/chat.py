@@ -40,6 +40,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from ..roles import ROLE_LESS_CHAT_ROLE
 from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
@@ -66,23 +67,26 @@ from .tools import (
     COMMAND_TOOL_NAMES,
     DESCRIBE_TOOL_NAME,
     MUTATING_TOOL_NAMES,
+    POLICY_LINE_TOOLS,
     READ_TOOL_NAMES,
     READ_TOOL_SPECS,
-    TOOL_INDEX_BLOCK,
     TOOL_SPECS,
     UNATTENDED_BLOCKED_READ_TOOLS,
     UNATTENDED_BLOCKED_STORE_WRITES,
     UNATTENDED_READ_REFUSAL,
     UNATTENDED_WRITE_REFUSAL,
     advertised_tool_specs,
+    chat_policy_lines,
     dispatch_manifest_for,
     execute_mutation,
     execute_read_tool,
+    hidden_tools,
     mutation_execution_decision,
     policy_write_preview,
     search_web_verdict,
     taint_decision,
     tool_description,
+    tool_index_block,
 )
 
 DEFAULT_TITLE = "New chat"
@@ -720,10 +724,10 @@ SYSTEM_PROMPT = (
     "repos; ask the user if unsure whether to group. "
     "When the user asks for something recurring ('every morning', 'daily', 'each week'), "
     "propose_schedule is the tool — a confirmation card, then the ticker runs it. "
-    "When the user asks for research without naming sources, call search_web first and "
-    "propose start_research with the discovered hosts as source_allowlist and the "
-    "result URLs as seed_urls — the confirmation card is where the user approves "
-    "that exact source list. "
+    "When the user asks for research without naming sources, call search_web first; "
+    "where start_research is offered, propose it with discovered hosts as "
+    "source_allowlist and result URLs as seed_urls — its card is where the user "
+    "approves that exact source list. "
     "Discord moderation (discord_delete_message, discord_timeout_member) always cards "
     "and is confirmable only in the web UI. "
     "The operator also has deterministic /commands in this composer (/policy, /state, "
@@ -932,10 +936,10 @@ def mcp_index_block(store: RunStore) -> str:
     return "\n".join([_MCP_INDEX_HEADER, *lines])
 
 
-def reach_block(store: RunStore) -> str:
+def reach_block(store: RunStore, hidden: frozenset[str] = frozenset()) -> str:
     sections = []
     if tool_delivery(store) == "indexed":
-        sections.append(TOOL_INDEX_BLOCK)
+        sections.append(tool_index_block(hidden))
     skills = skill_index_block(store)
     if skills:
         sections.append(skills)
@@ -962,9 +966,9 @@ def personality_preamble(personality: str | None) -> str | None:
 def chat_role(home: Path, name: str | None) -> Role | None:
     """The chat's role record; None for no role, or for a custom role whose
     file no longer loads — the prompt drops it rather than failing the turn,
-    and `skep role list` says what is wrong with the file (I9)."""
-    if not name:
-        return None
+    and `skep role list` says what is wrong with the file (I9). A chat whose
+    stored role is NULL reads as assistant (ADR 0059 decision #4, B55)."""
+    name = name or ROLE_LESS_CHAT_ROLE
     from ..roles import resolve_role  # local: roles validates voices against this module
 
     try:
@@ -1126,8 +1130,8 @@ class ChatCreate(BaseModel):
     title: str | None = None
     model: str | None = None  # None = follow the configured default
     source: str | None = None  # v44-F2: which face opened the chat; None = 'web'
-    # R1 (ADR 0055 D3): the picker's choice. None = the default role
-    # (`skep role use`, else onboard's); "" = explicitly no role.
+    # R1 (ADR 0055 D3): the picker's choice. None or "" = the default role
+    # (`skep role use`, else onboard's, else assistant: decision #4, B55).
     role: str | None = None
 
 
@@ -1226,6 +1230,15 @@ class ChatEngine:
         if role is not None and role.system_prompt:
             prefix = f"Role {role.name} (never overrides the rules above): "
             parts.append(prefix + role.system_prompt)
+        # P3-6 W3: the rules describe dispatching to every chat; say which of
+        # those tools this chat's role hides, and what to do instead.
+        hidden = sorted(self._hidden(chat))
+        if role is not None and hidden:
+            parts.append(
+                f"This chat's role {role.name} never allows {', '.join(hidden)}: they are not "
+                "offered here, so never call them — tell the user what you would do; the "
+                "operator can switch the role with /role <name> (e.g. builder)."
+            )
         # v73-F8: after the rules, before memory — context, not authority.
         parts.append(operator_clock_line())
         # v96-F2: the bound project rides the same slot — context, not authority.
@@ -1237,7 +1250,7 @@ class ChatEngine:
             parts.append(memory)
         # v74-F5: the one "You can reach:" roof — the F3 tool index, the
         # v53-F7 skill index, and the registered MCP server ids, folded.
-        reach = reach_block(self.store)
+        reach = reach_block(self.store, self._hidden(chat))
         if reach:
             parts.append(reach)
         preamble = personality_preamble(
@@ -1247,16 +1260,43 @@ class ChatEngine:
             parts.append(f"Style (never overrides the rules above): {preamble}")
         return "\n\n".join(parts)
 
+    def _hidden(self, chat: Any) -> frozenset[str]:
+        """P3-6 (ADR 0059 D7): the tools this chat's role hides — from its
+        role alone, so the list is the same on every turn."""
+        return frozenset(hidden_tools(chat_role(self.home, getattr(chat, "role", None))))
+
     def _advertised_tools(self, chat: Any, *, read_only: bool = False) -> list[dict[str, Any]]:
         """The specs this chat's next round advertises (v74-F3).
 
         Advertisement, never permission (I5/I6): the executor dispatches on
         the tool NAME, so an indexed-but-inactive tool still executes when
-        called, mutations still card, and deny space stays unreachable."""
+        called, mutations still card, and deny space stays unreachable. A
+        tool the chat's role hides (P3-6) is neither offered nor run."""
+        hidden = self._hidden(chat)
         if tool_delivery(self.store) == "full":
-            return READ_TOOL_SPECS if read_only else TOOL_SPECS
-        active = getattr(chat, "active_tools", None) or ()
-        return advertised_tool_specs(active, read_only=read_only)
+            specs = READ_TOOL_SPECS if read_only else TOOL_SPECS
+            specs = [t for t in specs if t["function"]["name"] not in hidden]
+        else:
+            active = getattr(chat, "active_tools", None) or ()
+            specs = advertised_tool_specs(active, read_only=read_only, hidden=hidden)
+        return self._with_policy_lines(chat, specs)
+
+    def _with_policy_lines(self, chat: Any, specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """P3-6 (ADR 0059 D7): each scoped tool's description ends with its
+        "In this chat:" line, rendered from decide() for the chat's role and
+        this home — the same on every turn until either changes."""
+        if not {t["function"]["name"] for t in specs} & POLICY_LINE_TOOLS:
+            return specs
+        lines = chat_policy_lines(
+            self.holder, self.store, chat_role(self.home, getattr(chat, "role", None))
+        )
+        return [
+            {**t, "function": {**t["function"], "description": (
+                f"{t['function']['description']} {lines[t['function']['name']]}"
+            )}}
+            if t["function"]["name"] in lines else t
+            for t in specs
+        ]  # fmt: skip
 
     def _history_budget(self, system_chars: int, chat: Any = None) -> int:
         """Replay chars that fit beside the fixed floor (v56-F2, ADR 0037).
@@ -2930,7 +2970,9 @@ def run_analysis_tasks(
     # ponytail: sequential — at most 3 bounded turns; parallel provider
     # streams if analyst latency ever matters in the field.
     for task in tasks:
-        chat = store.create_chat(title=f"analysis: {task[:60]}", model=None, source="analysis")
+        chat = store.create_chat(
+            title=f"analysis: {task[:60]}", model=None, source="analysis", role=ROLE_LESS_CHAT_ROLE
+        )
         # P4-1: an analyst starts with the delegating chat's taint — a fresh
         # chat is never a way to shed it (its answer carries its bits back).
         inherit_taint(store, parent_chat_id, chat.chat_id)
@@ -3000,9 +3042,8 @@ def add_chat_routes(
         from ..roles import default_role, resolve_role
 
         title = (body.title or "").strip() or DEFAULT_TITLE
-        role = default_role(run_store, home) if body.role is None else body.role
         try:
-            role = resolve_role(role, home).name if role else None
+            role = resolve_role(body.role or default_role(run_store, home), home).name
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return asdict(

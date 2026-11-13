@@ -102,6 +102,7 @@ from ..projects import (
 )
 from ..roles import (
     EXCEEDS_DELEGATOR,
+    ROLE_LESS_CHAT_ROLE,
     Delegator,
     Role,
     parse_delegation_chain,
@@ -2004,7 +2005,9 @@ def baseline_alarm(holder: ConfigHolder, store: RunStore) -> dict[str, str]:
     if row is not None:
         chat = next((c for c in store.list_chats() if c.source == "policy"), None)
         if chat is None:
-            chat = store.create_chat(title="policy baseline", model=None, source="policy")
+            chat = store.create_chat(
+                title="policy baseline", model=None, source="policy", role=ROLE_LESS_CHAT_ROLE
+            )
         if row["reason"] == "schema_changed":
             text = (
                 "The policy baseline was approved under an older schema. Its content is "
@@ -4070,7 +4073,27 @@ def apply_shell_preset(store: RunStore, holder: ConfigHolder, preset: str) -> li
 
 # v52-F4: the scopes the Queen actually consults — the honest bound for
 # operator-policy edits (shell/coding/mcp/email decide elsewhere).
-OPERATOR_POLICY_SCOPES = ("filesystem", "network")
+OPERATOR_POLICY_SCOPES = ("filesystem", "network", "shell")
+# P3-6 (B20): what a standing Queen shell allow may never name, beyond what a
+# run_shell keep already refuses (remote git, outbound posts, privilege,
+# catastrophic and ops-mutating lines, `sh -c`): a program that runs other
+# code or reaches the network, and a package install.
+_NO_STANDING_SHELL = frozenset(
+    {"bash", "sh", "zsh", "fish", "dash", "ksh", "python", "python3", "node", "deno", "bun",
+     "perl", "ruby", "php", "lua", "osascript", "pwsh", "npx", "bunx", "pnpx", "env", "xargs",
+     "eval", "exec", "source", "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp",
+     "sftp", "ftp", "telnet", "rsync", ".", "busybox", "toybox", "su", "sudo", "doas",
+     "pkexec", "gh", "glab", "docker", "podman", "kubectl", "helm", "aws", "gcloud", "az",
+     "terraform", "ansible", "ansible-playbook", "open", "xdg-open", "uvx", "pipx"}
+)  # fmt: skip
+_PACKAGE_MANAGERS = frozenset(
+    {"pip", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
+     "gem", "go", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk"}
+)  # fmt: skip
+# installs, and the verbs that fetch a package and run it (`pnpm dlx`, `npm exec`)
+_INSTALL_VERBS = frozenset(
+    {"install", "i", "add", "sync", "update", "upgrade", "get", "ci", "dlx", "exec", "x", "tool"}
+)
 
 
 def set_operator_policy_rule(
@@ -4119,6 +4142,8 @@ def set_operator_policy_rule(
     pattern = pattern.strip()
     if not pattern:
         raise HTTPException(status_code=400, detail="pattern must be non-empty")
+    if scope == "shell" and verdict == "allow":
+        return _queen_shell_allow(store, action, pattern, holder=holder, dry_run=dry_run)
     document = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
     bucket = next((s for s in document.scopes if s.scope == scope), None)
     if bucket is None:
@@ -4146,6 +4171,99 @@ def set_operator_policy_rule(
         "rule": {"rule_id": rule_id, "action": action, "pattern": pattern},
         "allow": [r.model_dump() for r in bucket.allow],
         "deny": [r.model_dump() for r in bucket.deny],
+        **_write_report(report),
+    }
+
+
+def queen_shell_allow_refusal(pattern: str, action: str) -> str | list[tuple[str, str, str, str]]:
+    """P3-6 (B20): why a standing Queen shell allow of ``pattern`` is refused,
+    or the grants it is — exactly what an approved run_shell keep=always
+    stores (one exact argv per segment of a line ``sh`` would split), and
+    never an interpreter, a network tool, a package install, a credential
+    path, or a line with a newline or ``#`` (a comment can hide a segment)."""
+    from ..secret_floor import shell_secret_floor_reason
+    from ..shell_prefixes import _ASSIGNMENT_RE, git_core_argv, launched_command, program_name
+
+    if "\n" in pattern or "\r" in pattern or "#" in pattern:
+        return "a standing shell allow is one line with no '#': write the exact command alone"
+    found = _grant_subjects("start_process" if action == "run_background" else "run_shell",
+                            {"command": pattern})  # fmt: skip
+    if isinstance(found, str):
+        return found.replace("approve-once", "never a standing allow")
+    for _scope, _action, line, _matcher in found:
+        argv = shlex.split(line)
+        program = program_name(argv[0])
+        if _ASSIGNMENT_RE.match(argv[0]):
+            return f"{line!r}: a standing allow never sets the environment (PATH=, LD_PRELOAD=…)"
+        if launched_command(argv) != argv:
+            return f"{program}: it runs the command after it — allow that command itself"
+        # python3.12 is python, pip3 is pip, node18 is node
+        base = program.rstrip("0123456789.") or program
+        if program in _NO_STANDING_SHELL or base in _NO_STANDING_SHELL:
+            return (
+                f"{program}: a program that runs other code or reaches the network "
+                "is never a standing allow"
+            )
+        verbs = [token for token in argv[1:4] if not token.startswith("-")]
+        if base in _PACKAGE_MANAGERS and (not verbs or _INSTALL_VERBS & set(verbs)):
+            return f"{line!r}: a package install is never a standing allow"
+        if base == "find" and {"-exec", "-execdir", "-ok", "-okdir", "-delete"} & set(argv):
+            return f"{line!r}: find that runs or deletes is never a standing allow"
+        core = git_core_argv(argv)
+        if base == "git" and (core[1:2] == ["config"] or "-c" in argv[: len(argv) - len(core) + 1]
+                              or any(t.startswith("--config-env") for t in argv)):  # fmt: skip
+            return f"{line!r}: git configuration can run any program, never a standing allow"
+    secret = shell_secret_floor_reason(pattern, cwd=None)
+    if secret is not None:
+        return secret
+    return [(scope, action, line, matcher) for scope, _a, line, matcher in found]
+
+
+def _queen_shell_allow(
+    store: RunStore,
+    action: str,
+    pattern: str,
+    *,
+    holder: ConfigHolder | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """B20: ``set_operator_policy scope=shell verdict=allow`` stores the grant
+    a human-approved run_shell keep=always stores (exact argv, global, on the
+    one learned list ``revoke_policy_rule`` lists) — through the same
+    write-time check — and nothing wider."""
+    from ..policy_schema import LearnedRule
+    from ..policy_write import PolicyWriteRejected
+
+    found = queen_shell_allow_refusal(pattern, action)
+    if isinstance(found, str):
+        # as a PolicyWriteRejected cause: the proposal answers it, no card (B22)
+        detail = f"shell allow refused: {found}"
+        raise HTTPException(status_code=400, detail=detail) from PolicyWriteRejected(detail)
+    report: dict[str, Any] = {}
+    try:
+        if dry_run:
+            report = vet_keep(store, found)
+        for scope, rule_action, line, matcher in [] if dry_run else found:
+            store_grant(
+                store,
+                LearnedRule(
+                    rule_id=f"{scope}:{rule_action}:{line}", action=rule_action, pattern=line,
+                    scope=scope,  # type: ignore[arg-type]
+                    provenance="set_operator_policy", lifetime="global",
+                    matcher=matcher,  # type: ignore[arg-type]
+                ),
+                report=report,
+                replay=True,
+            )  # fmt: skip
+    except PolicyWriteRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    lines = [line for _scope, _action, line, _matcher in found]
+    return {
+        "scope": "shell",
+        "verdict": "allow",
+        "rule": {"rule_id": f"shell:{action}:{lines[0]}", "action": action, "pattern": pattern},
+        "patterns": lines,
+        "matcher": "exact_argv",
         **_write_report(report),
     }
 
@@ -4961,12 +5079,14 @@ def dispatch_run_decision(
     execution_mode: str | None = None,
     engine: str | None = None,
     delegation_chain: Sequence[str] = (),
+    role: str | None = None,
 ) -> AutonomyDecision:
     """The dispatch gate. ADR 0059 D3 (V7, B22): with the proposing chat's
     ``delegation_chain`` it consults the chain first — a dispatch the
     delegator could never make (its role denies the workspace write) is
     refused at proposal time with the reason, never carded only to 403 on
-    confirm."""
+    confirm. P3-6 (B22 residue): so is a worker ``role`` that may not write
+    the workspace — the same refusal ``_within_delegation`` gives on confirm."""
     decision = _dispatch_run_decision(
         holder,
         store,
@@ -4981,10 +5101,11 @@ def dispatch_run_decision(
         execution_mode=execution_mode,
         engine=engine,
     )
-    if not delegation_chain or decision.verdict == "deny" or is_git_url(repo):
+    if (not delegation_chain and not role) or decision.verdict == "deny" or is_git_url(repo):
         return decision
     try:
         chain = parse_delegation_chain(delegation_chain, holder.current.home)
+        worker_role = resolve_role(role, holder.current.home) if role else None
         resolved = resolve_repo_arg(repo, repos_root(holder), store)
         write = resolve_run_policy(
             store=store,
@@ -5004,7 +5125,7 @@ def dispatch_run_decision(
         ).permissions.write
     except (ValueError, HTTPException, PolicyResolutionError):
         return decision  # the dispatch itself answers with the honest error
-    refusal = _delegated_write_refusal(holder, store, resolved, chain, write)
+    refusal = _delegated_write_refusal(holder, store, resolved, chain, write, role=worker_role)
     if refusal is None:
         return decision
     return AutonomyDecision(
@@ -5280,10 +5401,10 @@ def _grant_subjects(tool: str, args: dict[str, Any]) -> list[tuple[str, str, str
     from ..shell_prefixes import is_outbound_content_prefix, queen_command_line_refusal
 
     if tool not in REMEMBERABLE_TOOLS:
-        return (
-            f"{tool} has no standing grant: only read_url, run_shell and start_process "
-            "approvals can be kept, so this card is approve-once"
-        )
+        from .tools import ALWAYS_CARDS
+
+        reason = ALWAYS_CARDS.get(tool, "only read_url, run_shell and start_process approvals keep")
+        return f"{tool} has no standing grant ({reason}), so this card is approve-once"
     if tool == "read_url":
         prefix = url_prefix_of(str(args.get("url") or ""))
         if prefix is None:

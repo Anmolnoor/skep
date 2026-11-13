@@ -61,14 +61,17 @@ def openai() -> Iterator[FakeOpenAI]:
 
 
 def chat_client(
-    config: SupervisorConfig, ollama: FakeOllama, **app_kwargs: Any
+    config: SupervisorConfig, ollama: FakeOllama, role: str | None = None, **app_kwargs: Any
 ) -> tuple[TestClient, str]:
+    """A configured client and a new chat — in ``role``, or the default
+    (assistant: ADR 0059 decision #4); a chat that dispatches needs a role
+    that may (builder)."""
     client = _client(config, **app_kwargs)
     client.put(
         "/api/llm/config",
         json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
     )
-    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    chat_id = client.post("/api/chats", json={"role": role}).json()["chat_id"]
     return client, str(chat_id)
 
 
@@ -930,7 +933,7 @@ def test_confirmed_one_shot_reminder_pins_once_and_start_at(
 def test_confirmed_dispatch_run_really_dispatches(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call(
         "dispatch_run",
         {
@@ -968,7 +971,7 @@ def test_confirmed_dispatch_run_really_dispatches(
 def test_trusted_project_dispatch_run_executes_inside_the_turn_without_confirmation(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     created = client.post(
         "/api/projects",
         json={
@@ -1022,7 +1025,7 @@ def test_trusted_project_dispatch_run_executes_inside_the_turn_without_confirmat
 def test_trusted_project_dispatch_run_with_explicit_override_stays_confirmation_gated(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     created = client.post(
         "/api/projects",
         json={
@@ -1867,7 +1870,7 @@ def test_confirmed_register_repo_initializes_empty_clone_then_dispatches_by_slug
     empty.mkdir()
     git(empty, "init", "-q")
 
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call("register_repo", {"url": str(empty), "name": "empty-fixture"})
     client.post(
         f"/api/chats/{chat_id}/messages",
@@ -1903,7 +1906,7 @@ def test_confirmed_register_repo_initializes_empty_clone_then_dispatches_by_slug
 def test_dispatch_run_with_git_url_tells_chat_to_register_first(
     config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call(
         "dispatch_run",
         {
@@ -2180,7 +2183,7 @@ def test_start_research_is_confirm_carded(config: SupervisorConfig, ollama: Fake
 
     assert "start_research" in MUTATING_TOOL_NAMES  # a mutating (carded) tool
 
-    client, chat_id = chat_client(config, ollama)
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call(
         "start_research",
         {

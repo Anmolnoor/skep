@@ -758,16 +758,15 @@ def test_an_assistant_queen_gets_no_script_trial_through_promote_tool(
 ) -> None:
     """run_code refuses an `assistant` Queen; a confirmed promote_tool card
     dispatched the same script-caste run with no chain at all. The trial is
-    a Queen dispatch like any other: queen@<chat role>, held by the R2 ⊆."""
+    a Queen dispatch like any other: queen@<chat role>, held by the R2 ⊆. A
+    chat whose stored role is NULL is an assistant chat (P3-6): refused too."""
     assert _promote_seed(config, "assistant", monkeypatch) == []
     assert _promote_seed(config, "operator", monkeypatch)[0]["dispatch_decision"].delegation == {
         "chain": ["queen@operator"],
         "role": None,
         "team": None,
     }
-    assert (
-        _promote_seed(config, None, monkeypatch)[0]["dispatch_decision"].delegation is None
-    )  # today
+    assert _promote_seed(config, None, monkeypatch) == []
 
 
 # --- T2 audit: every Queen dispatch face carries the chain; every resume keeps it

@@ -5227,7 +5227,7 @@ def test_chat_dispatch_uses_default_local_coding_worker(repo: Path, tmp_path: Pa
             "/api/llm/config",
             json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
         )
-        chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+        chat_id = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
         ollama.script_tool_call(
             "dispatch_run",
             {

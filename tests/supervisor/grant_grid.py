@@ -37,6 +37,7 @@ from skep.supervisor.serve import actions
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import mutation_execution_decision
 
+from .conftest import no_layer_role
 from .queen_lane_grid import build_home
 
 HOMES = ("legacy", "zero", "builder", "assistant", "tampered")
@@ -182,8 +183,11 @@ def rows(root: Path, kind: str) -> Iterator[tuple[str, str]]:
         store.add_project_binding(
             project_id="other", binding_kind="repo_path", binding_value=str(other.resolve())
         )
+        stored = {role: role or no_layer_role(config.home) for role in ROLES}  # "-": no layer
         chats = {
-            (role, which): store.create_chat(title=f"{role}-{which}", model=None, role=role).chat_id
+            (role, which): store.create_chat(
+                title=f"{role}-{which}", model=None, role=stored[role]
+            ).chat_id
             for role in ROLES
             for which in ("a", "b")
         }

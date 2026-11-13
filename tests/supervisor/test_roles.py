@@ -96,9 +96,9 @@ def test_default_role_is_the_operator_pick_then_the_onboard_one(tmp_path: Path) 
     config = build_config(tmp_path / "skep", None)
     store = RunStore(config.db_path)
     try:
-        assert default_role(store, config.home) is None
-        (config.home.parent / "first_run.json").write_text(json.dumps({"role": "assistant"}))
-        assert default_role(store, config.home) == "assistant"
+        assert default_role(store, config.home) == "assistant"  # ADR 0059 decision #4
+        (config.home.parent / "first_run.json").write_text(json.dumps({"role": "builder"}))
+        assert default_role(store, config.home) == "builder"
         assert use_role(store, config.home, "operator") == {"default_role": "operator"}
         assert default_role(store, config.home) == "operator"
         chat = store.create_chat(title="t", model=None, role="builder")
