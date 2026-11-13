@@ -570,3 +570,23 @@ def test_under_is_the_root_or_below_it_never_a_sibling_with_the_same_prefix() ->
     assert not _under(Path("/home/u/.ssh-config-docs/x"), root)
     assert not _under(Path("/home/u"), root)
     assert not _under(Path("/home/v/.ssh/id_rsa"), root)
+
+
+def test_a_secret_named_after_a_cd_or_inside_quoted_code_is_on_the_floor(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    """ES-F80 review: relative names were judged against the cwd only and a
+    path inside a quoted ``-c`` payload was one word with the code, so
+    ``cd ~ && cat .ssh/id_rsa`` and ``python3 -c 'open("~/.ssh/id_rsa")'``
+    walked past the floor."""
+    from skep.supervisor.secret_floor import shell_secret_floor_reason
+
+    (tmp_path / "out").mkdir()
+    for command in (
+        "cd ~ && cat .ssh/id_rsa",
+        "cd ~ && cd .ssh && cat id_rsa",
+        f"python3 -c 'print(open(\"{fake_home}/.ssh/id_rsa\").read())'",
+        'node -e \'require("fs").readFileSync("~/.aws/credentials")\'',
+    ):
+        assert shell_secret_floor_reason(command, cwd=str(tmp_path / "out")), command
+    assert shell_secret_floor_reason("cd ~ && ls src", cwd=str(tmp_path / "out")) is None

@@ -69,6 +69,9 @@ def test_the_queen_shell_never_runs_skep(tmp_path: Path, line: str) -> None:
         "grep -r token {home}",
         "sh -c 'cat {home}/settings.json'",
         "python3 -c 'print(1)' {home}/x",
+        # a path inside quoted interpreter code (ES-F80 review)
+        "python3 -c 'print(open(\"{home}/settings.json\").read())'",
+        'node -e \'require("fs").rmSync("{root}", {{recursive: true}})\'',
     ],
 )
 def test_the_queen_shell_never_names_skeps_own_files(tmp_path: Path, template: str) -> None:
@@ -86,6 +89,21 @@ def test_a_relative_name_inside_the_home_counts(tmp_path: Path) -> None:
     for line, cwd in lines:
         decision = queen_shell_decision(store, holder, command=line, cwd=str(cwd))
         assert decision is not None and decision.verdict == "deny", (line, cwd, decision)
+
+
+def test_a_relative_name_after_a_cd_counts(tmp_path: Path) -> None:
+    """ES-F80 review: relative names were judged against the cwd only, so a
+    `cd` into (or above) the home walked past D11."""
+    store, holder, home = _lane(tmp_path)
+    (home.parent / "serve.log").write_text("")
+    (tmp_path / "out").mkdir()
+    for line in (
+        f"cd {tmp_path} && cat {home.parent.name}/serve.log",
+        f"cd {tmp_path} && cd {home.parent.name} && cat serve.log",
+        f"cd {home.parent} && tail -n 5 serve.log",
+    ):
+        decision = queen_shell_decision(store, holder, command=line, cwd=str(tmp_path / "out"))
+        assert decision is not None and decision.reason == "shell.deny.skep_self", (line, decision)
 
 
 @pytest.mark.parametrize(

@@ -18,6 +18,7 @@ which stays on this floor.
 from __future__ import annotations
 
 import os
+import re
 from fnmatch import fnmatch
 from functools import lru_cache
 from glob import iglob
@@ -223,9 +224,9 @@ def shell_secret_floor_reason(
     ``secret_floor_reason``; so is the cwd itself.
 
     ponytail: static tokens only — a shell can build a path at run time
-    (``cat $(printf ~/.s%s/id_rsa sh)``, ``cd ~ && cd .ssh``, a script that
-    opens it). The real fix is sandboxing the Queen's shell (deny the floor
-    paths like the worker sandbox will, B05) — out of scope here."""
+    (``cat $(printf ~/.s%s/id_rsa sh)``, a script that opens it). The real
+    fix is sandboxing the Queen's shell (deny the floor paths like the
+    worker sandbox will, B05) — out of scope here."""
     for candidate in _command_paths(command, cwd):
         reason = secret_floor_reason(candidate, skep_home=skep_home, templates_ok=True)
         if reason is not None:
@@ -236,13 +237,21 @@ def shell_secret_floor_reason(
 def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -> list[Path]:
     """The cwd and every path a host-shell line's tokens may name (also after
     ``=`` and a curl-style ``@``), ``$VAR``/``~``-expanded, resolved against
-    the cwd and globbed. ``named_only``: not the cwd itself, and a bare
-    relative word (``df``) only when it exists there."""
-    from .shell_prefixes import command_line_segments
+    the cwd and every ``cd`` target before it (``cd ~ && cat .ssh/x``), and
+    globbed; a path quoted inside a word counts too (``python3 -c
+    'open("/x")'``). ``named_only``: not the cwd itself, and a bare relative
+    word (``df``) only when it exists there."""
+    from .shell_prefixes import command_line_segments, program_name
 
     base = Path(cwd).expanduser() if cwd else Path.cwd()
-    tokens = [token for argv in command_line_segments(command) or [] for token in argv]
+    argvs = command_line_segments(command) or []
+    bases = [base]
+    for argv in argvs:
+        if len(argv) > 1 and program_name(argv[0]) in ("cd", "pushd"):
+            bases.append(bases[-1] / Path(os.path.expandvars(argv[1])).expanduser())
+    tokens = [token for argv in argvs for token in argv]
     tokens += [token.strip("'\"") for token in command.split()]  # unparseable lines too
+    tokens += _QUOTED_PATH.findall(command)
     candidates = [] if named_only else [base]
     for token in tokens:
         if "://" in token:
@@ -252,14 +261,19 @@ def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -
             if not part:
                 continue
             named = Path(os.path.expandvars(part)).expanduser()
-            path = base / named
             bare = len(named.parts) == 1 and not named.is_absolute()
-            if named_only and bare and not path.exists():
-                continue  # a bare word (`df`, `-h`) names no file here
-            candidates.append(path)
-            if any(char in part for char in "*?["):
-                candidates += [Path(hit) for hit in islice(iglob(str(path)), 200)]
+            for path in dict.fromkeys(b / named for b in bases):
+                if named_only and bare and not path.exists():
+                    continue  # a bare word (`df`, `-h`) names no file here
+                candidates.append(path)
+                if any(char in part for char in "*?["):
+                    candidates += [Path(hit) for hit in islice(iglob(str(path)), 200)]
     return candidates
+
+
+# An absolute, ``~`` or ``$HOME`` path starting inside a word, after a quote,
+# bracket, ``=`` or ``,`` (``open("/x/y")``, ``{"p": "~/x"}``).
+_QUOTED_PATH = re.compile(r"""(?<=['"(\[=,])(?:~|\$\{?HOME\}?)?/[^\s'"`;|&<>(){}\[\],]+""")
 
 
 def names_path_under(command: str, root: Path, *, cwd: str | None, except_under: Path) -> bool:
