@@ -382,3 +382,158 @@ def test_the_unlocked_step_holds_the_role_the_chain_and_the_baseline_guard(
 
     bare = replace(stack, run=None, unlocked=None)
     assert decide(req, stack=bare, sandboxed=True) == decide(req, stack=bare)
+
+
+# --- ES-F145: a worker gate answers itself through decide() --------------------
+
+_SANDBOX = pytest.mark.skipif(
+    not __import__("skep.supervisor.sandbox", fromlist=["availability"]).availability().usable,
+    reason="the auto-answer applies only to a sandboxed run",
+)
+
+
+def _gated_run(
+    config: SupervisorConfig,
+    repo: Path,
+    gate: str,
+    *,
+    mode: str = "shellgate",
+    unlocked: bool = True,
+    execution_mode: str = "sandbox",
+) -> tuple[Any, str]:
+    """A serve app, an (un)locked project on ``repo`` and one run that stops
+    on ``gate``; returns the client and the first run's terminal record."""
+    from .conftest import wait_terminal
+
+    config.home.mkdir(parents=True, exist_ok=True)
+    lock_baseline(config.home)
+    _bound(config, repo, {**UNLOCKED, "unlocked": unlocked}).close()
+    client = serve_client(config)
+    sent = client.post("/api/runs", json={
+        "repo": str(repo), "instructions": f"Fix it. MODE:{mode} GATE:{gate}",
+        "execution_mode": execution_mode,
+    })  # fmt: skip
+    assert sent.status_code == 202, sent.text
+    return client, wait_terminal(client, sent.json()["task_id"])["task_id"]
+
+
+def _decisions(config: SupervisorConfig) -> list[dict[str, Any]]:
+    import json
+
+    path = config.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return [row for row in rows if row.get("actor") == "auto:unlocked"]
+
+
+def _settled(config: SupervisorConfig, task_id: str, *, resolved_only: bool = False) -> None:
+    """The done-callback runs after the run reads terminal: wait until it has
+    resolved the gate (or, unless ``resolved_only``, logged its decision)."""
+    import time
+
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        store = RunStore(config.db_path)
+        try:
+            resolved = any(a.status != "pending" for a in store.approvals_for(task_id))
+        finally:
+            store.close()
+        if resolved or (_decisions(config) and not resolved_only):
+            return
+        time.sleep(0.05)
+    raise AssertionError("the unlocked auto-answer never ran")
+
+
+def _landed(config: SupervisorConfig, task_id: str) -> tuple[str | None, str | None]:
+    import time
+
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        store = RunStore(config.db_path)
+        try:
+            landed = [a for a in store.approvals_for(task_id) if a.action == "apply_patch"]
+        finally:
+            store.close()
+        if landed and landed[0].status != "pending":
+            return landed[0].resolved_by, landed[0].landing_branch
+        time.sleep(0.05)
+    raise AssertionError(f"run {task_id} never landed")
+
+
+def _final(client: TestClient, config: SupervisorConfig, task_id: str) -> dict[str, Any]:
+    """The last run of a resume chain, once terminal (``superseded`` follows
+    the successor; a gate just resolved is superseded a moment later)."""
+    import time
+
+    from skep.supervisor.serve.app import TERMINAL_STATES
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        run: dict[str, Any] = client.get(f"/api/runs/{task_id}").json()["run"]
+        store = RunStore(config.db_path)
+        try:
+            successor = store.resumed_as_for(task_id)
+        finally:
+            store.close()
+        if successor is not None:
+            task_id = successor
+        elif run["state"] in TERMINAL_STATES and run["state"] != "pending_approval":
+            return run
+        time.sleep(0.05)
+    raise AssertionError(f"run {task_id} never finished")
+
+
+@_SANDBOX
+@pytest.mark.parametrize(("mode", "gate"), [("shellgate", "rm_-rf_build"),
+                                             ("hostgate", "files.example")])  # fmt: skip
+def test_a_gate_on_an_unlocked_project_answers_itself_once(
+    repo: Path, config: SupervisorConfig, mode: str, gate: str
+) -> None:
+    client, first = _gated_run(config, repo, gate, mode=mode)
+    _settled(config, first, resolved_only=True)
+    run = _final(client, config, first)
+    assert run["state"] == "completed", run
+    # zero clicks: G10 re-runs the pinned verify, then the patch lands on skep/*
+    assert _landed(config, run["task_id"]) == ("auto:verified-patch", f"skep/{run['task_id']}")
+    store = RunStore(config.db_path)
+    try:
+        resolved = store.approvals_for(first)
+        assert [(a.status, a.resolved_by) for a in resolved] == [("approved", "auto:unlocked")]
+        # once: no session grant was written for the command (B39)
+        from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
+
+        assert "rm -rf build" not in str(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    finally:
+        store.close()
+    rows = _decisions(config)
+    assert [r["decided_by"] for r in rows] == ["unlocked:unlockable/zero-ask"]
+
+
+@_SANDBOX
+@pytest.mark.parametrize("gate", ["git_push_origin_main", "echo_$(cat_x)"])
+def test_a_floor_or_unreadable_gate_stays_a_human_card(
+    repo: Path, config: SupervisorConfig, gate: str
+) -> None:
+    client, first = _gated_run(config, repo, gate)
+    _settled(config, first)
+    assert client.get(f"/api/runs/{first}").json()["run"]["state"] == "pending_approval"
+    assert [r["verdict"] for r in _decisions(config)] in (["deny"], ["require_approval"])
+
+
+def test_a_gate_stays_a_card_when_the_project_is_not_unlocked(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    client, first = _gated_run(config, repo, "rm_-rf_build", execution_mode="workspace",
+                               unlocked=False)  # fmt: skip
+    assert client.get(f"/api/runs/{first}").json()["run"]["state"] == "pending_approval"
+    assert _decisions(config) == []
+
+
+def test_a_gate_stays_a_card_when_the_home_runs_no_sandbox(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from dataclasses import replace
+
+    unsandboxed = replace(config, sandbox=False)
+    client, first = _gated_run(unsandboxed, repo, "rm_-rf_build")
+    assert client.get(f"/api/runs/{first}").json()["run"]["state"] == "pending_approval"
+    assert _decisions(unsandboxed) == []

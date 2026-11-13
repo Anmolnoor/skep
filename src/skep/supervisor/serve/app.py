@@ -36,6 +36,7 @@ from .actions import (
     approval_event_views_for_task,
     approval_views,
     approve_policy_baseline,
+    auto_answer_unlocked_gate,
     command_views_for_task,
     create_branch,
     created_event_view_for_task,
@@ -1245,7 +1246,16 @@ def create_app(
         suppress(); the notice has already been written either way, so a broken
         continuation degrades to the pre-v105 behaviour rather than losing the
         terminal line.
+
+        ADR 0060: on an unlocked project the gate answers itself BEFORE the
+        notice, so the chat never hears an ask that is already answered; any
+        failure leaves the gate a human's card.
         """
+        try:
+            if auto_answer_unlocked_gate(run_store, holder, runner, task_id) is not None:
+                return
+        except Exception:
+            logging.getLogger("skep.serve").exception("unlocked auto-answer failed")
         notify_run_terminal(run_store, config.home, task_id, web_ui_url=web_ui_url)
         if run_store.get_setting(CONTINUE_CHAT_SETTING) is False:
             return  # opt-out; default is on

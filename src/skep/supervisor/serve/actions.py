@@ -3650,9 +3650,13 @@ def resume_past_gate(
     *,
     remembered: bool = False,
     granted: Sequence[list[str]] = (),
+    session: bool = True,
 ) -> str:
     """Q8: approving a suspended task resumes it past the gate (fresh worker
     run carrying the granted verdict), dispatched on the background pool.
+
+    ``session=False`` (ADR 0060's auto-answer) approves ONCE: an automatic
+    verdict never writes the session tier a human's plain approve does.
 
     ``shell_allowlist`` overrides the original permissions' allowlist so a
     just-persisted policy change applies to this resume, not only future runs.
@@ -3695,7 +3699,7 @@ def resume_past_gate(
     # (the verdict and the resume chain's worker_state carry it) and must not
     # reach the session tier every repo's runs read (B39).
     session_kept: list[list[str]] = []
-    if not remembered and approval_commands:
+    if session and not remembered and approval_commands:
         session_kept = remember_commands_for_session(
             store,
             [list(command) for command in approval_commands if not _asked(command, permissions)],
@@ -3751,6 +3755,78 @@ def resume_past_gate(
     # before the predecessor drops out of pending_gate_workspaces.
     store.transition(task_id, TaskState.SUPERSEDED.value, f"resumed as {resumed_id}")
     return resumed_id
+
+
+UNLOCKED_ACTOR = "auto:unlocked"
+
+
+def _gate_requests(store: RunStore, task_id: str, approval: Any) -> list[Request]:
+    """What a worker gate asks, as decide() requests — the shell commands it
+    lists, or the host a network gate names (decided as the run's
+    ``network.connect``). Empty for anything else: that gate is a human's."""
+    if approval.action == "shell.run":
+        commands = store.approval_commands(approval.review_id) or []
+        return [Request("shell", "run", shlex.join(command)) for command in commands]
+    if approval.action in ("network.fetch", "network.read"):
+        decision = approval_decision_for_action(
+            action=approval.action, events=current_events(store, task_id)
+        )
+        host = "" if decision is None or decision.detail is None else str(decision.detail).strip()
+        if host and ASK_HOST_RE.match(host):
+            return [Request("network", "connect", host)]
+    return []
+
+
+def auto_answer_unlocked_gate(
+    store: RunStore, holder: ConfigHolder, runner: Dispatcher, task_id: str
+) -> str | None:
+    """ADR 0060: on an unlocked project a sandboxed run's gate answers itself
+    when ``decide(…, sandboxed=True)`` allows every request it names, under
+    the run's own role and chain — the click path (``resume_past_gate``),
+    actor ``auto:unlocked``, once. Each request is a decision-log row (I13).
+    Returns the resumed task id, or None: the gate stays a human's card."""
+    run = store.get_run(task_id)
+    if run is None or run.state != "pending_approval":
+        return None
+    if run.execution_mode != "sandbox" or not holder.current.sandbox:
+        return None  # the mode stands on the wall (I12)
+    approval = next((a for a in store.pending_approvals() if a.task_id == task_id), None)
+    requests = [] if approval is None else _gate_requests(store, task_id, approval)
+    if approval is None or not requests:
+        return None
+    stack = load_stack(holder, store, repo=run.repo)
+    if stack.unlocked is None:
+        return None
+    audit_task = holder.current.audit_dir / task_id / "task.json"
+    delegation = _delegation_of(CodingWorkerTask.model_validate_json(audit_task.read_text()))
+    chain, role = delegation_inputs(
+        holder,
+        (delegation or {}).get("chain") or (),
+        (delegation or {}).get("role"),
+        team=(delegation or {}).get("team"),
+    )
+    for req in requests:
+        verdict = decide_v3(req, stack=stack, role=role, chain=chain, sandboxed=True)
+        row = _decision_row(
+            verdict,
+            stack,
+            actor=UNLOCKED_ACTOR,
+            repo=run.repo,
+            req=(req.scope, req.action, req.value),
+            role=role,
+        )
+        log_decision(holder.current.audit_dir, row)
+        if verdict.verdict != "allow":
+            return None
+    return resume_past_gate(
+        store,
+        holder.current,
+        runner,
+        require_run(store, task_id),
+        approval.review_id,
+        UNLOCKED_ACTOR,
+        session=False,
+    )
 
 
 def persist_remembered_command(
