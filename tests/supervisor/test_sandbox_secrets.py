@@ -520,3 +520,21 @@ def test_the_mask_list_covers_every_home_and_spares_only_the_workers_own_npmrc(
     assert other / "code" / "x.py" not in masked
     assert home / ".claude" / ".credentials.json" in masked
     assert home / ".npmrc" not in masked
+
+
+def test_known_agent_socket_places_are_masked_under_every_home(
+    fake_homes: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5 (D19): a read-only bind does not stop connect(), so bwrap hides the
+    places an agent socket lives (1Password, Docker Desktop, colima, ...)
+    under this home and every other one, like the secret floor."""
+    from skep.supervisor import secret_floor
+
+    home, skep_home = fake_homes
+    other = tmp_path / "Users" / "bob"
+    for base in (home, other):
+        for rel in sandbox.AGENT_SOCKETS:
+            (base / rel).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(secret_floor, "HOME_DIRS", (f"{tmp_path}/Users/*",))
+    masked = set(sandbox.secret_paths(skep_home))
+    assert {base / rel for base in (home, other) for rel in sandbox.AGENT_SOCKETS} <= masked

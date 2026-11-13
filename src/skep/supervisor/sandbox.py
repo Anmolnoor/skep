@@ -351,6 +351,24 @@ SANDBOX_READABLE_SECRETS: dict[str, str] = {
 }
 _HOME_SECRET_PATHS = tuple(rel for rel in HOME_SECRETS if rel not in SANDBOX_READABLE_SECRETS)
 
+# R5 (D19): a read-only bind does not stop connect(), so bwrap's ``--ro-bind
+# / /`` left an agent socket outside /tmp and /run reachable. These hold one
+# (relative to every home; ~/.ssh and ~/.gnupg are already in HOME_SECRETS).
+# Hidden like a secret on every backend; Seatbelt refuses the connect anyway
+# (W34). ponytail: known places only — a socket at a path nobody listed stays
+# reachable on bubblewrap (docs/sandboxing.md says what would close it).
+AGENT_SOCKETS: tuple[str, ...] = (
+    ".1password",  # 1Password SSH agent: agent.sock
+    ".bitwarden-ssh-agent.sock",
+    ".docker/desktop",  # Docker Desktop for Linux: docker.sock
+    ".docker/run",
+    ".colima",
+    ".lima",
+    ".rd",  # Rancher Desktop
+    ".orbstack/run",
+    ".local/share/containers/podman/machine",
+)
+
 
 def _refuse_home_inside(skep_home: Path, writable_roots: Iterable[Path]) -> None:
     """ES-F5 (B46): a skep home under a worker-writable root hands the worker
@@ -372,11 +390,14 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
     dir secret_floor takes (B148)."""
     home = Path.home()
     supervisor = skep_home / "supervisor"
-    candidates = [home / rel for rel in _HOME_SECRET_PATHS]
+    candidates = [home / rel for rel in (*_HOME_SECRET_PATHS, *AGENT_SOCKETS)]
     # W40: every other home's credential files, its engine logins included
     own = {home.resolve(), Path(os.path.abspath(home))}
     candidates += [
-        other / rel for other in other_homes() if other.resolve() not in own for rel in HOME_SECRETS
+        other / rel
+        for other in other_homes()
+        if other.resolve() not in own
+        for rel in (*HOME_SECRETS, *AGENT_SOCKETS)
     ]
     candidates += [skep_home / SERVE_ENV, supervisor / "audit", supervisor / "chat-attachments"]
     readable = {"llm-secret", *_active_llm_key_names(supervisor)} if worker_llm_key else set()
