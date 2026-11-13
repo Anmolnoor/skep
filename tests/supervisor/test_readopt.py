@@ -21,6 +21,7 @@ import time
 from contextlib import closing, suppress
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -237,6 +238,10 @@ def _kill_serve_mid_run(
     recorded), SIGKILL the serve. Returns the task id and the worker pid."""
     from .conftest import FAKE_WORKER
 
+    earlier: set[str] = set()  # runs from before this serve are not its
+    if config.db_path.exists():
+        with closing(sqlite3.connect(config.db_path)) as conn:
+            earlier = {row[0] for row in conn.execute("SELECT task_id FROM runs")}
     old = subprocess.Popen(
         [
             sys.executable,
@@ -263,7 +268,7 @@ def _kill_serve_mid_run(
                 "SELECT task_id, detail FROM run_transitions WHERE state = 'running'"
             ):
                 match = re.fullmatch(r"pid (\d+) started .+", detail or "")
-                if match:
+                if match and task_id not in earlier:
                     worker = (task_id, int(match[1]))
     old.kill()
     old.wait()
@@ -323,6 +328,114 @@ def test_restart_readopts_a_live_worker_and_lands_its_work(
         bridge = re.search(r" proxy socket (\S+)", details)
         assert (bridge is not None) is (mode == "sandbox" and sys.platform == "linux")
         assert bridge is None or not Path(bridge[1]).parent.exists()
+    finally:
+        store.close()
+
+
+def _landing_view(store: RunStore, task_id: str) -> Any:
+    """What landing and the operator see of a finished run, ids and times out."""
+
+    def plain(value: object) -> Any:
+        return json.loads(json.dumps(value, default=str).replace(task_id, "<task>"))
+
+    record, reverify = store.get_run(task_id), store.reverification_for(task_id)
+    assert record is not None
+    patches = [
+        Path(path).read_text() for kind, path, _ in store.artifacts_for(task_id) if kind == "patch"
+    ]
+    return plain(
+        {
+            "run": {
+                k: getattr(record, k)
+                for k in [
+                    "state",
+                    "summary",
+                    "verification_outcome",
+                    "verification_details",
+                    "execution_mode",
+                    "worker_kind",
+                    "coding_engine",
+                    "base_commit",
+                ]
+            },
+            "reverify": reverify
+            and [
+                reverify.outcome,
+                reverify.worker_outcome,
+                reverify.confirmed,
+                reverify.commands,
+                reverify.exit_codes,
+                reverify.base_commit,
+            ],
+            "approvals": [
+                (a.action, a.reason, a.status, a.landing_branch)
+                for a in store.pending_approvals()
+                if a.task_id == task_id
+            ],
+            "artifacts": [kind for kind, _, _ in store.artifacts_for(task_id)],
+            "patches": patches,
+            "commands": store.commands_for(task_id),
+        }
+    )
+
+
+@pytest.mark.parametrize("instructions", ["Fix it. MODE:happy GATE", "Commit. MODE:pending GATE"])
+def test_an_adopted_run_lands_exactly_as_an_uninterrupted_one(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, instructions: str
+) -> None:
+    """ES-F136 follow-up (D2's golden parity): the same task, once never
+    interrupted and once adopted across a serve death, ends in the same run
+    record, re-verification, patch, approval (the gated run) and commands —
+    and its proxy was
+    built from the same arguments (a filter argument added to the live path
+    and not to the adopter fails here, not in the field)."""
+    from skep.supervisor import dispatch
+    from skep.supervisor.contracts_io import DEFAULT_PERMISSIONS
+    from skep.supervisor.netproxy import FilteringProxy
+
+    proxies: list[dict[str, object]] = []
+
+    class _Spy(FilteringProxy):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            proxies.append(
+                {"args": args}
+                | {k: v for k, v in kwargs.items() if k not in ("port", "unix_socket_path")}
+            )
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(dispatch, "FilteringProxy", _Spy)
+    done = threading.Event()
+
+    def _release() -> None:  # the uninterrupted run's gate: open it once it waits
+        while not done.wait(0.1):
+            for run_dir in config.results_dir.glob("*/"):
+                (run_dir / "gate").write_text("go")
+
+    opener = threading.Thread(target=_release, daemon=True)
+    opener.start()
+    try:
+        live = run_task(
+            repo,
+            instructions,
+            config=config,
+            execution_mode="workspace",
+            permissions=DEFAULT_PERMISSIONS.model_copy(update={"network": ["example.com"]}),
+        ).record.task_id
+    finally:
+        done.set()
+        opener.join()
+    store = RunStore(config.db_path)
+    try:
+        expected = _landing_view(store, live)
+    finally:
+        store.close()
+
+    adopted, _pid = _kill_serve_mid_run(config, repo, instructions, "workspace")
+    store, _ = _adopt_and_finish(config, adopted)
+    try:
+        assert _landing_view(store, adopted) == expected
+        assert expected["approvals" if "pending" in instructions else "patches"]  # compared
+        assert len(proxies) == 2 and proxies[0] == proxies[1]
     finally:
         store.close()
 
