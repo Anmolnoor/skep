@@ -1126,6 +1126,41 @@ def _replayable_call(call: dict[str, Any]) -> dict[str, Any]:
     return {**call, "function": {**call.get("function", {}), "arguments": arguments}}
 
 
+def _rounds_in_order(records: list[Any], *, side: bool) -> list[Any]:
+    """W23 (B62): a tool round replays as one piece. A card's result is
+    written when it is confirmed, after any /btw rows that ran beside it; it
+    moves back to its call, so strict providers never see a call split from
+    its result. A side turn (``side``) leaves out a round that is still open
+    — the pending card stays pending for the main turn."""
+    # Each result joins the newest round still waiting on its call id, or,
+    # for rows without ids, the newest round still waiting on any call.
+    results: dict[int, list[Any]] = {}
+    waiting: dict[int, list[str]] = {}
+    for record in records:
+        if record.role == "assistant" and record.tool_calls:
+            results[record.id] = []
+            waiting[record.id] = [str(c.get("id") or "") for c in record.tool_calls]
+        elif record.role == "tool":
+            call = record.tool_call_id or ""
+            round_id = next((r for r in reversed(waiting) if call in waiting[r]), None)
+            if round_id is None and not call:
+                round_id = next((r for r in reversed(waiting) if waiting[r]), None)
+            if round_id is not None:
+                results[round_id].append(record)
+                pending = waiting[round_id]
+                pending.remove(call if call in pending else pending[0])
+    placed = {r.id for rows in results.values() for r in rows}
+    ordered: list[Any] = []
+    for record in records:
+        if record.id in placed:
+            continue
+        if record.id not in results:
+            ordered.append(record)
+        elif not (side and waiting[record.id]):  # a side turn skips the open round
+            ordered += [record, *results[record.id]]
+    return ordered
+
+
 class ChatCreate(BaseModel):
     title: str | None = None
     model: str | None = None  # None = follow the configured default
@@ -1318,7 +1353,7 @@ class ChatEngine:
         return self._history_budget(len(self._system_prompt(chat_id)) + len(summary), chat)
 
     def _turn_messages(
-        self, chat_id: str, *, budget_cap: int | None = None
+        self, chat_id: str, *, budget_cap: int | None = None, side: bool = False
     ) -> list[dict[str, Any]]:
         """System prompt (+ compaction digest) and the budgeted replay.
 
@@ -1332,7 +1367,7 @@ class ChatEngine:
         budget = self._history_budget(len(system) + len(summary), chat)
         if budget_cap is not None:
             budget = min(budget, budget_cap)
-        replay, dropped = self._replay(chat_id, chat, budget=budget)
+        replay, dropped = self._replay(chat_id, chat, budget=budget, side=side)
         if UNTRUSTED_OPEN in summary or any(
             str(m.get("content") or "").startswith(UNTRUSTED_OPEN) for m in replay
         ):
@@ -1346,14 +1381,19 @@ class ChatEngine:
             system = f"{system}\n\n{block}"
         return [{"role": "system", "content": system}, *replay]
 
-    def _replay(self, chat_id: str, chat: Any, *, budget: int) -> tuple[list[dict[str, Any]], int]:
+    def _replay(
+        self, chat_id: str, chat: Any, *, budget: int, side: bool = False
+    ) -> tuple[list[dict[str, Any]], int]:
         """The transcript slice the model sees: newest-first within budget;
         prior-turn tool results capped; count of messages left out."""
         from .llm import LLM_VISION
 
         vision = self.store.get_setting(LLM_VISION) is True
         compacted_through = (getattr(chat, "compacted_through", 0) or 0) if chat else 0
-        records = [r for r in self.store.chat_messages(chat_id) if r.id > compacted_through]
+        records = _rounds_in_order(
+            [r for r in self.store.chat_messages(chat_id) if r.id > compacted_through],
+            side=side,
+        )
         last_user_id = max((r.id for r in records if r.role == "user"), default=0)
         messages: list[dict[str, Any]] = []
         last_user_index: int | None = None
@@ -1697,7 +1737,9 @@ class ChatEngine:
             # indistinguishable from a hung daemon (I8).
             yield ("turn_status", {"state": "thinking"})
             while True:  # at most two passes: full, then halved after a 4xx
-                messages = self._turn_messages(chat_id, budget_cap=shrink_budget)
+                messages = self._turn_messages(
+                    chat_id, budget_cap=shrink_budget, side=read_only and not unattended
+                )
                 if nudge is not None:
                     # v70-F1: the stall correction rides as a transient trailing
                     # system instruction (the v62-F2 mechanism — never stored;
@@ -2332,8 +2374,9 @@ class ChatEngine:
                 # the model to answer in text (same off-ramp as the round cap).
                 break
         yield from self._final_no_tool_events(
-            chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
-        )
+            chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+            side=read_only and not unattended,
+        )  # fmt: skip
 
     def _final_no_tool_events(
         self,
@@ -2343,6 +2386,7 @@ class ChatEngine:
         api_key: str | None,
         model: str,
         protocol: LLMProtocol,
+        side: bool = False,
     ) -> Iterator[ChatEvent]:
         """After the read-tool cap, let the model summarize the last result once.
 
@@ -2360,7 +2404,10 @@ class ChatEngine:
         yield ("turn_status", {"state": "thinking"})  # v87-F7: the final pass waits too
         shrink_budget: int | None = None  # v73-F1: same one-shrink rule as the loop
         while True:
-            messages = [*self._turn_messages(chat_id, budget_cap=shrink_budget), final_nudge]
+            messages = [
+                *self._turn_messages(chat_id, budget_cap=shrink_budget, side=side),
+                final_nudge,
+            ]
             try:
                 for chunk in self._chat_stream_with_retry(
                     base_url,

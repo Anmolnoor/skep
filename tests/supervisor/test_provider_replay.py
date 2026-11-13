@@ -216,3 +216,40 @@ def test_an_outside_row_landing_while_a_card_waits_replays_after_its_result(
     events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "?"}).text)
     assert events[-1] == ("done", {"state": "complete"})
     assert '<untrusted source=\\"webhook:ci\\">' in json.dumps(provider.chat_bodies()[-1])
+
+
+def test_a_btw_beside_a_pending_card_replays_on_every_strict_protocol(
+    config: SupervisorConfig, provider: Any
+) -> None:
+    """W23 (B62): a /btw while a card waits replayed the card's tool call with
+    no result yet, and four strict protocols refused the side turn. The side
+    turn leaves the open round out; the card stays pending, and its confirm
+    and the next turn replay cleanly too."""
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": provider.base_url, "default_model": "m",
+              "protocol": provider.protocol, "api_key": "sk-fake"},
+    )  # fmt: skip
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    provider.script_tool_call("set_policy", {"auto_approve": True})
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "on"}).text)
+    assert events[-1] == ("done", {"state": "awaiting_confirmation"})
+    provider.script_reply("side answer")
+    events = sse_events(
+        client.post(
+            f"/api/chats/{chat_id}/messages", json={"content": "what time?", "read_only": True}
+        ).text
+    )
+    assert events[-1] == ("done", {"state": "complete"}), events
+    side = json.dumps(provider.chat_bodies()[-1])
+    assert 'auto_approve\\": true' not in side and '"auto_approve": true' not in side
+    actions = client.get(f"/api/chats/{chat_id}").json()["actions"]
+    assert [a["status"] for a in actions] == ["proposed"]
+    provider.script_reply("done")
+    confirm = f"/api/chats/{chat_id}/actions/{actions[0]['action_id']}/confirm"
+    events = sse_events(client.post(confirm).text)
+    assert events[-1] == ("done", {"state": "complete"}), events
+    provider.script_reply("seen")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "?"}).text)
+    assert events[-1] == ("done", {"state": "complete"}), events
