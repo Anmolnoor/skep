@@ -51,6 +51,12 @@ PROJECT_POLICY_KEYS = frozenset(
         # Shape-validated here; known-name checks live at attach time and,
         # fail-closed, at resolve time.
         "policy_groups",
+        # ES-F141 (ADR 0060): the top rung of the per-project trust ramp (I6).
+        # On an unlocked project decide() answers a sandboxed worker's default
+        # asks, dispatch runs in-turn and a G10-confirmed patch lands. Saved on
+        # only with a pinned verify_command, a usable sandbox and an approved
+        # baseline (registry.unlocked_block_reason).
+        "unlocked",
     }
 )
 
@@ -224,7 +230,12 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
             normalized["allowed_plugin_risks"],
             field="allowed_plugin_risks",
         )
-    for field in ("allow_git_mutation", "auto_apply_verified_patch", "auto_dispatch_allowed"):
+    for field in (
+        "allow_git_mutation",
+        "auto_apply_verified_patch",
+        "auto_dispatch_allowed",
+        "unlocked",
+    ):
         if field in normalized:
             normalized[field] = _require_bool(normalized[field], field=field)
     if normalized.get("auto_apply_branch") is not None:
@@ -260,7 +271,7 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
 # Named, reusable bundles of CONVENIENCE grants, live-composed into run policy
 # for every project that attaches them (edit once, every attached project
 # follows on its next dispatch). The trust-ramp keys (auto_apply_*,
-# allow_git_mutation, auto_dispatch_allowed, trusted_workspace_roots) are
+# allow_git_mutation, auto_dispatch_allowed, trusted_workspace_roots, unlocked) are
 # deliberately ungroupable: the trust ramp is climbed per project (I6), never
 # bundled. Group contents pass the same validators as project policy (I5).
 

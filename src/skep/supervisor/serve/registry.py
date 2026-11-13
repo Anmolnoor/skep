@@ -25,6 +25,7 @@ from ...profile import load_profile, profile_path, run_personal_setup
 from ..autonomy import project_policy_dispatch_decision, run_request_resolved_decision
 from ..dispatch import auto_apply_decision
 from ..packs import PolicyPack, builtin_policy_packs, get_policy_pack
+from ..policy_layers import baseline_guard
 from ..projects import (
     ProjectBinding,
     first_party_project_policy,
@@ -34,6 +35,7 @@ from ..projects import (
     project_to_dict,
     validate_project_definition,
 )
+from ..sandbox import availability as sandbox_availability
 from ..scheduler import (
     make_schedule,
     make_template_schedule,
@@ -564,7 +566,41 @@ def _validate_project_binding(*, root: Path, run_store: RunStore, kind: str, val
         raise HTTPException(status_code=400, detail=f"unknown template {value!r}")
 
 
+def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | None:
+    """ES-F141 (ADR 0060): why ``unlocked=true`` may not be saved, or None.
+    The mode stands on three things: G10 re-runs a command the PROJECT
+    pinned (I2), its runs are sandboxed (I12), and decide() has a baseline
+    to answer under — on a zero-state or tampered home every worker ask is
+    the guard's, so the mode would silently answer nothing (I8)."""
+    if policy.get("unlocked") is not True:
+        return None
+    if not str(policy.get("verify_command") or "").strip():
+        return (
+            "unlocked=true needs a pinned verify_command: a patch lands without a "
+            "human only after G10 re-runs the project's own check (I2). Pin one "
+            "(--verify-command, or verify_command in policy_overrides)."
+        )
+    probe = sandbox_availability()
+    if not probe.usable:
+        return (
+            "unlocked=true needs a usable sandbox (unlocked runs are sandboxed) and "
+            f"this host has none: {probe.reason or 'unavailable'}: "
+            f"{probe.detail or 'no detail'}. Fix it (see `skep doctor`) or leave unlocked off."
+        )
+    guard = sorted(set(baseline_guard(run_store).values()))
+    if guard:
+        return (
+            f"unlocked=true needs an approved policy baseline (this home: {', '.join(guard)}); "
+            "every worker ask would still be the baseline's. Approve one first "
+            "(`skep policy approve`)."
+        )
+    return None
+
+
 def _persist_project(run_store: RunStore, project: Any) -> dict[str, Any]:
+    block = unlocked_block_reason(run_store, project.policy)
+    if block is not None:
+        raise HTTPException(status_code=400, detail=block)
     run_store.add_project_policy(
         project_id=project.project_id,
         name=project.name,
@@ -626,6 +662,8 @@ def _dangerous_grant_warnings(policy: dict[str, Any]) -> list[str]:
         warnings.append("auto_dispatch_allowed")
     if policy.get("auto_apply_verified_patch") is True:
         warnings.append("auto_apply_verified_patch")
+    if policy.get("unlocked") is True:
+        warnings.append("unlocked")
     return warnings
 
 

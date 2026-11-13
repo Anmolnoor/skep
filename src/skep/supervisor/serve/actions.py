@@ -979,7 +979,13 @@ def copy_project_policy(store: RunStore, *, src: str, dst: str) -> dict[str, Any
     target = project_from_store(store, dst)
     if target is None:
         raise HTTPException(status_code=404, detail=f"no project {dst!r}")
-    overlay = {key: value for key, value in source.policy.items() if key in PROJECT_POLICY_KEYS}
+    # ES-F141 (ADR 0060, I6): unlocked is climbed per project, on its own
+    # HIGH card — a copy never carries it.
+    overlay = {
+        key: value
+        for key, value in source.policy.items()
+        if key in PROJECT_POLICY_KEYS and key != "unlocked"
+    }
     store.add_project_policy(
         project_id=target.project_id,
         name=target.name,

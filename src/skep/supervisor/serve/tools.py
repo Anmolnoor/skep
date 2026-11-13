@@ -1714,6 +1714,13 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "groups matching the repo's toolchain — suggestions never "
                 "attach silently, pass them here to attach)",
             },
+            "unlocked": {
+                "type": "boolean",
+                "description": "zero-ask mode (ADR 0060): the project's sandboxed "
+                "workers stop asking about commands and hosts no rule names, and "
+                "verified patches land on skep/*. Set it ONLY when the user asks to "
+                "unlock the project; true is a HIGH card, false turns it off",
+            },
             "policy_overrides": {"type": "object"},
             "seed_default_schedules": {"type": "boolean"},
         },
@@ -5246,6 +5253,10 @@ def _execute_mutation(
             if not isinstance(args["groups"], list):
                 raise ValueError("groups must be a list of policy group names")
             overrides.setdefault("policy_groups", [str(group) for group in args["groups"]])
+        if args.get("unlocked") is not None:
+            # ES-F141: sugar like engine=; the preconditions are vetted where
+            # every face's write lands (registry.unlocked_block_reason, I5).
+            overrides.setdefault("unlocked", bool(args["unlocked"]))
         return setup_project_record(
             run_store=store,
             root=repos_root(holder),

@@ -284,6 +284,7 @@ registry. Use `skep skill --help` for the full subcommand list.
 ```sh
 skep project preview REPO [--pack PACK] [--phase PHASE]
 skep project setup   REPO [--engine ENGINE] [--verify-command CMD] [--group NAME]
+                     [--unlocked | --no-unlocked]
 skep project list
 skep project show    PROJECT_ID
 skep project set-phase PROJECT_ID PHASE
@@ -307,7 +308,13 @@ as `GET` / `DELETE /api/policy/rules` and the chat `revoke_policy_rule` card.
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
 from the repo's own entry point (v91); an explicit `--verify-command` always
-wins. `set-phase` moves the trust-ramp defaults (build → maintain).
+wins. `--unlocked` is the top rung of the trust ramp (ADR 0060): the
+project's sandboxed workers stop asking about commands and hosts no rule
+names, dispatch needs no card and a G10-confirmed patch lands on `skep/*`;
+denies, named asks and the floor still hold. It needs a pinned verify
+command, a usable sandbox and an approved baseline; `--no-unlocked` turns it
+off. `set-phase` moves the trust-ramp defaults (build → maintain) and drops
+`unlocked`.
 `policy registry` lists every policy setting skep has (type, default, the
 layers that may set it); `policy rsop` is the resultant policy for a repo —
 each key with the layer that decided it and the layers it overrode, the
