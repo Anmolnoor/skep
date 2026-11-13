@@ -18,7 +18,8 @@ decides on its own and the stricter of the two verdicts stands
 passes through, as it does for the baseline (ADR 0056 D2). The floor is above
 all of it (I4): it is already ``deny``, and nothing is stricter.
 
-No chat (REST, the CLI, the hook) means no role layer. A chat whose stored
+A role naming no template acts as ``assistant`` (ADR 0059 D14): every chat
+has a role layer. No chat (REST, the CLI, the hook) means none. A chat whose stored
 role is NULL — from before every chat recorded one — is an ``assistant`` chat
 (ADR 0059 decision #4, ``role_for_chat``).
 
@@ -70,7 +71,7 @@ class Role(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,39}$")
-    # A template name (decision #6) or None: a role with no policy layer.
+    # A template name (decision #6) or None: acts as assistant (D14, ``template``).
     policy_layer: str | None = None
     system_prompt: str = Field(default="", max_length=2000)
     default_castes: tuple[str, ...] = ()
@@ -99,12 +100,16 @@ class Role(BaseModel):
     def label(self) -> str:
         return f"{ROLE_LAYER}:{self.name}"
 
-    def layer(self) -> Layer | None:
+    @property
+    def template(self) -> str:
+        """The template the role layer is built from. D14 (ADR 0059): a role
+        naming none acts as assistant until it gets one — never as no role."""
+        return self.policy_layer or ROLE_LESS_CHAT_ROLE
+
+    def layer(self) -> Layer:
         """The ``role`` slot's layer: the bound template's rules, relabelled.
         Rules only — knobs stay with the baseline that enforces them."""
-        if self.policy_layer is None:
-            return None
-        template = load_policy_template(self.policy_layer).layer()
+        template = load_policy_template(self.template).layer()
         return Layer(ROLE_LAYER, self.label, rules=template.rules)
 
     def view(self) -> dict[str, Any]:
@@ -224,8 +229,6 @@ def _role_hits(role: Role, scope: str, action: str, value: str) -> list[PolicyDe
     """The role layer's rule per part of the action, None where it has none.
     A chained shell line is judged per simple command (B3-F7's rule)."""
     layer = role.layer()
-    if layer is None:
-        return []
     scopes = resolve_stack([layer]).scopes()
     parts = (shell_segments(value) or []) if scope == "shell" and action == "run" else [value]
     hits = [decide(scopes, scope, action, part, template=layer.label) for part in parts]
@@ -249,8 +252,7 @@ def role_denies_every(
     if value is not None:
         hit = role_decision(role, scope, action, value)
         return hit if hit is not None and hit.verdict == "deny" else None
-    layer = role.layer()
-    rules = [r for r in layer.rules if (r.scope, r.action) == (scope, action)] if layer else []
+    rules = [r for r in role.layer().rules if (r.scope, r.action) == (scope, action)]
     if not any(r.pattern == "*" for r in rules) or any(r.verdict != "deny" for r in rules):
         return None
     return role_decision(role, scope, action, "*")
@@ -268,10 +270,11 @@ def catch_all_asks_only(role: Role, scope: str, action: str, value: str) -> bool
     the action — no deny, no named ask; at most its catch-all ``*`` ask
     (``shell-learnable``, ``shell-gated``, ``net-gated``, …), which is a
     default a human's grant answers, not a ceiling."""
-    layer = role.layer()
-    if layer is None:
-        return True
-    stars = {r.rule_id for r in layer.rules if r.verdict == "require_approval" and r.pattern == "*"}
+    stars = {
+        r.rule_id
+        for r in role.layer().rules
+        if r.verdict == "require_approval" and r.pattern == "*"
+    }
     return all(
         hit is None
         or hit.verdict == "allow"

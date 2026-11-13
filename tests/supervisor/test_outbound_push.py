@@ -163,12 +163,14 @@ def test_notification_level_filters_delivery_at_the_choke_point(
         )
         assert push("tick digest", "info") is False
         assert push("pending gate", "action_needed") is True
+        assert push("your click's reply", "reply") is True  # an answer, not a notice
         # 'none': nothing delivers, whatever the kind.
         store.upsert_channel_config(
             ChannelConfig(channel="discord", enabled=True, notification_level="none")
         )
         assert push("anything", "action_needed") is False
-        assert sent == ["digest", "gate", "pending gate"]
+        assert push("still answered", "reply") is True
+        assert sent == ["digest", "gate", "pending gate", "your click's reply", "still answered"]
     finally:
         store.close()
 

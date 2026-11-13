@@ -55,3 +55,59 @@ def test_a_reloaded_policy_write_card_keeps_its_replay(config: SupervisorConfig)
     live, fetched = _live_and_fetched(config, ("set_policy", {"auto_approve": True}))
     assert fetched["card"] == live["card"]
     assert fetched.get("decision") == live.get("decision")
+
+
+def test_l6_a_gate_card_and_a_follow_up_card_carry_a_why_line(
+    config: SupervisorConfig, tmp_path: Any
+) -> None:
+    """L6 (ES-F104): a worker's approval gate mirrored into the chat records
+    the gate's own decision, so its why-line names what the worker asked; a
+    card raised by an unattended follow-up turn has the same why-line an
+    attended card gets (both from the server's record)."""
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+    from skep.supervisor.onboard import verdict_why
+    from skep.supervisor.serve.chat import ChatEngine
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.run_status import notify_run_terminal
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    onboard_transparency(config.home, verbose=True)  # why-lines on
+    ollama = FakeOllama(api_key=None).start()
+    client = serve_client(config)
+    client.put("/api/llm/config", json={"base_url": ollama.base_url, "default_model": "m"})
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=tmp_path, instructions="fix", budget=DEFAULT_BUDGET)
+        store.create_run(task, repo=tmp_path, ref=None, execution_mode="sandbox")
+        action = store.add_chat_action(chat_id, tool="dispatch_run", args={})
+        store.resolve_chat_action(action, status="confirmed", result={"task_id": task.task_id})
+        store.enqueue_approval(
+            task.task_id, action="shell.run", reason="worker asks shell.run uv sync",
+            decided_by="capability.require_approval.delegated_ask",
+        )  # fmt: skip
+        store.transition(task.task_id, "pending_approval", "shell.run gate")
+        notify_run_terminal(store, config.home, task.task_id)
+
+        holder = ConfigHolder(config, store)
+        engine = ChatEngine(
+            store=store, holder=holder, runner=Dispatcher(store=store, holder=holder),
+            home=config.home,
+        )  # fmt: skip
+        ollama.script_tool_call("set_personality", {"value": "terse"})
+        llm = engine.resolved_llm(store.get_chat(chat_id))
+        base_url, api_key, model, protocol = llm
+        list(engine.turn_events(
+            chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+            unattended=True,
+        ))  # fmt: skip
+    finally:
+        store.close()
+        ollama.stop()
+    by_tool = {a["tool"]: a for a in client.get(f"/api/chats/{chat_id}").json()["actions"]}
+    gate = by_tool["approve_review"]
+    assert gate["why"] == "asked: worker asks shell.run uv sync"
+    follow = by_tool["set_personality"]
+    assert follow["why"] and follow["why"] == verdict_why(
+        follow.get("decision"), tool="set_personality"
+    )

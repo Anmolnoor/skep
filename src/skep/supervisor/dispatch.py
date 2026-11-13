@@ -31,7 +31,9 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -58,6 +60,7 @@ from .apply import RefreshError, refresh_clone, repo_default_branch, resolve_com
 from .autonomy import AutonomyDecision, AutonomyVerdict
 from .config import SupervisorConfig
 from .contracts_io import (
+    DEFAULT_BUDGET,
     DEFAULT_PERMISSIONS,
     mint_task,
     read_event_log,
@@ -65,16 +68,23 @@ from .contracts_io import (
     write_task_file,
 )
 from .ingest import IngestOutcome, ingest_run
-from .monitor import MonitorVerdict, kill_session, synthesize_terminal, watch_worker
-from .netproxy import FilteringProxy, control_plane_ports
+from .monitor import (
+    AdoptedWorker,
+    MonitorVerdict,
+    kill_session,
+    synthesize_terminal,
+    watch_worker,
+)
+from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
 from .provider_hosts import provider_hosts_for
+from .provider_relay import provider_relay_for_run, readopted_relay, relay_worker_env
 from .providers import ProviderProfile
 from .reverify import reverify_run
-from .sandbox import NetworkPolicy, SandboxUnavailableError
+from .sandbox import PODMAN, NetworkPolicy, SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
 from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
-from .store import RunStore
+from .store import RunRecord, RunStore, owner_alive, process_owner
 from .worker_state import (
     prior_task_from_audit,
     resume_checkpoint_version,
@@ -229,6 +239,43 @@ def _resume_workspace(
     if workspace.parent not in roots or not is_linked_worktree(repo, workspace):
         return None
     return workspace
+
+
+def _binding_candidates(config: SupervisorConfig, repo: Path) -> list[tuple[str, str]]:
+    # Managed clones are slug-bound (registry name == directory name), so
+    # the safety-net lookup must offer the slug too — path-only matching
+    # dropped the pin for every slug-bound project that reached run_task
+    # without an explicit verify_command (the authwapi acceptance hole).
+    return [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+
+
+def _project_policy(run_store: RunStore, config: SupervisorConfig, repo: Path) -> dict[str, Any]:
+    """The project policy run_task falls back to for knobs its caller did
+    not pass (the verify pin, the landing branch, the codex login opt-in)."""
+    from .policy_resolver import run_policy_for_repo
+
+    candidates = _binding_candidates(config, repo)
+    return run_policy_for_repo(run_store, config, repo, binding_candidates=candidates)
+
+
+def _codex_login_setup_command(run_store: RunStore, config: SupervisorConfig, repo: Path) -> str:
+    """ES-F123 follow-up (I9): the CLI line that opts this repo in and changes
+    nothing else — a re-setup needs the strategy again, and its default
+    ``--phase build`` would move a project in another phase."""
+    import shlex
+
+    from .policy_resolver import _match_project_for_repo
+
+    match = _match_project_for_repo(
+        run_store, repo, binding_candidates=_binding_candidates(config, repo)
+    )
+    where = (
+        "--strategy <strategy>"
+        if match is None
+        else f"--project-id {shlex.quote(match.project.project_id)} "
+        f"--strategy {match.project.strategy} --phase {match.project.phase}"
+    )
+    return f"skep project setup {shlex.quote(str(repo))} {where} --codex-chatgpt-login"
 
 
 def _toolchain_env(workspace: Path, engine: CodingEngine, cache_root: Path) -> dict[str, str]:
@@ -411,6 +458,8 @@ def run_task(
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
     worker_argv = engine.argv if (worker_kind == "coding" and engine.external) else None
+    codex_auth: str | None = None  # ES-F122: set only when the plan login is used
+    run_login: Path | None = None
     if execution_mode == "sandbox" and config.sandbox:
         # ES-F1 (B47, I12): every sandbox-mode run, not only external engines
         # (v94-F4) — the builtin worker and run_code's script caste took the
@@ -454,23 +503,48 @@ def run_task(
                 "to another engine (`skep project setup --engine builtin`)"
             )
         if engine.auth_env and not any(os.environ.get(var) for var in engine.auth_env):
-            raise ValueError(
+            refusal = (
                 f"coding_engine {engine.name!r}: NO AUTH ENV — set one of "
                 f"{'/'.join(engine.auth_env)} in the environment the worker inherits "
                 "(the daemon reads <home>/serve.env at startup; `skep run` uses your "
                 "shell) — the line `skep doctor` prints for this engine"
             )
-    if not verify_command or auto_apply_branch is None:
-        from .policy_resolver import run_policy_for_repo
+            # ES-F122 (D20): a codex run on a project that opted in may use the
+            # operator's ChatGPT plan login instead — checked HERE, before any
+            # run record, against the run's whole budget (codex_login.py).
+            if engine.login_host is None:
+                raise ValueError(refusal)
+            from .codex_login import AUTH_SOURCE, POLICY_KEY, login_status
 
-        # Managed clones are slug-bound (registry name == directory name), so
-        # the safety-net lookup must offer the slug too — path-only matching
-        # dropped the pin for every slug-bound project that reached run_task
-        # without an explicit verify_command (the authwapi acceptance hole).
-        candidates = (
-            [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
-        )
-        project_policy = run_policy_for_repo(run_store, config, repo, binding_candidates=candidates)
+            if _project_policy(run_store, config, repo).get(POLICY_KEY) is not True:
+                if login_status().present:
+                    # ES-F123 (I9): name the other way in when it is right here.
+                    refusal += (
+                        " — or let this project's codex runs use your ChatGPT plan "
+                        f"login: `{_codex_login_setup_command(run_store, config, repo)}` "
+                        "(chat: setup_project codex_chatgpt_login=true)"
+                    )
+                raise ValueError(refusal)
+            login = login_status(min_seconds=(budget or DEFAULT_BUDGET).wall_clock_seconds)
+            if login.problem is not None:
+                raise ValueError(
+                    f"coding_engine {engine.name!r}: this project uses your ChatGPT plan "
+                    f"login, but {login.problem} (or set OPENAI_API_KEY instead)"
+                )
+            codex_auth = AUTH_SOURCE
+            permissions = permissions.model_copy(
+                update={
+                    "provider_hosts": provider_hosts_for(
+                        run_store,
+                        config.home.parent,
+                        caste=worker_kind,
+                        engine=engine.name,
+                        chatgpt_login=True,
+                    )
+                }
+            )
+    if not verify_command or auto_apply_branch is None:
+        project_policy = _project_policy(run_store, config, repo)
         if not verify_command:
             pinned = project_policy.get("verify_command")
             # A non-string overlay value is treated as unset; resolve_run_policy is
@@ -644,6 +718,9 @@ def run_task(
             # inheriting a default that never ran (I8).
             coding_engine=engine.name if worker_kind == "coding" else None,
         )
+        # ADR 0060 §5: named with the row, not at spawn — a serve starting while
+        # this run is still being set up must see it is supervised.
+        run_store.claim_run_supervisor(task.task_id, expected=None, owner=process_owner())
         if on_run_created is not None:
             on_run_created(task.task_id)
 
@@ -694,20 +771,49 @@ def run_task(
         # so the proxy also opens an AF_UNIX door and dispatch bind-mounts it in.
         domains = effective_network_domains(task)
         proxy_unix_path: str | None = None
-        if domains and domains != ("*",):
-            if execution_mode == "sandbox" and sandbox_backend() == "bubblewrap":
+        # ADR 0062 (V6b): with the switch on, a builtin worker's model calls
+        # go through a relay route on this same proxy, which holds the key.
+        # An allow-all run gets a relay-only proxy (empty allowlist): it
+        # reaches the port because allow-all permits loopback.
+        relay, relay_model, relay_note = provider_relay_for_run(
+            run_store, config, task, builtin=worker_argv is None
+        )
+        if relay is not None and not domains:
+            relay, relay_note = None, "not used: the run has no network"
+        if (
+            relay is not None
+            and domains == ("*",)
+            and execution_mode == "sandbox"
+            and config.sandbox
+            and resolve_sandbox_backend(config, NetworkPolicy(allow=domains)) == PODMAN
+        ):
+            # A podman run has its own network namespace; a domain-list run
+            # already falls back to the native backend, an allow-all one not.
+            relay, relay_note = None, "not used: a podman run cannot reach the host loopback"
+        if (domains and domains != ("*",)) or relay is not None:
+            if (
+                execution_mode == "sandbox"
+                and sandbox_backend() == "bubblewrap"
+                and domains != ("*",)
+            ):
                 # AF_UNIX 108-char limit: a short host dir, cleaned in finally.
                 proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
                 proxy_unix_path = str(Path(proxy_socket_dir) / "p.sock")
             try:
-                # ES-F6 (B05): loopback stays open for the project's own test
-                # servers, never for skep serve's port (the control plane).
+                # D6: loopback only on the run's ports; ES-F6 (B05): never on
+                # skep serve's port (the control plane).
                 proxy = FilteringProxy(
-                    domains,
+                    () if domains == ("*",) else domains,
                     unix_socket_path=proxy_unix_path,
                     denied_loopback_ports=control_plane_ports(config.home),
                     # W30: named in the 403 as needing approval, never admitted.
                     asks=task.permissions.network_ask,
+                    loopback_ports=run_loopback_ports(
+                        task.permissions.loopback_ports,
+                        task.permissions.provider_hosts,
+                        config.home,
+                    ),
+                    relay=relay,
                 ).start()
             except OSError as exc:
                 return finish_before_worker(
@@ -718,18 +824,16 @@ def run_task(
         provider_routing, routed_profile = _resolve_provider_routing(
             run_store, project_context=project_context, task=task
         )
+        dispatched_fields: dict[str, Any] = {}
+        if provider_routing is not None:
+            dispatched_fields["provider_routing"] = {
+                "provider_id": provider_routing.provider_id,
+                "reason": provider_routing.reason,
+            }
+        if relay_note != "off":  # off: the record reads as it did before ADR 0062
+            dispatched_fields["provider_key_relay"] = relay_note
         dispatched_detail = (
-            json.dumps(
-                {
-                    "provider_routing": {
-                        "provider_id": provider_routing.provider_id,
-                        "reason": provider_routing.reason,
-                    }
-                },
-                ensure_ascii=True,
-            )
-            if provider_routing is not None
-            else None
+            json.dumps(dispatched_fields, ensure_ascii=True) if dispatched_fields else None
         )
         routed_env: dict[str, str] = {}
         if routed_profile is not None and routed_profile.protocol == "ollama":
@@ -745,8 +849,33 @@ def run_task(
 
         cache_root = project_cache_root(run_store, config, repo)
         routed_env.update(_toolchain_env(workspace, engine, cache_root))
+        if codex_auth is not None:
+            # ES-F122 (D20): the run's own login copy — in its audit dir, which
+            # every other run's sandbox masks, linked from its CODEX_HOME and
+            # bound back for this run only; removed in the finally below
+            # however the run ends. The record names the source, never a
+            # value (I8).
+            from .codex_login import write_run_login
+            from .secret_floor import CODEX_RUN_LOGIN
+
+            try:
+                run_login = write_run_login(
+                    Path(routed_env["CODEX_HOME"]),
+                    audit_task_dir / CODEX_RUN_LOGIN,
+                    min_seconds=task.budget.wall_clock_seconds,
+                )
+            except (ValueError, OSError) as exc:
+                return finish_before_worker(reason="codex_login_unusable", summary=str(exc))
+            detail = json.loads(dispatched_detail) if dispatched_detail else {}
+            dispatched_detail = json.dumps({**detail, "codex_auth": codex_auth})
+        if relay is not None and proxy is not None:
+            routed_env.update(relay_worker_env(relay, relay_model, proxy.port))
         run_store.transition(task.task_id, "dispatched", dispatched_detail)
         log_path = audit_task_dir / "worker.log"
+        if codex_auth is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"codex_auth={codex_auth}: the operator's ChatGPT plan login\n")
         # W31: the second carrier of GIT_ALLOW_PROTOCOL=file — git config only
         # task worktrees include, which an emptied env still meets; read-only
         # in the sandbox, editable in workspace mode (there is no wall).
@@ -767,6 +896,8 @@ def run_task(
                 # must outlive the worktree), so the wall needs a door for it.
                 extra_writable=(cache_root,),
                 write_denied=() if git_pin is None else (git_pin,),
+                unmasked=() if run_login is None else (run_login,),
+                relay=relay if proxy is not None else None,
             )
         except SandboxUnavailableError as exc:
             # ES-F1 backstop: the up-front check passed but the backend the
@@ -778,7 +909,17 @@ def run_task(
                 reason="spawn_failed",
                 summary=f"Worker process could not be started: {exc}",
             )
-        run_store.transition(task.task_id, "running", f"pid {process.pid}")
+        # ADR 0060: pid AND start time (a pid alone is reused) and the proxy
+        # port a re-adopting serve must rebind.
+        owner = process_owner(process.pid)
+        running_detail = f"pid {process.pid}"
+        if owner is not None:
+            running_detail += f" started {json.loads(owner)['started']}"
+        if proxy is not None:
+            running_detail += f" proxy port {proxy.port}"
+        if proxy_unix_path is not None:
+            running_detail += f" proxy socket {proxy_unix_path}"
+        run_store.transition(task.task_id, "running", running_detail)
 
         verdict = watch_worker(
             process,
@@ -843,6 +984,8 @@ def run_task(
                 # v88-F4 (I2): when the project pinned what verification means,
                 # G10 re-runs THAT — not the command the worker nominated.
                 verify_command=verify_command,
+                # D6 (I2): the project's loopback ports, as the worker had them.
+                loopback_ports=tuple(task.permissions.loopback_ports),
                 # The re-run is afforded the run's own wall-clock budget —
                 # the flat 300s cap timed out a healthy 10-minute pinned
                 # suite (dogfood 019fc72c, exit -1).
@@ -879,6 +1022,8 @@ def run_task(
                 cleanup_orphans(repo, worktrees_root, keep=_keep_worktree_names(run_store))
         return outcome
     finally:
+        if run_login is not None:
+            run_login.unlink(missing_ok=True)
         _ACTIVE.discard(*active_names)
         if proxy is not None:
             proxy.stop()
@@ -971,21 +1116,36 @@ def dispatch_parallel(
             run_store.close()
 
 
+# ADR 0060: "pid N[ started <lstart>][ proxy port P][ proxy socket S]" — the
+# running transition.
+_WORKER_DETAIL = re.compile(
+    r"pid (\d+)(?: started (.+?))?(?: proxy port (\d+))?(?: proxy socket (.+))?"
+)
+
+
+def _recorded_worker(run_store: RunStore, task_id: str) -> re.Match[str] | None:
+    """The run's last ``running`` transition parsed (ADR 0060): pid, start
+    time (None on rows written before ES-F131) and proxy port."""
+    for state, detail, _ in reversed(run_store.transitions_for(task_id)):
+        match = _WORKER_DETAIL.fullmatch(detail or "") if state == "running" else None
+        if match is not None:
+            return match
+    return None
+
+
 def _live_worker_pid(run_store: RunStore, task_id: str) -> int | None:
     """The recorded worker pid when that process is still THIS run's worker.
 
     ES-F5 (B10): a pid outlives a reboot as a number only — it is ours when
     its command line still names this task (the worker argv carries the task
-    file path); a zombie's or a stranger's does not."""
-    pid = next(
-        (
-            int(detail.split()[1])
-            for state, detail, _ in reversed(run_store.transitions_for(task_id))
-            if state == "running" and detail and re.fullmatch(r"pid \d+", detail)
-        ),
-        None,
-    )
-    if pid is None:
+    file path); a zombie's or a stranger's does not. ADR 0060: when the start
+    time was recorded, the process must also have started then (W27's pair) —
+    a reused pid is a stranger even if its argv happens to match."""
+    worker = _recorded_worker(run_store, task_id)
+    if worker is None:
+        return None
+    pid, started = int(worker[1]), worker[2]
+    if started is not None and not owner_alive(json.dumps({"pid": pid, "started": started})):
         return None
     probe = subprocess.run(
         ["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True, check=False
@@ -1031,6 +1191,7 @@ def recover_interrupted_runs(
     config: SupervisorConfig,
     *,
     on_run_finished: Callable[[str], None] | None = None,
+    on_adopted_finished: Callable[[str], None] | None = None,
 ) -> list[str]:
     """Reap runs stranded by a supervisor death (v59-F10).
 
@@ -1040,18 +1201,41 @@ def recover_interrupted_runs(
     valid result envelope that nobody ingested. On startup: a run with a valid
     envelope takes the STANDARD ingest path (a late deposit is still a
     deposit, G10 re-verification included); anything else becomes an honest
-    ``worker_crashed`` with reason ``supervisor_restart``. Returns the task
-    ids it touched.
+    ``worker_crashed`` with reason ``supervisor_restart``. ADR 0060: a live,
+    verified worker is re-adopted instead and finishes on a daemon thread
+    (``on_adopted_finished`` — a live run's finish, chat turn included —
+    else ``on_run_finished`` fires from there); a run whose supervisor is
+    still alive is left alone. Returns the task ids it touched.
     """
     recovered: list[str] = []
+    me = process_owner()
     for record in run_store.runs_with_states(_INTERRUPTED_STATES):
         task_id = record.task_id
+        supervisor = run_store.run_supervisor(task_id)
+        if supervisor is not None and supervisor != me and owner_alive(supervisor):
+            continue  # ADR 0060 §5: a live serve or CLI still supervises it
+        if not run_store.claim_run_supervisor(task_id, expected=supervisor, owner=me):
+            continue  # §5: another serve starting with this one took it first
         # ES-F5 (B10, I1 I12): the detached worker may still be alive — with no
         # babysitter, no budget, and the proxy gone. Kill its whole session
         # BEFORE reading its evidence or touching its worktree: nothing may
-        # write there once recovery decides. (Re-adopting would need a monitor
-        # for a non-child; the kill is the smaller honest answer.)
+        # write there once recovery decides. ADR 0060 (D2): unless the worker is
+        # verifiably the one a serve started (pid + start time) — then this
+        # serve re-adopts it and supervises it to completion, kill switch
+        # (`readopt_workers`) permitting.
         live_pid = _live_worker_pid(run_store, task_id)
+        worker = _recorded_worker(run_store, task_id)
+        if (
+            live_pid is not None
+            and worker is not None
+            and worker[2]
+            and config.readopt_workers
+            and _adopt_worker(
+                run_store, config, record, worker, on_adopted_finished or on_run_finished
+            )
+        ):
+            recovered.append(task_id)
+            continue
         if live_pid is not None:
             kill_session(live_pid)
             deadline = time.monotonic() + 5.0
@@ -1104,71 +1288,185 @@ def recover_interrupted_runs(
                     reason="supervisor_restart",
                 ),
             )
-        repo = Path(record.repo)
-        outcome = ingest_run(
+        _finish_recovered(
+            run_store,
+            config,
+            record,
+            task,
+            verdict,
+            result if worker_reported else None,
+            result_path,
+            on_run_finished,
+        )
+        recovered.append(task_id)
+    return recovered
+
+
+def _finish_recovered(
+    run_store: RunStore,
+    config: SupervisorConfig,
+    record: RunRecord,
+    task: CodingWorkerTask,
+    verdict: MonitorVerdict,
+    result: CodingWorkerResult | None,
+    result_path: Path,
+    on_run_finished: Callable[[str], None] | None,
+) -> None:
+    """Ingest a recovered (or re-adopted, ADR 0060) run: the standard ingest,
+    worktree keep rules and G10 re-verification, then the finish notice."""
+    task_id = record.task_id
+    workspace = Path(record.workspace or task.workspace)
+    repo = Path(record.repo)
+    outcome = ingest_run(
+        store=run_store,
+        task=task,
+        verdict=verdict,
+        result=result,
+        workspace=workspace,
+        audit_dir=config.audit_dir,
+        result_path=result_path,
+        contract_range=config.contract_range,
+        # ADR 0060: as the live path — an adopted run lands as if never restarted.
+        delivery_root=config.home.parent / "workspace",
+    )
+    # v72-F8: the whole point of the salvaged checkpoint — a restart-
+    # crashed run keeps its worktree so resume_run continues in place.
+    keep_for_resume = outcome.record.state == TaskState.FAILED.value or (
+        outcome.record.state in _RESUMABLE_CRASH_STATES
+        and salvaged_checkpoint_version(config, task_id) >= 2
+    )
+    recovered_completed = outcome.record.state == TaskState.COMPLETED.value
+    if (
+        outcome.record.state != TaskState.PENDING_APPROVAL.value
+        and not keep_for_resume
+        and not recovered_completed
+    ):
+        remove_worktree(repo, workspace)
+    if recovered_completed:
+        # G10 unchanged: a late-ingested completed claim is re-verified in
+        # a clean worktree before anyone may trust it. Auto-apply rules are
+        # deliberately NOT replayed on recovery — landing stays human.
+        # v88-F4: the recovery path has no ResolvedRunPolicy in hand, so it
+        # re-resolves the project's pinned verify_command from the repo. A
+        # crash must not silently downgrade G10 to the worker's own claim.
+        from .policy_resolver import run_policy_for_repo
+
+        # Slug-bound projects keep their pin on recovery too (0bda59d
+        # closed this for the live path; same candidates here).
+        recovery_candidates = (
+            [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+        )
+        recovery_policy = run_policy_for_repo(
+            run_store, config, repo, binding_candidates=recovery_candidates
+        )
+        reverify_run(
             store=run_store,
-            task=task,
-            verdict=verdict,
-            result=result if worker_reported else None,
-            workspace=workspace,
-            audit_dir=config.audit_dir,
-            result_path=result_path,
-            contract_range=config.contract_range,
+            task_id=task_id,
+            worker_outcome=outcome.record.verification_outcome,
+            repo=repo,
+            ref=record.ref,
+            config=config,
+            changed_files=tuple(result.changed_files) if result is not None else None,
+            verify_command=str(recovery_policy.get("verify_command") or ""),
+            # D6 (I2): the project's loopback ports, as the worker had them.
+            loopback_ports=tuple(recovery_policy.get("loopback_ports") or ()),
+            timeout_seconds=float(task.budget.wall_clock_seconds),  # as the live path
         )
-        # v72-F8: the whole point of the salvaged checkpoint — a restart-
-        # crashed run keeps its worktree so resume_run continues in place.
-        keep_for_resume = outcome.record.state == TaskState.FAILED.value or (
-            outcome.record.state in _RESUMABLE_CRASH_STATES
-            and salvaged_checkpoint_version(config, task_id) >= 2
-        )
-        recovered_completed = outcome.record.state == TaskState.COMPLETED.value
+        # v107-F1: same post-reverify keep answer as the live path.
+        reverify_record = run_store.reverification_for(task_id)
         if (
-            outcome.record.state != TaskState.PENDING_APPROVAL.value
-            and not keep_for_resume
-            and not recovered_completed
+            reverify_record is None
+            or reverify_record.confirmed
+            or (reverify_record.outcome == "not_applicable")
         ):
             remove_worktree(repo, workspace)
-        if recovered_completed:
-            # G10 unchanged: a late-ingested completed claim is re-verified in
-            # a clean worktree before anyone may trust it. Auto-apply rules are
-            # deliberately NOT replayed on recovery — landing stays human.
-            # v88-F4: the recovery path has no ResolvedRunPolicy in hand, so it
-            # re-resolves the project's pinned verify_command from the repo. A
-            # crash must not silently downgrade G10 to the worker's own claim.
-            from .policy_resolver import run_policy_for_repo
+    if on_run_finished is not None:
+        on_run_finished(task_id)
 
-            # Slug-bound projects keep their pin on recovery too (0bda59d
-            # closed this for the live path; same candidates here).
-            recovery_candidates = (
-                [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+
+def _adopt_worker(
+    run_store: RunStore,
+    config: SupervisorConfig,
+    record: RunRecord,
+    worker: re.Match[str],
+    on_run_finished: Callable[[str], None] | None,
+) -> bool:
+    """ADR 0060 (D2): supervise a live worker a previous serve started, on a
+    daemon thread, to the same ingest a never-restarted serve would run.
+    False when it cannot be adopted honestly — recovery then kills it."""
+    task_id = record.task_id
+    pid, started, port, unix_path = int(worker[1]), worker[2], worker[3], worker[4]
+    task = _task_from_audit(config, task_id)
+    if task is None or not record.workspace:
+        return False
+    proxy: FilteringProxy | None = None
+    if port is not None:
+        # Its Seatbelt profile and env name this port: rebind it or kill it —
+        # whatever else holds the port is not skep's filter (I12). On Linux
+        # the sandbox reaches the proxy through its socket's directory: listen
+        # again at the same path, in place of the dead listener's socket.
+        try:
+            if unix_path is not None and Path(unix_path).is_socket():
+                Path(unix_path).unlink()
+            domains = effective_network_domains(task)
+            proxy = FilteringProxy(
+                () if domains == ("*",) else domains,  # as the live path: relay-only
+                unix_socket_path=unix_path,
+                denied_loopback_ports=control_plane_ports(config.home),
+                asks=task.permissions.network_ask,
+                # D6: the run's loopback ports, as the live path's proxy had them
+                loopback_ports=run_loopback_ports(
+                    task.permissions.loopback_ports, task.permissions.provider_hosts, config.home
+                ),
+                port=int(port),
+                # ADR 0062: its worker holds a token, not the key
+                relay=readopted_relay(run_store, config, task_id),
+            ).start()
+        except OSError as exc:
+            run_store.transition(
+                task_id, record.state, f"supervisor restart: proxy port {port} not rebound: {exc}"
             )
-            recovery_policy = run_policy_for_repo(
-                run_store, config, repo, binding_candidates=recovery_candidates
+            return False
+    elapsed = (
+        time.time()
+        - datetime.strptime(started, "%a %b %d %H:%M:%S %Y").replace(tzinfo=UTC).timestamp()
+    )
+    run_store.transition(
+        task_id, record.state, f"supervisor restart: adopted live worker pid {pid} ({started})"
+    )
+
+    def supervise() -> None:
+        try:
+            try:
+                verdict = watch_worker(
+                    AdoptedWorker(pid, started),
+                    Path(record.workspace or "") / ".events" / f"{task_id}.ndjson",
+                    task_id=task_id,
+                    trace_id=task.trace_id,
+                    wall_clock_seconds=float(task.budget.wall_clock_seconds),
+                    grace_seconds=config.grace_seconds,
+                    heartbeat_seconds=config.heartbeat_seconds,
+                    # ponytail: liveness is a `ps` per poll; twice a second at most.
+                    poll_seconds=max(config.poll_seconds, 0.5),
+                    startup_seconds=config.startup_seconds,
+                    elapsed_seconds=elapsed,
+                )
+            finally:
+                if proxy is not None:
+                    proxy.stop()
+                if unix_path is not None:  # stop() unlinked the socket; its dir
+                    with suppress(OSError):
+                        Path(unix_path).parent.rmdir()
+            result_path = config.result_path(task_id)
+            result = _run_result(run_store, task_id, result_path)
+            _finish_recovered(
+                run_store, config, record, task, verdict, result, result_path, on_run_finished
             )
-            reverify_run(
-                store=run_store,
-                task_id=task_id,
-                worker_outcome=outcome.record.verification_outcome,
-                repo=repo,
-                ref=record.ref,
-                config=config,
-                changed_files=tuple(result.changed_files)
-                if worker_reported and result is not None
-                else None,
-                verify_command=str(recovery_policy.get("verify_command") or ""),
-            )
-            # v107-F1: same post-reverify keep answer as the live path.
-            reverify_record = run_store.reverification_for(task_id)
-            if (
-                reverify_record is None
-                or reverify_record.confirmed
-                or (reverify_record.outcome == "not_applicable")
-            ):
-                remove_worktree(repo, workspace)
-        recovered.append(task_id)
-        if on_run_finished is not None:
-            on_run_finished(task_id)
-    return recovered
+        except Exception:
+            logger.exception("supervising re-adopted run %s failed", task_id)
+
+    threading.Thread(target=supervise, name=f"skep-adopt-{task_id}", daemon=True).start()
+    return True
 
 
 def _task_from_audit(config: SupervisorConfig, task_id: str) -> CodingWorkerTask | None:

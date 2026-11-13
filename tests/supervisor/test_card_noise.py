@@ -154,19 +154,19 @@ def _transcript(env: Live) -> dict[str, Any]:
     s.confirm(c, card, keep="session")
     assert not s.ask(c, "again", uname, reply=True)
 
-    # t12: "df -h should always run" as a standing operator rule (f1-15, B20)
+    # t12: "df -h should always run" as a standing operator rule (f1-15, B20).
+    # D7 moved it: under this home's locked baseline set_operator_policy only
+    # tightens, so the allow is refused at proposal (re-approve the baseline).
     c = s.chat()
-    (card,) = s.ask(
+    assert not s.ask(
         c,
         "make df -h a standing rule",
         (
             "set_operator_policy",
             {"scope": "shell", "action": "run", "pattern": "df -h", "verdict": "allow"},
         ),
-        reply=False,
+        reply=True,
     )
-    env.ollama.script_reply("ok")
-    s.confirm(c, card)
 
     # t13: an assistant chat dispatches (B22) — refused at proposal, no card
     c = s.chat("assistant")
@@ -233,9 +233,10 @@ def _transcript(env: Live) -> dict[str, Any]:
     env.ollama.script_reply("not transferring")
     s.deny(c, transfer)
 
-    # t18: a compound line, keep=always, the same line again (B61)
+    # t18: a compound line, keep=always, the same line again (B61). D13 moved it
+    # off `git --version && uname -r`: `git --version` is not a standing allow now.
     c = s.chat()
-    line = ("run_shell", {"command": "git --version && uname -r", "cwd": str(outside)})
+    line = ("run_shell", {"command": "git status && uname -r", "cwd": str(outside)})
     (card,) = s.ask(c, "versions", line, reply=False)
     env.ollama.script_reply("ok")
     s.confirm(c, card, keep="always")
@@ -354,10 +355,12 @@ def test_f1_transcript_card_noise(live: Callable[[str], Live], ticking_clock: No
     counts = card_noise(env, script["keeps"])
 
     # Pinned: what this branch reaches on F1's script (ADR targets in the module doc).
-    # 18: W7's t08 repeat now asks in its private chat (17 before).
-    assert counts["total"] == 18, counts  # target <= 12: missed (see the round report)
+    # 18: W7's t08 repeat now asks in its private chat (17 before); 17 since D7
+    # refuses t12's allow at proposal on this locked home (no card).
+    assert counts["total"] == 17, counts  # target <= 12: missed (see the round report)
     # Noise 0 (target met): set_operator_policy scope=shell, the last noise
-    # card, now stores df -h as an exact-argv grant on confirm (B20, P3-6).
+    # card, stored df -h as an exact-argv grant on confirm (B20, P3-6); since
+    # D7 it never cards on a locked home.
     assert counts["refused"] == [], counts
     assert counts["covered"] == [] and counts["empty_keeps"] == 0, counts
     assert counts["noise"] == 0, counts
@@ -377,6 +380,5 @@ def test_f1_transcript_card_noise(live: Callable[[str], Live], ticking_clock: No
     assert "tier" not in fetch and "any page under https://example.com/" in fetch["keep_covers"]
     assert high_tier("allow_fetch_domain", {"domain": "example.com"}) is not None
     assert counts["high"] == sorted(
-        ["call_mcp_tool", "propose_schedule", "propose_schedule", "register_mcp_server",
-         "set_operator_policy"]
-    )  # fmt: skip
+        ["call_mcp_tool", "propose_schedule", "propose_schedule", "register_mcp_server"]
+    )  # fmt: skip  (D7: t12's set_operator_policy no longer cards)

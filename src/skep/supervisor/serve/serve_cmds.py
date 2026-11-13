@@ -6,6 +6,7 @@ import argparse
 import os
 from collections.abc import MutableMapping
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +98,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # v111-F1: before anything reads the process env — engine auth rides it.
     loaded_env = load_serve_env(args.home.expanduser().resolve() / SERVE_ENV_FILE)
     config = build_config(args.home, args.worker_cmd, auto_approve=args.auto_approve)
+    # ADR 0060 §6: the kill switch for restart re-adoption — the flag, or
+    # SKEP_READOPT_WORKERS=0 in the environment or serve.env (loaded above,
+    # read by build_config).
+    if getattr(args, "no_readopt", False):
+        config = replace(config, readopt_workers=False)
     # v26-F3: channel confirm-pointers name the UI the operator actually runs.
     app = create_app(config, web_ui_url=f"http://{args.host}:{args.port}/")
     banner = f"skep serve: http://{args.host}:{args.port}  (home: {config.home})"
@@ -161,5 +167,11 @@ def register_serve_command(
         "--auto-approve",
         action="store_true",
         help="activate D3: auto-apply safe manifest-only fixes (U1)",
+    )
+    serve.add_argument(
+        "--no-readopt",
+        action="store_true",
+        help="kill workers still running from a previous serve instead of re-adopting "
+        "them (ADR 0060); also SKEP_READOPT_WORKERS=0",
     )
     serve.set_defaults(func=cmd_serve)

@@ -152,6 +152,14 @@ def test_b23_a_write_inside_a_baseline_deny_is_refused_naming_it(home: Home, wri
     with pytest.raises((ValueError, HTTPException)) as refused:
         write(home, inside)
     text = str(getattr(refused.value, "detail", refused.value))
+    if writer == "set_operator_policy":
+        # D7 moved this row: under a locked baseline set_operator_policy takes
+        # no allow at all — inside a deny or not — and nothing is stored.
+        assert "skep policy approve" in text
+        with pytest.raises(HTTPException, match="skep policy approve"):
+            write(home, harmless)
+        assert home.snapshot() == before
+        return
     assert f"template:builder/{deny}" in text and "§5.4 check 6" in text
     assert "nothing was stored" in text
     assert home.snapshot() == before  # byte-identical

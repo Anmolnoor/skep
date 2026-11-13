@@ -46,11 +46,23 @@ PROJECT_POLICY_KEYS = frozenset(
         # tasks — "builtin" (skep's own worker) or a CLI-agent adapter. An
         # external engine is confined by the SANDBOX, not the capability layer.
         "coding_engine",
+        # ES-F121 (D20): a codex run with no OPENAI_API_KEY may use the
+        # operator's ChatGPT plan login (codex_login.py). Off by default.
+        "codex_chatgpt_login",
         # v97-F2 (ADR 0048): names of attached policy groups, live-composed in
         # run_policy_for_repo (list keys union; project scalars beat groups).
         # Shape-validated here; known-name checks live at attach time and,
         # fail-closed, at resolve time.
         "policy_groups",
+        # D6 (operator decision 2026-11-13): the loopback ports this project's
+        # sandboxed workers may reach; loopback is otherwise closed.
+        "loopback_ports",
+        # ES-F141 (ADR 0061): the top rung of the per-project trust ramp (I6).
+        # On an unlocked project decide() answers a sandboxed worker's default
+        # asks, dispatch runs in-turn and a G10-confirmed patch lands. Saved on
+        # only with a pinned verify_command, a usable sandbox and an approved
+        # baseline (registry.unlocked_block_reason).
+        "unlocked",
     }
 )
 
@@ -178,6 +190,21 @@ def _require_auto_apply_branch(value: object) -> str:
     return name
 
 
+def require_loopback_ports(value: object) -> list[int]:
+    """D6: loopback ports as sorted, distinct integers 1024-65535."""
+    if not isinstance(value, list) or any(
+        isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port < 65536
+        for port in value
+    ):
+        # A port below 1024 is privileged inside bubblewrap's netns: netshim
+        # cannot present it there and the worker would never start.
+        raise ValueError(
+            "loopback_ports must be a list of port numbers 1024-65535, e.g. [5432]; "
+            "a port below 1024 cannot be opened inside a Linux sandbox"
+        )
+    return sorted(set(value))
+
+
 def _require_bool(value: object, *, field: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{field} must be a boolean")
@@ -224,7 +251,13 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
             normalized["allowed_plugin_risks"],
             field="allowed_plugin_risks",
         )
-    for field in ("allow_git_mutation", "auto_apply_verified_patch", "auto_dispatch_allowed"):
+    for field in (
+        "allow_git_mutation",
+        "auto_apply_verified_patch",
+        "auto_dispatch_allowed",
+        "codex_chatgpt_login",
+        "unlocked",
+    ):
         if field in normalized:
             normalized[field] = _require_bool(normalized[field], field=field)
     if normalized.get("auto_apply_branch") is not None:
@@ -244,6 +277,8 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
             field="default_max_provider_calls",
             minimum=0,
         )
+    if "loopback_ports" in normalized:
+        normalized["loopback_ports"] = require_loopback_ports(normalized["loopback_ports"])
     if "policy_groups" in normalized:
         names = _require_string_list(normalized["policy_groups"], field="policy_groups")
         malformed = sorted(name for name in names if not POLICY_GROUP_NAME_RE.match(name))
@@ -260,7 +295,7 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
 # Named, reusable bundles of CONVENIENCE grants, live-composed into run policy
 # for every project that attaches them (edit once, every attached project
 # follows on its next dispatch). The trust-ramp keys (auto_apply_*,
-# allow_git_mutation, auto_dispatch_allowed, trusted_workspace_roots) are
+# allow_git_mutation, auto_dispatch_allowed, trusted_workspace_roots, unlocked) are
 # deliberately ungroupable: the trust ramp is climbed per project (I6), never
 # bundled. Group contents pass the same validators as project policy (I5).
 

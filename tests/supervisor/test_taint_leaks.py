@@ -290,3 +290,148 @@ def test_a_script_schedules_output_note_is_untrusted(tmp_path: Path) -> None:
         assert bits == {"script said": {"untrusted"}, "note said": set()}
     finally:
         store.close()
+
+
+def test_a_channel_turn_decides_without_the_chats_session_keeps(env: Live) -> None:
+    """D16 (ES-F102): a keep given at the web UI binds the chat, not whoever
+    can post in its messenger channel. A turn that arrives from the channel —
+    and the follow-up turn after a channel confirm — decides with durable
+    grants only; the next web turn has the keep back."""
+    from skep.supervisor.serve import actions
+    from skep.supervisor.serve.channels import ChannelIdentity, ChannelMessage
+    from skep.supervisor.serve.channels.runtime import run_channel_turn
+
+    chat = env.chat()
+    env.store.bind_channel_session(
+        session_key="discord:t1", channel="discord", identity_id="u1", chat_id=chat
+    )
+    line = {"command": "python3 build.py --fast", "cwd": str(env.paths["outside"])}
+    actions.remember_action_for_session(
+        env.store, tool="run_shell", args={"command": line["command"]}, actor="op",
+        tier="session", chat_id=chat,
+    )  # fmt: skip
+    message = ChannelMessage(
+        channel="discord",
+        identity=ChannelIdentity(channel="discord", identity_id="u1"),
+        text="build it",
+        session_key="discord:t1",
+    )
+    env.ollama.script_tool_call("run_shell", line)
+    _text, events = run_channel_turn(env.engine, message, web_ui_url="http://x")
+    (raw,) = events
+    card: dict[str, Any] = dict(raw)
+    assert card["decision"]["verdict"] == "require_approval", card["decision"]
+    assert "grant" not in str(card["decision"]["decided_by"])
+
+    # a channel confirm's follow-up turn: the keep sits that out too
+    env.ollama.script_tool_call("run_shell", line)
+    follow = list(
+        env.engine.verdict_events(
+            chat, env.store.get_chat(chat), card["action_id"], confirm=False,
+            actor="channel:discord:u1",
+        )
+    )  # fmt: skip
+    (again,) = [d for e, d in follow if e == "action"]
+    assert again["decision"]["verdict"] == "require_approval"
+    env.store.resolve_chat_action(again["action_id"], status="denied", result={"ok": False})
+
+    env.ollama.script_tool_call("run_shell", line)
+    env.ollama.script_reply("built")
+    assert not [d for e, d in env.turn(chat, "build it") if e == "action"]  # web: keep holds
+
+
+def test_a_queued_follow_up_after_a_channel_click_replies_in_that_channel(
+    env: Live, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D18 + D16: a channel click recorded while another turn runs queues the
+    model's follow-up; that turn still sits out the chat's session keeps, and
+    its reply goes back to the conversation the click came from."""
+    from skep.supervisor.serve import actions
+    from skep.supervisor.serve.channels import ChannelIdentity, ChannelMessage, outbound
+    from skep.supervisor.serve.channels.runtime import run_channel_turn
+    from skep.supervisor.serve.chat import chat_turn_lock
+
+    from .test_provider_replay import _wait_follow_ups
+
+    chat = env.chat()
+    env.store.bind_channel_session(
+        session_key="discord:c1", channel="discord", identity_id="c1", chat_id=chat
+    )
+    pushed: list[tuple[str, str, str]] = []
+
+    def push(_store: Any, _home: Any, chat_id: str, text: str, **kw: Any) -> bool:
+        pushed.append((chat_id, text, kw["kind"]))
+        return True
+
+    monkeypatch.setattr(outbound, "push_to_chat_channel", push)
+    line = {"command": "python3 build.py --fast", "cwd": str(env.paths["outside"])}
+    actions.remember_action_for_session(
+        env.store, tool="run_shell", args={"command": line["command"]}, actor="op",
+        tier="session", chat_id=chat,
+    )  # fmt: skip
+    message = ChannelMessage(
+        channel="discord",
+        identity=ChannelIdentity(channel="discord", identity_id="c1"),
+        text="build it",
+        session_key="discord:c1",
+    )
+    env.ollama.script_tool_call("run_shell", line)
+    _text, (card,) = run_channel_turn(env.engine, message, web_ui_url="http://x")
+
+    def click_mid_turn(action_id: str) -> None:
+        lock = chat_turn_lock(chat)
+        lock.acquire()  # another turn runs
+        events = list(
+            env.engine.verdict_events(
+                chat, env.store.get_chat(chat), action_id, confirm=False,
+                actor="channel:discord:c1",
+            )
+        )  # fmt: skip
+        assert events[-1] == ("done", {"state": "queued"})
+        lock.release()
+        _wait_follow_ups()
+
+    env.ollama.script_tool_call("run_shell", line)
+    click_mid_turn(str(card["action_id"]))
+    (again,) = env.store.pending_chat_actions(chat)  # D16: the keep sat out
+    assert again.decided_by is not None and "grant" not in again.decided_by
+    assert pushed == []  # the follow-up said nothing: nothing to send
+
+    env.ollama.script_reply("left the build alone")
+    click_mid_turn(again.action_id)
+    assert pushed == [(chat, "left the build alone", "reply")]
+
+
+@pytest.mark.parametrize("actor", ["channel:discord:c2", "channel:telegram:c1", "chat-user"])
+def test_a_queued_follow_up_never_replies_to_a_conversation_the_click_did_not_come_from(
+    env: Live, monkeypatch: pytest.MonkeyPatch, actor: str
+) -> None:
+    """ES-F180: the chat is bound to discord:c1; a click from another
+    conversation, another messenger or the web hears nothing pushed there."""
+    from skep.supervisor.serve.channels import outbound
+    from skep.supervisor.serve.chat import chat_turn_lock
+
+    from .test_provider_replay import _wait_follow_ups
+
+    chat = env.chat()
+    env.store.bind_channel_session(
+        session_key="discord:c1", channel="discord", identity_id="c1", chat_id=chat
+    )
+    pushed: list[str] = []
+    monkeypatch.setattr(outbound, "push_to_chat_channel", lambda *a, **k: pushed.append(a[3]))
+    set_taint(env.store, chat, "untrusted")
+    env.ollama.script_tool_call("add_note", {"content": "x"})
+    card = _action(env.turn(chat, "note it"))
+    env.ollama.script_reply("not for discord:c1")
+    lock = chat_turn_lock(chat)
+    lock.acquire()  # another turn runs
+    events = list(
+        env.engine.verdict_events(
+            chat, env.store.get_chat(chat), card["action_id"], confirm=False, actor=actor
+        )
+    )
+    assert events[-1] == ("done", {"state": "queued"})
+    lock.release()
+    _wait_follow_ups()
+    assert "not for discord:c1" in [m.content for m in env.store.chat_messages(chat)]
+    assert pushed == []

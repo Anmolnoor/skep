@@ -214,11 +214,27 @@ def high_tier(
         existing = None if store is None else store.get_schedule(str(safe.get("name") or ""))
         if existing is None or existing.worker_kind == "script":  # unknown: fail closed
             return f"a script schedule {SCRIPT_SENTENCE}"
-    if tool == "setup_project" and (safe.get("policy_overrides") or safe.get("groups")):
+    overrides = safe.get("policy_overrides")
+    if tool == "setup_project" and (
+        safe.get("unlocked") is True
+        or (isinstance(overrides, dict) and overrides.get("unlocked") is True)
+    ):
+        # ES-F142 (ADR 0061): a whole project's worker asks stop asking
+        return "it turns unlocked mode on: the project's sandboxed workers stop asking"
+    if tool == "setup_project" and (overrides or safe.get("groups")):
         # the overlay spells any knob (coding_engine, default_network, …) and
         # groups= is attach_policy_group: both write the project's policy
         return "it writes the project's policy (policy_overrides or groups)"
-    if manifest is not None and "*" in (manifest.get("network") or []):
+    if tool == "setup_project" and safe.get("codex_chatgpt_login") not in (None, False):
+        # ES-F121 follow-up: the same policy write through its own sugar arg —
+        # every later codex run spends the operator's plan on chatgpt.com
+        return (
+            "it lets the project's codex runs use your ChatGPT plan login "
+            "(repo content goes to chatgpt.com)"
+        )
+    if manifest is not None and any(
+        "*" in (m.get("network") or []) for m in [manifest, *(manifest.get("members") or [])]
+    ):  # D23: a batch is HIGH when any of its runs may reach any host
         return "the run may reach any host on the internet (network '*')"
     if tool in _DISPATCH_TOOLS:
         tasks = safe.get("tasks") if tool == "batch_dispatch" else [safe]
@@ -519,6 +535,13 @@ def fold_subject(tool: str, args: Any, decided_by: str | None) -> str | None:
     return json.dumps([tool, "network.fetch", origin, decided_by])
 
 
+def unreadable_under_deny(recorded: dict[str, Any] | None) -> bool:
+    """L13, D12: the card's recorded decision says skep cannot read the line
+    and a deny or named ask exists — such a card holds once."""
+    decision = (recorded or {}).get("decision") or {}
+    return decision.get("reason") == "shell.require_approval.unreadable_under_deny"
+
+
 def card_summary(
     tool: str,
     args: Any,
@@ -558,9 +581,12 @@ def card_summary(
         # L9: landing or gate is the approval's, never the model's ``reason`` arg
         held = store.get_approval(str(safe_args.get("review_id") or ""))
     danger = risk(tool, safe_args if held is None else {**safe_args, "reason": held.reason})
-    decision = (recorded or {}).get("decision") or {}
-    if decision.get("reason") == "shell.require_approval.unreadable_under_deny":
-        danger = str(decision.get("detail"))  # L13: the deny this line may get around
+    if unreadable_under_deny(recorded):
+        # L13: the deny this line may get around
+        danger = str(((recorded or {}).get("decision") or {}).get("detail"))
+    push = (recorded or {}).get("push")
+    if tool == "open_pr" and push:  # L30: which remote and branch, as recorded
+        danger = f"{push} — {danger}"
     if danger is not None:
         summary["risk"] = danger
     if tool in _POLICY_TOOLS:
@@ -574,8 +600,10 @@ def card_summary(
         # card never offers a lifetime the confirm would refuse (B32).
         offered = [keep_options(tool, item, taint, high=high is not None) for item in folded]
         summary["keep"] = [keep for keep in offered[0] if all(keep in o for o in offered)]
+        if unreadable_under_deny(recorded):
+            summary["keep"] = ["once"]  # L13, D12: approve-once, never keepable
         covers = [found for item in folded if (found := keep_covers(tool, item)) is not None]
-        if covers:
+        if covers and summary["keep"] != ["once"]:
             # what "session"/"always" would allow — for every item of a fold
             summary["keep_covers"] = "; ".join(dict.fromkeys(covers))
     manifest = (recorded or {}).get("manifest")

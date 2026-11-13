@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS runs (
     updated_at TEXT NOT NULL,
     base_commit TEXT,
     worker_kind TEXT,
-    coding_engine TEXT
+    coding_engine TEXT,
+    supervisor_owner TEXT
 );
 CREATE TABLE IF NOT EXISTS run_transitions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -384,7 +385,10 @@ CREATE TABLE IF NOT EXISTS chat_actions (
     -- P4-2 (ADR 0059 D6): what the server recorded on the card when it was
     -- proposed — the HIGH tier, the folded items, the dispatch manifest. A
     -- confirm acts on exactly this, never on a later recomputation.
-    card_json TEXT
+    card_json TEXT,
+    -- D18: who clicked, while the model's follow-up for this verdict waits
+    -- its turn; cleared when that follow-up starts (a restart resumes it).
+    follow_up TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_actions_pending ON chat_actions (chat_id, status);
 -- v7 Stage B: inert notes and tasks the assistant may append to freely; due
@@ -953,7 +957,9 @@ def owner_alive(owner: str | None) -> bool:
         return False
     except PermissionError:
         pass  # alive, another user's
-    return bool(_process_started(pid) == record.get("started"))
+    started = _process_started(pid)
+    # the pid exists and ps could not say when it started: not shown to be gone
+    return started is None or started == record.get("started")
 
 
 class RunStore:
@@ -1089,6 +1095,9 @@ class RunStore:
             # v101-F4: and which AGENT edited the repo — builtin or a CLI engine.
             # Resolved at dispatch (policy_resolver) and then discarded.
             self._conn.execute("ALTER TABLE runs ADD COLUMN coding_engine TEXT")
+        if "supervisor_owner" not in run_columns:
+            # ADR 0060: the W27 owner ({"pid", "started"}) supervising the run.
+            self._conn.execute("ALTER TABLE runs ADD COLUMN supervisor_owner TEXT")
         chat_message_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(chat_messages)")
         }
@@ -1141,6 +1150,9 @@ class RunStore:
             # P4-2 (ADR 0059 D6): the card as the server recorded it (tier,
             # folded items, manifest). NULL = a card from before P4-2.
             self._conn.execute("ALTER TABLE chat_actions ADD COLUMN card_json TEXT")
+        if "follow_up" not in action_columns:
+            # D18: a queued follow-up turn survives a serve restart.
+            self._conn.execute("ALTER TABLE chat_actions ADD COLUMN follow_up TEXT")
         chat_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(chats)")}
         if "personality" not in chat_columns:
             # v44-F10: per-chat style preamble.
@@ -1166,6 +1178,11 @@ class RunStore:
         if "taint" not in chat_columns:
             # ADR 0059 D5 (V9): the trifecta guard's two bits; NULL = no taint.
             self._conn.execute("ALTER TABLE chats ADD COLUMN taint TEXT")
+        memory_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(memory_items)")}
+        if "provenance" not in memory_columns:
+            # D15: who wrote a memory item when not the operator (NULL = the
+            # operator: nothing already stored is retroactively marked).
+            self._conn.execute("ALTER TABLE memory_items ADD COLUMN provenance TEXT")
         for table in ("notes", "tasks", "memory_proposals"):
             columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
             if "taint" not in columns:
@@ -1265,6 +1282,27 @@ class RunStore:
             "INSERT INTO run_transitions (task_id, state, detail, created_at) VALUES (?, ?, ?, ?)",
             (task_id, state, detail, _now()),
         )
+
+    @_locked
+    def run_supervisor(self, task_id: str) -> str | None:
+        """ADR 0060: the W27 owner supervising this run, or None."""
+        row = self._conn.execute(
+            "SELECT supervisor_owner FROM runs WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
+
+    @_locked
+    def claim_run_supervisor(
+        self, task_id: str, *, expected: str | None, owner: str | None
+    ) -> bool:
+        """ADR 0060: compare-and-set the run's supervisor in ONE UPDATE, so of
+        two serves adopting one worker exactly one wins (across processes)."""
+        cursor = self._conn.execute(
+            "UPDATE runs SET supervisor_owner = ? WHERE task_id = ? AND supervisor_owner IS ?",
+            (owner, task_id, expected),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     @_locked
     def record_result(self, task_id: str, result: CodingWorkerResult) -> None:
@@ -1636,6 +1674,36 @@ class RunStore:
         return owner if isinstance(owner, dict) else None
 
     @_locked
+    def release_dead_gate_claim(self, review_id: str) -> bool:
+        """D24: a mid-run gate's claim whose recorded claimer is gone (a CLI
+        killed mid-resume: same pid + start time check as the restart sweep)
+        goes back to pending, so the answer that met it applies. Never a
+        live claimer, never an owner that was not recorded, never a landing
+        (git may have half run: the restart sweep owns that one), never a gate
+        whose resume the claimer already dispatched (a second would follow)."""
+        row = self._conn.execute(
+            "SELECT claim_owner FROM approvals WHERE review_id = ? AND status = 'applying'"
+            " AND action != 'apply_patch'"
+            " AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.resume_of = approvals.task_id)",
+            (review_id,),
+        ).fetchone()
+        if row is None or not row[0] or owner_alive(row[0]):
+            return False
+        pid = json.loads(row[0]).get("pid")  # owner_alive parsed it: a dict
+        # I13: the verdict's note will say another process held this gate
+        cursor = self._conn.execute(
+            "UPDATE approvals SET status = 'pending', claim_owner = NULL, resolution_note = ?"
+            " WHERE review_id = ? AND status = 'applying' AND claim_owner = ?",
+            (
+                f"released the claim of pid {pid}: that process is no longer running",
+                review_id,
+                row[0],
+            ),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
     def unclaim_approval(self, review_id: str) -> None:
         """An apply that blew up unexpectedly hands the review back, pending."""
         self._conn.execute(
@@ -1718,12 +1786,14 @@ class RunStore:
         claimer holds it there); everything else from 'pending'.
         """
         row = self._conn.execute(
-            "SELECT status FROM approvals WHERE review_id = ?", (review_id,)
+            "SELECT status, resolution_note FROM approvals WHERE review_id = ?", (review_id,)
         ).fetchone()
         if row is None:
             raise KeyError(f"no approval {review_id!r}")
         if row[0] != ("applying" if claimed else "pending"):
             raise ValueError(f"approval {review_id!r} already resolved as {row[0]!r}")
+        if row[1]:  # D24: a released dead claim's line leads the verdict's note
+            note = f"{row[1]}; {note}" if note else str(row[1])
         resolved_at = _now()
         self._conn.execute(
             "UPDATE approvals SET status = ?, resolved_at = ?, resolved_by = ?,"
@@ -3143,10 +3213,12 @@ class RunStore:
             active=bool(row[5]),
             created_at=str(row[6]),
             updated_at=str(row[7]),
+            provenance=None if row[8] is None else str(row[8]),
         )
 
     _MEMORY_ITEM_COLS = (
-        "memory_id, memory_class, content, project_id, proposal_id, active, created_at, updated_at"
+        "memory_id, memory_class, content, project_id, proposal_id, active, created_at, updated_at,"
+        " provenance"
     )
 
     @_locked
@@ -3158,16 +3230,20 @@ class RunStore:
         actor: str,
         project_id: str | None = None,
         proposal_id: str | None = None,
+        provenance: str | None = None,
     ) -> MemoryItem:
         """Insert a durable memory item directly. The governed path is a proposal
-        approval (Step 4); this is the low-level write it and tests build on."""
+        approval (Step 4); this is the low-level write it and tests build on.
+        ``provenance`` names a writer that is not the operator (D15:
+        ``worker:<task>``); None is operator-written."""
         validate_memory_class(memory_class)
         memory_id = str(uuid.uuid4())
         now = _now()
         self._conn.execute(
             "INSERT INTO memory_items (memory_id, memory_class, content, project_id,"
-            " proposal_id, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
-            (memory_id, memory_class, content, project_id, proposal_id, now, now),
+            " proposal_id, active, created_at, updated_at, provenance)"
+            " VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
+            (memory_id, memory_class, content, project_id, proposal_id, now, now, provenance),
         )
         self._conn.execute(
             "INSERT INTO memory_fts (content, memory_id) VALUES (?, ?)",
@@ -4082,7 +4158,7 @@ class RunStore:
         )
         message_id = int(cursor.lastrowid or 0)
         self._conn.execute("UPDATE chats SET updated_at = ? WHERE chat_id = ?", (now, chat_id))
-        if provenance is not None and provenance not in TRUSTED_PROVENANCE:
+        if provenance is not None and not self.covered_by_trust(chat_id, provenance):
             self._add_chat_taint(chat_id, untrusted=message_id)
         self._conn.commit()
         return message_id
@@ -4136,10 +4212,15 @@ class RunStore:
             self._write_taint(chat_id, merged, self.chat_trusted_through(chat_id))
         return merged
 
-    def _write_taint(self, chat_id: str, taint: ChatTaint, through: int) -> None:
-        payload: dict[str, int | None] = {"private": taint.private, "untrusted": taint.untrusted}
+    def _write_taint(
+        self, chat_id: str, taint: ChatTaint, through: int, runs: Sequence[str] = ()
+    ) -> None:
+        payload: dict[str, Any] = {"private": taint.private, "untrusted": taint.untrusted}
         if through:
             payload["trusted_through"] = through
+        runs = sorted({*self.chat_trusted_runs(chat_id), *runs})
+        if runs:
+            payload["trusted_runs"] = runs
         self._conn.execute(
             "UPDATE chats SET taint = ? WHERE chat_id = ?", (json.dumps(payload), chat_id)
         )
@@ -4157,16 +4238,39 @@ class RunStore:
         return through if type(through) is int else 0
 
     @_locked
-    def clear_chat_taint(self, chat_id: str, bits: Sequence[str], *, through: int) -> ChatTaint:
+    def chat_trusted_runs(self, chat_id: str) -> set[str]:
+        """D3: the runs a /trust covered while they were in flight — their
+        finish notice (a ``worker:<task>`` row) sets no bit."""
+        row = self._conn.execute("SELECT taint FROM chats WHERE chat_id = ?", (chat_id,)).fetchone()
+        try:
+            raw = json.loads(str(row[0])) if row and row[0] else {}
+        except ValueError:
+            return set()
+        runs = raw.get("trusted_runs") if isinstance(raw, dict) else None
+        return {r for r in runs if isinstance(r, str)} if isinstance(runs, list) else set()
+
+    def covered_by_trust(self, chat_id: str, provenance: str) -> bool:
+        """Does a row by this author leave the chat's bits alone? The trusted
+        authors, and a run's own notice once /trust covered that run (D3)."""
+        if provenance in TRUSTED_PROVENANCE:
+            return True
+        kind, _, task = provenance.partition(":")
+        return kind == "worker" and task in self.chat_trusted_runs(chat_id)
+
+    @_locked
+    def clear_chat_taint(
+        self, chat_id: str, bits: Sequence[str], *, through: int, runs: Sequence[str] = ()
+    ) -> ChatTaint:
         """W20: the one way a bit is cleared — ``taint.trust_chat``, the
         operator's /trust (never a model tool). ``through`` is the newest row
-        it covers. Returns the chat's taint after."""
+        it covers; ``runs`` the in-flight runs whose finish notice it covers
+        (D3). Returns the chat's taint after."""
         current = self.get_chat_taint(chat_id)
         cleared = ChatTaint(
             private=None if "private" in bits else current.private,
             untrusted=None if "untrusted" in bits else current.untrusted,
         )
-        self._write_taint(chat_id, cleared, through)
+        self._write_taint(chat_id, cleared, through, runs)
         self._conn.commit()
         return cleared
 
@@ -4438,6 +4542,35 @@ class RunStore:
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    @_locked
+    def queue_follow_up(self, action_id: str, actor: str) -> None:
+        """D18: the model's follow-up for this card's verdict waits its turn."""
+        self._conn.execute(
+            "UPDATE chat_actions SET follow_up = ? WHERE action_id = ?", (actor, action_id)
+        )
+        self._conn.commit()
+
+    @_locked
+    def claim_follow_up(self, action_id: str) -> bool:
+        """D18: one conditional UPDATE — exactly one caller starts the
+        follow-up, and once started no restart starts it again."""
+        cursor = self._conn.execute(
+            "UPDATE chat_actions SET follow_up = NULL"
+            " WHERE action_id = ? AND follow_up IS NOT NULL",
+            (action_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
+    def queued_follow_ups(self) -> list[tuple[str, str]]:
+        """D18: (action_id, actor) of every follow-up not yet started, in click order."""
+        rows = self._conn.execute(
+            "SELECT action_id, follow_up FROM chat_actions"
+            " WHERE follow_up IS NOT NULL ORDER BY resolved_at, action_id"
+        ).fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
 
     @_locked
     def unclaim_chat_action(self, action_id: str) -> None:

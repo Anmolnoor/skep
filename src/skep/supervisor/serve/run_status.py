@@ -144,7 +144,13 @@ def _mirror_gate_card(store: RunStore, task_id: str, chat_id: str) -> None:
     args: dict[str, Any] = {"review_id": gate.review_id}
     if gate.reason:
         args["reason"] = gate.reason
-    store.add_chat_action(chat_id, tool="approve_review", args=args, source="gate")
+    # L6: the gate's own decision rides the card, so its why-line names what
+    # the worker asked (in words, as the gate recorded it)
+    decision = {"verdict": "require_approval", "reason": gate.reason or gate.action}
+    store.add_chat_action(
+        chat_id, tool="approve_review", args=args, source="gate",
+        decided_by=gate.decided_by, card={"decision": decision},
+    )  # fmt: skip
 
 
 def run_terminal_text(
@@ -157,7 +163,12 @@ def run_terminal_text(
     classifies delivery for notification_level: "action_needed" for the
     waiting-on-you shapes (pending gate, unlanded patch, G10 disagreement,
     crash with a live resume checkpoint), "info" for everything else."""
-    from .actions import applied_branch_for, patch_digest, patch_path
+    from .actions import (
+        applied_branch_for,
+        created_transition_views_for_task,
+        patch_digest,
+        patch_path,
+    )
 
     run = store.get_run(task_id)
     if run is None:
@@ -267,6 +278,13 @@ def run_terminal_text(
                 f"(the resume_run verb) continues where it stopped"
             )
             kind = "action_needed"
+    # L32: the hosts the dispatch's network list dropped, as its start card said
+    constraints = (
+        created_transition_views_for_task(store, task_id).get("dispatch_decision") or {}
+    ).get("constraints") or {}
+    if constraints.get("network_dropped"):
+        hosts = ", ".join(map(str, constraints["network_dropped"]))
+        text += f" — lost the project's own hosts for this run: {hosts}"
     # v78-F2: the state glyph, prefixed once here — every consumer inherits it.
     return f"{state_emoji(run.state)} {text}", kind
 

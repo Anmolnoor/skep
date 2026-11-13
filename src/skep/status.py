@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from .profile import PersonalProfile, load_profile, profile_path
-from .supervisor.sandbox import SOCKET_GAP
 from .supervisor.sandbox import availability as sandbox_availability
+from .supervisor.sandbox import socket_gap
 
 _STALE_PENDING_DAYS = 7
 
@@ -30,6 +30,7 @@ def build_status(
     home = Path(home)
     required: dict[str, dict[str, Any]] = {}
     stale_pending = _stale_pending_runs(home, now=now)
+    approvals = _pending_approvals(home, now=now)
 
     if not profile_path(home).exists():
         required["profile"] = {
@@ -56,10 +57,13 @@ def build_status(
             + _policy_v3_advisories(home)
             + _legacy_host_advisories(home)
             + _role_less_chat_advisories(home)
+            + _template_less_role_advisories(home)
+            + _unlocked_advisories(home)
             + _policy_migration_advisories(home)
             + _channel_user_advisories(home)
         )
         payload["stale_pending"] = stale_pending
+        payload["approvals"] = approvals
         return payload
 
     profile = load_profile(home)
@@ -91,10 +95,13 @@ def build_status(
         + _policy_v3_advisories(home)
         + _legacy_host_advisories(home)
         + _role_less_chat_advisories(home)
+        + _template_less_role_advisories(home)
+        + _unlocked_advisories(home)
         + _policy_migration_advisories(home)
         + _channel_user_advisories(home)
     )
     payload["stale_pending"] = stale_pending
+    payload["approvals"] = approvals
     return payload
 
 
@@ -154,6 +161,25 @@ def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
             "detail": target,
         }
     return {"status": "ready", "label": f"provider ready ({target})", "detail": target}
+
+
+def _pending_approvals(home: Path, *, now: datetime | None = None) -> dict[str, Any]:
+    """Every approval row the store holds pending, and how many are older
+    than the stale threshold: no auto-deny timeout applies to a gate, and a
+    row whose run moved on still waits (doctor printed a constant 0)."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return {"status": "ready", "pending": 0, "stale": 0}
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=_STALE_PENDING_DAYS)
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        pending = store.pending_approvals()
+    finally:
+        store.close()
+    stale = sum(a.requested_at < cutoff.strftime("%Y-%m-%dT%H:%M:%SZ") for a in pending)
+    return {"status": "ready", "pending": len(pending), "stale": stale}
 
 
 def _stale_pending_runs(home: Path, *, now: datetime | None = None) -> list[dict[str, Any]]:
@@ -432,6 +458,52 @@ def _role_less_chat_advisories(home: Path) -> list[str]:
     ]
 
 
+def _template_less_role_advisories(home: Path) -> list[str]:
+    """ADR 0059 D14: a custom role that names no template acts as
+    ``assistant`` — named here, one line for all of them."""
+    from .supervisor.roles import all_roles, roles_dir
+
+    supervisor = home / "supervisor"
+    try:
+        roles = all_roles(supervisor)
+    except ValueError as exc:  # every chat's tool lane resolves roles through this load
+        return [f"{exc} — every chat's own tools refuse until it loads or is removed"]
+    names = sorted(name for name, role in roles.items() if role.policy_layer is None)
+    if not names:
+        return []
+    return [
+        f"custom role(s) {', '.join(names)} name no template and act as assistant until they "
+        f"get one — set policy_layer (builder, operator or assistant) in "
+        f"{roles_dir(supervisor)}/<name>.json"
+    ]
+
+
+def _unlocked_advisories(home: Path) -> list[str]:
+    """ADR 0061 (I8): an unlocked project is a standing mode — "nothing
+    asked" must read as the mode the operator turned on, with the way out."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        unlocked = sorted(
+            record.project_id
+            for record in store.list_project_policies()
+            if record.policy.get("unlocked") is True
+        )
+    finally:
+        store.close()
+    if not unlocked:
+        return []
+    return [
+        f"{len(unlocked)} project(s) are unlocked (zero-ask, ADR 0061): {', '.join(unlocked)} — "
+        "sandboxed workers there are not asked about commands and hosts no rule names; "
+        f"turn it off with `skep project setup <repo> --project-id {unlocked[0]} --no-unlocked`"
+    ]
+
+
 def _policy_migration_advisories(home: Path) -> list[str]:
     """ADR 0059 P3-5: ``skep policy migrate --dry-run``'s one line — logged
     decisions that decide differently now, §5.4 combinations the home already
@@ -653,14 +725,31 @@ def format_doctor_report(status: Mapping[str, Any]) -> str:
     engines = status.get("coding_engines", {})
     for name, engine in engines.items():
         mark = "ok" if engine.get("present") else "MISSING"
-        if engine.get("present") and not engine.get("auth_ok", True):
+        login = engine.get("chatgpt_login") or {}
+        if engine.get("present") and login.get("uses") == "chatgpt_login":
+            mark = "ok via your ChatGPT plan login (opted-in projects only)"
+        elif engine.get("present") and not engine.get("auth_ok", True):
             # v111-F3: binary present but no way to authenticate headlessly.
             mark = f"NO AUTH ENV — set one of {'/'.join(engine.get('auth_env', []))}"
         walls = "" if not engine.get("external") else " (sandbox-confined; needs verify_command)"
         lines.append(f"- engine {name}: {mark} — {engine.get('detail')}{walls}")
+        if login:
+            lines.extend(_codex_login_lines(login))
+    relay = status.get("provider_key_relay", {})
+    if relay:
+        lines.append(f"- provider key relay: {relay.get('label')}")
 
     approvals = status.get("approvals", {})
-    lines.append(f"- approvals: {approvals.get('pending', 0)} pending")
+    stale = approvals.get("stale", 0)
+    lines.append(
+        f"- approvals: {approvals.get('pending', 0)} pending"
+        + (
+            f" ({stale} stale: pending more than {_STALE_PENDING_DAYS} days, and no auto-deny "
+            "timeout applies to a gate — skep review <task> --deny clears one)"
+            if stale
+            else ""
+        )
+    )
 
     memory = status.get("memory", {})
     if memory:
@@ -728,7 +817,101 @@ def _coding_engine_checks(home: Path) -> dict[str, dict[str, Any]]:
             "auth_ok": auth_ok,
             "auth_env": list(engine.auth_env),
         }
+        if engine.login_host is not None:
+            checks[name]["chatgpt_login"] = _codex_login_check(home, key_set=auth_ok)
     return checks
+
+
+def _codex_login_check(home: Path, *, key_set: bool) -> dict[str, Any]:
+    """ES-F125 (D20): the operator's Codex ChatGPT login as doctor may say it
+    — presence, plan, expiry (never a value) — which projects opted in, and
+    what a codex run would authenticate with."""
+    from skep.supervisor.codex_login import AUTH_SOURCE, POLICY_KEY, login_status
+
+    status = login_status()
+    opted_in: list[str] = []
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if db_path.is_file():
+        from skep.supervisor.store import RunStore
+
+        store = RunStore(db_path)
+        try:
+            opted_in = sorted(
+                p.project_id for p in store.list_project_policies() if p.policy.get(POLICY_KEY)
+            )
+        finally:
+            store.close()
+    uses = "OPENAI_API_KEY" if key_set else None
+    if uses is None and opted_in and status.problem is None:
+        uses = AUTH_SOURCE
+    return {
+        "present": status.present,
+        "plan": status.plan,
+        "expires_at": status.expires_at.isoformat() if status.expires_at else None,
+        "problem": status.problem,
+        "opted_in": opted_in,
+        "uses": uses,
+    }
+
+
+def _codex_login_lines(login: Mapping[str, Any]) -> list[str]:
+    if not login.get("present"):
+        return [f"  ChatGPT login: none ({login.get('problem')})"]
+    facts = ", ".join(
+        part
+        for part in (
+            f"plan {login['plan']}" if login.get("plan") else "",
+            f"access token expires {login['expires_at']}" if login.get("expires_at") else "",
+        )
+        if part
+    )
+    lines = [f"  ChatGPT login: yes{f' ({facts})' if facts else ''}"]
+    if login.get("problem"):
+        lines.append(f"  ChatGPT login not usable now: {login['problem']}")
+    if login.get("opted_in"):
+        lines.append(f"  opted in to the plan login: {', '.join(login['opted_in'])}")
+    else:
+        lines.append(
+            "  no project opted in — `skep project setup <repo> --strategy <strategy> "
+            "--phase <phase> --codex-chatgpt-login` (an existing project's own "
+            "strategy and phase: `skep project show <id>`)"
+        )
+    uses = {
+        "OPENAI_API_KEY": "OPENAI_API_KEY (an API key wins over the plan login)",
+        "chatgpt_login": "your ChatGPT plan login (opted-in projects; others need OPENAI_API_KEY)",
+    }.get(str(login.get("uses")), "nothing — it would be refused")
+    lines.append(f"  a codex run would use: {uses}")
+    return lines
+
+
+def _provider_key_relay_check(home: Path) -> dict[str, Any]:
+    """ADR 0062: does a builtin worker hold the provider key, and which
+    engines the relay does not cover. Names and protocols only, never a key."""
+    from skep.supervisor.engines import CODING_ENGINES
+    from skep.supervisor.provider_relay import relay_plan
+    from skep.supervisor.serve.settings import PROVIDER_KEY_RELAY
+
+    from .supervisor.store import RunStore
+
+    external = [name for name, engine in CODING_ENGINES.items() if engine.external]
+    engines = ", ".join(external[:-1]) + f" and {external[-1]}" if len(external) > 1 else ""
+    not_relayed = f"; {engines} authenticate from their own auth env (not relayed)"
+    db = home / "supervisor" / "supervisor.sqlite3"
+    on = False
+    if db.is_file():
+        store = RunStore(db)
+        try:
+            on = store.get_setting(PROVIDER_KEY_RELAY) is True
+        finally:
+            store.close()
+    if not on:
+        label = "off — builtin workers hold the provider key (set provider_key_relay to relay it)"
+        return {"on": False, "relayed": False, "label": label + not_relayed}
+    plan, why = relay_plan(home)
+    if plan is None:
+        return {"on": True, "relayed": False, "label": f"on, not used — {why}{not_relayed}"}
+    label = f"on — builtin workers reach {plan[1]} through their run's relay and hold no key"
+    return {"on": True, "relayed": True, "label": label + not_relayed}
 
 
 def _memory_status(home: Path, has_profile: bool) -> dict[str, Any]:
@@ -792,6 +975,7 @@ def _status_payload(
         # Reported BEFORE dispatch — the v87-F6 lesson, where a binary that was
         # not on the host burned three runs before anything said so.
         "coding_engines": _coding_engine_checks(home),
+        "provider_key_relay": _provider_key_relay_check(home),
         "approvals": {"status": "ready", "pending": 0},
         "memory": _memory_status(home, profile is not None),
         "sandbox": sandbox or {},
@@ -867,7 +1051,7 @@ def _sandbox_check() -> dict[str, Any]:
     probe = sandbox_availability()
     if probe.usable:
         backend = probe.backend or "native"
-        gap = f" {SOCKET_GAP[backend]}" if backend in SOCKET_GAP else ""
+        gap = f" {residual}" if (residual := socket_gap(backend)) else ""
         return {
             "status": "ready",
             "detail": f"{backend} backend is usable.{gap}",

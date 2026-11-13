@@ -9,6 +9,9 @@ task instructions:
 - crash:    task.start then dies without terminal event or result, exit 9
 - crashgate: dies like crash but leaves a v2 resume checkpoint; its resume
             gates on the shell command ``make check`` (pending, exit 4)
+- shellgate: pending, gating on the shell command ``GATE:<argv>`` (``_`` for
+            spaces); resumed with an approval it runs happy
+- hostgate: pending, gating on network.fetch of host ``GATE:<host>``
 - hang:     task.start + one heartbeat, then sleeps forever (monitor must kill)
 - envdump:  writes its environment to <workspace>/envdump.json, then happy-min
 - childenv: spawns a grandchild through the worker's REAL child-env boundary
@@ -34,6 +37,13 @@ task instructions:
             command that cannot fail, so re-running "the worker's verification"
             confirms a broken patch. Only a project-pinned verify_command
             (v88-F4) catches this one.
+
+A ``GATE`` token (with any mode) holds the worker after ``task.start``,
+heartbeating, until a ``gate`` file appears beside --out; it then records
+whether its proxy answers on its port (``proxy-probe.txt``) — and, when
+relayed (ADR 0062), the status of a model call through its relay
+(``relay-probe.txt``) — and goes on
+— the shape of a worker that outlives a serve restart (ADR 0060).
 """
 
 from __future__ import annotations
@@ -128,11 +138,14 @@ def main() -> int:
     # v54-F4: FILE:<name> picks which repo file the happy patch mutates, so a
     # test can land several runs on ONE branch without their patches colliding.
     file_name = "existing.py"
+    gated = "make_check"
     for token in instructions.split():
         if token.startswith("MODE:"):
             mode = token.removeprefix("MODE:")
         if token.startswith("FILE:"):
             file_name = token.removeprefix("FILE:")
+        if token.startswith("GATE:"):
+            gated = token.removeprefix("GATE:")
 
     stream = Stream(workspace / ".events" / f"{task_id}.ndjson", task_id, trace_id)
     start_payload: dict[str, object] = {
@@ -146,6 +159,44 @@ def main() -> int:
     if task.get("landing_decision") is not None:
         start_payload["landing_decision"] = task["landing_decision"]
     stream.emit("task.start", start_payload)
+
+    if "GATE" in instructions.split():
+        gate_deadline = time.monotonic() + 120  # never outlive a failed test long
+        while not (args.out.parent / "gate").exists() and time.monotonic() < gate_deadline:
+            stream.emit("heartbeat", {"phase": "gated"})
+            time.sleep(0.3)
+        proxy = os.environ.get("HTTP_PROXY", "")
+        proxy_probe = "no proxy"
+        if proxy:
+            import socket
+
+            # A reply, not just an accept: on Linux the netshim inside the
+            # sandbox accepts even when no proxy answers behind it.
+            try:
+                with socket.create_connection(("127.0.0.1", int(proxy.rsplit(":", 1)[1])), 5) as s:
+                    s.sendall(b"CONNECT probe.invalid:443 HTTP/1.1\r\n\r\n")
+                    reply = s.recv(16)
+                proxy_probe = "connected" if reply.startswith(b"HTTP/1.") else f"no reply {reply!r}"
+            except OSError as exc:
+                proxy_probe = f"refused: {exc}"
+        (args.out.parent / "proxy-probe.txt").write_text(proxy_probe)
+        relay = os.environ.get("SKEP_PROVIDER_RELAY", "")
+        if relay:  # ADR 0062: a model call through the run's relay, after the gate
+            import urllib.error
+            import urllib.request
+
+            spec = json.loads(relay)
+            request = urllib.request.Request(
+                spec["url"] + "/v1/models", headers={"Authorization": f"Bearer {spec['token']}"}
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10) as reply:
+                    relay_probe = str(reply.status)
+            except urllib.error.HTTPError as exc:
+                relay_probe = str(exc.code)
+            except OSError as exc:
+                relay_probe = f"refused: {exc}"
+            (args.out.parent / "relay-probe.txt").write_text(relay_probe)
 
     if mode == "crash":
         stream.emit("plan.created", {"steps": ["about to die"]})
@@ -278,7 +329,7 @@ def main() -> int:
     resumed_with_approval = isinstance(approval_verdict, dict) and approval_verdict.get("approved")
 
     crash_first = mode == "crashgate" and task.get("resume_of") is None
-    if mode in {"pending", "crashgate"} and not resumed_with_approval:
+    if mode in {"pending", "crashgate", "shellgate", "hostgate"} and not resumed_with_approval:
         # Leave evidence of in-flight work plus a v2 resume checkpoint so the
         # supervisor can resume this exact worktree in-place.
         (workspace / "pending-marker.txt").write_text("suspended here\n")
@@ -318,6 +369,23 @@ def main() -> int:
                 "reason": "shell.run requires approval for command: make check",
                 "commands": [["make", "check"]],
             }
+        if mode == "shellgate":
+            argv = gated.split("_")
+            gate = {
+                "action": "shell.run",
+                "reason": f"shell.run requires approval for command: {' '.join(argv)}",
+                "commands": [argv],
+            }
+        if mode == "hostgate":
+            gate = {
+                "action": "network.fetch",
+                "reason": f"network host {gated} is not allowlisted",
+                "decision": {
+                    "verdict": "require_approval",
+                    "reason": "network.host_not_allowlisted",
+                    "detail": gated,
+                },
+            }
         stream.emit("approval.requested", gate)
         stream.emit(
             "task.terminal",
@@ -347,7 +415,7 @@ def main() -> int:
         args.out.write_text(json.dumps(result))
         return 4
 
-    if mode == "pending" and resumed_with_approval:
+    if mode in {"pending", "shellgate", "hostgate"} and resumed_with_approval:
         # Record whether the suspended attempt's evidence survived into this
         # run's workspace (true only for an in-place resume).
         (args.out.parent / f"reuse-{task_id}.json").write_text(

@@ -410,6 +410,39 @@ def test_doctor_reports_stale_pending_runs(tmp_path: Path) -> None:
     assert build_status(home)["stale_pending"] == []
 
 
+def test_doctor_counts_every_pending_approval_row_and_says_which_are_stale(
+    tmp_path: Path,
+) -> None:
+    """Doctor honesty (field test): doctor printed "0 pending" while the store
+    held two approval rows pending for weeks (their runs long past the gate).
+    The count is the store's; rows older than the stale threshold say so —
+    no auto-deny timeout applies to a gate."""
+    from datetime import UTC, datetime
+
+    from skep.status import build_status, format_doctor_report
+
+    home = tmp_path / "personal"
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    db_path.parent.mkdir(parents=True)
+    store = RunStore(db_path)
+    try:
+        for name in ("a", "b"):
+            task = mint_task(workspace=tmp_path / name, instructions="x")
+            store.create_run(task, repo=tmp_path / "repo", ref=None, execution_mode="workspace")
+            store.enqueue_approval(task.task_id, action="shell.run", reason="gate")
+            store.transition(task.task_id, "failed", "gone")
+    finally:
+        store.close()
+
+    fresh = build_status(home)
+    assert fresh["approvals"]["pending"] == 2 and fresh["approvals"]["stale"] == 0
+    assert "- approvals: 2 pending\n" in format_doctor_report(fresh)
+    later = build_status(home, now=datetime(2099, 1, 1, tzinfo=UTC))
+    assert "- approvals: 2 pending (2 stale: pending more than 7 days" in (
+        format_doctor_report(later)
+    )
+
+
 def test_doctor_flags_deprecated_global_auto_approve(tmp_path: Path) -> None:
     """v23-F6 → v81-F14: a store carrying auto_approve=true is told the toggle
     is inert now, and how to clear it."""
@@ -1879,6 +1912,35 @@ def test_project_setup_engine_flag_saves_and_validates(
     assert code == 2
     assert "warp-drive" in err
     assert "builtin" in err  # the refusal names the valid choices
+
+
+def test_project_setup_opts_a_project_into_the_codex_chatgpt_login(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ES-F121 (D20): the operator face of the opt-in — off unless asked."""
+    home = tmp_path / "home"
+    args = ("project", "setup", str(repo), "--strategy", "trusted_local_dev")
+    assert _run_cli(home, *args, "--project-id", "plain") == 0
+    code = _run_cli(
+        home, *args, "--project-id", "plan", "--engine", "codex", "--codex-chatgpt-login"
+    )
+    assert code == 0, capsys.readouterr()
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        plain, plan = store.get_project_policy("plain"), store.get_project_policy("plan")
+        assert plain is not None and "codex_chatgpt_login" not in plain.policy
+        assert plan is not None and plan.policy["codex_chatgpt_login"] is True
+    finally:
+        store.close()
+    # ES-F121 follow-up: the operator can take it back from the CLI too — a
+    # repeated setup carries every stored key forward, so only a flag can.
+    assert _run_cli(home, *args, "--project-id", "plan", "--no-codex-chatgpt-login") == 0
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        plan = store.get_project_policy("plan")
+        assert plan is not None and plan.policy["codex_chatgpt_login"] is False
+    finally:
+        store.close()
 
 
 def _pin_engine(home: Path, repo: Path, engine: str) -> None:

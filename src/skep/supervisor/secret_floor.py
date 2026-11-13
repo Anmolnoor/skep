@@ -18,6 +18,8 @@ which stays on this floor.
 from __future__ import annotations
 
 import os
+import re
+from collections.abc import Sequence
 from fnmatch import fnmatch
 from functools import lru_cache
 from glob import iglob
@@ -87,7 +89,10 @@ HOME_DIRS: tuple[str, ...] = (
 # serve-token (auth.py), llm-secret / llm-secret-<id> (llm.py), and every
 # ``<name>-secret`` — channel, webhook (channels.channel_secret_path) and
 # mail (mcp_servers/mail.py). serve.env sits one level up, in the skep root.
-SKEP_SECRET_NAMES: tuple[str, ...] = ("serve-token", "llm-secret*", "*-secret")
+# ES-F122: a codex run's ChatGPT login copy (in its audit dir, dispatch.py) —
+# the worktree's CODEX_HOME/auth.json links to it, and its realpath is judged.
+CODEX_RUN_LOGIN = "codex-login.json"
+SKEP_SECRET_NAMES: tuple[str, ...] = ("serve-token", "llm-secret*", "*-secret", CODEX_RUN_LOGIN)
 SERVE_ENV = "serve.env"
 
 
@@ -105,7 +110,7 @@ def alias_key(path: Path) -> Path:
     macOS data-volume prefix dropped (over-matching on Linux is harmless)."""
     folded = _fold(path)
     parts, volume = folded.parts, _DATA_VOLUME.parts
-    if len(parts) > len(volume) and parts[: len(volume)] == volume:
+    if parts[: len(volume)] == volume:  # the volume root itself is `/` too
         return Path("/", *parts[len(volume) :])
     return folded
 
@@ -121,6 +126,38 @@ _DOTENV_TEMPLATES = (".example", ".sample", ".template", ".dist")
 
 def _is_dotenv_template(name: str) -> bool:
     return is_dotenv(name) and name.casefold().endswith(_DOTENV_TEMPLATES)
+
+
+def creates_dotenv_from_template(argv: Sequence[str], workspace: Path) -> bool:
+    """D21 (operator decision 2026-11-13): ``cp [-n] TEMPLATE NEW`` inside
+    ``workspace`` — the one write of a ``.env`` the floor lets a worker's
+    shell make. TEMPLATE is a ``.env`` template (``.example``/``.sample``/
+    ``.template``/``.dist``) by name and by realpath, a file inside the
+    worktree; NEW is a ``.env`` / ``.env.<name>`` that does not exist yet (no
+    link either), in a directory inside the worktree. Any other shape is not
+    this, and the floor judges it as always.
+
+    ponytail: checked, then run — a NEW created between the two by another
+    process is overwritten by plain ``cp``; the worktree is the run's own."""
+    args = list(argv)
+    if args[:2] == ["cp", "-n"]:
+        args = ["cp", *args[2:]]
+    if len(args) != 3 or args[0] != "cp" or any(a.startswith("-") for a in args[1:]):
+        return False
+    root = workspace.resolve()
+    # never collapse ``..`` lexically: after a linked directory the kernel
+    # lands beside the link's target, and ``resolve`` follows it the same way
+    source, target = (workspace / arg for arg in args[1:])
+    real = source.resolve()
+    return (
+        _is_dotenv_template(source.name)
+        and _is_dotenv_template(real.name)
+        and real.is_file()
+        and _under(real, root)
+        and is_dotenv(target.name)
+        and not os.path.lexists(target)
+        and _under(target.parent.resolve(), root)
+    )
 
 
 def _under(path: Path, root: Path) -> bool:
@@ -183,7 +220,8 @@ def path_spellings(path: str | Path) -> tuple[Path, Path]:
     links) and its realpath — the two spellings every path judge compares."""
     requested = Path(os.path.abspath(Path(path).expanduser()))
     try:
-        real = requested.resolve()
+        # from the path as given: ``..`` after a link goes where the kernel goes
+        real = Path(path).expanduser().resolve()
     except (OSError, RuntimeError):  # pragma: no cover - a loop resolves nowhere
         real = requested
     return requested, real
@@ -223,15 +261,35 @@ def shell_secret_floor_reason(
     ``secret_floor_reason``; so is the cwd itself.
 
     ponytail: static tokens only — a shell can build a path at run time
-    (``cat $(printf ~/.s%s/id_rsa sh)``, ``cd ~ && cd .ssh``, a script that
-    opens it). The real fix is sandboxing the Queen's shell (deny the floor
-    paths like the worker sandbox will, B05) — out of scope here."""
-    from .shell_prefixes import command_line_segments
+    (``cat $(printf ~/.s%s/id_rsa sh)``, a script that opens it). The real
+    fix is sandboxing the Queen's shell (deny the floor paths like the
+    worker sandbox will, B05) — out of scope here."""
+    for candidate in _command_paths(command, cwd):
+        reason = secret_floor_reason(candidate, skep_home=skep_home, templates_ok=True)
+        if reason is not None:
+            return reason
+    return None
+
+
+def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -> list[Path]:
+    """The cwd and every path a host-shell line's tokens may name (also after
+    ``=`` and a curl-style ``@``), ``$VAR``/``~``-expanded, resolved against
+    the cwd and every ``cd`` target before it (``cd ~ && cat .ssh/x``), and
+    globbed; a path quoted inside a word counts too (``python3 -c
+    'open("/x")'``). ``named_only``: not the cwd itself, and a bare relative
+    word (``df``) only when it exists there."""
+    from .shell_prefixes import command_line_segments, program_name
 
     base = Path(cwd).expanduser() if cwd else Path.cwd()
-    tokens = [token for argv in command_line_segments(command) or [] for token in argv]
+    argvs = command_line_segments(command) or []
+    bases = [base]
+    for argv in argvs:
+        if len(argv) > 1 and program_name(argv[0]) in ("cd", "pushd"):
+            bases.append(bases[-1] / Path(os.path.expandvars(argv[1])).expanduser())
+    tokens = [token for argv in argvs for token in argv]
     tokens += [token.strip("'\"") for token in command.split()]  # unparseable lines too
-    candidates = [base]
+    tokens += _QUOTED_PATH.findall(command)
+    candidates = [] if named_only else [base]
     for token in tokens:
         if "://" in token:
             continue  # a URL names no local file
@@ -239,12 +297,31 @@ def shell_secret_floor_reason(
             part = part.removeprefix("@")
             if not part:
                 continue
-            path = base / Path(os.path.expandvars(part)).expanduser()
-            candidates.append(path)
-            if any(char in part for char in "*?["):
-                candidates += [Path(hit) for hit in islice(iglob(str(path)), 200)]
-    for candidate in candidates:
-        reason = secret_floor_reason(candidate, skep_home=skep_home, templates_ok=True)
-        if reason is not None:
-            return reason
-    return None
+            named = Path(os.path.expandvars(part)).expanduser()
+            bare = len(named.parts) == 1 and not named.is_absolute()
+            for path in dict.fromkeys(b / named for b in bases):
+                if named_only and bare and not path.exists():
+                    continue  # a bare word (`df`, `-h`) names no file here
+                candidates.append(path)
+                if any(char in part for char in "*?["):
+                    candidates += [Path(hit) for hit in islice(iglob(str(path)), 200)]
+    return candidates
+
+
+# An absolute, ``~`` or ``$HOME`` path starting inside a word, after a quote,
+# bracket, ``=`` or ``,`` (``open("/x/y")``, ``{"p": "~/x"}``).
+_QUOTED_PATH = re.compile(r"""(?<=['"(\[=,])(?:~|\$\{?HOME\}?)?/[^\s'"`;|&<>(){}\[\],]+""")
+
+
+def names_path_under(command: str, root: Path, *, cwd: str | None, except_under: Path) -> bool:
+    """D11: does the line (its cwd included) name a path under ``root`` — by
+    either spelling, the requested path or its realpath — that is not under
+    ``except_under``?"""
+    roots = {alias_key(spelling) for spelling in path_spellings(root)}
+    exempt = {alias_key(spelling) for spelling in path_spellings(except_under)}
+    for candidate in _command_paths(command, cwd, named_only=True):
+        for spelling in path_spellings(candidate):
+            folded = alias_key(spelling)
+            if any(_under(folded, r) for r in roots) and not any(_under(folded, e) for e in exempt):
+                return True
+    return False

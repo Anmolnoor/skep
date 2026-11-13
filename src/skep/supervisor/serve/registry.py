@@ -25,6 +25,7 @@ from ...profile import load_profile, profile_path, run_personal_setup
 from ..autonomy import project_policy_dispatch_decision, run_request_resolved_decision
 from ..dispatch import auto_apply_decision
 from ..packs import PolicyPack, builtin_policy_packs, get_policy_pack
+from ..policy_layers import baseline_guard
 from ..projects import (
     ProjectBinding,
     first_party_project_policy,
@@ -34,6 +35,7 @@ from ..projects import (
     project_to_dict,
     validate_project_definition,
 )
+from ..sandbox import availability as sandbox_availability
 from ..scheduler import (
     make_schedule,
     make_template_schedule,
@@ -532,19 +534,33 @@ def too_broad_root(path: Path, store_root: Path) -> str | None:
     """W15: why ``path`` may not become an operator root (the Queen reads
     all of a bound repo path), or None. ``/``, ``/home``, ``/Users``, your
     home directory, any ancestor of it or of the skep store (``store_root``,
-    the parent of the skep home). One list for every face that binds one."""
+    the parent of the skep home), a system top-level folder, ``/Volumes`` or
+    the root of a mounted volume (D17). One list for every face that binds one."""
     from ..secret_floor import alias_key
 
     user = Path.home().resolve()
     store = store_root.expanduser().resolve()
     broad = {Path("/"), Path("/home"), Path("/Users"), user, *user.parents, store, *store.parents}
-    if alias_key(path.resolve()) in {alias_key(p) for p in broad}:
+    broad |= {Path(folder) for folder in _SYSTEM_FOLDERS}  # D17
+    resolved = path.resolve()
+    keys = {alias_key(path), alias_key(resolved)}
+    if keys & {alias_key(p) for p in broad} or resolved.is_mount():
         return (
             f"too broad — {path} would let the assistant read everything under it "
-            "(your home directory, / and their parents are never a workspace): "
-            "name a project subdirectory"
+            "(your home directory, /, system folders, a volume and their parents are "
+            "never a workspace): name a project subdirectory"
         )
     return None
+
+
+# D17 (2026-11-13): system top-level folders and /Volumes are never bound as a
+# whole; a sub-folder still binds (the suite's temp homes live under /var/folders).
+_SYSTEM_FOLDERS = (
+    "/etc", "/var", "/usr", "/opt", "/tmp", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/dev",
+    "/proc", "/sys", "/run", "/srv", "/mnt", "/media", "/private", "/private/etc",
+    "/private/var", "/private/tmp", "/System", "/System/Volumes", "/Library", "/Applications",
+    "/Volumes",
+)  # fmt: skip
 
 
 def _validate_project_binding(*, root: Path, run_store: RunStore, kind: str, value: str) -> None:
@@ -564,7 +580,41 @@ def _validate_project_binding(*, root: Path, run_store: RunStore, kind: str, val
         raise HTTPException(status_code=400, detail=f"unknown template {value!r}")
 
 
+def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | None:
+    """ES-F141 (ADR 0061): why ``unlocked=true`` may not be saved, or None.
+    The mode stands on three things: G10 re-runs a command the PROJECT
+    pinned (I2), its runs are sandboxed (I12), and decide() has a baseline
+    to answer under — on a zero-state or tampered home every worker ask is
+    the guard's, so the mode would silently answer nothing (I8)."""
+    if policy.get("unlocked") is not True:
+        return None
+    if not str(policy.get("verify_command") or "").strip():
+        return (
+            "unlocked=true needs a pinned verify_command: a patch lands without a "
+            "human only after G10 re-runs the project's own check (I2). Pin one "
+            "(--verify-command, or verify_command in policy_overrides)."
+        )
+    probe = sandbox_availability()
+    if not probe.usable:
+        return (
+            "unlocked=true needs a usable sandbox (unlocked runs are sandboxed) and "
+            f"this host has none: {probe.reason or 'unavailable'}: "
+            f"{probe.detail or 'no detail'}. Fix it (see `skep doctor`) or leave unlocked off."
+        )
+    guard = sorted(set(baseline_guard(run_store).values()))
+    if guard:
+        return (
+            f"unlocked=true needs an approved policy baseline (this home: {', '.join(guard)}); "
+            "every worker ask would still be the baseline's. Approve one first "
+            "(`skep policy approve`)."
+        )
+    return None
+
+
 def _persist_project(run_store: RunStore, project: Any) -> dict[str, Any]:
+    block = unlocked_block_reason(run_store, project.policy)
+    if block is not None:
+        raise HTTPException(status_code=400, detail=block)
     run_store.add_project_policy(
         project_id=project.project_id,
         name=project.name,
@@ -626,6 +676,8 @@ def _dangerous_grant_warnings(policy: dict[str, Any]) -> list[str]:
         warnings.append("auto_dispatch_allowed")
     if policy.get("auto_apply_verified_patch") is True:
         warnings.append("auto_apply_verified_patch")
+    if policy.get("unlocked") is True:
+        warnings.append("unlocked")
     return warnings
 
 

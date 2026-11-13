@@ -56,6 +56,10 @@ fields tomorrow):
   never from a request; it is a supervisor resource, not a grant, so delegation never narrows
   it. Egress = `network` ∪ `provider_hosts` (`["*"]` already allows all); the proxy admits a
   provider entry on that exact port only. Absent ≡ `[]`.
+- **`permissions.loopback_ports`** (v0.3.8, additive, operator decision D6): `list[int]` of
+  loopback ports the project policy (`loopback_ports`) opens to the run. Filled by the
+  supervisor from the project policy, never from a request. A sandboxed worker reaches loopback
+  only on these ports and a local provider's own port; serve's port never opens. Absent ≡ `[]`.
 - **`permissions.network_ask` / `permissions.shell_ask`** (v0.3.7, additive, ADR 0059 D3 V7):
   `list[str]` of bare hostnames / `list[list[str]]` of argv prefixes that the delegation chain
   made an *ask* (the delegator would itself ask). Filled only by the supervisor, at a dispatch a

@@ -328,6 +328,11 @@ function offersRemember(approval) {
 function manifestNode(card) {
   const m = card && card.manifest;
   if (!m) return null;
+  if (Array.isArray(m.members)) { // D23: a batch lists each run it starts
+    return el("div", {}, ...m.members.flatMap((member, i) => [
+      el("p", { class: "note" }, `Run ${i + 1} of ${m.members.length}:`),
+      manifestNode({ manifest: member })]));
+  }
   if (m.error) {
     return el("p", { class: "note card-manifest" }, `The run's envelope could not be compiled: ${m.error}`);
   }
@@ -339,10 +344,17 @@ function manifestNode(card) {
   return el("div", { class: "card-manifest" },
     el("p", { class: "note" }, "What this run gets:"),
     row("hosts", list(m.network)),
-    // L10: an explicit network replaces the project's hosts — name what goes
+    // D10: a role chain dropped the project's `*` — say so and why
+    m.network_note ? el("p", { class: "note" }, String(m.network_note)) : null,
+    // D5: a named network adds to the project's hosts; only [] drops them
+    Array.isArray(m.network_added) && m.network_added.length
+      ? row("adds to the project's hosts for this run", list(m.network_added)) : null,
     Array.isArray(m.network_dropped) && m.network_dropped.length
       ? row("loses the project's own hosts for this run", list(m.network_dropped)) : null,
     row("model provider", list(m.provider_hosts)),
+    // D6: loopback is closed but for these ports; an older card has no key
+    "loopback_ports" in m
+      ? row("loopback ports", m.loopback_ports.length ? list(m.loopback_ports) : "closed") : null,
     row("commands it may run", list(m.shell_allowlist)),
     row("may write", list(m.write)),
     // W13: the other task grants; a key an older card did not record stays off
@@ -358,6 +370,8 @@ function manifestNode(card) {
       : null,
     row("engine · mode", `${m.engine} · ${m.execution_mode}`),
     row("verify", m.verify_command || "the worker picks"),
+    // ES-F124: whose login a codex run spends (the server decided it)
+    m.engine_auth === "chatgpt_login" ? row("login", "uses your ChatGPT plan login (Codex)") : null,
     asks.length ? row("also approved, this run only", list(asks)) : null,
     Array.isArray(m.chain) && m.chain.length ? row("delegated by", m.chain.join(" → ")) : null,
     Array.isArray(m.taint) && m.taint.length ? row("from a chat that has", m.taint.join(" + ")) : null);
@@ -2301,7 +2315,8 @@ async function viewMemory(main) {
       memList.append(el("div", { class: "item-card" },
         el("div", { class: "row" },
           memoryClassChip(item.memory_class),
-          el("span", { class: "note grow" }, item.project_id || "global"),
+          el("span", { class: "note grow" }, item.project_id || "global",
+            item.provenance ? ` · written by ${item.provenance}` : ""),
           forget),
         el("p", {}, item.content)));
     }
@@ -3282,6 +3297,7 @@ async function viewChat(main, chatId) {
     const card = el("div", { class: "confirm-card gate-card", "data-action-id": d.action_id },
       el("p", { class: "card-kicker" }, "A run is waiting on your approval"),
       ...cardBody(d),
+      whyLine(d),
       el("div", { class: "actions" }, approve, refuse));
     const verdict = (verb) => async () => {
       approve.disabled = refuse.disabled = true; // double-click guard

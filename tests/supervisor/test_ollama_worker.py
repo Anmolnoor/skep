@@ -112,6 +112,9 @@ def test_ollama_worker_honors_a_worker_specific_endpoint_override(
                 read=["workspace"],
                 write=["workspace"],
                 network=["127.0.0.1"],
+                # D6 (operator decision 2026-11-13): an endpoint the provider
+                # registry does not name is a loopback port the project opens.
+                loopback_ports=[int(worker_server.base_url.rsplit(":", 1)[1])],
                 # SKEP_OLLAMA_* must reach the worker process.
                 env_allowlist=["SKEP_OLLAMA_URL", "SKEP_OLLAMA_MODEL"],
                 shell_allowlist=[_VERIFY],  # ES-F3: a verify label is no grant

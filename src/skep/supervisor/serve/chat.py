@@ -45,10 +45,17 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
-from ..policy_v3 import UNATTENDED_CHATS
+from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS
 from ..policy_write import PolicyWriteRejected
 from . import actions
-from .cards import card_summary, fold_subject, headline, high_tier, recorded_card
+from .cards import (
+    card_summary,
+    fold_subject,
+    headline,
+    high_tier,
+    recorded_card,
+    unreadable_under_deny,
+)
 from .fileio import resolves_elsewhere
 from .jobs import Dispatcher
 from .llm import (
@@ -79,6 +86,7 @@ from .tools import (
     READ_TOOL_NAMES,
     READ_TOOL_SPECS,
     TAINT_ASKED_STORE_WRITES,
+    TOOL_SCOPES,
     TOOL_SPECS,
     UNATTENDED_BLOCKED_READ_TOOLS,
     UNATTENDED_BLOCKED_STORE_WRITES,
@@ -97,6 +105,13 @@ from .tools import (
     taint_decision,
     tool_description,
     tool_index_block,
+)
+
+# L3r: the scoped tools that only read files (``filesystem.read``)
+_FILE_READS = frozenset(
+    tool
+    for tool, (scope, action, _) in TOOL_SCOPES.items()
+    if (scope, action) == ("filesystem", "read")
 )
 
 DEFAULT_TITLE = "New chat"
@@ -398,7 +413,10 @@ def duplicate_proposal_result(action_id: str) -> dict[str, Any]:
 _SUPERSEDED_BY_NEWER = "superseded by a newer proposal for the same subject"
 
 
-APPROVED_NOTE = "the operator confirmed this on a card; it was not auto-allowed"
+def approved_note(*, high: bool) -> str:
+    """L7: what a confirmed result tells the model; L29: and the card's tier."""
+    tier = "HIGH" if high else "normal"
+    return f"the operator confirmed this on a card (tier: {tier}); it was not auto-allowed"
 
 
 def high_tier_decision(high: str, allowed: Any) -> Any:
@@ -413,6 +431,12 @@ def high_tier_decision(high: str, allowed: Any) -> Any:
         f"{allowed.decided_by or allowed.reason} would allow it",
         decided_by="tier/high",
     )
+
+
+# P4-2 (ADR 0059 D6) + D23: the calls whose card shows the run manifest.
+_MANIFEST_TOOLS = frozenset(
+    {"dispatch_run", "start_research", "quick_edit", "batch_dispatch", "forge_tool"}
+)
 
 
 def manifest_ask_decision(allowed: Any) -> Any:
@@ -483,9 +507,84 @@ _TURN_LOCKS_GUARD = threading.Lock()
 TURN_BUSY = "a turn is already running in this chat — try again when it finishes"
 
 
+# D18: the cards the turn in flight raised (its round may still be folding into
+# them) — a click on one waits for the turn; any other card is answered at once.
+# ponytail: per-process state, like UNATTENDED_CHATS; serve is one process.
+_OPEN_CARDS: dict[str, set[str]] = {}
+QUEUED_FOLLOW_UP = (
+    "[The operator {verdict} your {tool} card while another turn ran; its result "
+    "is with that call above.] Continue from that result."
+)
+
+
+def _queue_follow_up(engine: ChatEngine, action_id: str, actor: str) -> None:
+    """D18: the model's turn for a verdict recorded while another turn ran —
+    it waits for that turn, the way a run-finish follow-up does, and runs
+    unattended (it fires whether or not anyone is watching). A card still
+    pending by then holds it: that card's verdict resumes the model. The
+    card row holds it until it starts (``store.queue_follow_up``). A click
+    from a messenger hears the reply there, as an in-turn click does."""
+
+    def follow() -> None:
+        action = engine.store.get_chat_action(action_id)
+        chat = engine.store.get_chat(action.chat_id) if action is not None else None
+        if action is None or chat is None:
+            return
+        chat_id = action.chat_id
+        base_url, api_key, model, protocol = engine.resolved_llm(chat)
+        with chat_turn_lock(chat_id):
+            # claimed before the turn: a restart from here on never reruns it
+            if not engine.store.claim_follow_up(action_id) or blocking_cards(engine.store, chat_id):
+                return
+            verdict = "denied" if action.status == "denied" else "confirmed"
+            engine.store.add_chat_message(
+                chat_id, role="user", provenance="queen",
+                content=QUEUED_FOLLOW_UP.format(verdict=verdict, tool=action.tool),
+            )  # fmt: skip
+            parts = [
+                str(data.get("content") or "")
+                for event, data in engine.turn_events(
+                    chat_id, base_url=base_url, api_key=api_key, model=model,
+                    protocol=protocol, unattended=True,  # D16: unattended keeps no session keep
+                )
+                if event is None
+            ]  # fmt: skip
+        text = "".join(parts).strip()
+        binding = engine.store.channel_binding_for_chat(chat_id)
+        if text and binding is not None and actor.startswith("channel:"):
+            from .channels import ChannelIdentity, channel_actor
+            from .channels.outbound import push_to_chat_channel
+
+            # only into the conversation the click came from
+            if actor == channel_actor(ChannelIdentity(binding.channel, binding.identity_id)):
+                push_to_chat_channel(engine.store, engine.home, chat_id, text, kind="reply")
+
+    threading.Thread(target=follow, name=f"skep-verdict-{action_id[:8]}", daemon=True).start()
+
+
+def resume_follow_ups(engine: ChatEngine) -> int:
+    """D18: at serve start, the follow-ups a stopped serve never started —
+    each runs once (its claim is the once). Returns how many."""
+    queued = engine.store.queued_follow_ups()
+    for action_id, actor in queued:
+        _queue_follow_up(engine, action_id, actor)
+    return len(queued)
+
+
 def chat_turn_lock(chat_id: str) -> threading.Lock:
     with _TURN_LOCKS_GUARD:
         return _TURN_LOCKS.setdefault(chat_id, threading.Lock())
+
+
+# D18: a click recorded while another turn runs still executes after any card
+# of this chat that is executing — one card's execution at a time, in click
+# order. Taken inside the turn lock, never around it.
+_VERDICT_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _verdict_lock(chat_id: str) -> threading.Lock:
+    with _TURN_LOCKS_GUARD:
+        return _VERDICT_LOCKS.setdefault(chat_id, threading.Lock())
 
 
 def take_turn(chat_id: str) -> threading.Lock:
@@ -900,7 +999,10 @@ def memory_block(store: RunStore, project_id: str | None = None) -> str:
         bucket = sorted(by_class.get(memory_class, ()), key=lambda i: i.updated_at, reverse=True)
         cap = _MEMORY_CLASS_RECENT_CAP.get(memory_class)
         for item in bucket if cap is None else bucket[:cap]:
-            line = f"- [{item.memory_class}] {item.content}"
+            content = item.content
+            if item.provenance is not None:  # D15: a worker wrote it — outside content
+                content = wrap_untrusted(item.provenance, content)
+            line = f"- [{item.memory_class}] {content}"
             if len(line) > budget:
                 break
             lines.append(line)
@@ -1051,7 +1153,12 @@ def first_run_events(events: Iterator[ChatEvent], personal_home: Path) -> Iterat
     tally = {"allowed": 0, "asked": 0, "denied": 0}
     for event, data in events:
         if event == "action" or (event == "tool" and data.get("decision")):
-            data = {**data, "why": verdict_why(data.get("decision"), tool=data.get("tool"))}
+            data = {
+                **data,
+                "why": verdict_why(
+                    data.get("decision"), tool=data.get("tool"), args=data.get("args")
+                ),
+            }
             verdict = (data.get("decision") or {}).get("verdict")
             key = "asked" if event == "action" else "denied" if verdict == "deny" else "allowed"
             tally[key] += 1
@@ -1432,8 +1539,10 @@ class ChatEngine:
         if budget_cap is not None:
             budget = min(budget, budget_cap)
         replay, dropped = self._replay(chat_id, chat, budget=budget)
-        if UNTRUSTED_OPEN in summary or any(
-            str(m.get("content") or "").startswith(UNTRUSTED_OPEN) for m in replay
+        if (
+            UNTRUSTED_OPEN in system
+            or UNTRUSTED_OPEN in summary
+            or any(UNTRUSTED_OPEN in str(m.get("content") or "") for m in replay)
         ):
             system = f"{system}\n\n{UNTRUSTED_NOTE}"
         if summary or dropped:
@@ -1531,7 +1640,9 @@ class ChatEngine:
                 )
                 if not open_calls:
                     flush()
-                if record.id > trusted_through:
+                if record.id > trusted_through and not self.store.covered_by_trust(
+                    chat_id, record.provenance
+                ):
                     untrusted_row = untrusted_row or record.id
                 continue
             elif record.role == "user" and record.attachments:
@@ -1760,6 +1871,7 @@ class ChatEngine:
         protocol: LLMProtocol,
         read_only: bool = False,
         unattended: bool = False,
+        channel: bool = False,
     ) -> Iterator[ChatEvent]:
         """One assistant turn: stream deltas, run read tools, pause on mutations.
 
@@ -1771,21 +1883,18 @@ class ChatEngine:
         ES-F3 (B08): and they never execute a mutation, even one policy would
         auto-allow — it becomes a card (run-finish continuations).
         """
-        if unattended:
-            # W24: nobody is at the desk — the chat's session keeps sit this out
-            UNATTENDED_CHATS.add(chat_id)
-            try:
-                yield from self._turn_events(
-                    chat_id, base_url=base_url, api_key=api_key, model=model,
-                    protocol=protocol, read_only=read_only, unattended=True,
-                )  # fmt: skip
-            finally:
-                UNATTENDED_CHATS.discard(chat_id)
-            return
-        yield from self._turn_events(
-            chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
-            read_only=read_only,
-        )  # fmt: skip
+        # W24: nobody is at the desk — the chat's session keeps sit this out;
+        # D16: nor are they for a messenger's members
+        marks = UNATTENDED_CHATS if unattended else CHANNEL_CHATS if channel else set()
+        marks.add(chat_id)
+        try:
+            yield from self._turn_events(
+                chat_id, base_url=base_url, api_key=api_key, model=model,
+                protocol=protocol, read_only=read_only, unattended=unattended,
+            )  # fmt: skip
+        finally:
+            marks.discard(chat_id)
+            _OPEN_CARDS.pop(chat_id, None)  # D18: this turn's round is closed
 
     def _turn_events(
         self,
@@ -1924,6 +2033,12 @@ class ChatEngine:
                 # continuation reads its own reasoning as its prior message.
                 content = thinking_text
                 yield (None, {"content": content})
+            # D18: every stored call has an id, so a card's result written while
+            # another turn runs pairs with its own call, never by position
+            tool_calls = [
+                call if call.get("id") else {**call, "id": f"call_{uuid.uuid4().hex[:24]}"}
+                for call in tool_calls
+            ]
             if content or thinking_text or tool_calls:
                 # v70-F1: an all-empty round persists nothing — an empty row
                 # is noise, and its old silent done/complete was the bug.
@@ -2087,36 +2202,14 @@ class ChatEngine:
                     # auto-dispatch, grant or rule runs it unasked. Not a
                     # decide() verdict: the allow is recorded, the card asks.
                     # P4-2: a dispatch's manifest — what its run will get.
+                    # D23: quick_edit, batch_dispatch and forge_tool start
+                    # runs too — the same manifest (a batch: one per run).
                     manifest = (
-                        dispatch_manifest_for(self.store, self.holder, args, chat_id)
-                        if name in ("dispatch_run", "start_research")
+                        dispatch_manifest_for(self.store, self.holder, args, chat_id, name)
+                        if name in _MANIFEST_TOOLS
                         and (decision is None or decision.verdict != "deny")
                         else None
                     )
-                    # quick_edit and batch members compile the same envelope
-                    # as dispatch_run: a run that may reach any host (a
-                    # project's default network '*') is HIGH from them too.
-                    reach = None
-                    if (
-                        name in ("quick_edit", "batch_dispatch")
-                        and decision is not None
-                        and decision.verdict != "deny"
-                    ):
-                        members = args.get("tasks") if name == "batch_dispatch" else [args]
-                        reach = next(
-                            (
-                                compiled
-                                for member in (members if isinstance(members, list) else [])
-                                if isinstance(member, dict)
-                                and "*"
-                                in (
-                                    compiled := dispatch_manifest_for(
-                                        self.store, self.holder, member, chat_id
-                                    )
-                                ).get("network", [])
-                            ),
-                            None,
-                        )
                     if (
                         manifest is not None
                         and manifest.get("refused")
@@ -2131,7 +2224,7 @@ class ChatEngine:
                         args,
                         taint=self.store.get_chat_taint(chat_id),
                         store=self.store,
-                        manifest=manifest or reach,
+                        manifest=manifest,
                     )
                     if (
                         high is not None
@@ -2141,14 +2234,15 @@ class ChatEngine:
                         # an allow ask — decide() and mutation_execution_decision
                         # already asked on every lane D5 names (a read inside
                         # the roots is none of them)
-                        and high_tier(name, args, store=self.store, manifest=manifest or reach)
-                        is not None
+                        and high_tier(name, args, store=self.store, manifest=manifest) is not None
                     ):
                         decision = high_tier_decision(high, decision)
                     elif (
                         manifest is not None
-                        and manifest.get("network_ask")
-                        and manifest.get("execution_mode") == "sandbox"
+                        and any(  # D23: a batch asks when any of its runs does
+                            m.get("network_ask") and m.get("execution_mode") == "sandbox"
+                            for m in [manifest, *(manifest.get("members") or [])]
+                        )
                         and decision is not None
                         and decision.allows_execution()
                     ):
@@ -2233,7 +2327,13 @@ class ChatEngine:
                     # policy-allowed mutation becomes a card a human pulls.
                     # That also bounds the run-finish chain: no continuation
                     # can dispatch the run that earns the next continuation.
-                    if decision is not None and decision.allows_execution() and not unattended:
+                    # L3r: a file read decide() allows is no mutation — it runs
+                    # unattended exactly as it does in an attended turn.
+                    if (
+                        decision is not None
+                        and decision.allows_execution()
+                        and (not unattended or name in _FILE_READS)
+                    ):
                         try:
                             result = execute_mutation(
                                 name,
@@ -2359,9 +2459,16 @@ class ChatEngine:
                             **({"decision": asdict(decision)} if decision is not None else {}),
                             **({"checked": checked} if checked else {}),
                             **_resolution(name, args),
+                            # L30: the remote and branch an open-PR card pushes to
+                            **(
+                                {"push": actions.pr_push_target(self.holder, self.store, args)}
+                                if name == "open_pr"
+                                else {}
+                            ),
                         }
                         or None,
                     )
+                    _OPEN_CARDS.setdefault(chat_id, set()).add(action_id)  # D18
                     if fold_key:
                         round_folds[fold_key] = action_id
                     action_event: dict[str, Any] = {
@@ -2649,7 +2756,7 @@ class ChatEngine:
         # W13: a dispatch is judged on what its run would get NOW, not only
         # on what the card showed — a project widened since is caught here.
         fresh = (
-            dispatch_manifest_for(self.store, self.holder, action.args, chat_id)
+            dispatch_manifest_for(self.store, self.holder, action.args, chat_id, action.tool)
             if confirm and shown is not None and action.status == "proposed"
             else None
         )
@@ -2713,6 +2820,19 @@ class ChatEngine:
             ),
             None,
         )
+        if refused is None and keep != "once" and unreadable_under_deny(action.card):
+            refused = (
+                "skep cannot read this line and a deny or named ask exists, so it is once only"
+            )
+        if refused is None and keep == "always":
+            refused = next(
+                (
+                    why
+                    for item in folded
+                    if (why := actions.standing_keep_refusal(action.tool, item))
+                ),
+                None,
+            )  # D13: the standing allow-list
         if refused is not None and not named:
             # The write-time check narrowed this card to "once" and the client
             # named no keep: a plain Approve runs once, it is not a 400.
@@ -2735,15 +2855,38 @@ class ChatEngine:
         # ES-F2 (B13): the verdict and its continuation are a turn — taken
         # BEFORE the claim, so a busy chat leaves the card pending, not stuck.
         try:
-            lock = take_turn(chat_id)
+            lock: threading.Lock | None = take_turn(chat_id)
         except HTTPException:
             current = self.store.get_chat_action(action_id)
             if current is not None and current.status != "proposed":
                 # A Deny landing mid-confirm says what won, not just "busy".
                 raise card_taken(self.store, action_id) from None
-            raise
+            if action_id in _OPEN_CARDS.get(chat_id, ()) or not all(
+                item["tool_call_id"] for item in action.fold_items()
+            ):
+                # P4-2: a card the running turn raised may still be folding; a
+                # call stored with no id (before D18) pairs by position only
+                raise
+            lock = None  # D18: record the click now; the model follows the turn
+        if lock is None:
+            with _verdict_lock(chat_id):
+                payload = self._record_verdict(
+                    chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
+                )
+            queued = not blocking_cards(self.store, chat_id)
+            if queued:
+                self.store.queue_follow_up(action_id, actor)
+                _queue_follow_up(self, action_id, actor)
+            return iter([
+                *(("tool", {"tool": action.tool, "result": item})
+                  for item in payload.get("items", [payload])),
+                ("done", {"state": "queued" if queued else "awaiting_confirmation"}),
+            ])  # fmt: skip
         try:
-            payload = self._record_verdict(chat_id, action, confirm=confirm, actor=actor, keep=keep)
+            with _verdict_lock(chat_id):
+                payload = self._record_verdict(
+                    chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
+                )
             more_pending = bool(blocking_cards(self.store, chat_id))
         except BaseException:
             lock.release()
@@ -2766,10 +2909,11 @@ class ChatEngine:
             chain(
                 verdicts,
                 self.turn_events(
-                    chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
+                    chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+                    channel=actor.startswith("channel:"),
                 ),
             ),
-        )
+        )  # fmt: skip
 
     def _join_fold(
         self, chat_id: str, head: str, name: str, args: dict[str, Any], call_id: str | None
@@ -2840,7 +2984,14 @@ class ChatEngine:
         return payload
 
     def _record_verdict(
-        self, chat_id: str, action: ChatActionRecord, *, confirm: bool, actor: str, keep: str
+        self,
+        chat_id: str,
+        action: ChatActionRecord,
+        *,
+        confirm: bool,
+        actor: str,
+        keep: str,
+        high: bool = False,
     ) -> dict[str, Any]:
         """Claim, execute (or deny) and record one card; the tool row's payload.
 
@@ -2899,7 +3050,7 @@ class ChatEngine:
             # L7: the model reads this row — say a person approved it, or it
             # tells the user no card was needed (a run_shell result names the
             # rule that ASKED as its decided_by)
-            payloads = [{**p, "approved": APPROVED_NOTE} for p in payloads]
+            payloads = [{**p, "approved": approved_note(high=high)} for p in payloads]
             payload = (
                 payloads[0]
                 if len(payloads) == 1
@@ -3284,7 +3435,9 @@ def add_chat_routes(
             # W39: a pending card's why-line, as first_run_events adds it live
             for action in detail["actions"]:
                 if action["status"] == "proposed":
-                    action["why"] = verdict_why(action.get("decision"), tool=action.get("tool"))
+                    action["why"] = verdict_why(
+                        action.get("decision"), tool=action.get("tool"), args=action.get("args")
+                    )
         return detail
 
     def _chat_detail(chat_id: str, chat: Any) -> dict[str, Any]:

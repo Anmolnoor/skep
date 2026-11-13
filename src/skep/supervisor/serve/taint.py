@@ -288,22 +288,46 @@ def trust_chat(
         f"{bit} (set by message {origin})" if origin else f"{bit} (origin unknown)"
         for bit, origin in cleared.items()
     )
+    # D3: this chat's runs still in flight — their finish notice will not set
+    # ``untrusted`` again. Only a /trust of outside content covers them.
+    runs = _runs_in_flight(store, chat_id) if "untrusted" in wanted else []
+    covers = f" It also covers the finish notice of run {', '.join(runs)}." if runs else ""
     line = store.add_chat_message(
         chat_id,
         role="system",
         content=f"[{actor} trusted this chat again: cleared {said}. Rows already here stay "
-        "marked as outside content; new outside content sets the bit again.]",
+        f"marked as outside content; new outside content sets the bit again.{covers}]",
     )
-    after = store.clear_chat_taint(chat_id, list(cleared), through=line)
+    after = store.clear_chat_taint(chat_id, list(cleared), through=line, runs=runs)
     record = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "actor": actor,
         "chat_id": chat_id,
         "cleared": cleared,
         "line": line,
+        "runs": runs,
     }
     path = audit_dir / "policy" / "taint-cleared.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record) + "\n")
-    return {"chat_id": chat_id, "cleared": cleared, "line_id": line, "taint": after.bits()}
+    return {
+        "chat_id": chat_id,
+        "cleared": cleared,
+        "line_id": line,
+        "taint": after.bits(),
+        "covers_runs": runs,
+    }
+
+
+def _runs_in_flight(store: RunStore, chat_id: str) -> list[str]:
+    """The runs this chat dispatched that have not reached a terminal state
+    (a run paused at a gate has: it is not covered)."""
+    from skep.worker_contract import TERMINAL_STATES, TaskState
+
+    live = [s.value for s in TaskState if s not in TERMINAL_STATES]
+    return sorted(
+        run.task_id
+        for run in store.runs_with_states(live)
+        if store.chat_for_task(run.task_id) == chat_id
+    )

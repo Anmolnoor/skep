@@ -114,7 +114,9 @@ def test_the_manifest_lists_what_the_compiled_task_holds(desk: Desk) -> None:
     # until it is shown or excluded.
     answered = {"network", "network_ask", "shell_allowlist", "shell_ask"}  # pinned above
     not_shown = {"provider_hosts": "filled at spawn from the provider registry; shown"
-                 " from provider_hosts_for, not from the task"}  # fmt: skip
+                 " from provider_hosts_for, not from the task",
+                 "loopback_ports": "D6: shown with a local provider's port added and"
+                 " serve's removed (run_loopback_ports), the set the wall enforces"}  # fmt: skip
     for field in Permissions.model_fields:
         if field in answered or field in not_shown:
             continue
@@ -487,25 +489,444 @@ def test_a_research_card_lists_its_source_hosts_and_the_desk_confirm_answers_the
     ]
 
 
-def test_a_call_network_that_replaces_the_project_hosts_says_what_the_run_loses(
+def test_a_call_network_adds_to_the_project_hosts_and_only_an_empty_list_drops_them(
     desk: Desk,
 ) -> None:
-    """L10: a dispatch's ``network`` replaces the project's own hosts (the
-    documented override, pinned by the policy regression fixtures), and the
-    card showed only what was left. The manifest now names the hosts the run
-    loses, and the tool description says a list replaces the default."""
+    """D5 (operator decision 2026-11-13): a dispatch's ``network`` ADDS to the
+    project's own hosts (it used to replace them, so naming one API host cost
+    the run PyPI). The card names what it adds; ``network_dropped`` is left
+    only for ``[]`` (the worker's own LLM and nothing from the project)."""
     from skep.supervisor.serve.tools import TOOL_SPECS
 
     omitted = dispatch_manifest_for(desk.store, desk.holder, {"repo": str(desk.repo)}, None)
     assert "pypi.org" in omitted["network"] and omitted["network_dropped"] == []
+    assert omitted["network_added"] == []
     named = dispatch_manifest_for(
-        desk.store, desk.holder, {"repo": str(desk.repo), "network": ["example.com"]}, None
+        desk.store, desk.holder, {"repo": str(desk.repo), "network": ["api.example.org"]}, None
     )
-    assert "pypi.org" in named["network_dropped"] and "pypi.org" not in named["network"]
+    assert "pypi.org" in named["network"] and "api.example.org" in named["network"]
+    assert named["network_dropped"] == [] and named["network_added"] == ["api.example.org"]
+    lines = manifest_lines(named)
+    assert "adds to the project's hosts for this run: api.example.org" in lines
+    assert not any(line.startswith("loses") for line in lines)
+    empty = dispatch_manifest_for(
+        desk.store, desk.holder, {"repo": str(desk.repo), "network": []}, None
+    )
+    assert empty["network"] == [] and "pypi.org" in empty["network_dropped"]
     assert any(
         line.startswith("loses the project's own hosts for this run: ") and "pypi.org" in line
-        for line in manifest_lines(named)
+        for line in manifest_lines(empty)
     )
     (spec,) = [s for s in TOOL_SPECS if s["function"]["name"] == "dispatch_run"]
     described = spec["function"]["parameters"]["properties"]["network"]["description"]
-    assert "REPLACES" in described
+    assert "ADDS" in described and "REPLACES" not in described
+
+
+def test_the_terminal_card_names_what_a_named_network_adds(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D5: the CLI chat's card shows the same added-hosts line as web and channels."""
+    from skep.cli_chat import _render_card
+
+    manifest = {"network": ["api.example.org", "pypi.org"], "network_added": ["api.example.org"]}
+    _render_card({"tool": "dispatch_run", "card": {"manifest": manifest}})
+    assert "adds to the project's hosts for this run: api.example.org" in capsys.readouterr().out
+
+
+def test_a_role_run_on_a_star_project_says_it_holds_no_hosts_and_why(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D10 (operator decision 2026-11-13): a role chain never holds network
+    ``*`` (already true). When the project's default_network is ``*`` and the
+    chain drops it, the card and the run record say in one line that the run
+    holds no hosts, why, and what to do instead."""
+    from skep.cli_chat import _render_card
+    from skep.supervisor.serve import actions
+
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"default_network": ["*"]},
+        )
+        holder = ConfigHolder(config, store)
+        manifest = dispatch_manifest_for(
+            store, holder, {"repo": str(repo), "role": "builder"}, None
+        )
+        assert manifest["network"] == []
+        why = manifest["network_note"]
+        assert "holds no hosts" in why and "*" in why and "default_network" in why
+        assert why in manifest_lines(manifest)
+        _render_card({"tool": "dispatch_run", "card": {"manifest": manifest}})
+        assert why in capsys.readouterr().out
+        runner = _Runner()
+        actions.submit_run(
+            holder,
+            runner,  # type: ignore[arg-type]
+            store,
+            repo=str(repo),
+            instructions="go",
+            role="builder",
+        )
+        assert why in (runner.submitted[0]["dispatch_decision"].detail or "")
+        plain = dispatch_manifest_for(store, holder, {"repo": str(repo)}, None)
+        assert "network_note" not in plain and plain["network"] == ["*"]
+    finally:
+        store.close()
+
+
+def test_a_role_run_card_adds_only_hosts_the_run_holds(tmp_path: Path, repo: Path) -> None:
+    """ES-F90 follow-up: ``network_added`` was computed before the role chain
+    narrowed the run, so a builder dispatch naming ``*`` or a host its role
+    drops carded "adds to the project's hosts for this run: *" for a run
+    that holds neither."""
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"default_network": ["pypi.org"]},
+        )
+        holder = ConfigHolder(config, store)
+        for network in (["*"], ["*", "api.example.org"], ["api.example.org"]):
+            manifest = dispatch_manifest_for(
+                store, holder, {"repo": str(repo), "role": "builder", "network": network}, None
+            )
+            assert set(manifest["network_added"]) <= set(manifest["network"]), network
+    finally:
+        store.close()
+
+
+def test_the_no_hosts_note_is_true_when_the_dispatch_named_star(tmp_path: Path, repo: Path) -> None:
+    """ES-F93 follow-up: the D10 note said ``*`` "is this project's
+    default_network" when the project's hosts were pypi.org and the dispatch
+    itself named ``*``."""
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"default_network": ["pypi.org"]},
+        )
+        holder = ConfigHolder(config, store)
+        manifest = dispatch_manifest_for(
+            store, holder, {"repo": str(repo), "role": "builder", "network": ["*"]}, None
+        )
+        assert manifest["network"] == []
+        why = manifest["network_note"]
+        assert "holds no hosts" in why and "is this project's default_network" not in why
+    finally:
+        store.close()
+
+
+def _propose_call(desk: Desk, tool: str, args: dict[str, Any]) -> tuple[str, Any]:
+    made = desk.store.create_chat(title="c", model=None, role="builder", source="web")
+    desk.ollama.script_tool_call(tool, args)
+    desk.store.add_chat_message(made.chat_id, role="user", content="do it")
+    base_url, api_key, model, protocol = desk.engine.resolved_llm(desk.store.get_chat(made.chat_id))
+    events = list(
+        desk.engine.turn_events(
+            made.chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
+        )
+    )
+    (card,) = cards(events)
+    return made.chat_id, card
+
+
+def test_a_quick_edit_card_carries_the_dispatch_manifest_and_the_desk_answers_it(
+    desk: Desk,
+) -> None:
+    """D23: quick_edit starts a coding run like dispatch_run, so its card shows
+    the same manifest (one builder) and the desk confirm answers its asks."""
+    chat, card = _propose_call(
+        desk, "quick_edit", {"repo": str(desk.repo), "file": "hello.py", "instruction": "typo"}
+    )
+    manifest = card["card"]["manifest"]
+    assert manifest == dispatch_manifest_for(
+        desk.store, desk.holder, {"repo": str(desk.repo)}, chat
+    )
+    assert manifest["network_ask"] == ["example.com"]
+    desk.confirm(chat, card["action_id"])
+    (submitted,) = desk.runner.submitted
+    assert "example.com" in submitted["permissions"].network
+    assert submitted["permissions"].network_ask == []
+
+
+def test_a_batch_card_carries_one_manifest_per_run_and_each_run_gets_its_own(
+    desk: Desk,
+) -> None:
+    """D23: a batch starts N runs; its card shows each run's manifest, the
+    messenger lines name each, and the desk confirm answers each run's asks."""
+    tasks = [
+        {"repo": str(desk.repo), "instructions": "one"},
+        {"repo": str(desk.repo), "instructions": "two", "caste": "coding"},
+    ]
+    chat, card = _propose_call(desk, "batch_dispatch", {"tasks": tasks})
+    members = card["card"]["manifest"]["members"]
+    assert members == [
+        dispatch_manifest_for(desk.store, desk.holder, {"repo": t["repo"]}, chat) for t in tasks
+    ]
+    assert [m["network_ask"] for m in members] == [["example.com"], ["example.com"]]
+    lines = manifest_lines(card["card"]["manifest"])
+    assert lines[0] == "run 1 of 2:" and "run 2 of 2:" in lines
+    desk.confirm(chat, card["action_id"])
+    assert len(desk.runner.submitted) == 2
+    for submitted in desk.runner.submitted:
+        assert "example.com" in submitted["permissions"].network
+        assert submitted["permissions"].network_ask == []
+
+
+def test_a_batch_member_with_a_wildcard_project_makes_the_batch_high() -> None:
+    manifest = {"members": [{"network": ["pypi.org"]}, {"network": ["*"]}]}
+    assert high_tier("batch_dispatch", {"tasks": []}, manifest=manifest) is not None
+
+
+def test_a_forge_card_carries_the_manifest_of_the_forge_run(desk: Desk) -> None:
+    """D23: forge_tool starts a coding run in the forge repo; its card says
+    what that run gets. The first forge sets the repo up on confirm (which
+    decides its hosts), so that card says so rather than show too little."""
+    from skep.supervisor import forge
+
+    forge_args = {"name": "word count", "purpose": "count"}
+    chat, card = _propose_call(desk, "forge_tool", forge_args)
+    assert "set up when you confirm" in card["card"]["manifest"]["error"]
+    desk.confirm(chat, card["action_id"])
+    (first,) = desk.runner.submitted
+    assert first["permissions"].network  # set up on confirm: the project's hosts
+
+    chat, card = _propose_call(desk, "forge_tool", {"name": "line count", "purpose": "count"})
+    root = str(forge.forge_root(desk.holder.current).resolve())
+    manifest = card["card"]["manifest"]
+    assert manifest == dispatch_manifest_for(desk.store, desk.holder, {"repo": root}, chat)
+    assert manifest["network"] == first["permissions"].network
+
+
+def test_a_research_card_says_what_was_asked_and_why_it_needs_a_run(desk: Desk) -> None:
+    """L8: a research card carried no decision, so its why-line was the
+    retired "no policy rule covers this tool, so it asks by default". It now
+    names the question and why it is a run, as other run cards say why."""
+    from skep.supervisor.onboard import verdict_why
+
+    _chat, card = _propose_call(
+        desk,
+        "start_research",
+        {"repo": str(desk.repo), "question": "why is X slow", "source_allowlist": ["example.com"]},
+    )
+    assert card.get("decision") is None  # the frozen tool surface: it cards, undecided
+    why = verdict_why(card.get("decision"), tool="start_research", args=card["args"])
+    assert "no policy rule" not in why
+    assert why.startswith("asked: ") and "'why is X slow'" in why and "example.com" in why
+    assert "run" in why
+
+
+def test_the_live_research_card_event_carries_that_why(tmp_path: Path) -> None:
+    from skep.supervisor.onboard import onboard_transparency
+    from skep.supervisor.serve.chat import first_run_events
+
+    onboard_transparency(tmp_path / "skep-home", verbose=True)
+    args = {"question": "q", "source_allowlist": ["example.com"]}
+    events = list(
+        first_run_events(iter([("action", {"tool": "start_research", "args": args})]), tmp_path)
+    )
+    assert "researching 'q'" in events[0][1]["why"]
+
+
+def test_an_open_pr_card_names_the_remote_and_the_branch_it_pushes(desk: Desk) -> None:
+    """L30: the open-PR card said only "publishes to the remote". It now
+    names the branch, the remote (its URL, any login stripped) and the base."""
+    import subprocess
+
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+    from skep.supervisor.serve.actions import pr_push_target
+    from skep.supervisor.serve.cards import card_summary
+
+    login = "u" + ":" + "p" * 3  # built, never a literal
+    subprocess.run(
+        ["git", "-C", str(desk.repo), "remote", "add", "origin",
+         f"https://{login}@example.invalid/x/y.git"],
+        check=True,
+    )  # fmt: skip
+    task = mint_task(workspace=desk.repo, instructions="fix", budget=DEFAULT_BUDGET)
+    desk.store.create_run(task, repo=desk.repo.resolve(), ref=None, execution_mode="workspace")
+    desk.store.transition(task.task_id, "completed", None)
+
+    chat, card = _propose_call(desk, "open_pr", {"task_id": task.task_id, "base": "dev"})
+    line = (
+        f"pushes skep/{task.task_id} to origin (https://example.invalid/x/y.git) "
+        "and opens a PR into dev"
+    )
+    assert card["card"]["risk"].startswith(line)
+    assert login not in json.dumps(card)
+    (pending,) = desk.store.pending_chat_actions(chat)
+    assert pending.card is not None and pending.card["push"] == line  # recorded
+    grouped = pr_push_target(
+        desk.holder, desk.store, {"task_ids": [task.task_id], "title": "Fix it"}
+    )
+    assert grouped.startswith("pushes skep/fix-it to origin")
+    named = pr_push_target(desk.holder, desk.store, {"branch": "feat", "repo": str(desk.repo)})
+    assert named.startswith("pushes feat to origin") and named.endswith("into main")
+    assert pr_push_target(desk.holder, desk.store, {"task_id": "nope"}).startswith(
+        "pushes to origin"
+    )
+    bare = desk.repo.parent / "no-origin"
+    subprocess.run(["git", "init", "-q", str(bare)], check=True)
+    lone = pr_push_target(desk.holder, desk.store, {"branch": "feat", "repo": str(bare)})
+    assert "no origin remote" in lone
+    assert card_summary("open_pr", {}, recorded={"push": line})["risk"].startswith(line)
+
+
+def test_a_run_that_lost_the_project_hosts_says_so_on_its_terminal_notice(desk: Desk) -> None:
+    """L32: the start card names the project hosts a dispatch's network list
+    drops (L10); the terminal notice did not, so a run that failed for want
+    of pypi.org never said why. The run records them; the notice says so."""
+    from skep.supervisor.serve import actions
+    from skep.supervisor.serve.run_status import run_terminal_text
+    from skep.worker_contract.task import AutonomyDecisionPayload
+
+    class _Recording:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        def submit(self, repo: Path, instructions: str, **kwargs: Any) -> str:
+            self.kwargs = kwargs
+            from skep.supervisor import mint_task
+
+            task = mint_task(workspace=repo, instructions=instructions)
+            payload = AutonomyDecisionPayload.model_validate(
+                kwargs["dispatch_decision"].to_payload()
+            )
+            task = task.model_copy(update={"dispatch_decision": payload})
+            desk.store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+            return task.task_id
+
+    runner = _Recording()
+    task_id = actions.submit_run(
+        desk.holder, runner, desk.store, repo=str(desk.repo), instructions="x",  # type: ignore[arg-type]
+        network=[],  # D5 (R2a): only an empty list drops the project's hosts
+    )  # fmt: skip
+    dropped = runner.kwargs["dispatch_decision"].constraints["network_dropped"]
+    assert "pypi.org" in dropped
+    desk.store.transition(task_id, "failed", "pip could not reach its index")
+    notice = run_terminal_text(desk.store, task_id)
+    assert notice is not None
+    assert f"lost the project's own hosts for this run: {', '.join(dropped)}" in notice[0]
+
+    kept = actions.submit_run(
+        desk.holder, runner, desk.store, repo=str(desk.repo), instructions="y",  # type: ignore[arg-type]
+    )  # fmt: skip
+    assert "network_dropped" not in (runner.kwargs["dispatch_decision"].constraints or {})
+    desk.store.transition(kept, "failed", "boom")
+    assert "lost the project" not in run_terminal_text(desk.store, kept)[0]  # type: ignore[index]
+    actions.submit_run(
+        desk.holder, runner, desk.store, repo=str(desk.repo), instructions="z",  # type: ignore[arg-type]
+        network=["example.com"],
+    )  # fmt: skip
+    # D5: a named list ADDS to the project's hosts, so nothing is lost
+    assert "network_dropped" not in (runner.kwargs["dispatch_decision"].constraints or {})
+
+
+def test_an_open_pr_card_names_the_push_url_git_push_uses(desk: Desk) -> None:
+    """L30 follow-up: open_pr runs `git push origin`, which goes to origin's
+    pushurl when one is set — the card named the fetch URL, a host the push
+    never reaches. It now names the push URL (any login stripped)."""
+    import subprocess
+
+    from skep.supervisor.serve.actions import pr_push_target
+
+    login = "u" + ":" + "p" * 3  # built, never a literal
+    git = ["git", "-C", str(desk.repo)]
+    subprocess.run([*git, "remote", "add", "origin", "https://fetch.invalid/x.git"], check=True)
+    subprocess.run(
+        [*git, "config", "remote.origin.pushurl", f"https://{login}@push.invalid/x.git"],
+        check=True,
+    )
+    line = pr_push_target(desk.holder, desk.store, {"branch": "feat", "repo": str(desk.repo)})
+    assert "(https://push.invalid/x.git)" in line and login not in line, line
+
+
+def test_an_open_pr_url_whose_port_does_not_parse_is_never_shown(desk: Desk) -> None:
+    """L30 follow-up: urlsplit's .port raised on a port that is not a number,
+    so proposing the open-PR card crashed the round. The login is cut from
+    the netloc as written (no port parse), and it never shows."""
+    import subprocess
+
+    from skep.supervisor.serve.actions import pr_push_target
+
+    login = "u" + ":" + "p" * 3
+    subprocess.run(
+        ["git", "-C", str(desk.repo), "remote", "add", "origin",
+         f"https://{login}@example.invalid:port/x.git"],
+        check=True,
+    )  # fmt: skip
+    line = pr_push_target(desk.holder, desk.store, {"branch": "feat", "repo": str(desk.repo)})
+    assert line.startswith("pushes feat to origin") and login not in line, line
+
+
+def test_an_auto_allowed_batch_whose_runs_would_ask_cards_with_their_manifests(
+    desk: Desk,
+) -> None:
+    """D23 follow-up (B147): an auto-allowed dispatch_run or quick_edit whose
+    sandboxed run would ask about a host cards so one confirm answers it; a
+    batch read only the top of its manifest, which has no asks (they sit in
+    ``members``), so it ran unasked and each run met the proxy's 403 for a
+    card nobody was shown. It now cards when any of its runs would ask."""
+    _auto_dispatch(desk, ["pypi.org", "example.com"])
+    tasks = [{"repo": str(desk.repo), "instructions": n} for n in ("one", "two")]
+    chat, card = _propose_call(desk, "batch_dispatch", {"tasks": tasks})
+    assert desk.runner.submitted == []  # not auto-run
+    members = card["card"]["manifest"]["members"]
+    assert [m["network_ask"] for m in members] == [["example.com"], ["example.com"]]
+    desk.confirm(chat, card["action_id"])
+    assert len(desk.runner.submitted) == 2
+    assert all(s["permissions"].network_ask == [] for s in desk.runner.submitted)
+
+
+def test_a_codex_card_on_the_chatgpt_login_says_so_and_a_change_is_stale(
+    desk: Desk, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F124 (D20, I8): whose login a codex run spends is on the card,
+    with the one host that login reaches; flipping it after the card was
+    shown is a widening the confirm refuses."""
+    import os
+
+    from skep.supervisor.codex_login import CARD_LINE
+    from skep.supervisor.serve.actions import dispatch_manifest, manifest_widening
+
+    from .test_codex_login import write_fake_login
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    write_fake_login(Path(os.environ["CODEX_HOME"]))
+    policy = {"coding_engine": "codex", "verify_command": "true"}
+
+    def manifest(**extra: Any) -> dict[str, Any]:
+        desk.store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={**policy, **extra},
+        )
+        return dispatch_manifest(desk.holder, desk.store, repo=str(desk.repo))
+
+    keyless = manifest()
+    assert keyless["engine_auth"] is None
+    assert CARD_LINE not in "\n".join(manifest_lines(keyless))
+    plan = manifest(codex_chatgpt_login=True)
+    assert plan["engine_auth"] == "chatgpt_login"
+    assert plan["provider_hosts"] == ["chatgpt.com:443"]
+    assert CARD_LINE in "\n".join(manifest_lines(plan))
+    assert manifest_widening(keyless, plan) is not None
+    same_hosts = {**keyless, "provider_hosts": plan["provider_hosts"]}
+    assert "engine_auth" in (manifest_widening(same_hosts, plan) or "")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-value")
+    assert manifest(codex_chatgpt_login=True)["engine_auth"] is None  # a key still wins

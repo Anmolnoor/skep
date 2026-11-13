@@ -323,10 +323,10 @@ def inside_a_deny(stack: Stack, allow: Allow, role: Role | None = None) -> list[
         if reason is not None and not hits:
             hits.append(f"floor/{reason}")
     denies = _rules(stack, allow.scope, "deny")
-    if role is not None and (layer := role.layer()) is not None:
+    if role is not None:
         denies += [
             ResolvedRule("deny", r.rule_id, r.action, r.pattern, layer=role.label)
-            for r in layer.rules
+            for r in role.layer().rules
             if (r.scope, r.verdict) == (allow.scope, "deny")
         ]
     hits += [
@@ -659,12 +659,52 @@ def migration_report(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
             f"B31: this home predates the engine-v2 scope switch — its approved baseline now "
             f"composes in {len(missing)} scope(s) it did not before ({', '.join(missing)})"
         )
+    # D6 (operator decision 2026-11-13, supersedes v115-F9): loopback closed.
+    # A project that sets the key (even to []) has decided; the rest are named.
+    closed = sorted(
+        p.project_id for p in store.list_project_policies() if "loopback_ports" not in p.policy
+    )
+    loopback = (
+        f"D6: loopback is closed to sandboxed workers but for a local model provider's "
+        f"port; {len(closed)} project(s) open no loopback port ({', '.join(closed[:3])}"
+        f"{', ...' if len(closed) > 3 else ''}) — open one with `skep project setup <repo> "
+        "--loopback-port <port>`; setting loopback_ports (even to []) records the decision"
+        if closed
+        else None
+    )
     return {
         "replay": summary,
         "replay_line": line,
         "held": [f.message for f in findings(stack) if f.check != 2],  # W16: 2 only warns
         "b31": b31,
+        "standing": unaccepted_standing_shell(store),
+        "loopback": loopback,
+        "has_runs": bool(store.recent_runs(1)),
     }
+
+
+def unaccepted_standing_shell(store: RunStore) -> list[str]:
+    """D13: the standing ("always", global) shell grants this home holds that
+    a new standing allow would refuse today. Still held and still matching —
+    named so the operator can revoke them; nothing is disabled."""
+    from .policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        document_from_settings,
+        lifetime_of,
+        matcher_of,
+    )
+    from .serve.actions import queen_shell_allow_refusal
+
+    document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    return [
+        rule.pattern
+        for rule in (document.learned if document else [])
+        if rule.scope == "shell"
+        and rule.action in ("run", "run_background")
+        and lifetime_of(rule) == "global"
+        and matcher_of(rule) == "exact_argv"
+        and isinstance(queen_shell_allow_refusal(rule.pattern, rule.action), str)
+    ]
 
 
 def migration_line(report: Mapping[str, Any]) -> str | None:
@@ -683,6 +723,16 @@ def migration_line(report: Mapping[str, Any]) -> str | None:
         )
     if report["b31"]:
         parts.append(report["b31"])
+    if report.get("standing"):
+        names = ", ".join(f"`{p}`" for p in report["standing"])
+        parts.append(
+            f"{len(report['standing'])} standing shell grant(s) a new one would refuse (D13): "
+            f"{names} — still held; revoke on the Policies page"
+        )
+    if report.get("loopback") and report.get("has_runs"):
+        # doctor's line only for a home that has run workers (the ones D6
+        # changed); `skep policy migrate --dry-run` always prints it.
+        parts.append(report["loopback"])
     if not parts:
         return None
     return "policy v3: " + "; ".join(parts) + " — `skep policy migrate --dry-run` lists them"

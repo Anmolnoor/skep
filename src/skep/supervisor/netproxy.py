@@ -21,15 +21,18 @@ Filtering is by the CONNECT target host (HTTPS) or the absolute-form request hos
 from __future__ import annotations
 
 import contextlib
+import hmac
+import http.client
 import ipaddress
 import socket
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
 from socketserver import StreamRequestHandler, ThreadingTCPServer, ThreadingUnixStreamServer
 from types import TracebackType
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 _CONNECT_TIMEOUT = 10.0
 # v100-F6: a POLL interval, not a deadline. Both relay loops treat a recv
@@ -54,8 +57,8 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
-# ES-F6 (B05/B54): loopback is not egress (v115-F9), but skep serve's own port
-# is the control plane — never reachable from a run. `skep serve` records the
+# ES-F6 (B05/B54): skep serve's own port is the control plane — never
+# reachable from a run, even when a project lists it (D6). `skep serve` records the
 # port it binds; the default is always refused too.
 SERVE_PORT_FILE = "serve-port"
 DEFAULT_SERVE_PORT = 8765
@@ -72,6 +75,30 @@ def control_plane_ports(home: Path) -> tuple[int, ...]:
     with contextlib.suppress(OSError, ValueError):
         ports.add(int((home / SERVE_PORT_FILE).read_text(encoding="utf-8").strip()))
     return tuple(sorted(ports))
+
+
+def closed_loopback_reason(port: int) -> str:
+    """D6: what a worker sees at a closed loopback port (ASCII: it rides the
+    HTTP status line)."""
+    return (
+        f"loopback port {port} is closed for this run; a project opens it with "
+        f"`skep project setup <repo> --loopback-port {port}` "
+        f"(chat: setup_project policy_overrides loopback_ports=[{port}])"
+    )
+
+
+def run_loopback_ports(
+    ports: Iterable[int], provider_hosts: Iterable[str], home: Path | None
+) -> tuple[int, ...]:
+    """D6 (operator decision 2026-11-13, supersedes v115-F9): the loopback
+    ports a run reaches — the project's ``loopback_ports`` and a local model
+    provider's own port, never serve's (``home`` is the supervisor home)."""
+    opened = set(ports)
+    for entry in provider_hosts:
+        pinned = split_authority(entry)
+        if pinned is not None and _plain_loopback(pinned[0]):
+            opened.add(pinned[1])
+    return tuple(sorted(opened - set(control_plane_ports(home) if home else ())))
 
 
 def _plain_loopback(host: str) -> bool:
@@ -119,6 +146,7 @@ def admit_target(
     denied_ports: tuple[int, ...],
     resolve: Resolver = socket.getaddrinfo,
     asks: tuple[str, ...] = (),
+    loopback_ports: tuple[int, ...] = (),
 ) -> tuple[int, str, list[tuple[str, int]]]:
     """ES-F6 (B54): (200, "", addresses to dial) or (status, reason, []).
 
@@ -127,10 +155,13 @@ def admit_target(
     vetted IPs, so DNS cannot rebind between the check and the connect. An
     IP literal the operator allowlisted is taken as stated. W30: a refusal
     names host and port, where else the host is allowed, and whether it is
-    one of the run's deferred asks (``asks``: ``network_ask``)."""
+    one of the run's deferred asks (``asks``: ``network_ask``). D6: loopback
+    is admitted only on ``loopback_ports`` (``run_loopback_ports``)."""
     if _plain_loopback(host):
         if port in denied_ports:
             return 403, "Forbidden: the skep control plane is not reachable from a run", []
+        if port not in loopback_ports:
+            return 403, f"Forbidden: {closed_loopback_reason(port)}", []
         return 200, "", [(host.strip("[]"), port)]
     if not domain_allowed(host, allowlist, port=port):
         return 403, _refusal(host, port, allowlist, asks), []
@@ -190,8 +221,9 @@ def _refusal(host: str, port: int, allowlist: tuple[str, ...], asks: tuple[str, 
     if domain_allowed(host, asks):
         return (
             f"Forbidden: {target} needs approval for this run (a deferred ask) and a "
-            "subprocess cannot ask; approve it on the dispatch card, or remember the "
-            "host for the project"
+            "subprocess cannot ask; answer it when the run starts (chat: confirm the "
+            "dispatch; skep run/team: --answer-host; API: answer_hosts), or remember "
+            "the host for the project"
         )
     ports = sorted(
         pinned[1]
@@ -256,6 +288,69 @@ def domain_allowed(host: str, allowlist: tuple[str, ...], *, port: int | None = 
     return False
 
 
+# ADR 0062: headers that may carry a credential. The relay drops every one
+# the worker sent and adds back only the protocol's own, with the real key.
+_CREDENTIAL_HEADERS = frozenset(
+    {b"authorization", b"x-api-key", b"api-key", b"x-goog-api-key", b"proxy-authorization"}
+)
+_HOP_BY_HOP = frozenset(
+    {
+        b"connection",
+        b"proxy-connection",
+        b"keep-alive",
+        b"te",
+        b"trailer",
+        b"transfer-encoding",
+        b"upgrade",
+    }
+)
+# Above the worker's own 300 s provider timeout: the worker gives up first.
+_RELAY_READ_TIMEOUT = 600.0
+
+
+def _mask(data: bytes, secret: bytes) -> bytes:
+    return data.replace(secret, b"*" * len(secret))
+
+
+def _masked(chunks: Iterable[bytes], secret: bytes) -> Iterator[bytes]:
+    """``chunks`` with every ``secret`` masked, across chunk boundaries. Holds
+    back only a tail that could start the secret, so a stream still reaches
+    the worker chunk by chunk. ponytail: exact bytes only; a provider that
+    echoes the key re-encoded (JSON-escaped, base64) is not caught."""
+    tail = b""
+    for chunk in chunks:
+        buf = _mask(tail + chunk, secret)
+        top = min(len(buf), len(secret) - 1)
+        hold = next((n for n in range(top, 0, -1) if secret.startswith(buf[-n:])), 0)
+        cut = len(buf) - hold
+        if cut:
+            yield buf[:cut]
+        tail = buf[cut:]
+    if tail:
+        yield tail
+
+
+@dataclass(frozen=True)
+class ProviderRelay:
+    """ADR 0062 (V6b): one run's relay to one provider.
+
+    The worker sends ``token`` where its client sends a key (``Authorization:
+    Bearer`` or, for anthropic, ``x-api-key``); the relay checks it and sends
+    ``key`` in its place to ``upstream`` (the provider base URL), never to
+    any other origin or path."""
+
+    upstream: str
+    token: str = field(repr=False)
+    key: str = field(repr=False)
+    protocol: str
+
+    def auth(self, secret: str) -> tuple[bytes, str]:
+        """The protocol's credential header name and its value for ``secret``."""
+        if self.protocol == "anthropic":
+            return b"x-api-key", secret
+        return b"authorization", f"Bearer {secret}"
+
+
 class _ProxyServer(ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -265,14 +360,25 @@ class _ProxyServer(ThreadingTCPServer):
         allowlist: tuple[str, ...],
         denied_ports: tuple[int, ...] = (),
         asks: tuple[str, ...] = (),
+        loopback_ports: tuple[int, ...] = (),
+        port: int = 0,
+        relay: ProviderRelay | None = None,
     ) -> None:
-        super().__init__(("127.0.0.1", 0), _ProxyHandler)
+        super().__init__(("127.0.0.1", port), _ProxyHandler)
         self.allowlist = allowlist
         self.denied_ports = denied_ports
         self.asks = asks  # W30: named in the 403, never admitted
+        self.loopback_ports = loopback_ports  # D6: the only loopback it admits
+        self.relay = relay
         self._counts_lock = threading.Lock()
         self.allowed = 0
         self.denied = 0
+        self.relayed = 0
+        self.relay_refused = 0
+
+    @property
+    def own_port(self) -> int:
+        return int(self.server_address[1])
 
     def note(self, *, allowed: bool) -> None:
         with self._counts_lock:
@@ -280,6 +386,13 @@ class _ProxyServer(ThreadingTCPServer):
                 self.allowed += 1
             else:
                 self.denied += 1
+
+    def note_relay(self, *, relayed: bool) -> None:
+        with self._counts_lock:
+            if relayed:
+                self.relayed += 1
+            else:
+                self.relay_refused += 1
 
 
 class _ProxyUnixServer(ThreadingUnixStreamServer):
@@ -308,8 +421,23 @@ class _ProxyUnixServer(ThreadingUnixStreamServer):
     def asks(self) -> tuple[str, ...]:
         return self._tcp.asks
 
+    @property
+    def loopback_ports(self) -> tuple[int, ...]:
+        return self._tcp.loopback_ports
+
+    @property
+    def relay(self) -> ProviderRelay | None:
+        return self._tcp.relay
+
+    @property
+    def own_port(self) -> int:
+        return self._tcp.own_port
+
     def note(self, *, allowed: bool) -> None:
         self._tcp.note(allowed=allowed)
+
+    def note_relay(self, *, relayed: bool) -> None:
+        self._tcp.note_relay(relayed=relayed)
 
 
 class _ProxyHandler(StreamRequestHandler):
@@ -329,6 +457,12 @@ class _ProxyHandler(StreamRequestHandler):
             return
         method, target = parts[0].upper(), parts[1]
         headers = self._read_headers()
+        relay = self.server.relay
+        if relay is not None and method != "CONNECT":
+            path = self._addressed_to_me(target)
+            if path is not None:
+                self._do_relay(relay, parts[0], path, headers)
+                return
         if method == "CONNECT":
             self._do_connect(target, headers)
         else:
@@ -364,17 +498,17 @@ class _ProxyHandler(StreamRequestHandler):
         self._tunnel(self.connection, upstream)
 
     def _admitted(self, host: str, port: int, headers: list[bytes]) -> bool:
-        """v115-F9: loopback is not egress — a project's own test servers on
-        127.0.0.1 stay reachable through the proxied client (the first
-        skep-maintains-skep run lost 210 tests to a 403). ES-F6: but never
-        serve's port, never a loopback alias, never a name that resolves to a
-        local address, and never under a Host header naming someone else."""
+        """D6 (supersedes v115-F9): loopback only on the run's loopback ports.
+        ES-F6: never serve's port, never a loopback alias, never a name that
+        resolves to a local address, never under a Host header naming someone
+        else."""
         status, reason, self._addresses = admit_target(
             host,
             port,
             self.server.allowlist,
             denied_ports=self.server.denied_ports,
             asks=self.server.asks,
+            loopback_ports=self.server.loopback_ports,
         )
         if status == 200:
             mismatch = _host_header_mismatch(headers, host, port)
@@ -450,6 +584,135 @@ class _ProxyHandler(StreamRequestHandler):
             except OSError:
                 pass
 
+    def _addressed_to_me(self, target: str) -> str | None:
+        """ADR 0062: the path of a request addressed to the proxy itself —
+        origin-form (the worker dialled this port), or absolute-form naming
+        this port on loopback (a client going through HTTP_PROXY). A forward
+        request names another host, so it never lands here."""
+        if target.startswith("/"):
+            return target
+        split = urlsplit(target)
+        try:
+            port = split.port
+        except ValueError:
+            return None
+        if (
+            split.scheme == "http"
+            and _plain_loopback(split.hostname or "")
+            and (port == self.server.own_port)
+        ):
+            return (split.path or "/") + (f"?{split.query}" if split.query else "")
+        return None
+
+    def _do_relay(self, relay: ProviderRelay, method: str, path: str, headers: list[bytes]) -> None:
+        """ADR 0062: check the run's token, swap in the key, forward to the one
+        upstream and stream the reply back. Logs nothing but a counter."""
+        upstream = urlsplit(relay.upstream)
+        base = upstream.path.rstrip("/")
+        bare = path.split("?", 1)[0]
+        # A dot segment (also percent-encoded) would walk out of the base path
+        # at the provider, which normalizes after this check.
+        dotted = any(seg in (".", "..") for seg in unquote(bare).split("/"))
+        if dotted or (base and bare != base and not bare.startswith(base + "/")):
+            self.server.note_relay(relayed=False)
+            self._reply(403, f"Forbidden: the provider relay serves {base}/ only")
+            return
+        auth_name, token_value = relay.auth(relay.token)
+        forwarded: list[tuple[str, str]] = [("Host", upstream.netloc.rpartition("@")[2])]
+        token_ok = False
+        content_length: int | None = None
+        for header in headers:
+            raw_name, _, raw_value = header.partition(b":")
+            name = raw_name.strip().lower()
+            value = raw_value.strip().decode("latin-1")
+            if name == b"transfer-encoding":
+                self.server.note_relay(relayed=False)
+                self._reply(411, "Length Required: the provider relay needs Content-Length")
+                return
+            if name == auth_name and hmac.compare_digest(value.encode(), token_value.encode()):
+                token_ok = True
+                # Same name and place as the worker sent it: only the value moves.
+                forwarded.append((raw_name.strip().decode("latin-1"), relay.auth(relay.key)[1]))
+                continue
+            # Parity (ADR 0062 section 4): the worker's plain keep-alive/close
+            # rides along as sent; any other hop-by-hop header stops here.
+            plain_connection = name == b"connection" and value.lower() in ("keep-alive", "close")
+            if name in _CREDENTIAL_HEADERS or name == b"host":
+                continue
+            if name in _HOP_BY_HOP and not plain_connection:
+                continue
+            if name == b"content-length":
+                # One plain length or none: a second one (or a sign) would let
+                # bytes past the body reach the provider as another request.
+                if content_length is not None or not (value.isascii() and value.isdigit()):
+                    self.server.note_relay(relayed=False)
+                    self._reply(400, "Bad Request: the provider relay needs one Content-Length")
+                    return
+                content_length = int(value)
+            forwarded.append((raw_name.strip().decode("latin-1"), value))
+        if not token_ok:
+            self.server.note_relay(relayed=False)
+            self._reply(403, "Forbidden: the provider relay token does not match this run")
+            return
+        body = self.rfile.read(content_length) if content_length else None
+        import httpx  # the worker's own HTTP library: same trust, same decoders
+
+        host, port = upstream.hostname or "", upstream.port
+        conn: http.client.HTTPConnection
+        if upstream.scheme == "https":
+            # The direct client's own trust (httpx: certifi, or SSL_CERT_FILE /
+            # SSL_CERT_DIR), so a relayed call verifies exactly as a direct one.
+            conn = http.client.HTTPSConnection(
+                host, port, timeout=_CONNECT_TIMEOUT, context=httpx.create_ssl_context()
+            )
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=_CONNECT_TIMEOUT)
+        try:
+            conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+            for name_s, value in forwarded:
+                conn.putheader(name_s, value)
+            conn.endheaders(body)
+            if conn.sock is not None:
+                conn.sock.settimeout(_RELAY_READ_TIMEOUT)
+            response = conn.getresponse()
+        except (OSError, http.client.HTTPException, ValueError):  # ValueError: a bad header
+            conn.close()
+            self.server.note_relay(relayed=False)
+            self._reply(502, "Bad Gateway: the provider relay could not reach the provider")
+            return
+        self.server.note_relay(relayed=True)
+        # A provider that reflects the auth header must not hand the worker
+        # the key: the reply is decoded with the worker's own HTTP library (so
+        # any encoding the worker can ask for, the relay can read) and the key
+        # is masked, byte for byte, in the status line, headers and body.
+        secret = relay.key.encode()
+        coding = response.getheader("Content-Encoding") or "identity"
+        decoded = httpx.Response(
+            response.status,
+            headers={"Content-Encoding": coding},
+            content=iter(lambda: response.read1(65536), b""),
+        )
+        try:
+            status = f"HTTP/1.1 {response.status} {response.reason}\r\n".encode("latin-1")
+            self.wfile.write(_mask(status, secret))
+            for name_s, value in response.getheaders():
+                name_b = name_s.lower().encode("latin-1")
+                if name_b in _HOP_BY_HOP or (
+                    coding.strip().lower() != "identity"
+                    and name_b in (b"content-encoding", b"content-length")
+                ):
+                    continue
+                self.wfile.write(_mask(f"{name_s}: {value}\r\n".encode("latin-1"), secret))
+            self.wfile.write(b"Connection: close\r\n\r\n")
+            self.wfile.flush()
+            for chunk in _masked(decoded.iter_bytes(), secret):
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (OSError, http.client.HTTPException, httpx.HTTPError):
+            pass
+        finally:
+            conn.close()
+
     def _tunnel(self, client: socket.socket, upstream: socket.socket) -> None:
         client.settimeout(_TUNNEL_POLL)
         upstream.settimeout(_TUNNEL_POLL)
@@ -498,6 +761,8 @@ class FilteringProxy:
     v28-F1: ``unix_socket_path`` opens a second door — the same handler and
     counters on an AF_UNIX socket, for sandboxes whose only egress is a
     bind-mounted socket (Linux ``--unshare-net``).
+
+    ADR 0062: ``relay`` adds the provider-key relay route on both doors.
     """
 
     def __init__(
@@ -507,8 +772,18 @@ class FilteringProxy:
         unix_socket_path: str | None = None,
         denied_loopback_ports: tuple[int, ...] = (),
         asks: tuple[str, ...] | list[str] = (),
+        loopback_ports: Iterable[int] = (),
+        port: int = 0,  # ADR 0060: a re-adopted worker's profile names its port
+        relay: ProviderRelay | None = None,
     ) -> None:
-        self._server = _ProxyServer(tuple(allowlist), tuple(denied_loopback_ports), tuple(asks))
+        self._server = _ProxyServer(
+            tuple(allowlist),
+            tuple(denied_loopback_ports),
+            tuple(asks),
+            tuple(loopback_ports),
+            port,
+            relay,
+        )
         self._unix_path = unix_socket_path
         self._unix_server = (
             _ProxyUnixServer(unix_socket_path, self._server)
@@ -532,6 +807,14 @@ class FilteringProxy:
     @property
     def denied_count(self) -> int:
         return self._server.denied
+
+    @property
+    def relayed_count(self) -> int:
+        return self._server.relayed
+
+    @property
+    def relay_refused_count(self) -> int:
+        return self._server.relay_refused
 
     def start(self) -> FilteringProxy:
         servers: list[ThreadingTCPServer | ThreadingUnixStreamServer] = [self._server]

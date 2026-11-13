@@ -69,6 +69,7 @@ from .policy_schema import (
     operator_document_from_settings,
     rule_matches,
     shell_segments,
+    shell_tokens,
     specificity,
 )
 from .policy_schema import Verdict as VerdictName
@@ -84,6 +85,7 @@ from .roles import (
 from .secret_floor import secret_floor_reason, shell_secret_floor_reason
 from .shell_prefixes import (
     command_line_segments,
+    hides_commands,
     is_branch_switch_command,
     is_history_rewrite_command,
     is_remote_git_command,
@@ -166,6 +168,9 @@ class Stack:
     # P4-1 (D5): the asking chat's trifecta bits. None — no chat (REST, the
     # CLI, the hook, ACP) — is no taint: those faces decide as before.
     taint: ChatTaint | None = None
+    # ADR 0061: the project id when the repo's project is unlocked — the run
+    # lane's default asks of a sandboxed worker are answered (``_unlocked``).
+    unlocked: str | None = None
 
 
 def floor_verdict(
@@ -387,6 +392,10 @@ def run_lane(
 # ponytail: per-process state; serve is one process. Pass ``attended`` down
 # the lanes if decisions ever leave it.
 UNATTENDED_CHATS: set[str] = set()
+# D16: the chats whose turn in flight came from a messenger (a channel message,
+# or the follow-up after a channel confirm) — the keep was given at the web UI
+# for this chat, not for every channel member. Durable grants only, as above.
+CHANNEL_CHATS: set[str] = set()
 
 
 def load_stack(
@@ -401,7 +410,9 @@ def load_stack(
     from .serve.fileio import operator_roots
 
     home = holder.current.home
-    operator, ignored = operator_lane(store, chat=chat, durable_only=chat in UNATTENDED_CHATS)
+    operator, ignored = operator_lane(
+        store, chat=chat, durable_only=chat in UNATTENDED_CHATS | CHANNEL_CHATS
+    )
     stack = Stack(
         home=home,
         cwd=repo,
@@ -425,11 +436,13 @@ def load_stack(
     except PolicyResolutionError as exc:
         return replace(stack, run_note=f"run policy did not resolve: {exc}")
     note = None if project is not None else "repo is not bound to a project — the global run policy"
+    unlocked = project is not None and resolved.policy.get("unlocked") is True
     return replace(
         stack,
         run=run_lane(resolved, project),
         run_note=note,
         provider_hosts=tuple(resolved.permissions.provider_hosts),
+        unlocked=str(project["project_id"]) if unlocked and project is not None else None,
     )
 
 
@@ -524,6 +537,9 @@ def _match(
     parts = [value]
     background = False
     found: list[Verdict] = []
+    if scope == "shell" and hides_commands(value) and _binding_rules(scopes, action):
+        # D12: a shell fed on stdin, inline interpreter code — unreadable
+        return _opaque(scopes, req, unmatched, url, hidden=True)
     if scope == "shell" and action == "run":
         segments = shell_segments(value)
         background = backgrounds(value)
@@ -547,14 +563,35 @@ def _match(
     )
 
 
+UNREADABLE_NOTE = "skep cannot read which command this line runs"
+
+
+def _binding_rules(scopes: dict[str, ResolvedScopePolicy], action: str) -> list[ResolvedRule]:
+    """The shell denies and named asks that bind ``action`` — the rules an
+    unreadable line may be getting around."""
+    policy = scopes.get("shell")
+    return [
+        rule
+        for rule in (policy.rules if policy else ())
+        if _binding(rule.verdict, rule.pattern)
+        and action_binds("shell", rule.verdict, rule.action, action, rule.pattern)
+    ]
+
+
 def _opaque(
-    scopes: dict[str, ResolvedScopePolicy], req: Request, unmatched: Verdict, url: str | None
+    scopes: dict[str, ResolvedScopePolicy],
+    req: Request,
+    unmatched: Verdict,
+    url: str | None,
+    *,
+    hidden: bool = False,
 ) -> Verdict:
     """L13: a line the segment reader cannot split (``sh -c '…'``, ``$(…)``,
     ``$P x``) is allowed by nothing, but a deny or named ask still reads it
-    the way the floor does (``shell_deny_binds`` unwraps ``-c`` payloads), so
-    ``sh -c 'curl x'`` is denied by a curl deny. What even that cannot read
-    asks, and says which denies it may be getting around."""
+    the way the floor does (``shell_deny_binds`` unwraps ``-c`` and ``eval``
+    payloads), so ``sh -c 'curl x'`` is denied by a curl deny. What even that
+    cannot read (``hidden``, D12: a shell fed on stdin, inline interpreter
+    code) asks, and says which denies or named asks it may be getting around."""
     scope, action, value = req
     hit = _hit(scopes, scope, action, value, url)
     if hit is not None and _binding(hit.verdict, hit.pattern):
@@ -562,26 +599,78 @@ def _opaque(
         bound = Verdict(hit.verdict, layer, hit.rule_id, f"{layer}/{hit.rule_id}", unmatched.source)
         return max((bound, unmatched), key=lambda v: _VERDICT_RANK[v.verdict])
     argvs = command_line_segments(value, exact=True)
-    if argvs is not None and not any(a and (a[0] == "eval" or "$" in a[0]) for a in argvs):
+    if not hidden and argvs is not None and not any(a and "$" in a[0] for a in argvs):
         return unmatched  # every program it runs was read, and no deny named one
-    policy = scopes.get(scope)
-    denies = sorted(
-        {
-            rule.pattern
-            for rule in (policy.rules if policy else ())
-            if rule.verdict == "deny" and action_binds(scope, "deny", rule.action, action)
-        }
-    )
-    if not denies:
+    rules = _binding_rules(scopes, action)
+    if not rules:
         return unmatched
-    named = ", ".join(f"`{pattern}`" for pattern in denies[:3])
+    denies = sorted({rule.pattern for rule in rules if rule.verdict == "deny"})
+    kind, patterns = ("deny", denies) if denies else ("ask", sorted({r.pattern for r in rules}))
+    named = ", ".join(f"`{pattern}`" for pattern in patterns[:3])
     return replace(
         unmatched,
         note=(
-            f"skep cannot read which command this line runs, and a deny on {named} exists "
-            "that it may be getting around; approve once only if you can see it does not"
+            f"{UNREADABLE_NOTE}, and {'a' if denies else 'an'} "
+            f"{kind} on {named} exists that it may be getting around; approve once only "
+            "if you can see it does not"
         ),
     )
+
+
+# ADR 0061: what the unlocked step answers — the two asks a worker gate
+# raises that its auto-answer understands. Nothing else (a write outside the
+# workspace, a Queen lane) is ever the layer's.
+UNLOCKED_REQUESTS = frozenset({("shell", "run"), ("network", "connect")})
+UNLOCKED_RULE = "zero-ask"
+
+
+def _unlocked(stack: Stack, req: Request, verdict: Verdict) -> bool:
+    """Is ``verdict`` an ask that is only a default — every part of the line
+    unmatched, a catch-all ``*`` ask, or allowed? A deny, a named ask, a line
+    skep cannot read (``_opaque``) and a background line (B21) are not.
+
+    The run lane is compiled from knobs (allows only); the operator's
+    standing denies and named asks live on the operator lane — the setup
+    document, the overlay and the locked baseline (D2: a template's denies
+    and named asks bind as a ceiling). They bind here too: where one names
+    any part of the line, the step declines and a human answers."""
+    scope, action, value = req
+    if verdict.verdict != "require_approval" or (scope, action) not in UNLOCKED_REQUESTS:
+        return False
+    parts: Sequence[str] | None = [value]
+    if scope == "shell":
+        parts = None if backgrounds(value) else shell_segments(value)
+    if not parts:
+        return False
+    for part in parts:
+        for scopes in (stack.run or {}, stack.operator):
+            hit = _hit(scopes, scope, action, part)
+            if hit is not None and _binding(hit.verdict, hit.pattern):
+                return False
+            if scope == "shell" and _widens(scopes, action, part):
+                return False
+    return True
+
+
+def _widens(scopes: dict[str, ResolvedScopePolicy], action: str, part: str) -> bool:
+    """The auto-answer grants ``part`` as an argv PREFIX (the worker
+    contract's matcher), so ``make`` would also run ``make deploy`` and
+    ``env`` / ``timeout 5`` would launch ``curl x``. True when a deny or a
+    named ask binds a line that grant covers: the rule's own words extend
+    ``part``, or ``part`` launches them."""
+    policy = scopes.get("shell")
+    got = shell_tokens(part)
+    for rule in policy.rules if policy else ():
+        if not (
+            _binding(rule.verdict, rule.pattern)
+            and action_binds("shell", rule.verdict, rule.action, action, rule.pattern)
+        ):
+            continue
+        if shell_tokens(rule.pattern)[: len(got)] == got or rule_matches(
+            rule, "shell", f"{part} {rule.pattern}"
+        ):
+            return True
+    return False
 
 
 def decide(
@@ -593,6 +682,7 @@ def decide(
     face: Face = "advisory",
     read_only: bool = False,
     url: str | None = None,
+    sandboxed: bool = False,
 ) -> Verdict:
     """One decision (ADR 0059 D1). ``face="hard"`` is the governor's hard
     ring, which has no human hop: there a tampered baseline denies (O2);
@@ -611,7 +701,15 @@ def decide(
     applies (B101); everything else there still asks, and on a tampered
     baseline nothing applies. REST and the CLI pass a whole URL as a
     ``network`` value: it decides as its host, with the URL as ``url``, so
-    every face can ask what read_url asks (V1)."""
+    every face can ask what read_url asks (V1).
+
+    ``sandboxed`` (ADR 0061) is a fact about the request: a worker inside
+    the sandbox walls raised it (only the worker-gate auto-answer says so).
+    On an unlocked project's run lane, the default asks of such a request —
+    unmatched, or a catch-all ``*`` ask — are answered ``allow`` labelled
+    ``unlocked:<project>/zero-ask``, after the floor and the baseline guard
+    and before the role, the delegation cap and taint, which all still
+    apply. REST, the CLI, the hook and ACP never pass it."""
     if req.scope == "network" and "://" in req.value:
         url = url or req.value
         req = Request(req.scope, req.action, urlsplit(req.value).hostname or "")
@@ -642,6 +740,11 @@ def decide(
         note = None if operator_only else stack.run_note
         if stack.run is not None and not on_operator:
             verdict = _match(_granting(stack.run, scope, read_only), req, "run", note)
+            if sandboxed and stack.unlocked and _unlocked(stack, req, verdict):
+                layer = f"unlocked:{stack.unlocked}"
+                verdict = Verdict(
+                    "allow", layer, UNLOCKED_RULE, f"{layer}/{UNLOCKED_RULE}", "run", note
+                )
         else:
             verdict = _match(
                 _granting(stack.operator, scope, read_only), req, "operator", note, url

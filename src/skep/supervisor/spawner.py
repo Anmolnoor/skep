@@ -24,6 +24,7 @@ from skep.worker_contract.worker_state import (
 from . import sandbox
 from .castes import CASTES
 from .config import SupervisorConfig
+from .netproxy import ProviderRelay, run_loopback_ports
 from .worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
 logger = logging.getLogger("skep.spawner")
@@ -99,23 +100,18 @@ def build_worker_env(
 WORKER_GIT_ENV = {"GIT_ALLOW_PROTOCOL": "file"}
 
 
-_LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
-
-
-def _proxy_env(port: int, *, loopback_direct: bool = True) -> dict[str, str]:
+def _proxy_env(port: int) -> dict[str, str]:
     """Env that routes the worker's HTTP(S) tooling through the D1 filtering proxy.
 
     pip / git / curl / requests all honour these. Combined with the Seatbelt pin
     to ``localhost:port`` (the worker's only allowed egress), the proxy is the
     sole path out — so the domain allowlist is enforced, not merely suggested.
 
-    ``loopback_direct`` is for a sandbox whose loopback IS the host's (Seatbelt):
-    v115-F9 — loopback is not egress, so a worker's own test server on 127.0.0.1
-    is reached directly, not through the proxy, which answered a dead loopback
-    port with "502 Bad Gateway" where a test expected a connection error. Under
-    bubblewrap ``--unshare-net`` the sandbox loopback is a different namespace:
-    a host loopback server is reachable only through the netshim bridge, and
-    the proxy admits loopback (v115-F9 too) — so there the exemption must be off.
+    D6 (supersedes v115-F9's ``NO_PROXY`` loopback exemption): loopback HTTP
+    goes through the proxy too, on every backend, so a closed loopback port
+    answers with a 403 that names the port and the setup command that opens
+    it, where a direct connect would only say "Operation not permitted". (A
+    dead open port now answers 502 rather than a connection error.)
     """
     url = f"http://127.0.0.1:{port}"
     env = {
@@ -126,8 +122,6 @@ def _proxy_env(port: int, *, loopback_direct: bool = True) -> dict[str, str]:
         "https_proxy": url,
         "all_proxy": url,
     }
-    if loopback_direct:
-        env["NO_PROXY"] = env["no_proxy"] = _LOOPBACK_NO_PROXY
     return env
 
 
@@ -165,6 +159,19 @@ def effective_network_domains(task: CodingWorkerTask) -> tuple[str, ...]:
     return ()
 
 
+# ADR 0060 §1: runs bwrap as its child and exits with its status (128 + n
+# for signal n). argv: <deadline seconds> <bwrap argv...>. Run with -I: its
+# cwd is the worktree, and it runs on the host.
+BWRAP_KEEPER = (
+    "import subprocess, sys\n"
+    "try:\n"
+    "    rc = subprocess.call(sys.argv[2:], timeout=float(sys.argv[1]))\n"
+    "except subprocess.TimeoutExpired:\n"
+    "    rc = -9\n"
+    "sys.exit(rc if rc >= 0 else 128 - rc)\n"
+)
+
+
 def spawn_worker(
     config: SupervisorConfig,
     task: CodingWorkerTask,
@@ -179,6 +186,8 @@ def spawn_worker(
     worker_argv: tuple[str, ...] | None = None,
     extra_writable: Iterable[Path] = (),
     write_denied: Iterable[Path] = (),
+    unmasked: Iterable[Path] = (),
+    relay: ProviderRelay | None = None,
 ) -> subprocess.Popen[bytes]:
     """Start the headless worker in its own session (so the whole tree is killable).
 
@@ -192,6 +201,11 @@ def spawn_worker(
 
     ``write_denied`` (W31): files inside a writable root the sandbox keeps
     read-only — the run's git protocol pin (``worktree.pin_git_protocols``).
+    ``unmasked``: masked files only this run may read (``sandbox.write_profile``).
+
+    ``relay`` (ADR 0062): the run's provider-key relay. A relayed worker
+    holds no copy of the key: its key files stay masked (no B125 carve-out)
+    and no env variable carrying the key reaches it.
     """
     argv = [
         # D2: route by caste. v90-F1: a coding run may override this with a
@@ -214,11 +228,10 @@ def spawn_worker(
     else:
         network = sandbox.NetworkPolicy(allow=domains)
     backend = resolve_sandbox_backend(config, network) if use_sandbox else None
-    own_netns = False  # bubblewrap --unshare-net: the sandbox loopback is not the host's
     if use_sandbox:
         # ES-F1 (B47): no usable backend raises here — the worker never starts
         # unconfined under a "sandbox" record.
-        own_netns = sandbox.require_usable(backend).backend == "bubblewrap"
+        bubblewrap = sandbox.require_usable(backend).backend == "bubblewrap"
         workspace = Path(task.workspace)
         # v109-F4: ``extra_writable`` is per-run (the project dependency-cache
         # root); every backend consumes this one list (Seatbelt subpaths,
@@ -243,11 +256,36 @@ def spawn_worker(
             # external engine (worker_argv) authenticates from its env, and an
             # unregistered caste falls back to the coding worker.
             worker_llm_key=worker_argv is None
+            and relay is None
             and getattr(CASTES.get(task.worker_kind), "needs_provider", True),
             write_denied=write_denied,
+            loopback_ports=(
+                *run_loopback_ports(
+                    task.permissions.loopback_ports, task.permissions.provider_hosts, config.home
+                ),
+                # ADR 0062 x D6: an allow-all run's relay-only proxy is one of its ports.
+                *(
+                    (network_proxy_port,)
+                    if relay is not None and network.is_allow_all and network_proxy_port
+                    else ()
+                ),
+            ),
+            unmasked=unmasked,
         )
         argv = sandbox.wrap_command(argv, profile_path, backend=backend)
+        if bubblewrap and config.readopt_workers:
+            # ADR 0060 §1: bwrap's --die-with-parent ties the sandbox to its
+            # parent; the keeper is that parent instead of serve, so the
+            # sandbox outlives serve for re-adoption, still dies with
+            # kill_session, and dies a minute past its budget if no serve
+            # ever comes back for it.
+            deadline = task.budget.wall_clock_seconds + config.grace_seconds + 60
+            argv = [sys.executable, "-I", "-c", BWRAP_KEEPER, str(deadline), *argv]
     env = build_worker_env(task.permissions.env_allowlist, baseline=config.env_baseline)
+    if relay is not None:
+        # ADR 0062: by value, so the key leaves under any name (api_key_env,
+        # SKEP_LLM_API_KEY, a profile's own variable) the allowlist named.
+        env = {name: value for name, value in env.items() if relay.key not in value}
     # Needed: the builtin worker reads its provider profile, LLM key and
     # plugin shelf from here (llm_plan.py, capabilities.py). The control-plane
     # secrets under it are hidden by the profile (ES-F4), not by omission.
@@ -257,7 +295,7 @@ def spawn_worker(
         # endpoint/model) — same class as SKEP_HOME and the proxy env below.
         env.update(extra_env)
     if proxy_port is not None:
-        env.update(_proxy_env(proxy_port, loopback_direct=not own_netns))
+        env.update(_proxy_env(proxy_port))
     env.update(WORKER_GIT_ENV)  # last: nothing above may loosen it
     log_handle = log_path.open("ab")
     try:

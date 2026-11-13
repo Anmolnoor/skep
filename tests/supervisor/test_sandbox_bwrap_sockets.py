@@ -7,10 +7,12 @@ git dir), and an abstract socket (a name starting with NUL: the session
 D-Bus, X11) belongs to the network namespace, so it is reachable whenever
 the run keeps the host's (allow-all). Seatbelt refuses all of these (W34).
 
-The matrix below is the stated wall, residuals included: a socket at a path
-nobody listed is still reachable, and so is an abstract socket in allow-all
-mode (bubblewrap alone cannot filter either; docs/sandboxing.md says what
-would).
+The matrix below is the stated wall, residuals included. With Landlock off
+(the masks alone, as on an older kernel) a socket at a path nobody listed is
+still reachable, and so is an abstract socket in allow-all mode. R5b: with
+the running kernel's Landlock (ABI 6 scopes abstract sockets, ABI 9 path
+sockets outside the worker's roots) both are refused, while the sockets the
+worker makes itself and those in its own roots still connect.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from skep import landlock
 from skep.supervisor import sandbox, secret_floor
 from skep.supervisor.netproxy import FilteringProxy
 
@@ -43,7 +46,20 @@ Canaries = dict[str, tuple[str, str]]
 _PROBE = """
 import json, os, socket, sys
 seen = {}
-for label, (directory, name) in json.loads(sys.argv[1]).items():
+# R5b: the worker's own listeners, made inside the sandbox (in its domain)
+mine = {"self_abstract": "\\0skep-self-%d" % os.getpid(), "self_path": "/tmp/self.sock"}
+for label, address in mine.items():
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(address)
+    srv.listen(1)
+    c = socket.socket(socket.AF_UNIX)
+    try:
+        c.connect(address)
+        seen[label] = "CONNECTED"
+    except OSError as exc:
+        seen[label] = type(exc).__name__
+found = json.loads(sys.argv[1])
+for label, (directory, name) in found.items():
     c = socket.socket(socket.AF_UNIX)
     try:
         if directory:
@@ -51,6 +67,23 @@ for label, (directory, name) in json.loads(sys.argv[1]).items():
             c.connect(name)
         else:
             c.connect("\\0" + name)
+        seen[label] = "CONNECTED"
+    except OSError as exc:
+        seen[label] = type(exc).__name__
+# R5b: a symlink in the worktree to that unlisted socket is checked at the
+# path it resolves to; and a cross-directory rename in the worktree still
+# works ("CONNECTED" = it did), though Landlock handles a filesystem right.
+os.chdir(found["own"][0])
+os.symlink(os.path.join(*found["home_other"]), "link.sock")
+os.makedirs("r/a")
+os.makedirs("r/b")
+open("r/a/f", "w").close()
+for label, act in [
+    ("symlinked_other", lambda: socket.socket(socket.AF_UNIX).connect("link.sock")),
+    ("rename_across", lambda: os.rename("r/a/f", "r/b/f")),
+]:
+    try:
+        act()
         seen[label] = "CONNECTED"
     except OSError as exc:
         seen[label] = type(exc).__name__
@@ -129,7 +162,16 @@ def proxy() -> Iterator[FilteringProxy]:
         shutil.rmtree(sock_dir, ignore_errors=True)
 
 
-_CLOSED = {"home_agent": False, "env_agent": False, "ro_root": False, "own": True}
+_CLOSED = {
+    "home_agent": False,
+    "env_agent": False,
+    "ro_root": False,
+    "own": True,
+    "self_abstract": True,
+    "self_path": True,
+    "rename_across": True,
+}
+_KERNEL_ABI = landlock.abi()
 
 
 @pytest.mark.parametrize(
@@ -141,13 +183,25 @@ _CLOSED = {"home_agent": False, "env_agent": False, "ro_root": False, "own": Tru
         ("allow-all", {**_CLOSED, "home_other": True, "abstract": True}),
     ],
 )
+@pytest.mark.parametrize("scoping", ["masks-only", "landlock"])
 def test_which_unix_sockets_a_bwrap_worker_reaches(
     tmp_path: Path,
     canaries: tuple[Canaries, Path],
     proxy: FilteringProxy,
+    monkeypatch: pytest.MonkeyPatch,
     mode: str,
     expected: dict[str, bool],
+    scoping: str,
 ) -> None:
+    if scoping == "masks-only":
+        monkeypatch.setattr(landlock, "abi", lambda: 0)  # an older kernel: the R5 wall
+    elif _KERNEL_ABI < landlock.ABI_SCOPE_ABSTRACT:
+        pytest.skip(f"this kernel's Landlock ABI is {_KERNEL_ABI}; scoping needs 6")
+    else:  # what this kernel's ABI closes on top of the masks
+        expected = {**expected, "abstract": False}
+        if _KERNEL_ABI >= landlock.ABI_RESOLVE_UNIX:
+            expected["home_other"] = False
+    expected = {**expected, "symlinked_other": expected["home_other"]}
     found, ro_root = canaries
     network = {
         "deny-all": sandbox.DENY_ALL_NETWORK,

@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -150,6 +151,7 @@ from .settings import (
     DEFAULT_WALL_CLOCK_SECONDS,
     EXECUTION_MODES,
     POLICY_ENGINE_V2_SCOPES,
+    PROVIDER_KEY_RELAY,
     SANDBOX_BACKEND,
     SANDBOX_BACKENDS,
     SANDBOX_REQUIRED_FOR,
@@ -181,6 +183,7 @@ POLICY_FIELDS = {
     "allowed_plugin_risks": ALLOWED_PLUGIN_RISKS,
     "sandbox_backend": SANDBOX_BACKEND,
     "policy_engine_v2_scopes": POLICY_ENGINE_V2_SCOPES,
+    "provider_key_relay": PROVIDER_KEY_RELAY,
 }
 
 _POSITIVE_POLICY_FIELDS = {
@@ -979,7 +982,15 @@ def copy_project_policy(store: RunStore, *, src: str, dst: str) -> dict[str, Any
     target = project_from_store(store, dst)
     if target is None:
         raise HTTPException(status_code=404, detail=f"no project {dst!r}")
-    overlay = {key: value for key, value in source.policy.items() if key in PROJECT_POLICY_KEYS}
+    # ES-F141 (ADR 0061, I6): unlocked is climbed per project, on its own
+    # HIGH card — a copy never carries it. codex_chatgpt_login is the same
+    # shape (its HIGH card: the operator's ChatGPT plan, repo content to
+    # chatgpt.com), so it stays behind too.
+    overlay = {
+        key: value
+        for key, value in source.policy.items()
+        if key in PROJECT_POLICY_KEYS and key not in ("unlocked", "codex_chatgpt_login")
+    }
     store.add_project_policy(
         project_id=target.project_id,
         name=target.name,
@@ -2309,7 +2320,7 @@ def policy_why(
         view["role"] = {
             "name": role_record.name,
             "layer": role_record.label,
-            "binds": role_record.policy_layer,
+            "binds": role_record.template,
             "verdict": hit.verdict if hit else None,
             "decided_by": hit.decided_by if hit else None,
             "note": (
@@ -2841,6 +2852,7 @@ def ingest_curator_proposals(
                     project_id=(
                         None if entry.get("project_id") is None else str(entry.get("project_id"))
                     ),
+                    provenance=f"worker:{task_id}",  # D15: the curator worker wrote it
                 )
             continue
         sources = tuple(
@@ -2913,6 +2925,42 @@ def open_pr_from_branch(
         "detail": result.detail,
         "branch": branch,
     }
+
+
+def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) -> str:
+    """L30: what an open_pr card pushes, and where — the branch each mode
+    lands on, ``origin``'s URL (any login stripped) and the PR base."""
+    base = str(args.get("base") or "main")
+    try:
+        if args.get("branch"):
+            repo = resolve_repo_arg(str(args.get("repo") or ""), repos_root(holder), store)
+            branch = str(args["branch"])
+        else:
+            ids = [str(t) for t in args.get("task_ids") or [args.get("task_id")]]
+            repo = Path(str(require_run(store, ids[0])["repo"]))
+            branch = (
+                _grouped_branch(None if args.get("title") is None else str(args["title"]), ids[0])
+                if args.get("task_ids")
+                else applied_branch_for(store, ids[0]) or f"skep/{ids[0]}"
+            )
+    except (HTTPException, IndexError, TypeError, ValueError, OSError):
+        return f"pushes to origin and opens a PR into {base}"
+    probe = subprocess.run(
+        ["git", "-C", str(repo), "remote", "get-url", "--push", "origin"],  # what push uses
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    url = probe.stdout.strip()
+    if probe.returncode != 0 or not url:
+        return f"pushes {branch} to origin, but this repo has no origin remote: the push will fail"
+    if "://" in url:  # a login in the URL never reaches a card
+        try:
+            parts = urllib.parse.urlsplit(url)
+        except ValueError:  # a URL git stores but Python cannot split: name no URL
+            return f"pushes {branch} to origin and opens a PR into {base}"
+        url = urllib.parse.urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2]))
+    return f"pushes {branch} to origin ({url}) and opens a PR into {base}"
 
 
 def open_pr_for_branch(
@@ -3109,6 +3157,7 @@ def open_pr_for_runs(
 
 
 def pending_approval_or_409(store: RunStore, review_id: str) -> dict[str, Any]:
+    store.release_dead_gate_claim(review_id)  # D24: a gone claimer's gate claim
     approval = store.get_approval(review_id)
     if approval is None:
         # v24-F3: the most common misuse is passing a TASK id here — teach the
@@ -3644,9 +3693,13 @@ def resume_past_gate(
     *,
     remembered: bool = False,
     granted: Sequence[list[str]] = (),
+    session: bool = True,
 ) -> str:
     """Q8: approving a suspended task resumes it past the gate (fresh worker
     run carrying the granted verdict), dispatched on the background pool.
+
+    ``session=False`` (ADR 0061's auto-answer) approves ONCE: an automatic
+    verdict never writes the session tier a human's plain approve does.
 
     ``shell_allowlist`` overrides the original permissions' allowlist so a
     just-persisted policy change applies to this resume, not only future runs.
@@ -3689,7 +3742,7 @@ def resume_past_gate(
     # (the verdict and the resume chain's worker_state carry it) and must not
     # reach the session tier every repo's runs read (B39).
     session_kept: list[list[str]] = []
-    if not remembered and approval_commands:
+    if session and not remembered and approval_commands:
         session_kept = remember_commands_for_session(
             store,
             [list(command) for command in approval_commands if not _asked(command, permissions)],
@@ -3745,6 +3798,78 @@ def resume_past_gate(
     # before the predecessor drops out of pending_gate_workspaces.
     store.transition(task_id, TaskState.SUPERSEDED.value, f"resumed as {resumed_id}")
     return resumed_id
+
+
+UNLOCKED_ACTOR = "auto:unlocked"
+
+
+def _gate_requests(store: RunStore, task_id: str, approval: Any) -> list[Request]:
+    """What a worker gate asks, as decide() requests — the shell commands it
+    lists, or the host a network gate names (decided as the run's
+    ``network.connect``). Empty for anything else: that gate is a human's."""
+    if approval.action == "shell.run":
+        commands = store.approval_commands(approval.review_id) or []
+        return [Request("shell", "run", shlex.join(command)) for command in commands]
+    if approval.action in ("network.fetch", "network.read"):
+        decision = approval_decision_for_action(
+            action=approval.action, events=current_events(store, task_id)
+        )
+        host = "" if decision is None or decision.detail is None else str(decision.detail).strip()
+        if host and ASK_HOST_RE.match(host):
+            return [Request("network", "connect", host)]
+    return []
+
+
+def auto_answer_unlocked_gate(
+    store: RunStore, holder: ConfigHolder, runner: Dispatcher, task_id: str
+) -> str | None:
+    """ADR 0061: on an unlocked project a sandboxed run's gate answers itself
+    when ``decide(…, sandboxed=True)`` allows every request it names, under
+    the run's own role and chain — the click path (``resume_past_gate``),
+    actor ``auto:unlocked``, once. Each request is a decision-log row (I13).
+    Returns the resumed task id, or None: the gate stays a human's card."""
+    run = store.get_run(task_id)
+    if run is None or run.state != "pending_approval":
+        return None
+    if run.execution_mode != "sandbox" or not holder.current.sandbox:
+        return None  # the mode stands on the wall (I12)
+    approval = next((a for a in store.pending_approvals() if a.task_id == task_id), None)
+    requests = [] if approval is None else _gate_requests(store, task_id, approval)
+    if approval is None or not requests:
+        return None
+    stack = load_stack(holder, store, repo=run.repo)
+    if stack.unlocked is None:
+        return None
+    audit_task = holder.current.audit_dir / task_id / "task.json"
+    delegation = _delegation_of(CodingWorkerTask.model_validate_json(audit_task.read_text()))
+    chain, role = delegation_inputs(
+        holder,
+        (delegation or {}).get("chain") or (),
+        (delegation or {}).get("role"),
+        team=(delegation or {}).get("team"),
+    )
+    for req in requests:
+        verdict = decide_v3(req, stack=stack, role=role, chain=chain, sandboxed=True)
+        row = _decision_row(
+            verdict,
+            stack,
+            actor=UNLOCKED_ACTOR,
+            repo=run.repo,
+            req=(req.scope, req.action, req.value),
+            role=role,
+        )
+        log_decision(holder.current.audit_dir, row)
+        if verdict.verdict != "allow":
+            return None
+    return resume_past_gate(
+        store,
+        holder.current,
+        runner,
+        require_run(store, task_id),
+        approval.review_id,
+        UNLOCKED_ACTOR,
+        session=False,
+    )
 
 
 def persist_remembered_command(
@@ -4201,6 +4326,49 @@ _NO_STANDING_SHELL = NETWORK_PROGRAMS | frozenset(
 )  # fmt: skip
 
 
+# D13 (2026-11-13): a standing shell allow names only these programs — read-only
+# inspection, read-only git, the common test runners. Anything else is
+# approve-once or session-only; the refusals above stay a second check.
+_STANDING_SAFE = frozenset(
+    {"ls", "cat", "head", "tail", "wc", "grep", "rg", "stat", "file", "du", "df", "pwd",
+     "which", "date", "uname", "find", "pytest"}
+)  # fmt: skip
+# A listed program's options that write a file or run another program.
+_STANDING_UNSAFE_FLAGS = {"find": {"-fprint", "-fprint0", "-fprintf", "-fls"}, "rg": {"--pre"}}
+_STANDING_SAFE_GIT = frozenset({"status", "log", "diff", "show", "rev-parse", "ls-files", "blame"})
+_STANDING_SAFE_RUNNERS = (("uv", "run", "pytest"), ("npm", "test"), ("cargo", "test"),
+                          ("go", "test"))  # fmt: skip
+STANDING_SHELL_ONLY = (
+    "a standing shell allow covers only read-only inspection (ls, cat, grep…), read-only "
+    "git (status, log, diff…) and test runners (pytest, npm test…); approve it once or "
+    "keep it for this session"
+)
+
+
+def standing_shell_safe(argv: list[str]) -> bool:
+    """D13: is this one segment on the standing shell allow-list?"""
+    from ..shell_prefixes import git_core_argv, program_name
+
+    program = program_name(argv[0])
+    if any(t.startswith((">", "&>")) for t in argv):
+        return False  # a redirect writes a file
+    if _STANDING_UNSAFE_FLAGS.get(program, set()) & {t.partition("=")[0] for t in argv[1:]}:
+        return False
+    if program in _STANDING_SAFE:
+        return True
+    if any(tuple(argv[: len(r)]) == r for r in _STANDING_SAFE_RUNNERS):
+        return True
+    core = git_core_argv(argv)
+    if program != "git" or core[:1] != ["git"]:
+        return False
+    # ponytail: --output writes a file and --ext-diff runs a configured program
+    if any(t.startswith(("--output", "--ext-diff")) for t in core):
+        return False
+    if core[1:] in (["branch"], ["branch", "--list"]):
+        return True
+    return len(core) > 1 and core[1] in _STANDING_SAFE_GIT
+
+
 def set_operator_policy_rule(
     store: RunStore,
     *,
@@ -4222,6 +4390,8 @@ def set_operator_policy_rule(
     answer carries the replay of recent decisions under the new document.
     ``dry_run`` (the card's proposal) checks and answers, writing nothing.
     """
+    from ..policy_baseline import NoBaseline, verify
+    from ..policy_layers import store_home
     from ..policy_schema import (
         OPERATOR_POLICY_SETTINGS_KEY,
         SCOPE_ACTIONS,
@@ -4247,6 +4417,13 @@ def set_operator_policy_rule(
     pattern = pattern.strip()
     if not pattern:
         raise HTTPException(status_code=400, detail="pattern must be non-empty")
+    if verdict == "allow" and not isinstance(verify(store_home(store)), NoBaseline):
+        # D7: under an approved baseline (tampered too) this verb only tightens
+        detail = (
+            "a locked baseline takes no new allow from set_operator_policy; "
+            "re-approve the baseline to allow this: `skep policy approve`"
+        )
+        raise HTTPException(status_code=400, detail=detail) from PolicyWriteRejected(detail)
     if scope == "shell" and verdict == "allow":
         return _queen_shell_allow(store, action, pattern, holder=holder, dry_run=dry_run)
     rule_id = f"op:{scope}:{action}:{pattern}"
@@ -4326,6 +4503,9 @@ def queen_shell_allow_refusal(pattern: str, action: str) -> str | list[tuple[str
     secret = shell_secret_floor_reason(pattern, cwd=None)
     if secret is not None:
         return secret
+    for _scope, _action, line, _matcher in found:
+        if not standing_shell_safe(shlex.split(line)):
+            return f"{line!r}: {STANDING_SHELL_ONLY}"
     return [(scope, action, line, matcher) for scope, _a, line, matcher in found]
 
 
@@ -4617,6 +4797,12 @@ def submit_run(
         effective_dispatch_decision = delegated_decision(
             effective_dispatch_decision, delegation, delegation_note
         )
+        if resolved_policy.network_dropped:  # L32: the terminal notice says it too
+            constraints = {**(effective_dispatch_decision.constraints or {})}
+            constraints["network_dropped"] = list(resolved_policy.network_dropped)
+            effective_dispatch_decision = replace(
+                effective_dispatch_decision, constraints=constraints
+            )
         if chat_taint:
             constraints = {**(effective_dispatch_decision.constraints or {})}
             constraints["chat_taint"] = list(chat_taint)
@@ -4685,6 +4871,55 @@ def _preanswer(
     return updated, {"network": hosts, "shell": prefixes}
 
 
+def unanswerable_hosts(store: RunStore, manifests: Sequence[dict[str, Any]]) -> list[str]:
+    """D9: the hosts these runs would ask about on a home with no approved
+    baseline where ``no_baseline`` binds (``zero_state_home``: every grant is
+    an ask, which nothing answers once a sandboxed subprocess meets it). []
+    elsewhere — on an upgraded home the asks are a role's own (V7), which
+    the worker cards and ``skep review`` answers."""
+    from ..policy_baseline import NoBaseline, verify
+    from ..policy_layers import store_home, zero_state_home
+
+    if not isinstance(verify(store_home(store)), NoBaseline) or not zero_state_home(store):
+        return []
+    return sorted({str(h) for manifest in manifests for h in manifest.get("network_ask") or []})
+
+
+def answered_hosts(
+    store: RunStore,
+    manifests: Sequence[dict[str, Any]],
+    answer: Sequence[str] | None,
+    *,
+    how: str,
+) -> dict[str, Any] | None:
+    """D9 (operator decision 2026-11-13): a role or team run the operator
+    starts. ``answer`` becomes the pre-answer (``submit_run(preanswered=)``,
+    the dispatch card's own mechanism) — refused unless every host is one
+    the manifests list as an ask. With no answer on a home with no approved
+    baseline (where every grant is an ask nothing answers once the run is
+    going) the run is refused, naming the hosts. ``how`` names this face's
+    way to answer (``answer_hosts`` / ``--answer-host``)."""
+    asked = sorted({str(h) for manifest in manifests for h in manifest.get("network_ask") or []})
+    if answer is not None:
+        beyond = sorted(set(answer) - set(asked))
+        if beyond:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{', '.join(beyond)}: not a host this run asks about "
+                f"({', '.join(asked) or 'none'})",
+            )
+        return {"network_ask": list(answer)} if answer else None
+    unanswered = unanswerable_hosts(store, manifests)
+    if unanswered:
+        raise HTTPException(
+            status_code=400,
+            detail=f"this home has no approved policy baseline, so this run would ask about "
+            f"{', '.join(unanswered)} and nothing could answer once it runs; name the hosts to "
+            f"answer for this run only in {how}, or approve a baseline (skep policy approve)",
+        )
+    return None
+
+
 def dispatch_manifest(
     holder: ConfigHolder,
     store: RunStore,
@@ -4742,16 +4977,41 @@ def dispatch_manifest(
     except (HTTPException, ValueError, OSError) as exc:
         detail = exc.detail if isinstance(exc, HTTPException) else exc
         return {"error": str(detail)}
+    from ..codex_login import run_auth_source
+    from ..netproxy import run_loopback_ports
     from ..provider_hosts import provider_hosts_for
 
     permissions, resolved_policy = compiled.permissions, compiled.policy
+    # ES-F124 (D20): whose login a codex run spends is on the card.
+    engine_auth = run_auth_source(
+        resolved_policy.coding_engine,
+        resolved_policy.policy,
+        min_seconds=resolved_policy.budget.wall_clock_seconds,
+    )
+    provider_hosts = provider_hosts_for(
+        store,
+        holder.current.home.parent,
+        caste=caste,
+        engine=resolved_policy.coding_engine,
+        chatgpt_login=engine_auth is not None,
+    )
+    # D10: a role chain dropped the project's `*` — one line on the card
+    star = (
+        {"network_note": NO_STAR_NOTE}
+        if star_dropped(resolved_policy.permissions, permissions)
+        else {}
+    )
     return {
+        **star,
         "repo": str(compiled.repo),
         "network": list(permissions.network),
-        # L10: an explicit network replaces the project's hosts — say which
+        # D5: a named network adds to the project's hosts; [] drops them
+        "network_added": [h for h in resolved_policy.network_added if h in permissions.network],
         "network_dropped": list(resolved_policy.network_dropped),
-        "provider_hosts": provider_hosts_for(
-            store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
+        "provider_hosts": provider_hosts,
+        # D6: the only loopback ports the run reaches (project list + local provider)
+        "loopback_ports": list(
+            run_loopback_ports(permissions.loopback_ports, provider_hosts, holder.current.home)
         ),
         "network_ask": list(permissions.network_ask),
         "shell_ask": [list(p) for p in permissions.shell_ask],
@@ -4768,6 +5028,7 @@ def dispatch_manifest(
         "auto_apply_verified_patch": compiled.auto_apply_verified_patch,
         "auto_apply_branch": compiled.auto_apply_branch,
         "engine": resolved_policy.coding_engine,
+        "engine_auth": engine_auth,
         "execution_mode": resolved_policy.execution_mode,
         "verify_command": str(resolved_policy.policy.get("verify_command") or ""),
         "chain": list(delegation_chain),
@@ -4865,10 +5126,12 @@ def compile_run(
 # loses its list: the run would get more than the operator approved.
 _MANIFEST_SETS = (
     "network", "provider_hosts", "shell_allowlist", "write", "read", "env_allowlist",
-    "allowed_plugin_risks",
+    "allowed_plugin_risks", "loopback_ports",
 )  # fmt: skip
 _MANIFEST_FLAGS = ("allow_git_mutation", "auto_apply_verified_patch")
-_MANIFEST_EXACT = ("repo", "engine", "execution_mode", "verify_command", "auto_apply_branch")
+_MANIFEST_EXACT = (
+    "repo", "engine", "engine_auth", "execution_mode", "verify_command", "auto_apply_branch",
+)  # fmt: skip
 
 
 def manifest_widening(shown: dict[str, Any], fresh: dict[str, Any]) -> str | None:
@@ -4880,6 +5143,12 @@ def manifest_widening(shown: dict[str, Any], fresh: dict[str, Any]) -> str | Non
         return None
     if "error" in shown:
         return "the card showed no envelope (it could not be compiled) and it compiles now"
+    if "members" in shown:  # D23: a batch widens when any of its runs does
+        pairs = zip(shown["members"], fresh.get("members") or [], strict=False)
+        for index, (was, now) in enumerate(pairs, 1):
+            if (widened := manifest_widening(was, now)) is not None:
+                return f"run {index}: {widened}"
+        return None
 
     def items(value: Any) -> set[str]:  # a shell prefix is a list: compare it as one line
         return {shlex.join(v) if isinstance(v, list) else str(v) for v in value or []}
@@ -5112,6 +5381,7 @@ def _within_delegation(
         who
         + (f"; beyond {beyond}, asks a human (this run only): {named(asks)}" if asks else "")
         + (f"; beyond {beyond}, dropped: {named(rows)}" if rows else "")
+        + (f"; {NO_STAR_NOTE}" if star_dropped(permissions, narrowed) else "")
     )
     delegation = {
         "chain": [hop.entry for hop in chain],
@@ -5119,6 +5389,20 @@ def _within_delegation(
         "team": team,
     }
     return narrowed, delegation, note
+
+
+# D10 (operator decision 2026-11-13): a role chain never holds network `*`; a
+# run that lost it says so, why, and what to do, on its card and its record.
+NO_STAR_NOTE = (
+    "this run holds no hosts: its network was *, which a role chain never holds; "
+    "name the hosts instead (the project policy's default_network, or the dispatch's network)"
+)
+
+
+def star_dropped(before: Permissions, after: Permissions) -> bool:
+    """D10: the run policy granted ``*`` (the project's or the dispatch's)
+    and the chain left the run no hosts."""
+    return "*" in before.network and not after.network
 
 
 def _delegation_who(chain: Sequence[Delegator], role: Role | None) -> str:
@@ -5195,6 +5479,7 @@ def submit_team(
     delegation_chain: Sequence[str] = (),
     dispatch_decision: AutonomyDecision | None = None,
     deferred_asks: bool = False,
+    preanswered: Sequence[dict[str, Any] | None] = (),
 ) -> dict[str, Any]:
     """R3 (ADR 0055 D5): a team run — v51's batch dispatch with a manager as
     the dispatcher. The manager is a hop, ``manager@<role>``, under whoever
@@ -5244,8 +5529,12 @@ def submit_team(
             role=str(task.get("role") or manager),
             team=team,
             deferred_asks=deferred_asks,
+            # D23: the member's manifest the batch card listed and a human
+            # approved; D9's team answer arrives as one copy per member, each
+            # taking the hosts it asks (``_preanswer`` intersects).
+            preanswered=preanswered[index] if index < len(preanswered) else None,
         )
-        for task in tasks
+        for index, task in enumerate(tasks)
     ]
     return {
         "team": team,
@@ -5254,6 +5543,35 @@ def submit_team(
         "dispatched": dispatched,
         "count": len(dispatched),
     }
+
+
+def team_manifests(
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    manager: str,
+    tasks: Sequence[dict[str, Any]],
+    delegation_chain: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    """D9: what each member of ``submit_team`` would get, compiled the way
+    it compiles them (``dispatch_manifest``, no side effect)."""
+    chain = [*delegation_chain, f"manager@{manager}"]
+    return [
+        dispatch_manifest(
+            holder,
+            store,
+            repo=str(task.get("repo") or ""),
+            caste=str(task.get("caste") or "coding"),
+            execution_mode=(
+                None if task.get("execution_mode") is None else str(task["execution_mode"])
+            ),
+            engine=None if task.get("engine") is None else str(task["engine"]),
+            delegation_chain=chain,
+            role=str(task.get("role") or manager),
+            deferred_asks=True,
+        )
+        for task in tasks
+    ]
 
 
 def dispatch_run_auto_allowed(
@@ -5797,7 +6115,23 @@ def keep_options(
 ) -> list[str]:
     """The keep choices a card offers — the card never offers what the
     server refuses (``keep_refusal`` with the same taint and tier)."""
-    return [keep for keep in KEEP_TIERS if keep_refusal(tool, args, keep, taint, high=high) is None]
+    return [
+        keep
+        for keep in KEEP_TIERS
+        if keep_refusal(tool, args, keep, taint, high=high) is None
+        and (keep != "always" or standing_keep_refusal(tool, args) is None)
+    ]
+
+
+def standing_keep_refusal(tool: str, args: dict[str, Any]) -> str | None:
+    """D13: why an "always" keep on this shell card is refused — it is the
+    standing allow set_operator_policy writes, so the same allow-list holds.
+    The card offers it only when this is None and the confirm checks it."""
+    if tool not in ("run_shell", "start_process"):
+        return None
+    action = "run_background" if tool == "start_process" else "run"
+    standing = queen_shell_allow_refusal(str(args.get("command") or "").strip(), action)
+    return standing if isinstance(standing, str) else None
 
 
 def default_keep(
@@ -6126,6 +6460,9 @@ def update_policy(
             status_code=400,
             detail="default_execution_mode must be 'ask', 'workspace', or 'sandbox'",
         )
+    relay = updates.get("provider_key_relay")
+    if relay is not None and not isinstance(relay, bool):
+        raise HTTPException(status_code=400, detail="provider_key_relay must be true or false")
     backend = updates.get("sandbox_backend")
     if backend is not None and backend not in SANDBOX_BACKENDS:
         raise HTTPException(

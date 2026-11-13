@@ -76,6 +76,12 @@ def test_the_trust_ramp_is_enforced_at_project_and_never_groupable() -> None:
         "worker_protocol",
         "allowed_plugin_risks",
         "default_execution_mode",
+        # D6: which loopback ports a project's workers reach — a project fact,
+        # not a trust step and never bundled into a group.
+        "loopback_ports",
+        # ES-F121: whose login a codex run spends is a per-project choice,
+        # never bundled into a group, and not a landing/dispatch ramp step
+        "codex_chatgpt_login",
     }
     assert set(PROJECT_POLICY_KEYS) - set(GROUPABLE_POLICY_KEYS) - off_ramp_project_only == (
         TRUST_RAMP_KEYS
@@ -120,6 +126,7 @@ def test_every_run_policy_knob_declares_its_scope_or_is_a_daemon_knob_on_purpose
         "ticker_interval_seconds",
         "card_timeout_seconds",
         "policy_engine_v2_scopes",
+        "provider_key_relay",  # ADR 0062: how a key reaches a worker, not a scope's rule
     }
     for key in registry_keys(system="run_policy"):
         if key.scope is None:

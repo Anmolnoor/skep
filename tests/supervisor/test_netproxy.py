@@ -84,7 +84,7 @@ def _fetch_via(proxy_port: int, url: str) -> tuple[int, bytes]:
 
 
 def test_http_forward_allowed_host_reaches_origin(origin: int) -> None:
-    proxy = FilteringProxy(("localhost",)).start()
+    proxy = FilteringProxy(("localhost",), loopback_ports=(origin,)).start()
     try:
         status, body = _fetch_via(proxy.port, f"http://localhost:{origin}/")
         assert status == 200
@@ -141,7 +141,7 @@ def _connect_via_proxy(
 
 def test_connect_allowed_host_tunnels() -> None:
     echo_port, srv = _echo_listener()
-    proxy = FilteringProxy(("localhost",)).start()
+    proxy = FilteringProxy(("localhost",), loopback_ports=(echo_port,)).start()
     try:
         status, sock = _connect_via_proxy(proxy.port, "localhost", echo_port)
         assert "200" in status
@@ -209,7 +209,7 @@ def test_connect_tunnel_survives_a_response_longer_than_the_poll(
     "nothing to relay yet", not "the peer is gone"."""
     monkeypatch.setattr(netproxy, "_TUNNEL_POLL", 0.2)
     echo_port, srv = _streaming_listener(chunks=4, delay=0.25)  # 1.0s >> one poll
-    proxy = FilteringProxy(("localhost",)).start()
+    proxy = FilteringProxy(("localhost",), loopback_ports=(echo_port,)).start()
     try:
         status, sock = _connect_via_proxy(proxy.port, "localhost", echo_port)
         assert "200" in status
@@ -251,7 +251,7 @@ def test_plain_http_slow_body_is_relayed_whole(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(netproxy, "_CONNECT_TIMEOUT", 0.2)  # what the socket used to keep
     server = HTTPServer(("127.0.0.1", 0), _SlowOriginHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    proxy = FilteringProxy(("localhost",)).start()
+    proxy = FilteringProxy(("localhost",), loopback_ports=(server.server_address[1],)).start()
     try:
         status, body = _fetch_via(proxy.port, f"http://localhost:{server.server_address[1]}/")
         assert status == 200
@@ -269,7 +269,7 @@ def test_tunnel_teardown_is_prompt_when_a_peer_really_closes(
     latency, so this is strictly better than the 120s deadline it replaces."""
     monkeypatch.setattr(netproxy, "_TUNNEL_POLL", 0.2)
     echo_port, srv = _echo_listener()  # echoes once, then closes
-    proxy = FilteringProxy(("localhost",)).start()
+    proxy = FilteringProxy(("localhost",), loopback_ports=(echo_port,)).start()
     try:
         status, sock = _connect_via_proxy(proxy.port, "localhost", echo_port)
         assert "200" in status
@@ -312,7 +312,9 @@ def test_unix_socket_door_filters_like_the_tcp_one() -> None:
     echo_port, srv = _echo_listener()
     sock_dir = tempfile.mkdtemp(prefix="skep-nx-", dir="/tmp")
     sock_path = str(Path(sock_dir) / "proxy.sock")
-    proxy = FilteringProxy(("localhost",), unix_socket_path=sock_path).start()
+    proxy = FilteringProxy(
+        ("localhost",), unix_socket_path=sock_path, loopback_ports=(echo_port,)
+    ).start()
     try:
         assert proxy.unix_socket_path == sock_path
         status, sock = _connect_via_unix(sock_path, "localhost", echo_port)
@@ -359,17 +361,28 @@ def test_loopback_is_not_egress(host: str, expected: bool) -> None:
     assert domain_allowed(host, ()) is False
 
 
-def test_loopback_passes_through_the_proxy_with_an_empty_allowlist(origin: int) -> None:
-    """v115-F9, end to end: the field shape — an httpx client inside a worker,
-    HTTP_PROXY pointed at the filtering proxy, talking to a test server the
-    suite started on 127.0.0.1. Nothing is allowlisted; loopback still works."""
-    proxy = FilteringProxy(()).start()
+def test_loopback_passes_through_the_proxy_only_on_the_runs_ports(origin: int) -> None:
+    """D6 (operator decision 2026-11-13, supersedes v115-F9): loopback is no
+    longer open to every port. The run's own ports (the project's
+    ``loopback_ports`` and a local provider's port) pass with an empty
+    allowlist; any other loopback port gets a 403 that names the port and the
+    command that opens it. A bare ``localhost`` allowlist entry opens nothing."""
+    proxy = FilteringProxy((), loopback_ports=(origin,)).start()
     try:
         status, body = _fetch_via(proxy.port, f"http://127.0.0.1:{origin}/")
         assert status == 200 and body
         assert proxy.allowed_count == 1 and proxy.denied_count == 0
     finally:
         proxy.stop()
+    closed = FilteringProxy(("localhost",)).start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            _fetch_via(closed.port, f"http://127.0.0.1:{origin}/")
+        assert excinfo.value.code == 403
+        assert f"loopback port {origin} is closed" in str(excinfo.value.reason)
+        assert f"skep project setup <repo> --loopback-port {origin}" in str(excinfo.value.reason)
+    finally:
+        closed.stop()
 
 
 def _raw(proxy_port: int, request: bytes) -> str:
@@ -429,9 +442,9 @@ def test_loopback_aliases_are_not_loopback_through_the_proxy(host: str) -> None:
 
 
 def test_loopback_never_reaches_the_control_plane_port(origin: int) -> None:
-    """ES-F6 (B05/B54): loopback stays reachable for a project's own test
-    servers (v115-F9) — but never skep serve's port."""
-    proxy = FilteringProxy((), denied_loopback_ports=(origin,)).start()
+    """ES-F6 (B05/B54): never skep serve's port — not even when the run's
+    loopback ports list it (D6)."""
+    proxy = FilteringProxy((), denied_loopback_ports=(origin,), loopback_ports=(origin,)).start()
     try:
         for target in (f"127.0.0.1:{origin}", f"localhost:{origin}", f"[::1]:{origin}"):
             status = _raw(proxy.port, f"CONNECT {target} HTTP/1.1\r\n\r\n".encode())
@@ -446,7 +459,7 @@ def test_loopback_never_reaches_the_control_plane_port(origin: int) -> None:
 def test_a_mismatched_host_header_or_malformed_port_is_a_400(origin: int) -> None:
     """ES-F6 (B54 fronting, B58 crash): the Host header must name the target;
     `CONNECT localhost:8771@x` crashed the handler instead of answering 400."""
-    proxy = FilteringProxy(()).start()
+    proxy = FilteringProxy((), loopback_ports=(origin,)).start()
     try:
         fronted = _raw(
             proxy.port,
@@ -520,3 +533,16 @@ def test_malformed_targets_and_unresolvable_names_answer_not_crash(origin: int) 
         assert "400" in _raw(proxy.port, b"GET /relative HTTP/1.1\r\n\r\n")
     finally:
         proxy.stop()
+
+
+def test_a_proxy_rebinds_the_port_a_previous_serve_used() -> None:
+    """ES-F135 (ADR 0060 §3): an adopted worker's Seatbelt profile names its
+    proxy's port, so the re-adopting serve restarts the filter ON that port."""
+    first = FilteringProxy(["example.com"]).start()
+    port = first.port
+    first.stop()
+    second = FilteringProxy(["example.com"], port=port).start()
+    try:
+        assert second.port == port
+    finally:
+        second.stop()

@@ -40,10 +40,26 @@ def _pump(src: socket.socket, dst: socket.socket, done: threading.Event) -> None
                 sock.shutdown(socket.SHUT_RDWR)
 
 
-def _bridge_connection(client: socket.socket, unix_path: str) -> None:
+def _tunnel(upstream: socket.socket, port: int) -> bool:
+    """D6: open a CONNECT tunnel to the host's ``127.0.0.1:port`` through the
+    proxy, which admits only the run's loopback ports; True when it did."""
+    target = f"127.0.0.1:{port}"
+    upstream.sendall(f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n".encode())
+    reply = b""
+    while b"\r\n\r\n" not in reply and len(reply) < _CHUNK:
+        data = upstream.recv(1)  # one byte at a time: nothing past the header is eaten
+        if not data:
+            return False
+        reply += data
+    return reply.split(b" ", 2)[1:2] == [b"200"]
+
+
+def _bridge_connection(client: socket.socket, unix_path: str, port: int | None = None) -> None:
     try:
         upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         upstream.connect(unix_path)
+        if port is not None and not _tunnel(upstream, port):
+            raise OSError(f"the proxy refused loopback port {port}")
     except OSError:
         client.close()
         return
@@ -56,19 +72,36 @@ def _bridge_connection(client: socket.socket, unix_path: str) -> None:
     upstream.close()
 
 
-def _serve(listener: socket.socket, unix_path: str) -> None:
+def _serve(listener: socket.socket, unix_path: str, port: int | None = None) -> None:
     while True:
         try:
             client, _ = listener.accept()
         except OSError:
             return
-        threading.Thread(target=_bridge_connection, args=(client, unix_path), daemon=True).start()
+        threading.Thread(
+            target=_bridge_connection, args=(client, unix_path, port), daemon=True
+        ).start()
+
+
+def _listen(port: int) -> socket.socket:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", port))
+    listener.listen(_BACKLOG)
+    return listener
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="skep.netshim")
     parser.add_argument("--unix", required=True, help="bind-mounted proxy socket path")
     parser.add_argument("--port", type=int, required=True, help="loopback port to present")
+    parser.add_argument(
+        "--loopback-port",
+        type=int,
+        action="append",
+        default=[],
+        help="a host loopback port the run may reach (D6), tunnelled through the proxy",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER, help="-- worker argv")
     args = parser.parse_args(argv)
     command = args.command
@@ -78,17 +111,17 @@ def main(argv: list[str] | None = None) -> int:
         print("netshim: no worker command given", file=sys.stderr)
         return 2
 
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        # Fail closed: if the proxy port cannot be presented, the worker
-        # must not start at all (it would run with no egress path).
-        listener.bind(("127.0.0.1", args.port))
-    except OSError as exc:
-        print(f"netshim: cannot bind 127.0.0.1:{args.port}: {exc}", file=sys.stderr)
-        return 3
-    listener.listen(_BACKLOG)
-    threading.Thread(target=_serve, args=(listener, args.unix), daemon=True).start()
+    listeners: list[socket.socket] = []
+    for port, tunnel in [(args.port, None), *((p, p) for p in args.loopback_port)]:
+        try:
+            # Fail closed: if a port cannot be presented, the worker must not
+            # start at all (it would run without the path it was given).
+            listener = _listen(port)
+        except OSError as exc:
+            print(f"netshim: cannot bind 127.0.0.1:{port}: {exc}", file=sys.stderr)
+            return 3
+        listeners.append(listener)
+        threading.Thread(target=_serve, args=(listener, args.unix, tunnel), daemon=True).start()
 
     child = subprocess.Popen(command)
 
@@ -99,7 +132,8 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _forward)
     signal.signal(signal.SIGINT, _forward)
     code = child.wait()
-    listener.close()
+    for listener in listeners:
+        listener.close()
     # Mirror a signal death as the conventional 128+N shell code.
     return 128 - code if code < 0 else code
 

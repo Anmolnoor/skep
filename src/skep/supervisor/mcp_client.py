@@ -144,6 +144,29 @@ def _browse_read_name(name: str) -> bool:
     )
 
 
+# ES-F161 (R6, D25): Playwright MCP's page-state reads — used only when its
+# server sends no readOnlyHint for the tool (a hint it sends always wins).
+# Each one only reports the page it is on: none navigates, types, clicks,
+# submits or changes page state (an optional `filename` saves the report to
+# the server's output folder). `browser_find` reads too, but its name is not
+# a page-state read here (_BROWSE_READ_KEYWORDS), so it would act anyway.
+PLAYWRIGHT_READ_TOOLS: frozenset[str] = frozenset(
+    {"browser_snapshot", "browser_take_screenshot", "browser_console_messages",
+     "browser_network_requests", "browser_network_request", "browser_wait_for"}
+)  # fmt: skip
+
+
+def _playwright_read(config: MCPServerConfig, name: str) -> bool:
+    """A hint-less tool of a browse server launched from Playwright's MCP
+    package (npx ``@playwright/mcp``, or its ``mcr.microsoft.com/playwright/mcp``
+    image) that is one of its known page-state reads."""
+    return (
+        config.scope == "browse"
+        and name in PLAYWRIGHT_READ_TOOLS
+        and any("playwright/mcp" in part for part in config.command)
+    )
+
+
 def classify_browse_action(tool: MCPTool) -> str:
     """``read`` for a page-state read, ``act`` for everything else. W9: a read
     needs both the server's ``readOnlyHint`` and a page-state name with no
@@ -270,14 +293,16 @@ class MCPClient:
                 continue
             schema = entry.get("inputSchema")
             annotations = entry.get("annotations")
+            hint = annotations.get("readOnlyHint") if isinstance(annotations, dict) else None
             tools.append(
                 MCPTool(
                     server_id=self._config.server_id,
                     name=name,
                     description=str(entry.get("description") or ""),
                     input_schema=dict(schema) if isinstance(schema, dict) else {},
-                    read_only=isinstance(annotations, dict)
-                    and annotations.get("readOnlyHint") is True,
+                    read_only=(
+                        hint if isinstance(hint, bool) else _playwright_read(self._config, name)
+                    ),
                 )
             )
         return tools
@@ -354,6 +379,7 @@ def save_mcp_server(store: RunStore, config: MCPServerConfig) -> None:
     servers = load_mcp_servers(store)
     servers[config.server_id] = config
     _store_servers(store, servers)
+    _LISTED.pop((str(store.db_path), config.server_id), None)
 
 
 def remove_mcp_server(store: RunStore, server_id: str) -> None:
@@ -364,6 +390,7 @@ def remove_mcp_server(store: RunStore, server_id: str) -> None:
         raise MCPError(f"no MCP server registered as {server_id!r}")
     del servers[server_id]
     _store_servers(store, servers)
+    _LISTED.pop((str(store.db_path), server_id), None)
 
 
 def _jsonrpc_result(message: Mapping[str, object]) -> Mapping[str, object]:
@@ -380,7 +407,6 @@ def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None)
     session pool is the upgrade path if call volume matters.
     """
     import json
-    import subprocess
 
     if config.transport == "http":
         # MCP Streamable HTTP (2025-03-26): JSON-RPC POSTs to one endpoint;
@@ -488,22 +514,30 @@ def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None)
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
-                "params": {"protocolVersion": "2024-11-05", "capabilities": {}},
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "skep", "version": "1"},  # the spec requires it
+                },
             },
             {"jsonrpc": "2.0", "id": 2, "method": method, "params": dict(params)},
         ]
         payload = "".join(json.dumps(r) + "\n" for r in requests)
         if not config.server_id.startswith(FORGED_SERVER_PREFIX):
-            proc = subprocess.run(
-                list(config.command),
-                input=payload,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            cwd = None
+            if config.scope == "browse":
+                # R6 review: Playwright writes a read's optional `filename`
+                # anywhere under its cwd, and a read takes no card — so a
+                # browse server never runs in serve's folder (the repo or the
+                # operator's home), only in one of its own.
+                if skep_home is None:
+                    raise MCPError(f"browse server {config.server_id!r} needs its skep home")
+                cwd = skep_home / "browser"
+                cwd.mkdir(parents=True, exist_ok=True)
+            lines = _stdio_exchange(list(config.command), payload, cwd=cwd)
         else:
-            proc = _run_forged_sandboxed(config, payload, skep_home)
-        for line in proc.stdout.splitlines():
+            lines = _run_forged_sandboxed(config, payload, skep_home).stdout.splitlines()
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -516,6 +550,66 @@ def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None)
         raise MCPError("no JSON-RPC response for the tool request")
 
     return run
+
+
+def _stdio_exchange(argv: list[str], payload: str, *, cwd: Path | None = None) -> list[str]:
+    """ES-F162 (R6): send ``payload`` and keep stdin open until the server
+    answers request 2, or the deadline passes. A server that stops when its
+    stdin closes (Playwright's does, ~0.4 s) never answered a call that takes
+    longer than that: stdin used to close with the request. Returns the
+    stdout lines read; stops the server either way."""
+    import json
+    import queue
+    import subprocess
+    import threading
+    import time
+
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        cwd=cwd,
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+    stdout = proc.stdout
+    read: queue.Queue[str | None] = queue.Queue()
+
+    def pump() -> None:
+        for line in stdout:
+            read.put(line)
+        read.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
+    lines: list[str] = []
+    deadline = time.monotonic() + MCP_CALL_DEADLINE_SECONDS
+    try:
+        proc.stdin.write(payload)
+        proc.stdin.flush()
+        while True:
+            try:
+                line = read.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                proc.kill()  # a server that went quiet gets no grace period
+                raise MCPError(
+                    f"stdio MCP call passed its {MCP_CALL_DEADLINE_SECONDS:g}s deadline"
+                ) from None
+            if line is None:
+                return lines
+            lines.append(line)
+            try:
+                if json.loads(line).get("id") == 2:
+                    return lines
+            except ValueError:
+                continue
+    finally:
+        try:
+            proc.stdin.close()
+            proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            proc.kill()
+            proc.wait()
 
 
 # ES (B115): promote_tool registers every activated forged/seed tool as
@@ -573,14 +667,30 @@ def _run_forged_sandboxed(
         )
 
 
+# ES-F160 (R6, D25): each server's tools/list, kept per home + server id so a
+# read uses no extra server process to learn its hint. Registering the id
+# again or removing it drops the entry; a serve restart starts empty; a
+# failed listing is never kept (the next read asks again).
+_LISTED: dict[tuple[str, str], tuple[MCPServerConfig, tuple[MCPTool, ...]]] = {}
+
+
+def _listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
+    key = (str(store.db_path), config.server_id)
+    hit = _LISTED.get(key)
+    if hit is not None and hit[0] == config:
+        return hit[1]
+    runner = runner_for_config(config, skep_home=store.db_path.parent.parent)
+    tools = tuple(MCPClient(config, runner=runner).list_tools())
+    _LISTED[key] = (config, tools)
+    return tools
+
+
 def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:
     """B09: a bare tool name from a call carries no ``readOnlyHint``; ask the
     server's own tools/list. Only a read-shaped name can become a read (a read
     verb; on a browse server a page-state name, W9), so only those pay the
-    lookup; any failure leaves the tool not-read-only (asks).
-
-    ponytail: one live tools/list per read-verb decision — cache per server
-    if MCP call volume makes the extra round trip matter.
+    lookup — once per registered server (ES-F160); any failure leaves the
+    tool not-read-only (asks).
     """
     if tool.read_only is not None:
         return tool
@@ -595,11 +705,9 @@ def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:
         readish = bool(tokens) and tokens[0] in _MCP_READ_VERBS
     if config is not None and readish:
         try:
-            listed = MCPClient(
-                config, runner=runner_for_config(config, skep_home=store.db_path.parent.parent)
-            ).list_tools()
+            listed: tuple[MCPTool, ...] = _listed_tools(store, config)
         except Exception:  # an unreachable server cannot vouch for a read
-            listed = []
+            listed = ()
         read_only = any(entry.name == tool.name and entry.read_only for entry in listed)
     return replace(tool, read_only=read_only)
 

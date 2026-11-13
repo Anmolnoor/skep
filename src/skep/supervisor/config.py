@@ -57,6 +57,9 @@ class SupervisorConfig:
     # conditions hold (verification + re-verification passed, no risk flags,
     # diff in scope). Mechanism is live in v2; goes active for real workloads in v3.
     auto_approval_rules: tuple[AutoApprovalRule, ...] = ()
+    # ADR 0060 (D2): a serve restart re-adopts a live, verified worker. The
+    # kill switch (`skep serve --no-readopt`) restores kill-on-restart.
+    readopt_workers: bool = True
 
     def command_for(self, worker_kind: str) -> tuple[str, ...]:
         """The worker argv for a caste — its registered command, else the default."""

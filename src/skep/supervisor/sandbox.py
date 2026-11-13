@@ -35,6 +35,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .. import landlock
 from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, other_homes
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
@@ -338,9 +339,10 @@ def available() -> bool:
 # ``*-secret`` and ``llm-secret*`` file (secret_floor.SKEP_SECRET_NAMES), the
 # other runs' audit trails and the chat attachments (B125). One carve-out:
 # a worker whose caste calls the LLM reads ``llm-secret`` and the ACTIVE
-# profile's ``llm-secret-<id>`` (llm_plan.py) until V6 moves the credential
-# into the proxy. The store (supervisor.sqlite3) stays readable: that same
-# worker reads its provider settings from it. Checked when the profile is
+# profile's ``llm-secret-<id>`` (llm_plan.py) unless its run is relayed
+# (ADR 0062, ``provider_key_relay``): then the proxy holds the credential.
+# The store (supervisor.sqlite3) stays readable: that same worker reads its
+# provider settings from it. Checked when the profile is
 # built, so a secret file created mid-run is not covered.
 # W33: the engine logins (~/Library/Keychains, ~/.claude/.credentials.json,
 # ~/.codex/auth.json) are masked too — each external engine's config dir is
@@ -355,8 +357,8 @@ _HOME_SECRET_PATHS = tuple(rel for rel in HOME_SECRETS if rel not in SANDBOX_REA
 # / /`` left an agent socket outside /tmp and /run reachable. These hold one
 # (relative to every home; ~/.ssh and ~/.gnupg are already in HOME_SECRETS).
 # Hidden like a secret on every backend; Seatbelt refuses the connect anyway
-# (W34). ponytail: known places only — a socket at a path nobody listed stays
-# reachable on bubblewrap (docs/sandboxing.md says what would close it).
+# (W34). ponytail: known places only — on a kernel below Landlock ABI 9 a
+# socket at a path nobody listed stays reachable (R5b, socket_gap).
 AGENT_SOCKETS: tuple[str, ...] = (
     ".1password",  # 1Password SSH agent: agent.sock
     ".bitwarden-ssh-agent.sock",
@@ -371,17 +373,44 @@ AGENT_SOCKETS: tuple[str, ...] = (
 # R5 (I12): what each Linux backend alone cannot close, said wherever the
 # wall is described (doctor's sandbox line, docs/sandboxing.md). A podman run
 # always gets its own network namespace, so no abstract socket reaches it.
-SOCKET_GAP = {
-    "bubblewrap": (
-        "Not walled on Linux: an allow-all run can connect to abstract unix sockets "
-        "(session D-Bus, X11), and any run to a unix socket at a path outside /tmp "
-        "and /run that the mask list does not name."
-    ),
-    PODMAN: (
-        "Not walled on podman: any run can connect to a unix socket under the host "
-        "dirs it binds (/home /var /etc /usr /opt) at a path the mask list does not name."
-    ),
+_UNLISTED_SOCKET = {
+    "bubblewrap": "a unix socket at a path outside /tmp and /run that the mask list does not name",
+    PODMAN: "a unix socket under the host dirs it binds (/home /var /etc /usr /opt) at a path "
+    "the mask list does not name",
 }
+
+
+def socket_gap(backend: str) -> str:
+    """R5b: the unix sockets a worker on ``backend`` still reaches under this
+    kernel's Landlock ABI (ABI 6 scopes abstract sockets, ABI 9 path
+    sockets); "" for a backend with no gap (Seatbelt, W34)."""
+    if backend not in _UNLISTED_SOCKET:
+        return ""
+    abi = landlock.abi()
+    if abi >= landlock.ABI_RESOLVE_UNIX:
+        return (
+            f"Landlock ABI {abi}: a worker connects only to unix sockets in its own "
+            "roots or ones it made itself."
+        )
+    path = _UNLISTED_SOCKET[backend]
+    if backend == PODMAN:
+        return (
+            f"Not walled on podman: any run can connect to {path} "
+            f"(path sockets need Landlock ABI 9; this kernel has {abi})."
+        )
+    if abi >= landlock.ABI_SCOPE_ABSTRACT:
+        return (
+            f"Landlock ABI {abi} refuses abstract unix sockets made outside the worker. "
+            f"Not walled on Linux: any run can connect to {path} "
+            "(path sockets need Landlock ABI 9)."
+        )
+    return (
+        "Not walled on Linux: an allow-all run can connect to abstract unix sockets "
+        f"(session D-Bus, X11), and any run to {path}. Landlock is off or too old here "
+        f"(ABI {abi}; 6 scopes abstract sockets, 9 path sockets)."
+    )
+
+
 # R5: wherever the operator's own agents listen (serve's environment).
 _SOCKET_ENV = ("SSH_AUTH_SOCK", "DOCKER_HOST", "CONTAINER_HOST")
 
@@ -447,6 +476,11 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
         for rel in (*HOME_SECRETS, *AGENT_SOCKETS)
     ]
     candidates += _env_sockets()
+    # W33 where the operator moved it: skep reads the Codex login from
+    # $CODEX_HOME when set (codex_login.auth_file), so the mask follows it.
+    from .codex_login import auth_file
+
+    candidates.append(auth_file())
     candidates += [skep_home / SERVE_ENV, supervisor / "audit", supervisor / "chat-attachments"]
     readable = {"llm-secret", *_active_llm_key_names(supervisor)} if worker_llm_key else set()
     if supervisor.is_dir():
@@ -455,7 +489,8 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
             for p in supervisor.iterdir()
             if p.name not in readable and any(fnmatch(p.name, pat) for pat in SKEP_SECRET_NAMES)
         )
-    return [path.resolve() for path in candidates if _exists(path)]
+    # dict: the default ~/.codex/auth.json is already in HOME_SECRETS
+    return list(dict.fromkeys(path.resolve() for path in candidates if _exists(path)))
 
 
 def _exists(path: Path) -> bool:
@@ -502,25 +537,39 @@ def _serve_ports(skep_home: Path | None) -> set[int]:
     return ports
 
 
-# v115-F9: loopback is not egress. The project's own tests start servers on
-# 127.0.0.1 and talk to them; with loopback denied, skep's own suite lost 210
-# tests inside the wall on its first self-maintenance run. The wall still
-# governs what leaves the machine — and it is STATED (I12): a sandboxed worker
-# can reach services listening on the host's loopback; those must carry their
-# own auth (the serve API does, G2).
-# Seatbelt accepts only "*" or "localhost" in a network address filter (an IP
-# literal is a profile syntax error), and "localhost" matches every address
-# this host owns. So the wall, stated exactly: a sandboxed worker can reach
-# listeners on THIS host; it cannot reach any other machine.
-_LOOPBACK_RULES = (
-    '(allow network-bind (local ip "localhost:*"))',
-    '(allow network-inbound (local ip "localhost:*"))',
-    '(allow network-outbound (remote ip "localhost:*"))',
-    # v115-F14: Unix-domain sockets are files, and "(deny network*)" covers
-    # them too — skep's own netshim/netproxy tests bind one and died with
-    # EPERM inside the re-verify wall. Creating one still needs a writable
-    # root (file-write says where); which ones it may CONNECT to is
-    # _unix_socket_rules (W34).
+# D6 (operator decision 2026-11-13, supersedes v115-F9's open loopback):
+# loopback is closed to a sandboxed worker in every network mode except the
+# ports the run was given — the project's ``loopback_ports`` and a local
+# model provider's own port (``netproxy.run_loopback_ports``); serve's port is
+# denied last, so no list reopens it. Seatbelt accepts only "*" or
+# "localhost" in a network address filter (an IP literal is a profile syntax
+# error), and "localhost" matches every address this host owns, so a closed
+# port is closed on every address of this host. What closes is the worker
+# REACHING a port (connect); binding and accepting stay open as before —
+# per-port bind/inbound filters refused listen() on allowed ports under
+# allow-default on this Seatbelt (measured 2026-11-13), and binding reaches
+# nothing.
+def _loopback_rules(ports: Iterable[int], *, open_bind: bool) -> list[str]:
+    rules = (
+        [
+            '(allow network-bind (local ip "localhost:*"))',
+            '(allow network-inbound (local ip "localhost:*"))',
+        ]
+        if open_bind  # under (deny network*); allow-default already allows both
+        else []
+    )
+    rules.append('(deny network-outbound (remote ip "localhost:*"))')
+    rules += [
+        f'(allow network-outbound (remote ip "localhost:{port}"))' for port in sorted(set(ports))
+    ]
+    return rules
+
+
+# v115-F14: Unix-domain sockets are files, and "(deny network*)" covers them
+# too — skep's own netshim/netproxy tests bind one and died with EPERM inside
+# the re-verify wall. Creating one still needs a writable root (file-write
+# says where); which ones it may CONNECT to is _unix_socket_rules (W34).
+_UNIX_SOCKET_BIND_RULES = (
     "(allow network-bind (local unix-socket))",
     "(allow network-inbound (local unix-socket))",
 )
@@ -544,13 +593,30 @@ def _unix_socket_rules(roots: Iterable[Path], network: NetworkPolicy) -> list[st
     return rules
 
 
-def _network_rules(network: NetworkPolicy, proxy_port: int | None) -> list[str]:
+def _network_rules(
+    network: NetworkPolicy,
+    proxy_port: int | None,
+    loopback_ports: Iterable[int] = (),
+    unix_rules: Iterable[str] = (),
+) -> list[str]:
+    """The per-port allows come LAST: on this Seatbelt any network-outbound
+    deny after a one-port allow (the unix-socket deny, a serve-port deny)
+    also refused some of those ports — 20000 and 50000 did, 5432 and 40000
+    did not (measured 2026-11-13)."""
     if network.is_deny_all:
-        return ["(deny network*)", *_LOOPBACK_RULES]
+        return [
+            "(deny network*)",
+            *_UNIX_SOCKET_BIND_RULES,
+            *unix_rules,
+            *_loopback_rules(loopback_ports, open_bind=True),
+        ]
     if network.is_allow_all:
-        # allow-default already permits network; an explicit comment keeps the
-        # generated profile self-documenting.
-        return ["; network: allow-all (manual real-provider path; allow-default)"]
+        # allow-default already permits network; loopback is still closed (D6).
+        return [
+            "; network: allow-all (manual real-provider path; allow-default)",
+            *unix_rules,
+            *_loopback_rules(loopback_ports, open_bind=False),
+        ]
     # Concrete domain allowlist (D1, v3): deny all egress except the loopback port
     # of the filtering proxy that enforces the domains. Seatbelt gates by IP/port,
     # so pinning egress to the proxy is the half it *can* enforce; netproxy.py
@@ -564,14 +630,19 @@ def _network_rules(network: NetworkPolicy, proxy_port: int | None) -> list[str]:
         )
     return [
         "(deny network*)",
-        *_LOOPBACK_RULES,
+        *_UNIX_SOCKET_BIND_RULES,
+        *unix_rules,
+        *_loopback_rules(loopback_ports, open_bind=True),
         f'(allow network-outbound (remote ip "localhost:{proxy_port}"))',
     ]
 
 
 # v28-F3: the bind-mount target inside the sandbox for the host proxy socket.
 # Short (AF_UNIX 108-char limit) and under the tmpfs bwrap already mounts.
-SANDBOX_PROXY_SOCKET = "/tmp/.skep-proxy.sock"
+# ADR 0060: the socket's private DIRECTORY is bound (read-only; connect()
+# still works), not the socket file: a file bind pins the inode of a listener
+# that dies with serve, while a re-adopting serve listens at the same path.
+SANDBOX_PROXY_DIR = "/tmp/.skep-proxy"
 
 
 def _bubblewrap_args(
@@ -583,7 +654,12 @@ def _bubblewrap_args(
     read_denied: Iterable[Path] = (),
     readable_roots: Iterable[Path] = (),
     write_denied: Iterable[Path] = (),
+    loopback_ports: Iterable[int] = (),
+    unmasked: Iterable[Path] = (),
 ) -> list[str]:
+    # D6: the netns has its own loopback, so the host's is reachable only
+    # through the proxy bridge, which admits the run's loopback ports alone;
+    # netshim presents each of them on the netns loopback over that bridge.
     # v28-F3: a domain list is now enforceable on Linux. Keep --unshare-net
     # (the deny-all pin Linux already trusts — the netns has NO route out),
     # bind-mount the host FilteringProxy's unix socket in, and prefix the
@@ -632,9 +708,12 @@ def _bubblewrap_args(
                 tmpfs=["--tmpfs", str(denied)],
             )
         )
+    for own in unmasked:  # after the masks: this run's own file in a masked dir
+        args.extend(["--ro-bind", str(own), str(own)])
     if network.is_domain_list:
         assert unix_socket_path is not None and proxy_port is not None
-        args.extend(["--bind", unix_socket_path, SANDBOX_PROXY_SOCKET])
+        socket_path = Path(unix_socket_path)
+        args.extend(["--ro-bind", str(socket_path.parent), SANDBOX_PROXY_DIR])
         # The shim prefix runs INSIDE the sandbox before the worker; wrap_command
         # appends the trailing "--" that separates it from the worker argv.
         args.extend(
@@ -644,12 +723,31 @@ def _bubblewrap_args(
                 "-m",
                 "skep.netshim",
                 "--unix",
-                SANDBOX_PROXY_SOCKET,
+                f"{SANDBOX_PROXY_DIR}/{socket_path.name}",
                 "--port",
                 str(proxy_port),
+                *(
+                    arg
+                    for port in sorted(set(loopback_ports))
+                    for arg in ("--loopback-port", str(port))
+                ),
             ]
         )
     return args
+
+
+def _landlock_step(writable_roots: Iterable[Path]) -> list[str]:
+    """R5b: the in-sandbox step that scopes the worker's unix sockets with
+    what the running kernel's Landlock ABI offers; none below ABI 6 (the
+    run carries on with the masks alone, and doctor says so). ``-E -P``:
+    neither the worker's cwd nor a worktree entry on PYTHONPATH may shadow
+    skep's own module (the env still reaches the worker through exec)."""
+    abi = landlock.abi()
+    flags = ["--scope-abstract"] if abi >= landlock.ABI_SCOPE_ABSTRACT else []
+    if abi >= landlock.ABI_RESOLVE_UNIX:
+        for root in writable_roots:
+            flags += ["--unix-root", str(root)]
+    return [sys.executable, "-E", "-P", "-m", "skep.landlock", *flags] if flags else []
 
 
 def _mask_args(path: Path, *, dev_null: list[str], tmpfs: list[str]) -> list[str]:
@@ -665,6 +763,7 @@ def _podman_args(
     read_denied: Iterable[Path] = (),
     readable_roots: Iterable[Path] = (),
     write_denied: Iterable[Path] = (),
+    unmasked: Iterable[Path] = (),
 ) -> list[str]:
     """v44-F7: the container equivalent of the bwrap invocation.
 
@@ -709,6 +808,8 @@ def _podman_args(
                 tmpfs=["--tmpfs", f"{denied}:notmpcopyup"],
             )
         )
+    for own in unmasked:  # podman mounts a child over its parent's tmpfs
+        args.extend(["-v", f"{own}:{own}:ro"])
     if roots:
         # Popen(cwd=workspace) only moves the podman CLIENT; the container's
         # workdir needs pinning explicitly (workspace is always the first root).
@@ -769,6 +870,8 @@ def build_profile(
     read_denied: Iterable[Path] = (),
     skep_home: Path | None = None,
     write_denied: Iterable[Path] = (),
+    loopback_ports: Iterable[int] = (),
+    unmasked: Iterable[Path] = (),
 ) -> str:
     """Return the SBPL text confining writes to ``writable_roots`` and gating network.
 
@@ -784,8 +887,15 @@ def build_profile(
     lines = [
         "(version 1)",
         "(allow default)",
-        *_network_rules(network, proxy_port),
-        *_unix_socket_rules(roots, network),
+        # ES-F4 (B05) + D6: serve's port never opens, even when a project lists
+        # it — dropped from the allows (the loopback deny covers it), never a
+        # trailing per-port deny (see _network_rules).
+        *_network_rules(
+            network,
+            proxy_port,
+            set(loopback_ports) - _serve_ports(skep_home),
+            _unix_socket_rules(roots, network),
+        ),
         "(deny file-write*)",
     ]
     if roots:
@@ -795,14 +905,11 @@ def build_profile(
     lines.append(f"(allow file-write* {dev_nodes})")
     for pinned in write_denied:  # W31: last match wins over its writable root
         lines.append(f'(deny file-write* (literal "{_sbpl_quote(pinned)}"))')
-    # ES-F4 (B05): last match wins, so these follow every allow above. The
-    # loopback allow (v115-F9) keeps a worker's own test servers reachable;
-    # serve's port is the one listener on this host it must never dial.
-    for port in sorted(_serve_ports(skep_home)):
-        lines.append(f'(deny network-outbound (remote ip "localhost:{port}"))')
     for denied in read_denied:
         kind = "subpath" if denied.is_dir() else "literal"
         lines.append(f'(deny file-read* ({kind} "{_sbpl_quote(denied)}"))')
+    for own in unmasked:  # last match wins: this run's own file in a masked dir
+        lines.append(f'(allow file-read* (literal "{_sbpl_quote(own)}"))')
     return "\n".join(lines) + "\n"
 
 
@@ -819,6 +926,8 @@ def write_profile(
     skep_home: Path,
     worker_llm_key: bool = False,
     write_denied: Iterable[Path] = (),
+    loopback_ports: Iterable[int] = (),
+    unmasked: Iterable[Path] = (),
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -839,8 +948,16 @@ def write_profile(
 
     ``write_denied`` (W31): files inside a writable root the worker may read
     but never write, rename or delete — the run's git protocol pin.
+
+    ``loopback_ports`` (D6): the only loopback ports the run reaches
+    (``netproxy.run_loopback_ports``); the default closes loopback.
+
+    ``unmasked`` (ES-F122 follow-up): files inside a masked directory that
+    THIS run alone may read, bound back read-only after the masks — a codex
+    run's own login copy under the audit dir every other run cannot see.
     """
     write_denied = list(write_denied)
+    unmasked = [Path(own).resolve() for own in unmasked]
     probe = require_usable(backend)
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
@@ -848,32 +965,38 @@ def write_profile(
         extra_readable = list(extra_readable)
         read_denied += _sockets_under(extra_readable)
     if probe.backend == PODMAN:
-        return _write_argv_profile(
-            profile_path,
-            _podman_args(
-                writable_roots=[workspace, *extra_writable],
-                network=network,
-                rootfs=_podman_rootfs_skeleton(profile_path.parent),
-                read_denied=read_denied,
-                readable_roots=extra_readable,
-                write_denied=write_denied,
-            ),
-            header=_PODMAN_HEADER,
+        extra_writable = list(extra_writable)
+        args = _podman_args(
+            writable_roots=[workspace, *extra_writable],
+            network=network,
+            rootfs=_podman_rootfs_skeleton(profile_path.parent),
+            read_denied=read_denied,
+            readable_roots=extra_readable,
+            write_denied=write_denied,
+            unmasked=unmasked,
         )
+        # podman's command slot follows rootfs:O; the worker argv lands after "--"
+        if step := _landlock_step([workspace, *extra_writable]):
+            args += [*step, "--"]
+        return _write_argv_profile(profile_path, args, header=_PODMAN_HEADER)
     if probe.backend == "bubblewrap":
         writable_roots = [workspace, *extra_writable]
-        return _write_bubblewrap_profile(
-            profile_path,
-            _bubblewrap_args(
-                writable_roots=writable_roots,
-                network=network,
-                proxy_port=proxy_port,
-                unix_socket_path=unix_socket_path,
-                read_denied=read_denied,
-                readable_roots=extra_readable,
-                write_denied=write_denied,
-            ),
+        args = _bubblewrap_args(
+            writable_roots=writable_roots,
+            network=network,
+            proxy_port=proxy_port,
+            unix_socket_path=unix_socket_path,
+            read_denied=read_denied,
+            readable_roots=extra_readable,
+            write_denied=write_denied,
+            loopback_ports=loopback_ports,
+            unmasked=unmasked,
         )
+        # After the netshim when there is one (it alone needs the proxy
+        # bridge); wrap_command's "--" then ends the step's options.
+        if step := _landlock_step(writable_roots):
+            args += step if network.is_domain_list else ["--", *step]
+        return _write_bubblewrap_profile(profile_path, args)
     # ES-F5 (B11): no blanket /tmp, /private/tmp, /var/folders roots — they
     # were shared by every run (run B read run A's files) and held any
     # SKEP_HOME placed under $TMPDIR. Each run's TMPDIR is already private,
@@ -889,6 +1012,8 @@ def write_profile(
             read_denied=read_denied,
             skep_home=skep_home,
             write_denied=write_denied,
+            loopback_ports=loopback_ports,
+            unmasked=unmasked,
         )
     )
     return profile_path

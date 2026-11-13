@@ -31,11 +31,13 @@ from ..store import RunStore
 from .actions import (
     allow_network_host_and_resume,
     allow_shell_command_and_resume,
+    answered_hosts,
     applied_branch_for,
     apply_patch,
     approval_event_views_for_task,
     approval_views,
     approve_policy_baseline,
+    auto_answer_unlocked_gate,
     command_views_for_task,
     create_branch,
     created_event_view_for_task,
@@ -44,6 +46,7 @@ from .actions import (
     delete_policy_group,
     deny_approval,
     diagnose_run,
+    dispatch_manifest,
     effective_policy_view,
     land_run,
     landing_reason,
@@ -75,6 +78,7 @@ from .actions import (
     set_policy_group,
     submit_run,
     submit_team,
+    team_manifests,
     transition_detail_view,
     update_policy,
     workon,
@@ -141,6 +145,9 @@ class RunRequest(BaseModel):
     # (actor@role, outermost first) — the worker holds no more than either.
     role: str | None = None
     delegation_chain: list[str] = Field(default_factory=list)
+    # D9: on a home with no approved baseline, a role run's asks answered for
+    # this run only; a subset of what its manifest lists.
+    answer_hosts: list[str] | None = None
 
 
 class TeamTask(BaseModel):
@@ -159,6 +166,7 @@ class TeamRequest(BaseModel):
     manager: str
     tasks: list[TeamTask] = Field(min_length=1, max_length=3)
     delegation_chain: list[str] = Field(default_factory=list)
+    answer_hosts: list[str] | None = None  # D9: as on POST /api/runs
 
 
 class ResolveRequest(BaseModel):
@@ -238,6 +246,8 @@ class PolicyUpdate(BaseModel):
     sandbox_backend: Literal["auto", "podman", "none"] | None = None
     # P1 (ADR 0053 D6): scopes routed through policy engine v2.
     policy_engine_v2_scopes: list[str] | None = None
+    # ADR 0062 (V6b): the provider-key relay's kill switch.
+    provider_key_relay: bool | None = None
 
 
 class PolicyDecideRequest(BaseModel):
@@ -362,6 +372,8 @@ def create_app(
                 on_run_finished=lambda task_id: notify_run_terminal(
                     run_store, config.home, task_id, web_ui_url=web_ui_url
                 ),
+                # ADR 0060 (D2): an adopted run finishes as a live one does.
+                on_adopted_finished=runner.on_run_finished,
             )
         except Exception:
             logging.getLogger("skep.serve").exception("interrupted-run recovery failed")
@@ -383,6 +395,14 @@ def create_app(
                 )
         except Exception:
             logging.getLogger("skep.serve").exception("interrupted-card sweep failed")
+        try:
+            # D18: a card's follow-up turn queued when serve stopped runs now, once.
+            from .chat import resume_follow_ups
+
+            if chat_engine is not None and resume_follow_ups(chat_engine):
+                logging.getLogger("skep.serve").info("resumed queued card follow-up turn(s)")
+        except Exception:
+            logging.getLogger("skep.serve").exception("card follow-up resume failed")
         try:
             # v86-F1: a serve restart ends the approval session — drop the
             # session-tier shell grants the previous process collected.
@@ -554,6 +574,28 @@ def create_app(
         # v109-F6: same helper, same line as the chat face — a resumable prior
         # run's kept worktree rides the response; the dispatch proceeds as is.
         hint = preserved_resumable_hint(holder, run_store, repo=body.repo, ref=body.ref)
+        preanswered = None
+        if body.role or body.delegation_chain or body.answer_hosts is not None:
+            # D9: the hosts this run would ask about, answered up front or refused.
+            manifest = dispatch_manifest(
+                holder,
+                run_store,
+                repo=body.repo,
+                caste=body.caste,
+                network=body.network,
+                wall_clock_seconds=body.wall_clock_seconds,
+                max_iterations=body.max_iterations,
+                max_actions=body.max_actions,
+                max_provider_calls=body.max_provider_calls,
+                execution_mode=body.execution_mode,
+                engine=body.engine,
+                delegation_chain=body.delegation_chain,
+                role=body.role,
+                deferred_asks=True,
+            )
+            preanswered = answered_hosts(
+                run_store, [manifest], body.answer_hosts, how="answer_hosts"
+            )
         task_id = submit_run(
             holder,
             runner,
@@ -576,6 +618,7 @@ def create_app(
             delegation_chain=body.delegation_chain,
             # V7: the operator's own face — its gate cards have a human.
             deferred_asks=True,
+            preanswered=preanswered,
         )
         response = {"task_id": task_id, "state": "dispatched"}
         if hint is not None:
@@ -586,15 +629,27 @@ def create_app(
     def create_team(body: TeamRequest) -> dict[str, Any]:
         """first-run R3 (ADR 0055 D5): a team run — a manager in ``manager``'s
         role dispatches every task; one ledger thread (the chat's
-        ``batch_dispatch manager=`` and ``skep team``)."""
+        ``batch_dispatch manager=`` and ``skep team``). D9: on a home with no
+        approved baseline its hosts are answered up front (``answer_hosts``)
+        or the team is refused, naming them."""
+        tasks = [task.model_dump(exclude_none=True) for task in body.tasks]
+        manifests = team_manifests(
+            holder,
+            run_store,
+            manager=body.manager,
+            tasks=tasks,
+            delegation_chain=body.delegation_chain,
+        )
+        answer = answered_hosts(run_store, manifests, body.answer_hosts, how="answer_hosts")
         return submit_team(
             holder,
             runner,
             run_store,
             manager=body.manager,
-            tasks=[task.model_dump(exclude_none=True) for task in body.tasks],
+            tasks=tasks,
             delegation_chain=body.delegation_chain,
             deferred_asks=True,
+            preanswered=[answer] * len(tasks),  # D9's one answer, a copy per member
         )
 
     @app.get("/api/policy")
@@ -1245,7 +1300,16 @@ def create_app(
         suppress(); the notice has already been written either way, so a broken
         continuation degrades to the pre-v105 behaviour rather than losing the
         terminal line.
+
+        ADR 0061: on an unlocked project the gate answers itself BEFORE the
+        notice, so the chat never hears an ask that is already answered; any
+        failure leaves the gate a human's card.
         """
+        try:
+            if auto_answer_unlocked_gate(run_store, holder, runner, task_id) is not None:
+                return
+        except Exception:
+            logging.getLogger("skep.serve").exception("unlocked auto-answer failed")
         notify_run_terminal(run_store, config.home, task_id, web_ui_url=web_ui_url)
         if run_store.get_setting(CONTINUE_CHAT_SETTING) is False:
             return  # opt-out; default is on

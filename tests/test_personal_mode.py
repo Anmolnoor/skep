@@ -548,9 +548,12 @@ class PersonalModeTests(unittest.TestCase):
             home = Path(tmp)
             run_personal_setup(home, provider="mock", model="local-ready")
 
-            with mock.patch(
-                "skep.status.sandbox_availability",
-                return_value=SandboxAvailability(True, backend="bubblewrap"),
+            with (
+                mock.patch(
+                    "skep.status.sandbox_availability",
+                    return_value=SandboxAvailability(True, backend="bubblewrap"),
+                ),
+                mock.patch("skep.landlock.abi", return_value=0),
             ):
                 status = build_status(home)
             report = format_doctor_report(status)
@@ -562,6 +565,35 @@ class PersonalModeTests(unittest.TestCase):
             self.assertIn("bubblewrap", report)
             # R5 (I12): the socket residual bubblewrap cannot close is stated
             self.assertIn("abstract unix sockets", report)
+            # R5b: and why Landlock does not close it on this kernel, in the same line
+            line = next(row for row in report.splitlines() if "sandbox: ready" in row)
+            self.assertIn("Landlock is off or too old here (ABI 0", line)
+
+    def test_doctor_states_what_landlock_closes_per_abi(self) -> None:
+        """R5b (I12): ABI 6 closes abstract sockets, ABI 9 path sockets too."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            run_personal_setup(home, provider="mock", model="local-ready")
+
+            def line(backend: str, abi: int) -> str:
+                with (
+                    mock.patch(
+                        "skep.status.sandbox_availability",
+                        return_value=SandboxAvailability(True, backend=backend),
+                    ),
+                    mock.patch("skep.landlock.abi", return_value=abi),
+                ):
+                    report = format_doctor_report(build_status(home))
+                return next(row for row in report.splitlines() if "sandbox: ready" in row)
+
+            scoped = line("bubblewrap", 6)
+            self.assertIn("Landlock ABI 6 refuses abstract unix sockets", scoped)
+            self.assertIn("mask list does not name (path sockets need Landlock ABI 9)", scoped)
+            for backend in ("bubblewrap", "podman"):
+                full = line(backend, 10)
+                self.assertIn("Landlock ABI 10: a worker connects only to unix sockets", full)
+                self.assertNotIn("Not walled", full)
+            self.assertIn("need Landlock ABI 9; this kernel has 6", line("podman", 6))
 
     def test_doctor_states_the_podman_socket_residual_and_not_bubblewraps(self) -> None:
         """R5 (I12): podman binds /home read-only too, so an unlisted path
@@ -569,9 +601,12 @@ class PersonalModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             run_personal_setup(home, provider="mock", model="local-ready")
-            with mock.patch(
-                "skep.status.sandbox_availability",
-                return_value=SandboxAvailability(True, backend="podman"),
+            with (
+                mock.patch(
+                    "skep.status.sandbox_availability",
+                    return_value=SandboxAvailability(True, backend="podman"),
+                ),
+                mock.patch("skep.landlock.abi", return_value=0),
             ):
                 report = format_doctor_report(build_status(home))
             self.assertIn("mask list does not name", report)

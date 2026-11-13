@@ -51,7 +51,8 @@ def cmd_memory_list(args: argparse.Namespace) -> int:
         return 0
     for item in items:
         scope = item.project_id or "global"
-        print(f"{item.memory_id}  [{item.memory_class}] ({scope})  {item.content}")
+        source = f" from {item.provenance}" if item.provenance else ""  # D15
+        print(f"{item.memory_id}  [{item.memory_class}] ({scope}){source}  {item.content}")
     return 0
 
 
@@ -68,7 +69,8 @@ def cmd_memory_search(args: argparse.Namespace) -> int:
         print("no matches")
         return 0
     for item in hits:
-        print(f"{item.memory_id}  [{item.memory_class}]  {item.content}")
+        source = f" from {item.provenance}" if item.provenance else ""  # D15
+        print(f"{item.memory_id}  [{item.memory_class}]{source}  {item.content}")
     return 0
 
 
@@ -91,6 +93,8 @@ def cmd_memory_show(args: argparse.Namespace) -> int:
     print(f"created: {item.created_at}")
     if item.proposal_id is not None:
         print(f"from:    proposal {item.proposal_id}")
+    if item.provenance is not None:
+        print(f"written: by {item.provenance}")
     print(f"\n{item.content}")
     return 0
 

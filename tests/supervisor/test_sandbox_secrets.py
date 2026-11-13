@@ -194,17 +194,20 @@ def test_seatbelt_profile_denies_secret_reads_and_the_serve_port(
             proxy_port=port,
             read_denied=sandbox.secret_paths(skep_home),
             skep_home=skep_home,
+            loopback_ports=[5432, 8765, 8771, 8772],
         )
         lines = text.splitlines()
         assert f'(deny file-read* (literal "{skep_home / "supervisor" / "serve-token"}"))' in lines
         assert f'(deny file-read* (subpath "{Path.home() / ".ssh"}"))' in lines
         # B125: a profile that is not an LLM worker's hides the LLM key too.
         assert f'(deny file-read* (literal "{skep_home / "supervisor" / "llm-secret"}"))' in lines
+        # D6: loopback is denied and only the run's ports are allowed back; a
+        # serve port is never among them, even listed (no trailing per-port
+        # deny: on this Seatbelt one also refused unrelated allowed ports).
+        assert '(deny network-outbound (remote ip "localhost:*"))' in lines
+        assert '(allow network-outbound (remote ip "localhost:5432"))' in lines
         for serve_port in ("8765", "8771", "8772"):
-            deny = f'(deny network-outbound (remote ip "localhost:{serve_port}"))'
-            # Last match wins in SBPL: the deny must follow every loopback allow.
-            allows = [i for i, line in enumerate(lines) if "(allow network-outbound" in line]
-            assert lines.index(deny) > max(allows, default=-1)
+            assert f'(allow network-outbound (remote ip "localhost:{serve_port}"))' not in lines
 
 
 def test_bwrap_and_podman_mask_the_secret_paths(fake_homes: tuple[Path, Path]) -> None:
@@ -490,8 +493,12 @@ def test_serve_records_its_port_for_cli_runs_on_the_same_home(
         home=home, worker_cmd=None, auto_approve=False, host="127.0.0.1", port=9187
     )
     assert serve_cmds.cmd_serve(args) == 0
-    text = sandbox.build_profile(writable_roots=[tmp_path / "ws"], skep_home=home)
-    assert '(deny network-outbound (remote ip "localhost:9187"))' in text
+    # D6: a profile that lists serve's recorded port still does not open it.
+    text = sandbox.build_profile(
+        writable_roots=[tmp_path / "ws"], skep_home=home, loopback_ports=[9187, 5432]
+    )
+    assert '(allow network-outbound (remote ip "localhost:5432"))' in text
+    assert "localhost:9187" not in text
 
 
 def test_the_sandbox_masks_the_policy_floor_minus_what_engines_and_installs_read(
@@ -593,3 +600,182 @@ def test_rancher_desktops_socket_is_masked_but_its_tools_stay_on_path(
     masked = set(sandbox.secret_paths(skep_home))
     assert home / ".rd" / "docker.sock" in masked
     assert not {home / ".rd", home / ".rd" / "bin"} & masked
+
+
+def test_a_runs_own_secret_is_bound_back_after_every_mask(fake_homes: tuple[Path, Path]) -> None:
+    """ES-F122 follow-up: a file inside a masked dir (a codex run's login
+    copy under the audit dir) is readable by its own run only — bound back
+    AFTER the masks on every backend, so the mask still hides its siblings."""
+    _home, skep_home = fake_homes
+    sup = skep_home / "supervisor"
+    (sup / "audit" / "t-own").mkdir(parents=True)
+    own = sup / "audit" / "t-own" / "codex-login.json"
+    masked = sandbox.secret_paths(skep_home)
+    audit = str(sup / "audit")
+    args = sandbox._bubblewrap_args(
+        writable_roots=[Path("/srv/ws")],
+        network=sandbox.NetworkPolicy(allow=("chatgpt.com:443",)),
+        proxy_port=40000,
+        unix_socket_path="/tmp/p.sock",
+        read_denied=masked,
+        unmasked=[own],
+    )
+    at = args.index(str(own))
+    assert args[at - 1 : at + 2] == ["--ro-bind", str(own), str(own)]
+    assert at > args.index(audit) and at < args.index("--")  # before the netshim argv
+    pod = sandbox._podman_args(
+        writable_roots=[Path("/srv/ws")],
+        network=sandbox.DENY_ALL_NETWORK,
+        rootfs=Path("/r"),
+        read_denied=masked,
+        unmasked=[own],
+    )
+    assert pod.index(f"{own}:{own}:ro") > pod.index(f"{audit}:notmpcopyup")
+    lines = sandbox.build_profile(
+        writable_roots=[Path("/w")], read_denied=masked, skep_home=skep_home, unmasked=[own]
+    ).splitlines()
+    allow = f'(allow file-read* (literal "{own}"))'
+    assert lines.index(allow) > lines.index(f'(deny file-read* (subpath "{audit}"))')
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux") or sandbox.availability().backend != "bubblewrap",
+    reason="real bubblewrap proof (runs where bwrap is the backend)",
+)
+def test_a_real_worker_reads_its_own_login_copy_and_never_another_runs(
+    fake_homes: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """ES-F122 follow-up: before, the copy sat in the run's worktree and any
+    other sandboxed run (any engine, any project) could read it."""
+    _home, skep_home = fake_homes
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    audit = skep_home / "supervisor" / "audit"
+    copies = {}
+    for task in ("t-own", "t-other"):
+        (audit / task).mkdir(parents=True)
+        copies[task] = audit / task / "codex-login.json"
+        copies[task].write_text(f"CANARY {task}\n", encoding="utf-8")
+        copies[task].chmod(0o400)
+    profile = sandbox.write_profile(
+        tmp_path / "p.profile",
+        workspace=workspace,
+        skep_home=skep_home,
+        unmasked=[copies["t-own"]],
+    )
+    proc = subprocess.run(
+        sandbox.wrap_command(
+            [sys.executable, "-c", _READER, str(copies["t-own"]), str(copies["t-other"])], profile
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "CANARY t-own" in proc.stdout
+    assert "CANARY t-other" not in proc.stdout
+
+
+def test_the_codex_login_is_masked_where_codex_home_puts_it(
+    fake_homes: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F120 follow-up: skep reads the operator's login from $CODEX_HOME
+    when it is set (codex_login.auth_file); the mask must cover that file,
+    not only ~/.codex/auth.json, or every worker could read the refresh token."""
+    _home, skep_home = fake_homes
+    elsewhere = tmp_path / "codex-elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "auth.json").write_text("CANARY codex\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(elsewhere))
+    assert (elsewhere / "auth.json").resolve() in sandbox.secret_paths(skep_home)
+
+
+# ADR 0062: the worker reports what it can see of the key, from inside.
+_KEY_PROBE = """
+import json, os, sys
+from pathlib import Path
+out = Path(sys.argv[sys.argv.index("--out") + 1])
+secrets_dir = Path(sys.argv[1])
+seen = {"env": sorted(k for k, v in os.environ.items() if v and v in sys.argv[2])}
+for name in ("llm-secret", "llm-secret-p1"):
+    try:
+        seen[name] = "read: " + str((secrets_dir / name).read_text().strip() == sys.argv[2])
+    except OSError as exc:
+        seen[name] = type(exc).__name__
+out.write_text(json.dumps(seen))
+"""
+
+
+@pytest.mark.parametrize("relayed", [False, True], ids=["off", "on"])
+def test_a_relayed_worker_holds_no_provider_key_in_its_env_or_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relayed: bool
+) -> None:
+    """ADR 0062 strangler step 4: a real sandboxed worker reads its own env
+    and its key files. Off, it holds the key (today's path, pinned so the
+    test proves the difference); relayed, it holds only the run's token."""
+    from skep.supervisor import RunStore, SupervisorConfig, spawner
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+    from skep.supervisor.netproxy import ProviderRelay
+    from skep.supervisor.providers import ProviderProfile
+    from skep.worker_contract import Permissions
+
+    if not sandbox.available():
+        pytest.skip("no usable sandbox backend on this host")
+    import secrets
+
+    key = "fk-" + secrets.token_hex(12)
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    monkeypatch.setenv("SKEP_TEST_RELAY_KEY", key)
+    sup = tmp_path / "skep" / "supervisor"
+    sup.mkdir(parents=True)
+    for name in ("llm-secret", "llm-secret-p1"):
+        (sup / name).write_text(key + "\n", encoding="utf-8")
+    store = RunStore(sup / "supervisor.sqlite3")
+    try:
+        store.upsert_provider_profile(
+            ProviderProfile(provider_id="p1", protocol="ollama", base_url="http://p1.x", model="m")
+        )
+        store.set_active_provider("p1")
+    finally:
+        store.close()
+    probe = tmp_path / "probe.py"
+    probe.write_text(_KEY_PROBE, encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config = SupervisorConfig(
+        home=sup, worker_command=(sys.executable, str(probe), str(sup), key), sandbox=True
+    )
+    task = mint_task(
+        workspace=workspace,
+        instructions="x",
+        budget=DEFAULT_BUDGET,
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], env_allowlist=["SKEP_TEST_RELAY_KEY"]
+        ),
+    )
+    out = tmp_path / "results" / "o.json"
+    out.parent.mkdir()
+    relay = ProviderRelay(upstream="http://p1.x", token="t" * 64, key=key, protocol="ollama")
+    proc = spawner.spawn_worker(
+        config,
+        task,
+        tmp_path / "t.json",
+        out,
+        log_path=tmp_path / "w.log",
+        relay=relay if relayed else None,
+    )
+    assert proc.wait(timeout=60) == 0, (tmp_path / "w.log").read_text()
+    seen = json.loads(out.read_text())
+    if relayed:
+        assert seen == {
+            "env": [],
+            "llm-secret": "PermissionError",
+            "llm-secret-p1": "PermissionError",
+        }
+    else:
+        assert seen == {
+            "env": ["SKEP_TEST_RELAY_KEY"],
+            "llm-secret": "read: True",
+            "llm-secret-p1": "read: True",
+        }

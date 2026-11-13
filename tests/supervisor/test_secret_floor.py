@@ -117,6 +117,23 @@ def test_a_symlink_to_a_secret_is_caught_by_its_realpath(fake_home: Path, tmp_pa
     assert secret_floor_reason(link) is not None
 
 
+def test_dotdot_after_a_linked_directory_is_caught_where_the_kernel_lands(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    """ES-F94 follow-up: the floor D21 leans on judged a path's realpath only
+    after collapsing ``..`` lexically, so ``sub/../.ssh/id_rsa`` with ``sub``
+    a link into the home (a tracked symlink, ES-F2's threat) read as a file in
+    the worktree while ``cat`` read the key."""
+    from skep.supervisor.secret_floor import shell_secret_floor_reason
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (fake_home / "x").mkdir()
+    (work / "sub").symlink_to(fake_home / "x")
+    assert secret_floor_reason(work / "sub" / ".." / ".ssh" / "id_rsa") is not None
+    assert shell_secret_floor_reason("cat sub/../.ssh/id_rsa", cwd=str(work)) is not None
+
+
 def test_the_macos_data_volume_spelling_of_a_secret_is_caught(fake_home: Path) -> None:
     """macOS firmlinks /System/Volumes/Data/Users (and /home) to /: the same
     file under another name, and resolve() does not follow a firmlink."""
@@ -570,3 +587,23 @@ def test_under_is_the_root_or_below_it_never_a_sibling_with_the_same_prefix() ->
     assert not _under(Path("/home/u/.ssh-config-docs/x"), root)
     assert not _under(Path("/home/u"), root)
     assert not _under(Path("/home/v/.ssh/id_rsa"), root)
+
+
+def test_a_secret_named_after_a_cd_or_inside_quoted_code_is_on_the_floor(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    """ES-F80 review: relative names were judged against the cwd only and a
+    path inside a quoted ``-c`` payload was one word with the code, so
+    ``cd ~ && cat .ssh/id_rsa`` and ``python3 -c 'open("~/.ssh/id_rsa")'``
+    walked past the floor."""
+    from skep.supervisor.secret_floor import shell_secret_floor_reason
+
+    (tmp_path / "out").mkdir()
+    for command in (
+        "cd ~ && cat .ssh/id_rsa",
+        "cd ~ && cd .ssh && cat id_rsa",
+        f"python3 -c 'print(open(\"{fake_home}/.ssh/id_rsa\").read())'",
+        'node -e \'require("fs").readFileSync("~/.aws/credentials")\'',
+    ):
+        assert shell_secret_floor_reason(command, cwd=str(tmp_path / "out")), command
+    assert shell_secret_floor_reason("cd ~ && ls src", cwd=str(tmp_path / "out")) is None

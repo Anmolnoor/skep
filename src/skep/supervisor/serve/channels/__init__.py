@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...codex_login import AUTH_SOURCE, CARD_LINE
+
 CHANNELS: frozenset[str] = frozenset({"discord", "telegram", "slack"})
 
 # The ONLY action classes a channel may confirm (fail-closed allow-list). Shell
@@ -211,24 +213,44 @@ def _grant_lines(manifest: Mapping[str, Any]) -> list[str]:
 
 def manifest_lines(manifest: Mapping[str, Any]) -> list[str]:
     """A dispatch card's manifest as plain lines (``actions.dispatch_manifest``).
-    A long shell list is counted, with the first few named."""
+    A long shell list is counted, with the first few named. D23: a batch's
+    ``members`` are listed run by run."""
+    members = manifest.get("members")
+    if isinstance(members, list):
+        return [
+            line
+            for index, member in enumerate(members, 1)
+            for line in [f"run {index} of {len(members)}:", *manifest_lines(member)]
+        ]
     if manifest.get("error"):
         return [f"the run's envelope could not be compiled: {manifest['error']}"]
     prefixes = [" ".join(map(str, p)) for p in manifest.get("shell_allowlist") or []]
     shown = ", ".join(prefixes[:8]) + (f" (+{len(prefixes) - 8} more)" if len(prefixes) > 8 else "")
     lines = [
         f"hosts: {_hosts(manifest.get('network'))}",
+        *([str(manifest["network_note"])] if manifest.get("network_note") else []),  # D10
+        *(
+            [f"adds to the project's hosts for this run: {_hosts(manifest['network_added'])}"]
+            if manifest.get("network_added")
+            else []
+        ),
         *(
             [f"loses the project's own hosts for this run: {_hosts(manifest['network_dropped'])}"]
             if manifest.get("network_dropped")
             else []
         ),
         f"model provider: {_hosts(manifest.get('provider_hosts'))}",
+        *(
+            [f"loopback ports: {', '.join(map(str, manifest['loopback_ports'])) or 'closed'}"]
+            if "loopback_ports" in manifest
+            else []
+        ),
         f"commands it may run: {shown or 'none'}",
         f"may write: {_hosts(manifest.get('write'))}",
         *_grant_lines(manifest),
         f"engine: {manifest.get('engine')} · mode: {manifest.get('execution_mode')}"
         f" · verify: {manifest.get('verify_command') or 'the worker picks'}",
+        *([f"login: {CARD_LINE}"] if manifest.get("engine_auth") == AUTH_SOURCE else []),
     ]
     asks = [
         *(manifest.get("network_ask") or []),

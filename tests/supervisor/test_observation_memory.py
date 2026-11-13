@@ -78,6 +78,7 @@ def test_ingestion_applies_observations_and_gates_everything_else(
         items = store.list_memory_items()
         assert [item.memory_class for item in items] == ["observation"]
         assert "Fridays" in items[0].content
+        assert items[0].provenance == "worker:task-cur-1"  # D15: the curator wrote it
         # The durable proposal still waits for its human verdict.
         pending = store.list_memory_proposals(state="pending_review")
         assert [p.memory_class for p in pending] == ["durable_preference"]

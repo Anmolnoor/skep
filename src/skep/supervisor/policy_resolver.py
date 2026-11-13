@@ -92,8 +92,9 @@ class ResolvedRunPolicy:
     # and the final resolved allowlist that landed in permissions.network.
     network_requested: list[str] | None = None
     network_resolved: list[str] | None = None
-    # L10: the hosts an explicit network took away from the project's own.
+    # L10/D5: the project's hosts an explicit [] took away.
     network_dropped: list[str] = field(default_factory=list)
+    network_added: list[str] = field(default_factory=list)  # D5: what a named list adds
     # v23-F1: which trusted root satisfied workspace trust for this repo
     # (an operator root, the project binding, or the managed repos dir); None
     # when nothing did — i.e. the shell allowlist resolved to [].
@@ -319,6 +320,15 @@ def run_policy_for_repo(
                 chain.pop(registered.name, None)
         engine["routed_keys"] = routed
         engine["rule_refusals"] = [asdict(refusal) for refusal in stack.refusals]
+    # ES-F143 (ADR 0061): unlocked implies the posture keys it stands for —
+    # dispatch without a card, in the sandbox (the wall that justifies it,
+    # I12), landing through the unchanged verified-patch lane (G10 with the
+    # pinned verify, skep/* only: I1, I2). After every layer, the engine seam
+    # included, so a phase default of False cannot outvote it; RSoP names it.
+    if effective.get("unlocked") is True:
+        _layer_set("auto_dispatch_allowed", True, "unlocked")
+        _layer_set("default_execution_mode", "sandbox", "unlocked")
+        _layer_set("auto_apply_verified_patch", True, "unlocked")
     effective["_provenance"] = provenance
     effective["_provenance_chain"] = chain
     effective["_engine"] = engine
@@ -511,7 +521,13 @@ def resolve_injected_memory(
     project-bound run sees its project's memory *plus* global (unscoped) memory;
     an unbound run sees *only* global memory, so project-scoped memory never
     leaks to a different project.
+
+    ES-F181 (D15): a worker-written item (an earlier run's observation) is
+    wrapped as outside content, as the Queen's prompt shows it — the worker
+    prompt and the task envelope carry the wrapped text.
     """
+    from .serve.chat import wrap_untrusted
+
     if project_context is not None:
         items = store.list_memory_items(project_id=project_context.project_id)
     else:
@@ -520,7 +536,9 @@ def resolve_injected_memory(
         MemoryContextEntry(
             memory_id=item.memory_id,
             memory_class=item.memory_class,
-            content=item.content,
+            content=item.content
+            if item.provenance is None
+            else wrap_untrusted(item.provenance, item.content),
             project_id=item.project_id,
         )
         for item in items
@@ -692,12 +710,13 @@ def resolve_run_policy(
     # may run one on the naked host (field run 019f9e9d did exactly that via
     # the trusted_local_dev workspace default). The coerced mode is the mode
     # every surface shows (I8); dispatch backs this with a hard refusal.
-    if chosen_engine.external:
+    # ES-F143 (ADR 0061): the same coercion for an unlocked project — zero-ask
+    # is justified by the wall, so no request flag runs one outside it.
+    if chosen_engine.external or policy.get("unlocked") is True:
         resolved_execution_mode = "sandbox"
     # L10: what the run gets with no explicit network — the project's default,
-    # its registries and remembered hosts. An explicit list REPLACES it (the
-    # documented override, frozen in the policy regression fixtures); the
-    # card names what that drops (``network_dropped``), never silently.
+    # its registries and remembered hosts. D5 (operator decision 2026-11-13):
+    # an explicit list ADDS to it; only ``[]`` drops it (``network_dropped``).
     omitted_network = list(policy["default_network"])
     # v19-F2 → ADR 0059 D3 (V6a): a worker that cannot reach its LLM provider
     # cannot work at all, so every needs_provider caste gets the provider on
@@ -742,10 +761,18 @@ def resolve_run_policy(
     # allowlist regardless of creation path or merge order. ``["*"]`` is left
     # as-is (a single element sorts to itself anyway).
     omitted_network = sorted(dict.fromkeys(omitted_network))
-    chosen_network = omitted_network if network is None else sorted(dict.fromkeys(network))
-    network_dropped = (
-        [] if "*" in chosen_network else [h for h in omitted_network if h not in chosen_network]
+    named = sorted(dict.fromkeys(network or []))
+    # A named list never widens a project's ``*`` to ``*``: it stays the list
+    # (the stricter reading of D5); the ceilings below bind either way.
+    chosen_network = (
+        omitted_network
+        if network is None
+        else named
+        if not named or "*" in named or "*" in omitted_network
+        else sorted(dict.fromkeys([*omitted_network, *named]))
     )
+    network_dropped = omitted_network if network == [] else []
+    network_added = [h for h in chosen_network if network and h not in omitted_network]
     # v40-F7 (v36-F3): compile the resolved knobs into ONE policy document and
     # read the legacy fields back out of it — Permissions is the compiled
     # artifact of resolved policy, which is why this needs no contract bump
@@ -783,6 +810,8 @@ def resolve_run_policy(
         allowed_plugin_risks=list(policy.get("allowed_plugin_risks") or []),
         allow_git_mutation=bool(policy.get("allow_git_mutation") is True),
         provider_hosts=provider_hosts,
+        # D6: the project's loopback ports (validated at every project write).
+        loopback_ports=sorted(set(policy.get("loopback_ports") or [])),
     )
     budget = Budget(
         wall_clock_seconds=(
@@ -809,6 +838,7 @@ def resolve_run_policy(
         network_requested=None if network is None else list(network),
         network_resolved=list(chosen_network),
         network_dropped=network_dropped,
+        network_added=network_added,
         trust_root=granting_root(repo, trusted_roots),
         document=document,
         resolved_scopes=resolved_scopes,

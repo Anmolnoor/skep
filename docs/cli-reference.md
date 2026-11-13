@@ -212,11 +212,21 @@ exist because a *model* proposed the action, not a human.
 ## Serve
 
 ```sh
-skep serve [--host HOST] [--port PORT] [--worker-cmd COMMAND] [--auto-approve]
+skep serve [--host HOST] [--port PORT] [--worker-cmd COMMAND] [--auto-approve] [--no-readopt]
 ```
 
 `serve` starts the local HTTP API and browser dashboard. It prints the URL and
 access token on startup.
+
+On startup, a run whose worker is still alive from a previous serve is
+re-adopted: serve checks it is the same process (pid and start time),
+restores its network proxy on the same port, and supervises it to the end
+with the time it has left, sandboxed or not. `--no-readopt` (or
+`SKEP_READOPT_WORKERS=0` in the environment or `serve.env`) kills such workers
+instead, as older versions did; on Linux a sandboxed worker then dies with the
+serve that started it. The variable also reaches runs that `skep run` and
+`skep team` start: on Linux their sandboxed worker then dies with the CLI.
+See ADR 0060.
 
 ## Chat
 
@@ -265,6 +275,10 @@ commands the model never sees, identical to the web deck:
 | `/trust [private\|untrusted]` | trust this chat again: clear its taint bits (both by default); never a model tool, never from a channel |
 
 `skep trust CHAT_ID [--bit private|untrusted]` is the same verb outside chat.
+A `/trust` that clears `untrusted` also covers the finish notice of the runs
+this chat has in flight at that moment: when one of those runs finishes, its
+notice is still shown as the worker's words but does not set `untrusted` again.
+The receipt names the runs it covers.
 It writes who cleared which bit, when and the message that had set it to
 `audit/policy/taint-cleared.jsonl` and as a line in the chat. Rows already in
 the chat stay wrapped as outside content; new outside content sets the bit
@@ -284,6 +298,7 @@ registry. Use `skep skill --help` for the full subcommand list.
 ```sh
 skep project preview REPO [--pack PACK] [--phase PHASE]
 skep project setup   REPO [--engine ENGINE] [--verify-command CMD] [--group NAME]
+                     [--unlocked | --no-unlocked]
 skep project list
 skep project show    PROJECT_ID
 skep project set-phase PROJECT_ID PHASE
@@ -307,7 +322,16 @@ as `GET` / `DELETE /api/policy/rules` and the chat `revoke_policy_rule` card.
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
 from the repo's own entry point (v91); an explicit `--verify-command` always
-wins. `set-phase` moves the trust-ramp defaults (build → maintain).
+wins. `--unlocked` is the top rung of the trust ramp (ADR 0061): the
+project's sandboxed workers stop asking about commands and hosts no rule
+names, dispatch needs no card and a G10-confirmed patch lands on `skep/*`;
+denies, named asks and the floor still hold. It needs a pinned verify
+command, a usable sandbox and an approved baseline; `--no-unlocked` turns it
+off. `set-phase` moves the trust-ramp defaults (build → maintain) and drops
+`unlocked`. Run again on an existing project with no `--pack` or `--strategy`
+(for example `skep project setup REPO --loopback-port 5432`), it keeps the
+project's strategy and phase and changes only what the flags name;
+`--loopback-port` lists every port, replacing the project's list.
 `policy registry` lists every policy setting skep has (type, default, the
 layers that may set it); `policy rsop` is the resultant policy for a repo —
 each key with the layer that decided it and the layers it overrode, the
@@ -346,7 +370,8 @@ A role (first-run R1, ADR 0055) is a record — `name`, `policy_layer`,
 `system_prompt`, `default_castes`, `voice` — and a **policy context**:
 `builder`, `operator` and `assistant` ship bound 1:1 to the templates of the
 same name; custom roles live in `~/.skep/roles/<name>.json` and may bind to
-any template. The role's layer sits directly under the approved baseline and
+any template; one that names none acts as `assistant` until it gets one
+(ADR 0059 D14; `skep doctor` names it). The role's layer sits directly under the approved baseline and
 only tightens it: the stricter of the two verdicts stands, a role with no rule
 for an action has no opinion, and the floor is above every role. A chat runs
 in one role — its prompt, its voice (when the chat has no `/personality`) and
@@ -407,6 +432,16 @@ policy decisions --team ID` reads it in order. `skep team` waits for its
 members like `skep run`; the same verb is `POST /api/teams` and the chat's
 `batch_dispatch` with `manager` (dispatched as `queen@<chat role>`). The
 manager writes no briefs of its own — the Queen or the operator does.
+
+On a home with no approved baseline (a fresh or onboarded one, where every
+grant is an ask), a role run or team run asks first: a `skep run` with `--role` and
+`skep team …` print the hosts the run would ask about and, on a terminal, ask
+y/n; yes answers them for that run only (the same pre-answer a confirmed
+dispatch card gives). Off a terminal they refuse unless `--answer-host HOST`
+(repeatable) names the hosts to answer, each one a host the run asks about.
+`POST /api/runs` with a role and `POST /api/teams` refuse with a 400 listing
+the hosts unless the body's `answer_hosts` names them (a subset of what the
+run asks).
 
 ## skep acp
 

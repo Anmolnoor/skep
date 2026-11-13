@@ -1127,3 +1127,129 @@ def test_a_claim_owner_reads_the_same_under_another_time_zone(
     finally:
         alive.kill()
         alive.wait()
+
+
+def test_an_answer_that_meets_a_dead_claimers_gate_claim_releases_it_and_applies(
+    rig: Rig, repo: Any
+) -> None:
+    """D24: a CLI killed mid-resume left its gate claim 'applying', and every
+    later answer stalled on a 409 until serve restarted. The answer now
+    checks the claimer is gone (same pid + start time) and releases the
+    claim itself, then applies — an approve resumes, a deny denies."""
+    from skep.supervisor.serve import actions
+
+    run, approve_gate = _gated_run(rig, repo)
+    assert rig.store.claim_approval(approve_gate, owner=_dead_owner())
+    held = _HeldMutation()
+    held.release.set()
+    actions.pending_approval_or_409(rig.store, approve_gate)
+    resumed = actions.resume_past_gate(
+        rig.store, rig.holder.current, _runner(held), run, approve_gate, "operator"
+    )
+    assert held.calls == 1 and resumed
+    approval = rig.store.get_approval(approve_gate)
+    assert approval is not None and approval.status == "approved"
+
+    _run2, deny_gate = _gated_run(rig, repo)
+    assert rig.store.claim_approval(deny_gate, owner=_dead_owner())
+    actions.deny_approval(rig.store, deny_gate, "operator", None)
+    denied = rig.store.get_approval(deny_gate)
+    assert denied is not None and denied.status == "denied"
+
+
+def test_a_live_or_unknown_claimer_and_a_landing_claim_are_never_released(
+    rig: Rig, repo: Any, tmp_path: Any
+) -> None:
+    """D24: only a claimer shown to be gone loses its gate claim. A live one,
+    one whose owner was never recorded, and a landing (git may have half run)
+    keep theirs: the answer is still the 409."""
+    from skep.supervisor.serve import actions
+
+    _r1, live_gate = _gated_run(rig, repo)
+    assert rig.store.claim_approval(live_gate)  # this live process holds it
+    _r2, unknown_gate = _gated_run(rig, repo)
+    assert rig.store.claim_approval(unknown_gate, owner=None)
+    run = _landable_run(rig.store, repo, tmp_path)
+    landing = rig.store.enqueue_approval(str(run["task_id"]), action="apply_patch", reason="land")
+    assert rig.store.claim_approval(landing, owner=_dead_owner())
+    for review_id in (live_gate, unknown_gate, landing):
+        with pytest.raises(HTTPException) as refused:
+            actions.pending_approval_or_409(rig.store, review_id)
+        assert refused.value.status_code == 409
+        approval = rig.store.get_approval(review_id)
+        assert approval is not None and approval.status == "applying"
+
+
+def test_a_dead_claimer_whose_resume_already_dispatched_keeps_its_gate_claim(
+    rig: Rig, repo: Any
+) -> None:
+    """D24 follow-up: a CLI killed mid-resume has often dispatched its resume
+    already (the run row exists, its worker may still run in the tree).
+    Releasing that claim let the answer dispatch a second resume of the same
+    gate; the restart sweep tells the operator to check for that run. The
+    answer keeps the 409 while a run resumed from the gated task exists."""
+    from skep.supervisor import mint_task
+    from skep.supervisor.serve import actions
+
+    run, gate = _gated_run(rig, repo)
+    assert rig.store.claim_approval(gate, owner=_dead_owner())
+    resume = mint_task(workspace=repo, instructions="gate me", resume_of=str(run["task_id"]))
+    rig.store.create_run(resume, repo=repo, ref=None, execution_mode="workspace")
+    with pytest.raises(HTTPException) as refused:
+        actions.pending_approval_or_409(rig.store, gate)
+    assert refused.value.status_code == 409
+    approval = rig.store.get_approval(gate)
+    assert approval is not None and approval.status == "applying"
+
+
+def test_a_live_pid_whose_start_time_cannot_be_read_counts_as_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D24 follow-up: owner_alive read "ps could not answer" (a timeout under
+    load) as "a different process", so a live claimer looked gone and an
+    answer could release its claim. A pid that exists with an unreadable
+    start time is not shown to be gone: it counts as alive."""
+    import json
+    import os
+
+    from skep.supervisor import store as store_mod
+
+    owner = json.dumps({"pid": os.getpid(), "started": "Thu Jan  1 00:00:00 1970"})
+    monkeypatch.setattr(store_mod, "_process_started", lambda pid: None)
+    assert store_mod.owner_alive(owner)
+
+
+def test_a_released_gate_claim_is_named_on_the_approval_record(rig: Rig, repo: Any) -> None:
+    """D24 follow-up (I8, I13): the release swapped 'applying' back to
+    'pending' and nothing recorded it — the verdict row read as if no other
+    process had ever held the gate. Its resolution note now says whose claim
+    was released and why."""
+    from skep.supervisor.serve import actions
+
+    _run, gate = _gated_run(rig, repo)
+    dead = _dead_owner()
+    assert rig.store.claim_approval(gate, owner=dead)
+    actions.deny_approval(rig.store, gate, "operator", "not now")
+    approval = rig.store.get_approval(gate)
+    assert approval is not None and approval.status == "denied"
+    pid = json.loads(dead)["pid"]
+    note = approval.resolution_note or ""
+    assert f"released the claim of pid {pid}" in note and note.endswith("not now"), note
+
+
+def test_a_cli_gate_approve_releases_a_dead_claimers_claim_as_serve_does(
+    rig: Rig, repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D24 follow-up (ADR 0050): serve's answers release a gone claimer's
+    gate claim, and `skep review --deny` does through deny_approval, but
+    `skep review --approve` claimed directly and still told the operator to
+    restart serve. The CLI approve now releases it and resumes."""
+    run, review_id = _gated_run(rig, repo)
+    assert rig.store.claim_approval(review_id, owner=_dead_owner())
+    held = _HeldMutation()
+    held.release.set()
+    cli = _cli_resume(rig, run, held, monkeypatch)
+    cli()
+    assert held.calls == 1
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "approved"

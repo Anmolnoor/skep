@@ -137,3 +137,54 @@ def test_a_real_sandboxed_process_cannot_reach_host_sockets_or_pids(tmp_path: Pa
             host_socket.unlink(missing_ok=True)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "ISOLATED", proc.stdout
+
+
+@pytest.mark.parametrize("readopt", [True, False])
+def test_bwrap_keeps_die_with_parent_and_its_parent_is_the_keeper_only_while_readopting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readopt: bool
+) -> None:
+    """ES-F211 (ADR 0060 §1): --die-with-parent stays in every bwrap argv —
+    dropping it lets a killed bwrap leave its sandbox running. What changes
+    is its parent: with re-adoption on, serve spawns the keeper, which runs
+    bwrap and outlives serve; with the kill switch, bwrap is serve's own
+    child again and dies with it."""
+    from skep.supervisor import SupervisorConfig, spawner
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+
+    def _bubblewrap(backend: str | None = None) -> sandbox.SandboxAvailability:
+        return sandbox.SandboxAvailability(True, backend="bubblewrap")
+
+    _bubblewrap.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(sandbox, "availability", _bubblewrap)
+    monkeypatch.setattr(sandbox, "_bubblewrap_binary", lambda: "/usr/bin/bwrap")
+    monkeypatch.setattr(spawner, "git_metadata_writable_roots", lambda _ws: ())
+    monkeypatch.setattr(spawner, "git_metadata_readable_roots", lambda _ws: ())
+    captured: list[list[str]] = []
+
+    def _popen(argv: list[str], **_kw: object) -> object:
+        captured.append(argv)
+        return type("P", (), {"pid": 1})()
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    task = mint_task(workspace=workspace, instructions="x", budget=DEFAULT_BUDGET)
+    config = SupervisorConfig(
+        home=tmp_path / ".skep" / "supervisor",
+        worker_command=("w",),
+        sandbox=True,
+        readopt_workers=readopt,
+    )
+    spawner.spawn_worker(
+        config, task, tmp_path / "t.json", tmp_path / "out" / "o.json", log_path=tmp_path / "w.log"
+    )
+
+    argv = captured[0]
+    assert "--die-with-parent" in argv
+    bwrap_at = argv.index("/usr/bin/bwrap")
+    if readopt:
+        deadline = DEFAULT_BUDGET.wall_clock_seconds + config.grace_seconds + 60
+        # -I: the keeper runs on the host in the worktree; never its modules.
+        assert argv[:bwrap_at] == [sys.executable, "-I", "-c", spawner.BWRAP_KEEPER, str(deadline)]
+    else:
+        assert bwrap_at == 0

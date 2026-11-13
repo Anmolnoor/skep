@@ -51,7 +51,7 @@ from skep.supervisor.serve.tools import (
     queen_shell_decision,
 )
 
-from .conftest import no_layer_role
+from .conftest import no_template_role
 from .grant_grid import GRANTED, HOMES, rows
 from .queen_lane_grid import build_home
 
@@ -186,8 +186,9 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[
         config = build_config(paths["personal"], None)
         store = RunStore(config.db_path)
         opened.append(store)
-        # Grants alone: chats with no role layer (a NULL role reads as assistant, P3-6).
-        role = no_layer_role(config.home)
+        # Chats in a role naming no template: it acts as assistant (D14), and a
+        # grant answers that role's catch-all asks (decision #1).
+        role = no_template_role(config.home)
         chat_a = store.create_chat(title="a", model=None, role=role).chat_id
         chat_b = store.create_chat(title="b", model=None, role=role).chat_id
         return Home(paths, config, store, ConfigHolder(config, store), chat_a, chat_b)
@@ -257,7 +258,7 @@ def test_b39_a_queen_session_keep_holds_in_its_own_chat_only(home: Any) -> None:
     assert (grant["lifetime"], grant["bound"]) == ("session", "this chat")
     assert h.decide("run_shell", command=GRANTED).startswith("allow grant:session/")
     assert h.decide("run_shell", chat=h.chat_b, command=GRANTED) == (
-        "require_approval default/unmatched"
+        "require_approval role:notemplate/shell-gated"  # D14: the assistant layer asks
     )
     rest = policy_decide(h.holder, h.store, scope="shell", action="run", value=GRANTED)
     assert rest["verdict"] == "require_approval"  # no chat: no chat-bound grant

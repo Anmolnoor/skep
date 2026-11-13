@@ -52,6 +52,7 @@ TRUST_RAMP_KEYS: frozenset[str] = frozenset(
         "allow_git_mutation",
         "auto_dispatch_allowed",
         "trusted_workspace_roots",
+        "unlocked",
     }
 )
 
@@ -64,7 +65,8 @@ class PolicyKey:
     # Which of the four systems owns it today — the P1 migration reads this.
     system: str  # "run_policy" | "scope_document" | "operator_document" | "auto_approval" | "floor"
     kind: str  # "knob" (typed value) | "rule" (scope·action·pattern → verdict)
-    type: str  # "bool" | "int" | "str" | "list[str]" | "list[argv]" | "enum[...]" | "rule"
+    # "bool" | "int" | "str" | "list[str]" | "list[int]" | "list[argv]" | "enum[...]" | "rule"
+    type: str
     default: Any
     layers: tuple[str, ...]
     invariant: str
@@ -234,6 +236,17 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         enforced_at="project",
     ),
     _knob(
+        "unlocked",
+        scope="coding",
+        type="bool",
+        default=False,
+        layers=("project",),
+        invariant="I6",
+        doc="zero-ask project (ADR 0061): decide() answers a sandboxed worker's default asks; "
+        "dispatch and verified landing need no card",
+        enforced_at="project",
+    ),
+    _knob(
         "trusted_workspace_roots",
         scope="filesystem",
         type="list[str]",
@@ -274,6 +287,27 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         "and need a pinned verify_command",
     ),
     _knob(
+        "loopback_ports",
+        scope="network",
+        type="list[int]",
+        default=[],
+        layers=("project",),
+        invariant="I12",
+        doc="loopback ports this project's sandboxed workers may reach (D6); loopback is "
+        "otherwise closed but for a local provider's own port; serve's port never opens",
+    ),
+    _knob(
+        "codex_chatgpt_login",
+        scope="coding",
+        type="bool",
+        default=False,
+        layers=("project",),
+        invariant="I12",
+        doc="a codex run with no OPENAI_API_KEY uses the operator's ChatGPT plan login: "
+        "an access-token-only, read-only copy only that run's sandbox can read, never "
+        "the refresh token (docs/codex-chatgpt-login.md)",
+    ),
+    _knob(
         "policy_groups",
         scope="coding",
         type="list[str]",
@@ -293,6 +327,17 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         "policy engine v2; every other scope keeps the v1 path. Flips are recorded in "
         "<audit>/policy/engine-flips.jsonl. A fresh home is seeded with filesystem+shell "
         "(ADR 0054 A6); an existing home keeps its switch",
+    ),
+    _knob(
+        "provider_key_relay",
+        type="bool",
+        default=False,
+        layers=("global",),
+        invariant="I12",
+        doc="ADR 0062 kill switch: on, a builtin worker reaches its model through a "
+        "token-checked relay on its run's proxy and never holds the provider key; off "
+        "(default), the worker holds the key as before. External engines keep their own "
+        "auth env either way",
     ),
     _knob(
         "auto_approve",
