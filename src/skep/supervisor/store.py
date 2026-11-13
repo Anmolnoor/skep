@@ -17,11 +17,11 @@ import sqlite3
 import subprocess
 import threading
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from skep.worker_contract import TERMINAL_STATES, CodingWorkerResult, CodingWorkerTask, Event
 
@@ -707,6 +707,13 @@ TRUSTED_PROVENANCE = frozenset({"operator", "queen", "tool"})
 # The author a row's role implies when nothing recorded one (rows older than
 # the column, and every writer that is the operator, the Queen or a tool).
 _ROLE_AUTHOR = {"user": "operator", "tool": "tool"}
+TAINT_BITS = ("private", "untrusted")
+
+
+def _taint_json(taint: Sequence[str]) -> str | None:
+    return json.dumps(sorted(set(taint))) if taint else None
+
+
 # A taint bit set where no message id says which (an unreadable taint, a
 # missing chat): it still counts as set.
 UNKNOWN_TAINT_ORIGIN = 0
@@ -1159,6 +1166,12 @@ class RunStore:
         if "taint" not in chat_columns:
             # ADR 0059 D5 (V9): the trifecta guard's two bits; NULL = no taint.
             self._conn.execute("ALTER TABLE chats ADD COLUMN taint TEXT")
+        for table in ("notes", "tasks", "memory_proposals"):
+            columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            if "taint" not in columns:
+                # W21: the bits of the chat that wrote the row (a JSON list,
+                # NULL = none); a chat that reads the row takes them on.
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN taint TEXT")
         if "source" not in chat_columns:
             # v44-F1: which face opened the chat — 'web', 'terminal', or a channel name.
             self._conn.execute("ALTER TABLE chats ADD COLUMN source TEXT NOT NULL DEFAULT 'web'")
@@ -2843,12 +2856,13 @@ class RunStore:
         )
 
     @_locked
-    def create_note(self, content: str, *, actor: str) -> NoteRecord:
+    def create_note(self, content: str, *, actor: str, taint: Sequence[str] = ()) -> NoteRecord:
         now = _now()
         note = NoteRecord(str(uuid.uuid4()), content, now, now)
         self._conn.execute(
-            "INSERT INTO notes (note_id, content, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (note.note_id, note.content, note.created_at, note.updated_at),
+            "INSERT INTO notes (note_id, content, created_at, updated_at, taint)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (note.note_id, note.content, note.created_at, note.updated_at, _taint_json(taint)),
         )
         self._record_note_task_event(
             kind="note", item_id=note.note_id, action="created", actor=actor, detail={}
@@ -2900,13 +2914,15 @@ class RunStore:
         return removed
 
     @_locked
-    def create_task(self, title: str, *, actor: str, due_at: str | None = None) -> TaskRecord:
+    def create_task(
+        self, title: str, *, actor: str, due_at: str | None = None, taint: Sequence[str] = ()
+    ) -> TaskRecord:
         now = _now()
         task_id = str(uuid.uuid4())
         self._conn.execute(
-            "INSERT INTO tasks (task_id, title, status, due_at, created_at, updated_at)"
-            " VALUES (?, ?, 'todo', ?, ?, ?)",
-            (task_id, title, due_at, now, now),
+            "INSERT INTO tasks (task_id, title, status, due_at, created_at, updated_at, taint)"
+            " VALUES (?, ?, 'todo', ?, ?, ?, ?)",
+            (task_id, title, due_at, now, now, _taint_json(taint)),
         )
         self._record_note_task_event(
             kind="task", item_id=task_id, action="created", actor=actor, detail={}
@@ -2924,6 +2940,28 @@ class RunStore:
             " ORDER BY status, due_at IS NULL, due_at, updated_at DESC, task_id"
         ).fetchall()
         return [self._row_to_task(row) for row in rows]
+
+    _CONTENT_TAINT: ClassVar[dict[str, str]] = {
+        "note": "SELECT taint FROM notes WHERE note_id = ?",
+        "task": "SELECT taint FROM tasks WHERE task_id = ?",
+        "proposal": "SELECT taint FROM memory_proposals WHERE proposal_id = ?",
+    }
+
+    @_locked
+    def content_taint(self, kind: str, ids: Iterable[str]) -> set[str]:
+        """W21: the taint bits the ``kind`` rows ``ids`` carry from the chat
+        that wrote them. A value that does not read counts as both bits."""
+        bits: set[str] = set()
+        for item_id in ids:
+            row = self._conn.execute(self._CONTENT_TAINT[kind], (item_id,)).fetchone()
+            if row is None or row[0] is None:
+                continue
+            try:
+                raw = json.loads(str(row[0]))
+                bits |= set(raw) & set(TAINT_BITS) if isinstance(raw, list) else set(TAINT_BITS)
+            except ValueError:
+                bits |= set(TAINT_BITS)
+        return bits
 
     @_locked
     def get_task(self, task_id: str) -> TaskRecord | None:
@@ -3035,6 +3073,7 @@ class RunStore:
         rationale: str | None = None,
         project_id: str | None = None,
         sources: Sequence[MemorySource] = (),
+        taint: Sequence[str] = (),
     ) -> MemoryProposal:
         validate_memory_class(memory_class)
         validate_proposal_state(state)
@@ -3044,10 +3083,13 @@ class RunStore:
         now = _now()
         self._conn.execute(
             "INSERT INTO memory_proposals (proposal_id, memory_class, content, state, actor,"
-            " rationale, project_id, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (proposal_id, memory_class, content, state, actor, rationale, project_id, now, now),
-        )
+            " rationale, project_id, created_at, updated_at, taint)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                proposal_id, memory_class, content, state, actor, rationale, project_id,
+                now, now, _taint_json(taint),
+            ),
+        )  # fmt: skip
         for source in sources:
             self._conn.execute(
                 "INSERT INTO memory_sources (proposal_id, source_kind, source_id, created_at)"
@@ -4091,11 +4133,42 @@ class RunStore:
             untrusted=current.untrusted if current.untrusted is not None else untrusted,
         )
         if merged != current:
-            self._conn.execute(
-                "UPDATE chats SET taint = ? WHERE chat_id = ?",
-                (json.dumps({"private": merged.private, "untrusted": merged.untrusted}), chat_id),
-            )
+            self._write_taint(chat_id, merged, self.chat_trusted_through(chat_id))
         return merged
+
+    def _write_taint(self, chat_id: str, taint: ChatTaint, through: int) -> None:
+        payload: dict[str, int | None] = {"private": taint.private, "untrusted": taint.untrusted}
+        if through:
+            payload["trusted_through"] = through
+        self._conn.execute(
+            "UPDATE chats SET taint = ? WHERE chat_id = ?", (json.dumps(payload), chat_id)
+        )
+
+    @_locked
+    def chat_trusted_through(self, chat_id: str) -> int:
+        """W20: the newest row an operator's /trust covered (0 = none). The
+        rows up to it stay wrapped on replay but never set a bit again."""
+        row = self._conn.execute("SELECT taint FROM chats WHERE chat_id = ?", (chat_id,)).fetchone()
+        try:
+            raw = json.loads(str(row[0])) if row and row[0] else {}
+        except ValueError:
+            return 0
+        through = raw.get("trusted_through") if isinstance(raw, dict) else None
+        return through if type(through) is int else 0
+
+    @_locked
+    def clear_chat_taint(self, chat_id: str, bits: Sequence[str], *, through: int) -> ChatTaint:
+        """W20: the one way a bit is cleared — ``taint.trust_chat``, the
+        operator's /trust (never a model tool). ``through`` is the newest row
+        it covers. Returns the chat's taint after."""
+        current = self.get_chat_taint(chat_id)
+        cleared = ChatTaint(
+            private=None if "private" in bits else current.private,
+            untrusted=None if "untrusted" in bits else current.untrusted,
+        )
+        self._write_taint(chat_id, cleared, through)
+        self._conn.commit()
+        return cleared
 
     _ACTION_COLS = (
         "action_id, chat_id, tool, args_json, status, result_json, created_at, resolved_at,"

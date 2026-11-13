@@ -451,6 +451,35 @@ def references_dead_worktree(argv: Sequence[str]) -> bool:
     return False
 
 
+# What runs the word after it as a program: ``python3 -m skep``, ``uv run
+# skep``, ``uvx skep``, ``pipx run skep``.
+_SKEP_RUNNERS = frozenset({"-m", "run", "exec", "uvx", "pipx"})
+
+
+def is_skep_trust_command(argv: Sequence[str]) -> bool:
+    """``skep trust`` or ``skep chat`` (whose deck takes "/trust" from a pipe)
+    in any spelling: ``uv run skep trust``, ``python3 -m skep --home h trust``.
+    Clearing a chat's taint is the operator's act at the desk — from a chat's
+    shell it is the model clearing its own guard (W20 review)."""
+    tokens = [str(token) for token in argv]
+    for index, token in enumerate(tokens):
+        runner = index == 0 or program_name(tokens[index - 1]) in _SKEP_RUNNERS
+        if program_name(token) != "skep" or not runner:
+            continue
+        rest = tokens[index + 1 :]
+        while rest and rest[0].startswith("-"):  # skep's own options
+            rest = rest[2:] if rest[0] in ("--home", "--url") else rest[1:]
+        if rest[:1] in (["trust"], ["chat"]):
+            return True
+    return False
+
+
+SKEP_TRUST_REFUSAL = (
+    "skep trust / skep chat never run from chat — trusting a chat again is the "
+    "operator's own /trust at the desk, never the model clearing its own guard"
+)
+
+
 def is_ops_mutating_command(argv: Sequence[str]) -> bool:
     """True for ops-mutating commands (systemctl, rm, backup tools, journalctl
     --vacuum) that must be approve-once only, never remembered (v15)."""
@@ -932,6 +961,8 @@ def hard_denied_segment_reason(entry: Sequence[str]) -> str | None:
             return "it hides a ref move (update-ref/symbolic-ref/branch -f/-d/worktree)"
         if is_outbound_content_prefix(stripped):
             return "it hides an outbound post/send, which always runs carded (ADR 0044)"
+        if is_skep_trust_command(stripped):
+            return SKEP_TRUST_REFUSAL
         # v109-F10: a wrapped machine-wrecker (`bash -c 'rm -rf /'`) joins the
         # same per-segment floor — the joke is the reason, verbatim.
         catastrophic = catastrophic_command_reason(stripped)
@@ -1049,6 +1080,8 @@ def queen_shell_refusal(argv: Sequence[str]) -> str | None:
             "moving or deleting refs never runs from chat as raw shell — use "
             "create_branch/delete_branch, which are carded"
         )
+    if is_skep_trust_command(argv):
+        return SKEP_TRUST_REFUSAL
     if is_unknown_git_subcommand(argv):
         # ES-F1 (B124): an alias in the operator's gitconfig can be `push`.
         return "git aliases never run from chat — spell out the builtin git command"

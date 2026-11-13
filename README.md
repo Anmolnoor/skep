@@ -195,7 +195,9 @@ use — the assistant's model never sees it. `/help` lists the deck; reads
 (`/policy`, `/state`, `/runs`, `/approvals`, `/repos`) render immediately, and
 mutations (`/setup`, `/workon`, `/phase`, `/land`, `/approve`, `/deny`,
 `/schedule`) show the same confirmation card a model proposal would, audited
-under actor `operator-command`. `/workon <path>` makes any local directory a
+under actor `operator-command`. `/trust` clears a chat's taint (the trifecta
+guard's "this chat read private data / took in outside content" bits) — an
+operator command only, never offered to the model. `/workon <path>` makes any local directory a
 first-class workspace: a confirmed `git init` + baseline commit if needed, then
 the same trusted-project setup a registered repo gets. The same deck works in
 the terminal: `skep chat` (see [`docs/cli-reference.md`](docs/cli-reference.md)).

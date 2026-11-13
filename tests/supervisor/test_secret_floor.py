@@ -493,6 +493,71 @@ def test_the_widened_floor_spares_the_neighbours(fake_home: Path) -> None:
         assert secret_floor_reason(fake_home / rel) is None, rel
 
 
+# W40: the floor is not relative to the serve process's $HOME. A credential
+# file under ANY home directory is floored, by requested and resolved path.
+OTHER_HOME_SECRETS = (
+    "/Users/someone/.ssh/id_rsa",
+    "/home/y/.aws/credentials",
+    "/root/.netrc",
+    "/var/root/.ssh/id_ed25519",
+    "/USERS/Someone/.SSH/id_rsa",
+    "/home/y/.config/gh/hosts.yml",
+    "/home/y/.claude/.credentials.json",
+)
+
+
+@pytest.mark.parametrize("path", OTHER_HOME_SECRETS)
+def test_a_credential_under_any_home_is_on_the_floor(
+    store: RunStore, holder: ConfigHolder, fake_home: Path, path: str
+) -> None:
+    from skep.supervisor.secret_floor import shell_secret_floor_reason
+
+    assert secret_floor_reason(path), path
+    assert shell_secret_floor_reason(f"cat {path}", cwd=str(fake_home)), path
+    decision = queen_filesystem_decision(store, holder, action="read", path=path)
+    assert (decision.verdict, decision.reason) == ("deny", "filesystem.deny.secret_floor"), path
+
+
+def test_a_link_to_another_homes_credential_is_floored_by_its_target(
+    fake_home: Path, tmp_path: Path
+) -> None:
+    link = tmp_path / "innocent.txt"
+    link.symlink_to("/home/y/.aws/credentials")
+    assert secret_floor_reason(link)
+
+
+def test_another_homes_ordinary_files_are_not_on_the_floor(fake_home: Path) -> None:
+    for path in (
+        "/Users/someone/code/app/README.md",
+        "/Users/someone/code/.ssh/id_rsa",  # not directly under a home
+        "/home/y/notes.txt",
+        "/home/y/.cache/pip/x",
+        "/var/rooted/.ssh/id_rsa",
+        "/srv/root/.netrc",
+    ):
+        assert secret_floor_reason(path) is None, path
+
+
+def test_a_path_under_our_own_home_is_judged_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """W40 review: our own home matches a HOME_DIRS pattern too; it is not
+    judged a second time as "another home" (every decision paid twice)."""
+    from skep.supervisor import secret_floor
+
+    monkeypatch.setenv("HOME", "/Users/someone")
+    seen: list[Path] = []
+    real_under = secret_floor._under
+
+    def counted(path: Path, root: Path) -> bool:
+        seen.append(root)
+        return real_under(path, root)
+
+    monkeypatch.setattr(secret_floor, "_under", counted)
+    assert secret_floor_reason("/Users/someone/code/app.py") is None
+    # once per judged spelling (the requested path and its realpath), not twice
+    assert len(seen) == 2 * len(set(seen))
+    assert secret_floor_reason("/Users/someone/.ssh/id_rsa")
+
+
 def test_under_is_the_root_or_below_it_never_a_sibling_with_the_same_prefix() -> None:
     """W43: ``_under`` compares path parts (the ``parents`` walk it replaced
     cost most of every floor check); a name that only starts like the root

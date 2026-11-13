@@ -510,7 +510,12 @@ def _deliver_tick_text(
             except Exception:
                 logger.warning("schedule %r outbound push failed", schedule.name, exc_info=True)
     else:
-        store.create_note(pushed, actor=f"schedule:{schedule.name}")
+        # W21 review: a script's output (or a chain's) is outside text, so the
+        # note carries ``untrusted`` to every chat that lists it
+        outside = script_output or context is not None
+        store.create_note(
+            pushed, actor=f"schedule:{schedule.name}", taint=("untrusted",) if outside else ()
+        )
 
 
 def compose_digest(store: RunStore) -> str:

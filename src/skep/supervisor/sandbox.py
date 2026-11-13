@@ -35,7 +35,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES
+from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, other_homes
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 BUBBLEWRAP = "bwrap"
@@ -373,6 +373,11 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
     home = Path.home()
     supervisor = skep_home / "supervisor"
     candidates = [home / rel for rel in _HOME_SECRET_PATHS]
+    # W40: every other home's credential files, its engine logins included
+    own = {home.resolve(), Path(os.path.abspath(home))}
+    candidates += [
+        other / rel for other in other_homes() if other.resolve() not in own for rel in HOME_SECRETS
+    ]
     candidates += [skep_home / SERVE_ENV, supervisor / "audit", supervisor / "chat-attachments"]
     readable = {"llm-secret", *_active_llm_key_names(supervisor)} if worker_llm_key else set()
     if supervisor.is_dir():
@@ -381,7 +386,14 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
             for p in supervisor.iterdir()
             if p.name not in readable and any(fnmatch(p.name, pat) for pat in SKEP_SECRET_NAMES)
         )
-    return [path.resolve() for path in candidates if path.exists()]
+    return [path.resolve() for path in candidates if _exists(path)]
+
+
+def _exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:  # another user's home we may not look into: nothing to mask
+        return False
 
 
 def _active_llm_key_names(supervisor: Path) -> set[str]:

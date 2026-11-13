@@ -262,6 +262,13 @@ commands the model never sees, identical to the web deck:
 | `/deny <review-id>` | deny a pending review (confirm card) |
 | `/workon <path>` | make a local directory a first-class workspace (confirm card) |
 | `/role <name>` | switch this chat's role — prompt, voice and policy layer together (confirm card) |
+| `/trust [private\|untrusted]` | trust this chat again: clear its taint bits (both by default); never a model tool, never from a channel |
+
+`skep trust CHAT_ID [--bit private|untrusted]` is the same verb outside chat.
+It writes who cleared which bit, when and the message that had set it to
+`audit/policy/taint-cleared.jsonl` and as a line in the chat. Rows already in
+the chat stay wrapped as outside content; new outside content sets the bit
+again.
 
 ## Skills
 

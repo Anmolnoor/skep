@@ -216,3 +216,129 @@ def test_an_outside_row_landing_while_a_card_waits_replays_after_its_result(
     events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "?"}).text)
     assert events[-1] == ("done", {"state": "complete"})
     assert '<untrusted source=\\"webhook:ci\\">' in json.dumps(provider.chat_bodies()[-1])
+
+
+def test_a_btw_beside_a_pending_card_replays_on_every_strict_protocol(
+    config: SupervisorConfig, provider: Any
+) -> None:
+    """W23 (B62): a /btw while a card waits replayed the card's tool call with
+    no result yet, and four strict protocols refused the side turn. The side
+    turn leaves the open round out; the card stays pending, and its confirm
+    and the next turn replay cleanly too."""
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": provider.base_url, "default_model": "m",
+              "protocol": provider.protocol, "api_key": "sk-fake"},
+    )  # fmt: skip
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    provider.script_tool_call("set_policy", {"auto_approve": True})
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "on"}).text)
+    assert events[-1] == ("done", {"state": "awaiting_confirmation"})
+    provider.script_reply("side answer")
+    events = sse_events(
+        client.post(
+            f"/api/chats/{chat_id}/messages", json={"content": "what time?", "read_only": True}
+        ).text
+    )
+    assert events[-1] == ("done", {"state": "complete"}), events
+    side = json.dumps(provider.chat_bodies()[-1])
+    assert 'auto_approve\\": true' not in side and '"auto_approve": true' not in side
+    actions = client.get(f"/api/chats/{chat_id}").json()["actions"]
+    assert [a["status"] for a in actions] == ["proposed"]
+    provider.script_reply("done")
+    confirm = f"/api/chats/{chat_id}/actions/{actions[0]['action_id']}/confirm"
+    events = sse_events(client.post(confirm).text)
+    assert events[-1] == ("done", {"state": "complete"}), events
+    provider.script_reply("seen")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "?"}).text)
+    assert events[-1] == ("done", {"state": "complete"}), events
+
+
+def test_a_round_with_no_result_never_wedges_a_turn_on_any_strict_protocol(
+    config: SupervisorConfig, provider: Any
+) -> None:
+    """W23 review: a run-finished continuation (an unattended turn) that
+    arrives while a card waits replayed the card's call with no result, and
+    four strict protocols refused it — the continuation was lost. A round a
+    client disconnect left without a result (B25) refused every later turn
+    the same way. Every turn now leaves a round still waiting out of its
+    replay; the card's confirm and the next turn replay it whole."""
+    from skep.supervisor.serve.chat import ChatEngine
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": provider.base_url, "default_model": "m",
+              "protocol": provider.protocol, "api_key": "sk-fake"},
+    )  # fmt: skip
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    provider.script_tool_call("set_policy", {"auto_approve": True})
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "on"}).text)
+    assert events[-1] == ("done", {"state": "awaiting_confirmation"})
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        engine = ChatEngine(
+            store=store, holder=holder, runner=Dispatcher(store=store, holder=holder),
+            home=config.home,
+        )  # fmt: skip
+        store.add_chat_message(chat_id, role="user", content="done: ok", provenance="worker:t1")
+        store.add_chat_message(chat_id, role="user", content="Continue.", provenance="queen")
+        base_url, api_key, model, protocol = engine.resolved_llm(store.get_chat(chat_id))
+        provider.script_reply("the run finished")
+        events = list(
+            engine.turn_events(
+                chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+                unattended=True,
+            )
+        )  # fmt: skip
+        assert events[-1] == ("done", {"state": "complete"}), events
+        action_id = client.get(f"/api/chats/{chat_id}").json()["actions"][0]["action_id"]
+        provider.script_reply("done")
+        events = sse_events(client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm").text)
+        assert events[-1] == ("done", {"state": "complete"}), events
+
+        # B25: a round a disconnect left with one call unanswered and no card
+        calls = [{"id": "c1", "function": {"name": "list_repos", "arguments": {}}},
+                 {"id": "c2", "function": {"name": "list_runs", "arguments": {}}}]  # fmt: skip
+        store.add_chat_message(chat_id, role="assistant", content="", tool_calls=calls)
+        store.add_chat_message(
+            chat_id, role="tool", tool_name="list_repos", tool_call_id="c1", content="{}"
+        )
+    finally:
+        store.close()
+    provider.script_reply("seen")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "?"}).text)
+    assert events[-1] == ("done", {"state": "complete"}), events
+
+
+def test_a_chat_replays_on_every_strict_protocol_after_trust(
+    config: SupervisorConfig, provider: Any
+) -> None:
+    """W20 review: /trust writes a system line into the chat for the
+    operator. Replayed as a system message mid-conversation, openai-compat
+    refused every later turn. A stored system row is a note for whoever reads
+    the transcript and is not replayed; the outside row stays wrapped."""
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": provider.base_url, "default_model": "m",
+              "protocol": provider.protocol, "api_key": "sk-fake"},
+    )  # fmt: skip
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    provider.script_reply("hi")
+    sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "a"}).text)
+    store = RunStore(config.db_path)
+    try:
+        store.add_chat_message(chat_id, role="user", content="ci failed", provenance="webhook:ci")
+    finally:
+        store.close()
+    assert client.post(f"/api/chats/{chat_id}/trust", json={"bits": []}).status_code == 200
+    provider.script_reply("ok")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "b"}).text)
+    assert events[-1] == ("done", {"state": "complete"}), events
+    body = json.dumps(provider.chat_bodies()[-1])
+    assert "trusted this chat again" not in body and "ci failed" in body

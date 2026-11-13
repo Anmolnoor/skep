@@ -45,9 +45,11 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
+from ..policy_v3 import UNATTENDED_CHATS
 from ..policy_write import PolicyWriteRejected
 from . import actions
 from .cards import card_summary, fold_subject, headline, high_tier, recorded_card
+from .fileio import resolves_elsewhere
 from .jobs import Dispatcher
 from .llm import (
     _TRANSIENT_STATUSES,
@@ -61,7 +63,13 @@ from .llm import (
     tool_delivery,
 )
 from .settings import ConfigHolder
-from .taint import inherit_taint, record_tool_taint, taint_line
+from .taint import (
+    TrustRefused,
+    inherit_taint,
+    record_tool_taint,
+    taint_line,
+    trust_chat,
+)
 from .tools import (
     CLARIFY_TOOL_NAME,
     COMMAND_TOOL_NAMES,
@@ -70,6 +78,7 @@ from .tools import (
     POLICY_LINE_TOOLS,
     READ_TOOL_NAMES,
     READ_TOOL_SPECS,
+    TAINT_ASKED_STORE_WRITES,
     TOOL_SPECS,
     UNATTENDED_BLOCKED_READ_TOOLS,
     UNATTENDED_BLOCKED_STORE_WRITES,
@@ -84,6 +93,7 @@ from .tools import (
     mutation_execution_decision,
     policy_write_preview,
     search_web_verdict,
+    store_write_taint_ask,
     taint_decision,
     tool_description,
     tool_index_block,
@@ -1143,6 +1153,69 @@ def _replayable_call(call: dict[str, Any]) -> dict[str, Any]:
     return {**call, "function": {**call.get("function", {}), "arguments": arguments}}
 
 
+def _resolution(tool: str, args: dict[str, Any]) -> dict[str, str]:
+    """W38: ``{"resolves_to": …}`` for a file read whose path is a link."""
+    if tool not in ("read_file", "search_files"):
+        return {}
+    real = resolves_elsewhere(str(args.get("path") or ""))
+    return {"resolves_to": real} if real else {}
+
+
+def _link_moved(action: ChatActionRecord, args: dict[str, Any]) -> dict[str, Any] | None:
+    """W38: the refusal for a confirmed file read whose link now leads
+    somewhere other than the card showed — nothing is read."""
+    if action.tool not in ("read_file", "search_files"):
+        return None
+    shown = (action.card or {}).get("resolves_to")
+    now = _resolution(action.tool, args).get("resolves_to")
+    if shown == now:
+        return None
+    where = now or str(args.get("path") or "")
+    return {
+        "ok": False,
+        "error": f"the path now resolves to {where}, not {shown or 'itself'} as the card "
+        "showed — nothing was read; ask again to get a card for where it leads now",
+    }
+
+
+def _rounds_in_order(records: list[Any]) -> list[Any]:
+    """W23 (B62): a tool round replays as one piece. A card's result is
+    written when it is confirmed, after any /btw rows that ran beside it; it
+    moves back to its call, so strict providers never see a call split from
+    its result. A round still waiting on a result is left out of every
+    turn: a /btw or a run-finished continuation beside a pending card (the
+    card stays pending; its confirm replays the round whole), or a round a
+    client disconnect left unanswered (B25) — a strict provider refuses a
+    call with no result, and every later turn with it."""
+    # Each result joins the newest round still waiting on its call id, or,
+    # for rows without ids, the newest round still waiting on any call.
+    results: dict[int, list[Any]] = {}
+    waiting: dict[int, list[str]] = {}
+    for record in records:
+        if record.role == "assistant" and record.tool_calls:
+            results[record.id] = []
+            waiting[record.id] = [str(c.get("id") or "") for c in record.tool_calls]
+        elif record.role == "tool":
+            call = record.tool_call_id or ""
+            round_id = next((r for r in reversed(waiting) if call in waiting[r]), None)
+            if round_id is None and not call:
+                round_id = next((r for r in reversed(waiting) if waiting[r]), None)
+            if round_id is not None:
+                results[round_id].append(record)
+                pending = waiting[round_id]
+                pending.remove(call if call in pending else pending[0])
+    placed = {r.id for rows in results.values() for r in rows}
+    ordered: list[Any] = []
+    for record in records:
+        if record.id in placed:
+            continue
+        if record.id not in results:
+            ordered.append(record)
+        elif not waiting[record.id]:  # a round still waiting is left out
+            ordered += [record, *results[record.id]]
+    return ordered
+
+
 class ChatCreate(BaseModel):
     title: str | None = None
     model: str | None = None  # None = follow the configured default
@@ -1165,6 +1238,12 @@ class MessageRequest(BaseModel):
     # v67-F3 (R12b): a /btw side question — the turn sees only read tools,
     # can never card, and may run beside a pending confirmation.
     read_only: bool = False
+
+
+class TrustRequest(BaseModel):
+    """W20: the bits /trust clears — empty clears both."""
+
+    bits: list[str] = Field(default_factory=list)
 
 
 class CommandRequest(BaseModel):
@@ -1370,11 +1449,14 @@ class ChatEngine:
 
         vision = self.store.get_setting(LLM_VISION) is True
         compacted_through = (getattr(chat, "compacted_through", 0) or 0) if chat else 0
-        records = [r for r in self.store.chat_messages(chat_id) if r.id > compacted_through]
+        records = _rounds_in_order(
+            [r for r in self.store.chat_messages(chat_id) if r.id > compacted_through]
+        )
         last_user_id = max((r.id for r in records if r.role == "user"), default=0)
         messages: list[dict[str, Any]] = []
         last_user_index: int | None = None
         untrusted_row = 0
+        trusted_through = self.store.chat_trusted_through(chat_id)  # W20: /trust
         # An outside row that landed inside an open tool round (a webhook while
         # a card waits) replays after that round's results: between a call and
         # its result a user turn is refused by the strict providers.
@@ -1390,6 +1472,11 @@ class ChatEngine:
             held.clear()
 
         for record in records:
+            if record.role == "system":
+                # a stored system row (a /trust line, a replay-halved note) is
+                # for whoever reads the transcript; replayed mid-conversation,
+                # openai-compat refuses the whole request (W20 review)
+                continue
             if record.role != "tool" and (record.trusted or not open_calls):
                 flush()
                 open_calls = 0
@@ -1437,7 +1524,8 @@ class ChatEngine:
                 )
                 if not open_calls:
                     flush()
-                untrusted_row = untrusted_row or record.id
+                if record.id > trusted_through:
+                    untrusted_row = untrusted_row or record.id
                 continue
             elif record.role == "user" and record.attachments:
                 messages.append(self._user_message_with_images(chat_id, record, vision))
@@ -1676,6 +1764,33 @@ class ChatEngine:
         ES-F3 (B08): and they never execute a mutation, even one policy would
         auto-allow — it becomes a card (run-finish continuations).
         """
+        if unattended:
+            # W24: nobody is at the desk — the chat's session keeps sit this out
+            UNATTENDED_CHATS.add(chat_id)
+            try:
+                yield from self._turn_events(
+                    chat_id, base_url=base_url, api_key=api_key, model=model,
+                    protocol=protocol, read_only=read_only, unattended=True,
+                )  # fmt: skip
+            finally:
+                UNATTENDED_CHATS.discard(chat_id)
+            return
+        yield from self._turn_events(
+            chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+            read_only=read_only,
+        )  # fmt: skip
+
+    def _turn_events(
+        self,
+        chat_id: str,
+        *,
+        base_url: str,
+        api_key: str | None,
+        model: str,
+        protocol: LLMProtocol,
+        read_only: bool = False,
+        unattended: bool = False,
+    ) -> Iterator[ChatEvent]:
         previous_read_tool: str | None = None
         # v59-F7: byte-identical read call returning a byte-identical result is
         # a loop, not diligence (field test 2026-07-18: ~20 list_runs/repo_state
@@ -1875,10 +1990,13 @@ class ChatEngine:
                     # free; the chat's own turn cycle is the pause, and the
                     # user's next message is the answer.
                     question = str(args.get("question") or "").strip()
+                    # W20 review: a choice is a button the web composer sends,
+                    # and a "/…" line there is a deck command — a model-written
+                    # "/trust" would be one click from clearing the bits
                     choices = [
                         str(choice).strip()
                         for choice in (args.get("choices") or [])
-                        if str(choice).strip()
+                        if str(choice).strip() and not str(choice).strip().startswith("/")
                     ]
                     if question:
                         self.store.add_chat_message(
@@ -1919,6 +2037,10 @@ class ChatEngine:
                 if name == "search_web" and not read_only and not unattended:
                     verdict = search_web_verdict(self.store, self.holder, chat_id)
                     search_ask = taint_decision(verdict) if verdict.layer == "taint" else None
+                elif name in TAINT_ASKED_STORE_WRITES and not unattended:
+                    # W21: a note or task from an untrusted chat asks (a /btw
+                    # refuses it below: a side turn cannot card)
+                    search_ask = store_write_taint_ask(self.store, chat_id)
                 if name in MUTATING_TOOL_NAMES or search_ask is not None:
                     if read_only:
                         # v67-F3: read-only by construction — a mutation
@@ -2214,7 +2336,15 @@ class ChatEngine:
                         decided_by=(
                             None if decision is None else decision.decided_by or decision.reason
                         ),
-                        card=recorded_card(name, args, high, self.store, manifest),
+                        # W39: the decision and a policy write's replay ride
+                        # the record, so a reloaded card is the live one
+                        card={
+                            **(recorded_card(name, args, high, self.store, manifest) or {}),
+                            **({"decision": asdict(decision)} if decision is not None else {}),
+                            **({"checked": checked} if checked else {}),
+                            **_resolution(name, args),
+                        }
+                        or None,
                     )
                     if fold_key:
                         round_folds[fold_key] = action_id
@@ -2227,11 +2357,7 @@ class ChatEngine:
                         # v90-F2: and the three lines a human reads first; the
                         # description moves behind the details disclosure.
                         "description": tool_description(name),
-                        # P3-5: laid over the card when the round closes.
-                        "_checked": checked,
                     }
-                    if decision is not None:
-                        action_event["decision"] = asdict(decision)
                     # P4-2: shown when the round closes, with every item.
                     round_cards.append(action_event)
                     paused = True
@@ -2344,10 +2470,8 @@ class ChatEngine:
             for action_event in round_cards:
                 # P4-2: the card as the server recorded it — every folded item.
                 record = self.store.get_chat_action(str(action_event["action_id"]))
-                tool = str(action_event["tool"])
-                checked = action_event.pop("_checked", {})  # P3-5: replay, a narrowed keep
-                card = {**self._card(chat_id, tool, action_event["args"], action=record), **checked}
-                yield ("action", {**action_event, "card": card})
+                assert record is not None
+                yield ("action", {**action_event, **self.card_fields(chat_id, record)})
             if paused:
                 # The turn waits for the human; verdict endpoints resume it.
                 yield ("done", {"state": "awaiting_confirmation"})
@@ -2357,8 +2481,8 @@ class ChatEngine:
                 # the model to answer in text (same off-ramp as the round cap).
                 break
         yield from self._final_no_tool_events(
-            chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
-        )
+            chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+        )  # fmt: skip
 
     def _final_no_tool_events(
         self,
@@ -2385,7 +2509,10 @@ class ChatEngine:
         yield ("turn_status", {"state": "thinking"})  # v87-F7: the final pass waits too
         shrink_budget: int | None = None  # v73-F1: same one-shrink rule as the loop
         while True:
-            messages = [*self._turn_messages(chat_id, budget_cap=shrink_budget), final_nudge]
+            messages = [
+                *self._turn_messages(chat_id, budget_cap=shrink_budget),
+                final_nudge,
+            ]
             try:
                 for chunk in self._chat_stream_with_retry(
                     base_url,
@@ -2725,7 +2852,8 @@ class ChatEngine:
             try:
                 for item in items:
                     payloads.append(
-                        self._execute_item(
+                        _link_moved(action, item["args"])
+                        or self._execute_item(
                             chat_id,
                             action.tool,
                             item["args"],
@@ -2787,6 +2915,19 @@ class ChatEngine:
                 )  # fmt: skip
         return payload
 
+    def card_fields(self, chat_id: str, action: ChatActionRecord) -> dict[str, Any]:
+        """W39: the card and its decision, from what the server recorded when
+        it proposed them — one function for the live event and the fetch."""
+        recorded = action.card or {}
+        fields: dict[str, Any] = {
+            # P3-5: a policy write's replay and narrowed keep, laid over the card
+            "card": {**self._card(chat_id, action.tool, action.args, action=action),
+                     **(recorded.get("checked") or {})},
+        }  # fmt: skip
+        if recorded.get("decision") is not None:
+            fields["decision"] = recorded["decision"]
+        return fields
+
     def _card(
         self,
         chat_id: str,
@@ -2801,13 +2942,20 @@ class ChatEngine:
         that record alone — it asks nothing live of the policy or a server."""
         taint = self.store.get_chat_taint(chat_id)
         pending = action is None or action.status == "proposed"
-        return card_summary(
+        card = card_summary(
             tool, args, tool_description(tool),
             taint=taint, taint_line=taint_line(self.store, chat_id, taint),
             store=self.store if pending else None,
             recorded=None if action is None else (action.card or {}),
             live_tier=pending,
         )  # fmt: skip
+        # W38: a linked path's card names where the read really goes — as
+        # recorded when it was proposed (the confirm holds it to that)
+        shown = (action.card or {}) if action is not None else _resolution(tool, args)
+        if shown.get("resolves_to"):
+            card["resolves_to"] = shown["resolves_to"]
+            card["headline"] = f"{card['headline']} → resolves to {shown['resolves_to']}"
+        return card
 
 
 # ES B27: a scheduled turn's TOTAL budget. The provider timeout is per read,
@@ -3109,6 +3257,17 @@ def add_chat_routes(
     @app.get("/api/chats/{chat_id}")
     def chat_detail(chat_id: str) -> dict[str, Any]:
         chat = _require_chat(chat_id)
+        detail = _chat_detail(chat_id, chat)
+        from ..onboard import transparency_active, verdict_why
+
+        if transparency_active(holder.current.home.parent):
+            # W39: a pending card's why-line, as first_run_events adds it live
+            for action in detail["actions"]:
+                if action["status"] == "proposed":
+                    action["why"] = verdict_why(action.get("decision"))
+        return detail
+
+    def _chat_detail(chat_id: str, chat: Any) -> dict[str, Any]:
         return {
             "chat": asdict(chat),
             "messages": [asdict(m) for m in run_store.chat_messages(chat_id)],
@@ -3118,7 +3277,8 @@ def add_chat_routes(
                 {
                     **asdict(a),
                     "description": tool_description(a.tool),
-                    "card": engine._card(chat_id, a.tool, a.args, action=a),
+                    # W39: the same card, decision and why-line the live event had
+                    **engine.card_fields(chat_id, a),
                 }
                 for a in run_store.chat_actions(chat_id)
             ],
@@ -3222,6 +3382,21 @@ def add_chat_routes(
     # -- the command deck (v25-F1): operator-typed /commands. The model is not
     # in this loop — no transcript writes, no continuation stream. The card +
     # the chat_actions row keep the same audit shape as a Queen proposal.
+
+    @app.post("/api/chats/{chat_id}/trust")
+    def trust(chat_id: str, body: TrustRequest) -> dict[str, Any]:
+        """W20: the operator's /trust — never a model tool, never a channel.
+        Refused while any turn runs in the chat (an unattended one included)."""
+        _require_chat(chat_id)
+        lock = take_turn(chat_id)
+        try:
+            return trust_chat(
+                run_store, holder.current.audit_dir, chat_id, body.bits, actor=COMMAND_ACTOR
+            )
+        except TrustRefused as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            lock.release()
 
     @app.post("/api/chats/{chat_id}/commands", status_code=201)
     def propose_command(chat_id: str, body: CommandRequest) -> dict[str, Any]:
