@@ -33,6 +33,19 @@ def predating_home(db_path: Path) -> Path:
     return db_path
 
 
+def known_chat(db_path: Path, chat_id: str) -> str:
+    """Make ``chat_id`` a chat that exists (raw, so the id is the test's own):
+    since P4-1 a chat that is not there reads as tainted (fail closed, ADR
+    0059 D5), so a test about grants in chat ``c1`` needs a chat ``c1``."""
+    with contextlib.closing(sqlite3.connect(db_path)) as conn, conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO chats (chat_id, title, created_at, updated_at)"
+            " VALUES (?, 'test', '2026-01-01', '2026-01-01')",
+            (chat_id,),
+        )
+    return chat_id
+
+
 def serve_client(config: SupervisorConfig, **app_kwargs: Any) -> TestClient:
     """An authenticated TestClient over a fresh serve app (v5)."""
     app_kwargs.setdefault("sse_poll_seconds", 0.05)
