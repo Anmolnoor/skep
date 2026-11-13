@@ -216,7 +216,8 @@ def path_spellings(path: str | Path) -> tuple[Path, Path]:
     links) and its realpath — the two spellings every path judge compares."""
     requested = Path(os.path.abspath(Path(path).expanduser()))
     try:
-        real = requested.resolve()
+        # from the path as given: ``..`` after a link goes where the kernel goes
+        real = Path(path).expanduser().resolve()
     except (OSError, RuntimeError):  # pragma: no cover - a loop resolves nowhere
         real = requested
     return requested, real
