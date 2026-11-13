@@ -817,11 +817,12 @@ def run_task(
             # however the run ends. The record names the source, never a
             # value (I8).
             from .codex_login import write_run_login
+            from .secret_floor import CODEX_RUN_LOGIN
 
             try:
                 run_login = write_run_login(
                     Path(routed_env["CODEX_HOME"]),
-                    audit_task_dir / "codex-login.json",
+                    audit_task_dir / CODEX_RUN_LOGIN,
                     min_seconds=task.budget.wall_clock_seconds,
                 )
             except (ValueError, OSError) as exc:

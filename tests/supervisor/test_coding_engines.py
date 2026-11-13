@@ -415,6 +415,7 @@ def _capture_spawn(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     import stat
 
     import skep.supervisor.dispatch as dispatch_module
+    from skep.supervisor.secret_floor import secret_floor_reason
 
     seen: dict[str, object] = {}
 
@@ -428,6 +429,14 @@ def _capture_spawn(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
         seen["links"] = links
         seen["logins"] = logins
         seen["unmasked"] = list(kw.get("unmasked") or ())  # type: ignore[call-overload]
+        # The Queen's file tools judge a path by the secret floor (read_file,
+        # search_files hits, a shell line naming it): the copy and the link
+        # to it must sit under it, or a confirmed card hands the token to
+        # the Queen's model provider.
+        seen["floored"] = [
+            secret_floor_reason(path, skep_home=config.home) is not None  # type: ignore[attr-defined]
+            for path in [*links, *logins]
+        ]
         seen["provider_hosts"] = list(task.permissions.provider_hosts)  # type: ignore[attr-defined]
         if logins:
             seen["mode"] = stat.S_IMODE(logins[0].stat().st_mode)
@@ -476,6 +485,7 @@ def test_an_opted_in_codex_run_gets_its_own_refresh_free_login_until_it_ends(
     audit = (config.audit_dir / outcome.record.task_id).resolve()
     assert logins[0].parent == audit, "the copy must live outside the worktree"
     assert seen["unmasked"] == [logins[0]], "only this run's sandbox gets the copy back"
+    assert seen["floored"] == [True, True], "the Queen's file tools could read the copy"
     assert seen["mode"] == 0o400
     doc = seen["doc"]
     assert isinstance(doc, dict) and doc["auth_mode"] == "chatgptAuthTokens"

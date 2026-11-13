@@ -90,7 +90,10 @@ The refresh token never leaves the host.
    is: `~/.codex/auth.json`, or `$CODEX_HOME/auth.json` when the operator
    set `CODEX_HOME` (the file skep reads is the file it masks). The builtin worker, `claude_code`, `aider`, `pi` and every
    other codex run never get the run file: it is written only for an
-   opted-in `codex` run and only that run's sandbox can read it.
+   opted-in `codex` run and only that run's sandbox can read it. The
+   copy is on the secret floor too (`codex-login.json`, and the link to
+   it by its realpath): the Queen's `read_file`, `search_files` and host
+   shell refuse it, and no card lifts that.
 
 ## Opting in
 
