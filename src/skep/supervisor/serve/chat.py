@@ -2347,6 +2347,12 @@ class ChatEngine:
                             **({"decision": asdict(decision)} if decision is not None else {}),
                             **({"checked": checked} if checked else {}),
                             **_resolution(name, args),
+                            # L30: the remote and branch an open-PR card pushes to
+                            **(
+                                {"push": actions.pr_push_target(self.holder, self.store, args)}
+                                if name == "open_pr"
+                                else {}
+                            ),
                         }
                         or None,
                     )

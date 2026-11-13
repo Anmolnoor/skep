@@ -563,6 +563,9 @@ def card_summary(
     decision = (recorded or {}).get("decision") or {}
     if decision.get("reason") == "shell.require_approval.unreadable_under_deny":
         danger = str(decision.get("detail"))  # L13: the deny this line may get around
+    push = (recorded or {}).get("push")
+    if tool == "open_pr" and push:  # L30: which remote and branch, as recorded
+        danger = f"{push} — {danger}"
     if danger is not None:
         summary["risk"] = danger
     if tool in _POLICY_TOOLS:

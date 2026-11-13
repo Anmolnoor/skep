@@ -621,3 +621,47 @@ def test_the_live_research_card_event_carries_that_why(tmp_path: Path) -> None:
         first_run_events(iter([("action", {"tool": "start_research", "args": args})]), tmp_path)
     )
     assert "researching 'q'" in events[0][1]["why"]
+
+
+def test_an_open_pr_card_names_the_remote_and_the_branch_it_pushes(desk: Desk) -> None:
+    """L30: the open-PR card said only "publishes to the remote". It now
+    names the branch, the remote (its URL, any login stripped) and the base."""
+    import subprocess
+
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+    from skep.supervisor.serve.actions import pr_push_target
+    from skep.supervisor.serve.cards import card_summary
+
+    login = "u" + ":" + "p" * 3  # built, never a literal
+    subprocess.run(
+        ["git", "-C", str(desk.repo), "remote", "add", "origin",
+         f"https://{login}@example.invalid/x/y.git"],
+        check=True,
+    )  # fmt: skip
+    task = mint_task(workspace=desk.repo, instructions="fix", budget=DEFAULT_BUDGET)
+    desk.store.create_run(task, repo=desk.repo.resolve(), ref=None, execution_mode="workspace")
+    desk.store.transition(task.task_id, "completed", None)
+
+    chat, card = _propose_call(desk, "open_pr", {"task_id": task.task_id, "base": "dev"})
+    line = (
+        f"pushes skep/{task.task_id} to origin (https://example.invalid/x/y.git) "
+        "and opens a PR into dev"
+    )
+    assert card["card"]["risk"].startswith(line)
+    assert login not in json.dumps(card)
+    (pending,) = desk.store.pending_chat_actions(chat)
+    assert pending.card is not None and pending.card["push"] == line  # recorded
+    grouped = pr_push_target(
+        desk.holder, desk.store, {"task_ids": [task.task_id], "title": "Fix it"}
+    )
+    assert grouped.startswith("pushes skep/fix-it to origin")
+    named = pr_push_target(desk.holder, desk.store, {"branch": "feat", "repo": str(desk.repo)})
+    assert named.startswith("pushes feat to origin") and named.endswith("into main")
+    assert pr_push_target(desk.holder, desk.store, {"task_id": "nope"}).startswith(
+        "pushes to origin"
+    )
+    bare = desk.repo.parent / "no-origin"
+    subprocess.run(["git", "init", "-q", str(bare)], check=True)
+    lone = pr_push_target(desk.holder, desk.store, {"branch": "feat", "repo": str(bare)})
+    assert "no origin remote" in lone
+    assert card_summary("open_pr", {}, recorded={"push": line})["risk"].startswith(line)

@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -2913,6 +2914,42 @@ def open_pr_from_branch(
         "detail": result.detail,
         "branch": branch,
     }
+
+
+def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) -> str:
+    """L30: what an open_pr card pushes, and where — the branch each mode
+    lands on, ``origin``'s URL (any login stripped) and the PR base."""
+    base = str(args.get("base") or "main")
+    try:
+        if args.get("branch"):
+            repo = resolve_repo_arg(str(args.get("repo") or ""), repos_root(holder), store)
+            branch = str(args["branch"])
+        else:
+            ids = [str(t) for t in args.get("task_ids") or [args.get("task_id")]]
+            repo = Path(str(require_run(store, ids[0])["repo"]))
+            branch = (
+                _grouped_branch(None if args.get("title") is None else str(args["title"]), ids[0])
+                if args.get("task_ids")
+                else applied_branch_for(store, ids[0]) or f"skep/{ids[0]}"
+            )
+    except (HTTPException, IndexError, TypeError, ValueError, OSError):
+        return f"pushes to origin and opens a PR into {base}"
+    probe = subprocess.run(
+        ["git", "-C", str(repo), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    url = probe.stdout.strip()
+    if probe.returncode != 0 or not url:
+        return f"pushes {branch} to origin, but this repo has no origin remote: the push will fail"
+    if "://" in url:  # a login in the URL never reaches a card
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or ""
+        url = urllib.parse.urlunsplit(
+            parts._replace(netloc=host + (f":{parts.port}" if parts.port else ""))
+        )
+    return f"pushes {branch} to origin ({url}) and opens a PR into {base}"
 
 
 def open_pr_for_branch(
