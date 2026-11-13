@@ -356,8 +356,8 @@ _HOME_SECRET_PATHS = tuple(rel for rel in HOME_SECRETS if rel not in SANDBOX_REA
 # / /`` left an agent socket outside /tmp and /run reachable. These hold one
 # (relative to every home; ~/.ssh and ~/.gnupg are already in HOME_SECRETS).
 # Hidden like a secret on every backend; Seatbelt refuses the connect anyway
-# (W34). ponytail: known places only — a socket at a path nobody listed stays
-# reachable on bubblewrap (docs/sandboxing.md says what would close it).
+# (W34). ponytail: known places only — on a kernel below Landlock ABI 9 a
+# socket at a path nobody listed stays reachable (R5b, socket_gap).
 AGENT_SOCKETS: tuple[str, ...] = (
     ".1password",  # 1Password SSH agent: agent.sock
     ".bitwarden-ssh-agent.sock",
@@ -372,17 +372,44 @@ AGENT_SOCKETS: tuple[str, ...] = (
 # R5 (I12): what each Linux backend alone cannot close, said wherever the
 # wall is described (doctor's sandbox line, docs/sandboxing.md). A podman run
 # always gets its own network namespace, so no abstract socket reaches it.
-SOCKET_GAP = {
-    "bubblewrap": (
-        "Not walled on Linux: an allow-all run can connect to abstract unix sockets "
-        "(session D-Bus, X11), and any run to a unix socket at a path outside /tmp "
-        "and /run that the mask list does not name."
-    ),
-    PODMAN: (
-        "Not walled on podman: any run can connect to a unix socket under the host "
-        "dirs it binds (/home /var /etc /usr /opt) at a path the mask list does not name."
-    ),
+_UNLISTED_SOCKET = {
+    "bubblewrap": "a unix socket at a path outside /tmp and /run that the mask list does not name",
+    PODMAN: "a unix socket under the host dirs it binds (/home /var /etc /usr /opt) at a path "
+    "the mask list does not name",
 }
+
+
+def socket_gap(backend: str) -> str:
+    """R5b: the unix sockets a worker on ``backend`` still reaches under this
+    kernel's Landlock ABI (ABI 6 scopes abstract sockets, ABI 9 path
+    sockets); "" for a backend with no gap (Seatbelt, W34)."""
+    if backend not in _UNLISTED_SOCKET:
+        return ""
+    abi = landlock.abi()
+    if abi >= landlock.ABI_RESOLVE_UNIX:
+        return (
+            f"Landlock ABI {abi}: a worker connects only to unix sockets in its own "
+            "roots or ones it made itself."
+        )
+    path = _UNLISTED_SOCKET[backend]
+    if backend == PODMAN:
+        return (
+            f"Not walled on podman: any run can connect to {path} "
+            f"(path sockets need Landlock ABI 9; this kernel has {abi})."
+        )
+    if abi >= landlock.ABI_SCOPE_ABSTRACT:
+        return (
+            f"Landlock ABI {abi} refuses abstract unix sockets made outside the worker. "
+            f"Not walled on Linux: any run can connect to {path} "
+            "(path sockets need Landlock ABI 9)."
+        )
+    return (
+        "Not walled on Linux: an allow-all run can connect to abstract unix sockets "
+        f"(session D-Bus, X11), and any run to {path}. Landlock is off or too old here "
+        f"(ABI {abi}; 6 scopes abstract sockets, 9 path sockets)."
+    )
+
+
 # R5: wherever the operator's own agents listen (serve's environment).
 _SOCKET_ENV = ("SSH_AUTH_SOCK", "DOCKER_HOST", "CONTAINER_HOST")
 

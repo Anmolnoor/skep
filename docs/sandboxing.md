@@ -77,16 +77,21 @@ serve's own `$SSH_AUTH_SOCK`, or a `unix://` `DOCKER_HOST` or
 binds (the repo's git dir: git's fsmonitor socket). A worker still uses
 sockets in its own roots, and a proxied run its proxy bridge.
 
-Still reachable on Linux, and stated by `skep doctor`:
+Still reachable on Linux, by the kernel's Landlock ABI (see Landlock below),
+and stated by `skep doctor` in its sandbox line:
 
-- a unix socket at any other path outside `/tmp` and `/run` (an app socket
-  somewhere under a home), in every network mode; on podman, any such path
-  under the host dirs it binds (`/home /var /etc /usr /opt`);
-- an abstract socket (a name starting with a NUL byte: the session D-Bus
-  where it listens abstractly, X11's `@/tmp/.X11-unix/X0`) in a bubblewrap
-  allow-all run. Abstract sockets belong to the network namespace, so
-  deny-all and proxied runs (`--unshare-net`) cannot reach them, nor can any
-  podman run (it always gets its own network namespace).
+- ABI 9 and later: no socket the worker did not make, except those inside
+  its own writable roots. Neither the masks nor Landlock touch a descriptor
+  the worker already holds when it starts.
+- ABI 6 to 8: a unix socket at any other path outside `/tmp` and `/run` (an
+  app socket somewhere under a home), in every network mode; on podman, any
+  such path under the host dirs it binds (`/home /var /etc /usr /opt`).
+- Below ABI 6, or Landlock off: that path socket, and an abstract socket (a
+  name starting with a NUL byte: the session D-Bus where it listens
+  abstractly, X11's `@/tmp/.X11-unix/X0`) in a bubblewrap allow-all run.
+  Abstract sockets belong to the network namespace, so deny-all and proxied
+  runs (`--unshare-net`) cannot reach them, nor can any podman run (it
+  always gets its own network namespace).
 
 Bubblewrap has no socket filter of its own. A seccomp filter (`--seccomp`)
 cannot do it either: classic BPF sees only the `connect()` arguments, not
