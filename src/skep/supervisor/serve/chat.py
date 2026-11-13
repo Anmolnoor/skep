@@ -504,12 +504,13 @@ QUEUED_FOLLOW_UP = (
 )
 
 
-def _queue_follow_up(engine: ChatEngine, action_id: str) -> None:
+def _queue_follow_up(engine: ChatEngine, action_id: str, actor: str) -> None:
     """D18: the model's turn for a verdict recorded while another turn ran —
     it waits for that turn, the way a run-finish follow-up does, and runs
     unattended (it fires whether or not anyone is watching). A card still
     pending by then holds it: that card's verdict resumes the model. The
-    card row holds it until it starts (``store.queue_follow_up``)."""
+    card row holds it until it starts (``store.queue_follow_up``). A click
+    from a messenger hears the reply there, as an in-turn click does."""
 
     def follow() -> None:
         action = engine.store.get_chat_action(action_id)
@@ -527,11 +528,23 @@ def _queue_follow_up(engine: ChatEngine, action_id: str) -> None:
                 chat_id, role="user", provenance="queen",
                 content=QUEUED_FOLLOW_UP.format(verdict=verdict, tool=action.tool),
             )  # fmt: skip
-            for _event in engine.turn_events(
-                chat_id, base_url=base_url, api_key=api_key, model=model,
-                protocol=protocol, unattended=True,
-            ):  # fmt: skip
-                pass
+            parts = [
+                str(data.get("content") or "")
+                for event, data in engine.turn_events(
+                    chat_id, base_url=base_url, api_key=api_key, model=model,
+                    protocol=protocol, unattended=True,  # D16: unattended keeps no session keep
+                )
+                if event is None
+            ]  # fmt: skip
+        text = "".join(parts).strip()
+        binding = engine.store.channel_binding_for_chat(chat_id)
+        if text and binding is not None and actor.startswith("channel:"):
+            from .channels import ChannelIdentity, channel_actor
+            from .channels.outbound import push_to_chat_channel
+
+            # only into the conversation the click came from
+            if actor == channel_actor(ChannelIdentity(binding.channel, binding.identity_id)):
+                push_to_chat_channel(engine.store, engine.home, chat_id, text, kind="reply")
 
     threading.Thread(target=follow, name=f"skep-verdict-{action_id[:8]}", daemon=True).start()
 
@@ -540,8 +553,8 @@ def resume_follow_ups(engine: ChatEngine) -> int:
     """D18: at serve start, the follow-ups a stopped serve never started —
     each runs once (its claim is the once). Returns how many."""
     queued = engine.store.queued_follow_ups()
-    for action_id, _actor in queued:
-        _queue_follow_up(engine, action_id)
+    for action_id, actor in queued:
+        _queue_follow_up(engine, action_id, actor)
     return len(queued)
 
 
@@ -2847,7 +2860,7 @@ class ChatEngine:
             queued = not blocking_cards(self.store, chat_id)
             if queued:
                 self.store.queue_follow_up(action_id, actor)
-                _queue_follow_up(self, action_id)
+                _queue_follow_up(self, action_id, actor)
             return iter([
                 *(("tool", {"tool": action.tool, "result": item})
                   for item in payload.get("items", [payload])),
