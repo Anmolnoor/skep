@@ -197,6 +197,51 @@ def test_podman_smoke_runs_a_real_container_with_no_network(tmp_path: Path) -> N
     assert "eth0" not in proc.stdout  # no interfaces beyond loopback
 
 
+@pytest.mark.skipif(
+    not _PODMAN_LIVE.usable, reason=f"podman overlay-rootfs unusable: {_PODMAN_LIVE.detail}"
+)
+def test_a_real_podman_worker_cannot_read_a_masked_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5: podman's --tmpfs copies the directory it covers into the tmpfs by
+    default (tmpcopyup): every masked secret dir was readable in the
+    container, and one holding a socket (Docker Desktop's) failed the run."""
+    import socket
+
+    from skep.supervisor import secret_floor
+
+    home = tmp_path / "fakehome"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_test").write_text("CANARY ssh\n", encoding="utf-8")
+    (home / ".docker" / "desktop").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(secret_floor, "HOME_DIRS", (f"{tmp_path}/no-homes/*",))
+    monkeypatch.chdir(home / ".docker" / "desktop")
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind("backend.sock")  # relative: AF_UNIX caps a path at 108 bytes
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    try:
+        profile = sandbox.write_profile(
+            tmp_path / "sandbox.profile",
+            workspace=workspace,
+            skep_home=tmp_path / "skep-home",
+            network=DENY_ALL_NETWORK,
+            backend="podman",
+        )
+        masked = f"{home / '.ssh'} {home / '.docker' / 'desktop'}"
+        argv = sandbox.wrap_command(
+            ["/bin/sh", "-c", f"find {masked} -mindepth 1; echo DONE"],
+            profile,
+            backend="podman",
+        )
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    finally:
+        srv.close()
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split() == ["DONE"], proc.stdout
+
+
 def test_podman_args_bind_readable_roots_read_only_before_writable(tmp_path: Path) -> None:
     common, objects = tmp_path / ".git", tmp_path / ".git" / "objects"
     args = _podman_args(

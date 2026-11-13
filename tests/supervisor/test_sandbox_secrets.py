@@ -227,7 +227,8 @@ def test_bwrap_and_podman_mask_the_secret_paths(fake_homes: tuple[Path, Path]) -
         read_denied=masked,
     )
     assert f"/dev/null:{token}:ro" in pod
-    assert pod[pod.index(str(home / ".ssh")) - 1] == "--tmpfs"
+    # R5: notmpcopyup, or podman copies the secrets into the mask
+    assert pod[pod.index(f"{home / '.ssh'}:notmpcopyup") - 1] == "--tmpfs"
 
 
 def test_bwrap_skips_masks_already_hidden_by_its_tmpfs() -> None:

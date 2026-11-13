@@ -553,7 +553,13 @@ def _bubblewrap_args(
         # /tmp and /run are fresh tmpfs here: their host paths do not exist.
         if denied.parts[1:2] in (("tmp",), ("run",)):
             continue
-        args.extend(_mask_args(denied, dev_null=["--ro-bind", "/dev/null", str(denied)]))
+        args.extend(
+            _mask_args(
+                denied,
+                dev_null=["--ro-bind", "/dev/null", str(denied)],
+                tmpfs=["--tmpfs", str(denied)],
+            )
+        )
     if network.is_domain_list:
         assert unix_socket_path is not None and proxy_port is not None
         args.extend(["--bind", unix_socket_path, SANDBOX_PROXY_SOCKET])
@@ -574,9 +580,9 @@ def _bubblewrap_args(
     return args
 
 
-def _mask_args(path: Path, *, dev_null: list[str]) -> list[str]:
+def _mask_args(path: Path, *, dev_null: list[str], tmpfs: list[str]) -> list[str]:
     """An empty tmpfs over a secret directory, /dev/null over a secret file."""
-    return ["--tmpfs", str(path)] if path.is_dir() else dev_null
+    return tmpfs if path.is_dir() else dev_null
 
 
 def _podman_args(
@@ -622,7 +628,15 @@ def _podman_args(
     for pinned in write_denied:  # W31: read-only over its writable root
         args.extend(["-v", f"{pinned}:{pinned}:ro"])
     for denied in read_denied:  # ES-F4: /home rides in read-only; hide these
-        args.extend(_mask_args(denied, dev_null=["-v", f"/dev/null:{denied}:ro"]))
+        # R5: podman's --tmpfs copies the directory it covers into the tmpfs
+        # by default (tmpcopyup), so the mask showed every secret under it.
+        args.extend(
+            _mask_args(
+                denied,
+                dev_null=["-v", f"/dev/null:{denied}:ro"],
+                tmpfs=["--tmpfs", f"{denied}:notmpcopyup"],
+            )
+        )
     if roots:
         # Popen(cwd=workspace) only moves the podman CLIENT; the container's
         # workdir needs pinning explicitly (workspace is always the first root).
