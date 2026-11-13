@@ -591,3 +591,33 @@ def test_a_forge_card_carries_the_manifest_of_the_forge_run(desk: Desk) -> None:
     manifest = card["card"]["manifest"]
     assert manifest == dispatch_manifest_for(desk.store, desk.holder, {"repo": root}, chat)
     assert manifest["network"] == first["permissions"].network
+
+
+def test_a_research_card_says_what_was_asked_and_why_it_needs_a_run(desk: Desk) -> None:
+    """L8: a research card carried no decision, so its why-line was the
+    retired "no policy rule covers this tool, so it asks by default". It now
+    names the question and why it is a run, as other run cards say why."""
+    from skep.supervisor.onboard import verdict_why
+
+    _chat, card = _propose_call(
+        desk,
+        "start_research",
+        {"repo": str(desk.repo), "question": "why is X slow", "source_allowlist": ["example.com"]},
+    )
+    assert card.get("decision") is None  # the frozen tool surface: it cards, undecided
+    why = verdict_why(card.get("decision"), tool="start_research", args=card["args"])
+    assert "no policy rule" not in why
+    assert why.startswith("asked: ") and "'why is X slow'" in why and "example.com" in why
+    assert "run" in why
+
+
+def test_the_live_research_card_event_carries_that_why(tmp_path: Path) -> None:
+    from skep.supervisor.onboard import onboard_transparency
+    from skep.supervisor.serve.chat import first_run_events
+
+    onboard_transparency(tmp_path / "skep-home", verbose=True)
+    args = {"question": "q", "source_allowlist": ["example.com"]}
+    events = list(
+        first_run_events(iter([("action", {"tool": "start_research", "args": args})]), tmp_path)
+    )
+    assert "researching 'q'" in events[0][1]["why"]

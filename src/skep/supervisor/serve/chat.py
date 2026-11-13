@@ -1057,7 +1057,12 @@ def first_run_events(events: Iterator[ChatEvent], personal_home: Path) -> Iterat
     tally = {"allowed": 0, "asked": 0, "denied": 0}
     for event, data in events:
         if event == "action" or (event == "tool" and data.get("decision")):
-            data = {**data, "why": verdict_why(data.get("decision"), tool=data.get("tool"))}
+            data = {
+                **data,
+                "why": verdict_why(
+                    data.get("decision"), tool=data.get("tool"), args=data.get("args")
+                ),
+            }
             verdict = (data.get("decision") or {}).get("verdict")
             key = "asked" if event == "action" else "denied" if verdict == "deny" else "allowed"
             tally[key] += 1
@@ -3267,7 +3272,9 @@ def add_chat_routes(
             # W39: a pending card's why-line, as first_run_events adds it live
             for action in detail["actions"]:
                 if action["status"] == "proposed":
-                    action["why"] = verdict_why(action.get("decision"), tool=action.get("tool"))
+                    action["why"] = verdict_why(
+                        action.get("decision"), tool=action.get("tool"), args=action.get("args")
+                    )
         return detail
 
     def _chat_detail(chat_id: str, chat: Any) -> dict[str, Any]:

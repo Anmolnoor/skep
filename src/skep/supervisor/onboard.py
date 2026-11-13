@@ -574,14 +574,24 @@ def _counters(record: dict[str, Any]) -> tuple[int, int] | None:
     return turns, verdicts
 
 
-def verdict_why(decision: dict[str, Any] | None, *, tool: str | None = None) -> str:
+def verdict_why(
+    decision: dict[str, Any] | None, *, tool: str | None = None, args: Any = None
+) -> str:
     """The one-line ``why`` under a verdict card, read off the decision the
     card already carries (I8): the rule and the layer it came from, then the
     reason code. No decision: a tool that always cards says why it does
-    (L8, ``tools.ALWAYS_CARDS``); any other asked because no rule named it."""
+    (L8, ``tools.ALWAYS_CARDS``; a research run names its question and
+    sources from ``args``); any other asked because no rule named it."""
     if not decision:
         from .serve.tools import ALWAYS_CARDS
 
+        if tool == "start_research":
+            safe = args if isinstance(args, dict) else {}
+            hosts = ", ".join(str(h) for h in safe.get("source_allowlist") or []) or "no host"
+            return (
+                f"asked: researching {str(safe.get('question') or '')!r} is a sandboxed run "
+                f"that fetches from {hosts}, and a person starts every research run"
+            )
         if tool in ALWAYS_CARDS:
             return f"asked: {tool} always asks — {ALWAYS_CARDS[tool]}"
         return "asked: no policy rule covers this tool, so it asks by default"
