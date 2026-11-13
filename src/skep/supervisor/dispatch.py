@@ -652,6 +652,9 @@ def run_task(
             # inheriting a default that never ran (I8).
             coding_engine=engine.name if worker_kind == "coding" else None,
         )
+        # ADR 0060 §5: named with the row, not at spawn — a serve starting while
+        # this run is still being set up must see it is supervised.
+        run_store.claim_run_supervisor(task.task_id, expected=None, owner=process_owner())
         if on_run_created is not None:
             on_run_created(task.task_id)
 
@@ -786,8 +789,8 @@ def run_task(
                 reason="spawn_failed",
                 summary=f"Worker process could not be started: {exc}",
             )
-        # ADR 0060: pid AND start time (a pid alone is reused), the proxy port
-        # a re-adopting serve must rebind, and who supervises the run.
+        # ADR 0060: pid AND start time (a pid alone is reused) and the proxy
+        # port a re-adopting serve must rebind.
         owner = process_owner(process.pid)
         running_detail = f"pid {process.pid}"
         if owner is not None:
@@ -796,7 +799,6 @@ def run_task(
             running_detail += f" proxy port {proxy.port}"
         if proxy_unix_path is not None:
             running_detail += f" proxy socket {proxy_unix_path}"
-        run_store.claim_run_supervisor(task.task_id, expected=None, owner=process_owner())
         run_store.transition(task.task_id, "running", running_detail)
 
         verdict = watch_worker(

@@ -88,6 +88,28 @@ def test_recovery_leaves_a_run_whose_supervisor_is_still_alive(
         store.close()
 
 
+def test_a_run_names_its_supervisor_from_the_moment_its_row_exists(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F131 follow-up (ADR 0060 §5): the row exists seconds before its
+    worker does (worktree, proxy, spawn). A serve starting in that window saw
+    an unsupervised `created` run and crashed it under the CLI that was
+    still setting it up; the supervisor is named when the row is."""
+    store = RunStore(config.db_path)
+    seen: list[str | None] = []
+    try:
+        run_task(
+            repo,
+            "Fix the bug. MODE:happy",
+            config=config,
+            store=store,
+            on_run_created=lambda task_id: seen.append(store.run_supervisor(task_id)),
+        )
+        assert seen == [process_owner()]
+    finally:
+        store.close()
+
+
 def test_recovery_neither_kills_nor_adopts_a_reused_pid(
     repo: Path, config: SupervisorConfig
 ) -> None:
