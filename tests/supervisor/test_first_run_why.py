@@ -53,6 +53,24 @@ def test_verdict_why_names_rule_layer_and_reason() -> None:
     assert verdict_why(guard) == "denied: rule queen-shell-guard — shell.deny.queen_guard"
 
 
+def test_l8_l6_a_tool_that_always_cards_and_a_taint_or_tier_ask_say_why_in_words() -> None:
+    """L8 (field test): land_run, policy writes and schedules carried "no
+    policy rule covers this tool, so it asks by default" — they always ask,
+    for a stated reason. L6: a HIGH or taint card's why repeated code words
+    ("rule high in the tier layer — tier.require_approval.high")."""
+    assert verdict_why(None, tool="land_run") == (
+        "asked: land_run always asks — it acts on a run's approval or landing, "
+        "which only a human decides"
+    )
+    assert verdict_why(None, tool="no_such_tool") == verdict_why(None)
+    high = {"verdict": "require_approval", "reason": "tier.require_approval.high",
+            "decided_by": "tier/high", "detail": "it changes standing policy"}  # fmt: skip
+    assert verdict_why(high) == "asked: it changes standing policy"
+    taint = {**high, "reason": "taint.require_approval.trifecta", "decided_by": "taint/trifecta",
+             "detail": "this chat has read private data"}  # fmt: skip
+    assert verdict_why(taint) == "asked: this chat has read private data"
+
+
 def test_every_verdict_gets_a_why_and_the_turn_a_tally(tmp_path: Path) -> None:
     onboard_transparency(tmp_path / "skep-home", verbose=True)
     events = list(first_run_events(iter(TURN), tmp_path))
@@ -144,7 +162,7 @@ def test_cli_snapshot(
     assert capsys.readouterr().out == snapshot
     _render_card(actions[0])
     card = capsys.readouterr().out
-    assert ("why: asked: no policy rule covers this tool" in card) is verbose
+    assert ("why: asked: set_policy always asks" in card) is verbose  # L8
 
 
 # ---------- the gate: a fresh chat shows why under every card; after dismiss, none ----------

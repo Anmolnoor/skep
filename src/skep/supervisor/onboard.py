@@ -572,14 +572,22 @@ def _counters(record: dict[str, Any]) -> tuple[int, int] | None:
     return turns, verdicts
 
 
-def verdict_why(decision: dict[str, Any] | None) -> str:
+def verdict_why(decision: dict[str, Any] | None, *, tool: str | None = None) -> str:
     """The one-line ``why`` under a verdict card, read off the decision the
     card already carries (I8): the rule and the layer it came from, then the
-    reason code. No decision means no rule named the tool — it asked by default."""
+    reason code. No decision: a tool that always cards says why it does
+    (L8, ``tools.ALWAYS_CARDS``); any other asked because no rule named it."""
     if not decision:
+        from .serve.tools import ALWAYS_CARDS
+
+        if tool in ALWAYS_CARDS:
+            return f"asked: {tool} always asks — {ALWAYS_CARDS[tool]}"
         return "asked: no policy rule covers this tool, so it asks by default"
     if decision.get("decided_by") == "default/unmatched":  # ADR 0059: decide() matched nothing
         return "asked: no policy rule covers this, so it asks"
+    layer_word = str(decision.get("decided_by") or "").partition("/")[0]
+    if layer_word in ("tier", "taint") and decision.get("detail"):
+        return f"asked: {decision['detail']}"  # L6: its plain-words reason, not code words
     word = _VERDICT_WORD.get(str(decision.get("verdict")), "asked")
     reason = str(decision.get("reason") or "")
     decided_by = str(decision.get("decided_by") or "")
