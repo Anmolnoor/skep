@@ -178,3 +178,47 @@ def test_a_store_with_the_taint_columns_opens_under_old_reads(tmp_path: Path) ->
         assert store.content_taint("note", [note.note_id]) == {"private", "untrusted"}
     finally:
         store.close()
+
+
+def test_policy_why_and_rsop_answer_for_the_asking_chat(env: Live) -> None:
+    """W22: from a chat, ``policy_why`` gives the verdict that chat's lane
+    gives — taint and the chat's own grants included — and ``policy_rsop``
+    names the chat's taint. The chat is the server's, never an argument; a
+    face with no chat answers as before."""
+    from skep.supervisor.serve import actions
+    from skep.supervisor.serve.tools import execute_read_tool
+
+    chat = env.chat()
+    clean = env.chat()
+    set_taint(env.store, chat, "private")
+    args = {"repo": str(env.paths["repo"]), "scope": "network", "action": "search",
+            "value": "ddgs", "chat_id": clean}  # fmt: skip
+    why = execute_read_tool("policy_why", args, store=env.store, holder=env.holder, chat_id=chat)
+    assert why["operator"]["verdict"] == "require_approval"
+    assert why["operator"]["decided_by"] == "taint/private-egress"
+    plain = execute_read_tool("policy_why", args, store=env.store, holder=env.holder, chat_id=clean)
+    assert plain["operator"]["verdict"] == "allow"
+    rest = actions.policy_why(env.holder, env.store, str(env.paths["repo"]), "network", "search",
+                              "ddgs")  # fmt: skip
+    assert rest["operator"]["verdict"] == "allow"
+
+    # a grant bound to this chat answers here and nowhere else
+    actions.remember_action_for_session(
+        env.store, tool="run_shell", args={"command": "make lint"}, actor="op",
+        tier="session", chat_id=clean,
+    )  # fmt: skip
+    shell = {**args, "scope": "shell", "action": "run", "value": "make lint"}
+    granted = execute_read_tool(
+        "policy_why", shell, store=env.store, holder=env.holder, chat_id=clean
+    )
+    other = execute_read_tool("policy_why", shell, store=env.store, holder=env.holder, chat_id=chat)
+    assert granted["operator"]["verdict"] == "allow"
+    assert other["operator"]["verdict"] != "allow"
+
+    rsop = execute_read_tool(
+        "policy_rsop", {"repo": str(env.paths["repo"])}, store=env.store, holder=env.holder,
+        chat_id=chat,
+    )  # fmt: skip
+    assert rsop["this_chat"]["taint"] == ["private"]
+    assert "your OK" in rsop["this_chat"]["taint_line"]
+    assert "this_chat" not in actions.rsop_view(env.holder, env.store, str(env.paths["repo"]))

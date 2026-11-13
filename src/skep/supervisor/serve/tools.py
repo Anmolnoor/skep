@@ -376,8 +376,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "policy_why",
         "Verdict and deciding rule for one action. Would <scope>.<action> <value> "
-        "be allowed in this repo? Answered for the run and for the Queen; "
-        "no dispatch.",
+        "be allowed in this repo? Answered for the run and for the Queen in this "
+        "chat (its role, grants and taint); no dispatch.",
         {
             "repo": {"type": "string", "description": "repo slug or path"},
             "scope": {"type": "string", "description": "shell, network, filesystem, …"},
@@ -3535,8 +3535,25 @@ def execute_read_tool(
 
         return registry_view()
     if name == "policy_rsop":
-        return actions.rsop_view(holder, store, str(args["repo"]))
+        rsop = actions.rsop_view(holder, store, str(args["repo"]))
+        if chat_id is not None:  # W22: what this chat adds on top
+            from .taint import taint_line
+
+            role = _chat_role(store, holder, chat_id)
+            taint = store.get_chat_taint(chat_id)
+            rsop["this_chat"] = {
+                "role": role.name if role else None,
+                "taint": taint.bits(),
+                "taint_line": taint_line(store, chat_id, taint),
+                "note": "this chat's own grants and taint apply on top of the rules "
+                "above — policy_why answers with them",
+            }
+        return rsop
     if name == "policy_why":
+        role_name = None if args.get("role") is None else str(args["role"])
+        if role_name is None and chat_id is not None:
+            chat_role = _chat_role(store, holder, chat_id)  # W22: the lane's own role
+            role_name = chat_role.name if chat_role else None
         return actions.policy_why(
             holder,
             store,
@@ -3544,8 +3561,9 @@ def execute_read_tool(
             str(args["scope"]),
             str(args["action"]),
             str(args["value"]),
-            role=None if args.get("role") is None else str(args["role"]),
+            role=role_name,
             delegation_chain=[str(hop) for hop in args.get("delegation_chain") or []],
+            chat_id=chat_id,
         )
     if name == "policy_explain":
         from ..policy_templates import explain_view
