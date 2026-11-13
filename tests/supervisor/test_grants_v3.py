@@ -611,3 +611,28 @@ def test_a_confirm_that_names_no_keep_runs_once_when_the_default_keep_would_be_r
     # Past the keep check: what stops this bare test home is that it has no model.
     assert unnamed.value.status_code == 409
     assert "keep" not in str(unnamed.value.detail)
+
+
+def test_the_cli_lists_and_revokes_a_grant(home: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    """W29: `skep policy grants` / `skep policy revoke <rule_id>`, through the
+    same verbs REST uses (ADR 0050)."""
+    h = home("builder")
+    repo = h.paths["repo"]
+    persist_remembered_command(h.store, h.holder, repo, ["make", "check"])
+    [rule] = h.learned()
+    personal = str(h.paths["personal"])
+    capsys.readouterr()
+
+    assert main(["--home", personal, "policy", "grants"]) == 0
+    listed = capsys.readouterr().out
+    assert rule.rule_id in listed
+    assert "shell.run" in listed and "make check" in listed
+    assert "prefix" in listed and "project" in listed and "project app" in listed
+
+    assert main(["--home", personal, "policy", "revoke", "no-such-rule"]) == 2
+    assert "no learned rule 'no-such-rule'" in capsys.readouterr().err
+    assert main(["--home", personal, "policy", "revoke", rule.rule_id]) == 0
+    assert f"revoked: {rule.rule_id}" in capsys.readouterr().out
+    assert h.learned() == []
+    assert main(["--home", personal, "policy", "grants"]) == 0
+    assert "no learned grants" in capsys.readouterr().out

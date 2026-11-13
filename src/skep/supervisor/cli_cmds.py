@@ -2853,6 +2853,49 @@ def cmd_policy_decisions(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy_grants(args: argparse.Namespace) -> int:
+    """W29: every learned grant — id, what it matches, lifetime, binding —
+    through ``list_policy_rules``, the read behind ``GET /api/policy/rules``."""
+    from .serve.actions import list_policy_rules
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        rules = list_policy_rules(store)["rules"]
+    finally:
+        store.close()
+    if not rules:
+        print("no learned grants")
+        return 0
+    for rule in rules:
+        print(rule["rule_id"])
+        print(f"  matches:  {rule['scope']}.{rule['action']} {rule['pattern']} ({rule['matcher']})")
+        print(f"  lifetime: {rule['lifetime']}  bound to: {rule['bound']}")
+    print("  next: skep policy revoke <rule_id>")
+    return 0
+
+
+def cmd_policy_revoke(args: argparse.Namespace) -> int:
+    """W29: remove one learned grant through ``revoke_policy_rule`` — the verb
+    ``DELETE /api/policy/rules/<id>`` and the chat card call (ADR 0050)."""
+    from fastapi import HTTPException
+
+    from .serve.actions import revoke_policy_rule
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        receipt = revoke_policy_rule(store, rule_id=args.rule_id)
+    except HTTPException as exc:
+        return _err(str(exc.detail), next_command="skep policy grants")
+    finally:
+        store.close()
+    revoked = receipt["revoked"]
+    print(f"revoked: {revoked['rule_id']}")
+    print(f"  {revoked['scope']}.{revoked['action']} {revoked['pattern']} asks again")
+    return 0
+
+
 def cmd_policy_hook(args: argparse.Namespace) -> int:
     """P3 (ADR 0053): the Claude Code PreToolUse hook. Reads the payload on
     stdin, answers in the hook's JSON. No opinion (a tool the engine has no
@@ -3755,6 +3798,15 @@ def register_supervisor_commands(
     )
     policy_hook.add_argument("--actor", default="claude-code", help="recorded on every decision")
     policy_hook.set_defaults(func=cmd_policy_hook)
+    policy_grants = policy_sub.add_parser(
+        "grants", help="every learned grant: id, what it matches, lifetime, bound to (W29)"
+    )
+    policy_grants.set_defaults(func=cmd_policy_grants)
+    policy_revoke = policy_sub.add_parser(
+        "revoke", help="remove one learned grant by id; what it allowed asks again (W29)"
+    )
+    policy_revoke.add_argument("rule_id", help="as `skep policy grants` lists it")
+    policy_revoke.set_defaults(func=cmd_policy_revoke)
     policy_decisions = policy_sub.add_parser(
         "decisions", help="the decisions ledger, newest first, with verdict counts (ADR 0054)"
     )

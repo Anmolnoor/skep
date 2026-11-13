@@ -290,7 +290,13 @@ skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME] [--role NAME]
                    [--delegated-by ACTOR@ROLE ...]
 skep policy hook [--actor NAME]
 skep policy decisions [--actor GLOB] [--since ISO] [--limit N] [--team ID]
+skep policy grants
+skep policy revoke RULE_ID
 ```
+
+`policy grants` lists every learned grant (id, what it matches, lifetime,
+what it is bound to) and `policy revoke` removes one by id — the same verbs
+as `GET` / `DELETE /api/policy/rules` and the chat `revoke_policy_rule` card.
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
 from the repo's own entry point (v91); an explicit `--verify-command` always
