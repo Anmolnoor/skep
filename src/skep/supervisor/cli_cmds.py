@@ -3243,7 +3243,8 @@ def register_supervisor_commands(
         action="append",
         default=None,
         metavar="DOMAIN",
-        help="domain the worker may reach, e.g. pypi.org (repeatable, D1). Omitted, "
+        help="domain the worker may reach, e.g. pypi.org (repeatable, D1); added to "
+        "the project's hosts (D5). Omitted, "
         "the policy's default_network applies: the builder and operator baselines "
         "allow their package-registry hosts (and start the filtering proxy); the "
         "assistant baseline and a bare home allow none. A worker that calls the LLM "

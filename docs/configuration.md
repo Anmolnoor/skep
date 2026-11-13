@@ -149,8 +149,8 @@ skep run /path/to/repo "update dependencies" \
 
 The serve Settings page can persist these policy defaults:
 
-- `default_network`: network hosts granted to runs without explicit network
-  flags
+- `default_network`: network hosts granted to every run; a dispatch's explicit
+  network list adds to them, and only an explicit empty list drops them
 - `default_env_allowlist`: environment variables passed to workers by default
 - `allowed_shell_commands`: argv prefixes that can be approved by policy
 - `allowed_plugin_risks`: plugin risk classes allowed by policy

@@ -25,6 +25,15 @@
       "provider_hosts_out": ["provider.example:443"]
     },
     {
+      "why": "D5 (operator decision 2026-11-13): a named network ADDS to the project's hosts for every needs_provider caste; until then it replaced them.",
+      "caste": "reviewer",
+      "project_network": ["pypi.org"],
+      "network": ["api.example.com"],
+      "provider_hosts": ["provider.example"],
+      "network_out": ["api.example.com", "pypi.org"],
+      "provider_hosts_out": ["provider.example:443"]
+    },
+    {
       "caste": "script",
       "network": [],
       "provider_hosts": ["provider.example"],

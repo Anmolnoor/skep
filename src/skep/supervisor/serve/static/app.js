@@ -339,7 +339,9 @@ function manifestNode(card) {
   return el("div", { class: "card-manifest" },
     el("p", { class: "note" }, "What this run gets:"),
     row("hosts", list(m.network)),
-    // L10: an explicit network replaces the project's hosts — name what goes
+    // D5: a named network adds to the project's hosts; only [] drops them
+    Array.isArray(m.network_added) && m.network_added.length
+      ? row("adds to the project's hosts for this run", list(m.network_added)) : null,
     Array.isArray(m.network_dropped) && m.network_dropped.length
       ? row("loses the project's own hosts for this run", list(m.network_dropped)) : null,
     row("model provider", list(m.provider_hosts)),

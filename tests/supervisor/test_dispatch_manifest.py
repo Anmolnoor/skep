@@ -487,25 +487,45 @@ def test_a_research_card_lists_its_source_hosts_and_the_desk_confirm_answers_the
     ]
 
 
-def test_a_call_network_that_replaces_the_project_hosts_says_what_the_run_loses(
+def test_a_call_network_adds_to_the_project_hosts_and_only_an_empty_list_drops_them(
     desk: Desk,
 ) -> None:
-    """L10: a dispatch's ``network`` replaces the project's own hosts (the
-    documented override, pinned by the policy regression fixtures), and the
-    card showed only what was left. The manifest now names the hosts the run
-    loses, and the tool description says a list replaces the default."""
+    """D5 (operator decision 2026-11-13): a dispatch's ``network`` ADDS to the
+    project's own hosts (it used to replace them, so naming one API host cost
+    the run PyPI). The card names what it adds; ``network_dropped`` is left
+    only for ``[]`` (the worker's own LLM and nothing from the project)."""
     from skep.supervisor.serve.tools import TOOL_SPECS
 
     omitted = dispatch_manifest_for(desk.store, desk.holder, {"repo": str(desk.repo)}, None)
     assert "pypi.org" in omitted["network"] and omitted["network_dropped"] == []
+    assert omitted["network_added"] == []
     named = dispatch_manifest_for(
-        desk.store, desk.holder, {"repo": str(desk.repo), "network": ["example.com"]}, None
+        desk.store, desk.holder, {"repo": str(desk.repo), "network": ["api.example.org"]}, None
     )
-    assert "pypi.org" in named["network_dropped"] and "pypi.org" not in named["network"]
+    assert "pypi.org" in named["network"] and "api.example.org" in named["network"]
+    assert named["network_dropped"] == [] and named["network_added"] == ["api.example.org"]
+    lines = manifest_lines(named)
+    assert "adds to the project's hosts for this run: api.example.org" in lines
+    assert not any(line.startswith("loses") for line in lines)
+    empty = dispatch_manifest_for(
+        desk.store, desk.holder, {"repo": str(desk.repo), "network": []}, None
+    )
+    assert empty["network"] == [] and "pypi.org" in empty["network_dropped"]
     assert any(
         line.startswith("loses the project's own hosts for this run: ") and "pypi.org" in line
-        for line in manifest_lines(named)
+        for line in manifest_lines(empty)
     )
     (spec,) = [s for s in TOOL_SPECS if s["function"]["name"] == "dispatch_run"]
     described = spec["function"]["parameters"]["properties"]["network"]["description"]
-    assert "REPLACES" in described
+    assert "ADDS" in described and "REPLACES" not in described
+
+
+def test_the_terminal_card_names_what_a_named_network_adds(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D5: the CLI chat's card shows the same added-hosts line as web and channels."""
+    from skep.cli_chat import _render_card
+
+    manifest = {"network": ["api.example.org", "pypi.org"], "network_added": ["api.example.org"]}
+    _render_card({"tool": "dispatch_run", "card": {"manifest": manifest}})
+    assert "adds to the project's hosts for this run: api.example.org" in capsys.readouterr().out

@@ -220,7 +220,8 @@ def test_trusted_dev_workspace_run_gets_registry_hosts(tmp_path: Path, repo: Pat
 def test_registry_hosts_follow_enforceability_and_strategy(tmp_path: Path, repo: Path) -> None:
     """v23-F5 + v28: registries reach a sandbox run ONLY where the backend can
     enforce a domain list (both native backends now can); non-trusted
-    strategies stay fail-closed, and an explicit network list is never widened."""
+    strategies stay fail-closed. D5 (operator decision 2026-11-13): an explicit
+    network list now ADDS to the project's hosts, registries included."""
     from skep.supervisor.policy_resolver import per_domain_egress_enforceable
 
     sandboxed = _resolve_for_project(
@@ -243,7 +244,8 @@ def test_registry_hosts_follow_enforceability_and_strategy(tmp_path: Path, repo:
         execution_mode="workspace",
         network=["github.com"],
     )
-    assert "pypi.org" not in explicit.permissions.network
+    # D5: it used to replace them (pypi.org was lost); now it adds to them.
+    assert {"pypi.org", "github.com"} <= set(explicit.permissions.network)
 
 
 # -- v52-F2: the operator policy — the Queen's standing rules ------------------

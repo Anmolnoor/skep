@@ -119,6 +119,10 @@ Skep models network access as a domain list:
 - `*`: allow all outbound network
 - concrete domains: allow only those domains, when the backend can enforce it
 
+A dispatch that names hosts adds them to the project's own (`default_network`,
+the trusted-dev registries and remembered hosts); an explicit empty list leaves
+the worker only its own model provider.
+
 Whatever the mode, every worker env carries `GIT_ALLOW_PROTOCOL=file`: git
 inside a worker (and every process it starts) uses only its local transport,
 so a push, fetch, clone or submodule update over https, ssh or git:// fails

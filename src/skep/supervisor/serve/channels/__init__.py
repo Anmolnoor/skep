@@ -219,6 +219,11 @@ def manifest_lines(manifest: Mapping[str, Any]) -> list[str]:
     lines = [
         f"hosts: {_hosts(manifest.get('network'))}",
         *(
+            [f"adds to the project's hosts for this run: {_hosts(manifest['network_added'])}"]
+            if manifest.get("network_added")
+            else []
+        ),
+        *(
             [f"loses the project's own hosts for this run: {_hosts(manifest['network_dropped'])}"]
             if manifest.get("network_dropped")
             else []

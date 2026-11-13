@@ -126,6 +126,7 @@ def _check_network_merge(fixture: dict[str, Any], tmp_path: Path) -> None:
     as ``provider_hosts``, never merged into ``network``; driven by the real
     ``resolve_run_policy`` reading the registry."""
     from skep.supervisor.serve.llm import LLM_BASE_URL
+    from skep.supervisor.serve.settings import DEFAULT_NETWORK
 
     config = SupervisorConfig(home=tmp_path / "home", worker_command=("false",))
     repo = tmp_path / "repo"
@@ -135,6 +136,8 @@ def _check_network_merge(fixture: dict[str, Any], tmp_path: Path) -> None:
         for case in fixture["cases"]:
             for host in case.get("provider_hosts", ()):
                 store.set_setting(LLM_BASE_URL, f"https://{host}")
+            # D5: the project's own hosts, so a case can show what a named list adds.
+            store.set_setting(DEFAULT_NETWORK, list(case.get("project_network", [])))
             resolved = resolve_run_policy(
                 store=store,
                 config=config,

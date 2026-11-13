@@ -370,8 +370,11 @@ test("manifestNode: the dispatch card lists what the run gets and the asks it ap
   const old = app.manifestNode({ manifest: { network: [] } }).textContent;
   assert.ok(!old.includes("may read") && !old.includes("tools") && !old.includes("auto-apply"));
   assert.ok(!old.includes("loses"));
-  // L10: an explicit network that replaced the project's hosts names them
-  const lost = app.manifestNode({ manifest: { network: ["example.com"],
+  // D5: a named network adds to the project's hosts; only [] drops them
+  const added = app.manifestNode({ manifest: { network: ["example.com", "pypi.org"],
+    network_added: ["example.com"] } }).textContent;
+  assert.ok(added.includes("adds to the project's hosts for this run") && !added.includes("loses"));
+  const lost = app.manifestNode({ manifest: { network: [],
     network_dropped: ["pypi.org"] } }).textContent;
   assert.ok(lost.includes("loses the project's own hosts for this run") && lost.includes("pypi.org"));
 });
