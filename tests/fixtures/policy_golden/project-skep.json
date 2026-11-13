@@ -203,6 +203,7 @@
       "default_network": "global",
       "default_wall_clock_seconds": "global",
       "policy_engine_v2_scopes": "global",
+      "provider_key_relay": "global",
       "sandbox_backend": "global",
       "sandbox_required_for": "global",
       "session_allowed_shell_commands": "global",
@@ -233,6 +234,7 @@
       "default_network": "global",
       "default_wall_clock_seconds": "global",
       "policy_engine_v2_scopes": "global",
+      "provider_key_relay": "global",
       "sandbox_backend": "global",
       "sandbox_required_for": "global",
       "session_allowed_shell_commands": "global",
@@ -328,6 +330,7 @@
       "network",
       "shell"
     ],
+    "provider_key_relay": false,
     "sandbox_backend": "auto",
     "sandbox_required_for": [
       "email",

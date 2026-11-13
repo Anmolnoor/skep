@@ -48,6 +48,9 @@ ALLOWED_PLUGIN_RISKS = "allowed_plugin_risks"
 SANDBOX_BACKEND = "sandbox_backend"  # v44-F7: "auto" (native) | "podman"; O3: | "none"
 # P1 (ADR 0053 D6): the per-scope kill switch — scopes routed through engine v2.
 POLICY_ENGINE_V2_SCOPES = "policy_engine_v2_scopes"
+# ADR 0062 (V6b): the provider-key relay's kill switch; off = the worker holds
+# the key as before.
+PROVIDER_KEY_RELAY = "provider_key_relay"
 # first-run O5 (ADR 0056 D2): when the store seeded a home that did not exist.
 FRESH_HOME_SEEDED_AT = "fresh_home_seeded_at"
 
@@ -229,6 +232,7 @@ def policy_view(store: RunStore, config: SupervisorConfig) -> dict[str, Any]:
         ),
         "sandbox_backend": config.sandbox_backend,
         "policy_engine_v2_scopes": engine_v2_scopes_from(settings.get(POLICY_ENGINE_V2_SCOPES)),
+        "provider_key_relay": settings.get(PROVIDER_KEY_RELAY) is True,
     }
 
 

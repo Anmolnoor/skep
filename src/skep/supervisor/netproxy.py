@@ -21,10 +21,14 @@ Filtering is by the CONNECT target host (HTTPS) or the absolute-form request hos
 from __future__ import annotations
 
 import contextlib
+import hmac
+import http.client
 import ipaddress
 import socket
+import ssl
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from socketserver import StreamRequestHandler, ThreadingTCPServer, ThreadingUnixStreamServer
 from types import TracebackType
@@ -256,6 +260,47 @@ def domain_allowed(host: str, allowlist: tuple[str, ...], *, port: int | None = 
     return False
 
 
+# ADR 0062: headers that may carry a credential. The relay drops every one
+# the worker sent and adds back only the protocol's own, with the real key.
+_CREDENTIAL_HEADERS = frozenset(
+    {b"authorization", b"x-api-key", b"api-key", b"x-goog-api-key", b"proxy-authorization"}
+)
+_HOP_BY_HOP = frozenset(
+    {
+        b"connection",
+        b"proxy-connection",
+        b"keep-alive",
+        b"te",
+        b"trailer",
+        b"transfer-encoding",
+        b"upgrade",
+    }
+)
+# Above the worker's own 300 s provider timeout: the worker gives up first.
+_RELAY_READ_TIMEOUT = 600.0
+
+
+@dataclass(frozen=True)
+class ProviderRelay:
+    """ADR 0062 (V6b): one run's relay to one provider.
+
+    The worker sends ``token`` where its client sends a key (``Authorization:
+    Bearer`` or, for anthropic, ``x-api-key``); the relay checks it and sends
+    ``key`` in its place to ``upstream`` (the provider base URL), never to
+    any other origin or path."""
+
+    upstream: str
+    token: str = field(repr=False)
+    key: str = field(repr=False)
+    protocol: str
+
+    def auth(self, secret: str) -> tuple[bytes, str]:
+        """The protocol's credential header name and its value for ``secret``."""
+        if self.protocol == "anthropic":
+            return b"x-api-key", secret
+        return b"authorization", f"Bearer {secret}"
+
+
 class _ProxyServer(ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -265,14 +310,22 @@ class _ProxyServer(ThreadingTCPServer):
         allowlist: tuple[str, ...],
         denied_ports: tuple[int, ...] = (),
         asks: tuple[str, ...] = (),
+        relay: ProviderRelay | None = None,
     ) -> None:
         super().__init__(("127.0.0.1", 0), _ProxyHandler)
         self.allowlist = allowlist
         self.denied_ports = denied_ports
         self.asks = asks  # W30: named in the 403, never admitted
+        self.relay = relay
         self._counts_lock = threading.Lock()
         self.allowed = 0
         self.denied = 0
+        self.relayed = 0
+        self.relay_refused = 0
+
+    @property
+    def own_port(self) -> int:
+        return int(self.server_address[1])
 
     def note(self, *, allowed: bool) -> None:
         with self._counts_lock:
@@ -280,6 +333,13 @@ class _ProxyServer(ThreadingTCPServer):
                 self.allowed += 1
             else:
                 self.denied += 1
+
+    def note_relay(self, *, relayed: bool) -> None:
+        with self._counts_lock:
+            if relayed:
+                self.relayed += 1
+            else:
+                self.relay_refused += 1
 
 
 class _ProxyUnixServer(ThreadingUnixStreamServer):
@@ -308,8 +368,19 @@ class _ProxyUnixServer(ThreadingUnixStreamServer):
     def asks(self) -> tuple[str, ...]:
         return self._tcp.asks
 
+    @property
+    def relay(self) -> ProviderRelay | None:
+        return self._tcp.relay
+
+    @property
+    def own_port(self) -> int:
+        return self._tcp.own_port
+
     def note(self, *, allowed: bool) -> None:
         self._tcp.note(allowed=allowed)
+
+    def note_relay(self, *, relayed: bool) -> None:
+        self._tcp.note_relay(relayed=relayed)
 
 
 class _ProxyHandler(StreamRequestHandler):
@@ -329,6 +400,12 @@ class _ProxyHandler(StreamRequestHandler):
             return
         method, target = parts[0].upper(), parts[1]
         headers = self._read_headers()
+        relay = self.server.relay
+        if relay is not None and method != "CONNECT":
+            path = self._addressed_to_me(target)
+            if path is not None:
+                self._do_relay(relay, parts[0], path, headers)
+                return
         if method == "CONNECT":
             self._do_connect(target, headers)
         else:
@@ -450,6 +527,102 @@ class _ProxyHandler(StreamRequestHandler):
             except OSError:
                 pass
 
+    def _addressed_to_me(self, target: str) -> str | None:
+        """ADR 0062: the path of a request addressed to the proxy itself —
+        origin-form (the worker dialled this port), or absolute-form naming
+        this port on loopback (a client going through HTTP_PROXY). A forward
+        request names another host, so it never lands here."""
+        if target.startswith("/"):
+            return target
+        split = urlsplit(target)
+        try:
+            port = split.port
+        except ValueError:
+            return None
+        if (
+            split.scheme == "http"
+            and _plain_loopback(split.hostname or "")
+            and (port == self.server.own_port)
+        ):
+            return (split.path or "/") + (f"?{split.query}" if split.query else "")
+        return None
+
+    def _do_relay(self, relay: ProviderRelay, method: str, path: str, headers: list[bytes]) -> None:
+        """ADR 0062: check the run's token, swap in the key, forward to the one
+        upstream and stream the reply back. Logs nothing but a counter."""
+        upstream = urlsplit(relay.upstream)
+        base = upstream.path.rstrip("/")
+        if base and path.split("?", 1)[0] != base and not path.startswith(base + "/"):
+            self.server.note_relay(relayed=False)
+            self._reply(403, f"Forbidden: the provider relay serves {base}/ only")
+            return
+        auth_name, token_value = relay.auth(relay.token)
+        forwarded: list[tuple[str, str]] = [("Host", upstream.netloc.rpartition("@")[2])]
+        token_ok = False
+        content_length = 0
+        for header in headers:
+            raw_name, _, raw_value = header.partition(b":")
+            name = raw_name.strip().lower()
+            value = raw_value.strip().decode("latin-1")
+            if name == b"transfer-encoding":
+                self.server.note_relay(relayed=False)
+                self._reply(411, "Length Required: the provider relay needs Content-Length")
+                return
+            if name == auth_name and hmac.compare_digest(value.encode(), token_value.encode()):
+                token_ok = True
+                # Same name and place as the worker sent it: only the value moves.
+                forwarded.append((raw_name.strip().decode("latin-1"), relay.auth(relay.key)[1]))
+                continue
+            if name in _CREDENTIAL_HEADERS or name in _HOP_BY_HOP or name == b"host":
+                continue
+            if name == b"content-length":
+                try:
+                    content_length = int(value)
+                except ValueError:
+                    content_length = 0
+            forwarded.append((raw_name.strip().decode("latin-1"), value))
+        if not token_ok:
+            self.server.note_relay(relayed=False)
+            self._reply(403, "Forbidden: the provider relay token does not match this run")
+            return
+        body = self.rfile.read(content_length) if content_length else None
+        host, port = upstream.hostname or "", upstream.port
+        conn: http.client.HTTPConnection
+        if upstream.scheme == "https":
+            conn = http.client.HTTPSConnection(
+                host, port, timeout=_CONNECT_TIMEOUT, context=ssl.create_default_context()
+            )
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=_CONNECT_TIMEOUT)
+        try:
+            conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+            for name_s, value in forwarded:
+                conn.putheader(name_s, value)
+            conn.endheaders(body)
+            if conn.sock is not None:
+                conn.sock.settimeout(_RELAY_READ_TIMEOUT)
+            response = conn.getresponse()
+        except (OSError, http.client.HTTPException):
+            conn.close()
+            self.server.note_relay(relayed=False)
+            self._reply(502, "Bad Gateway: the provider relay could not reach the provider")
+            return
+        self.server.note_relay(relayed=True)
+        try:
+            self.wfile.write(f"HTTP/1.1 {response.status} {response.reason}\r\n".encode("latin-1"))
+            for name_s, value in response.getheaders():
+                if name_s.lower().encode("latin-1") not in _HOP_BY_HOP:
+                    self.wfile.write(f"{name_s}: {value}\r\n".encode("latin-1"))
+            self.wfile.write(b"Connection: close\r\n\r\n")
+            self.wfile.flush()
+            while chunk := response.read1(65536):
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (OSError, http.client.HTTPException):
+            pass
+        finally:
+            conn.close()
+
     def _tunnel(self, client: socket.socket, upstream: socket.socket) -> None:
         client.settimeout(_TUNNEL_POLL)
         upstream.settimeout(_TUNNEL_POLL)
@@ -498,6 +671,8 @@ class FilteringProxy:
     v28-F1: ``unix_socket_path`` opens a second door — the same handler and
     counters on an AF_UNIX socket, for sandboxes whose only egress is a
     bind-mounted socket (Linux ``--unshare-net``).
+
+    ADR 0062: ``relay`` adds the provider-key relay route on both doors.
     """
 
     def __init__(
@@ -507,8 +682,11 @@ class FilteringProxy:
         unix_socket_path: str | None = None,
         denied_loopback_ports: tuple[int, ...] = (),
         asks: tuple[str, ...] | list[str] = (),
+        relay: ProviderRelay | None = None,
     ) -> None:
-        self._server = _ProxyServer(tuple(allowlist), tuple(denied_loopback_ports), tuple(asks))
+        self._server = _ProxyServer(
+            tuple(allowlist), tuple(denied_loopback_ports), tuple(asks), relay
+        )
         self._unix_path = unix_socket_path
         self._unix_server = (
             _ProxyUnixServer(unix_socket_path, self._server)
@@ -532,6 +710,14 @@ class FilteringProxy:
     @property
     def denied_count(self) -> int:
         return self._server.denied
+
+    @property
+    def relayed_count(self) -> int:
+        return self._server.relayed
+
+    @property
+    def relay_refused_count(self) -> int:
+        return self._server.relay_refused
 
     def start(self) -> FilteringProxy:
         servers: list[ThreadingTCPServer | ThreadingUnixStreamServer] = [self._server]

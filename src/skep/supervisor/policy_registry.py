@@ -295,6 +295,17 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         "(ADR 0054 A6); an existing home keeps its switch",
     ),
     _knob(
+        "provider_key_relay",
+        type="bool",
+        default=False,
+        layers=("global",),
+        invariant="I12",
+        doc="ADR 0062 kill switch: on, a builtin worker reaches its model through a "
+        "token-checked relay on its run's proxy and never holds the provider key; off "
+        "(default), the worker holds the key as before. External engines keep their own "
+        "auth env either way",
+    ),
+    _knob(
         "auto_approve",
         type="bool",
         default=False,

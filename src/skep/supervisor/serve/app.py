@@ -238,6 +238,8 @@ class PolicyUpdate(BaseModel):
     sandbox_backend: Literal["auto", "podman", "none"] | None = None
     # P1 (ADR 0053 D6): scopes routed through policy engine v2.
     policy_engine_v2_scopes: list[str] | None = None
+    # ADR 0062 (V6b): the provider-key relay's kill switch.
+    provider_key_relay: bool | None = None
 
 
 class PolicyDecideRequest(BaseModel):
