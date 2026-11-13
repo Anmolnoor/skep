@@ -381,6 +381,35 @@ def test_the_keeper_kills_a_sandbox_no_serve_comes_back_for(tmp_path: Path) -> N
     assert subprocess.run(["pgrep", "-f", f"sleep {marker}"], check=False).returncode == 1
 
 
+@_LINUX_BWRAP
+def test_a_linux_sandboxed_worker_under_a_reused_pid_is_neither_adopted_nor_killed(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F213 (ADR 0060 §2): the keeper's pid is what the run records and
+    what recovery verifies. Recorded with another start time — the pid now
+    belongs to some other process — the live keeper is a stranger: left
+    alone, and the run takes the dead-worker path."""
+    task_id, pid = _kill_serve_mid_run(config, repo, "Fix it. MODE:happy GATE", "sandbox")
+    try:
+        with closing(sqlite3.connect(config.db_path)) as conn, conn:
+            conn.execute(
+                "UPDATE run_transitions SET detail = ? WHERE task_id = ? AND state = 'running'",
+                (f"pid {pid} started Thu Jan 1 00:00:00 1970", task_id),
+            )
+        store = RunStore(config.db_path)
+        try:
+            recover_interrupted_runs(store, config)
+            record = store.get_run(task_id)
+            details = " ".join(d or "" for _, d, _ in store.transitions_for(task_id))
+        finally:
+            store.close()
+        assert _pid_alive(pid)  # not killed
+        assert record is not None and record.state == "worker_crashed"
+        assert "killed" not in details and "adopted" not in details
+    finally:
+        kill_session(pid)
+
+
 def _strand_with_live_worker(
     store: RunStore, config: SupervisorConfig, repo: Path, extra: str = ""
 ) -> tuple[str, int]:
