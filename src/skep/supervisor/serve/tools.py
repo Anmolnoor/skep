@@ -1335,8 +1335,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "shell lanes. NOT "
         "set_policy: run/worker policy is untouched. verdict 'allow' or "
         "'deny'; deny wins ties; an allow never lifts a baseline deny or "
-        "named ask; an allow is refused before any card when it reaches "
-        "into a deny (named), covers a credential file, or reads outside the "
+        "named ask; an allow is refused before any card under an approved "
+        "baseline, or when it reaches into a deny (named), covers a "
+        "credential file, or reads outside the "
         "operator roots while search_web runs uncarded (deny search first); "
         "a deny is always accepted. A shell allow is one exact command line "
         "(each part of an && line its own rule) — only a read-only look, "
@@ -3130,6 +3131,16 @@ def queen_shell_decision(
             )
         if verdict.layer == "taint":  # P4-1: a rule allowed it; taint only asks
             return taint_decision(verdict)
+        from ..policy_baseline import NoBaseline, verify
+        from ..policy_layers import store_home
+
+        opener = (
+            "set_operator_policy scope='shell' action='run_repo' with the exact "
+            "command line — a standing rule, not a one-off."
+            if isinstance(verify(store_home(store)), NoBaseline)
+            else "the operator re-approves the baseline (`skep policy approve`); "
+            "set_operator_policy takes no allow under it."  # D7
+        )
         return AutonomyDecision(
             verdict="deny",
             reason="shell.deny.repo_cwd" if via_cwd else "shell.deny.repo_target",
@@ -3142,10 +3153,7 @@ def queen_shell_decision(
                 f"{how} — a shell command there can modify files with no patch card, "
                 "so it refuses by default. To look: repo_state, search_files, "
                 "read_file, git_log, git_diff run in-turn with no card. To change "
-                f"something: {change}. Only to "
-                "open repo shells deliberately: set_operator_policy scope='shell' "
-                "action='run_repo' with the exact command line — a standing rule, "
-                "not a one-off."
+                f"something: {change}. Only to open repo shells deliberately: {opener}"
             ),
             decided_by=verdict.decided_by,
         )

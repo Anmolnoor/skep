@@ -975,3 +975,27 @@ def test_the_repo_pen_never_points_an_assistant_chat_at_a_hidden_tool(
         assert "quick_edit" not in said["assistant", background]
         assert "/role" in said["assistant", background]
         assert "dispatch_run" in said["builder", background]
+
+
+def test_d7_the_repo_pen_refusal_names_set_operator_policy_only_where_it_takes_an_allow(
+    locked: SupervisorConfig, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ES-F83 review: under a locked baseline set_operator_policy refuses
+    every allow (D7), so the repo-pen refusal sent the model to a proposal
+    that could only be refused; it names `skep policy approve` there."""
+
+    def detail(config: SupervisorConfig) -> str:
+        store = RunStore(config.db_path)
+        try:
+            found = queen_shell_decision(
+                store, ConfigHolder(config, store), command="pytest -q", cwd=str(repo)
+            )
+        finally:
+            store.close()
+        assert found is not None and found.verdict == "deny", found
+        return str(found.detail)
+
+    assert "set_operator_policy scope=" not in detail(locked)
+    assert "skep policy approve" in detail(locked)
+    unlocked = _home(tmp_path / "unlocked", repo, capsys, approve=False)
+    assert "set_operator_policy scope='shell'" in detail(unlocked)
