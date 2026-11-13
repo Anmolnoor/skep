@@ -2371,8 +2371,9 @@ def _project_policy_overrides(args: argparse.Namespace) -> dict[str, Any]:
     groups = getattr(args, "groups", None)
     if groups:
         overrides["policy_groups"] = groups
-    if getattr(args, "codex_chatgpt_login", False):
-        overrides["codex_chatgpt_login"] = True  # ES-F121 (D20)
+    if getattr(args, "codex_chatgpt_login", None) is not None:
+        # ES-F121 (D20); --no-... turns it back off (a re-setup keeps stored keys)
+        overrides["codex_chatgpt_login"] = args.codex_chatgpt_login
     return overrides
 
 
@@ -3592,10 +3593,12 @@ def register_supervisor_commands(
     )
     project_preview.add_argument(
         "--codex-chatgpt-login",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="let this project's codex runs use your ChatGPT plan login when no "
         "OPENAI_API_KEY is set: an access-token-only copy per run, never the "
-        "refresh token (ES-F121; `skep doctor` shows the login)",
+        "refresh token (ES-F121; `skep doctor` shows the login); "
+        "--no-codex-chatgpt-login turns it off",
     )
     project_preview.set_defaults(func=cmd_project_preview)
 
@@ -3640,10 +3643,12 @@ def register_supervisor_commands(
     )
     project_setup.add_argument(
         "--codex-chatgpt-login",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="let this project's codex runs use your ChatGPT plan login when no "
         "OPENAI_API_KEY is set: an access-token-only copy per run, never the "
-        "refresh token (ES-F121; `skep doctor` shows the login)",
+        "refresh token (ES-F121; `skep doctor` shows the login); "
+        "--no-codex-chatgpt-login turns it off",
     )
     project_setup.set_defaults(func=cmd_project_setup)
 

@@ -1899,6 +1899,15 @@ def test_project_setup_opts_a_project_into_the_codex_chatgpt_login(
         assert plan is not None and plan.policy["codex_chatgpt_login"] is True
     finally:
         store.close()
+    # ES-F121 follow-up: the operator can take it back from the CLI too — a
+    # repeated setup carries every stored key forward, so only a flag can.
+    assert _run_cli(home, *args, "--project-id", "plan", "--no-codex-chatgpt-login") == 0
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        plan = store.get_project_policy("plan")
+        assert plan is not None and plan.policy["codex_chatgpt_login"] is False
+    finally:
+        store.close()
 
 
 def _pin_engine(home: Path, repo: Path, engine: str) -> None:
