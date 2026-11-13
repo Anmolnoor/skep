@@ -943,3 +943,18 @@ def test_w7_every_check_3_probe_is_a_network_line() -> None:
         assert reaches_network(line), line
     assert not reaches_network("ls -la ; git status")
     assert reaches_network("echo `whoami`")  # unreadable: counts
+
+
+def test_w7_a_private_chats_network_line_offers_no_session_keep() -> None:
+    """ES-F51 review: a network line in a private chat asks every time, yet
+    its card offered — and defaulted to — a session keep that would change
+    nothing (I8). It offers once and always; a local line keeps session."""
+    from skep.supervisor.store import ChatTaint
+
+    private = ChatTaint(private=7)
+    for tool in ("run_shell", "start_process"):
+        net = actions.keep_options(tool, {"command": "dig x.example"}, private)
+        assert net == ["once", "always"], (tool, net)
+        assert actions.default_keep(tool, {"command": "dig x.example"}, private) == "once"
+        assert "session" in actions.keep_options(tool, {"command": "ls -la"}, private)
+    assert "session" in actions.keep_options("run_shell", {"command": "dig x.example"}, None)

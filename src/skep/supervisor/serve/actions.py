@@ -116,6 +116,7 @@ from ..shell_prefixes import (
     is_package_install,
     is_remote_git_command,
     normalize_remembered_command,
+    reaches_network,
     worker_allowlist_reason,
 )
 from ..store import ChatTaint, RunStore
@@ -5421,7 +5422,9 @@ def _grant_subjects(tool: str, args: dict[str, Any]) -> list[tuple[str, str, str
     return list(dict.fromkeys(subjects))
 
 
-def _taint_keep_refusal(tool: str, keep: str, taint: ChatTaint | None) -> str | None:
+def _taint_keep_refusal(
+    tool: str, keep: str, taint: ChatTaint | None, command: str = ""
+) -> str | None:
     """P4-1 (ADR 0059 D5): the keeps a tainted chat may not store. Both bits:
     once only (a HIGH card). Any bit: never a standing fetch grant (egress).
     A session keep the chat's own taint would ask past anyway is refused,
@@ -5441,6 +5444,15 @@ def _taint_keep_refusal(tool: str, keep: str, taint: ChatTaint | None) -> str | 
             if keep == "always"
             else "this chat has read private data, so every fetch from it asks: a session "
             "keep would change nothing"
+        )
+    shell = tool in ("run_shell", "start_process")
+    if keep == "session" and shell and taint.private is not None and reaches_network(command):
+        # ES-F51 review: a private chat's shell line that reaches the network
+        # asks every time (taint/private-egress), so a session keep is noise.
+        return (
+            "this chat has read private data, so every command from it that reaches "
+            "the network asks: a session keep would change nothing ('always' holds in "
+            "your other chats)"
         )
     if keep == "session" and not egress and taint.untrusted is not None:
         return (
@@ -5476,7 +5488,7 @@ def keep_refusal(
     found = _grant_subjects(tool, args)
     if isinstance(found, str):
         return _HIGH_KEEP if high else found
-    refused = _taint_keep_refusal(tool, keep, taint)
+    refused = _taint_keep_refusal(tool, keep, taint, str(args.get("command") or ""))
     if refused is not None:
         return refused
     if high:
