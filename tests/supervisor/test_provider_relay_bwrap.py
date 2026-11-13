@@ -161,6 +161,13 @@ def test_a_relayed_worker_on_real_bwrap_reaches_its_model_and_never_sees_the_key
         assert all(s in seen for s in (b"os.environ", b"/environ", b"llm-secret")), seen
         return
     assert '"provider_key_relay": "on"' in (dispatched[0] or "")
+    from skep import landlock
+
+    if landlock.abi() >= landlock.ABI_SCOPE_ABSTRACT:
+        # R5b: the worker ran under the Landlock step, outside of which the
+        # netshim (and so the relay's door) lives.
+        profile = (config.audit_dir / record.task_id / "sandbox.profile.sb").read_text()
+        assert "skep.landlock" in profile, profile
     # The probe ran inside the sandbox and saw no key anywhere it could read.
     assert record.verification_outcome == "passed", (record.verification_details, worker_log)
     assert "differed" not in (record.verification_details or ""), record.verification_details
