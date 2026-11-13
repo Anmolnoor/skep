@@ -64,6 +64,7 @@ _SOURCES = {
     "delegate_analysis": "read an analyst's answer",
     "get_run": "read a worker's report",
     "await_runs": "read a worker's report",
+    "list_runs": "read a worker's report",
     "list_notes": "read a note a tainted chat wrote",
     "list_tasks": "read a task a tainted chat wrote",
     "list_memory_proposals": "read memory a tainted chat filed",
@@ -154,6 +155,8 @@ def record_tool_taint(
         untrusted = "untrusted" in home
     elif name in _RUN_READS:
         untrusted = True
+    elif name == "list_runs":  # W21 review: each run's summary is the worker's
+        untrusted = bool(result.get("runs"))
     elif name in _STORE_READS:
         key, id_field, kind = _STORE_READS[name]
         rows = result.get(key) or []

@@ -131,7 +131,7 @@ def test_memory_filed_from_a_tainted_chat_taints_until_the_operator_approves_it(
 
 
 def test_run_reads_set_untrusted(env: Live) -> None:
-    """get_run / await_runs carry the worker's words (its summary)."""
+    """get_run / await_runs / list_runs carry the worker's words (its summary)."""
     from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
 
     task = mint_task(workspace=env.paths["repo"], instructions="x", budget=DEFAULT_BUDGET)
@@ -140,6 +140,7 @@ def test_run_reads_set_untrusted(env: Live) -> None:
     for tool, args in (
         ("get_run", {"task_id": task.task_id}),
         ("await_runs", {"task_ids": [task.task_id], "timeout_seconds": 1}),
+        ("list_runs", {}),  # every run's summary rides the list (W21 review)
     ):
         chat = env.chat()
         env.ollama.script_tool_call(tool, args)
