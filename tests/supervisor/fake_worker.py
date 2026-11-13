@@ -9,6 +9,9 @@ task instructions:
 - crash:    task.start then dies without terminal event or result, exit 9
 - crashgate: dies like crash but leaves a v2 resume checkpoint; its resume
             gates on the shell command ``make check`` (pending, exit 4)
+- shellgate: pending, gating on the shell command ``GATE:<argv>`` (``_`` for
+            spaces); resumed with an approval it runs happy
+- hostgate: pending, gating on network.fetch of host ``GATE:<host>``
 - hang:     task.start + one heartbeat, then sleeps forever (monitor must kill)
 - envdump:  writes its environment to <workspace>/envdump.json, then happy-min
 - childenv: spawns a grandchild through the worker's REAL child-env boundary
@@ -133,11 +136,14 @@ def main() -> int:
     # v54-F4: FILE:<name> picks which repo file the happy patch mutates, so a
     # test can land several runs on ONE branch without their patches colliding.
     file_name = "existing.py"
+    gated = "make_check"
     for token in instructions.split():
         if token.startswith("MODE:"):
             mode = token.removeprefix("MODE:")
         if token.startswith("FILE:"):
             file_name = token.removeprefix("FILE:")
+        if token.startswith("GATE:"):
+            gated = token.removeprefix("GATE:")
 
     stream = Stream(workspace / ".events" / f"{task_id}.ndjson", task_id, trace_id)
     start_payload: dict[str, object] = {
@@ -304,7 +310,7 @@ def main() -> int:
     resumed_with_approval = isinstance(approval_verdict, dict) and approval_verdict.get("approved")
 
     crash_first = mode == "crashgate" and task.get("resume_of") is None
-    if mode in {"pending", "crashgate"} and not resumed_with_approval:
+    if mode in {"pending", "crashgate", "shellgate", "hostgate"} and not resumed_with_approval:
         # Leave evidence of in-flight work plus a v2 resume checkpoint so the
         # supervisor can resume this exact worktree in-place.
         (workspace / "pending-marker.txt").write_text("suspended here\n")
@@ -344,6 +350,23 @@ def main() -> int:
                 "reason": "shell.run requires approval for command: make check",
                 "commands": [["make", "check"]],
             }
+        if mode == "shellgate":
+            argv = gated.split("_")
+            gate = {
+                "action": "shell.run",
+                "reason": f"shell.run requires approval for command: {' '.join(argv)}",
+                "commands": [argv],
+            }
+        if mode == "hostgate":
+            gate = {
+                "action": "network.fetch",
+                "reason": f"network host {gated} is not allowlisted",
+                "decision": {
+                    "verdict": "require_approval",
+                    "reason": "network.host_not_allowlisted",
+                    "detail": gated,
+                },
+            }
         stream.emit("approval.requested", gate)
         stream.emit(
             "task.terminal",
@@ -373,7 +396,7 @@ def main() -> int:
         args.out.write_text(json.dumps(result))
         return 4
 
-    if mode == "pending" and resumed_with_approval:
+    if mode in {"pending", "shellgate", "hostgate"} and resumed_with_approval:
         # Record whether the suspended attempt's evidence survived into this
         # run's workspace (true only for an in-place resume).
         (args.out.parent / f"reuse-{task_id}.json").write_text(

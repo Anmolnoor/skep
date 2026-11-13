@@ -2448,6 +2448,9 @@ def _project_policy_overrides(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "codex_chatgpt_login", None) is not None:
         # ES-F121 (D20); --no-... turns it back off (a re-setup keeps stored keys)
         overrides["codex_chatgpt_login"] = args.codex_chatgpt_login
+    unlocked = getattr(args, "unlocked", None)
+    if unlocked is not None:
+        overrides["unlocked"] = bool(unlocked)
     return overrides
 
 
@@ -3775,6 +3778,16 @@ def register_supervisor_commands(
         "OPENAI_API_KEY is set: an access-token-only copy per run, never the "
         "refresh token (ES-F121; `skep doctor` shows the login); "
         "--no-codex-chatgpt-login turns it off",
+    )
+    project_setup.add_argument(
+        "--unlocked",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="zero-ask mode for this project (ADR 0061): a sandboxed worker's default "
+        "asks answer themselves, dispatch needs no card and a G10-confirmed patch "
+        "lands on skep/*; denies, named asks and the floor still hold. Needs a pinned "
+        "verify command, a usable sandbox and an approved baseline; --no-unlocked "
+        "turns it off",
     )
     project_setup.set_defaults(func=cmd_project_setup)
 

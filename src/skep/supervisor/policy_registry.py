@@ -52,6 +52,7 @@ TRUST_RAMP_KEYS: frozenset[str] = frozenset(
         "allow_git_mutation",
         "auto_dispatch_allowed",
         "trusted_workspace_roots",
+        "unlocked",
     }
 )
 
@@ -232,6 +233,17 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         layers=_RAMP_LAYERS,
         invariant="I6",
         doc="a run matching the project policy exactly dispatches without a card",
+        enforced_at="project",
+    ),
+    _knob(
+        "unlocked",
+        scope="coding",
+        type="bool",
+        default=False,
+        layers=("project",),
+        invariant="I6",
+        doc="zero-ask project (ADR 0061): decide() answers a sandboxed worker's default asks; "
+        "dispatch and verified landing need no card",
         enforced_at="project",
     ),
     _knob(

@@ -58,6 +58,7 @@ def build_status(
             + _legacy_host_advisories(home)
             + _role_less_chat_advisories(home)
             + _template_less_role_advisories(home)
+            + _unlocked_advisories(home)
             + _policy_migration_advisories(home)
             + _channel_user_advisories(home)
         )
@@ -95,6 +96,7 @@ def build_status(
         + _legacy_host_advisories(home)
         + _role_less_chat_advisories(home)
         + _template_less_role_advisories(home)
+        + _unlocked_advisories(home)
         + _policy_migration_advisories(home)
         + _channel_user_advisories(home)
     )
@@ -473,6 +475,32 @@ def _template_less_role_advisories(home: Path) -> list[str]:
         f"custom role(s) {', '.join(names)} name no template and act as assistant until they "
         f"get one — set policy_layer (builder, operator or assistant) in "
         f"{roles_dir(supervisor)}/<name>.json"
+    ]
+
+
+def _unlocked_advisories(home: Path) -> list[str]:
+    """ADR 0061 (I8): an unlocked project is a standing mode — "nothing
+    asked" must read as the mode the operator turned on, with the way out."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        unlocked = sorted(
+            record.project_id
+            for record in store.list_project_policies()
+            if record.policy.get("unlocked") is True
+        )
+    finally:
+        store.close()
+    if not unlocked:
+        return []
+    return [
+        f"{len(unlocked)} project(s) are unlocked (zero-ask, ADR 0061): {', '.join(unlocked)} — "
+        "sandboxed workers there are not asked about commands and hosts no rule names; "
+        f"turn it off with `skep project setup <repo> --project-id {unlocked[0]} --no-unlocked`"
     ]
 
 
