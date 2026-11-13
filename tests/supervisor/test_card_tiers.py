@@ -423,6 +423,23 @@ def test_l7_a_confirmed_result_tells_the_model_a_person_approved_it(live: Any) -
     assert json.loads(row.content)["approved"] == chat_module.APPROVED_NOTE
 
 
+def test_l4_a_read_in_skeps_own_home_is_not_called_outside_your_folders(live: Any) -> None:
+    """L4 (field test): reading a run's verify log under skep's audit dir set
+    ``private`` and the card said "it read a file outside your folders"."""
+    from skep.supervisor.serve.taint import taint_line
+
+    env = live("builder")
+    chat = env.chat()
+    log = env.holder.current.home / "audit" / "t1-verify.txt"
+    row = env.store.add_chat_message(
+        chat, role="tool", tool_name="read_file", tool_call_id="c1",
+        content=json.dumps({"ok": True, "result": {"path": str(log), "content": "ok"}}),
+    )  # fmt: skip
+    env.store.add_chat_taint(chat, private=row)
+    line = taint_line(env.store, chat, env.store.get_chat_taint(chat))
+    assert line is not None and "it read skep's own records" in line, line
+
+
 def test_an_mcp_tool_the_operator_allowed_by_name_is_not_high(live: Any) -> None:
     from skep.supervisor.serve import actions
 

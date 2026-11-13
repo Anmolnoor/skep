@@ -173,3 +173,29 @@ def test_l16_an_mcp_card_names_the_server_tool_and_arguments() -> None:
         "this conversation"
     )
     assert "remote content" not in str(risk("register_mcp_server", {"server_id": "bank"}))
+
+
+def test_l9_l12_review_and_policy_risk_lines_match_what_the_verb_does() -> None:
+    """L9 (field test): a worker gate card (approving lets a paused run run
+    `python3 -m pytest --version`) said "applies a patch to a real branch".
+    L12: a deny written by set_operator_policy said "widens what future runs
+    may do". Each line now says what that call does."""
+    land = {"review_id": "r", "reason": 'land "add parser" → skep/x'}
+    assert (
+        risk("approve_review", land) == "applies a patch to a real branch — landing IS the commit"
+    )
+    assert risk("land_run", {"task_id": "t"}) == risk("approve_review", land)
+    gate = {"review_id": "r", "reason": "shell.run requires approval for command: env"}
+    assert risk("approve_review", gate) == (
+        "lets the paused run go past this gate and do what it names, once"
+    )
+    assert risk("deny_review", land) is None
+    deny = {"scope": "shell", "action": "run", "pattern": "curl", "verdict": "deny"}
+    assert risk("set_operator_policy", deny) == (
+        "adds a standing rule that makes matching actions ask or be refused"
+    )
+    allow = {**deny, "verdict": "allow"}
+    assert (
+        risk("set_operator_policy", allow)
+        == "widens what future runs may do without asking you again"
+    )

@@ -392,8 +392,17 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
         )
     if tool in _PUBLISHING_TOOLS:
         return "publishes to the remote — visible outside this machine, and not undone by a revert"
+    if tool == "deny_review":
+        return None  # refusing applies nothing
+    reason = str(args.get("reason") or "")
+    if tool == "approve_review" and reason and not reason.startswith("land "):
+        # L9: a worker gate, not a landing (landing reasons read 'land "…"')
+        return "lets the paused run go past this gate and do what it names, once"
     if tool in _LANDING_TOOLS:
         return "applies a patch to a real branch — landing IS the commit"
+    if tool == "set_operator_policy" and args.get("verdict") in ("deny", "require_approval"):
+        # L12: a deny or ask narrows; the _POLICY_TOOLS line would be a lie
+        return "adds a standing rule that makes matching actions ask or be refused"
     if tool == "revoke_policy_rule":
         # v109-F9: the one policy verb that NARROWS — the _POLICY_TOOLS line
         # ("widens…") would be a lie on this card.

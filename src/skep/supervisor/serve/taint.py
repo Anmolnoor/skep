@@ -202,6 +202,18 @@ def inherit_taint(store: RunStore, parent: str | None, child: str) -> None:
         store.add_chat_taint(child, private=taint.private, untrusted=taint.untrusted)
 
 
+def _in_home(store: RunStore, content: str) -> bool:
+    """Did this read_file result row read a file in skep's own home?"""
+    try:
+        data = json.loads(content)
+        result = data.get("result", data)
+        target = Path(str(result["path"])).resolve()
+        home = store.db_path.parent.resolve()
+    except (ValueError, TypeError, KeyError, AttributeError, OSError):
+        return False
+    return home in target.parents
+
+
 def _source(store: RunStore, chat_id: str, message_id: int | None) -> str | None:
     if not message_id:
         return None
@@ -210,6 +222,8 @@ def _source(store: RunStore, chat_id: str, message_id: int | None) -> str | None
     if row is None:
         return None
     if row.role == "tool":
+        if row.tool_name == "read_file" and _in_home(store, row.content):
+            return "read skep's own records"  # L4: audit/, the store — not outside the roots
         return _SOURCES.get(row.tool_name or "")
     return _AUTHORS.get(row.provenance.split(":", 1)[0])
 
