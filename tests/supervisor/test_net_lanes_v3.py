@@ -32,6 +32,7 @@ from skep.supervisor.serve.tools import (
     mutation_execution_decision,
 )
 
+from .conftest import no_layer_role
 from .net_lane_grid import (
     FETCH_PROBES,
     HOMES,
@@ -286,7 +287,8 @@ def test_b78_search_web_follows_the_chats_role(
     net: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """B78: search_web decides with the chat's role — a role layer that denies
-    search refuses it there, while a chat with no role still searches."""
+    search refuses it there, and in a chat whose stored role is NULL (an
+    assistant chat since P3-6), while a chat with no role layer still searches."""
     from skep.supervisor.policy_engine import Layer, LayerRule
     from skep.supervisor.roles import Role
 
@@ -301,14 +303,18 @@ def test_b78_search_web_follows_the_chats_role(
 
     monkeypatch.setattr(Role, "layer", layer)
     _paths, store, holder, _fetched = net("assistant")
-    plain = store.create_chat(title="p", model=None).chat_id
+    plain = store.create_chat(
+        title="p", model=None, role=no_layer_role(holder.current.home)
+    ).chat_id
     role = store.create_chat(title="a", model=None, role="assistant").chat_id
+    null = store.create_chat(title="n", model=None).chat_id
     ran = execute_read_tool("search_web", {"query": "q"}, store=store, holder=holder, chat_id=plain)
     assert ran["results"] and ran["decided_by"] == "template:assistant/net-search"
-    refused = execute_read_tool(
-        "search_web", {"query": "q"}, store=store, holder=holder, chat_id=role
-    )
-    assert refused["results"] == [] and refused["decided_by"] == "role:assistant/no-search"
+    for chat_id in (role, null):
+        refused = execute_read_tool(
+            "search_web", {"query": "q"}, store=store, holder=holder, chat_id=chat_id
+        )
+        assert refused["results"] == [] and refused["decided_by"] == "role:assistant/no-search"
 
 
 def test_b56_a_session_fetch_grant_in_a_role_chat_runs_the_url_with_no_second_card(
@@ -391,7 +397,9 @@ def test_an_operator_overlay_fetch_allow_does_not_let_read_url_run(
     set_operator_policy_rule(store, scope="network", action="fetch", pattern="refused.example",
                              verdict="deny")  # fmt: skip
     for role in ROLES:
-        chat = store.create_chat(title="c", model=None, role=role).chat_id
+        # No role: REST and the CLI have no chat, so the Queen asks with none
+        # too — a chat with a NULL role is an assistant chat (P3-6).
+        chat = store.create_chat(title="c", model=None, role=role).chat_id if role else None
         flags = ["--role", role] if role else []
         for host, verdict in (("written.example", "require_approval"),
                               ("overlay.example", "require_approval"),

@@ -382,8 +382,9 @@ def test_dispatch_refuses_a_chain_deeper_than_one(config: SupervisorConfig, repo
 def test_the_queen_dispatches_with_its_role(
     config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR 0055 D5: a chat in a role dispatches as queen@<role>; a chat with
-    no role, and the operator's own typed command, pass no chain."""
+    """ADR 0055 D5: a chat in a role dispatches as queen@<role>; no chat (the
+    REST and CLI face), and the operator's own typed command, pass no chain.
+    A chat whose stored role is NULL is an assistant chat (P3-6)."""
     seen: list[Any] = []
 
     def submit(*args: Any, **kwargs: Any) -> str:
@@ -397,10 +398,9 @@ def test_the_queen_dispatches_with_its_role(
         holder = ConfigHolder(config, store)
         in_role = store.create_chat(title="r", model=None).chat_id
         store.set_chat_role(in_role, "operator")
-        bare = store.create_chat(title="b", model=None).chat_id
         for chat_id, actor in (
             (in_role, "chat-user"),
-            (bare, "chat-user"),
+            (None, "chat-user"),
             (in_role, COMMAND_ACTOR),
         ):
             execute_mutation(

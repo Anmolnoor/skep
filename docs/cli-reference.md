@@ -340,7 +340,9 @@ in one role — its prompt, its voice (when the chat has no `/personality`) and
 the Queen's own tool lanes. `role list` marks the default new chats open in
 with `*`; `role show` prints the record and its layer as the explain table;
 `role use NAME` sets that default, `--chat ID` switches one chat (the chat's
-`set_role` card and `/role` are the same verb). `skep policy why|decide
+`set_role` card and `/role` are the same verb). A chat made before every
+chat recorded a role has none stored and runs as `assistant`; `skep role use
+builder --chat ID` gives it another (`skep doctor` lists such chats). `skep policy why|decide
 --role NAME` answers under a role: `decided_by` names `role:<name>` when the
 role decided, `why` adds a `role` block naming the layer, and the ledger row
 carries `role` (also `role` on `GET /api/policy/why`, `POST
@@ -358,7 +360,7 @@ delegator whose role has no rule for the action holds nothing to pass on
 (unset is not granted). The floor is above every chain. Also
 `delegation_chain` on `POST /api/policy/decide`, `GET /api/policy/why` and the
 chat `policy_why` tool. A Queen chat in a role dispatches as `queen@<role>`
-(an operator-typed `/command` and a chat with no role dispatch as today): the
+(an operator-typed `/command` and REST or the CLI, with no chat, dispatch as the operator): the
 worker's shell prefixes and egress hosts beyond what that role holds are
 dropped at dispatch — the worker cards for them instead, so a human answers —
 and each drop is a ledger row with `actor: dispatch`; a role denied workspace

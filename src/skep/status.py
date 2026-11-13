@@ -409,9 +409,9 @@ def _legacy_host_advisories(home: Path) -> list[str]:
 
 
 def _role_less_chat_advisories(home: Path) -> list[str]:
-    """ADR 0059 P3-6 (B55): every new chat records a role (no pick and no
-    default is ``assistant``); a chat made before that has none and runs with
-    no role layer — named here, with the one command that gives it one."""
+    """ADR 0059 P3-6 (B55, decision #4): every new chat records a role; a chat
+    made before that has none stored and runs as ``assistant`` (the row is not
+    rewritten) — named here, with the one command that gives it another."""
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
         return []
@@ -425,9 +425,9 @@ def _role_less_chat_advisories(home: Path) -> list[str]:
     if not role_less:
         return []
     return [
-        f"{len(role_less)} chat(s) have no role (made before every chat recorded one) and run "
-        "with no role layer, the widest Queen lanes; new chats open as assistant — give one a "
-        f"role with `skep role use assistant --chat {role_less[0].chat_id}` or /role in the chat"
+        f"{len(role_less)} chat(s) have no stored role (made before every chat recorded one) "
+        "and run as assistant: no dispatch, quick edit, run code, research or forge — to give "
+        f"one back, `skep role use builder --chat {role_less[0].chat_id}` or /role builder"
     ]
 
 

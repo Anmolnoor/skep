@@ -966,9 +966,9 @@ def personality_preamble(personality: str | None) -> str | None:
 def chat_role(home: Path, name: str | None) -> Role | None:
     """The chat's role record; None for no role, or for a custom role whose
     file no longer loads — the prompt drops it rather than failing the turn,
-    and `skep role list` says what is wrong with the file (I9)."""
-    if not name:
-        return None
+    and `skep role list` says what is wrong with the file (I9). A chat whose
+    stored role is NULL reads as assistant (ADR 0059 decision #4, B55)."""
+    name = name or ROLE_LESS_CHAT_ROLE
     from ..roles import resolve_role  # local: roles validates voices against this module
 
     try:

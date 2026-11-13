@@ -733,7 +733,9 @@ def test_slack_button_confirms_a_low_risk_dispatch(
         _enable_slack(config, ollama, can_confirm=True)
         store = RunStore(config.db_path)
         try:
-            chat = store.create_chat(title="slack C1", model=None)
+            chat = store.create_chat(
+                title="slack C1", model=None, role="builder"
+            )  # may dispatch (P3-6)
             action_id = store.add_chat_action(
                 chat.chat_id,
                 tool="dispatch_run",

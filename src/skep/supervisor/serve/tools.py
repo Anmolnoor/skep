@@ -2784,7 +2784,7 @@ def _queen_chain(
     """R2 (ADR 0055 D5): the Queen dispatches with its role — a chat in a role
     passes ``queen@<role>`` and its worker gets no grant beyond that role. An
     operator-typed /command (``chat.COMMAND_ACTOR``) is the human's own
-    dispatch, and a chat with no role has no layer: both pass [] — today."""
+    dispatch, and no chat has no role layer: both pass []."""
     if actor == "operator-command":
         return []
     role = _chat_role(store, holder, chat_id)

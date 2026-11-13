@@ -46,6 +46,7 @@ from skep.supervisor.serve.tools import (
     mutation_execution_decision,
 )
 
+from .conftest import no_layer_role
 from .queen_lane_grid import _baseline, build_home
 
 # legacy: predates the baseline, nothing approved (+ a setup document and an
@@ -325,7 +326,9 @@ def rows(root: Path, kind: str) -> Iterator[tuple[str, str]]:
     store = RunStore(config.db_path)
     try:
         chats = {
-            role: store.create_chat(title=role or "none", model=None, role=role).chat_id
+            role: store.create_chat(  # "-": a role with no layer (``no_layer_role``)
+                title=role or "none", model=None, role=role or no_layer_role(config.home)
+            ).chat_id
             for role in ROLES
         }
     finally:

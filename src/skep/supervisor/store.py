@@ -662,7 +662,8 @@ class ChatRecord:
     # request wall after a 4xx — replay and compaction stay under
     # min(num_ctx budget, this). None = the provider has never pushed back.
     provider_ceiling_chars: int | None = None
-    # first-run R1 (ADR 0055 D3): the role this chat runs in; None = no role layer.
+    # first-run R1 (ADR 0055 D3): the role this chat runs in; None (a chat from
+    # before every chat recorded one) reads as assistant (ADR 0059 decision #4).
     role: str | None = None
     # v74-F3: tools this chat described via describe_tools — their full
     # schemas ride the advertised tools array from then on. Advertisement
