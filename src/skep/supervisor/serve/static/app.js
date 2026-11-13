@@ -328,6 +328,11 @@ function offersRemember(approval) {
 function manifestNode(card) {
   const m = card && card.manifest;
   if (!m) return null;
+  if (Array.isArray(m.members)) { // D23: a batch lists each run it starts
+    return el("div", {}, ...m.members.flatMap((member, i) => [
+      el("p", { class: "note" }, `Run ${i + 1} of ${m.members.length}:`),
+      manifestNode({ manifest: member })]));
+  }
   if (m.error) {
     return el("p", { class: "note card-manifest" }, `The run's envelope could not be compiled: ${m.error}`);
   }

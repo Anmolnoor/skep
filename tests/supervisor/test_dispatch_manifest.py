@@ -509,3 +509,85 @@ def test_a_call_network_that_replaces_the_project_hosts_says_what_the_run_loses(
     (spec,) = [s for s in TOOL_SPECS if s["function"]["name"] == "dispatch_run"]
     described = spec["function"]["parameters"]["properties"]["network"]["description"]
     assert "REPLACES" in described
+
+
+def _propose_call(desk: Desk, tool: str, args: dict[str, Any]) -> tuple[str, Any]:
+    made = desk.store.create_chat(title="c", model=None, role="builder", source="web")
+    desk.ollama.script_tool_call(tool, args)
+    desk.store.add_chat_message(made.chat_id, role="user", content="do it")
+    base_url, api_key, model, protocol = desk.engine.resolved_llm(desk.store.get_chat(made.chat_id))
+    events = list(
+        desk.engine.turn_events(
+            made.chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
+        )
+    )
+    (card,) = cards(events)
+    return made.chat_id, card
+
+
+def test_a_quick_edit_card_carries_the_dispatch_manifest_and_the_desk_answers_it(
+    desk: Desk,
+) -> None:
+    """D23: quick_edit starts a coding run like dispatch_run, so its card shows
+    the same manifest (one builder) and the desk confirm answers its asks."""
+    chat, card = _propose_call(
+        desk, "quick_edit", {"repo": str(desk.repo), "file": "hello.py", "instruction": "typo"}
+    )
+    manifest = card["card"]["manifest"]
+    assert manifest == dispatch_manifest_for(
+        desk.store, desk.holder, {"repo": str(desk.repo)}, chat
+    )
+    assert manifest["network_ask"] == ["example.com"]
+    desk.confirm(chat, card["action_id"])
+    (submitted,) = desk.runner.submitted
+    assert "example.com" in submitted["permissions"].network
+    assert submitted["permissions"].network_ask == []
+
+
+def test_a_batch_card_carries_one_manifest_per_run_and_each_run_gets_its_own(
+    desk: Desk,
+) -> None:
+    """D23: a batch starts N runs; its card shows each run's manifest, the
+    messenger lines name each, and the desk confirm answers each run's asks."""
+    tasks = [
+        {"repo": str(desk.repo), "instructions": "one"},
+        {"repo": str(desk.repo), "instructions": "two", "caste": "coding"},
+    ]
+    chat, card = _propose_call(desk, "batch_dispatch", {"tasks": tasks})
+    members = card["card"]["manifest"]["members"]
+    assert members == [
+        dispatch_manifest_for(desk.store, desk.holder, {"repo": t["repo"]}, chat) for t in tasks
+    ]
+    assert [m["network_ask"] for m in members] == [["example.com"], ["example.com"]]
+    lines = manifest_lines(card["card"]["manifest"])
+    assert lines[0] == "run 1 of 2:" and "run 2 of 2:" in lines
+    desk.confirm(chat, card["action_id"])
+    assert len(desk.runner.submitted) == 2
+    for submitted in desk.runner.submitted:
+        assert "example.com" in submitted["permissions"].network
+        assert submitted["permissions"].network_ask == []
+
+
+def test_a_batch_member_with_a_wildcard_project_makes_the_batch_high() -> None:
+    manifest = {"members": [{"network": ["pypi.org"]}, {"network": ["*"]}]}
+    assert high_tier("batch_dispatch", {"tasks": []}, manifest=manifest) is not None
+
+
+def test_a_forge_card_carries_the_manifest_of_the_forge_run(desk: Desk) -> None:
+    """D23: forge_tool starts a coding run in the forge repo; its card says
+    what that run gets. The first forge sets the repo up on confirm (which
+    decides its hosts), so that card says so rather than show too little."""
+    from skep.supervisor import forge
+
+    forge_args = {"name": "word count", "purpose": "count"}
+    chat, card = _propose_call(desk, "forge_tool", forge_args)
+    assert "set up when you confirm" in card["card"]["manifest"]["error"]
+    desk.confirm(chat, card["action_id"])
+    (first,) = desk.runner.submitted
+    assert first["permissions"].network  # set up on confirm: the project's hosts
+
+    chat, card = _propose_call(desk, "forge_tool", {"name": "line count", "purpose": "count"})
+    root = str(forge.forge_root(desk.holder.current).resolve())
+    manifest = card["card"]["manifest"]
+    assert manifest == dispatch_manifest_for(desk.store, desk.holder, {"repo": root}, chat)
+    assert manifest["network"] == first["permissions"].network

@@ -415,6 +415,12 @@ def high_tier_decision(high: str, allowed: Any) -> Any:
     )
 
 
+# P4-2 (ADR 0059 D6) + D23: the calls whose card shows the run manifest.
+_MANIFEST_TOOLS = frozenset(
+    {"dispatch_run", "start_research", "quick_edit", "batch_dispatch", "forge_tool"}
+)
+
+
 def manifest_ask_decision(allowed: Any) -> Any:
     """B147 residue: an auto-allowed sandboxed dispatch whose chain turned a
     host into an ask cards with its manifest — only a confirmed card
@@ -2087,36 +2093,14 @@ class ChatEngine:
                     # auto-dispatch, grant or rule runs it unasked. Not a
                     # decide() verdict: the allow is recorded, the card asks.
                     # P4-2: a dispatch's manifest — what its run will get.
+                    # D23: quick_edit, batch_dispatch and forge_tool start
+                    # runs too — the same manifest (a batch: one per run).
                     manifest = (
-                        dispatch_manifest_for(self.store, self.holder, args, chat_id)
-                        if name in ("dispatch_run", "start_research")
+                        dispatch_manifest_for(self.store, self.holder, args, chat_id, name)
+                        if name in _MANIFEST_TOOLS
                         and (decision is None or decision.verdict != "deny")
                         else None
                     )
-                    # quick_edit and batch members compile the same envelope
-                    # as dispatch_run: a run that may reach any host (a
-                    # project's default network '*') is HIGH from them too.
-                    reach = None
-                    if (
-                        name in ("quick_edit", "batch_dispatch")
-                        and decision is not None
-                        and decision.verdict != "deny"
-                    ):
-                        members = args.get("tasks") if name == "batch_dispatch" else [args]
-                        reach = next(
-                            (
-                                compiled
-                                for member in (members if isinstance(members, list) else [])
-                                if isinstance(member, dict)
-                                and "*"
-                                in (
-                                    compiled := dispatch_manifest_for(
-                                        self.store, self.holder, member, chat_id
-                                    )
-                                ).get("network", [])
-                            ),
-                            None,
-                        )
                     if (
                         manifest is not None
                         and manifest.get("refused")
@@ -2131,7 +2115,7 @@ class ChatEngine:
                         args,
                         taint=self.store.get_chat_taint(chat_id),
                         store=self.store,
-                        manifest=manifest or reach,
+                        manifest=manifest,
                     )
                     if (
                         high is not None
@@ -2141,8 +2125,7 @@ class ChatEngine:
                         # an allow ask — decide() and mutation_execution_decision
                         # already asked on every lane D5 names (a read inside
                         # the roots is none of them)
-                        and high_tier(name, args, store=self.store, manifest=manifest or reach)
-                        is not None
+                        and high_tier(name, args, store=self.store, manifest=manifest) is not None
                     ):
                         decision = high_tier_decision(high, decision)
                     elif (
@@ -2649,7 +2632,7 @@ class ChatEngine:
         # W13: a dispatch is judged on what its run would get NOW, not only
         # on what the card showed — a project widened since is caught here.
         fresh = (
-            dispatch_manifest_for(self.store, self.holder, action.args, chat_id)
+            dispatch_manifest_for(self.store, self.holder, action.args, chat_id, action.tool)
             if confirm and shown is not None and action.status == "proposed"
             else None
         )

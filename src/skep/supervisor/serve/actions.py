@@ -4880,6 +4880,12 @@ def manifest_widening(shown: dict[str, Any], fresh: dict[str, Any]) -> str | Non
         return None
     if "error" in shown:
         return "the card showed no envelope (it could not be compiled) and it compiles now"
+    if "members" in shown:  # D23: a batch widens when any of its runs does
+        pairs = zip(shown["members"], fresh.get("members") or [], strict=False)
+        for index, (was, now) in enumerate(pairs, 1):
+            if (widened := manifest_widening(was, now)) is not None:
+                return f"run {index}: {widened}"
+        return None
 
     def items(value: Any) -> set[str]:  # a shell prefix is a list: compare it as one line
         return {shlex.join(v) if isinstance(v, list) else str(v) for v in value or []}
@@ -5195,6 +5201,7 @@ def submit_team(
     delegation_chain: Sequence[str] = (),
     dispatch_decision: AutonomyDecision | None = None,
     deferred_asks: bool = False,
+    preanswered: Sequence[dict[str, Any] | None] = (),
 ) -> dict[str, Any]:
     """R3 (ADR 0055 D5): a team run — v51's batch dispatch with a manager as
     the dispatcher. The manager is a hop, ``manager@<role>``, under whoever
@@ -5244,8 +5251,10 @@ def submit_team(
             role=str(task.get("role") or manager),
             team=team,
             deferred_asks=deferred_asks,
+            # D23: the member's manifest the batch card listed and a human approved
+            preanswered=preanswered[index] if index < len(preanswered) else None,
         )
-        for task in tasks
+        for index, task in enumerate(tasks)
     ]
     return {
         "team": team,

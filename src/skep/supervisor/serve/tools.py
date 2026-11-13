@@ -2818,12 +2818,59 @@ def _human_answers(store: RunStore, chat_id: str | None) -> bool:
 
 
 def dispatch_manifest_for(
-    store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
+    store: RunStore,
+    holder: ConfigHolder,
+    args: dict[str, Any],
+    chat_id: str | None,
+    tool: str = "dispatch_run",
+    hop: str | None = None,
 ) -> dict[str, Any]:
     """P4-2 (ADR 0059 D6): the manifest of a ``dispatch_run`` this chat
     proposes — compiled exactly as the confirm will compile it. A
     ``start_research`` call (its ``source_allowlist``) compiles as the
-    sandboxed researcher run its confirm submits (L23)."""
+    sandboxed researcher run its confirm submits (L23). D23: ``quick_edit``
+    and ``forge_tool`` compile as the one coding run they submit (forge: in
+    the forge repo); ``batch_dispatch`` is ``{"members": [...]}``, one
+    manifest per run (under the manager's hop for a team), each with its own
+    ``error`` when it cannot compile."""
+    if tool == "batch_dispatch":
+        tasks = args.get("tasks")
+        if not isinstance(tasks, list) or not all(isinstance(t, dict) for t in tasks):
+            return {"error": "bad arguments: tasks must be an array of objects"}
+        manager = None if not args.get("manager") else str(args["manager"])
+        members = [
+            dispatch_manifest_for(
+                store,
+                holder,
+                {  # only what the batch passes to submit_run / submit_team
+                    "repo": task.get("repo"),
+                    "caste": task.get("caste"),
+                    "execution_mode": task.get("execution_mode"),
+                    "engine": task.get("engine"),
+                    "role": task.get("role") or manager,
+                },
+                chat_id,
+                hop=None if manager is None else f"manager@{manager}",
+            )
+            for task in tasks
+        ]
+        return {"members": members}
+    if tool == "forge_tool":
+        from .. import forge
+
+        root = forge.forge_root(holder.current).resolve()
+        if not any(
+            binding.kind == "repo_path" and binding.value == str(root)
+            for project in list_projects(store)
+            for binding in project.bindings
+        ):  # its confirm sets the forge up first, and that decides the hosts
+            return {
+                "error": "the forge repo is set up when you confirm this, and that "
+                "decides what its run gets; the next forge card lists it"
+            }
+        args = {"repo": str(root)}
+    elif tool == "quick_edit":
+        args = {"repo": args.get("repo")}
     if "source_allowlist" in args:
         args = {
             "repo": args.get("repo"),
@@ -2846,7 +2893,10 @@ def dispatch_manifest_for(
             max_actions=_optional_int(args, "max_actions"),
             max_provider_calls=_optional_int(args, "max_provider_calls"),
             engine=None if args.get("engine") is None else str(args["engine"]),
-            delegation_chain=_queen_chain(store, holder, chat_id, "chat-user"),
+            delegation_chain=[
+                *_queen_chain(store, holder, chat_id, "chat-user"),
+                *([] if hop is None else [hop]),
+            ],
             role=None if args.get("role") is None else str(args["role"]),
             deferred_asks=_human_answers(store, chat_id),
             chat_taint=chat_taint_bits(store, chat_id),
@@ -4397,6 +4447,7 @@ def _execute_mutation(
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
             deferred_asks=_human_answers(store, chat_id),
             chat_taint=chat_taint_bits(store, chat_id),
+            preanswered=preanswered,  # D23: the manifest its card showed
         )
         return {
             "task_id": task_id,
@@ -4488,6 +4539,9 @@ def _execute_mutation(
             if not isinstance(entry, dict) or "repo" not in entry or "instructions" not in entry:
                 raise ValueError("each task must be an object with repo and instructions")
             entries.append(entry)
+        # D23: each run gets the manifest its card listed for it
+        approved = list((preanswered or {}).get("members") or [])
+        approved += [None] * (len(entries) - len(approved))
         if args.get("manager"):
             # R3 (ADR 0055 D5): the batch as a team — Queen → manager → workers.
             return actions.submit_team(
@@ -4499,6 +4553,7 @@ def _execute_mutation(
                 delegation_chain=_queen_chain(store, holder, chat_id, actor),
                 dispatch_decision=decision,
                 deferred_asks=_human_answers(store, chat_id),
+                preanswered=approved,
             )
         task_ids = [
             actions.submit_run(
@@ -4520,8 +4575,9 @@ def _execute_mutation(
                 role=None if entry.get("role") is None else str(entry["role"]),
                 deferred_asks=_human_answers(store, chat_id),
                 chat_taint=chat_taint_bits(store, chat_id),
+                preanswered=member_manifest,
             )
-            for entry in entries
+            for entry, member_manifest in zip(entries, approved, strict=False)
         ]
         return {"dispatched": task_ids, "count": len(task_ids)}
     if name == "create_skill":
@@ -4728,6 +4784,7 @@ def _execute_mutation(
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
             deferred_asks=_human_answers(store, chat_id),
             chat_taint=chat_taint_bits(store, chat_id),
+            preanswered=preanswered,  # D23: the manifest its card showed
         )
         forge.save_plugin(
             store,

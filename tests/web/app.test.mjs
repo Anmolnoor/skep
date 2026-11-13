@@ -376,6 +376,15 @@ test("manifestNode: the dispatch card lists what the run gets and the asks it ap
   assert.ok(lost.includes("loses the project's own hosts for this run") && lost.includes("pypi.org"));
 });
 
+test("manifestNode: a batch card lists each run's manifest (D23)", () => {
+  const app = loadApp();
+  const text = app.manifestNode({ manifest: { members: [
+    { network: ["pypi.org"] }, { error: "no such repo" }] } }).textContent;
+  for (const part of ["Run 1 of 2:", "pypi.org", "Run 2 of 2:", "no such repo"]) {
+    assert.ok(text.includes(part), part);
+  }
+});
+
 test("offersRemember: a delegated ask is approve-once, so no remember button is offered", () => {
   const app = loadApp();
   // L11: the server refuses allow-host / allow-command on a delegated ask (409)

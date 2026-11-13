@@ -218,7 +218,9 @@ def high_tier(
         # the overlay spells any knob (coding_engine, default_network, …) and
         # groups= is attach_policy_group: both write the project's policy
         return "it writes the project's policy (policy_overrides or groups)"
-    if manifest is not None and "*" in (manifest.get("network") or []):
+    if manifest is not None and any(
+        "*" in (m.get("network") or []) for m in [manifest, *(manifest.get("members") or [])]
+    ):  # D23: a batch is HIGH when any of its runs may reach any host
         return "the run may reach any host on the internet (network '*')"
     if tool in _DISPATCH_TOOLS:
         tasks = safe.get("tasks") if tool == "batch_dispatch" else [safe]
