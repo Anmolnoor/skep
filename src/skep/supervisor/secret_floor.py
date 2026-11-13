@@ -78,6 +78,21 @@ def _fold(path: Path) -> Path:
     return Path(str(path).casefold())
 
 
+# macOS firmlinks the data volume's /Users, /home, ... onto /, and resolve()
+# does not follow a firmlink: /System/Volumes/Data/Users/me/.ssh IS ~/.ssh.
+_DATA_VOLUME = Path("/system/volumes/data")
+
+
+def alias_key(path: Path) -> Path:
+    """One spelling for every name APFS opens as ``path``: case folded, the
+    macOS data-volume prefix dropped (over-matching on Linux is harmless)."""
+    folded = _fold(path)
+    parts, volume = folded.parts, _DATA_VOLUME.parts
+    if len(parts) > len(volume) and parts[: len(volume)] == volume:
+        return Path("/", *parts[len(volume) :])
+    return folded
+
+
 def is_dotenv(name: str) -> bool:
     name = name.casefold()
     return name == ".env" or name.startswith(".env.")
@@ -101,7 +116,7 @@ def _under(path: Path, root: Path) -> bool:
 def _secret_roots(home: Path, rels: tuple[str, ...]) -> tuple[tuple[Path, str], ...]:
     """``home``'s credential paths, folded once: every floor check compares
     against all of them."""
-    return tuple((_fold(home / rel), rel) for rel in rels)
+    return tuple((alias_key(home / rel), rel) for rel in rels)
 
 
 def _reason(
@@ -110,7 +125,7 @@ def _reason(
     skep_homes: tuple[Path, ...],
     templates_ok: bool = False,
 ) -> str | None:
-    folded = _fold(path)
+    folded = alias_key(path)
     if is_dotenv(folded.name) and not (templates_ok and _is_dotenv_template(folded.name)):
         return f"{path} is a .env file"
     for home in user_homes:
@@ -118,8 +133,8 @@ def _reason(
             if _under(folded, root):
                 return f"{path} is under ~/{rel}"
     for home in skep_homes:
-        if folded == _fold(home.parent / SERVE_ENV) or (
-            _under(folded, _fold(home))
+        if folded == alias_key(home.parent / SERVE_ENV) or (
+            _under(folded, alias_key(home))
             and any(fnmatch(folded.name, pat) for pat in SKEP_SECRET_NAMES)
         ):
             return f"{path} is one of skep's own secrets"

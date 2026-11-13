@@ -2477,12 +2477,20 @@ class ChatEngine:
         taint = self.store.get_chat_taint(chat_id)  # P4-1: a tainted chat keeps less
         # P4-2 (ADR 0059 D6): the tier is asked again here, on every confirm
         # path — HIGH as recorded at proposal, or HIGH now.
+        shown = (action.card or {}).get("manifest")
+        # W13: a dispatch is judged on what its run would get NOW, not only
+        # on what the card showed — a project widened since is caught here.
+        fresh = (
+            dispatch_manifest_for(self.store, self.holder, action.args, chat_id)
+            if confirm and shown is not None and action.status == "proposed"
+            else None
+        )
         high = (action.card or {}).get("high") or high_tier(
             action.tool,
             action.args,
             taint=taint,
             store=self.store,
-            manifest=(action.card or {}).get("manifest"),
+            manifest=fresh or shown,
         )
         if confirm and high is not None and actor.startswith("channel:"):
             # I6: a messenger account is not the operator's desk. Refused
@@ -2507,6 +2515,13 @@ class ChatEngine:
                     detail=f"this card folds {len(lines)} items, too many or too long for a "
                     "messenger to show in full: open the skep web UI to read and confirm them",
                 )
+        widened = None if fresh is None else actions.manifest_widening(shown or {}, fresh)
+        if widened is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"this dispatch card is stale: since it was shown, {widened}. "
+                "Nothing ran. Propose the dispatch again so the card shows what the run gets now",
+            )
         folded = [item["args"] for item in action.fold_items()]  # P4-2: every item
         named = keep is not None
         if keep is None:
@@ -2694,8 +2709,22 @@ class ChatEngine:
                             preanswered=preanswered,
                         )
                     )
-            except BaseException:
+            except Exception as exc:
                 if not payloads:  # nothing ran: hand the card back, as always
+                    self.store.unclaim_chat_action(action_id)
+                    raise
+                # W12: something ran — this item failed and the rest never run
+                # (PR #61): the card ends now, one result per item.
+                payloads.append({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+                payloads += [
+                    {
+                        "ok": False,
+                        "interrupted": True,
+                        "note": "not run: an earlier item of this card failed",
+                    }
+                ] * (len(items) - len(payloads))
+            except BaseException:
+                if not payloads:
                     self.store.unclaim_chat_action(action_id)
                 raise  # something ran: it stays claimed (restart marks it interrupted)
             payload = (

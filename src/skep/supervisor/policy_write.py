@@ -13,7 +13,10 @@ forbidden-combination checks on it before anything is stored:
 6. a NEW allow — a grant or an overlay rule — lands inside a deny at any
    layer (setup document, overlay, baseline, the chat's role) or the floor.
 
-A finding the current stack does not already hold rejects the write
+Check 2 only warns (W16, the operator's choice): the write lands and its
+answer (and card, ``policy_warnings``) says that a chat reading there will
+ask before it searches or fetches — the trifecta guard does that at decide
+time. Any other finding the current stack does not already hold rejects the write
 (``PolicyWriteRejected``) naming the rule and its layer, and nothing is
 stored. One the current stack already holds — a home that predates this
 check — is not this write's doing: decide() still handles it, and doctor
@@ -33,8 +36,11 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import unicodedata
 from collections import Counter, deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -50,7 +56,7 @@ from .policy_v3 import (
     load_stack,
     operator_lane,
 )
-from .secret_floor import HOME_SECRETS
+from .secret_floor import HOME_SECRETS, alias_key
 from .store import RunStore
 
 if TYPE_CHECKING:
@@ -78,9 +84,7 @@ EGRESS_PROBES = {
     "search": "ddgs",
 }
 _HINTS = {
-    1: "allow a narrower path that misses the credential files",
-    2: "a read inside the operator roots (the skep home, the repos root, a /workon "
-    "directory), or deny the egress first (set_operator_policy deny network search *)",
+    1: "allow (or bind) a narrower path that misses the credential files",
     3: "keep the exact command from its card instead (an exact-argv grant)",
     6: "the deny wins: narrow the allow so it misses the deny, or remove the deny first",
 }
@@ -88,6 +92,61 @@ _HINTS = {
 
 class PolicyWriteRejected(ValueError):
     """A policy write would create a §5.4 forbidden combination."""
+
+
+# -- W14: one writer at a time -------------------------------------------------
+
+# ponytail: one in-process lock for every policy writer — serve is one
+# process per home. Another process (the CLI) is caught by the
+# compare-and-set in ``write_setting``, on the policy document and the
+# overlay only: a group, project or baseline write from the CLI racing
+# serve is not (a lease row in the store would cover those).
+_WRITE_LOCK = threading.RLock()
+_LOCAL = threading.local()
+CAS_ATTEMPTS = 5
+UNCHANGED: Any = object()  # ``write_setting``'s plan: nothing to write
+
+
+@contextmanager
+def policy_write() -> Iterator[None]:
+    """W14: hold the policy write lock across a writer's read -> check ->
+    write. A ``vet_write`` replay asked for inside runs after the outermost
+    one releases the lock (it re-decides up to 200 rows: seconds), filling
+    the report it returned; a nested write runs its replays before it
+    returns, still under the outer lock."""
+    later: list[Callable[[], None]] = []
+    with _WRITE_LOCK:
+        outer = getattr(_LOCAL, "later", None)
+        _LOCAL.later = later
+        try:
+            yield
+        finally:
+            _LOCAL.later = outer
+        if outer is not None:
+            for replay in later:
+                replay()
+            return
+    for replay in later:
+        replay()
+
+
+def write_setting[T](store: RunStore, key: str, plan: Callable[[], tuple[Any, T]]) -> T:
+    """W14: one policy setting's read -> check -> write. ``plan`` reads the
+    store, checks (raising refuses) and returns the value to store (or
+    ``UNCHANGED``) and its answer. Under the lock, and compare-and-set: if
+    another process changed ``key`` meanwhile, nothing is written and the
+    plan runs again on the new value, at most ``CAS_ATTEMPTS`` times."""
+    for _ in range(CAS_ATTEMPTS):
+        with policy_write():
+            seen = store.get_setting(key)
+            value, answer = plan()
+            if value is UNCHANGED or store.compare_and_set_setting(key, seen, value):
+                return answer
+            _LOCAL.later.clear()  # this attempt's replays describe a write that did not land
+    raise PolicyWriteRejected(
+        f"policy write refused, nothing was stored: another skep process changed {key!r} "
+        f"{CAS_ATTEMPTS} times while this write was being checked. Try again"
+    )
 
 
 class Allow(NamedTuple):
@@ -137,17 +196,19 @@ def would_be_stack(
     *,
     settings: Mapping[str, Any] | None = None,
     baseline: PolicyTemplate | None = None,
+    chat: str | None = None,
 ) -> Stack:
     """The operator stack as it will decide after the write — nothing written.
+    ``chat``: as that chat decides (its session grants, its taint; W18).
     Only the Queen's lane: the run lane (groups, project overlays, knobs)
     carries no rule a §5.4 check reads (no filesystem read, no host shell)."""
     from .policy_layers import baseline_guard
 
-    stack = load_stack(holder, store)
+    stack = load_stack(holder, store, chat=chat)
     if not settings and baseline is None:
         return stack
     pending = cast(RunStore, _Pending(store, dict(settings or {})))
-    operator, ignored = operator_lane(pending, baseline=baseline)
+    operator, ignored = operator_lane(pending, chat=chat, baseline=baseline)
     guard = {} if baseline is not None else baseline_guard(pending)
     return replace(stack, operator=operator, ignored=ignored, guard=guard)
 
@@ -183,12 +244,29 @@ def _outside(stack: Stack, rule: ResolvedRule) -> bool:
     return not any(rule_matches(r, "filesystem", path) for r in stack.roots)
 
 
-def findings(stack: Stack, new: Sequence[Allow] = (), role: Role | None = None) -> list[Finding]:
+def findings(
+    stack: Stack,
+    new: Sequence[Allow] = (),
+    role: Role | None = None,
+    roots: Sequence[Path] = (),
+) -> list[Finding]:
     """Every §5.4 check this code base can evaluate, over one stack; check 6
-    only for ``new`` (the allows this write adds)."""
+    only for ``new`` (the allows this write adds), check 1 on ``roots`` (the
+    operator roots this write adds: the Queen reads all of one)."""
     out: list[Finding] = []
     reads = [r for r in _rules(stack, "filesystem", "allow") if r.action == "read"]
     secrets = _secret_probes(stack.home)
+    for root in roots:
+        key = alias_key(root)
+        probe = next(
+            (p for p in secrets if alias_key(Path(p)) == key or key in alias_key(Path(p)).parents),
+            None,
+        )
+        if probe is not None:
+            out.append(
+                Finding(1, f"1:root:{root}", f"binding {root} makes it an operator root, and it "
+                        f"holds {probe}, a secret-floor path (§5.4 check 1)")
+            )  # fmt: skip
     for rule in reads:
         probe = next((p for p in secrets if rule_matches(rule, "filesystem", p)), None)
         if probe is not None:
@@ -211,9 +289,9 @@ def findings(stack: Stack, new: Sequence[Allow] = (), role: Role | None = None) 
                 Finding(
                     2,
                     f"2:{_name(read)}+{by}",
-                    f"{_name(read)} allows reading outside the workspace ({read.pattern}) and "
-                    f"{by} allows network {action} to any host — together they can carry a "
-                    "private file off this machine (§5.4 check 2)",
+                    f"{_name(read)} allows reading outside the operator roots ({read.pattern}) "
+                    f"while {by} allows network {action} to any host: a chat that reads there "
+                    "will ask before it searches or fetches",
                 )
             )
     shell: dict[str, Finding] = {}
@@ -305,6 +383,7 @@ def vet_write(
     baseline: PolicyTemplate | None = None,
     new: Sequence[Allow] = (),
     role: Role | None = None,
+    roots: Sequence[Path] = (),
     replay: bool = True,
 ) -> dict[str, Any]:
     """The one write-time check every policy writer calls BEFORE it stores
@@ -316,18 +395,50 @@ def vet_write(
     before = load_stack(holder, store)
     after = would_be_stack(holder, store, settings=settings, baseline=baseline)
     held = {f.key for f in findings(before)}
-    fresh = [f for f in findings(after, new, role) if f.key not in held]
-    if fresh:
-        raise PolicyWriteRejected(rejection(fresh))
+    if roots:  # W15: the would-be stack reads inside the roots this write binds
+        from .policy_v3 import root_rules
+
+        after = replace(after, roots=(*after.roots, *root_rules(roots)))
+    fresh = [f for f in findings(after, new, role, roots) if f.key not in held]
+    # W16 (the operator's choice): check 2 warns. The trifecta guard makes a
+    # chat that read outside the roots ask before any search or fetch.
+    refused = [f for f in fresh if f.check != 2]
+    if refused:
+        raise PolicyWriteRejected(rejection(refused))
     warnings = [
         f"grant {entry} now lands inside a deny and is ignored — revoke it or narrow the deny"
         for entry in after.ignored
         if entry not in before.ignored
     ]
+    warnings += list(dict.fromkeys(f.message for f in fresh if f.check == 2))
+    report: dict[str, Any] = {"warnings": warnings}
     if not replay:
-        return {"warnings": warnings}
-    summary, line = _replay(holder.current.audit_dir, after, before=before)
-    return {"warnings": warnings, "replay": summary, "replay_line": line}
+        return report
+    audit_dir = holder.current.audit_dir
+    prior = {key: store.get_setting(key) for key in settings or {}}  # read under the lock
+    pending = dict(settings or {})
+    ready = holder
+
+    def stacks_for(chat: str) -> tuple[Stack, Stack | None] | None:
+        """W18: a chat's row replays as that chat decides. A baseline write's
+        old layer is not kept: its chat rows are not replayed."""
+        if baseline is not None:
+            return None
+        return (
+            would_be_stack(ready, store, settings=pending, chat=chat),
+            would_be_stack(ready, store, settings=prior, chat=chat),
+        )
+
+    def replay_now() -> None:
+        summary, line = _replay(audit_dir, after, before=before, stacks_for=stacks_for)
+        report.update(replay=summary, replay_line=line)
+
+    later = getattr(_LOCAL, "later", None)
+    if later is None:
+        replay_now()
+    else:
+        later.append(replay_now)  # W14: once the policy write lock is released
+    return report
 
 
 # -- replay ------------------------------------------------------------------
@@ -353,8 +464,15 @@ def read_log(audit_dir: Path, limit: int = REPLAY_ROWS) -> list[dict[str, Any] |
     return rows
 
 
+StacksFor = Callable[[str], "tuple[Stack, Stack | None] | None"]
+
+
 def _replay(
-    audit_dir: Path, after: Stack, *, before: Stack | None = None
+    audit_dir: Path,
+    after: Stack,
+    *,
+    before: Stack | None = None,
+    stacks_for: StacksFor | None = None,
 ) -> tuple[dict[str, Any], str]:
     """The replay and its line; a log the serve cannot read is said, never
     raised — the replay is advisory and must not fail the write."""
@@ -363,7 +481,7 @@ def _replay(
     except OSError as exc:
         summary = replay_decisions([], after, before=before)
         return summary, f"replay: the decision log could not be read ({exc.strerror or exc})"
-    summary = replay_decisions(rows, after, before=before)
+    summary = replay_decisions(rows, after, before=before, stacks_for=stacks_for)
     return summary, replay_line(summary)
 
 
@@ -383,8 +501,14 @@ def _unreplayable(row: dict[str, Any] | None) -> str | None:
     if (scope, action) in READ_ONLY_REQUESTS:
         return "read-only fact not logged"
     if (scope, action) == ("network", "fetch"):
-        return "URL not logged (a url_prefix grant needs it)"
-    if str(row.get("decided_by") or "").startswith("grant:session"):
+        url = row.get("url")
+        if not isinstance(url, str) or not url:  # a row from before W18
+            return "URL not logged (a url_prefix grant needs it)"
+        if _MASK in url:
+            return "value redacted in the log"
+        if row.get("url_query"):
+            return "query not logged"
+    if str(row.get("decided_by") or "").startswith("grant:session") and not row.get("chat"):
         return "chat-bound grant (chat not logged)"
     return None
 
@@ -393,19 +517,37 @@ VERDICT_WORDS = {"allow": "allows", "require_approval": "asks", "deny": "denies"
 
 
 def replay_decisions(
-    rows: Sequence[dict[str, Any] | None], after: Stack, *, before: Stack | None = None
+    rows: Sequence[dict[str, Any] | None],
+    after: Stack,
+    *,
+    before: Stack | None = None,
+    stacks_for: StacksFor | None = None,
 ) -> dict[str, Any]:
     """Re-decide each row under ``after``; against ``before`` when given (what
     one write changes), else against the logged verdict (what changed since:
-    ``migrate --dry-run``). Counts per flip, two short examples each."""
+    ``migrate --dry-run``). Counts per flip, two short examples each. W18: a
+    row that names its chat re-decides on ``stacks_for(chat)`` (that chat's
+    session grants and taint); without it, a chat row decides as no chat."""
     from .roles import resolve_role
 
     skipped: Counter[str] = Counter()
     flips: Counter[str] = Counter()
     examples: dict[str, list[str]] = {}
+    rules: dict[str, list[str]] = {}
     replayed = 0
+    chats: dict[str, tuple[Stack, Stack | None] | None] = {}
     for row in rows:
         why = _unreplayable(row)
+        row_after, row_before = after, before
+        chat = row.get("chat") if why is None and row is not None else None
+        if isinstance(chat, str) and chat and stacks_for is not None:
+            if chat not in chats:
+                chats[chat] = stacks_for(chat)
+            found = chats[chat]
+            if found is None:
+                why = "chat row on a baseline write (not replayed)"
+            else:
+                row_after, row_before = found[0], (found[1] if before is not None else None)
         role = None
         if why is None and row is not None and row.get("role"):
             try:
@@ -416,9 +558,12 @@ def replay_decisions(
             skipped[why or "unreadable row"] += 1
             continue
         req = Request(row["scope"], row["action"], row["value"])
+        url = row.get("url") if isinstance(row.get("url"), str) else None
         try:
-            new = decide(req, stack=after, role=role)
-            old_view = None if before is None else decide(req, stack=before, role=role)
+            new = decide(req, stack=row_after, role=role, url=url)
+            old_view = (
+                None if row_before is None else decide(req, stack=row_before, role=role, url=url)
+            )
         except (ValueError, OSError, RecursionError):  # a value nothing can decide
             skipped["unreadable row"] += 1
             continue
@@ -434,25 +579,45 @@ def replay_decisions(
         flips[label] += 1
         shown = examples.setdefault(label, [])
         if len(shown) < 2:
-            text = " ".join(req.value.split())[:48].replace("`", "'")
-            shown.append(f"{req.scope}.{req.action} `{text}` ({old_by} → {new.decided_by})")
+            # W17: the value is model- or attacker-chosen: plain text, and
+            # only in ``examples`` (the operator's CLI); ``rules`` is what a
+            # card or a tool result shows: the layers only, since a learned
+            # rule id is ``scope:action:<pattern>``, a value too.
+            text = plain(req.value)[:48].replace("`", "'")
+            why = f"({plain(str(old_by))} → {plain(str(new.decided_by))})"
+            shown.append(f"{req.scope}.{req.action} `{text}` {why}")
+            layers = f"({_layer(old_by)} → {_layer(new.decided_by)})"
+            rules.setdefault(label, []).append(f"{req.scope}.{req.action} {layers}")
     return {
         "rows": len(rows),
         "replayed": replayed,
         "flips": dict(flips),
         "examples": examples,
+        "rules": rules,
         "not_replayable": dict(skipped),
     }
 
 
+def _layer(decided_by: object) -> str:
+    """The layer of a ``layer/rule_id`` verdict label, as plain text."""
+    return plain(str(decided_by).partition("/")[0])[:32]
+
+
+def plain(text: str) -> str:
+    """W17: logged text as one plain line — every control, format and
+    escape character (C0, C1, DEL, ESC, bidi and zero-width) removed."""
+    return "".join(ch for ch in " ".join(text.split()) if unicodedata.category(ch)[0] != "C")
+
+
 def replay_line(summary: Mapping[str, Any]) -> str:
-    """The summary in one line, for a card, a tool result and the CLI."""
+    """The summary in one line, for a card, a tool result and the CLI —
+    counts and the deciding layers, never a logged value or rule id (W17)."""
     if not summary["rows"]:
         return "replay: the decision log is empty — no past decision to compare"
     parts = []
     for label, n in summary["flips"].items():
         old, _, new = label.partition("->")
-        shown = "; ".join(summary["examples"].get(label, []))
+        shown = "; ".join(dict.fromkeys(summary.get("rules", {}).get(label, [])))
         parts.append(f"now {VERDICT_WORDS[new]} {n} past {VERDICT_WORDS[old]}: {shown}")
     head = f"replay of the last {summary['rows']} decisions: " + (
         "; ".join(parts) if parts else f"none of {summary['replayed']} replayed flips"
@@ -480,7 +645,11 @@ def migration_report(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
     from .policy_schema import SCOPES
 
     stack = load_stack(holder, store)
-    summary, line = _replay(holder.current.audit_dir, stack)
+    summary, line = _replay(
+        holder.current.audit_dir,
+        stack,
+        stacks_for=lambda chat: (load_stack(holder, store, chat=chat), None),
+    )
     b31 = None
     missing = [s for s in SCOPES if s not in set(engine_v2_scopes(store))]
     if missing and isinstance(verify(store_home(store)), Ok):
@@ -491,7 +660,7 @@ def migration_report(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
     return {
         "replay": summary,
         "replay_line": line,
-        "held": [f.message for f in findings(stack)],
+        "held": [f.message for f in findings(stack) if f.check != 2],  # W16: 2 only warns
         "b31": b31,
     }
 

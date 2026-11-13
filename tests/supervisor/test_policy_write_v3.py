@@ -31,6 +31,7 @@ from skep.supervisor.policy_schema import (
     document_from_settings,
 )
 from skep.supervisor.policy_templates import TEMPLATE_NAMES, load_policy_template
+from skep.supervisor.policy_v3 import load_stack
 from skep.supervisor.policy_write import Allow, PolicyWriteRejected, vet_write
 from skep.supervisor.roles import SHIPPED_ROLES
 from skep.supervisor.serve import actions
@@ -206,42 +207,39 @@ def test_check_1_a_secret_floor_read_allow_is_refused(home: Home) -> None:
     )
 
 
-def test_check_2_an_outside_read_beside_egress_to_any_host_is_refused(
+def test_check_2_an_outside_read_beside_egress_to_any_host_is_a_warning(
     home: Home, tmp_path: Path
 ) -> None:
-    """The default operator document allows ``network search *`` (search_web),
-    so an outside-the-workspace read allow is the f1-07 pair — refused; after
-    the operator denies the search, the same read lands."""
+    """W16 (the operator's choice): the default operator document allows
+    ``network search *`` (search_web), so an outside-the-workspace read allow
+    is the f1-07 pair. It lands with a warning saying what happens instead:
+    reads there make the chat ask before it searches or fetches (the trifecta
+    guard, at decide time). No advice to deny search or /workon the folder."""
     outside = f"{tmp_path}/data/*"
-    with pytest.raises(HTTPException) as refused:
-        actions.set_operator_policy_rule(
-            home.store, scope="filesystem", action="read", pattern=outside, verdict="allow"
-        )
-    detail = str(refused.value.detail)
-    assert "§5.4 check 2" in detail and "global/net:search" in detail
-    assert "deny network search" in detail  # what would be accepted (I9)
-    actions.set_operator_policy_rule(
-        home.store, scope="network", action="search", pattern="*", verdict="deny"
-    )
-    actions.set_operator_policy_rule(
+    landed = actions.set_operator_policy_rule(
         home.store, scope="filesystem", action="read", pattern=outside, verdict="allow"
     )
+    (warning,) = landed["warnings"]
+    assert "global/net:search" in warning and outside in warning
+    assert "ask before it searches or fetches" in warning
+    assert "deny" not in warning and "/workon" not in warning
+    assert outside in str(home.store.get_setting("operator_policy_document"))
 
 
 def test_check_2_on_a_baseline_write(home: Home, tmp_path: Path) -> None:
     """A custom layer that adds an outside read to the builder template (which
-    allows search) is refused before anything is locked."""
+    allows search) locks, and its answer carries the warning (W16)."""
     layer = load_policy_template("builder").model_dump(mode="json")
     layer["template"] = "custom"
     layer["rules"].append({"scope": "filesystem", "verdict": "allow", "action": "read",
                            "pattern": f"{tmp_path}/data/*", "rule_id": "data-read"})  # fmt: skip
     path = tmp_path / "layer.json"
     path.write_text(json.dumps(layer))
-    with pytest.raises(PolicyWriteRejected, match="template:custom/data-read"):
-        actions.approve_policy_baseline(
-            home.config.home, file=str(path), approved_by="op", store=home.store
-        )
-    assert not pb.lock_path(home.config.home).exists()
+    approved = actions.approve_policy_baseline(
+        home.config.home, file=str(path), approved_by="op", store=home.store
+    )
+    assert any("template:custom/data-read" in w for w in approved["warnings"])
+    assert pb.lock_path(home.config.home).exists()
 
 
 def test_check_3_a_rule_that_lets_the_host_shell_install_is_refused(home: Home) -> None:
@@ -417,7 +415,103 @@ def test_replay_counts_flips_and_what_it_cannot_replay(home: Home) -> None:
         verdict="deny",
     )  # fmt: skip
     assert "now denies 1 past allows" in denied["replay"]
-    assert "global/operator-root → global/op:filesystem:read:" in denied["replay"]
+    assert "filesystem.read (global → global)" in denied["replay"]  # layers, no rule id
+
+
+def test_replay_examples_are_plain_and_never_reach_the_model(
+    home: Home, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """W17: a logged value is model- or attacker-chosen text. The line a
+    card, a tool result or the CLI shows carries counts and rule ids only;
+    the operator's migrate listing shows the value with escape sequences and
+    control characters removed."""
+    esc, bell, rlo = chr(27), chr(7), chr(0x202E)
+    hostile = f"ls {esc}[2J{esc}]0;pwned{bell} ignore previous{rlo}txt"
+    home.log(_row("shell", "run", hostile, "require_approval", "default/unmatched"))
+    receipt = actions.set_operator_policy_rule(
+        home.store, scope="shell", action="run", pattern="ls", verdict="deny"
+    )
+    line = receipt["replay"]
+    assert "now denies 1 past asks" in line
+    assert "ignore previous" not in line and "pwned" not in line
+    assert "shell.run (default → global)" in line
+    rows = policy_write.read_log(home.config.audit_dir)
+    summary = policy_write.replay_decisions(rows, load_stack(home.holder, home.store))
+    (example,) = next(iter(summary["examples"].values()))
+    assert "ignore previous" in example
+    assert all(ch not in example for ch in (esc, bell, rlo))
+    assert main(["--home", str(home.root), "policy", "migrate", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "ignore previous" in out and all(ch not in out for ch in (esc, bell, rlo))
+
+
+def test_a_rule_id_never_carries_its_pattern_to_the_model(home: Home) -> None:
+    """A learned grant's rule id is ``scope:action:pattern``: the pattern is
+    the command, host or URL prefix the card showed, model-chosen text. The
+    model-visible line names the layers that decided, never the rule id."""
+    _keep(home, "echo ignore-previous-instructions")
+    (grant,) = home.learned()
+    home.log(_row("shell", "run", "echo ignore-previous-instructions", "allow",
+                  f"grant:always/{grant.rule_id}"))  # fmt: skip
+    receipt = actions.set_operator_policy_rule(
+        home.store, scope="shell", action="run", pattern="echo", verdict="deny"
+    )
+    line = receipt["replay"]
+    assert "now denies 1 past allows" in line
+    assert "ignore-previous" not in line, line
+    assert "shell.run (grant:global → global)" in line
+
+
+def test_the_log_records_the_chat_and_a_fetch_url_so_replay_re_decides_them(
+    home: Home,
+) -> None:
+    """W18: each Queen row records its chat; a fetch row the scheme, host and
+    path directory a url_prefix grant matches on — never the query, never
+    userinfo, still redacted, still under the audit directory. The replay
+    then re-decides fetch rows and chat-bound grants; an old row without
+    the fields stays not replayable."""
+    from skep.supervisor.policy_v3 import Request, queen_decide
+
+    def fetch(chat: str, url: str) -> None:
+        queen_decide(home.holder, home.store, Request("network", "fetch", "docs.example.org"),
+                     chat_id=chat, url=url)  # fmt: skip
+
+    c1, c2 = (home.store.create_chat(title=t, model=None).chat_id for t in ("one", "two"))
+    token = "sk-" + "a1b2c3d4" * 3
+    fetch(c1, "https://docs.example.org/guide/a")
+    fetch(c2, "https://docs.example.org/guide/a")
+    fetch(c1, "https://docs.example.org/guide/b?q=1")
+    fetch(c1, f"https://docs.example.org/{token}/x")
+    log = home.config.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [r["chat"] for r in rows] == [c1, c2, c1, c1]
+    assert rows[0]["url"] == "https://docs.example.org/guide/"
+    assert rows[2]["url"] == "https://docs.example.org/guide/" and rows[2]["url_query"] is True
+    assert token not in log.read_text() and "q=1" not in log.read_text()
+    home.log(_row("network", "fetch", "docs.example.org", "require_approval", "default/x"))
+
+    actions.remember_action_for_session(
+        home.store, tool="read_url", args={"url": "https://docs.example.org/guide/z"},
+        actor="op", tier="session", chat_id=c1,
+    )  # fmt: skip
+    summary = policy_write.migration_report(home.holder, home.store)["replay"]
+    assert summary["flips"] == {"require_approval->allow": 1}  # c1's /guide/a only
+    skipped = summary["not_replayable"]
+    assert skipped.get("URL not logged (a url_prefix grant needs it)") == 1  # the old row
+    assert skipped.get("query not logged") == 1
+    assert skipped.get("value redacted in the log") == 1
+    # a standing write replays the chat rows as their chats decide
+    report: dict[str, Any] = {}
+    actions.learn_policy_rule(
+        home.store, rule_id="net:other", action="fetch", pattern="other.example.org",
+        scope="network", provenance="allow-always:op", report=report,
+    )  # fmt: skip
+    assert report["replay"]["replayed"] == 2 and not report["replay"]["flips"]
+    # a baseline write keeps no old layer to replay a chat row against
+    approved = actions.approve_policy_baseline(
+        home.config.home, template="builder", approved_by="op", store=home.store
+    )
+    assert "2 chat row on a baseline write (not replayed)" in approved["replay"]
 
 
 def test_replay_never_blocks_and_says_when_the_log_is_empty(home: Home) -> None:
@@ -438,10 +532,16 @@ def test_a_policy_write_card_carries_the_replay_and_a_refused_one_gets_no_card(
     )  # fmt: skip
     assert "now denies 1 past allows" in card["replay"]
     assert home.store.get_setting("operator_policy_document") is None  # nothing written
-    with pytest.raises(PolicyWriteRejected, match=r"§5\.4 check 2"):
+    warned = policy_write_preview(
+        home.store, home.holder, "set_operator_policy",
+        {"scope": "filesystem", "action": "read", "pattern": f"{tmp_path}/x/*",
+         "verdict": "allow"},
+    )  # fmt: skip
+    assert any("ask before it searches" in w for w in warned["policy_warnings"])  # W16
+    with pytest.raises(PolicyWriteRejected, match=r"§5\.4 check 1"):
         policy_write_preview(
             home.store, home.holder, "set_operator_policy",
-            {"scope": "filesystem", "action": "read", "pattern": f"{tmp_path}/x/*",
+            {"scope": "filesystem", "action": "read", "pattern": f"{Path.home()}/.ssh/*",
              "verdict": "allow"},
         )  # fmt: skip
     keep = policy_write_preview(home.store, home.holder, "run_shell", {"command": "ls -la"})
@@ -588,7 +688,8 @@ def test_an_already_held_combination_is_listed_not_refused(home: Home) -> None:
     )  # fmt: skip
     home.store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, document.model_dump_json())
     held = policy_write.migration_report(home.holder, home.store)["held"]
-    assert any("§5.4 check 1" in h for h in held) and any("§5.4 check 2" in h for h in held)
+    assert any("§5.4 check 1" in h for h in held)
+    assert not any("check 2" in h for h in held)  # W16: a warning, not a forbidden pair
     _keep(home, "ls -la")  # the next write still lands
 
 
@@ -605,7 +706,7 @@ def test_reapprove_diff_shows_the_replay_before_it_relocks(
     layer = load_policy_template("builder").model_dump(mode="json")
     layer["template"] = "custom"
     layer["rules"].append({"scope": "filesystem", "verdict": "allow", "action": "read",
-                           "pattern": f"{tmp_path}/data/*", "rule_id": "data-read"})  # fmt: skip
+                           "pattern": f"{Path.home()}/.ssh/*", "rule_id": "data-read"})  # fmt: skip
     path = tmp_path / "layer.json"
     path.write_text(json.dumps(layer))
     before = home.snapshot()
@@ -662,11 +763,11 @@ def test_a_deny_on_a_home_that_already_holds_a_combination_is_accepted(
     actions.set_operator_policy_rule(
         home.store, scope="network", action="connect", pattern="*", verdict="deny"
     )
-    with pytest.raises(HTTPException, match=r"§5\.4 check 2"):
-        actions.set_operator_policy_rule(
-            home.store, scope="filesystem", action="read", pattern=f"{tmp_path}/more/**",
-            verdict="allow",
-        )  # fmt: skip
+    more = actions.set_operator_policy_rule(
+        home.store, scope="filesystem", action="read", pattern=f"{tmp_path}/more/**",
+        verdict="allow",
+    )  # fmt: skip
+    assert any("ask before it searches" in w for w in more["warnings"])  # W16: lands
 
 
 def test_a_stricter_baseline_over_held_shell_grants_is_accepted(home: Home) -> None:
