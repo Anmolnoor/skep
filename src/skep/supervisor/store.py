@@ -12,7 +12,9 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+import os
 import sqlite3
+import subprocess
 import threading
 import uuid
 from collections.abc import Callable, Sequence
@@ -154,7 +156,10 @@ CREATE TABLE IF NOT EXISTS approvals (
     landing_branch TEXT,
     -- v40-F8 (v36-F4): the policy rule that routed this gate,
     -- "<template>/<rule_id>" (or "auto/<rule>" for auto-approvals).
-    decided_by TEXT
+    decided_by TEXT,
+    -- W27: who holds an 'applying' claim, {"pid", "started"} (process_owner);
+    -- the serve-start sweep takes only claims whose owner is gone.
+    claim_owner TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals (status, requested_at);
 CREATE TABLE IF NOT EXISTS approval_ledger (
@@ -892,6 +897,58 @@ class ProjectBindingRecord:
     created_at: str
 
 
+_THIS_PROCESS = object()
+
+
+def _process_started(pid: int) -> str | None:
+    """The process's start time as ``ps`` prints it (C locale, UTC), or None."""
+    try:
+        probe = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},  # lstart is local time
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return " ".join(probe.stdout.split()) or None
+
+
+@functools.cache
+def _own_owner(pid: int) -> str | None:
+    started = _process_started(pid)
+    return None if started is None else json.dumps({"pid": pid, "started": started})
+
+
+def process_owner(pid: int | None = None) -> str | None:
+    """W27: a claim's owner — the pid and its start time (a pid outlives its
+    process as a number; the pair does not). None when ``ps`` cannot say."""
+    if pid is None:
+        return _own_owner(os.getpid())  # keyed by pid: a fork recomputes
+    started = _process_started(pid)
+    return None if started is None else json.dumps({"pid": pid, "started": started})
+
+
+def owner_alive(owner: str | None) -> bool:
+    """W27: the recorded claimer still runs — same pid, same start time."""
+    try:
+        record = json.loads(owner) if owner else None
+        pid = int(record["pid"]) if isinstance(record, dict) else 0
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return False
+    if pid <= 0 or not isinstance(record, dict):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # alive, another user's
+    return bool(_process_started(pid) == record.get("started"))
+
+
 class RunStore:
     """Single-writer SQLite store for runs, events, artifacts, and approvals."""
 
@@ -1057,6 +1114,9 @@ class RunStore:
         if "decided_by" not in approval_columns:
             # v40-F8: the policy rule that routed this gate.
             self._conn.execute("ALTER TABLE approvals ADD COLUMN decided_by TEXT")
+        if "claim_owner" not in approval_columns:
+            # W27: the claimer's pid and start time (NULL: claimed before W27).
+            self._conn.execute("ALTER TABLE approvals ADD COLUMN claim_owner TEXT")
         action_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(chat_actions)")}
         if "source" not in action_columns:
             # v25-F1: operator-typed /commands audit beside model proposals.
@@ -1535,21 +1595,39 @@ class RunStore:
         return self.enqueue_approval(task_id, action=action, reason=reason)
 
     @_locked
-    def claim_approval(self, review_id: str) -> bool:
+    def claim_approval(self, review_id: str, *, owner: str | None | object = _THIS_PROCESS) -> bool:
         """ES-F4 (B17): pending → applying in ONE conditional UPDATE — the
-        card claim (ES-F1) for landings. Only the winner runs git."""
+        card claim (ES-F1) for landings. Only the winner runs git. W27: the
+        claim records its owner (this process unless given), so a restart
+        sweep can tell a live claimer — a CLI mid-resume — from a dead one."""
+        holder = process_owner() if owner is _THIS_PROCESS else owner
         cursor = self._conn.execute(
-            "UPDATE approvals SET status = 'applying' WHERE review_id = ? AND status = 'pending'",
-            (review_id,),
+            "UPDATE approvals SET status = 'applying', claim_owner = ?"
+            " WHERE review_id = ? AND status = 'pending'",
+            (holder, review_id),
         )
         self._conn.commit()
         return cursor.rowcount == 1
 
     @_locked
+    def approval_claim_owner(self, review_id: str) -> dict[str, Any] | None:
+        """W27: who holds this review's claim ({"pid", "started"}), or None."""
+        row = self._conn.execute(
+            "SELECT claim_owner FROM approvals WHERE review_id = ? AND status = 'applying'",
+            (review_id,),
+        ).fetchone()
+        try:
+            owner = json.loads(row[0]) if row is not None and row[0] else None
+        except json.JSONDecodeError:
+            return None
+        return owner if isinstance(owner, dict) else None
+
+    @_locked
     def unclaim_approval(self, review_id: str) -> None:
         """An apply that blew up unexpectedly hands the review back, pending."""
         self._conn.execute(
-            "UPDATE approvals SET status = 'pending' WHERE review_id = ? AND status = 'applying'",
+            "UPDATE approvals SET status = 'pending', claim_owner = NULL"
+            " WHERE review_id = ? AND status = 'applying'",
             (review_id,),
         )
         self._conn.commit()
@@ -1559,10 +1637,16 @@ class RunStore:
         """ES-F4 restart safety: a review still 'applying' at serve start was
         claimed by a process that died mid-git. Whether a commit landed is
         unknown, so it ends 'denied' with a note saying so — never quietly
-        pending again, where a retry could stack a second commit (I8)."""
-        rows = self._conn.execute(
-            "SELECT review_id, action FROM approvals WHERE status = 'applying'"
-        ).fetchall()
+        pending again, where a retry could stack a second commit (I8).
+        W27: only a claim whose owner is gone (or that predates owners); a
+        live claimer — the CLI's foreground resume — keeps its claim."""
+        rows = [
+            (review_id, action)
+            for review_id, action, owner in self._conn.execute(
+                "SELECT review_id, action, claim_owner FROM approvals WHERE status = 'applying'"
+            ).fetchall()
+            if not owner_alive(owner)
+        ]
         for review_id, action in rows:
             self.resolve_approval(
                 str(review_id),

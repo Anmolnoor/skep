@@ -42,6 +42,7 @@ from .actions import (
     created_transition_views_for_task,
     current_events,
     delete_policy_group,
+    deny_approval,
     diagnose_run,
     effective_policy_view,
     land_run,
@@ -993,16 +994,17 @@ def create_app(
         resumed_id = allow_network_host_and_resume(
             run_store, holder, runner, run, approval, review_id, principal(request)
         )
-        return {"action": "allowed_host", "resumed_as": resumed_id}
+        # W28 (B18): the host is a project grant; the receipt says where.
+        return {
+            "action": "allowed_host",
+            "resumed_as": resumed_id,
+            "remembered": remembered_where(run_store, Path(str(run["repo"]))),
+        }
 
     @app.post("/api/approvals/{review_id}/deny")
     def deny(review_id: str, body: ResolveRequest, request: Request) -> dict[str, str]:
-        pending_approval_or_409(run_store, review_id)
-        run_store.resolve_approval(
-            review_id,
-            approved=False,
-            actor=principal(request),
-            note=annotate_claim(body.note, body.actor),
+        deny_approval(
+            run_store, review_id, principal(request), annotate_claim(body.note, body.actor)
         )
         return {"action": "denied"}
 

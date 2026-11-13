@@ -287,7 +287,10 @@ def test_dispatched_worker_cannot_open_an_outbound_socket(
     """Q1 end-to-end: a worker's outbound connection is physically refused (EPERM)."""
     outcome = run_task(repo, "Probe the network. MODE:netprobe", config=config)
     assert outcome.record.state == "completed"
-    probe_path = config.results_dir / f"netprobe-{outcome.record.task_id}.json"
+    probe_path = (
+        config.result_path(outcome.record.task_id).parent
+        / f"netprobe-{outcome.record.task_id}.json"
+    )
     probe = json.loads(probe_path.read_text())
     assert probe["connected"] is False, "the worker reached the network — boundary is broken"
     assert probe["errno"] == errno.EPERM, (
@@ -313,7 +316,9 @@ def test_env_allowlist_is_a_boundary(
     assert outcome.record.state == "completed"
 
     # The fake worker writes the dump next to --out so it survives teardown.
-    dump_path = config.results_dir / f"envdump-{outcome.record.task_id}.json"
+    dump_path = (
+        config.result_path(outcome.record.task_id).parent / f"envdump-{outcome.record.task_id}.json"
+    )
     assert dump_path.is_file(), "envdump evidence missing"
     child_env = json.loads(dump_path.read_text())
     assert "CANARY_SECRET" not in child_env
@@ -334,7 +339,9 @@ def test_toolchain_state_gets_a_writable_workspace_home(
     outcome = run_task(repo, "Dump env. MODE:envdump", config=config, permissions=permissions)
     assert outcome.record.state == "completed"
 
-    dump_path = config.results_dir / f"envdump-{outcome.record.task_id}.json"
+    dump_path = (
+        config.result_path(outcome.record.task_id).parent / f"envdump-{outcome.record.task_id}.json"
+    )
     child_env = json.loads(dump_path.read_text())
     cache_prefix = str(config.home / "cache" / "projects")
     npm_cache = child_env.get("npm_config_cache", "")
@@ -447,7 +454,10 @@ def test_grandchildren_inherit_the_toolchain_env(repo: Path, config: SupervisorC
     outcome = run_task(repo, "Dump grandchild env. MODE:childenv", config=config)
     assert outcome.record.state == "completed"
 
-    dump_path = config.results_dir / f"childenv-{outcome.record.task_id}.json"
+    dump_path = (
+        config.result_path(outcome.record.task_id).parent
+        / f"childenv-{outcome.record.task_id}.json"
+    )
     grandchild_env = json.loads(dump_path.read_text())
     tmpdir = grandchild_env.get("TMPDIR", "")
     assert f"{os.sep}.toolchain{os.sep}tmp" in tmpdir

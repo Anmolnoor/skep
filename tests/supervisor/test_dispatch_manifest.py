@@ -325,3 +325,130 @@ def test_manifest_widening_per_field() -> None:
     assert "no envelope" in (manifest_widening({"error": "x"}, shown) or "")
     assert manifest_widening({"error": "x"}, {"error": "y"}) is None  # fails the same way
     assert manifest_widening(shown, {"error": "y"}) is None
+
+
+def test_a_zero_state_home_lists_the_registry_and_the_desk_answer_opens_it_for_that_run(
+    tmp_path: Path, repo: Path
+) -> None:
+    """B147 end to end: on a home with no approved baseline a role chat's
+    dispatch cards (nothing is auto-allowed there), the manifest lists the
+    registry hosts as asks, and confirming it at the desk lets the sandbox
+    proxy admit them for that run — a second run still has to ask."""
+    from skep.supervisor.netproxy import admit_target
+
+    from .test_deferred_asks_v7 import _zero_state
+    from .test_provider_hosts_v6a import _resolve_public
+
+    config = _zero_state(tmp_path, repo)
+    store = RunStore(config.db_path)
+    store.add_project_policy(  # the project's registry hosts, as setup writes them
+        project_id="app",
+        name="app",
+        strategy="trusted_local_dev",
+        phase="build",
+        policy={"default_network": ["pypi.org", "files.pythonhosted.org"]},
+    )
+    holder = ConfigHolder(config, store)
+    runner = _Runner()
+    ollama = FakeOllama(api_key=None).start()
+    store.set_setting(LLM_BASE_URL, ollama.base_url)
+    store.set_setting(LLM_DEFAULT_MODEL, "qwen3")
+    engine = ChatEngine(store=store, holder=holder, runner=runner, home=config.home)  # type: ignore[arg-type]
+    desk = Desk(config, store, holder, runner, engine, ollama, repo)
+    try:
+        chat, card = desk.propose()
+        manifest = card["card"]["manifest"]
+        assert manifest["network"] == []
+        assert {"pypi.org", "files.pythonhosted.org"} <= set(manifest["network_ask"])
+        desk.confirm(chat, card["action_id"])
+        execute_mutation(  # the same dispatch again, its own card not answered
+            "dispatch_run",
+            {"repo": str(repo), "instructions": "again"},
+            store=store,
+            holder=holder,
+            runner=runner,  # type: ignore[arg-type]
+            actor="chat-user",
+            chat_id=chat,
+        )
+    finally:
+        ollama.stop()
+        store.close()
+    approved, second = (s["permissions"] for s in runner.submitted)
+
+    def admitted(perms: Permissions) -> bool:
+        task = CodingWorkerTask.model_validate(
+            {
+                "contract_version": "0.3.7",
+                "task_id": "t",
+                "trace_id": "tr",
+                "worker_kind": "coding",
+                "workspace": str(tmp_path),
+                "instructions": "x",
+                "permissions": perms.model_dump(),
+                "budget": {"wall_clock_seconds": 60, "max_iterations": 1, "max_actions": 1,
+                           "max_provider_calls": 0},
+            }
+        )  # fmt: skip
+        status, _, _ = admit_target(
+            "pypi.org",
+            443,
+            tuple(effective_network_domains(task)),
+            denied_ports=(),
+            resolve=_resolve_public,  # resolved, never dialed
+        )
+        return status == 200
+
+    assert admitted(approved)
+    assert not admitted(second) and "pypi.org" in second.network_ask
+
+
+def _auto_dispatch(desk: Desk, network: list[str]) -> None:
+    project = desk.store.get_project_policy("app")
+    assert project is not None
+    desk.store.add_project_policy(
+        project_id="app",
+        name="app",
+        strategy=project.strategy,
+        phase=project.phase,
+        policy={
+            **project.policy,
+            "default_network": network,
+            "auto_dispatch_allowed": True,
+            "default_execution_mode": "sandbox",
+        },
+    )
+
+
+def test_an_auto_dispatch_whose_run_would_ask_cards_with_its_manifest(desk: Desk) -> None:
+    """B147 residue: a project that auto-dispatches let a role chat's
+    dispatch run unasked while its chain turned a grant into an ask. Nothing
+    pre-answered it, so a sandboxed `uv sync` met the proxy's 403 ("approve
+    it on the dispatch card") for a card that was never shown. Such a
+    dispatch now cards, listing the asks; one confirm answers them."""
+    _auto_dispatch(desk, ["pypi.org", "example.com"])
+    chat, card = desk.propose()
+    assert desk.runner.submitted == []  # not auto-run
+    assert card["card"]["manifest"]["network_ask"] == ["example.com"]
+    desk.confirm(chat, card["action_id"])
+    (submitted,) = desk.runner.submitted
+    assert "example.com" in submitted["permissions"].network
+    assert submitted["permissions"].network_ask == []
+
+
+def test_an_auto_dispatch_whose_run_asks_nothing_still_runs_unasked(desk: Desk) -> None:
+    _auto_dispatch(desk, ["pypi.org"])  # queen@builder allows pypi.org: nothing narrows
+    made = desk.store.create_chat(title="c", model=None, role="builder", source="web")
+    desk.ollama.script_tool_call(
+        "dispatch_run", {"repo": str(desk.repo), "instructions": "fix hello.py"}
+    )
+    desk.ollama.script_reply("dispatched")
+    desk.store.add_chat_message(made.chat_id, role="user", content="fix it")
+    base_url, api_key, model, protocol = desk.engine.resolved_llm(desk.store.get_chat(made.chat_id))
+    events = list(
+        desk.engine.turn_events(
+            made.chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
+        )
+    )
+    assert cards(events) == []
+    (submitted,) = desk.runner.submitted
+    assert submitted["permissions"].network_ask == []

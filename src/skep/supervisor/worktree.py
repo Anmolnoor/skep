@@ -111,6 +111,47 @@ def git_metadata_writable_roots(workspace: Path) -> tuple[Path, ...]:
     return (objects,) if git_dir == common_dir else (git_dir, objects)
 
 
+GIT_PROTOCOL_PIN = '[protocol]\n\tallow = never\n[protocol "file"]\n\tallow = always\n'
+GIT_PROTOCOL_PIN_FILE = "skep-protocol-pin"
+# A run worktree's git dir is <common dir>/worktrees/<task id>, every task id
+# is a uuid7, and git appends a digit to a name already taken. ``./`` anchors
+# the glob to the directory of the config file that holds it (the common dir).
+GIT_PROTOCOL_PIN_INCLUDE = "gitdir:./worktrees/????????-????-7???-????-????????????*"
+
+
+def pin_git_protocols(workspace: Path) -> Path | None:
+    """W31: the second carrier of the worker's ``GIT_ALLOW_PROTOCOL=file``,
+    in git config, which git reads with an EMPTY environment (``env -i git
+    push``) where the env var is gone — global config needs HOME, the system
+    file is not ours to write. The rule lives in ``skep-protocol-pin`` in the
+    repo's common dir, included from the shared config by one
+    ``[includeIf "gitdir:./worktrees/<uuid7>*"]`` section: only skep's task
+    worktrees match it; the operator's checkout (where open_pr and
+    push_branch push) and their own worktrees read none of it. A one-time
+    write to the operator's ``.git/config`` that every git client parses:
+    ``extensions.worktreeConfig`` (the first delivery) made libgit2 < 1.8
+    refuse a format-1 repo and dulwich < 0.22.x refuse any repo. Both files
+    sit in the common dir, read-only in the sandbox. None — the env var
+    alone — for a non-linked checkout, or where git in ``workspace`` does not
+    end up reading the rule."""
+    dirs = _git_dirs(workspace)
+    if dirs is None or dirs[0] == dirs[1]:
+        return None
+    common_dir = dirs[1]
+    pin = common_dir / GIT_PROTOCOL_PIN_FILE
+    try:
+        if not pin.is_file() or pin.read_text(encoding="utf-8") != GIT_PROTOCOL_PIN:
+            pin.write_text(GIT_PROTOCOL_PIN, encoding="utf-8")
+    except OSError:
+        return None
+    shared = str(common_dir / "config")
+    key = f"includeIf.{GIT_PROTOCOL_PIN_INCLUDE}.path"
+    if _git(workspace, "config", "--file", shared, "--get", key).stdout.strip() != pin.name:
+        _git(workspace, "config", "--file", shared, key, pin.name)  # read back below
+    seen = _git(workspace, "config", "--get", "protocol.allow").stdout.strip()
+    return pin if seen == "never" else None
+
+
 def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
     """The shared common dir a linked worktree's git must READ (HEAD, config, refs).
 

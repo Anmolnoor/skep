@@ -1279,7 +1279,19 @@ def cmd_review(args: argparse.Namespace) -> int:
             review_id = _pending_or_new(
                 store, record, reason=landing_reason(record.instructions, None)
             )
-            store.resolve_approval(review_id, approved=False, actor=actor, note=args.note)
+            from fastapi import HTTPException
+
+            from .serve.actions import deny_approval
+
+            try:
+                deny_approval(store, review_id, actor, args.note)
+            except HTTPException as exc:  # W27c: a resume or landing holds it
+                return _err(
+                    str(exc.detail),
+                    state=record.state,
+                    evidence=str(audit_dir),
+                    next_command=f"skep review {record.task_id}  # see what it left",
+                )
             print(f"denied: task {record.task_id} (by {actor})")
             print(f'  next: skep run {record.repo} "..." --resume-of {record.task_id}')
             return 0
@@ -1508,7 +1520,15 @@ def _prompt_inline_approval(
                 print(f"  remembered: {shlex.join(argv)} → {tier}")
             return _resume_pending_approval(config, run_store, record, actor, remembered=True)
         if choice in {"d", "deny", "n", "no"}:
-            run_store.resolve_approval(pending.review_id, approved=False, actor=actor)
+            from fastapi import HTTPException
+
+            from .serve.actions import deny_approval
+
+            try:
+                deny_approval(run_store, pending.review_id, actor, None)
+            except HTTPException as exc:  # W27c
+                print(f"not denied: {exc.detail}")
+                return None
             print(f"denied: task {record.task_id} (by {actor})")
             return STATE_EXIT_CODES.get(record.state, 3)
         print("approval left pending")
@@ -1555,6 +1575,37 @@ def _resume_pending_approval(
         )
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
     review_id = _pending_or_new(store, record, reason="resumed past approval gate")
+    # W27a: the claim serve's resume_past_gate takes (B142), held across this
+    # foreground run under this process's pid — a serve approve, or a serve
+    # restart's sweep, sees a live owner and leaves the gate alone.
+    if not store.claim_approval(review_id):
+        from .serve.actions import gate_taken
+
+        return _err(
+            str(gate_taken(store, review_id).detail),
+            state=record.state,
+            evidence=str(config.audit_dir / record.task_id),
+            next_command=f"skep review {record.task_id}  # see the resume that won",
+        )
+    try:
+        return _resume_claimed_gate(
+            config, store, record, actor, original, review_id, remembered=remembered
+        )
+    except BaseException:
+        store.unclaim_approval(review_id)  # never resolved: hand the gate back
+        raise
+
+
+def _resume_claimed_gate(
+    config: SupervisorConfig,
+    store: RunStore,
+    record: RunRecord,
+    actor: str,
+    original: CodingWorkerTask,
+    review_id: str,
+    *,
+    remembered: bool,
+) -> int:
     approval = store.get_approval(review_id)
     approval_reason = None if approval is None else approval.reason
     approval_action = None if approval is None else approval.action
@@ -1624,6 +1675,7 @@ def _resume_pending_approval(
         note=f"resumed as {outcome.record.task_id} ({outcome.record.state})"
         + ("; approval held for this serve session, in this repo only" if session_kept else ""),
         remembered=remembered,
+        claimed=True,
     )
     # v115-F1: the parent is superseded by its successor, as resume_past_gate
     # has said since v19-F8 — the CLI face left it "pending_approval" forever
@@ -2801,6 +2853,49 @@ def cmd_policy_decisions(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy_grants(args: argparse.Namespace) -> int:
+    """W29: every learned grant — id, what it matches, lifetime, binding —
+    through ``list_policy_rules``, the read behind ``GET /api/policy/rules``."""
+    from .serve.actions import list_policy_rules
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        rules = list_policy_rules(store)["rules"]
+    finally:
+        store.close()
+    if not rules:
+        print("no learned grants")
+        return 0
+    for rule in rules:
+        print(rule["rule_id"])
+        print(f"  matches:  {rule['scope']}.{rule['action']} {rule['pattern']} ({rule['matcher']})")
+        print(f"  lifetime: {rule['lifetime']}  bound to: {rule['bound']}")
+    print("  next: skep policy revoke <rule_id>")
+    return 0
+
+
+def cmd_policy_revoke(args: argparse.Namespace) -> int:
+    """W29: remove one learned grant through ``revoke_policy_rule`` — the verb
+    ``DELETE /api/policy/rules/<id>`` and the chat card call (ADR 0050)."""
+    from fastapi import HTTPException
+
+    from .serve.actions import revoke_policy_rule
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        receipt = revoke_policy_rule(store, rule_id=args.rule_id)
+    except HTTPException as exc:
+        return _err(str(exc.detail), next_command="skep policy grants")
+    finally:
+        store.close()
+    revoked = receipt["revoked"]
+    print(f"revoked: {revoked['rule_id']}")
+    print(f"  {revoked['scope']}.{revoked['action']} {revoked['pattern']} asks again")
+    return 0
+
+
 def cmd_policy_hook(args: argparse.Namespace) -> int:
     """P3 (ADR 0053): the Claude Code PreToolUse hook. Reads the payload on
     stdin, answers in the hook's JSON. No opinion (a tool the engine has no
@@ -3703,6 +3798,15 @@ def register_supervisor_commands(
     )
     policy_hook.add_argument("--actor", default="claude-code", help="recorded on every decision")
     policy_hook.set_defaults(func=cmd_policy_hook)
+    policy_grants = policy_sub.add_parser(
+        "grants", help="every learned grant: id, what it matches, lifetime, bound to (W29)"
+    )
+    policy_grants.set_defaults(func=cmd_policy_grants)
+    policy_revoke = policy_sub.add_parser(
+        "revoke", help="remove one learned grant by id; what it allowed asks again (W29)"
+    )
+    policy_revoke.add_argument("rule_id", help="as `skep policy grants` lists it")
+    policy_revoke.set_defaults(func=cmd_policy_revoke)
     policy_decisions = policy_sub.add_parser(
         "decisions", help="the decisions ledger, newest first, with verdict counts (ADR 0054)"
     )
