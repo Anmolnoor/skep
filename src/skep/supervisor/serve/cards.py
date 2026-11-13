@@ -277,6 +277,15 @@ def headline(tool: str, args: dict[str, Any], *, limit: int | None = 160) -> str
             if len(reason) > 160:
                 reason = f"{reason[:157]}…"
             return f"{tool} — {reason}"
+    if tool == "call_mcp_tool":
+        # L16: which tool, on which server, with what — an amount is the point
+        rendered = f"{args.get('server_id')}:{args.get('tool')}"
+        if args.get("arguments"):
+            rendered += " " + json.dumps(args["arguments"], ensure_ascii=False)
+        rendered = rendered.replace("\n", " ")
+        if limit is not None and len(rendered) > limit:
+            rendered = f"{rendered[: limit - 3]}…"
+        return f"{tool} — {rendered}"
     for key in _SUBJECT_KEYS:
         value = args.get(key)
         if value in (None, "", [], {}):
@@ -383,8 +392,17 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
         )
     if tool in _PUBLISHING_TOOLS:
         return "publishes to the remote — visible outside this machine, and not undone by a revert"
+    if tool == "deny_review":
+        return None  # refusing applies nothing
+    reason = str(args.get("reason") or "")
+    if tool == "approve_review" and reason and not reason.startswith("land "):
+        # L9: a worker gate, not a landing (landing reasons read 'land "…"')
+        return "lets the paused run go past this gate and do what it names, once"
     if tool in _LANDING_TOOLS:
         return "applies a patch to a real branch — landing IS the commit"
+    if tool == "set_operator_policy" and args.get("verdict") in ("deny", "require_approval"):
+        # L12: a deny or ask narrows; the _POLICY_TOOLS line would be a lie
+        return "adds a standing rule that makes matching actions ask or be refused"
     if tool == "revoke_policy_rule":
         # v109-F9: the one policy verb that NARROWS — the _POLICY_TOOLS line
         # ("widens…") would be a lie on this card.
@@ -396,6 +414,13 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
         return "widens what future runs may do without asking you again"
     if tool in _DESTRUCTIVE_TOOLS:
         return "removes state that cannot be restored from here"
+    if tool == "call_mcp_tool":
+        return (
+            f"runs {args.get('server_id')}:{args.get('tool')} as you with these arguments; "
+            "its reply comes into this conversation"
+        )
+    if tool == "register_mcp_server":
+        return "starts an MCP server whose tools can act as you"
     if tool in _NETWORK_TOOLS:
         host = _host_of(args)
         target = f" from {host}" if host else ""
@@ -528,7 +553,14 @@ def card_summary(
     why = purpose(description)
     if why is not None:
         summary["purpose"] = why
-    danger = risk(tool, safe_args)
+    held = None
+    if tool == "approve_review" and store is not None:
+        # L9: landing or gate is the approval's, never the model's ``reason`` arg
+        held = store.get_approval(str(safe_args.get("review_id") or ""))
+    danger = risk(tool, safe_args if held is None else {**safe_args, "reason": held.reason})
+    decision = (recorded or {}).get("decision") or {}
+    if decision.get("reason") == "shell.require_approval.unreadable_under_deny":
+        danger = str(decision.get("detail"))  # L13: the deny this line may get around
     if danger is not None:
         summary["risk"] = danger
     if tool in _POLICY_TOOLS:

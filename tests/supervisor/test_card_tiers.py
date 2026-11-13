@@ -387,6 +387,59 @@ def test_a_granted_non_read_mcp_call_cards_high_instead_of_running(live: Any) ->
     }  # fmt: skip
 
 
+def test_l3_a_doubly_tainted_chat_still_reads_inside_its_roots_with_no_card(live: Any) -> None:
+    """L3 (field test): once a chat held both bits, a read_file INSIDE the
+    workon'd repo — allowed by ``global/operator-root`` — became a HIGH card
+    (``tier/high``). D5 moves an allow to an ask only on the egress and action
+    lanes; a read inside the roots is neither. The tier still rises on a card
+    that asks for its own reason (a read outside the roots), with the line
+    that says how to clear the bits."""
+    env = live("builder")
+    chat = env.chat()
+    set_taint(env.store, chat, "both")
+    env.ollama.script_tool_call("read_file", {"path": str(env.paths["repo"] / "README.md")})
+    env.ollama.script_tool_call("read_file", {"path": str(env.paths["outside"] / "notes.txt")})
+    (card,) = cards(env.turn(chat, "read the readme and my notes"))
+    assert card["args"]["path"].endswith("notes.txt")
+    assert card["card"]["tier"] == "high"
+    assert "/trust" in card["card"]["taint"]
+    rows = env.store.chat_messages(chat)
+    readme = next(r for r in rows if r.role == "tool" and "README" in r.content)
+    assert json.loads(readme.content)["ok"] is True
+
+
+def test_l7_a_confirmed_result_tells_the_model_a_person_approved_it(live: Any) -> None:
+    """L7 (field test): after the operator confirmed a card the model read
+    ``{"ok": true, "result": …}`` — and a run_shell result naming the rule
+    that ASKED — and told the user "no card was needed". The confirmed row
+    says a person approved it; a denied one already says so."""
+    env = live("builder")
+    chat = env.chat()
+    env.ollama.script_tool_call("run_shell", {"command": "uname -a"})
+    (card,) = cards(env.turn(chat, "what kernel is this"))
+    env.ollama.script_reply("ok")
+    env.verdict(chat, card["action_id"], confirm=True)
+    row = next(r for r in env.store.chat_messages(chat) if r.tool_name == "run_shell")
+    assert json.loads(row.content)["approved"] == chat_module.APPROVED_NOTE
+
+
+def test_l4_a_read_in_skeps_own_home_is_not_called_outside_your_folders(live: Any) -> None:
+    """L4 (field test): reading a run's verify log under skep's audit dir set
+    ``private`` and the card said "it read a file outside your folders"."""
+    from skep.supervisor.serve.taint import taint_line
+
+    env = live("builder")
+    chat = env.chat()
+    log = env.holder.current.home / "audit" / "t1-verify.txt"
+    row = env.store.add_chat_message(
+        chat, role="tool", tool_name="read_file", tool_call_id="c1",
+        content=json.dumps({"ok": True, "result": {"path": str(log), "content": "ok"}}),
+    )  # fmt: skip
+    env.store.add_chat_taint(chat, private=row)
+    line = taint_line(env.store, chat, env.store.get_chat_taint(chat))
+    assert line is not None and "it read skep's own records" in line, line
+
+
 def test_an_mcp_tool_the_operator_allowed_by_name_is_not_high(live: Any) -> None:
     from skep.supervisor.serve import actions
 

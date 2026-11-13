@@ -484,15 +484,17 @@ def onboard_check(supervisor_home: Path) -> dict[str, Any]:
     try:
         scopes = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
         backend = store.get_setting(SANDBOX_BACKEND)
-        hosts = configured_provider_hosts(store, home)
+        hosts = list(dict.fromkeys(configured_provider_hosts(store, home)))  # L2: once each
     finally:
         store.close()
     # O5: a fresh home seeds every scope, so anything less is a narrowed switch.
     missing = [scope for scope in SCOPES if scope not in scopes]
-    checks["engine v2"] = _check(
+    # L2: ADR 0059 has no v1/v2 engine split; the switch only picks the scopes
+    # a home with no approved baseline holds to "ask" (policy_layers.baseline_guard)
+    checks["policy scopes"] = _check(
         not missing,
         f"{len(scopes)}/{len(SCOPES)} scopes — the baseline governs these"
-        + (f"; not routed (engine v1): {', '.join(missing)}" if missing else ""),
+        + (f"; switched off (no baseline guard): {', '.join(missing)}" if missing else ""),
     )
 
     if backend not in SANDBOX_BACKENDS:
@@ -572,14 +574,22 @@ def _counters(record: dict[str, Any]) -> tuple[int, int] | None:
     return turns, verdicts
 
 
-def verdict_why(decision: dict[str, Any] | None) -> str:
+def verdict_why(decision: dict[str, Any] | None, *, tool: str | None = None) -> str:
     """The one-line ``why`` under a verdict card, read off the decision the
     card already carries (I8): the rule and the layer it came from, then the
-    reason code. No decision means no rule named the tool — it asked by default."""
+    reason code. No decision: a tool that always cards says why it does
+    (L8, ``tools.ALWAYS_CARDS``); any other asked because no rule named it."""
     if not decision:
+        from .serve.tools import ALWAYS_CARDS
+
+        if tool in ALWAYS_CARDS:
+            return f"asked: {tool} always asks — {ALWAYS_CARDS[tool]}"
         return "asked: no policy rule covers this tool, so it asks by default"
     if decision.get("decided_by") == "default/unmatched":  # ADR 0059: decide() matched nothing
         return "asked: no policy rule covers this, so it asks"
+    layer_word = str(decision.get("decided_by") or "").partition("/")[0]
+    if layer_word in ("tier", "taint") and decision.get("detail"):
+        return f"asked: {decision['detail']}"  # L6: its plain-words reason, not code words
     word = _VERDICT_WORD.get(str(decision.get("verdict")), "asked")
     reason = str(decision.get("reason") or "")
     decided_by = str(decision.get("decided_by") or "")

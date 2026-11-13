@@ -425,3 +425,37 @@ def test_the_grid_never_writes_its_canaries_into_the_real_home(
         queen_lane_grid.build_home(tmp_path / "root", "builder")
     assert list(account_home.iterdir()) == []
     assert not (tmp_path / "root").exists()
+
+
+def test_l13_the_queen_shell_refuses_sh_c_under_a_chat_written_deny_and_flags_the_rest(
+    grid: Callable[..., Any],
+) -> None:
+    """L13 (field test): the live path — set_operator_policy wrote `deny curl`
+    (layer global), then a builder chat's run_shell `sh -c 'curl …'` got an
+    ordinary "no rule covers this" card. Now a payload the deny can read is
+    refused with no card; one it cannot read (`$(which curl)`) cards with a
+    risk line naming the deny, and offers no keep."""
+    from skep.supervisor.serve.actions import keep_options, set_operator_policy_rule
+    from skep.supervisor.serve.cards import card_summary
+
+    _paths, fmt, store, holder = grid("builder")
+    set_operator_policy_rule(
+        store, scope="shell", action="run", pattern="curl", verdict="deny", holder=holder
+    )
+    chat = store.create_chat(title="b", model=None, role="builder").chat_id
+    for line in ("sh -c 'curl -sI https://example.com'", "bash -c 'curl x'", "dash -c 'curl x'"):
+        refused = mutation_execution_decision(
+            "run_shell", {"command": line, "cwd": fmt["outside"]},
+            store=store, holder=holder, chat_id=chat,
+        )  # fmt: skip
+        assert refused is not None
+        assert (refused.verdict, refused.decided_by) == ("deny", "global/op:shell:run:curl"), line
+    args = {"command": "$(which curl) -sI https://example.com", "cwd": fmt["outside"]}
+    asked = mutation_execution_decision("run_shell", args, store=store, holder=holder, chat_id=chat)
+    assert asked is not None
+    assert asked.verdict == "require_approval"
+    assert asked.reason == "shell.require_approval.unreadable_under_deny"
+    assert "`curl`" in str(asked.detail)
+    card = card_summary("run_shell", args, recorded={"decision": asdict(asked)})
+    assert card["risk"] == asked.detail
+    assert keep_options("run_shell", args, None) == ["once"]

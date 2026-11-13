@@ -452,3 +452,60 @@ def test_an_auto_dispatch_whose_run_asks_nothing_still_runs_unasked(desk: Desk) 
     assert cards(events) == []
     (submitted,) = desk.runner.submitted
     assert submitted["permissions"].network_ask == []
+
+
+def test_a_research_card_lists_its_source_hosts_and_the_desk_confirm_answers_them(
+    desk: Desk,
+) -> None:
+    """L23: a confirmed start_research run dropped its own seed hosts (the
+    role asks on them) and failed "fetched 0/2 sources". Its card now carries
+    the manifest like dispatch_run's, and the desk confirm answers the hosts
+    it listed, for that run."""
+    made = desk.store.create_chat(title="c", model=None, role="builder", source="web")
+    chat = made.chat_id
+    desk.ollama.script_tool_call(
+        "start_research",
+        {"repo": str(desk.repo), "question": "q", "source_allowlist": ["example.com"]},
+    )
+    desk.store.add_chat_message(chat, role="user", content="research it")
+    base_url, api_key, model, protocol = desk.engine.resolved_llm(desk.store.get_chat(chat))
+    events = list(
+        desk.engine.turn_events(
+            chat, base_url=base_url, api_key=api_key, model=model, protocol=protocol
+        )
+    )
+    (card,) = cards(events)
+    manifest = card["card"]["manifest"]
+    assert manifest["network_ask"] == ["example.com"]
+    assert manifest["execution_mode"] == "sandbox"
+    desk.confirm(chat, card["action_id"])
+    (submitted,) = desk.runner.submitted
+    assert "example.com" in submitted["permissions"].network
+    assert submitted["permissions"].network_ask == []
+    assert submitted["dispatch_decision"].constraints["manifest_preanswered"]["network"] == [
+        "example.com"
+    ]
+
+
+def test_a_call_network_that_replaces_the_project_hosts_says_what_the_run_loses(
+    desk: Desk,
+) -> None:
+    """L10: a dispatch's ``network`` replaces the project's own hosts (the
+    documented override, pinned by the policy regression fixtures), and the
+    card showed only what was left. The manifest now names the hosts the run
+    loses, and the tool description says a list replaces the default."""
+    from skep.supervisor.serve.tools import TOOL_SPECS
+
+    omitted = dispatch_manifest_for(desk.store, desk.holder, {"repo": str(desk.repo)}, None)
+    assert "pypi.org" in omitted["network"] and omitted["network_dropped"] == []
+    named = dispatch_manifest_for(
+        desk.store, desk.holder, {"repo": str(desk.repo), "network": ["example.com"]}, None
+    )
+    assert "pypi.org" in named["network_dropped"] and "pypi.org" not in named["network"]
+    assert any(
+        line.startswith("loses the project's own hosts for this run: ") and "pypi.org" in line
+        for line in manifest_lines(named)
+    )
+    (spec,) = [s for s in TOOL_SPECS if s["function"]["name"] == "dispatch_run"]
+    described = spec["function"]["parameters"]["properties"]["network"]["description"]
+    assert "REPLACES" in described

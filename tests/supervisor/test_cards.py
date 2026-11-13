@@ -7,6 +7,9 @@ the three lines a human actually reads.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from skep.supervisor import RunStore
 from skep.supervisor.serve.cards import card_summary, headline, purpose, risk
 
 
@@ -156,3 +159,70 @@ def test_a_script_schedule_card_says_it_is_standing_host_shell() -> None:
     )
     # Other castes keep a quiet card.
     assert "risk" not in card_summary("propose_schedule", {**args, "caste": "note"})
+
+
+def test_l16_an_mcp_card_names_the_server_tool_and_arguments() -> None:
+    """L16 (field test): a money-transfer card read only "call_mcp_tool",
+    with the risk line of a web fetch; the amount sat under details."""
+    args = {"server_id": "bank", "tool": "budget_transfer",
+            "arguments": {"from": "checking", "to": "savings", "amount": 250}}  # fmt: skip
+    line = headline("call_mcp_tool", args)
+    assert line.startswith("call_mcp_tool — bank:budget_transfer ")
+    assert '"amount": 250' in line
+    huge = {**args, "arguments": {"memo": "x" * 1000}}
+    assert len(headline("call_mcp_tool", huge)) <= 200
+    assert risk("call_mcp_tool", args) == (
+        "runs bank:budget_transfer as you with these arguments; its reply comes into "
+        "this conversation"
+    )
+    assert "remote content" not in str(risk("register_mcp_server", {"server_id": "bank"}))
+
+
+def test_l9_l12_review_and_policy_risk_lines_match_what_the_verb_does() -> None:
+    """L9 (field test): a worker gate card (approving lets a paused run run
+    `python3 -m pytest --version`) said "applies a patch to a real branch".
+    L12: a deny written by set_operator_policy said "widens what future runs
+    may do". Each line now says what that call does."""
+    land = {"review_id": "r", "reason": 'land "add parser" → skep/x'}
+    assert (
+        risk("approve_review", land) == "applies a patch to a real branch — landing IS the commit"
+    )
+    assert risk("land_run", {"task_id": "t"}) == risk("approve_review", land)
+    gate = {"review_id": "r", "reason": "shell.run requires approval for command: env"}
+    assert risk("approve_review", gate) == (
+        "lets the paused run go past this gate and do what it names, once"
+    )
+    assert risk("deny_review", land) is None
+    deny = {"scope": "shell", "action": "run", "pattern": "curl", "verdict": "deny"}
+    assert risk("set_operator_policy", deny) == (
+        "adds a standing rule that makes matching actions ask or be refused"
+    )
+    allow = {**deny, "verdict": "allow"}
+    assert (
+        risk("set_operator_policy", allow)
+        == "widens what future runs may do without asking you again"
+    )
+
+
+def test_l9_an_approve_review_card_reads_landing_or_gate_from_the_approval_not_the_call(
+    tmp_path: Path,
+) -> None:
+    """ES-F68 review: the gate-or-landing risk line read the call's own
+    ``reason`` — an argument the model may write — so a model call
+    ``approve_review(review_id=<a landing>, reason="gate")`` showed the
+    milder gate line on a card that lands a patch. A pending card reads the
+    approval the store holds."""
+    store = RunStore(tmp_path / "s.sqlite")
+    try:
+        landing = store.enqueue_approval("t1", action="apply_patch", reason='land "x" → skep/t1')
+        gate = store.enqueue_approval("t2", action="shell.run", reason="shell.run needs: env")
+        spoof = {"review_id": landing, "reason": "shell.run requires approval: ls"}
+        assert card_summary("approve_review", spoof, store=store)["risk"] == (
+            "applies a patch to a real branch — landing IS the commit"
+        )
+        honest = {"review_id": gate, "reason": 'land "x"'}
+        assert card_summary("approve_review", honest, store=store)["risk"] == (
+            "lets the paused run go past this gate and do what it names, once"
+        )
+    finally:
+        store.close()

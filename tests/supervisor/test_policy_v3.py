@@ -906,6 +906,54 @@ def test_w5_a_deny_binds_through_reserved_words_and_unknown_launcher_options(
 
 @pytest.mark.parametrize(
     "line",
+    ["sh -c 'curl https://x.example/y'", "bash -c 'curl https://x.example/y'",
+     "zsh -c 'curl https://x.example/y'", "dash -c 'curl https://x.example/y'",
+     "ksh -c 'curl https://x.example/y'", "sh -c \"bash -c 'curl https://x.example/y'\"",
+     "bash -c \"sh -c \\\"zsh -c 'curl https://x.example/y'\\\"\""],
+)  # fmt: skip
+def test_l13_a_deny_binds_a_plain_sh_c_line_with_no_grant(line: str, tmp_path: Path) -> None:
+    """L13 (field test): `sh -c 'curl x'` is opaque to the segment reader, and
+    decide() matched opaque text against nothing, so a curl deny never saw
+    it: an ordinary "no rule covers this" card. The deny reads the payload
+    (the floor's reading) whenever it can be read statically."""
+    home, _repo = build_home(tmp_path, "legacy")
+    _lock(home, "builder", NO_CURL)
+    hit = _decide(home, scope="shell", action="run", value=line)
+    assert (hit["verdict"], hit["decided_by"]) == ("deny", "template:builder/no-curl"), line
+
+
+@pytest.mark.parametrize("line", ["$(which curl) https://x.example/y", "$CURL https://x.example/y"])
+def test_l13_an_unreadable_line_under_a_deny_asks_and_says_so(line: str, tmp_path: Path) -> None:
+    """L13: a line whose program cannot be read statically still asks, but
+    the decision says a deny exists that it may get around."""
+    home, _repo = build_home(tmp_path, "legacy")
+    _lock(home, "builder", NO_CURL)
+    hit = _decide(home, scope="shell", action="run", value=line)
+    assert hit["verdict"] == "require_approval", hit
+    assert "curl" in hit["note"] and "deny" in hit["note"], hit
+    plain = _decide(home, scope="shell", action="run", value="echo $(date)")
+    assert plain["verdict"] == "require_approval"
+
+
+@pytest.mark.parametrize(
+    "line", ["sh -c 'ls'", "sh -c 'echo curl'", "bash -c 'grep curl notes.txt'", "echo $(date)"]
+)
+def test_l13_a_readable_line_under_a_deny_carries_no_cannot_read_warning(
+    line: str, tmp_path: Path
+) -> None:
+    """ES-F60 review: every `sh -c` line under any deny said "skep cannot read
+    which command this line runs" — but `sh -c 'ls'` is read (the floor
+    unwraps it) and runs no denied program. Only a line whose program is
+    really hidden (`$(…)` as the program, a variable, eval) says so."""
+    home, _repo = build_home(tmp_path, "legacy")
+    _lock(home, "builder", NO_CURL)
+    hit = _decide(home, scope="shell", action="run", value=line)
+    assert hit["verdict"] == "require_approval", hit
+    assert hit.get("note") is None, hit
+
+
+@pytest.mark.parametrize(
+    "line",
     ["timeout 60 grep curl README.md", "time grep -r curl src", "nohup grep curl notes.txt",
      "xargs grep -l curl", "nice -n 5 echo curl", "grep curl README.md", "ls /usr/bin/curl"],
 )  # fmt: skip

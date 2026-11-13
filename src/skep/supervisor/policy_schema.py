@@ -309,7 +309,12 @@ def shell_segments(value: str) -> list[str] | None:
             segments[-1].append(token)
     found = [seg for seg in segments if seg]
     for seg in found:
-        if seg[0] == "eval" or (seg[0] in _SHELL_C_SHELLS and "-c" in seg):
+        # L13: a variable as the program (`$P x`) names no command a rule can read
+        if (
+            seg[0] == "eval"
+            or seg[0].startswith("$")
+            or (seg[0] in _SHELL_C_SHELLS and "-c" in seg)
+        ):
             return None
     # ponytail: wrappers that run a command named later (xargs, env, nohup,
     # sudo, find -exec) still match on the wrapper; list them here when a

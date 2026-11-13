@@ -179,3 +179,23 @@ def test_workon_over_the_command_deck_executes_on_confirm(
     assert confirmed["result"]["baseline_committed"] is True
     assert (workdir / ".git").is_dir()
     assert confirmed["result"]["effective_policy"]["project"]["project_id"] == "deck-dir"
+
+
+def test_the_workon_card_says_it_adds_a_weekly_schedule(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """L15: every /workon seeds the trusted_local_dev pack's enabled weekly
+    maintenance schedule (the same project setup a registered repo gets,
+    first fire one interval out since ES B99) — and the card never said so.
+    The preview's warnings (both decks render them) now name it and how to
+    remove it, and stop once it exists."""
+    client = serve_client(config)
+    preview = client.post("/api/workon/preview", json={"path": str(repo)}).json()
+    (line,) = [w for w in preview["warnings"] if "schedule" in w]
+    assert "trusted-maintenance-weekly" in line and "every 7d" in line
+    assert "skep schedule remove" in line
+    assert client.post("/api/workon", json={"path": str(repo)}).status_code == 201
+    names = [s["name"] for s in client.get("/api/schedules").json()["schedules"]]
+    assert any(name in line for name in names)
+    again = client.post("/api/workon/preview", json={"path": str(repo)}).json()
+    assert not [w for w in again["warnings"] if "schedule" in w]

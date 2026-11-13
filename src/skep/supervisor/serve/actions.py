@@ -1667,13 +1667,22 @@ def workon_preview(
         template_names=[],
         policy_overrides={},
     )
+    # L15: workon seeds the pack's schedules like any project setup — the
+    # card says which ones it adds (an existing one is skipped, not reset).
+    schedules = [
+        f"adds the {'enabled' if seed['enabled'] else 'disabled'} schedule {seed['name']!r} "
+        f"(every {seed['every']}, an unattended worker run; first run one interval "
+        f"from now) — remove it with `skep schedule remove {seed['name']}`"
+        for seed in project_preview.get("seeded_schedules") or []
+        if store.get_schedule(seed["name"]) is None
+    ]
     return {
         "path": str(resolved),
         "project_id": project_id,
         "git": {"is_repo": is_repo, "has_baseline": has_baseline, "dirty": dirty},
         "would_git_init": not is_repo,
         "would_commit_baseline": not has_baseline,
-        "warnings": _workon_warnings(has_baseline=has_baseline, dirty=dirty),
+        "warnings": [*_workon_warnings(has_baseline=has_baseline, dirty=dirty), *schedules],
         "project": project_preview,
     }
 
@@ -3358,6 +3367,38 @@ def _resumable_states() -> frozenset[str]:
 RESUMABLE_CRASH_STATES = frozenset({"worker_crashed", "worker_timeout"})
 
 
+def resume_refusal(store: RunStore, config: SupervisorConfig, task_id: str) -> str | None:
+    """Why resume_run cannot continue ``task_id``, or None. Side-effect free:
+    the confirm raises it and the proposal answers with it (L17: no card that
+    can only be refused)."""
+    from ..dispatch import salvaged_checkpoint_version
+
+    record = store.get_run(task_id)
+    if record is None:
+        return f"no run {task_id!r}"
+    if record.state not in _resumable_states():
+        return (
+            f"run {task_id[:13]}… is {record.state!r} — resume_run continues "
+            "worker_crashed/worker_timeout runs (from their checkpoint) and "
+            "failed runs (fresh attempt in the preserved worktree); for "
+            "anything else dispatch a fresh run"
+        )
+    # v107-F1: only the crash states carry a cursor to demand a checkpoint
+    # for. A failed run resumes as a fresh attempt in its warm worktree —
+    # there is nothing to "continue from", and that is fine.
+    if record.state in RESUMABLE_CRASH_STATES and salvaged_checkpoint_version(config, task_id) < 2:
+        return (
+            f"run {task_id[:13]}… left no resume checkpoint — there is nothing to "
+            "continue from; dispatch a fresh run instead"
+        )
+    if not (config.audit_dir / task_id / "task.json").is_file():
+        return (
+            "the original task envelope is missing from the audit dir — "
+            "dispatch a fresh run instead"
+        )
+    return None
+
+
 def resume_crashed_run(
     store: RunStore,
     config: SupervisorConfig,
@@ -3373,33 +3414,15 @@ def resume_crashed_run(
     the operator's confirmed card is the only trigger (I6)."""
     from skep.worker_contract import RESUME_CHECKPOINT_STATE_KEY
 
-    from ..dispatch import _resume_workspace, salvaged_checkpoint_version
+    from ..dispatch import _resume_workspace
     from ..worker_state import resume_worker_state_from_audit
 
+    refusal = resume_refusal(store, config, task_id)
+    if refusal is not None:
+        raise ValueError(refusal)
     record = store.get_run(task_id)
-    if record is None:
-        raise ValueError(f"no run {task_id!r}")
-    if record.state not in _resumable_states():
-        raise ValueError(
-            f"run {task_id[:13]}… is {record.state!r} — resume_run continues "
-            "worker_crashed/worker_timeout runs (from their checkpoint) and "
-            "failed runs (fresh attempt in the preserved worktree); for "
-            "anything else dispatch a fresh run"
-        )
-    # v107-F1: only the crash states carry a cursor to demand a checkpoint
-    # for. A failed run resumes as a fresh attempt in its warm worktree —
-    # there is nothing to "continue from", and that is fine.
-    if record.state in RESUMABLE_CRASH_STATES and salvaged_checkpoint_version(config, task_id) < 2:
-        raise ValueError(
-            f"run {task_id[:13]}… left no resume checkpoint — there is nothing to "
-            "continue from; dispatch a fresh run instead"
-        )
+    assert record is not None
     audit_task = config.audit_dir / task_id / "task.json"
-    if not audit_task.is_file():
-        raise ValueError(
-            "the original task envelope is missing from the audit dir — "
-            "dispatch a fresh run instead"
-        )
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
     # v19-F2 held on resume: run_task recomputes provider_hosts from the
     # registry (ADR 0059 D3), so a run created before the provider was
@@ -4725,6 +4748,8 @@ def dispatch_manifest(
     return {
         "repo": str(compiled.repo),
         "network": list(permissions.network),
+        # L10: an explicit network replaces the project's hosts — say which
+        "network_dropped": list(resolved_policy.network_dropped),
         "provider_hosts": provider_hosts_for(
             store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
         ),

@@ -398,6 +398,9 @@ def duplicate_proposal_result(action_id: str) -> dict[str, Any]:
 _SUPERSEDED_BY_NEWER = "superseded by a newer proposal for the same subject"
 
 
+APPROVED_NOTE = "the operator confirmed this on a card; it was not auto-allowed"
+
+
 def high_tier_decision(high: str, allowed: Any) -> Any:
     """P4-2 (ADR 0059 D6): the card a HIGH action gets where policy would
     have run it unasked — it says what allowed it and why it asks anyway."""
@@ -1048,7 +1051,7 @@ def first_run_events(events: Iterator[ChatEvent], personal_home: Path) -> Iterat
     tally = {"allowed": 0, "asked": 0, "denied": 0}
     for event, data in events:
         if event == "action" or (event == "tool" and data.get("decision")):
-            data = {**data, "why": verdict_why(data.get("decision"))}
+            data = {**data, "why": verdict_why(data.get("decision"), tool=data.get("tool"))}
             verdict = (data.get("decision") or {}).get("verdict")
             key = "asked" if event == "action" else "denied" if verdict == "deny" else "allowed"
             tally[key] += 1
@@ -1434,7 +1437,11 @@ class ChatEngine:
         ):
             system = f"{system}\n\n{UNTRUSTED_NOTE}"
         if summary or dropped:
-            block = "Earlier in this conversation (compacted):"
+            # L19: the digest is lossy (ADR 0037) — say so, and where the rest is
+            block = (
+                "Earlier in this conversation (compacted):\n(condensed, and its oldest lines "
+                f'drop once it is full; search_chats with chat_id "{chat_id}" finds what was said)'
+            )
             if summary:
                 block += f"\n{summary}"
             if dropped:
@@ -2082,9 +2089,8 @@ class ChatEngine:
                     # P4-2: a dispatch's manifest — what its run will get.
                     manifest = (
                         dispatch_manifest_for(self.store, self.holder, args, chat_id)
-                        if name == "dispatch_run"
-                        and decision is not None
-                        and decision.verdict != "deny"
+                        if name in ("dispatch_run", "start_research")
+                        and (decision is None or decision.verdict != "deny")
                         else None
                     )
                     # quick_edit and batch members compile the same envelope
@@ -2127,7 +2133,17 @@ class ChatEngine:
                         store=self.store,
                         manifest=manifest or reach,
                     )
-                    if high is not None and decision is not None and decision.allows_execution():
+                    if (
+                        high is not None
+                        and decision is not None
+                        and decision.allows_execution()
+                        # L3: double taint raises a card's tier; it never makes
+                        # an allow ask — decide() and mutation_execution_decision
+                        # already asked on every lane D5 names (a read inside
+                        # the roots is none of them)
+                        and high_tier(name, args, store=self.store, manifest=manifest or reach)
+                        is not None
+                    ):
                         decision = high_tier_decision(high, decision)
                     elif (
                         manifest is not None
@@ -2880,6 +2896,10 @@ class ChatEngine:
                 if not payloads:
                     self.store.unclaim_chat_action(action_id)
                 raise  # something ran: it stays claimed (restart marks it interrupted)
+            # L7: the model reads this row — say a person approved it, or it
+            # tells the user no card was needed (a run_shell result names the
+            # rule that ASKED as its decided_by)
+            payloads = [{**p, "approved": APPROVED_NOTE} for p in payloads]
             payload = (
                 payloads[0]
                 if len(payloads) == 1
@@ -3264,7 +3284,7 @@ def add_chat_routes(
             # W39: a pending card's why-line, as first_run_events adds it live
             for action in detail["actions"]:
                 if action["status"] == "proposed":
-                    action["why"] = verdict_why(action.get("decision"))
+                    action["why"] = verdict_why(action.get("decision"), tool=action.get("tool"))
         return detail
 
     def _chat_detail(chat_id: str, chat: Any) -> dict[str, Any]:

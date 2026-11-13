@@ -418,6 +418,17 @@ def test_replay_counts_flips_and_what_it_cannot_replay(home: Home) -> None:
     assert "filesystem.read (global → global)" in denied["replay"]  # layers, no rule id
 
 
+def test_l1_a_taint_ask_logged_with_no_chat_is_not_replayed_as_now_allowed(home: Home) -> None:
+    """L1 (field test): migrate --dry-run on an older home said "now allows
+    network.search (taint/private-egress → global/net:search)": the row
+    carried no chat, so the replay decided it with no taint at all."""
+    home.log(_row("network", "search", "ddgs", "require_approval", "taint/private-egress"))
+    rows = policy_write.read_log(home.config.audit_dir)
+    summary = policy_write.replay_decisions(rows, load_stack(home.holder, home.store))
+    assert summary["replayed"] == 0 and not summary["examples"], summary
+    assert any("taint" in why for why in summary["not_replayable"]), summary
+
+
 def test_replay_examples_are_plain_and_never_reach_the_model(
     home: Home, capsys: pytest.CaptureFixture[str]
 ) -> None:

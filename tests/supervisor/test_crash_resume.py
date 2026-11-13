@@ -171,6 +171,38 @@ def test_resume_refuses_wrong_state_and_missing_checkpoint(
         store.close()
 
 
+def test_l17_a_resume_that_can_only_be_refused_is_answered_at_proposal(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """L17 (field test): after a crash with no checkpoint the continuation
+    proposed resume_run, and the card could only be refused after the
+    operator confirmed it. The proposal gate gives the same refusal, no card."""
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import mutation_execution_decision
+
+    store = RunStore(config.db_path)
+    try:
+        task_id, _workspace = _strand_run(store, config, repo)
+        recover_interrupted_runs(store, config)
+        holder = ConfigHolder(config, store)
+        refused = mutation_execution_decision(
+            "resume_run", {"task_id": task_id}, store=store, holder=holder
+        )
+        assert refused is not None and refused.verdict == "deny"
+        assert "left no resume checkpoint" in str(refused.detail)
+        missing = mutation_execution_decision(
+            "resume_run", {"task_id": "nope"}, store=store, holder=holder
+        )
+        assert missing is None or missing.verdict != "deny"  # the confirm says "no run"
+        _salvage_checkpoint(config, task_id)
+        offered = mutation_execution_decision(
+            "resume_run", {"task_id": task_id}, store=store, holder=holder
+        )
+        assert offered is None or offered.verdict != "deny"
+    finally:
+        store.close()
+
+
 def test_resume_command_route_resumes_a_crashed_run_without_a_model(
     config: SupervisorConfig, repo: Path
 ) -> None:

@@ -202,6 +202,18 @@ def inherit_taint(store: RunStore, parent: str | None, child: str) -> None:
         store.add_chat_taint(child, private=taint.private, untrusted=taint.untrusted)
 
 
+def _in_home(store: RunStore, content: str) -> bool:
+    """Did this read_file result row read a file in skep's own home?"""
+    try:
+        data = json.loads(content)
+        result = data.get("result", data)
+        target = Path(str(result["path"])).resolve()
+        home = store.db_path.parent.resolve()
+    except (ValueError, TypeError, KeyError, AttributeError, OSError):
+        return False
+    return home in target.parents
+
+
 def _source(store: RunStore, chat_id: str, message_id: int | None) -> str | None:
     if not message_id:
         return None
@@ -210,6 +222,8 @@ def _source(store: RunStore, chat_id: str, message_id: int | None) -> str | None
     if row is None:
         return None
     if row.role == "tool":
+        if row.tool_name == "read_file" and _in_home(store, row.content):
+            return "read skep's own records"  # L4: audit/, the store — not outside the roots
         return _SOURCES.get(row.tool_name or "")
     return _AUTHORS.get(row.provenance.split(":", 1)[0])
 
@@ -227,7 +241,10 @@ def taint_line(store: RunStore, chat_id: str, taint: ChatTaint) -> str | None:
         how = _source(store, chat_id, taint.untrusted)
         parts.append("taken in outside content" + (f" (it {how})" if how else ""))
     if len(parts) == 2:
-        tail = "anything it sends out or changes needs your OK, one approval at a time"
+        tail = (
+            "anything it sends out or changes needs your OK, one approval at a time "
+            "(/trust clears this once you have checked what came in)"
+        )
     elif taint.private is not None:
         tail = "sending anything out from it needs your OK, even where a rule or grant allows it"
     else:

@@ -1855,7 +1855,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "domain allowlist; omit for policy default; [] = only the worker's own LLM"
+                    "omit: project hosts; a list REPLACES them (registries too); []: own LLM"
                 ),
             },
             "wall_clock_seconds": {"type": "integer"},
@@ -2821,7 +2821,16 @@ def dispatch_manifest_for(
     store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
 ) -> dict[str, Any]:
     """P4-2 (ADR 0059 D6): the manifest of a ``dispatch_run`` this chat
-    proposes — compiled exactly as the confirm will compile it."""
+    proposes — compiled exactly as the confirm will compile it. A
+    ``start_research`` call (its ``source_allowlist``) compiles as the
+    sandboxed researcher run its confirm submits (L23)."""
+    if "source_allowlist" in args:
+        args = {
+            "repo": args.get("repo"),
+            "caste": "researcher",
+            "execution_mode": "sandbox",
+            "network": args["source_allowlist"],
+        }
     try:
         return actions.dispatch_manifest(
             holder,
@@ -3150,6 +3159,14 @@ def queen_shell_decision(
         )
     if verdict.layer == "taint":
         return taint_decision(verdict)
+    if verdict.note is not None and verdict.layer == "default":
+        # L13: an unreadable line under a deny — the card's risk line says so
+        return AutonomyDecision(
+            verdict="require_approval",
+            reason="shell.require_approval.unreadable_under_deny",
+            detail=verdict.note,
+            decided_by=verdict.decided_by,
+        )
     # B79: the card names the rule that asked — never "no rule covers this".
     asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
     return AutonomyDecision(
@@ -5327,7 +5344,11 @@ def _execute_mutation(
             network=source_allowlist,
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            # L23: the role's asks on the source hosts ride as deferred asks;
+            # the card's manifest listed them, and the desk confirm answers them.
+            deferred_asks=_human_answers(store, chat_id),
             chat_taint=chat_taint_bits(store, chat_id),
+            preanswered=preanswered,
         )
         return {"task_id": task_id, "state": "research_dispatched"}
     if name == "propose_schedule":
@@ -5785,6 +5806,13 @@ def _mutation_execution_decision(
                     else f"schedule {schedule.name!r} is disabled — set_schedule_enabled first"
                 ),
             )
+    if name == "resume_run":
+        # L17: a resume that can only fail on confirm is answered now, no card
+        task_id = str(args.get("task_id") or "")
+        why = actions.resume_refusal(store, holder.current, task_id)
+        # an unknown id still cards (the frozen tool-surface grid holds that cell)
+        if why is not None and store.get_run(task_id) is not None:
+            return AutonomyDecision(verdict="deny", reason="resume.deny.not_resumable", detail=why)
     if name == "call_mcp_tool":
         # v40-F10: the resolved mcp scope decides — allow runs inside the
         # turn, require_approval cards, deny refuses without a card.
@@ -5923,10 +5951,15 @@ def _mutation_execution_decision(
         # URL cards too — the honest error surfaces on confirm.
         import urllib.parse
 
+        from .websearch import known_non_public
+
         url = str(args.get("url") or "")
         host = urllib.parse.urlparse(url).hostname or ""
         if not host:
             return None
+        local = known_non_public(url)
+        if local is not None:  # L22: a card here could only be refused
+            return AutonomyDecision(verdict="deny", reason="network.deny.non_public", detail=local)
         return fetch_grant_decision(store, holder, host, role=role, chat_id=chat_id, url=url)
     if name != "dispatch_run":
         return None
