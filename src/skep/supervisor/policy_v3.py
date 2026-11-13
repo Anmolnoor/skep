@@ -166,6 +166,9 @@ class Stack:
     # P4-1 (D5): the asking chat's trifecta bits. None — no chat (REST, the
     # CLI, the hook, ACP) — is no taint: those faces decide as before.
     taint: ChatTaint | None = None
+    # ADR 0060: the project id when the repo's project is unlocked — the run
+    # lane's default asks of a sandboxed worker are answered (``_unlocked``).
+    unlocked: str | None = None
 
 
 def floor_verdict(
@@ -425,11 +428,13 @@ def load_stack(
     except PolicyResolutionError as exc:
         return replace(stack, run_note=f"run policy did not resolve: {exc}")
     note = None if project is not None else "repo is not bound to a project — the global run policy"
+    unlocked = project is not None and resolved.policy.get("unlocked") is True
     return replace(
         stack,
         run=run_lane(resolved, project),
         run_note=note,
         provider_hosts=tuple(resolved.permissions.provider_hosts),
+        unlocked=str(project["project_id"]) if unlocked and project is not None else None,
     )
 
 
@@ -584,6 +589,39 @@ def _opaque(
     )
 
 
+# ADR 0060: what the unlocked step answers — the two asks a worker gate
+# raises that its auto-answer understands. Nothing else (a write outside the
+# workspace, a Queen lane) is ever the layer's.
+UNLOCKED_REQUESTS = frozenset({("shell", "run"), ("network", "connect")})
+UNLOCKED_RULE = "zero-ask"
+
+
+def _unlocked(stack: Stack, req: Request, verdict: Verdict) -> bool:
+    """Is ``verdict`` an ask that is only a default — every part of the line
+    unmatched, a catch-all ``*`` ask, or allowed? A deny, a named ask, a line
+    skep cannot read (``_opaque``) and a background line (B21) are not.
+
+    The run lane is compiled from knobs (allows only); the operator's
+    standing denies and named asks live on the operator lane — the setup
+    document, the overlay and the locked baseline (D2: a template's denies
+    and named asks bind as a ceiling). They bind here too: where one names
+    any part of the line, the step declines and a human answers."""
+    scope, action, value = req
+    if verdict.verdict != "require_approval" or (scope, action) not in UNLOCKED_REQUESTS:
+        return False
+    parts: Sequence[str] | None = [value]
+    if scope == "shell":
+        parts = None if backgrounds(value) else shell_segments(value)
+    if not parts:
+        return False
+    for part in parts:
+        for scopes in (stack.run or {}, stack.operator):
+            hit = _hit(scopes, scope, action, part)
+            if hit is not None and _binding(hit.verdict, hit.pattern):
+                return False
+    return True
+
+
 def decide(
     req: Request,
     *,
@@ -593,6 +631,7 @@ def decide(
     face: Face = "advisory",
     read_only: bool = False,
     url: str | None = None,
+    sandboxed: bool = False,
 ) -> Verdict:
     """One decision (ADR 0059 D1). ``face="hard"`` is the governor's hard
     ring, which has no human hop: there a tampered baseline denies (O2);
@@ -611,7 +650,15 @@ def decide(
     applies (B101); everything else there still asks, and on a tampered
     baseline nothing applies. REST and the CLI pass a whole URL as a
     ``network`` value: it decides as its host, with the URL as ``url``, so
-    every face can ask what read_url asks (V1)."""
+    every face can ask what read_url asks (V1).
+
+    ``sandboxed`` (ADR 0060) is a fact about the request: a worker inside
+    the sandbox walls raised it (only the worker-gate auto-answer says so).
+    On an unlocked project's run lane, the default asks of such a request —
+    unmatched, or a catch-all ``*`` ask — are answered ``allow`` labelled
+    ``unlocked:<project>/zero-ask``, after the floor and the baseline guard
+    and before the role, the delegation cap and taint, which all still
+    apply. REST, the CLI, the hook and ACP never pass it."""
     if req.scope == "network" and "://" in req.value:
         url = url or req.value
         req = Request(req.scope, req.action, urlsplit(req.value).hostname or "")
@@ -642,6 +689,11 @@ def decide(
         note = None if operator_only else stack.run_note
         if stack.run is not None and not on_operator:
             verdict = _match(_granting(stack.run, scope, read_only), req, "run", note)
+            if sandboxed and stack.unlocked and _unlocked(stack, req, verdict):
+                layer = f"unlocked:{stack.unlocked}"
+                verdict = Verdict(
+                    "allow", layer, UNLOCKED_RULE, f"{layer}/{UNLOCKED_RULE}", "run", note
+                )
         else:
             verdict = _match(
                 _granting(stack.operator, scope, read_only), req, "operator", note, url

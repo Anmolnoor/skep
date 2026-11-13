@@ -273,3 +273,112 @@ def test_a_phase_change_drops_unlocked(repo: Path, config: SupervisorConfig) -> 
         assert moved["policy"]["verify_command"] == "true"
     finally:
         store.close()
+
+
+# --- ES-F144: the unlocked step inside decide() --------------------------------
+
+
+def _unlocked_stack(tmp_path: Path, kind: str, *, unlocked: bool = True) -> Any:
+    """A grid home (``policy_v3_grid.build_home``) whose project ``app`` is
+    unlocked, with a named ask and a deny added to its baseline."""
+    from skep.supervisor import policy_baseline as pb
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.policy_templates import load_policy_template
+    from skep.supervisor.policy_v3 import load_stack
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    from .policy_v3_grid import build_home
+
+    home, repo = build_home(tmp_path, kind)
+    config = build_config(home, None)
+    if kind == "builder":
+        layer = load_policy_template("builder").model_dump(mode="json")
+        layer["rules"] = [
+            *layer["rules"],
+            {"scope": "shell", "verdict": "require_approval", "action": "run",
+             "pattern": "make deploy", "rule_id": "ask-make-deploy"},
+            {"scope": "shell", "verdict": "deny", "action": "run", "pattern": "curl",
+             "rule_id": "no-curl"},
+            {"scope": "network", "verdict": "deny", "action": "connect",
+             "pattern": "evil.example", "rule_id": "no-evil"},
+        ]  # fmt: skip
+        pb.write_lock(config.home, pb._load_layer(layer), approved_by="op")
+    store = RunStore(config.db_path)
+    store.add_project_policy(project_id="app", name="app", strategy="trusted_local_dev",
+                             phase="build", policy={**UNLOCKED, "unlocked": unlocked})  # fmt: skip
+    try:
+        return load_stack(ConfigHolder(config, store), store, repo=str(repo)), config
+    finally:
+        store.close()
+
+
+UNLOCKED_CELLS = [
+    # (scope, action, value, verdict, decided_by) for a sandboxed request
+    ("shell", "run", "rm -rf build", "allow", "unlocked:app/zero-ask"),
+    ("shell", "run", "pytest -q && rm -rf build", "allow", "unlocked:app/zero-ask"),
+    ("network", "connect", "files.example", "allow", "unlocked:app/zero-ask"),
+    ("shell", "run", "pytest -q", "allow", "template:builder/shell:pytest"),
+    ("shell", "run", "git push origin main", "deny", "floor/floor.worker-git-hard-denies"),
+    ("shell", "run", "git checkout other", "deny", "floor/floor.worker-git-hard-denies"),
+    ("shell", "run", "cat {home}/.ssh/id_rsa", "deny", "floor/floor.secret-reads"),
+    ("shell", "run", "sudo ls", "deny", "floor/floor.never-grantable-prefixes"),
+    # the baseline's deny and named ask (operator lane) bind: a human answers
+    ("shell", "run", "curl https://x.example", "require_approval", "default/unmatched"),
+    ("network", "connect", "evil.example", "require_approval", "default/unmatched"),
+    ("shell", "run", "make deploy", "require_approval", "default/unmatched"),
+    ("shell", "run", "rm -rf build && make deploy", "require_approval", "default/unmatched"),
+    ("shell", "run", "echo $(cat x)", "require_approval", "default/unmatched"),
+    ("shell", "run", "sleep 9 &", "require_approval", "default/unmatched"),
+    ("filesystem", "write", "/etc/x", None, None),  # not the layer's: as before
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(("scope", "action", "value", "verdict", "decided_by"), UNLOCKED_CELLS)
+def test_decide_answers_only_the_default_asks_of_a_sandboxed_worker(
+    tmp_path: Path, scope: str, action: str, value: str, verdict: str | None,
+    decided_by: str | None,
+) -> None:  # fmt: skip
+    import os
+
+    from skep.supervisor.policy_v3 import Request, decide
+
+    stack, _config = _unlocked_stack(tmp_path, "builder")
+    req = Request(scope, action, value.format(home=os.environ["HOME"]))
+    before = decide(req, stack=stack)  # no sandboxed fact: exactly as today
+    got = decide(req, stack=stack, sandboxed=True)
+    if verdict is None:
+        assert got == before
+        return
+    assert (got.verdict, got.decided_by) == (verdict, decided_by)
+    if got.layer.startswith("unlocked:"):
+        assert (before.verdict, before.layer) == ("require_approval", "default")
+    else:
+        assert got == before
+
+
+def test_the_unlocked_step_holds_the_role_the_chain_and_the_baseline_guard(
+    tmp_path: Path,
+) -> None:
+    from skep.supervisor.policy_v3 import Request, decide
+    from skep.supervisor.roles import SHIPPED_ROLES, parse_delegation_chain
+
+    req = Request("shell", "run", "rm -rf build")
+    stack, config = _unlocked_stack(tmp_path / "b", "builder")
+    # a delegated run: the builder role would itself ask, so a human answers
+    chain = parse_delegation_chain(["queen@builder"], config.home)
+    held = decide(req, stack=stack, chain=chain, sandboxed=True)
+    assert (held.verdict, held.deferred) == ("require_approval", True)
+    # a worker role's catch-all ask binds (only a human grant answers it, P3-2)
+    roled = decide(req, stack=stack, role=SHIPPED_ROLES["builder"], sandboxed=True)
+    assert roled.verdict == "require_approval"
+    # a zero-state home: the guard asks before any lane
+    zero, _ = _unlocked_stack(tmp_path / "z", "zero")
+    assert decide(req, stack=zero, sandboxed=True).decided_by == "baseline/no_baseline"
+    # a project that is not unlocked: nothing changes
+    locked, _ = _unlocked_stack(tmp_path / "l", "builder", unlocked=False)
+    assert decide(req, stack=locked, sandboxed=True) == decide(req, stack=locked)
+    # no repo (the Queen's own lanes): the step never applies
+    from dataclasses import replace
+
+    bare = replace(stack, run=None, unlocked=None)
+    assert decide(req, stack=bare, sandboxed=True) == decide(req, stack=bare)
