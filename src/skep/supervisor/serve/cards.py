@@ -209,7 +209,7 @@ def high_tier(
         # W11: every later turn, private data included, goes to that endpoint
         return "it points the assistant at another LLM endpoint: every later turn goes there"
     if tool in ("set_schedule_enabled", "run_schedule_now") and (
-        tool == "run_schedule_now" or safe.get("enabled") is True
+        tool == "run_schedule_now" or safe.get("enabled") is not False  # executor: bool(...)
     ):
         existing = None if store is None else store.get_schedule(str(safe.get("name") or ""))
         if existing is None or existing.worker_kind == "script":  # unknown: fail closed

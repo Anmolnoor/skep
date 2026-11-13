@@ -88,6 +88,13 @@ HIGH_KINDS: list[tuple[str, str, dict[str, Any], str]] = [
     # W11: they bring back "runs as you, on this host, unattended"
     ("script schedule back on", "set_schedule_enabled",
      {"name": "old-script", "enabled": True}, "none"),
+    # the executor reads bool(enabled): any truthy spelling turns it on
+    ("script schedule back on", "set_schedule_enabled",
+     {"name": "old-script", "enabled": "true"}, "none"),
+    ("script schedule back on", "set_schedule_enabled",
+     {"name": "old-script", "enabled": "false"}, "none"),
+    ("script schedule back on", "set_schedule_enabled", {"name": "old-script", "enabled": 1},
+     "none"),
     ("script schedule now", "run_schedule_now", {"name": "old-script"}, "none"),
 ]  # fmt: skip
 
