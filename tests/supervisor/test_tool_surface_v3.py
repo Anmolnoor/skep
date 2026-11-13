@@ -812,3 +812,31 @@ def test_a_dispatch_with_no_repo_is_answered_as_a_model_error(
         store.close()
     assert decision is not None and decision.verdict == "deny"
     assert "repo" in (decision.detail or "")
+
+
+def test_a_role_with_no_layer_is_offered_no_dispatcher_and_none_cards_to_fail(
+    locked: SupervisorConfig, repo: Path
+) -> None:
+    """A custom role that binds no template delegates no workspace write
+    (decision #7): every dispatcher is refused on confirm. So it is hidden —
+    start_research and forge_tool used to card and then 403."""
+    from skep.supervisor.roles import resolve_role
+
+    from .conftest import no_layer_role
+
+    role = resolve_role(no_layer_role(locked.home), locked.home)
+    assert set(hidden_tools(role)) == ASSISTANT_HIDDEN
+    store = RunStore(locked.db_path)
+    try:
+        chat = store.create_chat(title="n", model=None, role=role.name).chat_id
+        for tool, args in (
+            ("start_research", {"repo": str(repo), "question": "q", "source_allowlist": ["a.b"]}),
+            ("forge_tool", {"repo": str(repo), "name": "t", "purpose": "p"}),
+        ):
+            decision = mutation_execution_decision(
+                tool, args, store=store, holder=ConfigHolder(locked, store), chat_id=chat
+            )
+            assert decision is not None and decision.verdict == "deny", tool
+            assert decision.reason == "role.deny.tool_hidden", tool
+    finally:
+        store.close()
