@@ -136,7 +136,8 @@ dispatch is still setting the run up leaves it alone too.
 or in `serve.env`) restores the old behaviour: a live worker is killed with
 its session and the run is recovered as before. On Linux it also drops the
 keeper (section 1), so a sandboxed worker dies with the serve that spawned
-it. The skip of runs whose
+it; the variable (not the flag, which is serve's) does the same for runs a
+`skep run` or `skep team` process spawns. The skip of runs whose
 supervisor is still alive (5) stays on either way: killing a live sibling's
 worker was never intended.
 

@@ -99,9 +99,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     loaded_env = load_serve_env(args.home.expanduser().resolve() / SERVE_ENV_FILE)
     config = build_config(args.home, args.worker_cmd, auto_approve=args.auto_approve)
     # ADR 0060 §6: the kill switch for restart re-adoption — the flag, or
-    # SKEP_READOPT_WORKERS=0 in the environment or serve.env (loaded above).
-    readopt = not getattr(args, "no_readopt", False)
-    config = replace(config, readopt_workers=readopt and os.environ.get(READOPT_ENV) != "0")
+    # SKEP_READOPT_WORKERS=0 in the environment or serve.env (loaded above,
+    # read by build_config).
+    if getattr(args, "no_readopt", False):
+        config = replace(config, readopt_workers=False)
     # v26-F3: channel confirm-pointers name the UI the operator actually runs.
     app = create_app(config, web_ui_url=f"http://{args.host}:{args.port}/")
     banner = f"skep serve: http://{args.host}:{args.port}  (home: {config.home})"
@@ -133,8 +134,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
 # cancels them. A hung chat turn held SIGTERM for 139 s; streaming turns
 # resume from the store, so a short grace loses nothing durable.
 SHUTDOWN_GRACE_SECONDS = 10
-# ADR 0060 §6: "0" turns restart re-adoption off (like `--no-readopt`).
-READOPT_ENV = "SKEP_READOPT_WORKERS"
 
 
 def make_server(app: Any, **config: Any) -> Any:
@@ -173,6 +172,6 @@ def register_serve_command(
         "--no-readopt",
         action="store_true",
         help="kill workers still running from a previous serve instead of re-adopting "
-        f"them (ADR 0060); also {READOPT_ENV}=0",
+        "them (ADR 0060); also SKEP_READOPT_WORKERS=0",
     )
     serve.set_defaults(func=cmd_serve)

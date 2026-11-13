@@ -180,7 +180,13 @@ def build_config(
         caste_worker_commands=caste_worker_commands(),
         # D3 active: opt in to auto-applying safe manifest-only fixes (U1).
         auto_approval_rules=(SAFE_DEPENDENCY_RULE,) if auto_approve else (),
+        # ADR 0060 §6: the kill switch reaches CLI-started runs too (no keeper).
+        readopt_workers=os.environ.get(READOPT_ENV) != "0",
     )
+
+
+# ADR 0060 §6: "0" turns restart re-adoption off (like `skep serve --no-readopt`).
+READOPT_ENV = "SKEP_READOPT_WORKERS"
 
 
 def _parse_params(pairs: list[str]) -> dict[str, str]:

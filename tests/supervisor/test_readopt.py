@@ -574,6 +574,22 @@ def test_the_kill_switch_restores_kill_on_restart(repo: Path, config: Supervisor
         store.close()
 
 
+@pytest.mark.parametrize(("env", "readopt"), [(None, True), ("0", False)])
+def test_the_env_kill_switch_reaches_runs_the_cli_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env: str | None, readopt: bool
+) -> None:
+    """ES-F137 follow-up (ADR 0060 §6): SKEP_READOPT_WORKERS=0 also drops the
+    Linux keeper for runs `skep run`/`skep team` start, so their sandboxed
+    worker dies with the CLI as before; only `skep serve` read it."""
+    from skep.supervisor.cli_cmds import build_config
+
+    if env is None:
+        monkeypatch.delenv("SKEP_READOPT_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("SKEP_READOPT_WORKERS", env)
+    assert build_config(tmp_path / "home", None).readopt_workers is readopt
+
+
 @pytest.mark.parametrize(
     ("argv", "env", "readopt"),
     [([], None, True), (["--no-readopt"], None, False), ([], "0", False)],

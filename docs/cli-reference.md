@@ -224,7 +224,9 @@ restores its network proxy on the same port, and supervises it to the end
 with the time it has left, sandboxed or not. `--no-readopt` (or
 `SKEP_READOPT_WORKERS=0` in the environment or `serve.env`) kills such workers
 instead, as older versions did; on Linux a sandboxed worker then dies with the
-serve that started it. See ADR 0060.
+serve that started it. The variable also reaches runs that `skep run` and
+`skep team` start: on Linux their sandboxed worker then dies with the CLI.
+See ADR 0060.
 
 ## Chat
 
