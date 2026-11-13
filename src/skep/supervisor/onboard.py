@@ -518,7 +518,17 @@ def onboard_check(supervisor_home: Path) -> dict[str, Any]:
     provider = status["required"].get("provider", {"status": "blocked", "detail": "no profile"})
     checks["model"] = _check(provider.get("status") == "ready", str(provider.get("detail")))
 
-    pending = [step for step in STEPS if steps["steps"][step] is None]
+    # doctor honesty: the model step reads the model check above, never a
+    # second source (onboard.json) that can disagree with it
+    pending = [
+        step
+        for step in STEPS
+        if (
+            checks["model"]["status"] != "ready"
+            if step == "model"
+            else steps["steps"][step] is None
+        )
+    ]
     checks["steps"] = _check(
         not pending, "all five complete" if not pending else f"pending: {', '.join(pending)}"
     )
