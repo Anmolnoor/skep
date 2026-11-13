@@ -59,6 +59,7 @@ from .policy_schema import (
     PolicyDocument,
     ResolvedRule,
     ResolvedScopePolicy,
+    action_binds,
     applies,
     backgrounds,
     document_from_settings,
@@ -444,7 +445,9 @@ def _hit(
     policy = scopes.get(scope)
     by_layer: dict[str | None, list[ResolvedRule]] = {}
     for rule in policy.rules if policy else ():
-        if rule.action == action and rule_matches(rule, scope, value, url=url):
+        if action_binds(scope, rule.verdict, rule.action, action) and rule_matches(
+            rule, scope, value, url=url
+        ):
             by_layer.setdefault(rule.layer, []).append(rule)
 
     def best(rules: Sequence[ResolvedRule]) -> ResolvedRule:

@@ -771,3 +771,79 @@ def test_b23_a_learned_rule_inside_a_deny_is_ignored_and_logged_not_raised(
     finally:
         store.close()
     assert ignored == ("shell:run:curl https://x.example/y (deny/no-curl)",)
+
+
+CURL_SPELLINGS = (
+    "/usr/bin/curl https://x.example/y",
+    "env curl https://x.example/y",
+    "env A=1 /usr/bin/curl https://x.example/y",
+    "timeout 5 curl https://x.example/y",
+    "command curl https://x.example/y",
+    "nice -n 5 curl https://x.example/y",
+    "CURL https://x.example/y",
+)
+
+
+@pytest.mark.parametrize("line", CURL_SPELLINGS)
+def test_w5_a_program_deny_binds_its_path_and_launcher_spellings(line: str, tmp_path: Path) -> None:
+    """W5 (PR #73): a grant stored for `/usr/bin/curl x` (or `env curl x`,
+    `timeout 5 curl x`) under a `curl` deny was allowed: the deny matched the
+    literal first word only. A deny on a program binds it however the line
+    names or launches it, the way the floor already reads it."""
+    home, _repo = build_home(tmp_path, "legacy")
+    _grant(home, line, tier="always")
+    _lock(home, "builder", NO_CURL)
+    hit = _decide(home, scope="shell", action="run", value=line)
+    assert (hit["verdict"], hit["decided_by"]) == ("deny", "template:builder/no-curl")
+
+
+def test_w5_a_run_deny_binds_a_background_grant_and_a_repo_run(tmp_path: Path) -> None:
+    """W5 (PR #73): a start_process keep (`run_background`) under a shell
+    `run` deny was allowed — decide() kept the two actions apart. A deny on
+    `run` binds the same program in the background and in a repo; a deny on
+    `run_background` alone does not bind a foreground `run`."""
+    from skep.supervisor.serve.actions import remember_action_for_session
+
+    home, _repo = build_home(tmp_path, "legacy")
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        assert remember_action_for_session(
+            store, tool="start_process", args={"command": "curl https://x.example/y"},
+            actor="op", tier="always",
+        )  # fmt: skip
+    finally:
+        store.close()
+    _lock(home, "builder", NO_CURL)
+    hit = _decide(home, scope="shell", action="run_background", value="curl https://x.example/y")
+    assert (hit["verdict"], hit["decided_by"]) == ("deny", "template:builder/no-curl")
+    bg_only = {**NO_CURL, "action": "run_background", "rule_id": "no-bg-make"}
+    _lock(home, "builder", {**bg_only, "pattern": "make"})
+    assert _decide(home, scope="shell", action="run", value="make")["decided_by"] != (
+        "template:builder/no-bg-make"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool", "line"),
+    [("run_shell", "/usr/bin/curl https://x.example/y"),
+     ("run_shell", "timeout 5 curl https://x.example/y"),
+     ("start_process", "curl https://x.example/y")],
+)  # fmt: skip
+def test_w5_the_write_time_check_refuses_those_grants_too(
+    tool: str, line: str, tmp_path: Path
+) -> None:
+    """§5.4 check 6 agrees with decide(): a keep W5's deny binds is refused
+    when it is written, naming the deny, and nothing is stored."""
+    from skep.supervisor.policy_write import PolicyWriteRejected
+    from skep.supervisor.serve.actions import remember_action_for_session
+
+    home, _repo = build_home(tmp_path, "legacy")
+    _lock(home, "builder", NO_CURL)
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        with pytest.raises(PolicyWriteRejected, match="no-curl"):
+            remember_action_for_session(
+                store, tool=tool, args={"command": line}, actor="op", tier="always"
+            )
+    finally:
+        store.close()

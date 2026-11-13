@@ -39,7 +39,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
-from .policy_schema import UNMATCHED_VERDICT, ResolvedRule, patterns_intersect, rule_matches
+from .policy_schema import UNMATCHED_VERDICT, ResolvedRule, deny_reaches, rule_matches
 from .policy_v3 import (
     _MASK,
     READ_ONLY_REQUESTS,
@@ -244,14 +244,18 @@ def inside_a_deny(stack: Stack, allow: Allow, role: Role | None = None) -> list[
         reason = dangerous_prefix_reason(_shell_tokens(allow.pattern))
         if reason is not None and not hits:
             hits.append(f"floor/{reason}")
-    denies = [r for r in _rules(stack, allow.scope, "deny") if r.action == allow.action]
+    denies = _rules(stack, allow.scope, "deny")
     if role is not None and (layer := role.layer()) is not None:
         denies += [
             ResolvedRule("deny", r.rule_id, r.action, r.pattern, layer=role.label)
             for r in layer.rules
-            if (r.scope, r.verdict, r.action) == (allow.scope, "deny", allow.action)
+            if (r.scope, r.verdict) == (allow.scope, "deny")
         ]
-    hits += [_name(r) for r in denies if patterns_intersect(allow.scope, allow.pattern, r.pattern)]
+    hits += [
+        _name(r)
+        for r in denies
+        if deny_reaches(allow.scope, r.action, r.pattern, allow.action, allow.pattern)
+    ]
     return [
         Finding(6, f"6:{allow.rule_id}->{hit}", f"{allow.rule_id!r} lands inside deny {hit} — "
                 "a grant there is never honoured (§5.4 check 6)")
