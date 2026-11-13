@@ -74,7 +74,7 @@ from .reverify import reverify_run
 from .sandbox import NetworkPolicy, SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
 from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
-from .store import RunStore
+from .store import RunStore, process_owner
 from .worker_state import (
     prior_task_from_audit,
     resume_checkpoint_version,
@@ -778,7 +778,16 @@ def run_task(
                 reason="spawn_failed",
                 summary=f"Worker process could not be started: {exc}",
             )
-        run_store.transition(task.task_id, "running", f"pid {process.pid}")
+        # ADR 0060: pid AND start time (a pid alone is reused), the proxy port
+        # a re-adopting serve must rebind, and who supervises the run.
+        owner = process_owner(process.pid)
+        running_detail = f"pid {process.pid}"
+        if owner is not None:
+            running_detail += f" started {json.loads(owner)['started']}"
+        if proxy is not None:
+            running_detail += f" proxy port {proxy.port}"
+        run_store.claim_run_supervisor(task.task_id, expected=None, owner=process_owner())
+        run_store.transition(task.task_id, "running", running_detail)
 
         verdict = watch_worker(
             process,
@@ -971,6 +980,10 @@ def dispatch_parallel(
             run_store.close()
 
 
+# ADR 0060: "pid N[ started <lstart>][ proxy port P]" — the running transition.
+_WORKER_DETAIL = re.compile(r"pid (\d+)(?: started (.+?))?(?: proxy port (\d+))?")
+
+
 def _live_worker_pid(run_store: RunStore, task_id: str) -> int | None:
     """The recorded worker pid when that process is still THIS run's worker.
 
@@ -981,7 +994,7 @@ def _live_worker_pid(run_store: RunStore, task_id: str) -> int | None:
         (
             int(detail.split()[1])
             for state, detail, _ in reversed(run_store.transitions_for(task_id))
-            if state == "running" and detail and re.fullmatch(r"pid \d+", detail)
+            if state == "running" and detail and _WORKER_DETAIL.fullmatch(detail)
         ),
         None,
     )
