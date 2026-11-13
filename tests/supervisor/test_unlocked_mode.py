@@ -526,22 +526,44 @@ def test_a_floor_or_unreadable_gate_stays_a_human_card(
     assert [r["verdict"] for r in _decisions(config)] in (["deny"], ["require_approval"])
 
 
+def _callback_ran(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Set once the done-callback reaches the terminal notice — which it
+    does only after the auto-answer declined. A state read right after the
+    run turns terminal races that callback, and passes whatever it does."""
+    import threading
+
+    from skep.supervisor.serve.run_status import notify_run_terminal
+
+    ran = threading.Event()
+
+    def notify(*args: Any, **kwargs: Any) -> None:
+        ran.set()
+        notify_run_terminal(*args, **kwargs)
+
+    monkeypatch.setattr("skep.supervisor.serve.app.notify_run_terminal", notify)
+    return ran
+
+
 def test_a_gate_stays_a_card_when_the_project_is_not_unlocked(
-    repo: Path, config: SupervisorConfig
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    ran = _callback_ran(monkeypatch)
     client, first = _gated_run(config, repo, "rm_-rf_build", execution_mode="workspace",
                                unlocked=False)  # fmt: skip
+    assert ran.wait(20), "the done-callback never declined the gate"
     assert client.get(f"/api/runs/{first}").json()["run"]["state"] == "pending_approval"
     assert _decisions(config) == []
 
 
 def test_a_gate_stays_a_card_when_the_home_runs_no_sandbox(
-    repo: Path, config: SupervisorConfig
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dataclasses import replace
 
+    ran = _callback_ran(monkeypatch)
     unsandboxed = replace(config, sandbox=False)
     client, first = _gated_run(unsandboxed, repo, "rm_-rf_build")
+    assert ran.wait(20), "the done-callback never declined the gate"
     assert client.get(f"/api/runs/{first}").json()["run"]["state"] == "pending_approval"
     assert _decisions(unsandboxed) == []
 
