@@ -677,3 +677,35 @@ def test_w6_a_failed_read_behind_a_proxy_says_the_proxy_is_not_used(
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
     with pytest.raises(httpx.ConnectError, match="does not use HTTPS_PROXY"):
         fetch_url_text("https://site.example/", resolve=resolve)
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://127.0.0.1:8766/api/status", "http://192.168.1.1/", "http://localhost:8765/",
+     "http://[::1]/", "http://0177.0.0.1/"],
+)  # fmt: skip
+def test_l22_a_non_public_read_url_is_refused_at_proposal_with_no_card(
+    url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L22 (field test): read_url on loopback or a LAN address showed an
+    ordinary card (with a keep that could never apply) and refused only after
+    the confirm. An address known non-public without a DNS query is refused
+    at proposal, in the words the fetch uses; a public name still cards."""
+    from skep.supervisor import RunStore
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.serve.tools import mutation_execution_decision
+
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    config = build_config(tmp_path / "skep", None)
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        refused = mutation_execution_decision("read_url", {"url": url}, store=store, holder=holder)
+        assert refused is not None and refused.verdict == "deny", refused
+        assert "only reads public internet addresses" in str(refused.detail)
+        public = mutation_execution_decision(
+            "read_url", {"url": "https://docs.python.org/3/"}, store=store, holder=holder
+        )
+        assert public is None or public.verdict != "deny"
+    finally:
+        store.close()

@@ -25,7 +25,7 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Any
 
-from ..netproxy import UNRESOLVED, Resolver, resolve_public
+from ..netproxy import UNRESOLVED, Resolver, is_public_address, resolve_public
 
 MAX_RESULTS_CAP = 8
 # Hermes #36776: DDGS(timeout=) bounds individual HTTP requests, but the
@@ -144,6 +144,42 @@ def fetch_url_text(
     return {"url": current, "text": excerpt, "truncated": truncated}
 
 
+def _ambiguous_ip(host: str) -> str | None:
+    if _NUMERIC_HOST.fullmatch(host) and not _is_ip(host):
+        # `0177.0.0.1` is 127.0.0.1 to glibc and 177.0.0.1 to macOS.
+        return (
+            f"read_url only reads public internet addresses: {host!r} spells an IP in a "
+            "form platforms read differently — write it as a plain dotted address"
+        )
+    return None
+
+
+def _non_public(host: str, why: str) -> str:
+    return (
+        f"read_url only reads public internet addresses: {host!r} {why}. Loopback, "
+        "LAN, link-local and metadata addresses (skep's own API among them) are "
+        "never read, by card or grant — open that page yourself"
+    )
+
+
+def known_non_public(url: str) -> str | None:
+    """L22: the refusal the fetch would give, when it is known with no DNS
+    query — an IP literal (any spelling) or ``localhost`` — so the proposal
+    answers it instead of showing a card that can only be refused. A name
+    that resolves to a private address is still caught at fetch time."""
+    host = (urllib.parse.urlsplit(url).hostname or "").rstrip(".")
+    ambiguous = _ambiguous_ip(host)
+    if ambiguous is not None:
+        return ambiguous
+    if (
+        host == "localhost"
+        or host.endswith(".localhost")
+        or (_is_ip(host) and not is_public_address(host))
+    ):
+        return _non_public(host, "is a non-public address")
+    return None
+
+
 def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
     """W6: GET ``url`` from the address its host resolves to — resolved once
     here and vetted public, then dialled by IP with the name as Host and SNI
@@ -154,21 +190,14 @@ def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
     host = parts.hostname
     if parts.scheme not in ("http", "https") or not host:
         raise ValueError(f"read_url needs an http(s) URL, got {url!r}")
-    if _NUMERIC_HOST.fullmatch(host) and not _is_ip(host):
-        # `0177.0.0.1` is 127.0.0.1 to glibc and 177.0.0.1 to macOS.
-        raise ValueError(
-            f"read_url only reads public internet addresses: {host!r} spells an IP in a "
-            "form platforms read differently — write it as a plain dotted address"
-        )
+    ambiguous = _ambiguous_ip(host)
+    if ambiguous is not None:
+        raise ValueError(ambiguous)
     addresses, why = resolve_public(host, parts.port or _DEFAULT_PORTS[parts.scheme], resolve)
     if why == UNRESOLVED:
         raise httpx.ConnectError(f"{host!r} does not resolve")
     if not addresses:
-        raise ValueError(
-            f"read_url only reads public internet addresses: {host!r} {why}. Loopback, "
-            "LAN, link-local and metadata addresses (skep's own API among them) are "
-            "never read, by card or grant — open that page yourself"
-        )
+        raise ValueError(_non_public(host, why))
     userinfo = parts.netloc.rpartition("@")[0]
     named = httpx.URL(url)  # IDNA: Host and SNI carry the ASCII name
     error: Exception = httpx.ConnectError(f"{host!r} has no address to dial")

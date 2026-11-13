@@ -5936,10 +5936,15 @@ def _mutation_execution_decision(
         # URL cards too — the honest error surfaces on confirm.
         import urllib.parse
 
+        from .websearch import known_non_public
+
         url = str(args.get("url") or "")
         host = urllib.parse.urlparse(url).hostname or ""
         if not host:
             return None
+        local = known_non_public(url)
+        if local is not None:  # L22: a card here could only be refused
+            return AutonomyDecision(verdict="deny", reason="network.deny.non_public", detail=local)
         return fetch_grant_decision(store, holder, host, role=role, chat_id=chat_id, url=url)
     if name != "dispatch_run":
         return None
