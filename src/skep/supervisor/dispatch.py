@@ -74,7 +74,7 @@ from .reverify import reverify_run
 from .sandbox import NetworkPolicy, SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
 from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
-from .store import RunStore, process_owner
+from .store import RunStore, owner_alive, process_owner
 from .worker_state import (
     prior_task_from_audit,
     resume_checkpoint_version,
@@ -1057,8 +1057,12 @@ def recover_interrupted_runs(
     ids it touched.
     """
     recovered: list[str] = []
+    me = process_owner()
     for record in run_store.runs_with_states(_INTERRUPTED_STATES):
         task_id = record.task_id
+        supervisor = run_store.run_supervisor(task_id)
+        if supervisor is not None and supervisor != me and owner_alive(supervisor):
+            continue  # ADR 0060 §5: a live serve or CLI still supervises it
         # ES-F5 (B10, I1 I12): the detached worker may still be alive — with no
         # babysitter, no budget, and the proxy gone. Kill its whole session
         # BEFORE reading its evidence or touching its worktree: nothing may
