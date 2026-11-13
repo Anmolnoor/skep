@@ -533,10 +533,12 @@ def too_broad_root(path: Path, store_root: Path) -> str | None:
     all of a bound repo path), or None. ``/``, ``/home``, ``/Users``, your
     home directory, any ancestor of it or of the skep store (``store_root``,
     the parent of the skep home). One list for every face that binds one."""
+    from ..secret_floor import alias_key
+
     user = Path.home().resolve()
     store = store_root.expanduser().resolve()
     broad = {Path("/"), Path("/home"), Path("/Users"), user, *user.parents, store, *store.parents}
-    if path.resolve() in broad:
+    if alias_key(path.resolve()) in {alias_key(p) for p in broad}:
         return (
             f"too broad — {path} would let the assistant read everything under it "
             "(your home directory, / and their parents are never a workspace): "

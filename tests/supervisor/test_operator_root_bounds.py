@@ -28,6 +28,9 @@ BROAD: dict[str, Callable[[Home], Path]] = {
     "/home": lambda h: Path("/home"),
     "an ancestor of home": lambda h: Path.home().parent,
     "the skep store": lambda h: h.config.home.parent,
+    # one directory, other spellings: macOS's data volume, a case-insensitive volume
+    "home on the data volume": lambda h: Path("/System/Volumes/Data" + str(Path.home())),
+    "home in another case": lambda h: Path(str(Path.home()).upper()),
 }
 
 
@@ -60,6 +63,10 @@ def test_setup_refuses_a_root_over_a_secret_floor_path(home: Home) -> None:
         _setup(home, secrets)
     assert "check 1" in str(refused.value.detail) and ".ssh" in str(refused.value.detail)
     assert home.store.get_project_policy("q") is None
+    aliased = Path("/System/Volumes/Data" + str(secrets))
+    if aliased.is_dir():  # macOS: the same directory by its data-volume name
+        with pytest.raises(HTTPException, match="check 1"):
+            _setup(home, aliased)
 
 
 def test_a_project_subdirectory_is_still_bound(home: Home) -> None:

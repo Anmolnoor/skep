@@ -56,7 +56,7 @@ from .policy_v3 import (
     load_stack,
     operator_lane,
 )
-from .secret_floor import HOME_SECRETS
+from .secret_floor import HOME_SECRETS, alias_key
 from .store import RunStore
 
 if TYPE_CHECKING:
@@ -257,7 +257,11 @@ def findings(
     reads = [r for r in _rules(stack, "filesystem", "allow") if r.action == "read"]
     secrets = _secret_probes(stack.home)
     for root in roots:
-        probe = next((p for p in secrets if Path(p) == root or root in Path(p).parents), None)
+        key = alias_key(root)
+        probe = next(
+            (p for p in secrets if alias_key(Path(p)) == key or key in alias_key(Path(p)).parents),
+            None,
+        )
         if probe is not None:
             out.append(
                 Finding(1, f"1:root:{root}", f"binding {root} makes it an operator root, and it "
