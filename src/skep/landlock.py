@@ -27,6 +27,7 @@ _CREATE, _ADD_RULE, _RESTRICT = 444, 445, 446
 _CREATE_RULESET_VERSION = 1 << 0
 _RULE_PATH_BENEATH = 1
 _SCOPE_ABSTRACT_UNIX_SOCKET = 1 << 0
+_ACCESS_FS_REFER = 1 << 13
 _ACCESS_FS_RESOLVE_UNIX = 1 << 16
 _PR_SET_NO_NEW_PRIVS = 38
 
@@ -76,8 +77,14 @@ def restrict(*, scope_abstract: bool, unix_roots: Sequence[str]) -> None:
     if sys.platform != "linux":
         raise OSError(f"Landlock is Linux-only, not {sys.platform}")
     libc = _libc()
+    # A ruleset that handles any fs right also denies REFER (cross-directory
+    # rename/link: EXDEV) unless handled and granted; bwrap does the
+    # filesystem, so REFER is granted everywhere. The kernel still refuses a
+    # move that would carry a socket into a root (no rights gain on refer).
+    rules = [("/", _ACCESS_FS_REFER)] if unix_roots else []
+    rules += [(root, _ACCESS_FS_RESOLVE_UNIX) for root in unix_roots]
     attr = _RulesetAttr(
-        _ACCESS_FS_RESOLVE_UNIX if unix_roots else 0,
+        _ACCESS_FS_RESOLVE_UNIX | _ACCESS_FS_REFER if unix_roots else 0,
         0,
         _SCOPE_ABSTRACT_UNIX_SOCKET if scope_abstract else 0,
     )
@@ -87,10 +94,10 @@ def restrict(*, scope_abstract: bool, unix_roots: Sequence[str]) -> None:
         "landlock_create_ruleset",
     )
     try:
-        for root in unix_roots:
+        for root, access in rules:
             parent = os.open(root, os.O_PATH | os.O_CLOEXEC)
             try:
-                rule = _PathBeneathAttr(_ACCESS_FS_RESOLVE_UNIX, parent)
+                rule = _PathBeneathAttr(access, parent)
                 _check(
                     libc.syscall(
                         _ADD_RULE,

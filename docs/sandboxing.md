@@ -119,7 +119,11 @@ What is scoped, by the ABI the running kernel reports:
   a path socket only inside its writable roots (workspace, results, git
   metadata, caches) or one it made itself; any other path socket, listed or
   not, is refused with `EACCES`.
-- No other right is handled: file access stays the mount layout's job.
+- With `RESOLVE_UNIX` the step also handles `LANDLOCK_ACCESS_FS_REFER` and
+  grants it on `/`: the kernel otherwise refuses every cross-directory
+  rename and hard link once any filesystem right is handled. Its no-gain
+  rule still refuses moving or linking a socket into a writable root. No
+  other right is handled: file access stays the mount layout's job.
 
 On an older kernel, or with Landlock disabled at boot, serve leaves the step
 out, `skep doctor` says so in one line, and runs carry on exactly as before

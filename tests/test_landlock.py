@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import subprocess
 import sys
 from typing import Any
 
@@ -83,19 +84,21 @@ def test_restrict_scopes_abstract_sockets_and_resolves_unix_only_under_the_roots
     assert kinds == [
         ("syscall", landlock._CREATE),
         ("syscall", landlock._ADD_RULE),
+        ("syscall", landlock._ADD_RULE),
         ("prctl", landlock._PR_SET_NO_NEW_PRIVS),
         ("syscall", landlock._RESTRICT),
     ]
     attr = libc.calls[0][1][1]._obj
     assert (attr.handled_access_fs, attr.handled_access_net, attr.scoped) == (
-        landlock._ACCESS_FS_RESOLVE_UNIX,
+        landlock._ACCESS_FS_RESOLVE_UNIX | landlock._ACCESS_FS_REFER,
         0,
         landlock._SCOPE_ABSTRACT_UNIX_SOCKET,
     )
-    rule = libc.calls[1][1][3]._obj
-    assert rule.allowed_access == landlock._ACCESS_FS_RESOLVE_UNIX
-    assert ctypes.sizeof(rule) == 12  # the kernel's struct is packed
-    assert [_value(a) for a in libc.calls[2][1]] == [landlock._PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0]
+    # REFER everywhere (bwrap does the filesystem), RESOLVE_UNIX in the root
+    rules = [libc.calls[n][1][3]._obj.allowed_access for n in (1, 2)]
+    assert rules == [landlock._ACCESS_FS_REFER, landlock._ACCESS_FS_RESOLVE_UNIX]
+    assert ctypes.sizeof(libc.calls[1][1][3]._obj) == 12  # the kernel's struct is packed
+    assert [_value(a) for a in libc.calls[3][1]] == [landlock._PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0]
 
 
 def test_restrict_with_scope_only_handles_no_filesystem_right(libc: FakeLibc) -> None:
@@ -133,3 +136,34 @@ def test_main_fails_closed_and_never_execs_unscoped(
 def test_main_needs_a_command(libc: FakeLibc) -> None:
     assert landlock.main(["--scope-abstract"]) == 2
     assert libc.calls == []
+
+
+_RENAME_PROBE = """
+import os, sys
+d = sys.argv[1]
+os.rename(d + "/a/f", d + "/b/f")
+os.link(d + "/b/f", d + "/a/g")
+"""
+
+
+@pytest.mark.skipif(
+    landlock.abi() < landlock.ABI_RESOLVE_UNIX, reason="needs a kernel with Landlock ABI 9"
+)
+def test_a_worker_scoped_to_its_roots_still_renames_and_links_across_directories(
+    tmp_path: Any,
+) -> None:
+    # Handling RESOLVE_UNIX makes the kernel deny REFER too (cross-directory
+    # rename/link -> EXDEV) unless it is handled and granted: git mv, uv and
+    # npm installs would break inside the worktree.
+
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "f").write_text("x")
+    step = [sys.executable, "-P", "-m", "skep.landlock", "--unix-root", str(tmp_path), "--"]
+    done = subprocess.run(
+        [*step, sys.executable, "-c", _RENAME_PROBE, str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    assert (tmp_path / "a" / "g").read_text() == "x"
