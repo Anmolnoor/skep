@@ -630,12 +630,27 @@ def test_three_lands_at_once_land_once_with_honest_losers(
     assert [(a.status, a.landing_branch) for a in approvals] == [("approved", "skep/race-land")]
 
 
+def _dead_owner() -> str:
+    """The owner record of a claimer that has since exited (W27)."""
+    import subprocess
+    import sys
+
+    from skep.supervisor.store import process_owner
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+    owner = process_owner(proc.pid)
+    proc.kill()
+    proc.wait()
+    assert owner is not None
+    return owner
+
+
 def test_a_landing_left_applying_by_a_crash_is_denied_honestly_on_restart(
     rig: Rig, repo: Any, tmp_path: Any, config: SupervisorConfig
 ) -> None:
     run = _landable_run(rig.store, repo, tmp_path)
     review_id = rig.store.enqueue_approval(str(run["task_id"]), action="apply_patch", reason="land")
-    assert rig.store.claim_approval(review_id)
+    assert rig.store.claim_approval(review_id, owner=_dead_owner())
 
     with serve_client(config, start_ticker=False):
         pass
@@ -744,7 +759,7 @@ def test_two_gate_approvals_resume_the_run_once(rig: Rig, repo: Any) -> None:
     assert sorted(type(o).__name__ for o in outcomes) == ["HTTPException", "str"]
     [loser] = [o for o in outcomes if isinstance(o, HTTPException)]
     assert loser.status_code == 409
-    assert "already being approved" in str(loser.detail)
+    assert "already being resumed" in str(loser.detail)
     approval = rig.store.get_approval(review_id)
     assert approval is not None and approval.status == "approved"
     # A late approve names the resume that won.
@@ -758,7 +773,7 @@ def test_a_gate_left_claimed_by_a_crash_says_so_on_restart(
     rig: Rig, repo: Any, config: SupervisorConfig
 ) -> None:
     _run, review_id = _gated_run(rig, repo)
-    assert rig.store.claim_approval(review_id)
+    assert rig.store.claim_approval(review_id, owner=_dead_owner())
 
     with serve_client(config, start_ticker=False):
         pass
@@ -872,3 +887,243 @@ def test_the_last_card_verdict_continues_beside_a_gate(rig: Rig) -> None:
 
     assert ("done", {"state": "awaiting_confirmation"}) not in events
     assert "".join(str(data.get("content") or "") for _, data in events) == "noted, leaving it"
+
+
+# ---------- W27: the CLI gate resume claims, with an owner ----------
+
+
+def _cli_resume(rig: Rig, run: dict[str, Any], held: _HeldMutation, monkeypatch: Any) -> Any:
+    """``skep review <id> --approve`` on a mid-run gate, its run_task held."""
+    from skep.supervisor import cli_cmds
+
+    def fake_run_task(*_: Any, **__: Any) -> Any:
+        held("run_task", {})
+        record = rig.store.get_run(str(run["task_id"]))
+        return type("Outcome", (), {"record": record})()
+
+    monkeypatch.setattr(cli_cmds, "run_task", fake_run_task)
+    record = rig.store.get_run(str(run["task_id"]))
+    assert record is not None
+    return lambda: cli_cmds._resume_pending_approval(rig.holder.current, rig.store, record, "cli")
+
+
+def test_a_cli_gate_approve_and_a_serve_approve_resume_once(
+    rig: Rig, repo: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """W27a: the CLI resume never claimed, so serve claiming first made the
+    CLI run a second full resume and crash in resolve_approval. Now one
+    resume; the loser is told who holds it and nothing raises."""
+    from skep.supervisor.serve import actions
+
+    run, review_id = _gated_run(rig, repo)
+    held = _HeldMutation()
+    cli = _cli_resume(rig, run, held, monkeypatch)
+
+    def serve() -> Any:
+        try:
+            return actions.resume_past_gate(
+                rig.store, rig.holder.current, _runner(held), run, review_id, "operator"
+            )
+        finally:
+            held.release.set()
+
+    def cli_side() -> Any:
+        try:
+            return cli()
+        finally:
+            held.release.set()
+
+    outcomes = race(serve, cli_side)
+
+    assert held.calls == 1, outcomes
+    assert not any(
+        isinstance(o, BaseException) and not isinstance(o, HTTPException) for o in outcomes
+    )
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "approved"
+    serve_out, cli_out = outcomes
+    if isinstance(serve_out, HTTPException):  # the CLI won
+        assert serve_out.status_code == 409 and "already being resumed" in str(serve_out.detail)
+        assert f"pid {__import__('os').getpid()}" in str(serve_out.detail)
+    else:
+        assert cli_out == 2
+        assert "already being resumed" in capsys.readouterr().err
+
+
+def test_the_cli_loses_cleanly_to_a_gate_serve_already_holds(
+    rig: Rig, repo: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run, review_id = _gated_run(rig, repo)
+    assert rig.store.claim_approval(review_id)  # serve is mid-resume
+    held = _HeldMutation()
+    held.release.set()
+
+    assert _cli_resume(rig, run, held, monkeypatch)() == 2
+
+    assert held.calls == 0
+    assert "already being resumed" in capsys.readouterr().err
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "applying"  # still serve's
+
+
+def test_a_cli_resume_that_blows_up_hands_the_gate_back(
+    rig: Rig, repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, review_id = _gated_run(rig, repo)
+    held = _HeldMutation(error=OSError("disk full"))
+    held.release.set()
+
+    with pytest.raises(OSError):
+        _cli_resume(rig, run, held, monkeypatch)()
+
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "pending"
+
+
+def _owner_of(proc: Any) -> str:
+    from skep.supervisor.store import process_owner
+
+    owner = process_owner(proc.pid)
+    assert owner is not None
+    return owner
+
+
+def test_the_restart_sweep_spares_a_claim_whose_owner_is_alive(
+    rig: Rig, repo: Any, config: SupervisorConfig
+) -> None:
+    """W27b: the serve-start sweep denied every row left applying — a CLI
+    holding a claim through its long foreground resume lost it to a serve
+    restart. A claim records its owner's pid and start time; the sweep takes
+    only claims whose owner is gone (or that predate owners)."""
+    import subprocess
+    import sys
+
+    alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        dead_owner = _dead_owner()
+        _r1, live_gate = _gated_run(rig, repo)
+        _r2, dead_gate = _gated_run(rig, repo)
+        _r3, legacy_gate = _gated_run(rig, repo)
+        assert rig.store.claim_approval(live_gate, owner=_owner_of(alive))
+        assert rig.store.claim_approval(dead_gate, owner=dead_owner)
+        assert rig.store.claim_approval(legacy_gate, owner=None)
+
+        with serve_client(config, start_ticker=False):
+            pass
+
+        statuses = {
+            gate: getattr(rig.store.get_approval(gate), "status", None)
+            for gate in (live_gate, dead_gate, legacy_gate)
+        }
+        assert statuses == {live_gate: "applying", dead_gate: "denied", legacy_gate: "denied"}
+    finally:
+        alive.kill()
+        alive.wait()
+
+
+def test_a_reused_pid_is_not_the_claims_owner(rig: Rig, repo: Any) -> None:
+    """A pid outlives its process as a number; the start time tells them apart."""
+    import json
+    import os
+
+    from skep.supervisor.store import owner_alive, process_owner
+
+    mine = process_owner()
+    assert mine is not None and owner_alive(mine)
+    assert not owner_alive(json.dumps({**json.loads(mine), "started": "Thu Jan  1 00:00:00 1970"}))
+    assert json.loads(mine)["pid"] == os.getpid()
+
+
+def test_a_deny_racing_a_claimed_gate_is_a_409_not_a_500(
+    rig: Rig, repo: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W27c: the gate passes the pending check, then an approve claims it
+    before the deny resolves: resolve_approval's ValueError was a 500."""
+    from skep.supervisor.serve import actions
+
+    _run, review_id = _gated_run(rig, repo)
+    checked = actions.pending_approval_or_409
+
+    def check_then_lose_the_window(store: RunStore, rid: str) -> Any:
+        found = checked(store, rid)
+        assert store.claim_approval(rid)  # the approve lands inside the window
+        return found
+
+    monkeypatch.setattr(actions, "pending_approval_or_409", check_then_lose_the_window)
+    response = rig.client.post(f"/api/approvals/{review_id}/deny", json={})
+
+    assert response.status_code == 409, response.text
+    assert "already being resolved" in response.json()["detail"]
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "applying"
+
+
+def test_a_deny_of_a_claimed_gate_is_a_409_everywhere(
+    rig: Rig, repo: Any, tmp_path: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from skep.cli import main
+    from skep.supervisor import mint_task
+
+    _run, review_id = _gated_run(rig, repo)
+    assert rig.store.claim_approval(review_id)
+    response = rig.client.post(f"/api/approvals/{review_id}/deny", json={})
+    assert response.status_code == 409
+    assert "already being resolved" in response.json()["detail"]
+
+    home = tmp_path / "cli-home"
+    db = home / "supervisor" / "supervisor.sqlite3"
+    db.parent.mkdir(parents=True)
+    store = RunStore(db)
+    try:
+        task = mint_task(workspace=repo, instructions="gate me")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "pending_approval")
+        gate = store.enqueue_approval(task.task_id, action="git.commit", reason="gate")
+        assert store.claim_approval(gate)  # serve is resuming it
+    finally:
+        store.close()
+    assert main(["--home", str(home), "review", task.task_id, "--deny"]) == 2
+    assert "already being resolved" in capsys.readouterr().err
+
+
+def test_a_claim_whose_owner_died_says_how_to_release_it(rig: Rig, repo: Any) -> None:
+    """W27: a CLI killed mid-resume leaves its claim 'applying' until the
+    next serve start. The 409 named a pid that no longer runs and nothing
+    said how to get the gate back; it now says the owner is gone and that a
+    serve restart releases it (marked interrupted, as the sweep does)."""
+    from skep.supervisor.serve import actions
+
+    _run, review_id = _gated_run(rig, repo)
+    assert rig.store.claim_approval(review_id, owner=_dead_owner())
+    for refusal in (
+        actions.gate_taken(rig.store, review_id),
+        actions.being_resolved(rig.store, review_id),
+    ):
+        assert refusal.status_code == 409
+        assert "no longer running" in str(refusal.detail)
+        assert "restart skep serve" in str(refusal.detail)
+    _run2, live = _gated_run(rig, repo)
+    assert rig.store.claim_approval(live)  # this live process holds it
+    assert "no longer running" not in str(actions.gate_taken(rig.store, live).detail)
+
+
+def test_a_claim_owner_reads_the_same_under_another_time_zone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ps lstart`` prints local time: a CLI with TZ set and a serve (a
+    launchd/systemd service) without it disagreed on a live claimer's start
+    time, and the restart sweep took the CLI's claim mid-resume."""
+    import subprocess
+    import sys
+
+    from skep.supervisor.store import owner_alive, process_owner
+
+    alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        monkeypatch.setenv("TZ", "Asia/Tokyo")
+        owner = process_owner(alive.pid)
+        monkeypatch.setenv("TZ", "America/Los_Angeles")
+        assert owner_alive(owner)
+    finally:
+        alive.kill()
+        alive.wait()

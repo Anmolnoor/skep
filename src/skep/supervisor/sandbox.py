@@ -501,6 +501,7 @@ def _bubblewrap_args(
     unix_socket_path: str | None = None,
     read_denied: Iterable[Path] = (),
     readable_roots: Iterable[Path] = (),
+    write_denied: Iterable[Path] = (),
 ) -> list[str]:
     # v28-F3: a domain list is now enforceable on Linux. Keep --unshare-net
     # (the deny-all pin Linux already trusts — the netns has NO route out),
@@ -532,6 +533,9 @@ def _bubblewrap_args(
     for root in writable_roots:
         path = str(Path(root))
         args.extend(["--bind", path, path])
+    for pinned in write_denied:
+        # W31: read-only over its writable root (the run's git pin).
+        args.extend(["--ro-bind", str(pinned), str(pinned)])
     for denied in read_denied:
         # ES-F4: after the writable binds, so a mask wins inside one too.
         # /tmp and /run are fresh tmpfs here: their host paths do not exist.
@@ -570,6 +574,7 @@ def _podman_args(
     rootfs: Path,
     read_denied: Iterable[Path] = (),
     readable_roots: Iterable[Path] = (),
+    write_denied: Iterable[Path] = (),
 ) -> list[str]:
     """v44-F7: the container equivalent of the bwrap invocation.
 
@@ -602,6 +607,8 @@ def _podman_args(
         args.extend(["-v", f"{root}:{root}:ro"])
     for root in roots:
         args.extend(["-v", f"{root}:{root}"])
+    for pinned in write_denied:  # W31: read-only over its writable root
+        args.extend(["-v", f"{pinned}:{pinned}:ro"])
     for denied in read_denied:  # ES-F4: /home rides in read-only; hide these
         args.extend(_mask_args(denied, dev_null=["-v", f"/dev/null:{denied}:ro"]))
     if roots:
@@ -663,6 +670,7 @@ def build_profile(
     unix_socket_path: str | None = None,
     read_denied: Iterable[Path] = (),
     skep_home: Path | None = None,
+    write_denied: Iterable[Path] = (),
 ) -> str:
     """Return the SBPL text confining writes to ``writable_roots`` and gating network.
 
@@ -687,6 +695,8 @@ def build_profile(
         lines.append(f"(allow file-write* {subpaths})")
     dev_nodes = " ".join(f'(literal "{node}")' for node in _DEV_WRITE_NODES)
     lines.append(f"(allow file-write* {dev_nodes})")
+    for pinned in write_denied:  # W31: last match wins over its writable root
+        lines.append(f'(deny file-write* (literal "{_sbpl_quote(pinned)}"))')
     # ES-F4 (B05): last match wins, so these follow every allow above. The
     # loopback allow (v115-F9) keeps a worker's own test servers reachable;
     # serve's port is the one listener on this host it must never dial.
@@ -710,6 +720,7 @@ def write_profile(
     backend: str | None = None,
     skep_home: Path,
     worker_llm_key: bool = False,
+    write_denied: Iterable[Path] = (),
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -727,7 +738,11 @@ def write_profile(
 
     ``worker_llm_key`` leaves the worker's own LLM key readable (B125): only
     a worker whose caste calls the LLM passes it.
+
+    ``write_denied`` (W31): files inside a writable root the worker may read
+    but never write, rename or delete — the run's git protocol pin.
     """
+    write_denied = list(write_denied)
     probe = require_usable(backend)
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
@@ -740,6 +755,7 @@ def write_profile(
                 rootfs=_podman_rootfs_skeleton(profile_path.parent),
                 read_denied=read_denied,
                 readable_roots=extra_readable,
+                write_denied=write_denied,
             ),
             header=_PODMAN_HEADER,
         )
@@ -754,6 +770,7 @@ def write_profile(
                 unix_socket_path=unix_socket_path,
                 read_denied=read_denied,
                 readable_roots=extra_readable,
+                write_denied=write_denied,
             ),
         )
     # ES-F5 (B11): no blanket /tmp, /private/tmp, /var/folders roots — they
@@ -770,6 +787,7 @@ def write_profile(
             unix_socket_path=unix_socket_path,
             read_denied=read_denied,
             skep_home=skep_home,
+            write_denied=write_denied,
         )
     )
     return profile_path

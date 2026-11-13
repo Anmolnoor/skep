@@ -13,6 +13,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from skep.supervisor import RunStore, SupervisorConfig, mint_task
 from skep.supervisor.contracts_io import write_task_file
 from skep.supervisor.dispatch import recover_interrupted_runs
@@ -35,9 +37,17 @@ def _strand_run(store: RunStore, config: SupervisorConfig, repo: Path) -> tuple[
 
 
 def _deposit_completed_result(
-    store: RunStore, config: SupervisorConfig, task_id: str, workspace: Path
+    store: RunStore,
+    config: SupervisorConfig,
+    task_id: str,
+    workspace: Path,
+    *,
+    legacy: bool = True,
+    named: str | None = None,
 ) -> None:
-    """What a detached worker leaves behind: terminal event log + envelope."""
+    """What a detached worker leaves behind: terminal event log + envelope —
+    at the pre-W26 flat path (a run dispatched before the change) or in the
+    run's own directory; ``named`` forges the envelope's task id."""
     run = store.get_run(task_id)
     assert run is not None
     events_path = workspace / ".events" / f"{task_id}.ndjson"
@@ -72,12 +82,17 @@ def _deposit_completed_result(
         ],
         "usage": {"provider_calls": 1, "input_tokens": 0, "output_tokens": 0},
     }
-    result_path = config.results_dir / f"{task_id}.json"
+    if named is not None:
+        envelope["task_id"] = named
+    result_path = config.results_dir / f"{task_id}.json" if legacy else config.result_path(task_id)
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text(json.dumps(envelope))
 
 
-def test_recovery_ingests_a_late_deposited_result(repo: Path, config: SupervisorConfig) -> None:
+@pytest.mark.parametrize("legacy", [True, False])
+def test_recovery_ingests_a_late_deposited_result(
+    repo: Path, config: SupervisorConfig, legacy: bool
+) -> None:
     """A valid envelope on disk is a deposit — the run completes with its
     evidence and gets re-verified (G10). This deposit claims changed files
     without a patch (the v65-F1 suspicious shape), so its re-verification is
@@ -86,7 +101,7 @@ def test_recovery_ingests_a_late_deposited_result(repo: Path, config: Supervisor
     notified: list[str] = []
     try:
         task_id, workspace = _strand_run(store, config, repo)
-        _deposit_completed_result(store, config, task_id, workspace)
+        _deposit_completed_result(store, config, task_id, workspace, legacy=legacy)
 
         recovered = recover_interrupted_runs(store, config, on_run_finished=notified.append)
 
@@ -245,5 +260,27 @@ def test_es_f5_recovery_kills_a_live_worker_before_marking_it_crashed(
         assert record is not None and record.state == "worker_crashed"
         details = " ".join(d or "" for _, d, _ in store.transitions_for(task_id))
         assert f"pid {worker.pid}" in details and "killed" in details
+    finally:
+        store.close()
+
+
+def test_recovery_rejects_a_deposit_naming_another_task(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """W26: an envelope in this run's directory that names another task is
+    not this run's evidence — rejected, recorded, the run crash-grade."""
+    store = RunStore(config.db_path)
+    try:
+        task_id, workspace = _strand_run(store, config, repo)
+        _deposit_completed_result(
+            store, config, task_id, workspace, legacy=False, named="other-task"
+        )
+        recover_interrupted_runs(store, config)
+        record = store.get_run(task_id)
+        assert record is not None and record.state != "completed"
+        assert any(
+            "result rejected" in (detail or "") and "other-task" in (detail or "")
+            for _, detail, _ in store.transitions_for(task_id)
+        )
     finally:
         store.close()

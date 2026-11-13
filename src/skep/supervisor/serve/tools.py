@@ -5068,7 +5068,8 @@ def _execute_mutation(
             resumed = actions.allow_network_host_and_resume(
                 store, holder, runner, run, approval, review_id, actor
             )
-            return {"action": "allowed_host", "resumed_as": resumed}
+            where = actions.remembered_where(store, str(run["repo"]))  # W28: a grant
+            return {"action": "allowed_host", "resumed_as": resumed, "remembered": where}
         resumed = actions.allow_shell_command_and_resume(
             store, holder, runner, run, approval, review_id, actor
         )
@@ -5077,9 +5078,8 @@ def _execute_mutation(
         return {"action": "allowed_command", "resumed_as": resumed, "remembered": where}
     if name == "deny_review":
         review_id = str(args["review_id"])
-        actions.pending_approval_or_409(store, review_id)
         note = None if args.get("note") is None else str(args["note"])
-        store.resolve_approval(review_id, approved=False, actor=actor, note=note)
+        actions.deny_approval(store, review_id, actor, note)
         return {"action": "denied"}
     if name == "register_repo":
         return register_repo(

@@ -199,9 +199,10 @@ def test_a_knob_union_racing_update_policy_never_brings_back_a_removed_entry(
     home: Home, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``update_policy`` writes ``allowed_shell_commands`` and
-    ``default_network`` under the lock; the "allow this command" union and
-    the remembered-host write read-modify-write the same knobs. Outside the
-    lock, a union that read the list before the removal wrote it back."""
+    ``default_network`` under the lock; the "allow this command" union
+    read-modify-writes the same knob. Outside the lock, a union that read the
+    list before the removal wrote it back. A remembered host is a grant since
+    W28 and never writes ``default_network`` at all."""
     from skep.supervisor.serve.settings import policy_view as real_view
 
     def slow_view(*args: Any, **kwargs: Any) -> Any:
@@ -220,7 +221,7 @@ def test_a_knob_union_racing_update_policy_never_brings_back_a_removed_entry(
         ),
         (
             lambda: actions.update_policy(home.store, home.holder, {"default_network": []}),
-            lambda: actions._persist_remembered_network_host(
+            lambda: actions.persist_remembered_network_host(
                 home.store, home.holder, repo, "new.example.org"
             ),
         ),

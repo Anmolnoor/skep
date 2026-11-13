@@ -170,6 +170,13 @@ THREE_FACE_READS: dict[str, str] = {
 THREE_FACE_VERBS: dict[str, str] = {
     "approve_policy_baseline": "`skep policy approve`, `POST /api/policy/baseline/approve` "
     "and the chat card lock the policy baseline through one verb (first-run O2)",
+    "revoke_policy_rule": "`skep policy revoke`, `DELETE /api/policy/rules/<id>` and the "
+    "chat revoke_policy_rule card remove one learned grant through one verb (W29)",
+}
+# W29: the grant list, CLI and REST (`skep policy grants`, `GET /api/policy/rules`).
+TWO_FACE_READS: dict[str, str] = {
+    "list_policy_rules": "`skep policy grants` and `GET /api/policy/rules` list every learned "
+    "grant with its scope, matcher, lifetime and binding (W29)",
 }
 THREE_FACES: tuple[Path, ...] = (SUPERVISOR / "cli_cmds.py", SUPERVISOR / "serve/app.py", TOOLS)
 
@@ -388,6 +395,14 @@ def test_onboard_steps_are_called_from_the_cli_and_rest() -> None:
     for function, why in ONBOARD_VERBS.items():
         assert len(why.strip()) >= 20, function
         for face in ONBOARD_FACES:
+            assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
+                f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
+            )
+
+
+def test_the_grant_list_is_called_from_the_cli_and_rest() -> None:
+    for function, why in TWO_FACE_READS.items():
+        for face in THREE_FACES[:2]:
             assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
                 f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
             )

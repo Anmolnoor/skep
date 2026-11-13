@@ -110,7 +110,9 @@ def test_local_profile_routes_and_exports_worker_env(repo: Path, config: Supervi
         "provider_id": "local-ollama",
         "reason": "routing.preferred_local_healthy",
     }
-    dump = json.loads((config.results_dir / f"envdump-{task_id}.json").read_text(encoding="utf-8"))
+    dump = json.loads(
+        (config.result_path(task_id).parent / f"envdump-{task_id}.json").read_text(encoding="utf-8")
+    )
     assert dump["SKEP_OLLAMA_URL"] == "http://127.0.0.1:11434"
     assert dump["SKEP_OLLAMA_MODEL"] == "qwen3:8b"
 
@@ -131,7 +133,9 @@ def test_remote_profile_without_network_grant_is_blocked_not_silently_used(
         "provider_id": None,
         "reason": "routing.remote_blocked_by_policy",
     }
-    dump = json.loads((config.results_dir / f"envdump-{task_id}.json").read_text(encoding="utf-8"))
+    dump = json.loads(
+        (config.result_path(task_id).parent / f"envdump-{task_id}.json").read_text(encoding="utf-8")
+    )
     assert "SKEP_OLLAMA_URL" not in dump
     assert "SKEP_OLLAMA_MODEL" not in dump
 

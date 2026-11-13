@@ -22,7 +22,9 @@ The sandbox mounts the root filesystem read-only and binds only the intended
 writable roots back as writable:
 
 - the worker workspace (its private `TMPDIR` lives inside it)
-- the results/audit output directory
+- the run's own result directory (`results/<task_id>/`, where `--out` points);
+  no run can write another run's result, and the supervisor rejects (and
+  records on the run) an envelope whose `task_id` is not the run's
 - the worktree's own git metadata and the repo's `objects/` — enough for
   `git add`/`git commit`; the repo's `hooks/`, `config` and `refs/` stay
   read-only, and skep's own host-side git runs with hooks and fsmonitor off.
@@ -84,8 +86,34 @@ inside a worker (and every process it starts) uses only its local transport,
 so a push, fetch, clone or submodule update over https, ssh or git:// fails
 with "transport not allowed". That includes a package manager's git-sourced
 dependencies (`git+https://…` in uv/pip, `github:` in npm) unless they are
-already in the cache. A process that rewrites its own env can drop the variable; the
-network mode above is the wall.
+already in the cache.
+
+A process that clears its env (`env -i git push`, `subprocess.run(..., env={})`)
+drops the variable, so skep's task worktrees carry the same rule as git
+config, which git reads with an empty environment. The first time skep runs a
+task in a repository it writes `.git/skep-protocol-pin` (`protocol.allow=never`,
+`protocol.file.allow=always`) and adds one section to that repository's
+`.git/config`:
+
+```ini
+[includeIf "gitdir:./worktrees/????????-????-7???-????-????????????*"]
+	path = skep-protocol-pin
+```
+
+It matches only a linked worktree whose git dir is named like a skep task id
+(a UUIDv7): your checkout and your own worktrees read none of it, and it is
+plain config every git client parses (no repository extension). To remove it:
+`git config --remove-section 'includeIf.gitdir:./worktrees/????????-????-7???-????-????????????*'`
+and delete the file; skep writes both again on its next run there. In sandbox
+mode both files are read-only to the worker (it cannot edit, delete or
+replace them). In workspace mode there is no sandbox: the worker can edit or
+delete them, so there the rule only stops a script that clears its env and
+does nothing else.
+Neither carrier stops git told otherwise on its command line
+(`git -c protocol.allow=always`), a `GIT_CONFIG_*` variable, a `.git` file
+repointed at another git dir, or a fresh clone in the workspace: the network
+mode above is the wall. skep's own pushes (open_pr, push_branch) run in your
+checkout, which reads none of this.
 
 ### macOS
 

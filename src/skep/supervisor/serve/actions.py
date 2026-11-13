@@ -121,7 +121,7 @@ from ..shell_prefixes import (
     reaches_network,
     worker_allowlist_reason,
 )
-from ..store import ChatTaint, RunStore
+from ..store import ChatTaint, RunStore, owner_alive
 from ..worktree import TREE_LOCK
 from .jobs import Dispatcher, DispatchError
 from .registry import (
@@ -3108,11 +3108,47 @@ def pending_approval_or_409(store: RunStore, review_id: str) -> dict[str, Any]:
                 "land_run(task_id=...) to land a completed run",
             )
         raise HTTPException(status_code=404, detail=f"no approval {review_id!r}")
+    if approval.status == "applying":
+        raise being_resolved(store, review_id)
     if approval.status != "pending":
         raise HTTPException(
             status_code=409, detail=f"approval {review_id!r} already {approval.status}"
         )
     return asdict(approval)
+
+
+def being_resolved(store: RunStore, review_id: str) -> HTTPException:
+    """W27c: the 409 for a verb that met a claimed review — resume or landing
+    in flight; its outcome is the verdict, so nothing is resolved twice."""
+    owner = store.approval_claim_owner(review_id)
+    by = f" (pid {owner['pid']})" if owner else ""
+    return HTTPException(
+        status_code=409,
+        detail=f"approval {review_id!r} is already being resolved by another request{by} — "
+        "its outcome is the verdict; check the run, then act on what it left"
+        + _dead_claim_note(owner),
+    )
+
+
+def _dead_claim_note(owner: dict[str, Any] | None) -> str:
+    """W27: a claimer that died (a CLI killed mid-resume) holds its claim
+    until the serve-start sweep; say so, and how to get the review back."""
+    if owner is None or owner_alive(json.dumps(owner)):
+        return ""
+    return (
+        f". pid {owner.get('pid')} is no longer running: restart skep serve to release "
+        "the claim (the restart marks it interrupted; check for its run before redoing it)"
+    )
+
+
+def deny_approval(store: RunStore, review_id: str, actor: str, note: str | None) -> None:
+    """Deny a pending review — REST, chat and the CLI. W27c: an approve that
+    claims it between the check and the write is a 409, never a 500."""
+    pending_approval_or_409(store, review_id)
+    try:
+        store.resolve_approval(review_id, approved=False, actor=actor, note=note)
+    except ValueError as exc:
+        raise being_resolved(store, review_id) from exc
 
 
 def apply_patch(
@@ -3198,8 +3234,11 @@ def gate_taken(store: RunStore, review_id: str) -> HTTPException:
     approval = store.get_approval(review_id)
     status = approval.status if approval is not None else "gone"
     if status == "applying":
+        owner = store.approval_claim_owner(review_id)
+        by = f"another process (pid {owner['pid']})" if owner else "another request"
         detail = (
-            "this gate is already being approved by another request — its resume is the verdict"
+            f"this gate is already being resumed by {by} — its resume is the verdict"
+            + _dead_claim_note(owner)
         )
     elif approval is not None and status == "approved":
         detail = f"gate already approved: {approval.resolution_note or 'resumed'}"
@@ -3723,48 +3762,40 @@ def granted_commands(store: RunStore, holder: ConfigHolder, repo: Path) -> list[
     return [shlex.split(pattern) for pattern in grants]
 
 
-def _persist_remembered_network_host(
+def persist_remembered_network_host(
     store: RunStore, holder: ConfigHolder, repo: Path, host: str
-) -> None:
-    """v109-F7: the network twin of ``persist_remembered_command``. Prefers
-    the repo's bound project policy (``default_network``) so remembering does
-    not silently widen every repo's egress; falls back to the global setting
-    when the repo is unbound."""
-    from ..policy_write import policy_write
+) -> str:
+    """v109-F7: the network twin of ``persist_remembered_command``; returns
+    where it holds (``project:<id>`` / ``repo:<path>``).
 
-    with policy_write():  # W14: update_policy writes the same knob
-        _union_network_host(store, holder, repo, host)
+    W28 (B18's network half): a ``project`` grant on the one learned list —
+    ``network.connect <host>``, matcher ``host``, bound to the repo's project
+    or to the repo when it has none — that the run compile reads
+    (``worker_network_grants``). It no longer writes the project's (or the
+    global) ``default_network`` knob, which a locked baseline enforces and so
+    silently ignored while the receipt said remembered. Through the one
+    write-time check (``store_grant``): a remember inside a deny is refused."""
+    from ..policy_schema import LearnedRule
+
+    project = store.project_for_binding("repo_path", str(repo))
+    bound = {"repo": grant_repo(repo)} if project is None else {"project_id": project.project_id}
+    ((key, value),) = bound.items()
+    rule = LearnedRule(
+        rule_id=f"network:connect:{host}@{'project' if key == 'project_id' else key}:{value}",
+        action="connect",
+        pattern=host,
+        scope="network",
+        provenance="remember:worker",
+        lifetime="project",
+        matcher="host",
+        bound=bound,  # type: ignore[arg-type]
+    )
+    store_grant(store, rule, context={"repo": grant_repo(repo)})
     # v109-F8: every historical approval of this host now has a standing
     # grant — its ledger rows say so, whichever door persisted it (I13).
     for network_action in ("network.fetch", "network.read"):
         store.mark_ledger_remembered(action=network_action, resource=host, repo_path=str(repo))
-
-
-def _union_network_host(store: RunStore, holder: ConfigHolder, repo: Path, host: str) -> None:
-    project = store.project_for_binding("repo_path", str(repo))
-    if project is not None:
-        existing = [str(entry) for entry in (project.policy.get("default_network") or [])]
-        if host not in existing:
-            existing.append(host)
-            updated = dict(project.policy)
-            updated["default_network"] = existing
-            store.add_project_policy(
-                project_id=project.project_id,
-                name=project.name,
-                strategy=project.strategy,
-                phase=project.phase,
-                policy=updated,
-                pack_name=project.pack_name,
-                pack_version=project.pack_version,
-            )
-    else:
-        existing = [
-            str(entry) for entry in (policy_view(store, holder.current).get(DEFAULT_NETWORK) or [])
-        ]
-        if host not in existing:
-            existing.append(host)
-            store.set_setting(DEFAULT_NETWORK, existing)
-            holder.rebuild()
+    return remembered_where(store, repo)
 
 
 def allow_network_host_and_resume(
@@ -3782,8 +3813,8 @@ def allow_network_host_and_resume(
     say "this host is fine for this project, stop asking" (the field ledger
     holds the same install host approved twice in one workspace). The blocked
     hostname rides the approval decision's detail (the same slot the resume
-    verdict grants from, v90-F3); it lands in the project's ``default_network``
-    and the gated run resumes with the grant.
+    verdict grants from, v90-F3); it is stored as a project grant
+    (``persist_remembered_network_host``) and the gated run resumes with it.
     """
     if run["state"] != "pending_approval":
         raise HTTPException(status_code=409, detail="allow-host only applies to pending runs")
@@ -3805,16 +3836,17 @@ def allow_network_host_and_resume(
             status_code=409,
             detail="this approval carries no hostname to remember; approve it once instead",
         )
-    if host == "*" or "/" in host or ":" in host:
+    if "*" in host or "/" in host or ":" in host:
         # The wildcard is the trust ramp, not a host — it is never remembered
-        # from an approval; a URL or host:port is not a bare hostname either.
+        # from an approval, nor is a '*.' pattern (the host rides the worker's
+        # own event); a URL or host:port is not a bare hostname either.
         raise HTTPException(
             status_code=409,
             detail=f"{host!r} is not a rememberable bare hostname; approve it once instead",
         )
     _refuse_remembering_an_ask(holder.current, str(run["task_id"]), host=host)
     repo = Path(str(run["repo"]))
-    _persist_remembered_network_host(store, holder, repo, host)
+    persist_remembered_network_host(store, holder, repo, host)
     return resume_past_gate(
         store,
         holder.current,
@@ -4015,20 +4047,26 @@ def remember_ledger_entry(
         guard_reason = dangerous_prefix_reason(argv)
         if guard_reason is not None:
             raise HTTPException(status_code=409, detail=guard_reason)
-        persist_remembered_command(store, holder, repo_path, argv)
+        where = persist_remembered_command(store, holder, repo_path, argv)
     elif action in ("network.fetch", "network.read"):
         host = resource.strip()
-        if not host or host == "*" or "/" in host or ":" in host:
+        if not host or "*" in host or "/" in host or ":" in host:
             raise HTTPException(
                 status_code=409, detail=f"{host!r} is not a rememberable bare hostname"
             )
-        _persist_remembered_network_host(store, holder, repo_path, host)
+        where = persist_remembered_network_host(store, holder, repo_path, host)
     else:
         raise HTTPException(
             status_code=409,
             detail="only shell.run and network.fetch/network.read approvals can be remembered",
         )
-    return {"remembered": True, "action": action, "resource": resource, "repo": repo}
+    return {
+        "remembered": True,
+        "holds": where,  # W28: a project grant, not a knob
+        "action": action,
+        "resource": resource,
+        "repo": repo,
+    }
 
 
 def allow_shell_command_and_resume(
@@ -4972,10 +5010,12 @@ def _within_delegation(
     ordinary not-allowlisted gate. A grant is kept only where its row,
     held to the chain, still says ``allow`` (§5.4 check 5: no allow the
     delegator lacks). That also covers an explicit ``network`` host the run
-    policy has no rule for, which the worker used to keep. B147 is NOT closed
-    here: on a zero-state home every row reads ``ask baseline/no_baseline``,
-    the delegator's too, and the worker keeps those grants as it always has
-    (see ``kept``).
+    policy has no rule for, which the worker used to keep. B147: on a home
+    with no approved baseline every row reads ``ask baseline/no_baseline``,
+    so every grant there is a deferred ask (or dropped, headless); the
+    dispatch card lists them and approving it answers them for that run
+    (``_preanswer``), which is what lets a sandboxed install reach its
+    registry through the proxy.
 
     R3 (ADR 0055 D5): the worker's own ``role`` decides beside the chain —
     a grant its role layer made stricter is narrowed the same way, recorded
@@ -5000,11 +5040,7 @@ def _within_delegation(
     def kept(scope: str, action: str, value: str, *, askable: bool) -> bool | None:
         """True: kept as a grant. None: a deferred ask. False: dropped."""
         row = row_for(scope, action, value)
-        if row["verdict"] == "allow" or row["rule_id"] == NO_BASELINE_REASON:
-            # B147 stays open: on a zero-state home every row, the delegator's
-            # too, is the same baseline placeholder, so nothing is stricter and
-            # the grant is kept as before. Asking here strands a sandboxed
-            # `uv sync`: the proxy cannot card a subprocess for a registry host.
+        if row["verdict"] == "allow":
             return True
         ask = deferred_asks and askable and row["verdict"] == "require_approval"
         row = {**row, "delegated": "ask" if ask else "dropped"}

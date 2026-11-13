@@ -167,6 +167,17 @@ def test_connect_denied_host_gets_403() -> None:
         srv.close()
 
 
+def test_connect_to_a_deferred_ask_says_it_needs_approval() -> None:
+    """W30: the run's network_ask hosts reach the proxy so its 403 says so."""
+    proxy = FilteringProxy(("pypi.org",), asks=("denied.invalid",)).start()
+    try:
+        status, sock = _connect_via_proxy(proxy.port, "denied.invalid", 443)
+        sock.close()
+        assert "403" in status and "denied.invalid:443 needs approval" in status
+    finally:
+        proxy.stop()
+
+
 def _streaming_listener(chunks: int, delay: float) -> tuple[int, socket.socket]:
     """An origin that answers one request, then streams slowly — the shape of a
     long model response, which the client never interrupts."""

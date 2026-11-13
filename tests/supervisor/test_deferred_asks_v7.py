@@ -361,10 +361,10 @@ def test_a_child_never_holds_an_allow_its_delegator_lacks(
 ) -> None:
     """ADR 0059 §5.4 check 5, counting ask as weaker than allow: every grant
     the worker keeps is one each delegator (and its own role) allows; every
-    deferred ask is one they would ask about — never one they deny. A
-    zero-state home is the exception this round leaves open (B147): every
-    row there is the baseline placeholder, so the worker keeps its grants as
-    before — asking would strand a sandboxed install the proxy cannot card."""
+    deferred ask is one they would ask about — never one they deny. On a
+    zero-state home (B147) the delegator asks everything, so nothing stays an
+    allow: the grants become asks the dispatch card lists (and approving it
+    answers them for that run, test_dispatch_manifest)."""
     config = {
         "locked": lambda: _home(tmp_path, repo, capsys),
         "zero": lambda: _zero_state(tmp_path, repo),
@@ -401,10 +401,6 @@ def test_a_child_never_holds_an_allow_its_delegator_lacks(
         finally:
             store.close()
 
-    if state == "zero":
-        assert narrowed.network == hosts and narrowed.shell_allowlist == PREFIXES
-        assert narrowed.network_ask == [] and narrowed.shell_ask == []
-        return
     for host in narrowed.network:
         assert verdicts("network", "connect", host) == {"allow"}, host
     for prefix in narrowed.shell_allowlist:
@@ -413,6 +409,27 @@ def test_a_child_never_holds_an_allow_its_delegator_lacks(
         assert "deny" not in verdicts("network", "connect", host), host
     for prefix in narrowed.shell_ask:
         assert "deny" not in verdicts("shell", "run", shlex.join(prefix)), prefix
+    if state == "zero":
+        assert narrowed.network == [] and narrowed.shell_allowlist == []
+        assert narrowed.network_ask == hosts  # bare hosts: each one askable
+
+
+def test_a_headless_dispatch_on_a_zero_state_home_drops_every_grant(
+    tmp_path: Path, repo: Path
+) -> None:
+    """B147 with no human to answer: the grants are dropped, as on every
+    other home (I6: headless = deny)."""
+    config = _zero_state(tmp_path, repo)
+    narrowed, note = _narrow(
+        config,
+        repo,
+        _perms(network=HOSTS, shell_allowlist=PREFIXES),
+        chain=["queen@builder"],
+        deferred_asks=False,
+    )
+    assert narrowed.network == narrowed.network_ask == []
+    assert narrowed.shell_allowlist == narrowed.shell_ask == []
+    assert "dropped: " in note and "asks a human" not in note
 
 
 @pytest.mark.parametrize(

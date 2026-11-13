@@ -423,15 +423,31 @@ def test_an_old_database_gains_card_json_and_its_cards_read_as_unrecorded(
         reopened.close()
 
 
+@pytest.mark.parametrize("role", [None, "builder"])
 def test_a_project_wide_network_is_high_for_every_dispatch_verb(
-    repo: Any, config: SupervisorConfig
+    repo: Any, config: SupervisorConfig, role: str | None
 ) -> None:
     """A project whose default network is ``*`` and that auto-dispatches:
-    dispatch_run's manifest made its card HIGH, while quick_edit and
-    batch_dispatch — the same compile, the same run — ran unasked with every
-    host open. Each one now cards HIGH."""
+    quick_edit and batch_dispatch once ran unasked with every host open. No
+    chat can do that now, so nothing here is HIGH (``cards.high_tier``'s
+    wildcard branch is pinned by the tests above, on the manifest itself).
+
+    W25 (B147): a role chat's chain — here builder, on this home with no
+    approved baseline — asks every grant and never offers a wildcard, so
+    ``*`` never reaches its run and the run holds no host at all. A legacy
+    chat with no stored role reads as assistant (P3-6): its dispatch tools
+    are hidden, so each verb gets no card and starts no run."""
     from .test_serve_chat import sse_events
     from .test_serve_chat_tools import chat_client
+
+    def new_chat() -> str:
+        chat = client.post("/api/chats", json={"role": role or "builder"}).json()["chat_id"]
+        if role is None:  # a legacy chat: stored before P3-6 recorded a role
+            store = RunStore(config.db_path)
+            store._conn.execute("UPDATE chats SET role = NULL WHERE chat_id = ?", (chat,))
+            store._conn.commit()
+            store.close()
+        return str(chat)
 
     ollama = FakeOllama(api_key="sk-fake").start()
     try:
@@ -447,24 +463,36 @@ def test_a_project_wide_network_is_high_for_every_dispatch_verb(
             },
         )  # fmt: skip
         assert created.status_code == 201
+        if role is not None:
+            chat = new_chat()
+            ollama.script_tool_call("dispatch_run", {"repo": str(repo), "instructions": "a"})
+            ollama.script_reply("dispatched")
+            client.post(f"/api/chats/{chat}/messages", json={"content": "go"})
+            store = RunStore(config.db_path)
+            try:
+                [run] = store.recent_runs(10)
+                task = json.loads(
+                    (config.audit_dir / run.task_id / "task.json").read_text(encoding="utf-8")
+                )
+            finally:
+                store.close()
+            assert "*" not in task["permissions"]["network"]
+            assert "*" not in task["permissions"].get("network_ask", [])
+            return
         for tool, args in (
             ("dispatch_run", {"repo": str(repo), "instructions": "a"}),
             ("quick_edit", {"repo": str(repo), "file": "hello.py", "instruction": "b"}),
             ("batch_dispatch", {"tasks": [{"repo": str(repo), "instructions": "c"}]}),
         ):
-            # A builder chat: a new chat with no role picked opens as assistant
-            # (P3-6), which cannot dispatch at all.
-            chat = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
+            chat = new_chat()
             ollama.script_tool_call(tool, args)
             events = sse_events(
                 client.post(f"/api/chats/{chat}/messages", json={"content": "go"}).text
             )
-            (card,) = [data for name, data in events if name == "action"]
-            assert card["decision"]["decided_by"] == "tier/high", tool
-            assert "any host" in card["card"]["high"], tool
+            assert [data for name, data in events if name == "action"] == [], tool
         store = RunStore(config.db_path)
         try:
-            assert store.recent_runs(10) == []  # nothing ran unasked
+            assert store.recent_runs(10) == []  # nothing ran
         finally:
             store.close()
     finally:
