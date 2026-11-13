@@ -180,6 +180,10 @@ def net(
             return paths, store, ConfigHolder(config, store), fetched
 
         yield make
+        # A test's own monkeypatch over a fake (runner_for_config) is undone
+        # while the fake is still in place; undone after, it put the fake back
+        # for good and later real-server tests on this worker read its tools.
+        monkeypatch.undo()
     for store in opened:
         store.close()
 
