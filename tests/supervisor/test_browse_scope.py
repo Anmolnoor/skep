@@ -381,7 +381,7 @@ def _hintless_runner(hints: dict[str, bool] | None = None) -> object:
     names = ("browser_snapshot", "browser_take_screenshot", "browser_console_messages",
              "browser_network_requests", "browser_network_request", "browser_wait_for",
              "browser_navigate", "browser_click", "browser_type", "browser_evaluate",
-             "browser_tabs", "browser_find")  # fmt: skip
+             "browser_tabs", "browser_find", "browser_console_clear")  # fmt: skip
 
     def runner(method: str, params: object) -> dict[str, object]:
         assert method == "tools/list"
@@ -418,8 +418,10 @@ def test_es_f161_a_playwright_server_without_hints_reads_from_the_built_in_list(
             assert mcp_scope_decision(store, holder, _tool(name)).verdict == "allow", name
             args = {"server_id": "playwright", "tool": name}
             assert high_tier("call_mcp_tool", args, store=store) is None, name
+        # browser_console_clear: a page-state-shaped name with no act word,
+        # but not on the list, so with no hint it acts.
         for name in ("browser_navigate", "browser_click", "browser_type", "browser_evaluate",
-                     "browser_tabs", "browser_find"):  # fmt: skip
+                     "browser_tabs", "browser_find", "browser_console_clear"):  # fmt: skip
             assert mcp_tool_scope_action(store, _tool(name)) == ("browse", "act"), name
             assert not mcp_call_is_read(store, "playwright", name), name
     finally:
