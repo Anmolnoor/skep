@@ -305,3 +305,73 @@ def test_list_mcp_tools_labels_browse_tools_by_browse_action(
         assert by_name["browser_navigate"]["policy"] == "require_approval"
     finally:
         store.close()
+
+
+def test_es_f160_a_browse_read_lists_the_servers_tools_once_until_re_registered(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6 (D25): every read started a second server process just to ask its
+    tools/list for the hint — two per confirmed read (the gate and the last
+    guard), one more for the card tier. The list is cached per server and
+    dropped when the server is registered again or removed."""
+    from skep.supervisor.mcp_client import mcp_call_is_read, remove_mcp_server
+
+    calls: list[str] = []
+
+    def runner(method: str, params: object) -> dict[str, object]:
+        calls.append(method)
+        if method == "tools/call":
+            return {"content": [{"type": "text", "text": "page"}]}
+        return {"tools": [{"name": n, "annotations": {"readOnlyHint": True}} for n in _PAGE_READS]}
+
+    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", lambda config, **_: runner)
+    _seed_browse_server(config)
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        args = {"server_id": "playwright", "tool": "browser_snapshot", "arguments": {}}
+        for _ in range(2):  # two reads: gate, card tier, last guard, the call
+            assert mcp_scope_decision(store, holder, _tool("browser_snapshot")).verdict == "allow"
+            assert mcp_call_is_read(store, "playwright", "browser_snapshot")
+            result = execute_mutation(
+                "call_mcp_tool", args, store=store, holder=holder,
+                runner=None,  # type: ignore[arg-type]  # an MCP call never dispatches
+                actor="test",
+            )  # fmt: skip
+            assert result["ok"] is True
+        assert calls == ["tools/list", "tools/call", "tools/call"]
+
+        _seed_browse_server(config)  # registered again: the next read asks afresh
+        assert mcp_call_is_read(store, "playwright", "browser_snapshot")
+        assert calls.count("tools/list") == 2
+        remove_mcp_server(store, "playwright")
+        _seed_browse_server(config)
+        assert mcp_call_is_read(store, "playwright", "browser_snapshot")
+        assert calls.count("tools/list") == 3
+    finally:
+        store.close()
+
+
+def test_es_f160_a_failed_listing_is_not_cached(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreachable server cannot vouch for a read, and it is asked again
+    on the next read rather than remembered as having no tools."""
+    from skep.supervisor.mcp_client import mcp_call_is_read
+
+    up = {"now": False}
+
+    def runner(method: str, params: object) -> dict[str, object]:
+        if not up["now"]:
+            raise OSError("npx: not found")
+        return {"tools": [{"name": "browser_snapshot", "annotations": {"readOnlyHint": True}}]}
+
+    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", lambda config, **_: runner)
+    _seed_browse_server(config)
+    store = RunStore(config.db_path)
+    try:
+        assert not mcp_call_is_read(store, "playwright", "browser_snapshot")
+        up["now"] = True
+        assert mcp_call_is_read(store, "playwright", "browser_snapshot")
+    finally:
+        store.close()

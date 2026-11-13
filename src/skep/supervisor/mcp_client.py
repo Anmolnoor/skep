@@ -354,6 +354,7 @@ def save_mcp_server(store: RunStore, config: MCPServerConfig) -> None:
     servers = load_mcp_servers(store)
     servers[config.server_id] = config
     _store_servers(store, servers)
+    _LISTED.pop((str(store.db_path), config.server_id), None)
 
 
 def remove_mcp_server(store: RunStore, server_id: str) -> None:
@@ -364,6 +365,7 @@ def remove_mcp_server(store: RunStore, server_id: str) -> None:
         raise MCPError(f"no MCP server registered as {server_id!r}")
     del servers[server_id]
     _store_servers(store, servers)
+    _LISTED.pop((str(store.db_path), server_id), None)
 
 
 def _jsonrpc_result(message: Mapping[str, object]) -> Mapping[str, object]:
@@ -573,14 +575,30 @@ def _run_forged_sandboxed(
         )
 
 
+# ES-F160 (R6, D25): each server's tools/list, kept per home + server id so a
+# read uses no extra server process to learn its hint. Registering the id
+# again or removing it drops the entry; a serve restart starts empty; a
+# failed listing is never kept (the next read asks again).
+_LISTED: dict[tuple[str, str], tuple[MCPServerConfig, tuple[MCPTool, ...]]] = {}
+
+
+def _listed_tools(store: RunStore, config: MCPServerConfig) -> tuple[MCPTool, ...]:
+    key = (str(store.db_path), config.server_id)
+    hit = _LISTED.get(key)
+    if hit is not None and hit[0] == config:
+        return hit[1]
+    runner = runner_for_config(config, skep_home=store.db_path.parent.parent)
+    tools = tuple(MCPClient(config, runner=runner).list_tools())
+    _LISTED[key] = (config, tools)
+    return tools
+
+
 def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:
     """B09: a bare tool name from a call carries no ``readOnlyHint``; ask the
     server's own tools/list. Only a read-shaped name can become a read (a read
     verb; on a browse server a page-state name, W9), so only those pay the
-    lookup; any failure leaves the tool not-read-only (asks).
-
-    ponytail: one live tools/list per read-verb decision — cache per server
-    if MCP call volume makes the extra round trip matter.
+    lookup — once per registered server (ES-F160); any failure leaves the
+    tool not-read-only (asks).
     """
     if tool.read_only is not None:
         return tool
@@ -595,11 +613,9 @@ def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:
         readish = bool(tokens) and tokens[0] in _MCP_READ_VERBS
     if config is not None and readish:
         try:
-            listed = MCPClient(
-                config, runner=runner_for_config(config, skep_home=store.db_path.parent.parent)
-            ).list_tools()
+            listed: tuple[MCPTool, ...] = _listed_tools(store, config)
         except Exception:  # an unreachable server cannot vouch for a read
-            listed = []
+            listed = ()
         read_only = any(entry.name == tool.name and entry.read_only for entry in listed)
     return replace(tool, read_only=read_only)
 
