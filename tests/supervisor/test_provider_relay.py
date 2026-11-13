@@ -223,3 +223,152 @@ def test_the_kill_switch_is_off_by_default_and_set_like_every_policy_field(
     with pytest.raises(HTTPException):
         update_policy(store, holder, {"provider_key_relay": "yes"})
     store.close()
+
+
+def _plan_reply() -> str:
+    import json
+    import sys
+
+    return json.dumps(
+        {
+            "summary": "created relayed.py",
+            "files": [{"path": "relayed.py", "content": "print('relayed')\n"}],
+            "verify": {"argv": [sys.executable, "relayed.py"], "expected_stdout": "relayed\n"},
+        }
+    )
+
+
+@pytest.mark.parametrize("network", [["127.0.0.1"], ["*"]], ids=["proxied", "allow-all"])
+@pytest.mark.parametrize("relay_on", [True, False], ids=["on", "off"])
+def test_a_builtin_worker_reaches_its_model_through_the_relay_only_when_the_switch_is_on(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    network: list[str],
+    relay_on: bool,
+) -> None:
+    """The key lives only in the supervisor's environment (as serve's does),
+    never on the worker's env allowlist: a worker that dials the provider
+    itself cannot authenticate, a relayed one can. OFF is today's path."""
+    from skep.profile import run_personal_setup
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.dispatch import run_task
+    from skep.supervisor.store import RunStore
+    from skep.worker_contract import Permissions
+
+    key = _fake_key()
+    monkeypatch.setenv("SKEP_TEST_RELAY_KEY", key)
+    config = build_config(tmp_path / "home", None)
+    server = FakeOpenAI(api_key=key).start()
+    try:
+        run_personal_setup(
+            config.home.parent,
+            provider="openai-compat",
+            model="gpt-oss",
+            endpoint=server.base_url,
+            api_key_env="SKEP_TEST_RELAY_KEY",
+        )
+        store = RunStore(config.db_path)
+        store.set_setting("provider_key_relay", relay_on)
+        store.close()
+        server.script_reply(_plan_reply())
+        outcome = run_task(
+            repo,
+            "Create relayed.py.",
+            config=config,
+            permissions=Permissions(
+                read=["workspace"], write=["workspace"], network=network, env_allowlist=[]
+            ),
+            execution_mode="workspace",
+        )
+    finally:
+        server.stop()
+    record = outcome.record
+    store = RunStore(config.db_path)
+    try:
+        dispatched = [
+            d for state, d, _ in store.transitions_for(record.task_id) if state == "dispatched"
+        ]
+    finally:
+        store.close()
+    if not relay_on:
+        assert record.state != "completed"
+        assert server.chat_bodies() == []
+        assert "provider_key_relay" not in (dispatched[0] or "")  # the record as before
+        return
+    # The model's plan arrived (workspace mode then asks before running verify).
+    assert (record.summary or "").startswith("created relayed.py"), record.summary
+    assert server.requests[-1]["headers"]["Authorization"] == f"Bearer {key}"
+    assert '"provider_key_relay": "on"' in (dispatched[0] or "")
+
+
+def test_the_worker_takes_its_relay_and_admits_only_that_loopback_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from skep.workers.llm_plan import (
+        LlmPlanError,
+        _ensure_network_allowed,
+        worker_provider_from_env,
+    )
+
+    url = "http://127.0.0.1:4111/v1"
+    token = secrets.token_hex(16)
+    relay = {"url": url, "protocol": "openai-compat", "model": "m", "token": token}
+    monkeypatch.setenv("SKEP_PROVIDER_RELAY", json.dumps(relay))
+    monkeypatch.delenv("SKEP_HOME", raising=False)
+    provider = worker_provider_from_env()
+    assert provider is not None
+    assert (provider.profile.endpoint, provider.api_key) == (url, token)
+    _ensure_network_allowed(url, [], ["api.example:443"])
+    with pytest.raises(LlmPlanError):
+        _ensure_network_allowed("http://127.0.0.1:4112/v1", [], ["api.example:443"])
+    monkeypatch.setenv("SKEP_PROVIDER_RELAY", "{not json")
+    with pytest.raises(LlmPlanError, match="SKEP_PROVIDER_RELAY is malformed"):
+        worker_provider_from_env()
+
+
+@pytest.mark.parametrize(
+    ("provider", "key", "builtin", "note"),
+    [
+        ("openai-compat", True, False, "external engine"),
+        ("ollama", False, True, "takes no key"),
+        ("bedrock", True, True, "SigV4"),
+        ("openai-compat", True, True, "on"),
+    ],
+)
+def test_a_run_is_relayed_only_when_a_builtin_worker_has_a_key_to_hide(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    key: bool,
+    builtin: bool,
+    note: str,
+) -> None:
+    from skep.profile import run_personal_setup
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.contracts_io import mint_task
+    from skep.supervisor.provider_relay import provider_relay_for_run
+    from skep.supervisor.store import RunStore
+
+    config = build_config(tmp_path / "home", None)
+    if key:
+        monkeypatch.setenv("SKEP_TEST_RELAY_KEY", _fake_key())
+    run_personal_setup(
+        config.home.parent,
+        provider=provider,
+        model="m",
+        endpoint="https://provider.example",
+        api_key_env="SKEP_TEST_RELAY_KEY" if key else None,
+    )
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=tmp_path, instructions="x")
+        assert provider_relay_for_run(store, config, task, builtin=builtin)[2] == "off"
+        store.set_setting("provider_key_relay", True)
+        relay, _model, got = provider_relay_for_run(store, config, task, builtin=builtin)
+    finally:
+        store.close()
+    assert note in got
+    assert (relay is not None) is (note == "on")

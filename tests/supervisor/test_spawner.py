@@ -239,7 +239,9 @@ def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(
             unix_socket_path: str | None = None,
             denied_loopback_ports: tuple[int, ...] = (),
             asks: tuple[str, ...] | list[str] = (),
+            relay: object = None,  # ADR 0062: None while the switch is off
         ) -> None:
+            assert relay is None
             captured_domains.append(domains)
             captured_ports.append(denied_loopback_ports)
             self.port = 8765

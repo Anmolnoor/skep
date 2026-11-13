@@ -69,6 +69,7 @@ from .monitor import MonitorVerdict, kill_session, synthesize_terminal, watch_wo
 from .netproxy import FilteringProxy, control_plane_ports
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
 from .provider_hosts import provider_hosts_for
+from .provider_relay import provider_relay_for_run, relay_worker_env
 from .providers import ProviderProfile
 from .reverify import reverify_run
 from .sandbox import NetworkPolicy, SandboxUnavailableError
@@ -694,8 +695,21 @@ def run_task(
         # so the proxy also opens an AF_UNIX door and dispatch bind-mounts it in.
         domains = effective_network_domains(task)
         proxy_unix_path: str | None = None
-        if domains and domains != ("*",):
-            if execution_mode == "sandbox" and sandbox_backend() == "bubblewrap":
+        # ADR 0062 (V6b): with the switch on, a builtin worker's model calls
+        # go through a relay route on this same proxy, which holds the key.
+        # An allow-all run gets a relay-only proxy (empty allowlist): it
+        # reaches the port because allow-all permits loopback.
+        relay, relay_model, relay_note = provider_relay_for_run(
+            run_store, config, task, builtin=worker_argv is None
+        )
+        if relay is not None and not domains:
+            relay, relay_note = None, "not used: the run has no network"
+        if (domains and domains != ("*",)) or relay is not None:
+            if (
+                execution_mode == "sandbox"
+                and sandbox_backend() == "bubblewrap"
+                and domains != ("*",)
+            ):
                 # AF_UNIX 108-char limit: a short host dir, cleaned in finally.
                 proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
                 proxy_unix_path = str(Path(proxy_socket_dir) / "p.sock")
@@ -703,11 +717,12 @@ def run_task(
                 # ES-F6 (B05): loopback stays open for the project's own test
                 # servers, never for skep serve's port (the control plane).
                 proxy = FilteringProxy(
-                    domains,
+                    () if domains == ("*",) else domains,
                     unix_socket_path=proxy_unix_path,
                     denied_loopback_ports=control_plane_ports(config.home),
                     # W30: named in the 403 as needing approval, never admitted.
                     asks=task.permissions.network_ask,
+                    relay=relay,
                 ).start()
             except OSError as exc:
                 return finish_before_worker(
@@ -718,18 +733,16 @@ def run_task(
         provider_routing, routed_profile = _resolve_provider_routing(
             run_store, project_context=project_context, task=task
         )
+        dispatched_fields: dict[str, Any] = {}
+        if provider_routing is not None:
+            dispatched_fields["provider_routing"] = {
+                "provider_id": provider_routing.provider_id,
+                "reason": provider_routing.reason,
+            }
+        if relay_note != "off":  # off: the record reads as it did before ADR 0062
+            dispatched_fields["provider_key_relay"] = relay_note
         dispatched_detail = (
-            json.dumps(
-                {
-                    "provider_routing": {
-                        "provider_id": provider_routing.provider_id,
-                        "reason": provider_routing.reason,
-                    }
-                },
-                ensure_ascii=True,
-            )
-            if provider_routing is not None
-            else None
+            json.dumps(dispatched_fields, ensure_ascii=True) if dispatched_fields else None
         )
         routed_env: dict[str, str] = {}
         if routed_profile is not None and routed_profile.protocol == "ollama":
@@ -745,6 +758,8 @@ def run_task(
 
         cache_root = project_cache_root(run_store, config, repo)
         routed_env.update(_toolchain_env(workspace, engine, cache_root))
+        if relay is not None and proxy is not None:
+            routed_env.update(relay_worker_env(relay, relay_model, proxy.port))
         run_store.transition(task.task_id, "dispatched", dispatched_detail)
         log_path = audit_task_dir / "worker.log"
         # W31: the second carrier of GIT_ALLOW_PROTOCOL=file — git config only
