@@ -237,7 +237,7 @@ def main() -> int:
         git_dir = rev_parse("--absolute-git-dir")
         pin = rev_parse("--git-common-dir") / "skep-protocol-pin"
         decoy = git_dir / "decoy"
-        unpin = '[protocol]\n\tallow = always\n'
+        unpin = "[protocol]\n\tallow = always\n"
         tries: dict[str, object] = {}
 
         def replace() -> None:

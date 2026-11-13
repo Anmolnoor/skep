@@ -50,7 +50,9 @@ def test_an_emptied_env_still_meets_the_pinned_protocols(
 ) -> None:
     workspace = create_worktree(repo, config.worktrees_root, mint_uuid7())
     mine = tmp_path / "my-own-worktree"  # the operator's, beside skep's
-    subprocess.run([GIT, "-C", str(repo), "worktree", "add", "-q", "--detach", str(mine)], check=True)
+    subprocess.run(
+        [GIT, "-C", str(repo), "worktree", "add", "-q", "--detach", str(mine)], check=True
+    )
     try:
         pinned = pin_git_protocols(workspace)
         assert pinned is not None and pinned.name == "skep-protocol-pin"

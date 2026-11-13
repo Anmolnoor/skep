@@ -340,9 +340,7 @@ def test_an_auto_dispatch_whose_run_asks_nothing_still_runs_unasked(desk: Desk) 
     )
     desk.ollama.script_reply("dispatched")
     desk.store.add_chat_message(made.chat_id, role="user", content="fix it")
-    base_url, api_key, model, protocol = desk.engine.resolved_llm(
-        desk.store.get_chat(made.chat_id)
-    )
+    base_url, api_key, model, protocol = desk.engine.resolved_llm(desk.store.get_chat(made.chat_id))
     events = list(
         desk.engine.turn_events(
             made.chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
