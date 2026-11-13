@@ -86,8 +86,9 @@ The refresh token never leaves the host.
 5. The file is deleted when the run ends (the `finally` of
    `run_task`), including runs whose worktree is kept for a retry.
    `.toolchain/` (and so the link) is excluded from every patch.
-6. The real `~/.codex/auth.json` stays masked from every worker (W33 is
-   unchanged). The builtin worker, `claude_code`, `aider`, `pi` and every
+6. The real login file stays masked from every worker (W33), wherever it
+   is: `~/.codex/auth.json`, or `$CODEX_HOME/auth.json` when the operator
+   set `CODEX_HOME` (the file skep reads is the file it masks). The builtin worker, `claude_code`, `aider`, `pi` and every
    other codex run never get the run file: it is written only for an
    opted-in `codex` run and only that run's sandbox can read it.
 

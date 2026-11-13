@@ -668,3 +668,17 @@ def test_a_real_worker_reads_its_own_login_copy_and_never_another_runs(
     assert proc.returncode == 0, proc.stderr
     assert "CANARY t-own" in proc.stdout
     assert "CANARY t-other" not in proc.stdout
+
+
+def test_the_codex_login_is_masked_where_codex_home_puts_it(
+    fake_homes: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F120 follow-up: skep reads the operator's login from $CODEX_HOME
+    when it is set (codex_login.auth_file); the mask must cover that file,
+    not only ~/.codex/auth.json, or every worker could read the refresh token."""
+    _home, skep_home = fake_homes
+    elsewhere = tmp_path / "codex-elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "auth.json").write_text("CANARY codex\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(elsewhere))
+    assert (elsewhere / "auth.json").resolve() in sandbox.secret_paths(skep_home)

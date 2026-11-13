@@ -447,6 +447,11 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
         for rel in (*HOME_SECRETS, *AGENT_SOCKETS)
     ]
     candidates += _env_sockets()
+    # W33 where the operator moved it: skep reads the Codex login from
+    # $CODEX_HOME when set (codex_login.auth_file), so the mask follows it.
+    from .codex_login import auth_file
+
+    candidates.append(auth_file())
     candidates += [skep_home / SERVE_ENV, supervisor / "audit", supervisor / "chat-attachments"]
     readable = {"llm-secret", *_active_llm_key_names(supervisor)} if worker_llm_key else set()
     if supervisor.is_dir():
@@ -455,7 +460,8 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
             for p in supervisor.iterdir()
             if p.name not in readable and any(fnmatch(p.name, pat) for pat in SKEP_SECRET_NAMES)
         )
-    return [path.resolve() for path in candidates if _exists(path)]
+    # dict: the default ~/.codex/auth.json is already in HOME_SECRETS
+    return list(dict.fromkeys(path.resolve() for path in candidates if _exists(path)))
 
 
 def _exists(path: Path) -> bool:
