@@ -981,11 +981,13 @@ def copy_project_policy(store: RunStore, *, src: str, dst: str) -> dict[str, Any
     if target is None:
         raise HTTPException(status_code=404, detail=f"no project {dst!r}")
     # ES-F141 (ADR 0061, I6): unlocked is climbed per project, on its own
-    # HIGH card — a copy never carries it.
+    # HIGH card — a copy never carries it. codex_chatgpt_login is the same
+    # shape (its HIGH card: the operator's ChatGPT plan, repo content to
+    # chatgpt.com), so it stays behind too.
     overlay = {
         key: value
         for key, value in source.policy.items()
-        if key in PROJECT_POLICY_KEYS and key != "unlocked"
+        if key in PROJECT_POLICY_KEYS and key not in ("unlocked", "codex_chatgpt_login")
     }
     store.add_project_policy(
         project_id=target.project_id,

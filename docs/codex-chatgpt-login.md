@@ -108,6 +108,8 @@ Off by default. A project-policy key, `codex_chatgpt_login` (bool):
 - chat: `setup_project ... codex_chatgpt_login=true` (a HIGH confirmation
   card: it holds once and is never confirmable from a messenger channel);
   `codex_chatgpt_login=false` turns it off
+- `copy_project_policy` never copies it: each project opts in with its own
+  HIGH card.
 
 `OPENAI_API_KEY`, when set, still wins: the plan login is used only when
 no key is present.

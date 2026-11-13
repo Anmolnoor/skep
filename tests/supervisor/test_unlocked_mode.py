@@ -177,6 +177,36 @@ def test_copy_project_policy_never_copies_unlocked(
         store.close()
 
 
+def test_copy_project_policy_never_copies_codex_chatgpt_login(
+    repo: Path, unlockable: SupervisorConfig, tmp_path: Path
+) -> None:
+    # Same shape as unlocked: turning it on is a HIGH card (it spends the
+    # operator's ChatGPT plan and sends repo content to chatgpt.com), so a
+    # copy must not carry it; loopback_ports still copies.
+    from skep.supervisor.serve.actions import copy_project_policy
+
+    client = serve_client(unlockable)
+    policy = {"codex_chatgpt_login": True, "loopback_ports": [5432], "verify_command": "true"}
+    assert _setup(client, repo, policy).status_code == 201
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / ".git").mkdir()
+    made = client.post(
+        "/api/projects/setup",
+        json={"project_id": "other", "name": "Other", "strategy": "trusted_local_dev",
+              "repo_path": str(other)},
+    )  # fmt: skip
+    assert made.status_code == 201, made.text
+    store = RunStore(unlockable.db_path)
+    try:
+        copied = copy_project_policy(store, src="unlockable", dst="other")
+        assert "codex_chatgpt_login" not in copied["copied_keys"]
+        assert "codex_chatgpt_login" not in copied["project"]["policy"]
+        assert copied["project"]["policy"]["loopback_ports"] == [5432]
+    finally:
+        store.close()
+
+
 def test_turning_unlocked_on_from_chat_is_a_high_card_and_off_is_not() -> None:
     from skep.supervisor.serve.cards import high_tier
 

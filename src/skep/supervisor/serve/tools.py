@@ -1738,7 +1738,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "PROPOSE copying one project's policy overlay (network, shell allowlist, "
         "budgets, execution mode, auto-apply/dispatch knobs) onto another project "
         "(requires user confirmation). The target keeps its own name, strategy, "
-        "phase, pack, and repo bindings — only the policy knobs copy. Use when the "
+        "phase, pack, and repo bindings — only the policy knobs copy. NEVER copies "
+        "unlocked or codex_chatgpt_login: each project turns those on with its own "
+        "HIGH card. Use when the "
         "user wants a project governed like an existing one without re-answering "
         "every policy question.",
         {
