@@ -127,8 +127,9 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         # ChatGPT login) is file-based and can never reach the sandbox once
         # CODEX_HOME is redirected per-run; auth rides OPENAI_API_KEY — or,
         # ES-F122, for a project that opted in, a refresh-free copy of the
-        # ChatGPT login written into that run's CODEX_HOME (codex_login.py),
-        # talking to login_host instead of network_host. The redirect also
+        # ChatGPT login that only that run's sandbox can read, linked from its
+        # CODEX_HOME (codex_login.py), talking to login_host instead of
+        # network_host. The redirect also
         # gives codex's own sqlite state a writable home: under the read-only
         # / mount it dies opening ~/.codex before auth is even tested (I12).
         env_vars=("USER", "LOGNAME", "OPENAI_API_KEY"),
