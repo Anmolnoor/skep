@@ -494,6 +494,44 @@ _TURN_LOCKS_GUARD = threading.Lock()
 TURN_BUSY = "a turn is already running in this chat — try again when it finishes"
 
 
+# D18: the cards the turn in flight raised (its round may still be folding into
+# them) — a click on one waits for the turn; any other card is answered at once.
+# ponytail: per-process state, like UNATTENDED_CHATS; serve is one process.
+_OPEN_CARDS: dict[str, set[str]] = {}
+QUEUED_FOLLOW_UP = (
+    "[The operator {verdict} your {tool} card while another turn ran; its result "
+    "is with that call above.] Continue from that result."
+)
+
+
+def _queue_follow_up(engine: ChatEngine, chat_id: str, tool: str, confirm: bool) -> None:
+    """D18: the model's turn for a verdict recorded while another turn ran —
+    it waits for that turn, the way a run-finish follow-up does, and runs
+    unattended (it fires whether or not anyone is watching). A card still
+    pending by then holds it: that card's verdict resumes the model."""
+
+    def follow() -> None:
+        chat = engine.store.get_chat(chat_id)
+        if chat is None:
+            return
+        base_url, api_key, model, protocol = engine.resolved_llm(chat)
+        with chat_turn_lock(chat_id):
+            if blocking_cards(engine.store, chat_id):
+                return
+            verdict = "confirmed" if confirm else "denied"
+            engine.store.add_chat_message(
+                chat_id, role="user", provenance="queen",
+                content=QUEUED_FOLLOW_UP.format(verdict=verdict, tool=tool),
+            )  # fmt: skip
+            for _event in engine.turn_events(
+                chat_id, base_url=base_url, api_key=api_key, model=model,
+                protocol=protocol, unattended=True,
+            ):  # fmt: skip
+                pass
+
+    threading.Thread(target=follow, name=f"skep-verdict-{chat_id[:8]}", daemon=True).start()
+
+
 def chat_turn_lock(chat_id: str) -> threading.Lock:
     with _TURN_LOCKS_GUARD:
         return _TURN_LOCKS.setdefault(chat_id, threading.Lock())
@@ -1790,23 +1828,18 @@ class ChatEngine:
         ES-F3 (B08): and they never execute a mutation, even one policy would
         auto-allow — it becomes a card (run-finish continuations).
         """
-        if unattended or channel:
-            # W24: nobody is at the desk — the chat's session keeps sit this out;
-            # D16: nor are they for a messenger's members
-            marks = UNATTENDED_CHATS if unattended else CHANNEL_CHATS
-            marks.add(chat_id)
-            try:
-                yield from self._turn_events(
-                    chat_id, base_url=base_url, api_key=api_key, model=model,
-                    protocol=protocol, read_only=read_only, unattended=unattended,
-                )  # fmt: skip
-            finally:
-                marks.discard(chat_id)
-            return
-        yield from self._turn_events(
-            chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
-            read_only=read_only,
-        )  # fmt: skip
+        # W24: nobody is at the desk — the chat's session keeps sit this out;
+        # D16: nor are they for a messenger's members
+        marks = UNATTENDED_CHATS if unattended else CHANNEL_CHATS if channel else set()
+        marks.add(chat_id)
+        try:
+            yield from self._turn_events(
+                chat_id, base_url=base_url, api_key=api_key, model=model,
+                protocol=protocol, read_only=read_only, unattended=unattended,
+            )  # fmt: skip
+        finally:
+            marks.discard(chat_id)
+            _OPEN_CARDS.pop(chat_id, None)  # D18: this turn's round is closed
 
     def _turn_events(
         self,
@@ -1945,6 +1978,12 @@ class ChatEngine:
                 # continuation reads its own reasoning as its prior message.
                 content = thinking_text
                 yield (None, {"content": content})
+            # D18: every stored call has an id, so a card's result written while
+            # another turn runs pairs with its own call, never by position
+            tool_calls = [
+                call if call.get("id") else {**call, "id": f"call_{uuid.uuid4().hex[:24]}"}
+                for call in tool_calls
+            ]
             if content or thinking_text or tool_calls:
                 # v70-F1: an all-empty round persists nothing — an empty row
                 # is noise, and its old silent done/complete was the bug.
@@ -2389,6 +2428,7 @@ class ChatEngine:
                         }
                         or None,
                     )
+                    _OPEN_CARDS.setdefault(chat_id, set()).add(action_id)  # D18
                     if fold_key:
                         round_folds[fold_key] = action_id
                     action_event: dict[str, Any] = {
@@ -2762,13 +2802,31 @@ class ChatEngine:
         # ES-F2 (B13): the verdict and its continuation are a turn — taken
         # BEFORE the claim, so a busy chat leaves the card pending, not stuck.
         try:
-            lock = take_turn(chat_id)
+            lock: threading.Lock | None = take_turn(chat_id)
         except HTTPException:
             current = self.store.get_chat_action(action_id)
             if current is not None and current.status != "proposed":
                 # A Deny landing mid-confirm says what won, not just "busy".
                 raise card_taken(self.store, action_id) from None
-            raise
+            if action_id in _OPEN_CARDS.get(chat_id, ()) or not all(
+                item["tool_call_id"] for item in action.fold_items()
+            ):
+                # P4-2: a card the running turn raised may still be folding; a
+                # call stored with no id (before D18) pairs by position only
+                raise
+            lock = None  # D18: record the click now; the model follows the turn
+        if lock is None:
+            payload = self._record_verdict(
+                chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
+            )
+            queued = not blocking_cards(self.store, chat_id)
+            if queued:
+                _queue_follow_up(self, chat_id, action.tool, confirm)
+            return iter([
+                *(("tool", {"tool": action.tool, "result": item})
+                  for item in payload.get("items", [payload])),
+                ("done", {"state": "queued" if queued else "awaiting_confirmation"}),
+            ])  # fmt: skip
         try:
             payload = self._record_verdict(
                 chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
