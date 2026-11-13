@@ -125,6 +125,8 @@ def _reason(path: Path, user_homes: tuple[Path, ...], skep_homes: tuple[Path, ..
     if is_dotenv(folded.name):
         return f"{path} is a .env file"
     any_home = _any_home(folded)
+    if any_home in {_fold(home) for home in user_homes}:
+        any_home = None  # our own home: judged once, above
     for home in (*user_homes, *([any_home] if any_home else [])):
         for rel in HOME_SECRETS:
             if _under(folded, _fold(home / rel)):

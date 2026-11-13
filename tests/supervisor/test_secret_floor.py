@@ -527,3 +527,23 @@ def test_another_homes_ordinary_files_are_not_on_the_floor(fake_home: Path) -> N
         "/srv/root/.netrc",
     ):
         assert secret_floor_reason(path) is None, path
+
+
+def test_a_path_under_our_own_home_is_judged_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """W40 review: our own home matches a HOME_DIRS pattern too; it is not
+    judged a second time as "another home" (every decision paid twice)."""
+    from skep.supervisor import secret_floor
+
+    monkeypatch.setenv("HOME", "/Users/someone")
+    seen: list[Path] = []
+    real_under = secret_floor._under
+
+    def counted(path: Path, root: Path) -> bool:
+        seen.append(root)
+        return real_under(path, root)
+
+    monkeypatch.setattr(secret_floor, "_under", counted)
+    assert secret_floor_reason("/Users/someone/code/app.py") is None
+    # once per judged spelling (the requested path and its realpath), not twice
+    assert len(seen) == 2 * len(set(seen))
+    assert secret_floor_reason("/Users/someone/.ssh/id_rsa")
