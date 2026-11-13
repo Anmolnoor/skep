@@ -531,3 +531,49 @@ def test_the_terminal_card_names_what_a_named_network_adds(
     manifest = {"network": ["api.example.org", "pypi.org"], "network_added": ["api.example.org"]}
     _render_card({"tool": "dispatch_run", "card": {"manifest": manifest}})
     assert "adds to the project's hosts for this run: api.example.org" in capsys.readouterr().out
+
+
+def test_a_role_run_on_a_star_project_says_it_holds_no_hosts_and_why(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D10 (operator decision 2026-11-13): a role chain never holds network
+    ``*`` (already true). When the project's default_network is ``*`` and the
+    chain drops it, the card and the run record say in one line that the run
+    holds no hosts, why, and what to do instead."""
+    from skep.cli_chat import _render_card
+    from skep.supervisor.serve import actions
+
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"default_network": ["*"]},
+        )
+        holder = ConfigHolder(config, store)
+        manifest = dispatch_manifest_for(
+            store, holder, {"repo": str(repo), "role": "builder"}, None
+        )
+        assert manifest["network"] == []
+        why = manifest["network_note"]
+        assert "holds no hosts" in why and "*" in why and "default_network" in why
+        assert why in manifest_lines(manifest)
+        _render_card({"tool": "dispatch_run", "card": {"manifest": manifest}})
+        assert why in capsys.readouterr().out
+        runner = _Runner()
+        actions.submit_run(
+            holder,
+            runner,  # type: ignore[arg-type]
+            store,
+            repo=str(repo),
+            instructions="go",
+            role="builder",
+        )
+        assert why in (runner.submitted[0]["dispatch_decision"].detail or "")
+        plain = dispatch_manifest_for(store, holder, {"repo": str(repo)}, None)
+        assert "network_note" not in plain and plain["network"] == ["*"]
+    finally:
+        store.close()

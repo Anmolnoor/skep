@@ -218,6 +218,7 @@ def manifest_lines(manifest: Mapping[str, Any]) -> list[str]:
     shown = ", ".join(prefixes[:8]) + (f" (+{len(prefixes) - 8} more)" if len(prefixes) > 8 else "")
     lines = [
         f"hosts: {_hosts(manifest.get('network'))}",
+        *([str(manifest["network_note"])] if manifest.get("network_note") else []),  # D10
         *(
             [f"adds to the project's hosts for this run: {_hosts(manifest['network_added'])}"]
             if manifest.get("network_added")

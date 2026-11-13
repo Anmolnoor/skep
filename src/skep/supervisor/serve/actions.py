@@ -4798,7 +4798,14 @@ def dispatch_manifest(
     provider_hosts = provider_hosts_for(
         store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
     )
+    # D10: a role chain dropped the project's `*` — one line on the card
+    star = (
+        {"network_note": NO_STAR_NOTE}
+        if star_dropped(resolved_policy.permissions, permissions)
+        else {}
+    )
     return {
+        **star,
         "repo": str(compiled.repo),
         "network": list(permissions.network),
         # D5: a named network adds to the project's hosts; [] drops them
@@ -5168,6 +5175,7 @@ def _within_delegation(
         who
         + (f"; beyond {beyond}, asks a human (this run only): {named(asks)}" if asks else "")
         + (f"; beyond {beyond}, dropped: {named(rows)}" if rows else "")
+        + (f"; {NO_STAR_NOTE}" if star_dropped(permissions, narrowed) else "")
     )
     delegation = {
         "chain": [hop.entry for hop in chain],
@@ -5175,6 +5183,19 @@ def _within_delegation(
         "team": team,
     }
     return narrowed, delegation, note
+
+
+# D10 (operator decision 2026-11-13): a role chain never holds network `*`; a
+# run that lost it says so, why, and what to do, on its card and its record.
+NO_STAR_NOTE = (
+    "this run holds no hosts: a role chain never holds network *, which is this "
+    "project's default_network; list the hosts in the project policy instead"
+)
+
+
+def star_dropped(before: Permissions, after: Permissions) -> bool:
+    """D10: the run policy granted ``*`` and the chain took it away."""
+    return "*" in before.network and "*" not in after.network
 
 
 def _delegation_who(chain: Sequence[Delegator], role: Role | None) -> str:
