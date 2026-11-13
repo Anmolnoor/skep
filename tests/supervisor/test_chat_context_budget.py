@@ -241,5 +241,7 @@ def test_the_digest_tells_the_model_it_is_lossy_and_how_to_find_the_rest(
     system = ollama.chat_bodies()[0]["messages"][0]["content"]
     assert "Earlier in this conversation (compacted):" in system
     assert f'search_chats with chat_id "{chat_id}"' in system
+    # a digest under its cap dropped nothing: the line may not say it did
+    assert "(condensed, and its oldest lines drop once it is full;" in system
     tools = {t["function"]["name"] for t in ollama.chat_bodies()[0]["tools"]}
     assert "search_chats" in tools

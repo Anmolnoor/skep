@@ -38,8 +38,8 @@ Field words: "fix the context on per chat."
    digest capped at 4000 chars dropping its oldest lines. No model
    calls — compaction works offline and is testable byte-for-byte. The
    digest rides the system prompt as "Earlier in this conversation
-   (compacted)", followed by a line saying it is condensed with its oldest
-   lines dropped and that `search_chats` with this chat's id finds what was
+   (compacted)", followed by a line saying it is condensed, that its oldest
+   lines drop once it is full, and that `search_chats` with this chat's id finds what was
    said (ES-F77: a 60-turn field test lost turn 2 and the model never knew).
 
 5. **The meter is server truth.** Chat detail carries `context`

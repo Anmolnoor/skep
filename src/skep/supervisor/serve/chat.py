@@ -1439,8 +1439,8 @@ class ChatEngine:
         if summary or dropped:
             # L19: the digest is lossy (ADR 0037) — say so, and where the rest is
             block = (
-                "Earlier in this conversation (compacted):\n(condensed, its oldest lines "
-                f'dropped; search_chats with chat_id "{chat_id}" finds what was said)'
+                "Earlier in this conversation (compacted):\n(condensed, and its oldest lines "
+                f'drop once it is full; search_chats with chat_id "{chat_id}" finds what was said)'
             )
             if summary:
                 block += f"\n{summary}"
