@@ -2192,6 +2192,49 @@ def test_es_f52_review_a_dotenv_template_is_not_a_secret_on_the_shell_lane(
         ), name
 
 
+def test_d21_a_worker_may_create_a_dotenv_from_a_template_and_nothing_more(
+    tmp_path: Path,
+) -> None:
+    """D21 (operator decision 2026-11-13): `cp .env.example .env` was refused
+    because the secret floor cannot tell reading from writing. A worker's
+    shell may now CREATE a new `.env` / `.env.<name>` inside its worktree
+    from a template (`.example`, `.sample`, `.template`, `.dist`), as plain
+    `cp A B` or `cp -n A B`. Reading, printing, copying out, overwriting an
+    existing `.env`, a source that is a link to a secret, a destination
+    outside the worktree and any other shape stay refused."""
+    work = tmp_path / "work"
+    (work / "config").mkdir(parents=True)
+    (work / ".env.example").write_text("NAME=\n", encoding="utf-8")
+    (work / "config" / ".env.sample").write_text("NAME=\n", encoding="utf-8")
+    (work / ".env.linked.example").symlink_to(tmp_path / "outside.env")
+    (tmp_path / "outside.env").write_text("NAME=value\n", encoding="utf-8")
+    registry = CapabilityRegistry(work, emit=lambda t, p: None, shell_allowlist=[["cp"]])
+    created = registry.invoke(
+        "shell.run", {"argv": ["cp", ".env.example", ".env"], "purpose": "modify"}
+    )
+    assert created.status == "allowed" and (work / ".env").read_text() == "NAME=\n"
+    nested = registry.invoke(
+        "shell.run",
+        {"argv": ["cp", "-n", "config/.env.sample", "config/.env.local"], "purpose": "modify"},
+    )
+    assert nested.status == "allowed" and (work / "config" / ".env.local").is_file()
+    refused = [
+        ["cp", ".env.example", ".env"],  # .env exists now: an overwrite
+        ["cp", ".env", ".env.copy"],  # the source is a secret, not a template
+        ["cp", ".env.example", "../.env"],  # outside the worktree
+        ["cp", ".env.example", f"{tmp_path}/.env.out"],  # outside, absolute
+        ["cp", ".env.linked.example", ".env.two"],  # a template that links out
+        ["cp", "-r", ".env.example", ".env.two"],  # not a plain shape
+        ["cp", ".env.example", ".env.two", ".env.three"],
+        ["cat", ".env"],
+    ]
+    for argv in refused:
+        assert registry.shell_decision_preview({"argv": argv}).reason == (
+            "capability.deny.secret_floor"
+        ), argv
+    assert not (work / ".env.two").exists() and not (tmp_path / ".env").exists()
+
+
 def test_a_successful_commit_drops_only_the_packed_refs_lock_line(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -29,6 +29,7 @@ from skep.supervisor.netproxy import (
     run_loopback_ports,
 )
 from skep.supervisor.secret_floor import (
+    creates_dotenv_from_template,
     is_dotenv,
     secret_floor_reason,
     shell_secret_floor_reason,
@@ -835,7 +836,12 @@ class CapabilityRegistry:
 
         # W8: the floor binds the worker's shell as it binds the Queen's (the
         # line resolved from the workspace); _shell_run emits the blocked pair.
-        secret = shell_secret_floor_reason(command, cwd=str(self._workspace))
+        # D21: but a new .env made from a template in the worktree is a write.
+        secret = (
+            None
+            if creates_dotenv_from_template(argv, self._workspace)
+            else shell_secret_floor_reason(command, cwd=str(self._workspace))
+        )
         if secret is not None:
             return CapabilityDecision(
                 verdict="deny",

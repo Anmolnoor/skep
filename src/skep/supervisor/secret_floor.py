@@ -18,6 +18,7 @@ which stays on this floor.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from fnmatch import fnmatch
 from functools import lru_cache
 from glob import iglob
@@ -121,6 +122,36 @@ _DOTENV_TEMPLATES = (".example", ".sample", ".template", ".dist")
 
 def _is_dotenv_template(name: str) -> bool:
     return is_dotenv(name) and name.casefold().endswith(_DOTENV_TEMPLATES)
+
+
+def creates_dotenv_from_template(argv: Sequence[str], workspace: Path) -> bool:
+    """D21 (operator decision 2026-11-13): ``cp [-n] TEMPLATE NEW`` inside
+    ``workspace`` — the one write of a ``.env`` the floor lets a worker's
+    shell make. TEMPLATE is a ``.env`` template (``.example``/``.sample``/
+    ``.template``/``.dist``) by name and by realpath, a file inside the
+    worktree; NEW is a ``.env`` / ``.env.<name>`` that does not exist yet (no
+    link either), in a directory inside the worktree. Any other shape is not
+    this, and the floor judges it as always.
+
+    ponytail: checked, then run — a NEW created between the two by another
+    process is overwritten by plain ``cp``; the worktree is the run's own."""
+    args = list(argv)
+    if args[:2] == ["cp", "-n"]:
+        args = ["cp", *args[2:]]
+    if len(args) != 3 or args[0] != "cp" or any(a.startswith("-") for a in args[1:]):
+        return False
+    root = workspace.resolve()
+    source, target = (Path(os.path.abspath(workspace / arg)) for arg in args[1:])
+    real = source.resolve()
+    return (
+        _is_dotenv_template(source.name)
+        and _is_dotenv_template(real.name)
+        and real.is_file()
+        and _under(real, root)
+        and is_dotenv(target.name)
+        and not os.path.lexists(target)
+        and _under(target.parent.resolve(), root)
+    )
 
 
 def _under(path: Path, root: Path) -> bool:
