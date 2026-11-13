@@ -445,6 +445,58 @@ def test_replay_examples_are_plain_and_never_reach_the_model(
     assert "ignore previous" in out and all(ch not in out for ch in (esc, bell, rlo))
 
 
+def test_the_log_records_the_chat_and_a_fetch_url_so_replay_re_decides_them(
+    home: Home,
+) -> None:
+    """W18: each Queen row records its chat; a fetch row the scheme, host and
+    path directory a url_prefix grant matches on — never the query, never
+    userinfo, still redacted, still under the audit directory. The replay
+    then re-decides fetch rows and chat-bound grants; an old row without
+    the fields stays not replayable."""
+    from skep.supervisor.policy_v3 import Request, queen_decide
+
+    def fetch(chat: str, url: str) -> None:
+        queen_decide(home.holder, home.store, Request("network", "fetch", "docs.example.org"),
+                     chat_id=chat, url=url)  # fmt: skip
+
+    c1, c2 = (home.store.create_chat(title=t, model=None).chat_id for t in ("one", "two"))
+    token = "sk-" + "a1b2c3d4" * 3
+    fetch(c1, "https://docs.example.org/guide/a")
+    fetch(c2, "https://docs.example.org/guide/a")
+    fetch(c1, "https://docs.example.org/guide/b?q=1")
+    fetch(c1, f"https://docs.example.org/{token}/x")
+    log = home.config.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [r["chat"] for r in rows] == [c1, c2, c1, c1]
+    assert rows[0]["url"] == "https://docs.example.org/guide/"
+    assert rows[2]["url"] == "https://docs.example.org/guide/" and rows[2]["url_query"] is True
+    assert token not in log.read_text() and "q=1" not in log.read_text()
+    home.log(_row("network", "fetch", "docs.example.org", "require_approval", "default/x"))
+
+    actions.remember_action_for_session(
+        home.store, tool="read_url", args={"url": "https://docs.example.org/guide/z"},
+        actor="op", tier="session", chat_id=c1,
+    )  # fmt: skip
+    summary = policy_write.migration_report(home.holder, home.store)["replay"]
+    assert summary["flips"] == {"require_approval->allow": 1}  # c1's /guide/a only
+    skipped = summary["not_replayable"]
+    assert skipped.get("URL not logged (a url_prefix grant needs it)") == 1  # the old row
+    assert skipped.get("query not logged") == 1
+    assert skipped.get("value redacted in the log") == 1
+    # a standing write replays the chat rows as their chats decide
+    report: dict[str, Any] = {}
+    actions.learn_policy_rule(
+        home.store, rule_id="net:other", action="fetch", pattern="other.example.org",
+        scope="network", provenance="allow-always:op", report=report,
+    )  # fmt: skip
+    assert report["replay"]["replayed"] == 2 and not report["replay"]["flips"]
+    # a baseline write keeps no old layer to replay a chat row against
+    approved = actions.approve_policy_baseline(
+        home.config.home, template="builder", approved_by="op", store=home.store
+    )
+    assert "2 chat row on a baseline write (not replayed)" in approved["replay"]
+
+
 def test_replay_never_blocks_and_says_when_the_log_is_empty(home: Home) -> None:
     receipt = _keep(home, "ls -la")
     assert receipt["replay"] == "replay: the decision log is empty — no past decision to compare"

@@ -732,8 +732,9 @@ def queen_decide(
     stack = replace(load_stack(holder, store, chat=chat_id), cwd=cwd)
     verdict = decide(req, stack=stack, role=role, read_only=read_only, url=url)
     row = _decision_row(
-        verdict, stack, actor="queen", repo=None, req=(req.scope, req.action, req.value), role=role
-    )
+        verdict, stack, actor="queen", repo=None, req=(req.scope, req.action, req.value), role=role,
+        url=url,
+    )  # fmt: skip
     if stack.taint is not None and stack.taint.any:
         row["taint"] = stack.taint.bits()  # I13: the bits the verdict read
     log_decision(holder.current.audit_dir, row)

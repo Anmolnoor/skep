@@ -86,12 +86,13 @@ from ..policy_schema import (
     SCOPES,
     PolicyDocument,
     document_from_settings,
+    logged_url,
     operator_document_from_settings,
     pattern_matches,
     shell_segments,
 )
 from ..policy_templates import PolicyTemplate, layer_view, load_policy_template
-from ..policy_v3 import Request, Stack, Verdict, floor_verdict, load_stack, log_decision
+from ..policy_v3 import Request, Stack, Verdict, floor_verdict, load_stack, log_decision, redact
 from ..policy_v3 import decide as decide_v3
 from ..projects import (
     PROJECT_PHASES,
@@ -1981,9 +1982,13 @@ def _decision_row(
     repo: str | None,
     req: tuple[str, str, str],
     role: Role | None,
+    url: str | None = None,
 ) -> dict[str, Any]:
     """One ``decisions.jsonl`` row for a v3 verdict. A row decided under a
-    role carries ``role``; one without had no role layer."""
+    role carries ``role``; one without had no role layer. W18: a chat's row
+    carries ``chat``, and a fetch the ``url`` a url_prefix grant matches on
+    (``logged_url``: no query, no userinfo; redacted like the value), so the
+    write-time replay can re-decide both."""
     scope, action, value = req
     record: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1994,6 +1999,13 @@ def _decision_row(
         "value": value,
         "source": verdict.source,
     }
+    if stack.chat is not None:
+        record["chat"] = stack.chat
+    kept = None if url is None or (scope, action) != ("network", "fetch") else logged_url(url)
+    if kept is not None:
+        record["url"] = redact(kept[0])
+        if kept[1]:
+            record["url_query"] = True
     if role is not None:
         record["role"] = role.name
     if verdict.chain:

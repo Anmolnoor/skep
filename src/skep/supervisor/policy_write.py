@@ -196,17 +196,19 @@ def would_be_stack(
     *,
     settings: Mapping[str, Any] | None = None,
     baseline: PolicyTemplate | None = None,
+    chat: str | None = None,
 ) -> Stack:
     """The operator stack as it will decide after the write — nothing written.
+    ``chat``: as that chat decides (its session grants, its taint; W18).
     Only the Queen's lane: the run lane (groups, project overlays, knobs)
     carries no rule a §5.4 check reads (no filesystem read, no host shell)."""
     from .policy_layers import baseline_guard
 
-    stack = load_stack(holder, store)
+    stack = load_stack(holder, store, chat=chat)
     if not settings and baseline is None:
         return stack
     pending = cast(RunStore, _Pending(store, dict(settings or {})))
-    operator, ignored = operator_lane(pending, baseline=baseline)
+    operator, ignored = operator_lane(pending, chat=chat, baseline=baseline)
     guard = {} if baseline is not None else baseline_guard(pending)
     return replace(stack, operator=operator, ignored=ignored, guard=guard)
 
@@ -405,9 +407,22 @@ def vet_write(
     if not replay:
         return report
     audit_dir = holder.current.audit_dir
+    prior = {key: store.get_setting(key) for key in settings or {}}  # read under the lock
+    pending = dict(settings or {})
+    ready = holder
+
+    def stacks_for(chat: str) -> tuple[Stack, Stack | None] | None:
+        """W18: a chat's row replays as that chat decides. A baseline write's
+        old layer is not kept: its chat rows are not replayed."""
+        if baseline is not None:
+            return None
+        return (
+            would_be_stack(ready, store, settings=pending, chat=chat),
+            would_be_stack(ready, store, settings=prior, chat=chat),
+        )
 
     def replay_now() -> None:
-        summary, line = _replay(audit_dir, after, before=before)
+        summary, line = _replay(audit_dir, after, before=before, stacks_for=stacks_for)
         report.update(replay=summary, replay_line=line)
 
     later = getattr(_LOCAL, "later", None)
@@ -441,8 +456,15 @@ def read_log(audit_dir: Path, limit: int = REPLAY_ROWS) -> list[dict[str, Any] |
     return rows
 
 
+StacksFor = Callable[[str], "tuple[Stack, Stack | None] | None"]
+
+
 def _replay(
-    audit_dir: Path, after: Stack, *, before: Stack | None = None
+    audit_dir: Path,
+    after: Stack,
+    *,
+    before: Stack | None = None,
+    stacks_for: StacksFor | None = None,
 ) -> tuple[dict[str, Any], str]:
     """The replay and its line; a log the serve cannot read is said, never
     raised — the replay is advisory and must not fail the write."""
@@ -451,7 +473,7 @@ def _replay(
     except OSError as exc:
         summary = replay_decisions([], after, before=before)
         return summary, f"replay: the decision log could not be read ({exc.strerror or exc})"
-    summary = replay_decisions(rows, after, before=before)
+    summary = replay_decisions(rows, after, before=before, stacks_for=stacks_for)
     return summary, replay_line(summary)
 
 
@@ -471,8 +493,14 @@ def _unreplayable(row: dict[str, Any] | None) -> str | None:
     if (scope, action) in READ_ONLY_REQUESTS:
         return "read-only fact not logged"
     if (scope, action) == ("network", "fetch"):
-        return "URL not logged (a url_prefix grant needs it)"
-    if str(row.get("decided_by") or "").startswith("grant:session"):
+        url = row.get("url")
+        if not isinstance(url, str) or not url:  # a row from before W18
+            return "URL not logged (a url_prefix grant needs it)"
+        if _MASK in url:
+            return "value redacted in the log"
+        if row.get("url_query"):
+            return "query not logged"
+    if str(row.get("decided_by") or "").startswith("grant:session") and not row.get("chat"):
         return "chat-bound grant (chat not logged)"
     return None
 
@@ -481,11 +509,17 @@ VERDICT_WORDS = {"allow": "allows", "require_approval": "asks", "deny": "denies"
 
 
 def replay_decisions(
-    rows: Sequence[dict[str, Any] | None], after: Stack, *, before: Stack | None = None
+    rows: Sequence[dict[str, Any] | None],
+    after: Stack,
+    *,
+    before: Stack | None = None,
+    stacks_for: StacksFor | None = None,
 ) -> dict[str, Any]:
     """Re-decide each row under ``after``; against ``before`` when given (what
     one write changes), else against the logged verdict (what changed since:
-    ``migrate --dry-run``). Counts per flip, two short examples each."""
+    ``migrate --dry-run``). Counts per flip, two short examples each. W18: a
+    row that names its chat re-decides on ``stacks_for(chat)`` (that chat's
+    session grants and taint); without it, a chat row decides as no chat."""
     from .roles import resolve_role
 
     skipped: Counter[str] = Counter()
@@ -493,8 +527,19 @@ def replay_decisions(
     examples: dict[str, list[str]] = {}
     rules: dict[str, list[str]] = {}
     replayed = 0
+    chats: dict[str, tuple[Stack, Stack | None] | None] = {}
     for row in rows:
         why = _unreplayable(row)
+        row_after, row_before = after, before
+        chat = row.get("chat") if why is None and row is not None else None
+        if isinstance(chat, str) and chat and stacks_for is not None:
+            if chat not in chats:
+                chats[chat] = stacks_for(chat)
+            found = chats[chat]
+            if found is None:
+                why = "chat row on a baseline write (not replayed)"
+            else:
+                row_after, row_before = found[0], (found[1] if before is not None else None)
         role = None
         if why is None and row is not None and row.get("role"):
             try:
@@ -505,9 +550,12 @@ def replay_decisions(
             skipped[why or "unreadable row"] += 1
             continue
         req = Request(row["scope"], row["action"], row["value"])
+        url = row.get("url") if isinstance(row.get("url"), str) else None
         try:
-            new = decide(req, stack=after, role=role)
-            old_view = None if before is None else decide(req, stack=before, role=role)
+            new = decide(req, stack=row_after, role=role, url=url)
+            old_view = (
+                None if row_before is None else decide(req, stack=row_before, role=role, url=url)
+            )
         except (ValueError, OSError, RecursionError):  # a value nothing can decide
             skipped["unreadable row"] += 1
             continue
@@ -582,7 +630,11 @@ def migration_report(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
     from .policy_schema import SCOPES
 
     stack = load_stack(holder, store)
-    summary, line = _replay(holder.current.audit_dir, stack)
+    summary, line = _replay(
+        holder.current.audit_dir,
+        stack,
+        stacks_for=lambda chat: (load_stack(holder, store, chat=chat), None),
+    )
     b31 = None
     missing = [s for s in SCOPES if s not in set(engine_v2_scopes(store))]
     if missing and isinstance(verify(store_home(store)), Ok):
