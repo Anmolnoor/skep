@@ -88,6 +88,7 @@ from .shell_prefixes import (
     is_remote_git_command,
     is_worker_commit_command,
     queen_command_line_refusal,
+    reaches_network,
 )
 from .store import ChatTaint, RunStore
 
@@ -627,7 +628,7 @@ def decide(
         if held["rule_id"] == EXCEEDS_DELEGATOR:
             verdict = replace(_with(verdict, held), deferred=held["verdict"] == "require_approval")
         verdict = replace(verdict, chain=tuple(hop.entry for hop in chain))
-    return taint_verdict(verdict, stack.taint, scope, action, read_only=read_only)
+    return taint_verdict(verdict, stack.taint, scope, action, read_only=read_only, value=value)
 
 
 # P4-1 (ADR 0059 D5): the trifecta guard. Egress that carries model-chosen
@@ -653,11 +654,12 @@ TAINT_TRIFECTA = "trifecta"
 
 
 def taint_asks(
-    taint: ChatTaint | None, scope: str, action: str, *, read_only: bool = False
+    taint: ChatTaint | None, scope: str, action: str, *, read_only: bool = False, value: str = ""
 ) -> str | None:
     """The ``taint/<rule>`` a request asks under in a chat with ``taint``, or
-    None. Private only: egress carrying model-chosen text. Untrusted only:
-    consequential actions. Both: those plus every egress (``trifecta``)."""
+    None. Private only: egress carrying model-chosen text, which includes a
+    shell line that reaches the network (W7). Untrusted only: consequential
+    actions. Both: those plus every egress (``trifecta``)."""
     if taint is None or not taint.any:
         return None
     mcp_out = scope == "mcp" and action == "call" and not read_only
@@ -666,7 +668,7 @@ def taint_asks(
     private, untrusted = taint.private is not None, taint.untrusted is not None
     if private and untrusted and (scope in _EGRESS_SCOPES or acts):
         return TAINT_TRIFECTA
-    if private and text:
+    if private and (text or (scope == "shell" and reaches_network(value))):
         return TAINT_PRIVATE_EGRESS
     if untrusted and acts:
         return TAINT_UNTRUSTED_ACTION
@@ -674,13 +676,19 @@ def taint_asks(
 
 
 def taint_verdict(
-    verdict: Verdict, taint: ChatTaint | None, scope: str, action: str, *, read_only: bool
+    verdict: Verdict,
+    taint: ChatTaint | None,
+    scope: str,
+    action: str,
+    *,
+    read_only: bool,
+    value: str = "",
 ) -> Verdict:
     """D5 at decide(): after the layers, the grants and the delegation cap,
     before the face. Only an allow moves — to an ask labelled ``taint/<rule>``,
     even where a rule or a grant allowed it. Taint never turns a deny into an
     ask and never grants; an ask stays the ask that asked (its own label)."""
-    rule = taint_asks(taint, scope, action, read_only=read_only)
+    rule = taint_asks(taint, scope, action, read_only=read_only, value=value)
     if rule is None or verdict.verdict != "allow":
         return verdict
     return replace(

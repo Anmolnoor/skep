@@ -152,6 +152,46 @@ OUTBOUND_CONTENT_PREFIXES: tuple[tuple[str, ...], ...] = (
     ("himalaya", "template", "send"),
 )
 
+# W7: programs whose job is reaching another host. One list: the trifecta
+# guard's shell-egress row (``reaches_network``) and P3-6's refusal of a
+# standing Queen shell allow (serve/actions.py) both read it.
+# ponytail: named programs only; an interpreter (`python3 -c 'urllib…'`) or
+# git reaches the network too, and is judged by its own rules, not this list.
+NETWORK_PROGRAMS: frozenset[str] = frozenset(
+    {"curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp", "ftp", "tftp",
+     "telnet", "rsync", "dig", "nslookup", "host", "drill", "ping", "ping6", "traceroute",
+     "whois", "aria2c", "lftp", "http", "https", "xh"}
+)  # fmt: skip
+PACKAGE_MANAGERS: frozenset[str] = frozenset(
+    {"pip", "pip3", "pipx", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
+     "gem", "go", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk"}
+)  # fmt: skip
+INSTALL_VERBS: frozenset[str] = frozenset(
+    {"install", "i", "add", "sync", "update", "upgrade", "get"}
+)
+
+
+def is_package_install(argv: Sequence[str]) -> bool:
+    """``pip install x``, ``uv pip install x``, ``npm i x``: a package fetch."""
+    verbs = {token for token in argv[1:4] if not token.startswith("-")}
+    return bool(argv) and program_name(argv[0]) in PACKAGE_MANAGERS and bool(INSTALL_VERBS & verbs)
+
+
+def reaches_network(command: str) -> bool:
+    """W7: does the line run a network program or a package install (in any
+    argv the floor reads: launchers, ``env``, ``sh -c``), or write to bash's
+    ``/dev/tcp`` / ``/dev/udp``? A line that cannot be read counts."""
+    if "/dev/tcp/" in command or "/dev/udp/" in command:
+        return True
+    segments = command_line_segments(command)
+    if segments is None:
+        return True
+    return any(
+        argv and (program_name(argv[0]) in NETWORK_PROGRAMS or is_package_install(argv))
+        for argv in segments
+    )
+
+
 # v87-F6: the environment-bootstrap pack — the standing grants a worker needs
 # to create a Python env, offered as ONE card. Bare `pip` is deliberately
 # absent: it does not exist on macOS hosts (the 2026-07-23 field test

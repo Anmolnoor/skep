@@ -111,7 +111,9 @@ from ..roles import (
     role_decision,
 )
 from ..shell_prefixes import (
+    NETWORK_PROGRAMS,
     dangerous_prefix_reason,
+    is_package_install,
     is_remote_git_command,
     normalize_remembered_command,
     worker_allowlist_reason,
@@ -4078,17 +4080,11 @@ OPERATOR_POLICY_SCOPES = ("filesystem", "network", "shell")
 # run_shell keep already refuses (remote git, outbound posts, privilege,
 # catastrophic and ops-mutating lines, `sh -c`): a program that runs other
 # code or reaches the network, and a package install.
-_NO_STANDING_SHELL = frozenset(
+_NO_STANDING_SHELL = NETWORK_PROGRAMS | frozenset(
     {"bash", "sh", "zsh", "fish", "dash", "ksh", "python", "python3", "node", "deno", "bun",
      "perl", "ruby", "php", "lua", "osascript", "pwsh", "npx", "bunx", "pnpx", "env", "xargs",
-     "eval", "exec", "source", "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp",
-     "sftp", "ftp", "telnet", "rsync"}
+     "eval", "exec", "source"}
 )  # fmt: skip
-_PACKAGE_MANAGERS = frozenset(
-    {"pip", "pip3", "pipx", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
-     "gem", "go", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk"}
-)  # fmt: skip
-_INSTALL_VERBS = frozenset({"install", "i", "add", "sync", "update", "upgrade", "get"})
 
 
 def set_operator_policy_rule(
@@ -4193,8 +4189,7 @@ def queen_shell_allow_refusal(pattern: str, action: str) -> str | list[tuple[str
                 f"{program}: a program that runs other code or reaches the network "
                 "is never a standing allow"
             )
-        verbs = [token for token in argv[1:4] if not token.startswith("-")]
-        if program in _PACKAGE_MANAGERS and _INSTALL_VERBS & set(verbs):
+        if is_package_install(argv):
             return f"{line!r}: a package install is never a standing allow"
     secret = shell_secret_floor_reason(pattern, cwd=None)
     if secret is not None:
