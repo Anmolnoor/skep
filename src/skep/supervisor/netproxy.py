@@ -585,7 +585,7 @@ class _ProxyHandler(StreamRequestHandler):
         auth_name, token_value = relay.auth(relay.token)
         forwarded: list[tuple[str, str]] = [("Host", upstream.netloc.rpartition("@")[2])]
         token_ok = False
-        content_length = 0
+        content_length: int | None = None
         for header in headers:
             raw_name, _, raw_value = header.partition(b":")
             name = raw_name.strip().lower()
@@ -607,10 +607,13 @@ class _ProxyHandler(StreamRequestHandler):
             if name in _HOP_BY_HOP and not plain_connection:
                 continue
             if name == b"content-length":
-                try:
-                    content_length = int(value)
-                except ValueError:
-                    content_length = 0
+                # One plain length or none: a second one (or a sign) would let
+                # bytes past the body reach the provider as another request.
+                if content_length is not None or not (value.isascii() and value.isdigit()):
+                    self.server.note_relay(relayed=False)
+                    self._reply(400, "Bad Request: the provider relay needs one Content-Length")
+                    return
+                content_length = int(value)
             forwarded.append((raw_name.strip().decode("latin-1"), value))
         if not token_ok:
             self.server.note_relay(relayed=False)
@@ -633,7 +636,7 @@ class _ProxyHandler(StreamRequestHandler):
             if conn.sock is not None:
                 conn.sock.settimeout(_RELAY_READ_TIMEOUT)
             response = conn.getresponse()
-        except (OSError, http.client.HTTPException):
+        except (OSError, http.client.HTTPException, ValueError):  # ValueError: a bad header
             conn.close()
             self.server.note_relay(relayed=False)
             self._reply(502, "Bad Gateway: the provider relay could not reach the provider")

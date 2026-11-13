@@ -586,3 +586,68 @@ def test_the_key_is_masked_across_chunk_boundaries_and_a_stream_is_not_held_back
         assert b"".join(out) == stream.replace(secret, b"*" * len(secret))
     # A chunk whose tail cannot start the key goes out whole, at once.
     assert list(_masked([b"data: first\n"], secret)) == [b"data: first\n"]
+
+
+@pytest.mark.parametrize(
+    "lengths",
+    [
+        b"Content-Length: 2\r\nContent-Length: 60\r\n",  # smuggles bytes past the body
+        b"Content-Length: -5\r\n",
+        b"Content-Length: 2x\r\n",
+    ],
+    ids=["two", "negative", "not-a-number"],
+)
+def test_a_request_with_a_doubtful_content_length_is_refused_before_any_upstream_connection(
+    upstream: tuple[FakeOpenAI, str], lengths: bytes
+) -> None:
+    fake, key = upstream
+    token = secrets.token_hex(16)
+    with FilteringProxy((), relay=_relay(fake, key, token)) as proxy:
+        reply = _raw(
+            proxy.port,
+            b"POST /v1/chat/completions HTTP/1.1\r\nAuthorization: Bearer "
+            + token.encode()
+            + b"\r\n"
+            + lengths
+            + b"\r\n{}GET /v1/models HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"
+            + b"x" * 20,
+        )
+        assert proxy.relay_refused_count == 1
+    assert reply.startswith(b"HTTP/1.1 400 ")
+    assert fake.requests == []
+
+
+def test_a_chunked_request_is_refused_with_411_before_any_upstream_connection(
+    upstream: tuple[FakeOpenAI, str],
+) -> None:
+    fake, key = upstream
+    token = secrets.token_hex(16)
+    with FilteringProxy((), relay=_relay(fake, key, token)) as proxy:
+        reply = _raw(
+            proxy.port,
+            f"POST /v1/chat/completions HTTP/1.1\r\nAuthorization: Bearer {token}\r\n"
+            "Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n".encode(),
+        )
+        assert proxy.relay_refused_count == 1
+    assert reply.startswith(b"HTTP/1.1 411 ")
+    assert fake.requests == []
+
+
+def test_an_unreachable_provider_is_a_502_that_names_no_key() -> None:
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    port = closed.getsockname()[1]
+    closed.close()  # nothing listens here now
+    key, token = _fake_key(), secrets.token_hex(16)
+    relay = ProviderRelay(
+        upstream=f"http://127.0.0.1:{port}", token=token, key=key, protocol="anthropic"
+    )
+    with FilteringProxy((), relay=relay) as proxy:
+        reply = _raw(
+            proxy.port,
+            f"POST /v1/messages HTTP/1.1\r\nx-api-key: {token}\r\n"
+            "Content-Length: 0\r\n\r\n".encode(),
+        )
+        assert (proxy.relayed_count, proxy.relay_refused_count) == (0, 1)
+    assert reply.startswith(b"HTTP/1.1 502 ")
+    assert key.encode() not in reply and token.encode() not in reply
