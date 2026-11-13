@@ -432,7 +432,8 @@ def _next_turn_replays(client: Any, provider: Any, chat_id: str) -> list[dict[st
     events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "?"}).text)
     assert events[-1] == ("done", {"state": "complete"}), events
     assert REJECTIONS == []
-    return provider.chat_bodies()
+    bodies: list[dict[str, Any]] = provider.chat_bodies()
+    return bodies
 
 
 def test_d18_a_verdict_landing_mid_turn_is_recorded_at_once_and_replays(

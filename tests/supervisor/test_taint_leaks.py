@@ -318,7 +318,8 @@ def test_a_channel_turn_decides_without_the_chats_session_keeps(env: Live) -> No
     )
     env.ollama.script_tool_call("run_shell", line)
     _text, events = run_channel_turn(env.engine, message, web_ui_url="http://x")
-    (card,) = events
+    (raw,) = events
+    card: dict[str, Any] = dict(raw)
     assert card["decision"]["verdict"] == "require_approval", card["decision"]
     assert "grant" not in str(card["decision"]["decided_by"])
 
