@@ -67,21 +67,36 @@ def relay_base_url(port: int, upstream: str) -> str:
 RELAY_ENV = "SKEP_PROVIDER_RELAY"
 
 
-def provider_relay_for_run(
-    store: RunStore, config: SupervisorConfig, task: CodingWorkerTask, *, builtin: bool
-) -> tuple[ProviderRelay | None, str, str]:
-    """(relay, model, note) for one run. ``note`` is what the run record says
-    about the relay; "off" leaves the record as it was before ADR 0062.
-
-    The provider is resolved with the worker's own function
-    (``worker_provider_from_home``), so the relay forwards to exactly the
-    endpoint, protocol and key a direct worker would have used."""
+def relay_plan(personal_home: Path) -> tuple[tuple[str, str, str, str] | None, str]:
+    """((endpoint, protocol, key, model), "on") when this home's worker
+    provider can be relayed, else (None, why not). Resolved with the worker's
+    own function (``worker_provider_from_home``), so the relay forwards to
+    exactly the endpoint, protocol and key a direct worker would have used."""
     from skep.workers.llm_plan import (
         LlmPlanError,
         provider_probe_target,
         worker_provider_from_home,
     )
 
+    try:
+        provider = worker_provider_from_home(personal_home)
+        if provider is None:
+            return None, "no worker provider is configured"
+        endpoint, protocol, key, model = provider_probe_target(provider)
+    except LlmPlanError as exc:
+        return None, str(exc)
+    if protocol == "bedrock":
+        return None, "bedrock signs every request with the key (SigV4)"
+    if not key:
+        return None, "the provider takes no key"
+    return (endpoint, protocol, key, model), "on"
+
+
+def provider_relay_for_run(
+    store: RunStore, config: SupervisorConfig, task: CodingWorkerTask, *, builtin: bool
+) -> tuple[ProviderRelay | None, str, str]:
+    """(relay, model, note) for one run. ``note`` is what the run record says
+    about the relay; "off" leaves the record as it was before ADR 0062."""
     from .castes import CASTES
     from .serve.settings import PROVIDER_KEY_RELAY
 
@@ -91,17 +106,10 @@ def provider_relay_for_run(
         return None, "", "not used: an external engine authenticates from its own auth env"
     if not getattr(CASTES.get(task.worker_kind), "needs_provider", True):
         return None, "", "not used: this caste calls no model"
-    try:
-        provider = worker_provider_from_home(config.home.parent)
-        if provider is None:
-            return None, "", "not used: no worker provider is configured"
-        endpoint, protocol, key, model = provider_probe_target(provider)
-    except LlmPlanError as exc:
-        return None, "", f"not used: {exc}"
-    if protocol == "bedrock":
-        return None, "", "not used: bedrock signs every request with the key (SigV4)"
-    if not key:
-        return None, "", "not used: the provider takes no key"
+    plan, why = relay_plan(config.home.parent)
+    if plan is None:
+        return None, "", f"not used: {why}"
+    endpoint, protocol, key, model = plan
     token = relay_token(config.home, task.task_id)
     relay = ProviderRelay(upstream=endpoint, token=token, key=key, protocol=protocol)
     return relay, model, "on"

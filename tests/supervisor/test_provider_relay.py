@@ -372,3 +372,42 @@ def test_a_run_is_relayed_only_when_a_builtin_worker_has_a_key_to_hide(
         store.close()
     assert note in got
     assert (relay is not None) is (note == "on")
+
+
+@pytest.mark.parametrize(
+    ("provider", "relay_on", "expected"),
+    [
+        ("openai-compat", False, "provider key relay: off — builtin workers hold the provider key"),
+        ("openai-compat", True, "provider key relay: on — builtin workers reach openai-compat"),
+        ("bedrock", True, "provider key relay: on, not used — bedrock signs"),
+    ],
+)
+def test_doctor_says_whether_workers_hold_the_key_and_that_engines_are_not_relayed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    relay_on: bool,
+    expected: str,
+) -> None:
+    from skep.profile import run_personal_setup
+    from skep.status import build_status, format_doctor_report
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.store import RunStore
+
+    monkeypatch.setenv("SKEP_TEST_RELAY_KEY", _fake_key())
+    config = build_config(tmp_path / "home", None)
+    run_personal_setup(
+        config.home.parent,
+        provider=provider,
+        model="m",
+        endpoint="http://127.0.0.1:9",
+        api_key_env="SKEP_TEST_RELAY_KEY",
+    )
+    store = RunStore(config.db_path)
+    store.set_setting("provider_key_relay", relay_on)
+    store.close()
+    report = format_doctor_report(build_status(config.home.parent, provider_timeout=0.1))
+    (line,) = [ln for ln in report.splitlines() if ln.startswith("- provider key relay:")]
+    assert line.startswith("- " + expected), line
+    assert "claude_code, codex, aider and pi authenticate from their own auth env" in line
+    assert os.environ["SKEP_TEST_RELAY_KEY"] not in report
