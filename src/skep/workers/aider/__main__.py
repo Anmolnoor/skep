@@ -32,6 +32,7 @@ AIDER_SPEC = AdapterSpec(
         "--no-analytics",
     ],
     plan_steps=("run aider --message (no auto-commit)", "capture git diff"),
+    requires_sandbox=True,
 )
 
 

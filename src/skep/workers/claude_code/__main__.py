@@ -22,9 +22,14 @@ CLAUDE_SPEC = AdapterSpec(
     # ended "produced no patch" with the agent apologizing about its allowed
     # list (authwapi acceptance, task 019fc711). Confinement is the sandbox's
     # job, not Claude's prompts (ADR 0047): the run is FORCED into sandbox
-    # execution (v94-F4), which is the wall.
+    # execution (v94-F4), which is the wall. ES-F221: so is its Bash sandbox
+    # off — bubblewrap on Linux, which the kernel refuses inside skep's
+    # Landlock domain; the operator's or the repo's settings may turn it on,
+    # and --settings outranks both.
     build_argv=lambda base, instructions: [
         *base,
+        "--settings",
+        '{"sandbox": {"enabled": false}}',
         "--permission-mode",
         "bypassPermissions",
         "--print",

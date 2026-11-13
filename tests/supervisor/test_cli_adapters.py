@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -17,6 +18,13 @@ from skep.worker_contract import CodingWorkerResult, Permissions, TaskState, Ver
 from skep.workers.aider import run_aider_task
 from skep.workers.codex import run_codex_task
 from skep.workers.pi import run_pi_task
+
+
+@pytest.fixture(autouse=True)
+def _inside_skeps_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ES-F220: the codex worker refuses to start outside skep's sandbox; the
+    spawner marks every sandboxed launch, so these direct drives say so too."""
+    monkeypatch.setenv("SKEP_SANDBOX", "test")
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -303,6 +311,8 @@ def test_claude_argv_grants_headless_edit_permission() -> None:
     argv = CLAUDE_SPEC.build_argv(["claude"], "add multiply")
     assert argv == [
         "claude",
+        "--settings",
+        '{"sandbox": {"enabled": false}}',
         "--permission-mode",
         "bypassPermissions",
         "--print",
@@ -310,16 +320,69 @@ def test_claude_argv_grants_headless_edit_permission() -> None:
     ]
 
 
-def test_codex_argv_lets_it_write_its_own_worktree() -> None:
-    """ES-F128: `codex exec` defaults to a READ-ONLY sandbox of its own, so
-    the 2026-11-13 live run authenticated, answered, and could not edit
-    hello.py ("the sandbox is read-only") — completed, no patch. skep's
-    sandbox is the wall (ADR 0047); codex's own workspace-write mode keeps a
-    second one inside it, scoped to the worktree."""
+def test_claude_argv_turns_its_own_bash_sandbox_off() -> None:
+    """ES-F221: Claude Code's Bash sandbox is bubblewrap on Linux. Off by
+    default, but the operator's settings or the repo's own
+    .claude/settings.json can turn it on, and inside skep's Landlock domain
+    every Bash call then dies (`bwrap: Failed to make / slave: Operation not
+    permitted`, reproduced 2026-11-13). --settings outranks user and project
+    settings, so skep's sandbox stays the only wall (ADR 0047)."""
+    import json
+
+    from skep.workers.claude_code.__main__ import CLAUDE_SPEC
+
+    argv = CLAUDE_SPEC.build_argv(["claude"], "x")
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"sandbox": {"enabled": False}}
+
+
+def test_codex_argv_turns_its_own_sandbox_off() -> None:
+    """ES-F128 → ES-F220: `codex exec` defaults to a READ-ONLY sandbox of its
+    own (no edits), and workspace-write still starts codex's own bubblewrap
+    for every shell call — which the kernel refuses inside skep's Landlock
+    domain (T16: `bwrap: Failed to make / slave: Operation not permitted`,
+    no patch). skep's sandbox is the wall (ADR 0047), so codex's is off."""
     from skep.workers.codex.__main__ import CODEX_SPEC
 
     argv = CODEX_SPEC.build_argv(["codex"], "add multiply")
-    assert argv == ["codex", "exec", "--sandbox", "workspace-write", "add multiply"]
+    assert argv == ["codex", "exec", "--sandbox", "danger-full-access", "add multiply"]
+
+
+@pytest.mark.parametrize(
+    ("run", "cmd_env"),
+    [
+        (run_codex_task, "SKEP_CODEX_CMD"),
+        (run_aider_task, "SKEP_AIDER_CMD"),
+        (run_pi_task, "SKEP_PI_CMD"),
+    ],
+)
+def test_an_external_agent_refuses_to_start_outside_skeps_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run: Any, cmd_env: str
+) -> None:
+    """ES-F220: with codex's own sandbox off, skep's is its only wall — so a
+    codex worker the spawner did not mark as sandboxed never runs codex.
+    Aider and pi have no sandbox of their own and skip the capability layer
+    too (ADR 0047), so the same refusal binds them."""
+    monkeypatch.delenv("SKEP_SANDBOX")
+    workspace = _seed_repo(tmp_path)
+    ran = tmp_path / "agent-ran"
+    fake = tmp_path / "fake-agent"
+    fake.write_text(f"#!/bin/sh\ntouch {ran}\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv(cmd_env, str(fake))
+    task = mint_task(
+        workspace=workspace,
+        instructions="edit",
+        permissions=DEFAULT_PERMISSIONS,
+        budget=DEFAULT_BUDGET,
+    )
+    task_path = tmp_path / "task.json"
+    task_path.write_text(task.model_dump_json(indent=2), encoding="utf-8")
+    out_path = tmp_path / "result.json"
+    assert run(task_path, out_path) == 5  # EXIT_REJECTED
+    result = read_result(out_path)
+    assert result.status is TaskState.REJECTED
+    assert "outside skep's sandbox" in result.summary
+    assert not ran.exists()
 
 
 def test_event_streams_survive_the_agent_deleting_the_events_dir(tmp_path: Path) -> None:
