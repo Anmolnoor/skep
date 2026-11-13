@@ -72,6 +72,25 @@ def test_custom_roles_load_from_the_home_and_refuse_naming_the_file(tmp_path: Pa
         all_roles(home)
 
 
+def test_a_custom_role_with_no_template_acts_as_assistant(tmp_path: Path) -> None:
+    """D14 (ADR 0059): a role the operator named but never gave a template
+    decides as assistant, the strictest shipped role — never as no role at
+    all. The record keeps saying it has none, so doctor can name it."""
+    home = tmp_path / "skep" / "supervisor"
+    roles_dir(home).mkdir(parents=True)
+    (roles_dir(home) / "quiet.json").write_text(json.dumps({"name": "quiet"}))
+    quiet, assistant = resolve_role("quiet", home), SHIPPED_ROLES["assistant"]
+    assert quiet.policy_layer is None
+    layer, bound = quiet.layer(), assistant.layer()
+    assert layer is not None and bound is not None
+    assert (layer.label, layer.rules) == ("role:quiet", bound.rules)
+    hit = role_decision(quiet, "coding", "edit", "workspace")
+    assert hit is not None and (hit.verdict, hit.decided_by) == ("deny", "role:quiet/coding-denied")
+    view = explain_view("role:quiet", home)
+    assert "acts as assistant until it gets one" in view["note"]
+    assert any(row["rule_id"] == "coding-denied" for row in view["rules"])
+
+
 def test_the_role_layer_tightens_and_never_loosens() -> None:
     """D2: the stricter verdict stands. operator asks for pytest where the
     builder baseline allows it; builder's narrow allow cannot lift an ask."""

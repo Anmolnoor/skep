@@ -936,8 +936,10 @@ def test_l13_an_unreadable_line_under_a_deny_asks_and_says_so(line: str, tmp_pat
 
 
 @pytest.mark.parametrize(
-    "line", ["sh -c 'ls'", "sh -c 'echo curl'", "bash -c 'grep curl notes.txt'", "echo $(date)"]
-)
+    "line",
+    ["sh -c 'ls'", "sh -c 'echo curl'", "bash -c 'grep curl notes.txt'", "echo $(date)",
+     "python3 -V", "python3 tools/check.py", "node app.js"],
+)  # fmt: skip
 def test_l13_a_readable_line_under_a_deny_carries_no_cannot_read_warning(
     line: str, tmp_path: Path
 ) -> None:
@@ -998,3 +1000,58 @@ def test_w5_a_worker_grant_stored_before_the_deny_is_dropped_however_spelled(
         store.close()
     assert "make check" in grants
     assert "/usr/bin/curl x" not in grants and "env curl x" not in grants, grants
+
+
+HIDDEN_LINES = [
+    "printf 'curl x' | sh",
+    "echo 'curl x' | bash -s",
+    "sh <<< 'curl x'",
+    "bash -s < script.txt",
+    "cat cmds | timeout 5 sh -",
+    "python3 -c 'import os; os.system(\"curl x\")'",
+    'node -e \'require("child_process").execSync("curl x")\'',
+    "perl -e 'system(\"curl x\")'",
+    "ruby -e 'system(\"curl x\")'",
+    "sh -c 'python3 -c 1'",
+    # ES-F81 review: what the first reading missed
+    "bash /dev/stdin <<< 'curl x'",
+    "cat cmds | python3",
+    "python3 - < script.py",
+    'node --eval \'require("child_process").execSync("curl x")\'',
+    "python3.12 -c 'import os; os.system(\"curl x\")'",
+    "lua -e 'os.execute(\"curl x\")'",
+    "osascript -e 'do shell script \"curl x\"'",
+]
+
+
+@pytest.mark.parametrize("rule", [NO_CURL, ASK_CURL])
+@pytest.mark.parametrize("line", HIDDEN_LINES)
+def test_d12_a_shell_fed_on_stdin_or_inline_code_is_unreadable_under_a_deny_or_named_ask(
+    line: str, rule: dict[str, str], tmp_path: Path
+) -> None:
+    """D12 (operator decision 2026-11-13): a shell reading its commands on
+    stdin and inline interpreter code name no program a rule can read, so
+    under a deny or a named ask they get what `$(which curl)` gets since
+    ES-F60 — an ask whose note names the rules it may be getting around."""
+    home, _repo = build_home(tmp_path, "legacy")
+    _lock(home, "builder", rule)
+    hit = _decide(home, scope="shell", action="run", value=line)
+    assert hit["verdict"] == "require_approval", (line, hit)
+    assert "`curl`" in (hit.get("note") or ""), (line, hit)
+
+
+@pytest.mark.parametrize("line", ["eval curl x", "eval 'curl -sI https://x.example'"])
+def test_d12_a_literal_eval_is_readable_so_a_deny_refuses_it(line: str, tmp_path: Path) -> None:
+    home, _repo = build_home(tmp_path, "legacy")
+    _lock(home, "builder", NO_CURL)
+    hit = _decide(home, scope="shell", action="run", value=line)
+    assert (hit["verdict"], hit["decided_by"]) == ("deny", "template:builder/no-curl"), line
+    plain = _decide(home, scope="shell", action="run", value="eval ls -la")
+    assert plain["verdict"] == "require_approval" and "cannot read" not in (plain.get("note") or "")
+
+
+@pytest.mark.parametrize("line", HIDDEN_LINES[:3])
+def test_d12_with_no_shell_deny_or_named_ask_nothing_changes(line: str, tmp_path: Path) -> None:
+    home, _repo = build_home(tmp_path, "zero")
+    hit = _decide(home, scope="shell", action="run", value=line)
+    assert "cannot read" not in (hit.get("note") or ""), (line, hit)

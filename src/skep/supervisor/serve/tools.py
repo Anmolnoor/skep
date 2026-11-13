@@ -1335,12 +1335,13 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "shell lanes. NOT "
         "set_policy: run/worker policy is untouched. verdict 'allow' or "
         "'deny'; deny wins ties; an allow never lifts a baseline deny or "
-        "named ask; an allow is refused before any card when it reaches "
-        "into a deny (named), covers a credential file, or reads outside the "
+        "named ask; an allow is refused before any card under an approved "
+        "baseline, or when it reaches into a deny (named), covers a "
+        "credential file, or reads outside the "
         "operator roots while search_web runs uncarded (deny search first); "
         "a deny is always accepted. A shell allow is one exact command line "
-        "(each part of an && line its own rule) — never a prefix, an "
-        "interpreter, a network tool or an install — and can read and modify "
+        "(each part of an && line its own rule) — only a read-only look, "
+        "read-only git or tests — and can read and modify "
         "files in its working directory with no patch card: say so. A shell deny may "
         "be a prefix and beats every grant. shell actions: 'run' (run_shell), "
         "'run_repo' (repo cwds), 'run_background' (start_process); one never "
@@ -2318,11 +2319,6 @@ def hidden_tools(role: Role | None) -> dict[str, str]:
 def _hidden_tools(role: Role) -> dict[str, str]:
     hidden = {}
     for tool, (scope, action, value) in TOOL_SCOPES.items():
-        if value is _workspace and role.layer() is None:
-            # decision #7: a hop whose role has no rule delegates nothing — the
-            # chain refuses every worker write, so no dispatcher can succeed.
-            hidden[tool] = f"delegation:queen@{role.name}/unset"
-            continue
         constant = value({}) if value in (_workspace, _ddgs) else None
         hit = role_denies_every(role, scope, action, constant)
         if hit is not None:
@@ -3061,7 +3057,7 @@ def queen_shell_decision(
     grant never covers it (review item 3); repo cwds refuse flat (daemons do
     not belong in checkouts). ``chat_id``: the chat asking — its own session
     grants apply, no other chat's (P3-4, B39)."""
-    from ..policy_v3 import Request, floor_verdict, queen_decide
+    from ..policy_v3 import UNREADABLE_NOTE, Request, floor_verdict, queen_decide
 
     if not command.strip():
         return None
@@ -3073,6 +3069,16 @@ def queen_shell_decision(
             reason="shell.deny.secret_floor" if secret else "shell.deny.queen_guard",
             detail=floor["reason"],
             decided_by=floor["decided_by"],
+        )
+    from ..shell_prefixes import queen_skep_refusal
+
+    skep_self = queen_skep_refusal(command, home=holder.current.home, cwd=cwd)
+    if skep_self is not None:  # D11: the Queen's lanes only, not the hook's
+        return AutonomyDecision(
+            verdict="deny",
+            reason="shell.deny.skep_self",
+            detail=skep_self,
+            decided_by="floor/floor.never-grantable-prefixes",
         )
     repo = _cwd_registered_repo(store, holder, cwd)
     reached = None if repo is not None else _command_registered_repo(store, holder, command, cwd)
@@ -3120,6 +3126,16 @@ def queen_shell_decision(
             )
         if verdict.layer == "taint":  # P4-1: a rule allowed it; taint only asks
             return taint_decision(verdict)
+        from ..policy_baseline import NoBaseline, verify
+        from ..policy_layers import store_home
+
+        opener = (
+            "set_operator_policy scope='shell' action='run_repo' with the exact "
+            "command line — a standing rule, not a one-off."
+            if isinstance(verify(store_home(store)), NoBaseline)
+            else "the operator re-approves the baseline (`skep policy approve`); "
+            "set_operator_policy takes no allow under it."  # D7
+        )
         return AutonomyDecision(
             verdict="deny",
             reason="shell.deny.repo_cwd" if via_cwd else "shell.deny.repo_target",
@@ -3132,10 +3148,7 @@ def queen_shell_decision(
                 f"{how} — a shell command there can modify files with no patch card, "
                 "so it refuses by default. To look: repo_state, search_files, "
                 "read_file, git_log, git_diff run in-turn with no card. To change "
-                f"something: {change}. Only to "
-                "open repo shells deliberately: set_operator_policy scope='shell' "
-                "action='run_repo' with the exact command line — a standing rule, "
-                "not a one-off."
+                f"something: {change}. Only to open repo shells deliberately: {opener}"
             ),
             decided_by=verdict.decided_by,
         )
@@ -3159,8 +3172,9 @@ def queen_shell_decision(
         )
     if verdict.layer == "taint":
         return taint_decision(verdict)
-    if verdict.note is not None and verdict.layer == "default":
-        # L13: an unreadable line under a deny — the card's risk line says so
+    if (verdict.note or "").startswith(UNREADABLE_NOTE):
+        # L13, D12: an unreadable line under a deny — the card's risk line
+        # says so, whichever layer's ask labels it (a role's `*` ask too)
         return AutonomyDecision(
             verdict="require_approval",
             reason="shell.require_approval.unreadable_under_deny",
@@ -5380,15 +5394,9 @@ def _execute_mutation(
                     f"(the {'shell command' if caste == 'script' else 'text to run'})"
                 )
             if caste == "script":
-                from ..shell_prefixes import (
-                    SKEP_TRUST_REFUSAL,
-                    command_line_segments,
-                    is_skep_trust_command,
-                )
-
-                segments = command_line_segments(str(args["instructions"])) or []
-                if any(is_skep_trust_command(segment) for segment in segments):
-                    raise ValueError(SKEP_TRUST_REFUSAL)  # W20 review: nor on a timer
+                skep_self = _schedule_skep_refusal(args, holder)
+                if skep_self is not None:
+                    raise ValueError(skep_self)  # W20 review, D11: nor on a timer
             if caste == "prompt" and chat_id is None:
                 raise ValueError(
                     "a prompt schedule runs its Queen turn in the chat that "
@@ -5718,6 +5726,16 @@ _DECIDED_LANES = frozenset(
 )  # fmt: skip
 
 
+def _schedule_skep_refusal(args: dict[str, Any], holder: ConfigHolder) -> str | None:
+    """D11: a script schedule runs as the operator on this host, so it gets
+    the Queen shell's skep floor (``skep trust`` included, W20 review)."""
+    from ..shell_prefixes import queen_skep_refusal
+
+    if args.get("caste") != "script" or args.get("instructions") is None:
+        return None
+    return queen_skep_refusal(str(args["instructions"]), home=holder.current.home, cwd=None)
+
+
 def mutation_execution_decision(
     name: str,
     args: dict[str, Any],
@@ -5792,6 +5810,9 @@ def _mutation_execution_decision(
     # B22: the Queen's own hop (``_queen_chain``) — a dispatch its role can
     # never delegate refuses here, before a card exists to confirm.
     chain = [f"queen@{role.name}"] if role else []
+    skep_self = _schedule_skep_refusal(args, holder) if name == "propose_schedule" else None
+    if skep_self is not None:  # D11: refused at proposal, no card
+        return AutonomyDecision(verdict="deny", reason="schedule.deny.skep_self", detail=skep_self)
     if name == "run_schedule_now":
         # ES (B122): a disabled/unknown schedule can only fail on confirm —
         # refuse now, without a card, and tell the model why.

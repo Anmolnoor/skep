@@ -53,6 +53,15 @@ def locked(tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> Su
     return _home(tmp_path, repo, capsys)
 
 
+@pytest.fixture()
+def unlocked(tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> SupervisorConfig:
+    """The same home with no baseline approved. D7 moved the B20 tests here:
+    under a locked baseline set_operator_policy takes no allow at all, so the
+    allow-path rules are proven where it still takes one (a grant applies on
+    a home with no baseline, B101)."""
+    return _home(tmp_path, repo, capsys, approve=False)
+
+
 def test_every_mutating_tool_is_mapped_to_a_scope_or_always_cards_with_a_reason() -> None:
     unmapped = sorted(MUTATING_TOOL_NAMES - set(TOOL_SCOPES) - set(ALWAYS_CARDS))
     assert not unmapped, f"map each in TOOL_SCOPES or ALWAYS_CARDS (B32): {unmapped}"
@@ -362,6 +371,37 @@ def test_doctor_says_a_chat_with_no_stored_role_runs_as_assistant(tmp_path: Path
     assert "skep role use builder --chat old-chat" in line and "/role builder" in line
 
 
+def test_doctor_names_each_custom_role_with_no_template_acting_as_assistant(
+    tmp_path: Path,
+) -> None:
+    """D14: a custom role that names no template acts as assistant — doctor
+    says so in one line naming each, silent when every role has one."""
+    from skep.status import build_status
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.roles import roles_dir
+
+    config = build_config(tmp_path, None)
+    roles_dir(config.home).mkdir(parents=True)
+    (roles_dir(config.home) / "ops.json").write_text('{"name": "ops", "policy_layer": "operator"}')
+    assert not [a for a in build_status(tmp_path)["advisories"] if "no template" in a]
+    for name in ("quiet", "calm"):
+        (roles_dir(config.home) / f"{name}.json").write_text(f'{{"name": "{name}"}}')
+    (line,) = [a for a in build_status(tmp_path)["advisories"] if "no template" in a]
+    assert line == (
+        "custom role(s) calm, quiet name no template and act as assistant until they get one "
+        "— set policy_layer (builder, operator or assistant) in "
+        f"{roles_dir(config.home)}/<name>.json"
+    )
+    # A role file that does not load denies every chat's own tools — doctor
+    # names it instead (the template-less roles are not acting as anything).
+    (roles_dir(config.home) / "broken.json").write_text("{")
+    advisories = build_status(tmp_path)["advisories"]
+    assert not [a for a in advisories if "no template" in a]
+    (line,) = [a for a in advisories if "broken.json" in a]
+    assert line.startswith(f"role file {roles_dir(config.home) / 'broken.json'} does not load")
+    assert line.endswith("every chat's own tools refuse until it loads or is removed")
+
+
 @pytest.mark.parametrize("face", ["turn", "btw", "continuation", "unattended", "channel"])
 def test_a_chat_whose_stored_role_is_null_is_an_assistant_chat_on_every_face(
     config: SupervisorConfig, face: str
@@ -525,21 +565,22 @@ def _shell(config: SupervisorConfig, command: str, *, role: str | None = None, c
 
 
 def test_b20_a_shell_allow_is_the_exact_line_a_keep_always_would_store(
-    locked: SupervisorConfig, tmp_path: Path
+    unlocked: SupervisorConfig, tmp_path: Path
 ) -> None:
     out = str(tmp_path)
-    assert _shell(locked, "df -h", cwd=out).startswith("require_approval")
-    dry = _operator_shell(locked, "allow", "df -h", dry_run=True)
+    assert _shell(unlocked, "df -h", cwd=out).startswith("require_approval")
+    dry = _operator_shell(unlocked, "allow", "df -h", dry_run=True)
     assert dry["patterns"] == ["df -h"] and dry["matcher"] == "exact_argv"
-    assert _shell(locked, "df -h", cwd=out).startswith("require_approval")  # nothing written
-    _operator_shell(locked, "allow", "df  -h")  # normalised like a keep
-    assert _shell(locked, "df -h", cwd=out) == "allow grant:global/shell:run:df -h"
+    assert _shell(unlocked, "df -h", cwd=out).startswith("require_approval")  # nothing written
+    _operator_shell(unlocked, "allow", "df  -h")  # normalised like a keep
+    assert _shell(unlocked, "df -h", cwd=out) == "allow grant:global/shell:run:df -h"
     # exact, never a prefix; a role's catch-all ask yields to it, as to a keep (decision #1)
-    assert _shell(locked, "df -h /", cwd=out).startswith("require_approval")
-    assert _shell(locked, "df -h", cwd=out, role="builder").startswith("allow grant:global/")
-    # a compound line is one exact rule per segment
-    both = _operator_shell(locked, "allow", "uptime && whoami")
-    assert both["patterns"] == ["uptime", "whoami"]
+    assert _shell(unlocked, "df -h /", cwd=out).startswith("require_approval")
+    assert _shell(unlocked, "df -h", cwd=out, role="builder").startswith("allow grant:global/")
+    # a compound line is one exact rule per segment (D13 moved it off `uptime &&
+    # whoami`: a standing allow now names only the known-safe programs)
+    both = _operator_shell(unlocked, "allow", "uname -a && pwd")
+    assert both["patterns"] == ["uname -a", "pwd"]
 
 
 @pytest.mark.parametrize(
@@ -568,13 +609,13 @@ def test_b20_a_shell_allow_is_the_exact_line_a_keep_always_would_store(
     ],
 )
 def test_b20_a_shell_allow_cannot_express_a_prefix_a_guarded_class_or_a_trick(
-    locked: SupervisorConfig, pattern: str
+    unlocked: SupervisorConfig, pattern: str
 ) -> None:
     with pytest.raises(HTTPException) as refused:
-        _operator_shell(locked, "allow", pattern)
+        _operator_shell(unlocked, "allow", pattern)
     assert refused.value.status_code == 400
     assert str(refused.value.detail).startswith("shell allow refused: ")
-    store = RunStore(locked.db_path)
+    store = RunStore(unlocked.db_path)
     try:
         assert not [r for r in _learned(store) if r.scope == "shell"]
     finally:
@@ -588,7 +629,15 @@ def test_b20_a_shell_deny_binds_on_the_queens_lane_and_beats_a_grant(
     A deny is always accepted (stricter), may be a prefix, and wins over a
     standing grant inside it."""
     out = str(tmp_path)
-    _operator_shell(locked, "allow", "df -h")
+    # D7: a locked baseline takes no allow from set_operator_policy, so the
+    # standing grant is a card keep=always (D7 leaves those unchanged)
+    store = RunStore(locked.db_path)
+    try:
+        actions.remember_action_for_session(
+            store, tool="run_shell", args={"command": "df -h"}, actor="op", tier="always"
+        )
+    finally:
+        store.close()
     assert _shell(locked, "df -h", cwd=out).startswith("allow grant:global/")
     result = _operator_shell(locked, "deny", "df")
     assert result["deny"][0]["pattern"] == "df"
@@ -613,28 +662,32 @@ def test_b20_the_set_operator_policy_card_is_high(locked: SupervisorConfig) -> N
     assert high_tier("set_operator_policy", args) == "it changes standing policy"
 
 
-def test_b20_a_refused_shell_allow_gets_no_card(locked: SupervisorConfig) -> None:
+def test_b20_a_refused_shell_allow_gets_no_card(unlocked: SupervisorConfig) -> None:
     """Checked at proposal (P3-5): the model hears why, no card can only fail."""
     from skep.supervisor.policy_write import PolicyWriteRejected
     from skep.supervisor.serve.tools import policy_write_preview
 
     args = {"scope": "shell", "action": "run", "pattern": "curl https://x", "verdict": "allow"}
-    store = RunStore(locked.db_path)
+    store = RunStore(unlocked.db_path)
     try:
         with pytest.raises(PolicyWriteRejected, match="never a standing allow"):
-            policy_write_preview(store, ConfigHolder(locked, store), "set_operator_policy", args)
+            policy_write_preview(store, ConfigHolder(unlocked, store), "set_operator_policy", args)
     finally:
         store.close()
 
 
 def test_b20_a_run_repo_allow_opens_one_exact_line_in_a_repo(
-    locked: SupervisorConfig, repo: Path
+    unlocked: SupervisorConfig, repo: Path
 ) -> None:
-    """What the repo-pen refusal tells the model to propose, and no more."""
-    assert _shell(locked, "make test", cwd=str(repo)).startswith("deny")
-    _operator_shell(locked, "allow", "make test", action="run_repo")
-    assert _shell(locked, "make test", cwd=str(repo)).startswith("allow grant:global/")
-    assert _shell(locked, "make test-all", cwd=str(repo)).startswith("deny")
+    """What the repo-pen refusal tells the model to propose, and no more.
+    D13 moved it off `make test`: a standing allow now names only the
+    known-safe programs, so `make test` is refused and a test runner opens."""
+    assert _shell(unlocked, "pytest -q", cwd=str(repo)).startswith("deny")
+    with pytest.raises(HTTPException):
+        _operator_shell(unlocked, "allow", "make test", action="run_repo")
+    _operator_shell(unlocked, "allow", "pytest -q", action="run_repo")
+    assert _shell(unlocked, "pytest -q", cwd=str(repo)).startswith("allow grant:global/")
+    assert _shell(unlocked, "pytest -q -x", cwd=str(repo)).startswith("deny")
 
 
 # --- D7: the generated "In this chat:" line (the B33 class) -----------------------------
@@ -816,17 +869,17 @@ def test_a_dispatch_with_no_repo_is_answered_as_a_model_error(
     assert "repo" in (decision.detail or "")
 
 
-def test_a_role_with_no_layer_is_offered_no_dispatcher_and_none_cards_to_fail(
+def test_a_role_with_no_template_is_offered_no_dispatcher_and_none_cards_to_fail(
     locked: SupervisorConfig, repo: Path
 ) -> None:
-    """A custom role that binds no template delegates no workspace write
-    (decision #7): every dispatcher is refused on confirm. So it is hidden —
-    start_research and forge_tool used to card and then 403."""
+    """A custom role that binds no template acts as assistant (D14): it hides
+    what assistant hides, every dispatcher among them — start_research and
+    forge_tool are refused at proposal, never carded and then 403."""
     from skep.supervisor.roles import resolve_role
 
-    from .conftest import no_layer_role
+    from .conftest import no_template_role
 
-    role = resolve_role(no_layer_role(locked.home), locked.home)
+    role = resolve_role(no_template_role(locked.home), locked.home)
     assert set(hidden_tools(role)) == ASSISTANT_HIDDEN
     store = RunStore(locked.db_path)
     try:
@@ -883,12 +936,12 @@ def test_a_role_with_no_layer_is_offered_no_dispatcher_and_none_cards_to_fail(
     ],
 )
 def test_b20_a_shell_allow_never_names_a_wrapped_aliased_or_launched_program(
-    locked: SupervisorConfig, pattern: str
+    unlocked: SupervisorConfig, pattern: str
 ) -> None:
     with pytest.raises(HTTPException) as refused:
-        _operator_shell(locked, "allow", pattern)
+        _operator_shell(unlocked, "allow", pattern)
     assert str(refused.value.detail).startswith("shell allow refused: ")
-    store = RunStore(locked.db_path)
+    store = RunStore(unlocked.db_path)
     try:
         assert not [r for r in _learned(store) if r.scope == "shell"]
     finally:
@@ -896,15 +949,15 @@ def test_b20_a_shell_allow_never_names_a_wrapped_aliased_or_launched_program(
 
 
 def test_b20_a_harmless_exact_line_still_stores_and_matches_only_itself(
-    locked: SupervisorConfig, tmp_path: Path
+    unlocked: SupervisorConfig, tmp_path: Path
 ) -> None:
     for pattern in ("ls -la", "git log", "git status", "uv run pytest", "df -h"):
-        assert _operator_shell(locked, "allow", pattern)["matcher"] == "exact_argv", pattern
+        assert _operator_shell(unlocked, "allow", pattern)["matcher"] == "exact_argv", pattern
     out = str(tmp_path)
-    assert _shell(locked, "ls -la", cwd=out).startswith("allow grant:global/")
+    assert _shell(unlocked, "ls -la", cwd=out).startswith("allow grant:global/")
     for longer in ("ls -la\ngit push", "ls -la; curl https://x", "ls -la && rm -rf ~",
                    "ls -la | sh", "ls -la $(id)", "ls -la /"):  # fmt: skip
-        assert not _shell(locked, longer, cwd=out).startswith("allow"), longer
+        assert not _shell(unlocked, longer, cwd=out).startswith("allow"), longer
 
 
 def test_the_search_line_says_taint_can_make_a_search_ask(locked: SupervisorConfig) -> None:
@@ -953,3 +1006,27 @@ def test_the_repo_pen_never_points_an_assistant_chat_at_a_hidden_tool(
         assert "quick_edit" not in said["assistant", background]
         assert "/role" in said["assistant", background]
         assert "dispatch_run" in said["builder", background]
+
+
+def test_d7_the_repo_pen_refusal_names_set_operator_policy_only_where_it_takes_an_allow(
+    locked: SupervisorConfig, repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ES-F83 review: under a locked baseline set_operator_policy refuses
+    every allow (D7), so the repo-pen refusal sent the model to a proposal
+    that could only be refused; it names `skep policy approve` there."""
+
+    def detail(config: SupervisorConfig) -> str:
+        store = RunStore(config.db_path)
+        try:
+            found = queen_shell_decision(
+                store, ConfigHolder(config, store), command="pytest -q", cwd=str(repo)
+            )
+        finally:
+            store.close()
+        assert found is not None and found.verdict == "deny", found
+        return str(found.detail)
+
+    assert "set_operator_policy scope=" not in detail(locked)
+    assert "skep policy approve" in detail(locked)
+    unlocked = _home(tmp_path / "unlocked", repo, capsys, approve=False)
+    assert "set_operator_policy scope='shell'" in detail(unlocked)

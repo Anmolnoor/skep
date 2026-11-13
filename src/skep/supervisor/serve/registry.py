@@ -532,19 +532,33 @@ def too_broad_root(path: Path, store_root: Path) -> str | None:
     """W15: why ``path`` may not become an operator root (the Queen reads
     all of a bound repo path), or None. ``/``, ``/home``, ``/Users``, your
     home directory, any ancestor of it or of the skep store (``store_root``,
-    the parent of the skep home). One list for every face that binds one."""
+    the parent of the skep home), a system top-level folder, ``/Volumes`` or
+    the root of a mounted volume (D17). One list for every face that binds one."""
     from ..secret_floor import alias_key
 
     user = Path.home().resolve()
     store = store_root.expanduser().resolve()
     broad = {Path("/"), Path("/home"), Path("/Users"), user, *user.parents, store, *store.parents}
-    if alias_key(path.resolve()) in {alias_key(p) for p in broad}:
+    broad |= {Path(folder) for folder in _SYSTEM_FOLDERS}  # D17
+    resolved = path.resolve()
+    keys = {alias_key(path), alias_key(resolved)}
+    if keys & {alias_key(p) for p in broad} or resolved.is_mount():
         return (
             f"too broad — {path} would let the assistant read everything under it "
-            "(your home directory, / and their parents are never a workspace): "
-            "name a project subdirectory"
+            "(your home directory, /, system folders, a volume and their parents are "
+            "never a workspace): name a project subdirectory"
         )
     return None
+
+
+# D17 (2026-11-13): system top-level folders and /Volumes are never bound as a
+# whole; a sub-folder still binds (the suite's temp homes live under /var/folders).
+_SYSTEM_FOLDERS = (
+    "/etc", "/var", "/usr", "/opt", "/tmp", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/dev",
+    "/proc", "/sys", "/run", "/srv", "/mnt", "/media", "/private", "/private/etc",
+    "/private/var", "/private/tmp", "/System", "/System/Volumes", "/Library", "/Applications",
+    "/Volumes",
+)  # fmt: skip
 
 
 def _validate_project_binding(*, root: Path, run_store: RunStore, kind: str, value: str) -> None:

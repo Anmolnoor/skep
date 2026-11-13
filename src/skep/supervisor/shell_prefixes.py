@@ -11,6 +11,7 @@ import posixpath
 import re
 import shlex
 from collections.abc import Sequence
+from pathlib import Path
 
 # v19-F3: git subcommands the worker denies outright. The supervisor lands
 # changes as a patch after approval, so a worker has no business reaching a
@@ -192,7 +193,19 @@ _INLINE_CODE_FLAGS: dict[str, frozenset[str]] = {
     "python": frozenset({"-c"}), "python3": frozenset({"-c"}), "node": frozenset({"-e", "-p"}),
     "perl": frozenset({"-e", "-E"}), "ruby": frozenset({"-e"}), "php": frozenset({"-r"}),
     "deno": frozenset({"eval"}), "bun": frozenset({"-e", "--eval"}),
+    "lua": frozenset({"-e"}), "osascript": frozenset({"-e"}), "rscript": frozenset({"-e"}),
+    "pwsh": frozenset({"-c"}),
 }  # fmt: skip
+_INLINE_CODE_FLAGS["node"] |= {"--eval", "--print"}
+
+
+def _interpreter(token: str) -> str:
+    """``python3.12`` is python, ``node18`` is node (the table's spelling)."""
+    program = program_name(token)
+    base = program.rstrip("0123456789.") or program
+    return program if program in _INLINE_CODE_FLAGS else base
+
+
 PACKAGE_MANAGERS: frozenset[str] = frozenset(
     {"pip", "pip3", "pipx", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
      "gem", "go", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk"}
@@ -211,10 +224,10 @@ def is_package_install(argv: Sequence[str]) -> bool:
 
 def _inline_code(argv: Sequence[str]) -> bool:
     """Inline code, its flag alone or in a short cluster (``perl -pe``)."""
-    flags = _INLINE_CODE_FLAGS.get(program_name(argv[0]), frozenset())
+    flags = _INLINE_CODE_FLAGS.get(_interpreter(argv[0]), frozenset())
     letters = {flag[1] for flag in flags if len(flag) == 2 and flag[0] == "-"}
     for token in argv[1:]:
-        if token in flags:
+        if token.partition("=")[0] in flags:
             return True
         if token[:1] != "-":
             return False  # a script path: what follows is the script's
@@ -454,6 +467,41 @@ def references_dead_worktree(argv: Sequence[str]) -> bool:
 # What runs the word after it as a program: ``python3 -m skep``, ``uv run
 # skep``, ``uvx skep``, ``pipx run skep``.
 _SKEP_RUNNERS = frozenset({"-m", "run", "exec", "uvx", "pipx"})
+# A runner's options that take the next word as their value (`uvx --from skep
+# skep`, `uv run --with httpx skep`); any other option takes none.
+_RUNNER_VALUE_OPTIONS = frozenset(
+    {"--with", "-w", "--with-editable", "--with-requirements", "--from", "--spec", "--python",
+     "-p", "--project", "--directory", "--package", "--extra", "--group", "--index",
+     "--index-url", "--env-file"}
+)  # fmt: skip
+
+
+def _skep_subcommands(argv: Sequence[str]) -> list[list[str]]:
+    """What follows each ``skep`` this argv runs, past skep's own options:
+    ``uv run skep trust c1`` → ``[["trust", "c1"]]``; ``[]`` when it runs none.
+    A runner's own options may stand between it and skep (``uv run --frozen
+    skep``); ``python3 -m skep.__main__`` is skep too."""
+    tokens = [str(token) for token in argv]
+    found: list[list[str]] = []
+    runner, value = True, False  # the word at index 0 is a program
+    for index, token in enumerate(tokens):
+        name = program_name(token)
+        is_skep = runner and not value and name in ("skep", "skep.__main__")
+        if value:
+            value = False
+        elif name in _SKEP_RUNNERS:
+            runner = True
+        elif runner and index and token.startswith("-"):
+            value = token in _RUNNER_VALUE_OPTIONS
+        else:
+            runner = False
+        if not is_skep:
+            continue
+        rest = tokens[index + 1 :]
+        while rest and rest[0].startswith("-"):  # skep's own options
+            rest = rest[2:] if rest[0] in ("--home", "--url") else rest[1:]
+        found.append(rest)
+    return found
 
 
 def is_skep_trust_command(argv: Sequence[str]) -> bool:
@@ -461,17 +509,33 @@ def is_skep_trust_command(argv: Sequence[str]) -> bool:
     in any spelling: ``uv run skep trust``, ``python3 -m skep --home h trust``.
     Clearing a chat's taint is the operator's act at the desk — from a chat's
     shell it is the model clearing its own guard (W20 review)."""
-    tokens = [str(token) for token in argv]
-    for index, token in enumerate(tokens):
-        runner = index == 0 or program_name(tokens[index - 1]) in _SKEP_RUNNERS
-        if program_name(token) != "skep" or not runner:
-            continue
-        rest = tokens[index + 1 :]
-        while rest and rest[0].startswith("-"):  # skep's own options
-            rest = rest[2:] if rest[0] in ("--home", "--url") else rest[1:]
-        if rest[:1] in (["trust"], ["chat"]):
-            return True
-    return False
+    return any(rest[:1] in (["trust"], ["chat"]) for rest in _skep_subcommands(argv))
+
+
+SKEP_SELF_REFUSAL = (
+    "the chat's shell never runs skep or touches skep's own files (its store, audit, "
+    "tokens, settings) — use get_run for a run, policy_why for a decision, read_file to read"
+)
+
+
+def queen_skep_refusal(command: str, *, home: Path, cwd: str | None) -> str | None:
+    """D11: a line that runs skep in any spelling the floor reads (a path, ``uv
+    run``, ``python3 -m``, a launcher, ``sh -c``, a pipeline), or names a path
+    under the skep home (``home`` is the supervisor home; in the shipped
+    layout ``<SKEP_HOME>/supervisor``, so ``<SKEP_HOME>`` minus its ``repos``
+    clones), relative names judged against ``cwd``. The Queen's lanes only:
+    the hook and REST keep the narrower ``skep trust`` floor."""
+    from .secret_floor import names_path_under
+
+    segments = command_line_segments(command) or []
+    if any(is_skep_trust_command(argv) for argv in segments):
+        return SKEP_TRUST_REFUSAL  # its own words: trusting a chat is the operator's /trust
+    if any(_skep_subcommands(argv) for argv in segments):
+        return SKEP_SELF_REFUSAL
+    root = home.parent if home.name == "supervisor" else home
+    if names_path_under(command, root, cwd=cwd, except_under=root / "repos"):
+        return SKEP_SELF_REFUSAL
+    return None
 
 
 SKEP_TRUST_REFUSAL = (
@@ -794,6 +858,12 @@ def _unwrap_argv(
         if nested is None:
             return None
         result.extend(nested)
+    if program == "eval" and len(tokens) > 1:
+        # D12: `eval curl x` runs the line its words join into, as `sh -c` does
+        nested = command_line_segments(" ".join(tokens[1:]), _depth + 1, exact=exact)
+        if nested is None:
+            return None
+        result.extend(nested)
     if program in _WRAPPER_SHELLS:
         payload: str | None = None
         for index, token in enumerate(tokens[1:], start=1):
@@ -815,6 +885,38 @@ def _unwrap_argv(
                 return None
             result.extend(nested)
     return result
+
+
+def _stdin_shell(argv: Sequence[str]) -> bool:
+    """D12: a wrapper shell reading its commands from stdin — no ``-c`` and no
+    script operand (``… | sh``, ``sh <<< …``, a here-doc, ``sh -``), ``-s``,
+    or ``/dev/stdin`` as the script; an interpreter alone (``… | python3``)
+    or reading ``-`` / ``/dev/stdin``."""
+    if _interpreter(argv[0]) in _INLINE_CODE_FLAGS:
+        return argv[1:2] in ([], ["-"], ["/dev/stdin"])
+    if program_name(argv[0]) not in _WRAPPER_SHELLS:
+        return False
+    for token in argv[1:]:
+        if token == "/dev/stdin":
+            return True
+        if not token.startswith("-") or token == "--":
+            return False  # `sh script.sh`: a file, not stdin
+        short = "" if token.startswith("--") else token[1:]
+        if "s" in short:
+            return True
+        if "c" in short:
+            return False  # a -c payload: the floor reads it
+    return True
+
+
+def hides_commands(command: str) -> bool:
+    """D12: does any argv the floor reads in this line hand a shell its
+    commands on stdin, or run inline interpreter code (``python3 -c``,
+    ``node -e``)? Neither names a program a rule can read."""
+    return any(
+        argv and (_stdin_shell(argv) or _inline_code(argv))
+        for argv in command_line_segments(command, exact=True) or []
+    )
 
 
 def sh_command_list(line: str) -> str:

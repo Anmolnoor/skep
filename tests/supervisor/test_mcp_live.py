@@ -25,8 +25,9 @@ from skep.supervisor.mcp_client import (
     save_mcp_server,
 )
 from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
+from skep.supervisor.serve.actions import learn_policy_rule
 
-from .conftest import no_layer_role, predating_home
+from .conftest import no_template_role, predating_home
 from .conftest import serve_client as _client
 from .fake_ollama import FakeOllama
 
@@ -79,15 +80,29 @@ def chat_client(config: SupervisorConfig, ollama: FakeOllama) -> tuple[TestClien
         json={"base_url": ollama.base_url, "default_model": "qwen3", "api_key": "sk-fake"},
     )
     chat_id = str(client.post("/api/chats", json={}).json()["chat_id"])
-    # The MCP lane on its own: a chat in a role with no layer (ADR 0059 P3-6) —
-    # a new chat, and one whose stored role is NULL, is an assistant chat,
-    # whose mcp-gated ask would answer every probe here.
+    # A chat in a role naming no template: it acts as assistant (ADR 0059
+    # D14), so its mcp-gated catch-all asks for every MCP call nobody granted
+    # (``_grant_read``); its email layer lets reads run and asks for a send.
     store = RunStore(config.db_path)
     try:
-        store.set_chat_role(chat_id, no_layer_role(config.home))
+        store.set_chat_role(chat_id, no_template_role(config.home))
     finally:
         store.close()
     return client, chat_id
+
+
+def _grant_read(config: SupervisorConfig, server: str) -> None:
+    """D14: no chat is without a role layer, and every role's mcp-gated
+    catch-all asks — a standing grant answers it (decision #1), which is
+    what lets a read run inside the turn."""
+    store = RunStore(config.db_path)
+    try:
+        learn_policy_rule(
+            store, rule_id=f"mcp:{server}:list_issues", action="call",
+            pattern=f"{server}:list_issues", scope="mcp", provenance="allow-always:op",
+        )  # fmt: skip
+    finally:
+        store.close()
 
 
 def _seed_server(config: SupervisorConfig) -> None:
@@ -153,6 +168,7 @@ def test_read_shaped_tool_runs_inside_the_turn(
     fake_runner: list[tuple[str, dict[str, Any]]],
 ) -> None:
     _seed_server(config)
+    _grant_read(config, "issues")
     client, chat_id = chat_client(config, ollama)
     ollama.script_tool_call("call_mcp_tool", {"server_id": "issues", "tool": "list_issues"})
     ollama.script_reply("here are the issues")
@@ -177,7 +193,7 @@ def test_unknown_tool_cards_then_executes_on_confirm(
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "frobnicate it"})
     (action,) = client.get(f"/api/chats/{chat_id}").json()["actions"]
     assert action["status"] == "proposed"
-    assert action["decided_by"] == "default/unmatched"  # v39-F1 fail-closed (P3-3 label)
+    assert action["decided_by"] == "role:notemplate/mcp-gated"  # D14: the assistant layer asks
     assert fake_runner == []  # nothing ran before the human said so
 
     ollama.script_reply("done frobnicating")
@@ -312,7 +328,7 @@ def test_email_server_reads_flow_and_sends_card(
         if a["status"] == "proposed"
     ]
     assert action["status"] == "proposed"
-    assert action["decided_by"] == "default/unmatched"  # a send is never a read
+    assert action["decided_by"] == "role:notemplate/email-send-gated"  # a send is never a read
     assert ("tools/call", {"name": "send_message", "arguments": {"to": "x"}}) not in fake_runner
 
     ollama.script_reply("sent")
@@ -398,6 +414,7 @@ def test_http_transport_is_transparent_to_the_chat_surface(
     http server lists, a read flows inside the turn, an unknown tool cards
     and executes on confirm, exactly as stdio does."""
     _seed_http_server(config)
+    _grant_read(config, "remote")
     client, chat_id = chat_client(config, ollama)
 
     ollama.script_tool_call("list_mcp_tools", {"server_id": "remote"})
@@ -476,7 +493,7 @@ def test_unregister_mcp_server_is_carded_and_removes_the_config(
         store.close()
 
 
-def test_b09_destructive_name_cards_in_a_roleless_chat(
+def test_b09_destructive_name_cards_in_a_template_less_chat(
     config: SupervisorConfig,
     ollama: FakeOllama,
     fake_runner: list[tuple[str, dict[str, Any]]],

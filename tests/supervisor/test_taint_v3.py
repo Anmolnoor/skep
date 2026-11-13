@@ -30,7 +30,6 @@ from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import mutation_execution_decision
 from skep.supervisor.store import ChatTaint
 
-from .conftest import no_layer_role
 from .fake_ollama import FakeOllama
 from .net_lane_grid import build_net_home, fakes
 from .taint_grid import HOMES, rows, set_taint
@@ -57,22 +56,19 @@ GATED = {"private": TEXT_EGRESS, "untrusted": ACTIONS, "both": EGRESS | ACTIONS}
 
 
 def classify(key: str, old: str, new: str) -> str:
-    """``same``, ``no-layer:dispatch``, or ``<taint>:<lane>`` for an allow that
+    """``same``, ``hidden:dispatch``, or ``<taint>:<lane>`` for an allow that
     became the D5 ask; raises on any other change (so a test fails on it)."""
     _home, lane, probe, role, _grant, taint = key.split("|")
     if old == new:
         return "same"
-    if role == "-" and lane == "dispatch":
-        # P3-6: "-" is now a custom role with no layer (``no_layer_role``: a
-        # NULL chat reads as assistant). Its hop delegates nothing it is
-        # silent on (decision #7), so it may not hand a worker a write: deny.
-        assert new.startswith("deny "), f"only a deny: {key}: {old} -> {new}"
-        return "no-layer:dispatch"
-    if role == "assistant" and lane == "dispatch":
+    if role in ("assistant", "-") and lane == "dispatch":
         # W2 (P3-6): a tool the assistant role hides is refused at proposal on
-        # every home — where the run policy could not resolve, it carded.
+        # every home — where the run policy could not resolve, it carded. D14:
+        # "-" is a custom role naming no template, so it acts as assistant
+        # (its frozen cells are the assistant row's, labelled role:notemplate).
+        label = "role:assistant/" if role == "assistant" else "role:notemplate/"
         assert old.startswith("require_approval "), f"only a card: {key}: {old} -> {new}"
-        assert new.startswith("deny role:assistant/"), f"not hidden: {key}: {old} -> {new}"
+        assert new.startswith(f"deny {label}"), f"not hidden: {key}: {old} -> {new}"
         return "hidden:dispatch"
     assert taint != "none", f"taint none changed: {key}: {old} -> {new}"
     assert old.startswith("allow "), f"only an allow may move: {key}: {old} -> {new}"
@@ -88,12 +84,10 @@ def classify(key: str, old: str, new: str) -> str:
 # them). Identical rows per taint state: shell 8 = the granted run_shell and
 # start_process x 4 roles in two grant states; dispatch 24 = the four auto
 # lanes x builder and operator x 3 grant states (the gated one never allowed;
-# assistant never dispatched, "-" is no-layer:dispatch); other 12 = remember
-# x 4 roles x 3 grant states. no-layer:dispatch = the five dispatch probes x
-# 3 grant states x 4 taint states on every home: a layer-less role hides the
-# dispatchers (review follow-up), so the cells that carded where the run
-# policy cannot resolve — the assistant home's gated repo, all of the
-# tampered home — deny too, with the hidden-tool label.
+# assistant and "-" never dispatch); other 12 = remember x 4 roles x 3 grant
+# states. D14: "-" is a chat in a custom role naming no template, which acts
+# as assistant — its frozen cells are the assistant row's (relabelled
+# role:notemplate), and it flips exactly where the assistant row does.
 _SAME = {"dispatch": 24, "other": 12, "shell": 8}
 _UNTRUSTED = {f"untrusted:{lane}": n for lane, n in _SAME.items()} | {"untrusted:mcp": 8}
 _BOTH = {f"both:{lane}": n for lane, n in _SAME.items()}
@@ -107,19 +101,17 @@ def _flips(fetch: int, both_mcp: int, search: int) -> dict[str, int]:
     return flips
 
 
-_NO_LAYER = {"no-layer:dispatch": 60}
 EXPECTED_FLIPS: dict[str, dict[str, int]] = {
-    "legacy": _flips(fetch=8, both_mcp=29, search=0) | _NO_LAYER,
-    "zero": _flips(fetch=8, both_mcp=8, search=0) | _NO_LAYER,
-    "builder": _flips(fetch=11, both_mcp=11, search=12) | _NO_LAYER,
-    # hidden:dispatch (W2) = the assistant row's dispatch probes that carded
-    # where the run policy cannot resolve, x 3 grant states x 4 taint states:
-    # the gated repo here, all five on the tampered home.
-    "assistant": _flips(fetch=11, both_mcp=23, search=12)
-    | {"no-layer:dispatch": 60, "hidden:dispatch": 12},
-    "operator": _flips(fetch=17, both_mcp=11, search=12) | _NO_LAYER,
+    "legacy": _flips(fetch=8, both_mcp=20, search=0),
+    "zero": _flips(fetch=8, both_mcp=8, search=0),
+    "builder": _flips(fetch=8, both_mcp=8, search=12),
+    # hidden:dispatch (W2) = the assistant and "-" rows' dispatch probes that
+    # carded where the run policy cannot resolve, x 3 grant states x 4 taint
+    # states x 2 rows: the gated repo here, all five on the tampered home.
+    "assistant": _flips(fetch=8, both_mcp=20, search=12) | {"hidden:dispatch": 24},
+    "operator": _flips(fetch=11, both_mcp=8, search=12),
     # tampered: nothing allows but remember (an inert proposal, outside decide)
-    "tampered": {"untrusted:other": 12, "both:other": 12, "hidden:dispatch": 60} | _NO_LAYER,
+    "tampered": {"untrusted:other": 12, "both:other": 12, "hidden:dispatch": 120},
 }
 
 
@@ -324,15 +316,26 @@ def test_each_row_of_the_d5_table(
     live: Callable[[str], Live], bits: str, probe: tuple[str, dict[str, Any]], expected: str
 ) -> None:
     env = live("builder")
-    chat = env.chat(no_layer_role(env.holder.current.home))  # the guard alone: no role layer
-    actions.remember_action_for_session(
-        env.store, tool="run_shell", args={"command": "python3 build.py --fast"}, actor="op",
-        tier="always",
-    )  # fmt: skip
-    actions.learn_policy_rule(
-        env.store, rule_id="mcp:tracker:update_issue", action="call",
-        pattern="tracker:update_issue", scope="mcp", provenance="allow-always:op",
-    )  # fmt: skip
+    # The guard alone: every probe is granted, so the assistant role's
+    # catch-all asks are answered (decision #1) and only taint can ask. D14:
+    # no chat has no role layer any more — this was a template-less role.
+    chat = env.chat("assistant")
+    for tool_name, tool_args in (
+        ("run_shell", {"command": "python3 build.py --fast"}),
+        ("read_url", {"url": "https://docs.python.org/3/"}),
+    ):
+        actions.remember_action_for_session(
+            env.store, tool=tool_name, args=tool_args, actor="op", tier="always"
+        )
+    for granted in ("tracker:update_issue", "kb:get_doc"):
+        actions.learn_policy_rule(
+            env.store,
+            rule_id=f"mcp:{granted}",
+            action="call",
+            pattern=granted,
+            scope="mcp",
+            provenance="allow-always:op",
+        )
     set_taint(env.store, chat, bits)
     tool, raw = probe
     args = {k: v.format(repo=env.paths["repo"]) for k, v in raw.items()}
@@ -956,7 +959,7 @@ def test_w7_a_private_chats_network_line_offers_no_session_keep() -> None:
     private = ChatTaint(private=7)
     for tool in ("run_shell", "start_process"):
         net = actions.keep_options(tool, {"command": "dig x.example"}, private)
-        assert net == ["once", "always"], (tool, net)
+        assert net == ["once"], (tool, net)  # D13 dropped "always": dig is not on the list
         assert actions.default_keep(tool, {"command": "dig x.example"}, private) == "once"
         assert "session" in actions.keep_options(tool, {"command": "ls -la"}, private)
     assert "session" in actions.keep_options("run_shell", {"command": "dig x.example"}, None)
@@ -966,9 +969,9 @@ def test_w7_a_private_chats_network_line_offers_no_session_keep() -> None:
     ("line", "expected"),
     [("sendmail me@x.example < notes.txt", "taint/private-egress"),
      ("rclone copy notes.txt remote:bucket", "taint/private-egress"),
-     ("python3 -c 'import urllib.request'", "taint/private-egress"),
-     ("perl -pe 's/a/b/' notes.txt", "taint/private-egress"),
-     ("node -e 'fetch(1)'", "taint/private-egress"),
+     ("python3 -c 'import urllib.request'", "unreadable"),
+     ("perl -pe 's/a/b/' notes.txt", "unreadable"),
+     ("node -e 'fetch(1)'", "unreadable"),
      ("python3 build.py -c fast", "allow"),
      ("perl tools/gen.pl", "allow")],
 )  # fmt: skip
@@ -978,7 +981,12 @@ def test_w7_send_only_programs_and_inline_code_ask_in_a_private_chat(
     """ES-F51 review: mail, file-sync and socket programs send data and were
     not on the list; inline interpreter code (`python3 -c`, `perl -pe`) cannot
     be read, so a granted one ran with no card in a private chat. They ask
-    there; a script an interpreter runs, and its own flags, do not."""
+    there; a script an interpreter runs, and its own flags, do not.
+
+    D12 (2026-11-13) moved the inline-code rows: under the builder
+    baseline's shell denies inline code is unreadable, so the grant allows
+    nothing and the line asks before taint is reached — a once-only card
+    naming the denies, no longer labelled ``taint/private-egress``."""
     env = live("builder")
     chat = env.chat()
     actions.remember_action_for_session(
@@ -990,4 +998,6 @@ def test_w7_send_only_programs_and_inline_code_ask_in_a_private_chat(
     )
     assert decision is not None
     got = decision.verdict if decision.verdict == "allow" else decision.decided_by
+    if decision.reason == "shell.require_approval.unreadable_under_deny":
+        got = "unreadable"
     assert got == expected, (line, decision)

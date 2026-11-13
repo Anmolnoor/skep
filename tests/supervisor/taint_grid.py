@@ -14,6 +14,8 @@ taint ``none`` answered BEFORE P4-1 (the code then had no taint, so every
 taint state answered the same); ``test_taint_v3.py`` holds every taint
 state's new answer to it. Regenerate only with the pre-P4-1 code: ``python -m
 tests.supervisor.taint_grid > tests/fixtures/policy_v3/pre_p4_1_taint_verdicts.json``.
+D14 then set every ``-`` cell to the assistant cell, ``role:assistant/`` read
+``role:notemplate/``: a role naming no template acts as assistant.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from skep.supervisor.serve import actions
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_read_tool, mutation_execution_decision
 
-from .conftest import no_layer_role
+from .conftest import no_template_role
 from .net_lane_grid import GRANTED_TOOL, GRANTED_URL, build_net_home, fakes, show, show_search
 
 HOMES = ("legacy", "zero", "builder", "assistant", "operator", "tampered")
@@ -149,8 +151,8 @@ def rows(root: Path, kind: str) -> Iterator[tuple[str, str]]:
             project_id="auto", binding_kind="repo_path", binding_value=str(auto.resolve())
         )
         chats = {
-            (role, taint): store.create_chat(  # "-": a role with no layer (``no_layer_role``)
-                title=f"{role}-{taint}", model=None, role=role or no_layer_role(config.home)
+            (role, taint): store.create_chat(  # "-": names no template (``no_template_role``)
+                title=f"{role}-{taint}", model=None, role=role or no_template_role(config.home)
             ).chat_id
             for role in ROLES
             for taint in TAINTS

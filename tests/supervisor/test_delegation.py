@@ -24,7 +24,7 @@ from skep.supervisor.roles import (
     roles_dir,
 )
 from skep.supervisor.serve import actions
-from skep.supervisor.serve.actions import submit_run
+from skep.supervisor.serve.actions import remember_action_for_session, submit_run
 from skep.supervisor.serve.chat import COMMAND_ACTOR
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation, execute_read_tool
@@ -183,22 +183,49 @@ def test_a_custom_role_cannot_widen_past_its_delegator(
 
 def test_unset_in_the_delegator_is_not_granted(config: SupervisorConfig, repo: Path) -> None:
     """Decision #7: a delegator whose role layer has no rule for the action
-    holds nothing to pass on — even where the baseline beneath allows it."""
-    _custom_role(config, "hollow")  # no policy layer at all
-    ask = {"scope": "shell", "action": "run", "value": "uv sync", "repo": str(repo)}
-    assert _decide(config, role="hollow", **ask)["verdict"] == "allow"  # unset passes through
-    row = _decide(config, delegation_chain=["queen@hollow"], **ask)
+    holds nothing to pass on — not even the ask its delegatee gets alone.
+    operator's template has no shell.run_background rule at all. D14: a role
+    naming no template is no such delegator — it acts as assistant."""
+    ask = {"scope": "shell", "action": "run_background", "value": "uv sync", "repo": str(repo)}
+    alone = _decide(config, role="operator", **ask)
+    assert (alone["verdict"], alone["decided_by"]) == ("require_approval", "default/unmatched")
+    row = _decide(config, delegation_chain=["queen@operator"], **ask)
     assert (row["verdict"], row["rule_id"], row["decided_by"]) == (
         "deny",
         "exceeds_delegator",
-        "delegation:queen@hollow/unset",
+        "delegation:queen@operator/unset",
     )
     # Covered means a rule for every part: per simple command of a shell line,
-    # and per action — operator has no shell.run_background rule at all.
+    # and per action.
     operator = SHIPPED_ROLES["operator"]
     assert role_covers(operator, "shell", "run", "git status && uv sync")
     assert not role_covers(operator, "shell", "run_background", "git status")
-    assert not role_covers(resolve_role("hollow", config.home), "shell", "run", "ls")
+    _custom_role(config, "hollow")  # no policy layer: acts as assistant (D14)
+    assert role_covers(resolve_role("hollow", config.home), "shell", "run", "ls")
+
+
+def test_unset_in_the_delegator_is_not_granted_even_where_a_grant_allows(
+    config: SupervisorConfig,
+) -> None:
+    """Decision #7, against an allow: a standing grant lets every role start
+    `uv sync` in the background on its own, but no shipped template has a
+    shell.run_background rule — so a delegator in any of them passes nothing on."""
+    store = RunStore(config.db_path)
+    try:
+        remember_action_for_session(
+            store, tool="start_process", args={"command": "uv sync"}, actor="op", tier="always"
+        )
+    finally:
+        store.close()
+    ask = {"scope": "shell", "action": "run_background", "value": "uv sync"}
+    for role in DELEGATEES:
+        assert _decide(config, role=role, **ask)["verdict"] == "allow"
+    for delegator in ROLES:
+        row = _decide(config, delegation_chain=[f"queen@{delegator}"], **ask)
+        assert (row["verdict"], row["decided_by"]) == (
+            "deny",
+            f"delegation:queen@{delegator}/unset",
+        )
 
 
 def test_an_empty_chain_is_todays_row_byte_for_byte(config: SupervisorConfig, repo: Path) -> None:
@@ -237,12 +264,16 @@ def test_why_shows_the_chain(
     assert "the delegatee holds no more than queen@assistant does" in view["delegation"]["note"]
     assert main([*why, "shell", "run", "uv sync", "--delegated-by", "queen@hollow"]) != 0
     assert "no role 'hollow'" in capsys.readouterr().err
-    _custom_role(config, "hollow")
-    assert main([*why, "shell", "run", "uv sync", "--delegated-by", "queen@hollow"]) == 0
+    background = [*why, "shell", "run_background", "uv sync", "--delegated-by", "queen@operator"]
+    assert main(background) == 0
     view = json.loads(capsys.readouterr().out)
     assert view["delegation"]["held"] == {"run": None, "operator": None}
     assert "unset is not granted" in view["delegation"]["note"]
-    assert view["run"]["decided_by"] == "delegation:queen@hollow/unset"
+    assert view["run"]["decided_by"] == "delegation:queen@operator/unset"
+    _custom_role(config, "hollow")  # D14: no template, so it holds what assistant holds
+    assert main([*why, "shell", "run", "uv sync", "--delegated-by", "queen@hollow"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["delegation"]["held"]["run"]["decided_by"] == "role:hollow/shell-gated"
     assert main([*why, "shell", "run", "uv sync"]) == 0
     assert "delegation" not in json.loads(capsys.readouterr().out)  # no chain, no block
 

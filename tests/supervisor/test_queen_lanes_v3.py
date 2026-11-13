@@ -459,3 +459,48 @@ def test_l13_the_queen_shell_refuses_sh_c_under_a_chat_written_deny_and_flags_th
     card = card_summary("run_shell", args, recorded={"decision": asdict(asked)})
     assert card["risk"] == asked.detail
     assert keep_options("run_shell", args, None) == ["once"]
+
+
+def test_d12_a_stdin_shell_or_inline_code_under_a_deny_cards_once_naming_the_deny(
+    grid: Callable[..., Any],
+) -> None:
+    """D12: what `$(which curl)` gets since ES-F60 — a card whose risk line
+    names the deny, approve-once only: the card offers no keep and a confirm
+    naming one is refused. A plain confirm runs once."""
+    from typing import cast
+
+    from fastapi import HTTPException
+
+    from skep.supervisor.serve.actions import set_operator_policy_rule
+    from skep.supervisor.serve.cards import card_summary
+    from skep.supervisor.serve.chat import ChatEngine
+
+    _paths, fmt, store, holder = grid("builder")
+    set_operator_policy_rule(
+        store, scope="shell", action="run", pattern="curl", verdict="deny", holder=holder
+    )
+    chat = store.create_chat(title="b", model=None, role="builder").chat_id
+    for line in ("printf 'curl x' | sh", "python3 -c 'import os; os.system(1)'"):
+        args = {"command": line, "cwd": fmt["outside"]}
+        asked = mutation_execution_decision(
+            "run_shell", args, store=store, holder=holder, chat_id=chat
+        )
+        assert asked is not None and asked.reason == "shell.require_approval.unreadable_under_deny"
+        recorded = {"decision": asdict(asked)}
+        card = card_summary("run_shell", args, recorded=recorded)
+        assert card["risk"] == asked.detail and "`curl`" in card["risk"], line
+        assert card["keep"] == ["once"] and "keep_covers" not in card, card
+        engine = ChatEngine(
+            store=store, holder=holder, runner=cast(Any, None), home=holder.current.home
+        )
+        action_id = store.add_chat_action(chat, tool="run_shell", args=args, card=recorded)
+        with pytest.raises(HTTPException) as named:
+            engine.verdict_events(
+                chat, store.get_chat(chat), action_id, confirm=True, keep="always"
+            )
+        assert named.value.status_code == 400 and "once" in str(named.value.detail), line
+    sh_c = mutation_execution_decision(
+        "run_shell", {"command": "sh -c 'ls'", "cwd": fmt["outside"]},
+        store=store, holder=holder, chat_id=chat,
+    )  # fmt: skip
+    assert sh_c is not None and sh_c.reason != "shell.require_approval.unreadable_under_deny"

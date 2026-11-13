@@ -2309,7 +2309,7 @@ def policy_why(
         view["role"] = {
             "name": role_record.name,
             "layer": role_record.label,
-            "binds": role_record.policy_layer,
+            "binds": role_record.template,
             "verdict": hit.verdict if hit else None,
             "decided_by": hit.decided_by if hit else None,
             "note": (
@@ -4201,6 +4201,49 @@ _NO_STANDING_SHELL = NETWORK_PROGRAMS | frozenset(
 )  # fmt: skip
 
 
+# D13 (2026-11-13): a standing shell allow names only these programs — read-only
+# inspection, read-only git, the common test runners. Anything else is
+# approve-once or session-only; the refusals above stay a second check.
+_STANDING_SAFE = frozenset(
+    {"ls", "cat", "head", "tail", "wc", "grep", "rg", "stat", "file", "du", "df", "pwd",
+     "which", "date", "uname", "find", "pytest"}
+)  # fmt: skip
+# A listed program's options that write a file or run another program.
+_STANDING_UNSAFE_FLAGS = {"find": {"-fprint", "-fprint0", "-fprintf", "-fls"}, "rg": {"--pre"}}
+_STANDING_SAFE_GIT = frozenset({"status", "log", "diff", "show", "rev-parse", "ls-files", "blame"})
+_STANDING_SAFE_RUNNERS = (("uv", "run", "pytest"), ("npm", "test"), ("cargo", "test"),
+                          ("go", "test"))  # fmt: skip
+STANDING_SHELL_ONLY = (
+    "a standing shell allow covers only read-only inspection (ls, cat, grep…), read-only "
+    "git (status, log, diff…) and test runners (pytest, npm test…); approve it once or "
+    "keep it for this session"
+)
+
+
+def standing_shell_safe(argv: list[str]) -> bool:
+    """D13: is this one segment on the standing shell allow-list?"""
+    from ..shell_prefixes import git_core_argv, program_name
+
+    program = program_name(argv[0])
+    if any(t.startswith((">", "&>")) for t in argv):
+        return False  # a redirect writes a file
+    if _STANDING_UNSAFE_FLAGS.get(program, set()) & {t.partition("=")[0] for t in argv[1:]}:
+        return False
+    if program in _STANDING_SAFE:
+        return True
+    if any(tuple(argv[: len(r)]) == r for r in _STANDING_SAFE_RUNNERS):
+        return True
+    core = git_core_argv(argv)
+    if program != "git" or core[:1] != ["git"]:
+        return False
+    # ponytail: --output writes a file and --ext-diff runs a configured program
+    if any(t.startswith(("--output", "--ext-diff")) for t in core):
+        return False
+    if core[1:] in (["branch"], ["branch", "--list"]):
+        return True
+    return len(core) > 1 and core[1] in _STANDING_SAFE_GIT
+
+
 def set_operator_policy_rule(
     store: RunStore,
     *,
@@ -4222,6 +4265,8 @@ def set_operator_policy_rule(
     answer carries the replay of recent decisions under the new document.
     ``dry_run`` (the card's proposal) checks and answers, writing nothing.
     """
+    from ..policy_baseline import NoBaseline, verify
+    from ..policy_layers import store_home
     from ..policy_schema import (
         OPERATOR_POLICY_SETTINGS_KEY,
         SCOPE_ACTIONS,
@@ -4247,6 +4292,13 @@ def set_operator_policy_rule(
     pattern = pattern.strip()
     if not pattern:
         raise HTTPException(status_code=400, detail="pattern must be non-empty")
+    if verdict == "allow" and not isinstance(verify(store_home(store)), NoBaseline):
+        # D7: under an approved baseline (tampered too) this verb only tightens
+        detail = (
+            "a locked baseline takes no new allow from set_operator_policy; "
+            "re-approve the baseline to allow this: `skep policy approve`"
+        )
+        raise HTTPException(status_code=400, detail=detail) from PolicyWriteRejected(detail)
     if scope == "shell" and verdict == "allow":
         return _queen_shell_allow(store, action, pattern, holder=holder, dry_run=dry_run)
     rule_id = f"op:{scope}:{action}:{pattern}"
@@ -4326,6 +4378,9 @@ def queen_shell_allow_refusal(pattern: str, action: str) -> str | list[tuple[str
     secret = shell_secret_floor_reason(pattern, cwd=None)
     if secret is not None:
         return secret
+    for _scope, _action, line, _matcher in found:
+        if not standing_shell_safe(shlex.split(line)):
+            return f"{line!r}: {STANDING_SHELL_ONLY}"
     return [(scope, action, line, matcher) for scope, _a, line, matcher in found]
 
 
@@ -5797,7 +5852,23 @@ def keep_options(
 ) -> list[str]:
     """The keep choices a card offers — the card never offers what the
     server refuses (``keep_refusal`` with the same taint and tier)."""
-    return [keep for keep in KEEP_TIERS if keep_refusal(tool, args, keep, taint, high=high) is None]
+    return [
+        keep
+        for keep in KEEP_TIERS
+        if keep_refusal(tool, args, keep, taint, high=high) is None
+        and (keep != "always" or standing_keep_refusal(tool, args) is None)
+    ]
+
+
+def standing_keep_refusal(tool: str, args: dict[str, Any]) -> str | None:
+    """D13: why an "always" keep on this shell card is refused — it is the
+    standing allow set_operator_policy writes, so the same allow-list holds.
+    The card offers it only when this is None and the confirm checks it."""
+    if tool not in ("run_shell", "start_process"):
+        return None
+    action = "run_background" if tool == "start_process" else "run"
+    standing = queen_shell_allow_refusal(str(args.get("command") or "").strip(), action)
+    return standing if isinstance(standing, str) else None
 
 
 def default_keep(
