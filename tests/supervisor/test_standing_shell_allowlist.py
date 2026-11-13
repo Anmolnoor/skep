@@ -32,12 +32,16 @@ SAFE = [
     "find . -name '*.py'", "git status", "git log --oneline", "git diff HEAD", "git show HEAD",
     "git rev-parse HEAD", "git ls-files", "git blame x", "git branch", "git branch --list",
     "pytest -q", "uv run pytest -q", "npm test", "cargo test", "go test ./...", "ls && pwd",
+    "cat < x", "rg --pre-glob '*.gz' foo",
 ]  # fmt: skip
 UNSAFE = [
     "chmod 777 x", "git clean -fdx", "env", "printenv", "make", "touch x", "mkdir y",
     "git branch -D x", "git branch new", "git stash", "git diff --output=/tmp/x",
     "git diff --ext-diff", "ls && touch x", "echo hi", "find . -delete", "npm run build",
     "python3 -m pytest",  # listed by D13 but refused before it: nothing may widen
+    # ES-F82 review: a listed program that writes a file or runs another one
+    "cat a > b", "grep -r x . >> out", "ls 2>err", "find . -fprint out", "find . -fls out",
+    "find . -fprintf out %p", "rg --pre ./x foo", "rg --pre=./x foo",
 ]  # fmt: skip
 
 

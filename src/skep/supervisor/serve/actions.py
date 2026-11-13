@@ -4208,6 +4208,8 @@ _STANDING_SAFE = frozenset(
     {"ls", "cat", "head", "tail", "wc", "grep", "rg", "stat", "file", "du", "df", "pwd",
      "which", "date", "uname", "find", "pytest"}
 )  # fmt: skip
+# A listed program's options that write a file or run another program.
+_STANDING_UNSAFE_FLAGS = {"find": {"-fprint", "-fprint0", "-fprintf", "-fls"}, "rg": {"--pre"}}
 _STANDING_SAFE_GIT = frozenset({"status", "log", "diff", "show", "rev-parse", "ls-files", "blame"})
 _STANDING_SAFE_RUNNERS = (("uv", "run", "pytest"), ("npm", "test"), ("cargo", "test"),
                           ("go", "test"))  # fmt: skip
@@ -4223,6 +4225,10 @@ def standing_shell_safe(argv: list[str]) -> bool:
     from ..shell_prefixes import git_core_argv, program_name
 
     program = program_name(argv[0])
+    if any(t.startswith((">", "&>")) for t in argv):
+        return False  # a redirect writes a file
+    if _STANDING_UNSAFE_FLAGS.get(program, set()) & {t.partition("=")[0] for t in argv[1:]}:
+        return False
     if program in _STANDING_SAFE:
         return True
     if any(tuple(argv[: len(r)]) == r for r in _STANDING_SAFE_RUNNERS):
