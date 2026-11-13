@@ -313,3 +313,32 @@ def test_a_round_with_no_result_never_wedges_a_turn_on_any_strict_protocol(
     provider.script_reply("seen")
     events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "?"}).text)
     assert events[-1] == ("done", {"state": "complete"}), events
+
+
+def test_a_chat_replays_on_every_strict_protocol_after_trust(
+    config: SupervisorConfig, provider: Any
+) -> None:
+    """W20 review: /trust writes a system line into the chat for the
+    operator. Replayed as a system message mid-conversation, openai-compat
+    refused every later turn. A stored system row is a note for whoever reads
+    the transcript and is not replayed; the outside row stays wrapped."""
+    client = serve_client(config)
+    client.put(
+        "/api/llm/config",
+        json={"base_url": provider.base_url, "default_model": "m",
+              "protocol": provider.protocol, "api_key": "sk-fake"},
+    )  # fmt: skip
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    provider.script_reply("hi")
+    sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "a"}).text)
+    store = RunStore(config.db_path)
+    try:
+        store.add_chat_message(chat_id, role="user", content="ci failed", provenance="webhook:ci")
+    finally:
+        store.close()
+    assert client.post(f"/api/chats/{chat_id}/trust", json={"bits": []}).status_code == 200
+    provider.script_reply("ok")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "b"}).text)
+    assert events[-1] == ("done", {"state": "complete"}), events
+    body = json.dumps(provider.chat_bodies()[-1])
+    assert "trusted this chat again" not in body and "ci failed" in body

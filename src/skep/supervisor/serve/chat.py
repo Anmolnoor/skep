@@ -1455,6 +1455,11 @@ class ChatEngine:
             held.clear()
 
         for record in records:
+            if record.role == "system":
+                # a stored system row (a /trust line, a replay-halved note) is
+                # for whoever reads the transcript; replayed mid-conversation,
+                # openai-compat refuses the whole request (W20 review)
+                continue
             if record.role != "tool" and (record.trusted or not open_calls):
                 flush()
                 open_calls = 0
