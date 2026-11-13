@@ -129,7 +129,7 @@ def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> 
     cards there (role:operator asks), and the floor still denies."""
     from skep.supervisor import policy_baseline as pb
     from skep.supervisor.policy_templates import load_policy_template
-    from skep.supervisor.roles import tighten_autonomy
+    from skep.supervisor.roles import role_decision
     from skep.supervisor.serve.settings import ConfigHolder
     from skep.supervisor.serve.tools import mutation_execution_decision
 
@@ -182,7 +182,7 @@ def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> 
     finally:
         store.close()
     # A role deny refuses with no card, whatever the lane said.
-    denied = tighten_autonomy(None, SHIPPED_ROLES["assistant"], "coding", "edit", "workspace")
+    denied = role_decision(SHIPPED_ROLES["assistant"], "coding", "edit", "workspace")
     assert denied is not None and denied.verdict == "deny"
 
 

@@ -141,7 +141,7 @@ def test_email_scope_classifies_reads_flowing_and_send_carding(tmp_path: Path) -
     """The whole point of shipping first-party servers WITHOUT permission
     logic: the existing engine classifies them (I5), and sending always
     cards (I6)."""
-    from skep.supervisor import RunStore
+    from skep.supervisor import RunStore, SupervisorConfig
     from skep.supervisor.mcp_client import (
         MCPServerConfig,
         MCPTool,
@@ -149,8 +149,12 @@ def test_email_scope_classifies_reads_flowing_and_send_carding(tmp_path: Path) -
         mcp_tool_scope_action,
         save_mcp_server,
     )
+    from skep.supervisor.serve.settings import ConfigHolder
 
-    store = RunStore(tmp_path / "s.sqlite3")
+    from .conftest import predating_home
+
+    store = RunStore(predating_home(tmp_path / "s.sqlite3"))
+    holder = ConfigHolder(SupervisorConfig(home=tmp_path, worker_command=("x",)), store)
     try:
         save_mcp_server(
             store,
@@ -168,7 +172,7 @@ def test_email_scope_classifies_reads_flowing_and_send_carding(tmp_path: Path) -
         assert mcp_tool_scope_action(store, tool("list_recent")) == ("email", "read")
         assert mcp_tool_scope_action(store, tool("read_message")) == ("email", "read")
         assert mcp_tool_scope_action(store, tool("send_message")) == ("email", "send")
-        send_decision = mcp_scope_decision(store, tool("send_message"))
+        send_decision = mcp_scope_decision(store, holder, tool("send_message"))
         assert send_decision.verdict == "require_approval"
     finally:
         store.close()

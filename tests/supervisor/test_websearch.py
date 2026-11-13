@@ -15,10 +15,20 @@ from typing import cast
 import pytest
 
 from skep.supervisor.serve.chat import SYSTEM_PROMPT
+from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import READ_TOOL_NAMES, execute_read_tool
 from skep.supervisor.serve.websearch import WebSearchError, search_web
 
 from .conftest import predating_home
+
+
+def _holder(tmp_path: Path, store: object) -> ConfigHolder:
+    """P3-3: the lanes decide through policy_v3, which reads the home."""
+    from skep.supervisor import RunStore, SupervisorConfig
+
+    assert isinstance(store, RunStore)
+    return ConfigHolder(SupervisorConfig(home=tmp_path, worker_command=("x",)), store)
+
 
 _HITS = [
     {"title": "MCP docs", "href": "https://modelcontextprotocol.io/docs", "body": "The spec."},
@@ -85,7 +95,7 @@ def test_search_web_is_a_read_tool_with_clean_failure(
             "search_web",
             {"query": "x"},
             store=store,
-            holder=None,  # type: ignore[arg-type]
+            holder=_holder(tmp_path, store),
         )
     finally:
         store.close()
@@ -111,9 +121,9 @@ def test_search_web_carries_decided_by_and_honors_an_operator_deny(
             "search_web",
             {"query": "x"},
             store=store,
-            holder=None,  # type: ignore[arg-type]
+            holder=_holder(tmp_path, store),
         )
-        assert allowed["decided_by"] == "operator-default/net:search"
+        assert allowed["decided_by"] == "global/net:search"
         assert allowed["results"]
 
         store.set_setting(
@@ -134,7 +144,7 @@ def test_search_web_carries_decided_by_and_honors_an_operator_deny(
             "search_web",
             {"query": "x"},
             store=store,
-            holder=None,  # type: ignore[arg-type]
+            holder=_holder(tmp_path, store),
         )
         assert denied["results"] == []
         assert "no-search" in denied["error"]
@@ -172,10 +182,11 @@ def test_read_url_is_carded_and_fetches_nothing_until_confirmed(
         max_chars: int = 0,
     ) -> dict[str, str]:
         # v72-F7 widened the contract: the granted-domain lane passes a
-        # redirect guard; the card path passes None (this test's path).
+        # redirect guard. P3-3: the card path passes one too — it refuses
+        # only a hop a rule denies (this test's path: nothing denies).
         # v83-F1: the card lane keeps the SMALL caps (a card review stays
         # cheap); markdown is the default mode.
-        assert redirect_guard is None
+        assert callable(redirect_guard) and redirect_guard("elsewhere.example")
         assert markdown is True
         from skep.supervisor.serve import websearch as ws
 
@@ -194,7 +205,7 @@ def test_read_url_is_carded_and_fetches_nothing_until_confirmed(
             "read_url",
             {"url": "https://docs.python.org/3/"},
             store=store,
-            holder=None,  # type: ignore[arg-type]
+            holder=_holder(tmp_path, store),
             runner=None,  # type: ignore[arg-type]
             actor="tester",
         )
@@ -207,7 +218,8 @@ def test_read_url_is_carded_and_fetches_nothing_until_confirmed(
         }
         assert fetches == ["https://docs.python.org/3/"]
 
-        # An explicit standing allow is credited by its rule id instead.
+        # P3-3 operator decision: an operator-overlay fetch allow does not
+        # grant read_url yet, so the card stays the gate and is credited.
         store.set_setting(
             OPERATOR_POLICY_SETTINGS_KEY,
             PolicyDocument.model_validate(
@@ -219,7 +231,7 @@ def test_read_url_is_carded_and_fetches_nothing_until_confirmed(
                             "allow": [
                                 {
                                     "rule_id": "net:python-docs",
-                                    "action": "connect",
+                                    "action": "fetch",
                                     "pattern": "docs.python.org",
                                 }
                             ],
@@ -232,11 +244,11 @@ def test_read_url_is_carded_and_fetches_nothing_until_confirmed(
             "read_url",
             {"url": "https://docs.python.org/3/"},
             store=store,
-            holder=None,  # type: ignore[arg-type]
+            holder=_holder(tmp_path, store),
             runner=None,  # type: ignore[arg-type]
             actor="tester",
         )
-        assert credited["decided_by"] == "operator-default/net:python-docs"
+        assert credited["decided_by"] == "operator-card"
     finally:
         store.close()
 
@@ -285,8 +297,14 @@ def test_read_url_granted_lane_gets_the_bigger_budget(
         )
         return {"url": url, "text": "big page", "truncated": False}
 
+    from skep.supervisor import SupervisorConfig
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    from .conftest import predating_home
+
     monkeypatch.setattr("skep.supervisor.serve.websearch.fetch_url_text", fake_fetch)
-    store = RunStore(tmp_path / "s.sqlite3")
+    store = RunStore(predating_home(tmp_path / "s.sqlite3"))
+    holder = ConfigHolder(SupervisorConfig(home=tmp_path, worker_command=("x",)), store)
     try:
         store.set_setting(
             POLICY_DOCUMENT_SETTINGS_KEY,
@@ -302,13 +320,13 @@ def test_read_url_granted_lane_gets_the_bigger_budget(
                 ]
             ).model_dump_json(),
         )
-        decision = fetch_grant_decision(store, "docs.python.org")
+        decision = fetch_grant_decision(store, holder, "docs.python.org")
         assert decision is not None and decision.allows_execution()
         execute_mutation(
             "read_url",
             {"url": "https://docs.python.org/3/", "mode": "text"},
             store=store,
-            holder=None,  # type: ignore[arg-type]
+            holder=holder,
             runner=None,  # type: ignore[arg-type]
             actor="tester",
             decision=decision,

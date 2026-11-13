@@ -1871,6 +1871,7 @@ def policy_decide(
     ring: Literal["advisory", "hard"] = "advisory",
     role: str | None = None,
     delegation_chain: Sequence[str] = (),
+    read_only: bool = False,
 ) -> dict[str, Any]:
     """P3 (ADR 0053): ``decide()`` reachable from outside, and RECORDED —
     REST ``policy/decide``, ``skep policy decide``, the Claude Code hook and
@@ -1894,7 +1895,9 @@ def policy_decide(
     stricter verdict stands and ``decided_by`` names ``role:<name>``. R2 (D4):
     ``delegation_chain`` (``actor@role`` hops, outermost first) holds the
     verdict to what the innermost delegator itself holds; beyond it,
-    ``exceeds_delegator`` and the row carries the chain."""
+    ``exceeds_delegator`` and the row carries the chain. P3-3: ``read_only``
+    is the fact the Queen's MCP / browse / email lane passes — the tool
+    reports itself read-only (``policy_v3.decide``)."""
     _check_scope_action(scope, action)
     home = holder.current.home
     role_record = resolve_role(role, home) if role is not None else None
@@ -1913,7 +1916,12 @@ def policy_decide(
             raise
         stack = Stack(home=home, cwd=repo, guard={}, baseline="", operator={})
     verdict = decide_v3(
-        Request(scope, action, value), stack=stack, role=role_record, chain=chain, face=ring
+        Request(scope, action, value),
+        stack=stack,
+        role=role_record,
+        chain=chain,
+        face=ring,
+        read_only=read_only,
     )
     record = _decision_row(
         verdict, stack, actor=actor, repo=repo, req=(scope, action, value), role=role_record
@@ -2187,6 +2195,21 @@ def policy_why(
         view["run"] = {**_face(run), "considered": considered}
     if operator.source == "floor":
         view["floor"] = operator.note  # the floor binds workers AND the Queen (v83-F9)
+    if (scope, action) == ("network", "fetch"):
+        # P3-3 operator decision: shown, not yet granting (policy_v3.operator_lane).
+        overlay = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
+        held = [
+            rule.rule_id
+            for bucket in overlay.scopes
+            if bucket.scope == "network"
+            for rule in bucket.allow
+            if rule.action == "fetch" and pattern_matches("network", rule.pattern, value)
+        ]
+        if held:
+            view["overlay_fetch_allow"] = (
+                f"{', '.join(held)}: an operator-overlay fetch allow is recorded but does "
+                "not let read_url run yet — the verdict above is what read_url gets"
+            )
     if stack.guard.get(scope) == NO_BASELINE_REASON:
         view["baseline"] += f" — {NO_BASELINE_REASON}: every decision asks until one is"
     if role_record is not None:

@@ -165,11 +165,17 @@ def test_b09_unreachable_server_cannot_vouch_for_a_read(
 
         return runner
 
+    from skep.supervisor import SupervisorConfig
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    from .conftest import predating_home
+
     monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", broken)
-    store = RunStore(tmp_path / "s.sqlite3")
+    store = RunStore(predating_home(tmp_path / "s.sqlite3"))
+    holder = ConfigHolder(SupervisorConfig(home=tmp_path, worker_command=("x",)), store)
     try:
         save_mcp_server(store, MCPServerConfig(server_id="srv", transport="stdio", command=("x",)))
-        decision = mcp_scope_decision(store, _tool("list_users", read_only=None))
-        assert decision.verdict == "require_approval"
+        decision = mcp_scope_decision(store, holder, _tool("list_users", read_only=None))
+        assert (decision.verdict, decision.decided_by) == ("require_approval", "default/unmatched")
     finally:
         store.close()

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .autonomy import AutonomyDecision
     from .policy_schema import Scope
     from .roles import Role
+    from .serve.settings import ConfigHolder
     from .store import RunStore
 
 MCP_TRANSPORTS: frozenset[str] = frozenset({"stdio", "http"})
@@ -592,85 +593,51 @@ def mcp_tool_scope_action(store: RunStore, tool: MCPTool) -> tuple[Scope, str]:
 
 
 def mcp_scope_decision(
-    store: RunStore, tool: MCPTool, *, role: Role | None = None
+    store: RunStore, holder: ConfigHolder, tool: MCPTool, *, role: Role | None = None
 ) -> AutonomyDecision:
-    """R1 (ADR 0055 D3): the chat's role layer tightens the lane below."""
-    from .roles import tighten_autonomy
+    """One MCP tool call, decided by ``policy_v3.decide()`` with the chat's
+    role (ADR 0059 P3-3) under the scope its server binds: ``mcp.call``,
+    ``email.read|send`` (v41-F3) or ``browse.read|act`` (v71-F2). The value
+    is ``server:tool`` — never the call's arguments.
+
+    The classifiers are inputs, not a second decision: ``read_only`` is the
+    server's ``readOnlyHint`` plus a leading read verb (B09 — a name alone is
+    never a read; an unreachable server cannot vouch, so the tool is not one),
+    an email read, or a browse page-state read. A template allow grants an
+    ``mcp.call`` only for a read-only tool, and an unmatched read-only request
+    answers ``default/read-only`` allow (the read default the ladder held);
+    everything else unmatched asks. Baseline and role rules reach every call
+    (B29); a learned ``allow_mcp_tool`` grant answers a role's catch-all
+    ``mcp-gated *`` ask (decision #1, B56). allow → in-turn, deny → refused
+    with no card, ask → the card naming the rule that asked. A policy that
+    will not load refuses (fail closed)."""
+    from .autonomy import AutonomyDecision
+    from .policy_v3 import READ_ONLY, Request, queen_decide
 
     tool = with_server_hints(store, tool)
-    lane = _mcp_scope_lane(store, tool)
     scope, action = mcp_tool_scope_action(store, tool)
     value = f"{tool.server_id}:{tool.name}"
-    return tighten_autonomy(lane, role, scope, action, value) or lane
-
-
-def _mcp_scope_lane(store: RunStore, tool: MCPTool) -> AutonomyDecision:
-    """Decide one MCP tool call against its resolved scope (``mcp``, or
-    ``email`` for an email-bound server — v41-F3).
-
-    Explicit scope rules win (a deny is a hard deny — no card); an unmatched
-    tool falls back to the risk ladder: read auto-allows (the v17 ergonomic),
-    everything else — including ``unknown`` (v39-F1 fail-closed) — cards.
-    """
-    from .autonomy import AutonomyDecision
-    from .policy_schema import (
-        DEFAULT_DENY_RULE_ID,
-        POLICY_DOCUMENT_SETTINGS_KEY,
-        PolicyDocument,
-        decide,
-        document_from_settings,
-        resolve,
+    read_only = (
+        action == "read" if scope in ("email", "browse") else (classify_mcp_risk(tool) == "read")
     )
-
-    raw = store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)
-    document = document_from_settings(raw) or PolicyDocument()
-    from .policy_resolver import engine_v2_scopes
-
-    resolved = resolve(document, v2_scopes=engine_v2_scopes(store))
-    scope, action = mcp_tool_scope_action(store, tool)
-    value = f"{tool.server_id}:{tool.name}"
-    decision = decide(resolved, scope, action, value, template=document.template)
-    if decision.rule_id != DEFAULT_DENY_RULE_ID:
-        verdict = decision.verdict
-        return AutonomyDecision(
-            verdict="allow" if verdict == "allow" else verdict,
-            reason=f"{scope}.{verdict}.scope_rule",
-            detail=value,
-            decided_by=decision.decided_by,
+    try:
+        verdict = queen_decide(
+            holder, store, Request(scope, action, value), role=role, read_only=read_only
         )
-    if scope == "browse":
-        # v71-F2: the generic keyword ladder would misread browser_* names
-        # (every one contains "browse" → network risk). Page-state reads flow;
-        # every page ACT — navigation included (read_url parity: each fetch is
-        # one operator decision) — cards until an allow rule is learned.
-        if action == "read":
-            return AutonomyDecision(
-                verdict="allow",
-                reason="browse.allow.read_risk",
-                detail=value,
-                decided_by=f"{document.template or 'policy'}/browse:read",
-            )
+    except Exception as exc:  # I9: a policy that will not load never calls a tool
         return AutonomyDecision(
-            verdict="require_approval",
-            reason="browse.require_approval.page_action",
-            detail=value,
-            decided_by=f"{document.template or 'policy'}/browse:act",
+            verdict="deny",
+            reason=f"{scope}.deny.policy_unloadable",
+            detail=f"the policy did not load, so {value} is not called: {exc}",
+            decided_by="policy/unloadable",
         )
-    risk = classify_mcp_risk(tool)
-    if risk == "read":
-        return AutonomyDecision(
-            verdict="allow",
-            reason=f"{scope}.allow.read_risk",
-            detail=value,
-            decided_by=f"{document.template or 'policy'}/risk:read",
-        )
+    if verdict.verdict == "require_approval":
+        asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
+        reason = f"{scope}.require_approval.{asked}"
+    elif verdict.decided_by == f"default/{READ_ONLY}":
+        reason = f"{scope}.allow.read_risk"
+    else:
+        reason = f"{scope}.{verdict.verdict}.scope_rule"
     return AutonomyDecision(
-        verdict="require_approval",
-        reason=(
-            f"{scope}.require_approval.external_side_effect"
-            if risk == "external_side_effect"
-            else f"{scope}.require_approval.risk_not_allowed"
-        ),
-        detail=value,
-        decided_by=f"{document.template or 'policy'}/risk:{risk}",
+        verdict=verdict.verdict, reason=reason, detail=value, decided_by=verdict.decided_by
     )

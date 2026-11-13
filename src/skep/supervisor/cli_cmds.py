@@ -2775,6 +2775,7 @@ def cmd_policy_decide(args: argparse.Namespace) -> int:
             actor=args.actor,
             role=args.role,
             delegation_chain=args.delegated_by or (),
+            read_only=args.read_only,
         )
     except ValueError as exc:
         return _err(str(exc))
@@ -3625,6 +3626,11 @@ def register_supervisor_commands(
         "--delegated-by",
         action="append",
         help="held to what this delegator holds (actor@role; repeat outermost first)",
+    )
+    policy_decide.add_argument(
+        "--read-only",
+        action="store_true",
+        help="the MCP tool / browse / email action reports itself read-only (as the Queen sees it)",
     )
     policy_decide.set_defaults(func=cmd_policy_decide)
     policy_hook = policy_sub.add_parser(
