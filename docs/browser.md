@@ -49,6 +49,13 @@ Tools on a browse-bound server decide as `browse/read` or `browse/act`
   outbound fetch, and `read_url` set the parity: every fetch is one
   operator decision.
 
+Each call starts the server, waits for its answer, then stops it (one
+process per call). A page does not carry over from one call to the next:
+`browser_navigate` answers with the snapshot of the page it opened, and a
+later `browser_snapshot` starts on `about:blank`. Playwright writes its
+snapshot and console files to `.playwright-mcp/` in the folder serve runs
+from.
+
 Teach it your posture with `allow_mcp_tool` (writes a learned
 `browse`-scope rule; a policy deny always wins and refuses without a
 card), e.g. allow `playwright:browser_navigate` once you trust the flow.

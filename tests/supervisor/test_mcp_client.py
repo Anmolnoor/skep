@@ -232,3 +232,67 @@ def test_b112_keep_alive_stream_hits_a_total_deadline(monkeypatch: pytest.Monkey
     with pytest.raises(MCPError, match="deadline"):
         runner_for_config(_http_config())("tools/call", {"name": "get_report"})
     assert time.monotonic() - started < 5
+
+
+# R6: a stdio server shaped like Playwright's — it rejects an initialize with
+# no clientInfo, answers a call only after work that takes time, and stops
+# the moment its stdin closes.
+_SLOW_STDIO_SERVER = r"""
+import json, os, sys, threading, time
+greeted = False
+def answer(msg_id):
+    time.sleep(0.5)
+    reply = {"content": [{"type": "text", "text": "page"}]} if greeted else None
+    out = {"jsonrpc": "2.0", "id": msg_id}
+    out.update({"result": reply} if reply else {"error": {"message": "no clientInfo"}})
+    print(json.dumps(out), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get("method") == "initialize":
+        greeted = isinstance(request["params"].get("clientInfo"), dict)
+    elif request.get("method") == "tools/call":
+        threading.Thread(target=answer, args=(request["id"],)).start()
+os._exit(0)
+"""
+
+
+def test_r6_stdio_runner_waits_for_a_slow_reply_before_closing_stdin() -> None:
+    """R6 (D25): the real Playwright server got stdin's EOF with the request
+    and exited (~0.4 s) before its browser answered — every call came back
+    "no JSON-RPC response". The runner introduces itself (clientInfo, which
+    the spec requires) and holds stdin open until request 2 is answered."""
+    import sys
+
+    config = MCPServerConfig(
+        server_id="slow", transport="stdio", command=(sys.executable, "-c", _SLOW_STDIO_SERVER)
+    )
+    call = MCPClient(config, runner=runner_for_config(config)).call_tool("browser_snapshot", {})
+    assert call.ok, call.error
+    assert call.content == [{"type": "text", "text": "page"}]
+
+
+def test_r6_stdio_runner_gives_up_at_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setattr("skep.supervisor.mcp_client.MCP_CALL_DEADLINE_SECONDS", 0.2)
+    config = MCPServerConfig(
+        server_id="mute",
+        transport="stdio",
+        command=(sys.executable, "-c", "import sys, time\nfor _ in sys.stdin: time.sleep(5)"),
+    )
+    call = MCPClient(config, runner=runner_for_config(config)).call_tool("anything", {})
+    assert not call.ok
+    assert "deadline" in str(call.error)
+
+
+def test_r6_stdio_runner_reports_a_server_that_exits_without_answering() -> None:
+    import sys
+
+    config = MCPServerConfig(
+        server_id="gone",
+        transport="stdio",
+        command=(sys.executable, "-c", "print('starting up'); print('{\"id\": 1}')"),
+    )
+    call = MCPClient(config, runner=runner_for_config(config)).call_tool("anything", {})
+    assert not call.ok
+    assert call.error == "no JSON-RPC response for the tool request"

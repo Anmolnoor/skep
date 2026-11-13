@@ -64,6 +64,11 @@ def test_forged_tool_call_is_wrapped_in_the_sandbox_with_a_scrubbed_env(
     assert "SKEP_FAKE_SECRET" not in seen["env"]
 
     # A plain (operator-registered) server is not wrapped — B115 is forged tools.
+    def fake_exchange(argv: list[str], payload: str) -> list[str]:
+        seen["argv"] = argv
+        return ['{"jsonrpc": "2.0", "id": 2, "result": {}}']
+
+    monkeypatch.setattr("skep.supervisor.mcp_client._stdio_exchange", fake_exchange)
     plain = MCPServerConfig("plain", "stdio", command=(sys.executable, "x.py"))
     runner_for_config(plain)("tools/call", {"name": "t"})
     assert seen["argv"][0] == sys.executable

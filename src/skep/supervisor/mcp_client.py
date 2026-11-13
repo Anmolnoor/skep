@@ -407,7 +407,6 @@ def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None)
     session pool is the upgrade path if call volume matters.
     """
     import json
-    import subprocess
 
     if config.transport == "http":
         # MCP Streamable HTTP (2025-03-26): JSON-RPC POSTs to one endpoint;
@@ -515,22 +514,20 @@ def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None)
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
-                "params": {"protocolVersion": "2024-11-05", "capabilities": {}},
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "skep", "version": "1"},  # the spec requires it
+                },
             },
             {"jsonrpc": "2.0", "id": 2, "method": method, "params": dict(params)},
         ]
         payload = "".join(json.dumps(r) + "\n" for r in requests)
         if not config.server_id.startswith(FORGED_SERVER_PREFIX):
-            proc = subprocess.run(
-                list(config.command),
-                input=payload,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            lines = _stdio_exchange(list(config.command), payload)
         else:
-            proc = _run_forged_sandboxed(config, payload, skep_home)
-        for line in proc.stdout.splitlines():
+            lines = _run_forged_sandboxed(config, payload, skep_home).stdout.splitlines()
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -543,6 +540,65 @@ def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None)
         raise MCPError("no JSON-RPC response for the tool request")
 
     return run
+
+
+def _stdio_exchange(argv: list[str], payload: str) -> list[str]:
+    """ES-F162 (R6): send ``payload`` and keep stdin open until the server
+    answers request 2, or the deadline passes. A server that stops when its
+    stdin closes (Playwright's does, ~0.4 s) never answered a call that takes
+    longer than that: stdin used to close with the request. Returns the
+    stdout lines read; stops the server either way."""
+    import json
+    import queue
+    import subprocess
+    import threading
+    import time
+
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+    stdout = proc.stdout
+    read: queue.Queue[str | None] = queue.Queue()
+
+    def pump() -> None:
+        for line in stdout:
+            read.put(line)
+        read.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
+    lines: list[str] = []
+    deadline = time.monotonic() + MCP_CALL_DEADLINE_SECONDS
+    try:
+        proc.stdin.write(payload)
+        proc.stdin.flush()
+        while True:
+            try:
+                line = read.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                proc.kill()  # a server that went quiet gets no grace period
+                raise MCPError(
+                    f"stdio MCP call passed its {MCP_CALL_DEADLINE_SECONDS:g}s deadline"
+                ) from None
+            if line is None:
+                return lines
+            lines.append(line)
+            try:
+                if json.loads(line).get("id") == 2:
+                    return lines
+            except ValueError:
+                continue
+    finally:
+        try:
+            proc.stdin.close()
+            proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            proc.kill()
+            proc.wait()
 
 
 # ES (B115): promote_tool registers every activated forged/seed tool as
