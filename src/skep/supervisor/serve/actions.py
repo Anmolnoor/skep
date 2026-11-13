@@ -3796,9 +3796,10 @@ def allow_network_host_and_resume(
             status_code=409,
             detail="this approval carries no hostname to remember; approve it once instead",
         )
-    if host == "*" or "/" in host or ":" in host:
+    if "*" in host or "/" in host or ":" in host:
         # The wildcard is the trust ramp, not a host — it is never remembered
-        # from an approval; a URL or host:port is not a bare hostname either.
+        # from an approval, nor is a '*.' pattern (the host rides the worker's
+        # own event); a URL or host:port is not a bare hostname either.
         raise HTTPException(
             status_code=409,
             detail=f"{host!r} is not a rememberable bare hostname; approve it once instead",
@@ -4009,7 +4010,7 @@ def remember_ledger_entry(
         where = persist_remembered_command(store, holder, repo_path, argv)
     elif action in ("network.fetch", "network.read"):
         host = resource.strip()
-        if not host or host == "*" or "/" in host or ":" in host:
+        if not host or "*" in host or "/" in host or ":" in host:
             raise HTTPException(
                 status_code=409, detail=f"{host!r} is not a rememberable bare hostname"
             )

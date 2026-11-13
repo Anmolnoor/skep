@@ -270,3 +270,30 @@ def test_every_allow_host_receipt_says_where_the_grant_holds(
         assert ledger["holds"] == where
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("host", ["*.example.com", "*.com", "docs.*"])
+def test_a_wildcard_host_is_never_remembered(
+    repo: Path, config: SupervisorConfig, host: str
+) -> None:
+    """The host rides the worker's own approval event. Only a bare '*' was
+    refused, so "Allow host & remember" on '*.com' stored a project grant
+    the proxy reads as every .com host, for every later run of the project."""
+    from .conftest import serve_client
+
+    client = serve_client(config)
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        _task, review = _pending_network_run(store, repo, host=host)
+        response = client.post(f"/api/approvals/{review}/allow-host", json={})
+        assert response.status_code == 409, response.text
+        assert "not a rememberable bare hostname" in response.json()["detail"]
+        with pytest.raises(HTTPException) as ledger:
+            actions.remember_ledger_entry(
+                store, holder, action="network.fetch", resource=host, repo=str(repo)
+            )
+        assert ledger.value.status_code == 409
+        assert _network_grants(store) == []
+    finally:
+        store.close()
