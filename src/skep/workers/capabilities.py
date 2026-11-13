@@ -23,7 +23,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 from skep.supervisor.netproxy import domain_allowed, is_loopback_host
-from skep.supervisor.secret_floor import is_dotenv, secret_floor_reason
+from skep.supervisor.secret_floor import (
+    is_dotenv,
+    secret_floor_reason,
+    shell_secret_floor_reason,
+)
 from skep.supervisor.spawner import build_worker_env
 from skep.worker_contract import BOOKKEEPING_DIRS, PATCH_EXCLUDE_PATHSPECS, EventType
 from skep.workers.html_text import html_to_text
@@ -812,6 +816,15 @@ class CapabilityRegistry:
     ) -> CapabilityDecision:
         from .runtime_plugins import INSTRUCTION_GUARD_PLUGIN, SHELL_EXEC_PLUGIN
 
+        # W8: the floor binds the worker's shell as it binds the Queen's (the
+        # line resolved from the workspace); _shell_run emits the blocked pair.
+        secret = shell_secret_floor_reason(command, cwd=str(self._workspace))
+        if secret is not None:
+            return CapabilityDecision(
+                verdict="deny",
+                reason="capability.deny.secret_floor",
+                detail=f"secret floor: {secret}",
+            )
         guard = _runtime_decision_to_capability(
             INSTRUCTION_GUARD_PLUGIN.shell_decision(
                 instructions=self._instructions,

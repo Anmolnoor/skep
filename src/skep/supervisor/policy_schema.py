@@ -34,7 +34,12 @@ from pydantic import BaseModel, Field, model_validator
 
 from .netproxy import domain_allowed
 from .secret_floor import path_spellings
-from .shell_prefixes import dangerous_prefix_reason, sh_command_list
+from .shell_prefixes import (
+    command_line_segments,
+    dangerous_prefix_reason,
+    program_name,
+    sh_command_list,
+)
 
 if TYPE_CHECKING:
     from .policy_engine import Layer
@@ -383,12 +388,77 @@ def _resolved_rule(pattern: str) -> str:
 def rule_matches(rule: ResolvedRule, scope: str, value: str, *, url: str | None = None) -> bool:
     """Does ``rule`` cover the request? A ``url_prefix`` grant needs the URL
     itself (B74): a host-only value — a redirect hop, a REST probe — never
-    matches it."""
+    matches it. A shell deny or named ask also binds its program by path or
+    launcher (W5)."""
     if rule.matcher == "url_prefix":
         return url is not None and url_prefix_matches(rule.pattern, url)
-    return pattern_matches(
+    # W32 (filesystem): an allow judges the resolved path only, a deny or ask
+    # either spelling. W5 (shell): a deny or named ask also reads the launch.
+    if pattern_matches(
         scope, rule.pattern, value, exact=rule.exact, grants=rule.verdict == "allow"
+    ):
+        return True
+    return (
+        scope == "shell"
+        and _binding(rule.verdict, rule.pattern)
+        and shell_deny_binds(rule.pattern, value)
     )
+
+
+def _binding(verdict: str, pattern: str) -> bool:
+    """A deny, or a named (non-``*``) ask: the rules that bind across layers
+    (D2), so a spelling or an action an allow can answer must not walk past
+    them (ES-F49 review: an exact grant on ``/usr/bin/curl x`` answered a
+    named ``curl`` ask)."""
+    return verdict == "deny" or (verdict == "require_approval" and pattern != "*")
+
+
+def shell_deny_binds(pattern: str, value: str) -> bool:
+    """W5 (PR #73): a deny on ``curl`` binds ``/usr/bin/curl x``, ``env curl
+    x`` and ``timeout 5 curl x`` — every argv the floor reads in the line
+    (``command_line_segments``: launchers, ``env``, assignments, wrappers),
+    its program compared as the floor compares it (``program_name``). A word
+    a known launcher's command takes as an argument is not a program
+    (``exact``): ``timeout 60 grep curl x`` runs grep."""
+    want = _shell_tokens(pattern)
+    if not want:
+        return False
+    want = [program_name(want[0]), *want[1:]]
+    for argv in command_line_segments(value, exact=True) or [_shell_tokens(value)]:
+        if argv and [program_name(argv[0]), *argv[1 : len(want)]] == want:
+            return True
+    return False
+
+
+# W5: a deny (or named ask) on ``run`` binds the same program in the
+# background or in a repo; one on either of those does not bind a foreground
+# ``run``.
+_RUN_BINDS = frozenset({"run_background", "run_repo"})
+
+
+def action_binds(
+    scope: str, verdict: str, rule_action: str, action: str, pattern: str = ""
+) -> bool:
+    """Does a rule on ``rule_action`` speak to a request for ``action``?"""
+    if rule_action == action:
+        return True
+    return (
+        (scope, rule_action) == ("shell", "run")
+        and action in _RUN_BINDS
+        and _binding(verdict, pattern)
+    )
+
+
+def deny_reaches(
+    scope: str, deny_action: str, deny_pattern: str, action: str, pattern: str
+) -> bool:
+    """Write-time (§5.4 check 6) and resolution: would a deny bind an allow
+    on ``action``/``pattern``? Agrees with ``rule_matches`` and ``action_binds``."""
+    if not action_binds(scope, "deny", deny_action, action):
+        return False
+    if patterns_intersect(scope, pattern, deny_pattern):
+        return True
+    return scope == "shell" and shell_deny_binds(deny_pattern, pattern)
 
 
 def _url_parts(url: str) -> tuple[str, str, str, str] | None:
@@ -586,7 +656,8 @@ def decide(
     matches = [
         rule
         for rule in (scope_policy.rules if scope_policy else ())
-        if rule.action == action and rule_matches(rule, scope, value)
+        if action_binds(scope, rule.verdict, rule.action, action, rule.pattern)
+        and rule_matches(rule, scope, value)
     ]
     if not matches:
         return PolicyDecision(

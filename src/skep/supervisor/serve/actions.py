@@ -111,9 +111,13 @@ from ..roles import (
     role_decision,
 )
 from ..shell_prefixes import (
+    NETWORK_PROGRAMS,
+    PACKAGE_MANAGERS,
     dangerous_prefix_reason,
+    is_package_install,
     is_remote_git_command,
     normalize_remembered_command,
+    reaches_network,
     worker_allowlist_reason,
 )
 from ..store import ChatTaint, RunStore
@@ -4078,22 +4082,13 @@ OPERATOR_POLICY_SCOPES = ("filesystem", "network", "shell")
 # run_shell keep already refuses (remote git, outbound posts, privilege,
 # catastrophic and ops-mutating lines, `sh -c`): a program that runs other
 # code or reaches the network, and a package install.
-_NO_STANDING_SHELL = frozenset(
+_NO_STANDING_SHELL = NETWORK_PROGRAMS | frozenset(
     {"bash", "sh", "zsh", "fish", "dash", "ksh", "python", "python3", "node", "deno", "bun",
      "perl", "ruby", "php", "lua", "osascript", "pwsh", "npx", "bunx", "pnpx", "env", "xargs",
-     "eval", "exec", "source", "curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp",
-     "sftp", "ftp", "telnet", "rsync", ".", "busybox", "toybox", "su", "sudo", "doas",
-     "pkexec", "gh", "glab", "docker", "podman", "kubectl", "helm", "aws", "gcloud", "az",
-     "terraform", "ansible", "ansible-playbook", "open", "xdg-open", "uvx", "pipx"}
+     "eval", "exec", "source", ".", "busybox", "toybox", "su", "sudo", "doas", "pkexec", "gh",
+     "glab", "docker", "podman", "kubectl", "helm", "aws", "gcloud", "az", "terraform",
+     "ansible", "ansible-playbook", "open", "xdg-open", "uvx", "pipx"}
 )  # fmt: skip
-_PACKAGE_MANAGERS = frozenset(
-    {"pip", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
-     "gem", "go", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk"}
-)  # fmt: skip
-# installs, and the verbs that fetch a package and run it (`pnpm dlx`, `npm exec`)
-_INSTALL_VERBS = frozenset(
-    {"install", "i", "add", "sync", "update", "upgrade", "get", "ci", "dlx", "exec", "x", "tool"}
-)
 
 
 def set_operator_policy_rule(
@@ -4204,8 +4199,9 @@ def queen_shell_allow_refusal(pattern: str, action: str) -> str | list[tuple[str
                 f"{program}: a program that runs other code or reaches the network "
                 "is never a standing allow"
             )
+        # pip3.12 is pip; a bare `yarn` installs too
         verbs = [token for token in argv[1:4] if not token.startswith("-")]
-        if base in _PACKAGE_MANAGERS and (not verbs or _INSTALL_VERBS & set(verbs)):
+        if is_package_install([base, *argv[1:]]) or (base in PACKAGE_MANAGERS and not verbs):
             return f"{line!r}: a package install is never a standing allow"
         if base == "find" and {"-exec", "-execdir", "-ok", "-okdir", "-delete"} & set(argv):
             return f"{line!r}: find that runs or deletes is never a standing allow"
@@ -5443,7 +5439,9 @@ def _grant_subjects(tool: str, args: dict[str, Any]) -> list[tuple[str, str, str
     return list(dict.fromkeys(subjects))
 
 
-def _taint_keep_refusal(tool: str, keep: str, taint: ChatTaint | None) -> str | None:
+def _taint_keep_refusal(
+    tool: str, keep: str, taint: ChatTaint | None, command: str = ""
+) -> str | None:
     """P4-1 (ADR 0059 D5): the keeps a tainted chat may not store. Both bits:
     once only (a HIGH card). Any bit: never a standing fetch grant (egress).
     A session keep the chat's own taint would ask past anyway is refused,
@@ -5463,6 +5461,15 @@ def _taint_keep_refusal(tool: str, keep: str, taint: ChatTaint | None) -> str | 
             if keep == "always"
             else "this chat has read private data, so every fetch from it asks: a session "
             "keep would change nothing"
+        )
+    shell = tool in ("run_shell", "start_process")
+    if keep == "session" and shell and taint.private is not None and reaches_network(command):
+        # ES-F51 review: a private chat's shell line that reaches the network
+        # asks every time (taint/private-egress), so a session keep is noise.
+        return (
+            "this chat has read private data, so every command from it that reaches "
+            "the network asks: a session keep would change nothing ('always' holds in "
+            "your other chats)"
         )
     if keep == "session" and not egress and taint.untrusted is not None:
         return (
@@ -5498,7 +5505,7 @@ def keep_refusal(
     found = _grant_subjects(tool, args)
     if isinstance(found, str):
         return _HIGH_KEEP if high else found
-    refused = _taint_keep_refusal(tool, keep, taint)
+    refused = _taint_keep_refusal(tool, keep, taint, str(args.get("command") or ""))
     if refused is not None:
         return refused
     if high:

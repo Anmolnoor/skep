@@ -110,6 +110,16 @@ _MCP_WRITE_KEYWORDS = (
     "put",
 )
 _MCP_READ_VERBS = ("get", "list", "read", "search", "describe", "show", "find")
+# W10: a verb that changes or sends something. Anywhere in a name it makes the
+# tool not-read whatever the server's hint says (`get_and_transfer`). Nouns
+# that double as verbs (`run`, `order`, `email`) are left out: `get_run` reads.
+_MCP_MUTATION_VERBS = frozenset(
+    (*_MCP_WRITE_KEYWORDS, "send", "post", "notify", "publish", "deploy", "exec", "execute",
+     "transfer", "pay", "purge", "submit", "insert", "upload", "move", "rename", "drop",
+     "revoke", "grant", "reset", "kill", "cancel", "approve", "archive", "destroy", "wipe",
+     "merge", "push", "invite", "share", "reply", "forward", "refund", "withdraw", "click",
+     "fill", "press", "navigate", "eval", "evaluate")
+)  # fmt: skip
 
 
 def _name_tokens(name: str) -> list[str]:
@@ -127,22 +137,36 @@ def _name_tokens(name: str) -> list[str]:
 _BROWSE_READ_KEYWORDS = ("snapshot", "screenshot", "console", "network_request", "wait_for")
 
 
-def classify_browse_action(tool_name: str) -> str:
-    """``read`` for page-state reads, ``act`` for everything else."""
-    name = tool_name.lower()
-    return "read" if any(keyword in name for keyword in _BROWSE_READ_KEYWORDS) else "act"
+def _browse_read_name(name: str) -> bool:
+    lowered = name.lower()
+    return any(keyword in lowered for keyword in _BROWSE_READ_KEYWORDS) and (
+        _MCP_MUTATION_VERBS.isdisjoint(_name_tokens(name))
+    )
+
+
+def classify_browse_action(tool: MCPTool) -> str:
+    """``read`` for a page-state read, ``act`` for everything else. W9: a read
+    needs both the server's ``readOnlyHint`` and a page-state name with no
+    mutation verb in it (``browser_snapshot_and_submit`` acts)."""
+    return "read" if tool.read_only is True and _browse_read_name(tool.name) else "act"
 
 
 def classify_mcp_risk(tool: MCPTool) -> str:
     """Classify an MCP tool into a capability risk class.
 
     ``read`` only for a server-marked read-only tool whose leading verb is a
-    read verb (B09). Otherwise external_side_effect > network > write >
-    unknown by whole name token. Every non-read class requires approval
+    read verb (B09) and whose name has no mutation verb anywhere (W10).
+    Otherwise external_side_effect > network > write > unknown by whole name
+    token. Every non-read class requires approval
     (fail closed); a project may grant a risk explicitly — a visible act.
     """
     tokens = _name_tokens(tool.name)
-    if tool.read_only is True and tokens and tokens[0] in _MCP_READ_VERBS:
+    if (
+        tool.read_only is True
+        and tokens
+        and tokens[0] in _MCP_READ_VERBS
+        and _MCP_MUTATION_VERBS.isdisjoint(tokens)
+    ):
         return "read"
     for risk, keywords in (
         ("external_side_effect", _MCP_EXTERNAL_KEYWORDS),
@@ -551,8 +575,9 @@ def _run_forged_sandboxed(
 
 def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:
     """B09: a bare tool name from a call carries no ``readOnlyHint``; ask the
-    server's own tools/list. Only a read-verb name can become a read, so only
-    those pay the lookup; any failure leaves the tool not-read-only (asks).
+    server's own tools/list. Only a read-shaped name can become a read (a read
+    verb; on a browse server a page-state name, W9), so only those pay the
+    lookup; any failure leaves the tool not-read-only (asks).
 
     ponytail: one live tools/list per read-verb decision — cache per server
     if MCP call volume makes the extra round trip matter.
@@ -562,8 +587,13 @@ def with_server_hints(store: RunStore, tool: MCPTool) -> MCPTool:
     tokens = _name_tokens(tool.name)
     read_only = False
     config = load_mcp_servers(store).get(tool.server_id)
-    # A browse server classifies by its own page-state list (v71-F2).
-    if config is not None and config.scope != "browse" and tokens and tokens[0] in _MCP_READ_VERBS:
+    if config is None:
+        readish = False
+    elif config.scope == "browse":
+        readish = _browse_read_name(tool.name)
+    else:
+        readish = bool(tokens) and tokens[0] in _MCP_READ_VERBS
+    if config is not None and readish:
         try:
             listed = MCPClient(
                 config, runner=runner_for_config(config, skep_home=store.db_path.parent.parent)
@@ -588,7 +618,7 @@ def mcp_tool_scope_action(store: RunStore, tool: MCPTool) -> tuple[Scope, str]:
         tool = with_server_hints(store, tool)
         return "email", ("read" if classify_mcp_risk(tool) == "read" else "send")
     if scope == "browse":
-        return "browse", classify_browse_action(tool.name)
+        return "browse", classify_browse_action(with_server_hints(store, tool))
     return "mcp", "call"
 
 

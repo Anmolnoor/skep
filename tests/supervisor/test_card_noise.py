@@ -139,7 +139,12 @@ def _transcript(env: Live) -> dict[str, Any]:
     (card,) = s.ask(c, "check example.com headers", curl, reply=False)
     env.ollama.script_reply("200")
     s.confirm(c, card, keep="always")
-    assert not s.ask(c, "again", curl, reply=True)
+    # W7: the first dig's output made this chat private, so the same granted
+    # network line asks once more (taint/private-egress), over the grant.
+    (repeat,) = s.ask(c, "again", curl, reply=False)
+    assert repeat["card"]["taint"], repeat
+    env.ollama.script_reply("200")
+    s.confirm(c, repeat)
 
     # t09/t10: a builder chat, keep=session, the same command again (B56)
     c = s.chat("builder")
@@ -349,13 +354,14 @@ def test_f1_transcript_card_noise(live: Callable[[str], Live], ticking_clock: No
     counts = card_noise(env, script["keeps"])
 
     # Pinned: what this branch reaches on F1's script (ADR targets in the module doc).
-    assert counts["total"] == 17, counts  # target <= 12: missed (see the round report)
+    # 18: W7's t08 repeat now asks in its private chat (17 before).
+    assert counts["total"] == 18, counts  # target <= 12: missed (see the round report)
     # Noise 0 (target met): set_operator_policy scope=shell, the last noise
     # card, now stores df -h as an exact-argv grant on confirm (B20, P3-6).
     assert counts["refused"] == [], counts
     assert counts["covered"] == [] and counts["empty_keeps"] == 0, counts
     assert counts["noise"] == 0, counts
-    assert counts["ran_free_on_a_grant"] >= 4, counts  # t08/t09/t18/t19 repeats
+    assert counts["ran_free_on_a_grant"] >= 3, counts  # t09/t18/t19 repeats (t08: W7)
 
     shown = script["shown"]
     # F1's three dangerous actions:

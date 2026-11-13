@@ -3327,7 +3327,7 @@ def execute_read_tool(
                     # v71-F2: a browse-bound tool's honest label is its browse
                     # action — the generic ladder would misread browser_* names.
                     "risk": (
-                        classify_browse_action(tool.name)
+                        classify_browse_action(tool)
                         if config.scope == "browse"
                         else classify_mcp_risk(tool)
                     ),

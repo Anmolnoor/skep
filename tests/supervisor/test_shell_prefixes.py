@@ -678,3 +678,22 @@ def test_exec_through_forms_that_run_nothing_denied_stay_open(command: str) -> N
 
     assert queen_command_line_refusal(command) is None, command
     assert hard_denied_segment_reason(shlex.split(command)) is None, command
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["{ git push; }", "! git push", "if git push; then :; fi",
+     "for b in a; do git push; done", "function f { git push; }; f"],
+)  # fmt: skip
+def test_es_f49_review_reserved_words_do_not_hide_a_command_from_the_floor(line: str) -> None:
+    """`{`, `!`, `if`, `do`, `function NAME` open a compound command: sh runs
+    the word after them. The floor read `{` as the program, so `{ git push; }`
+    passed the Queen's refusal and a grant's vetting."""
+    from skep.supervisor.shell_prefixes import (
+        hard_denied_segment_reason,
+        queen_command_line_refusal,
+    )
+
+    assert queen_command_line_refusal(line) is not None
+    for argv in (["{", "git", "push"], ["!", "git", "push"], ["then", "git", "push"]):
+        assert hard_denied_segment_reason(argv) is not None, argv

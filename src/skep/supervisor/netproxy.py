@@ -135,15 +135,50 @@ def admit_target(
         return 200, "", [(str(ipaddress.ip_address(host.strip("[]"))), port)]
     except ValueError:
         pass
-    try:
-        infos = resolve(host, port, type=socket.SOCK_STREAM)
-    except OSError:
-        return 502, f"Bad Gateway: {host!r} does not resolve", []
-    addresses = list(dict.fromkeys(str(info[4][0]) for info in infos))
-    local = [a for a in addresses if not ipaddress.ip_address(a.split("%")[0]).is_global]
-    if local or not addresses:
-        return 403, f"Forbidden: {host!r} resolves to a non-public address {local}", []
+    addresses, why = resolve_public(host, port, resolve)
+    if not addresses:
+        status, label = (502, "Bad Gateway") if why == UNRESOLVED else (403, "Forbidden")
+        return status, f"{label}: {host!r} {why}", []
     return 200, "", [(a, port) for a in addresses]
+
+
+UNRESOLVED = "does not resolve"
+
+
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def is_public_address(address: str) -> bool:
+    """A global unicast address — not loopback, private, link-local, CGNAT,
+    unique-local, site-local, multicast, unspecified (``0.0.0.0``), nor an
+    IPv6 form that carries one of those in its low 32 bits (IPv4-mapped,
+    IPv4-compatible ``::7f00:1``, NAT64 ``64:ff9b::7f00:1``)."""
+    ip = ipaddress.ip_address(address.split("%")[0])
+    if not ip.is_global or ip.is_multicast or getattr(ip, "is_site_local", False):
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and (
+        ip.ipv4_mapped or ip in _NAT64 or int(ip) >> 32 == 0
+    ):
+        return is_public_address(str(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)))
+    return True
+
+
+def resolve_public(
+    host: str, port: int, resolve: Resolver = socket.getaddrinfo
+) -> tuple[list[str], str]:
+    """ES-F6 (B54), W6: ``host`` resolved ONCE — (its addresses, "") when every
+    answer is public, else ([], why). Dial what this returns, never the name
+    again, so DNS cannot rebind between the check and the connect. An IP
+    literal resolves to itself (decimal, octal and hex spellings included)."""
+    try:
+        infos = resolve(host.strip("[]"), port, type=socket.SOCK_STREAM)
+    except OSError:
+        return [], UNRESOLVED
+    addresses = list(dict.fromkeys(str(info[4][0]) for info in infos))
+    local = [a for a in addresses if not is_public_address(a)]
+    if local or not addresses:
+        return [], f"resolves to a non-public address {local}"
+    return addresses, ""
 
 
 def _dial(addresses: list[tuple[str, int]]) -> socket.socket:

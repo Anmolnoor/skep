@@ -46,8 +46,8 @@ from .policy_schema import (
     ResolvedScopePolicy,
     Verdict,
     applies,
+    deny_reaches,
     matcher_of,
-    patterns_intersect,
     shell_tokens,
 )
 from .shell_prefixes import dangerous_prefix_reason
@@ -281,9 +281,9 @@ def _floor_reason(rule: LayerRule) -> str | None:
 
 def _deny_reason(rule: LayerRule, existing: Sequence[SourcedRule]) -> str | None:
     for entry in existing:
-        if entry.rule.verdict != "deny" or entry.rule.action != rule.action:
-            continue
-        if patterns_intersect(rule.scope, rule.pattern, entry.rule.pattern):
+        if entry.rule.verdict == "deny" and deny_reaches(
+            rule.scope, entry.rule.action, entry.rule.pattern, rule.action, rule.pattern
+        ):
             return entry.rule.rule_id
     return None
 

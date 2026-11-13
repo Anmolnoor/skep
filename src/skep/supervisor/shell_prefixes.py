@@ -138,6 +138,26 @@ def launched_command(argv: Sequence[str]) -> list[str]:
     return launched_command(tokens[index + positionals :])
 
 
+def _launch_index(tokens: Sequence[str]) -> int | None:
+    """Where a launcher argv's command starts, when every option before it is
+    one ``_LAUNCHERS`` knows takes an operand (or ``--x=y``, or ``--``); None
+    when an unknown option might take the next word as its operand."""
+    operand_flags, positionals = _LAUNCHERS[program_name(tokens[0])]
+    index = 1
+    while index < len(tokens) and tokens[index].startswith("-"):
+        if tokens[index] == "--":
+            index += 1
+            break
+        if tokens[index] in operand_flags:
+            index += 2
+        elif tokens[index].startswith("--") and "=" in tokens[index]:
+            index += 1
+        else:
+            return None
+    index += positionals
+    return index if index < len(tokens) and not tokens[index].startswith("-") else None
+
+
 _BROAD_INTERPRETERS: frozenset[str] = frozenset({"bash", "sh", "zsh", "fish", "python", "python3"})
 
 # v84-F4 (ADR 0044): outbound-content prefixes are never-grantable — the git
@@ -151,6 +171,78 @@ OUTBOUND_CONTENT_PREFIXES: tuple[tuple[str, ...], ...] = (
     ("himalaya", "message", "send"),
     ("himalaya", "template", "send"),
 )
+
+# W7: programs whose job is reaching another host. One list: the trifecta
+# guard's shell-egress row (``reaches_network``) and P3-6's refusal of a
+# standing Queen shell allow (serve/actions.py) both read it.
+# ES-F51 review: plus the programs whose only job is sending (mail, file
+# sync, raw sockets). Left out on purpose — each also does local work: gh,
+# docker, kubectl, aws, gcloud, az, openssl, open/xdg-open (P3-6's standing
+# allow refuses them by its own list). Remote git is the floor's (I4).
+# ponytail: named programs only; a script an interpreter runs (`python3 x.py`)
+# can reach the network too and is not seen — inline code is (``reaches_network``).
+NETWORK_PROGRAMS: frozenset[str] = frozenset(
+    {"curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp", "ftp", "tftp",
+     "telnet", "rsync", "dig", "nslookup", "host", "drill", "ping", "ping6", "traceroute",
+     "whois", "aria2c", "lftp", "http", "https", "xh", "mail", "mailx", "sendmail", "mutt",
+     "msmtp", "nmap", "rclone", "s3cmd", "smbclient", "websocat", "grpcurl", "mosquitto_pub"}
+)  # fmt: skip
+# Interpreters and the flag that hands them inline code (`python3 -c '…'`).
+_INLINE_CODE_FLAGS: dict[str, frozenset[str]] = {
+    "python": frozenset({"-c"}), "python3": frozenset({"-c"}), "node": frozenset({"-e", "-p"}),
+    "perl": frozenset({"-e", "-E"}), "ruby": frozenset({"-e"}), "php": frozenset({"-r"}),
+    "deno": frozenset({"eval"}), "bun": frozenset({"-e", "--eval"}),
+}  # fmt: skip
+PACKAGE_MANAGERS: frozenset[str] = frozenset(
+    {"pip", "pip3", "pipx", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
+     "gem", "go", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk"}
+)  # fmt: skip
+# installs, and the verbs that fetch a package and run it (`pnpm dlx`, `npm exec`)
+INSTALL_VERBS: frozenset[str] = frozenset(
+    {"install", "i", "add", "sync", "update", "upgrade", "get", "ci", "dlx", "exec", "x", "tool"}
+)
+
+
+def is_package_install(argv: Sequence[str]) -> bool:
+    """``pip install x``, ``uv pip install x``, ``npm i x``: a package fetch."""
+    verbs = {token for token in argv[1:4] if not token.startswith("-")}
+    return bool(argv) and program_name(argv[0]) in PACKAGE_MANAGERS and bool(INSTALL_VERBS & verbs)
+
+
+def _inline_code(argv: Sequence[str]) -> bool:
+    """Inline code, its flag alone or in a short cluster (``perl -pe``)."""
+    flags = _INLINE_CODE_FLAGS.get(program_name(argv[0]), frozenset())
+    letters = {flag[1] for flag in flags if len(flag) == 2 and flag[0] == "-"}
+    for token in argv[1:]:
+        if token in flags:
+            return True
+        if token[:1] != "-":
+            return False  # a script path: what follows is the script's
+        if token[1:2] != "-" and letters & set(token[1:]):
+            return True
+    return False
+
+
+def reaches_network(command: str) -> bool:
+    """W7: does the line run a network program, a package install or inline
+    interpreter code (``python3 -c``, ``node -e``: code this cannot read) in
+    any argv the floor reads (launchers, ``env``, ``sh -c``), or write to
+    bash's ``/dev/tcp`` / ``/dev/udp``? A line that cannot be read counts."""
+    if "/dev/tcp/" in command or "/dev/udp/" in command:
+        return True
+    segments = command_line_segments(command)
+    if segments is None:
+        return True
+    return any(
+        argv
+        and (
+            program_name(argv[0]) in NETWORK_PROGRAMS
+            or is_package_install(argv)
+            or _inline_code(argv)
+        )
+        for argv in segments
+    )
+
 
 # v87-F6: the environment-bootstrap pack — the standing grants a worker needs
 # to create a Python env, offered as ONE card. Bare `pip` is deliberately
@@ -552,6 +644,12 @@ def catastrophic_command_line_reason(command: str) -> str | None:
 _SEGMENT_OPERATOR_CHARS = frozenset("|&;()<>")
 _WRAPPER_SHELLS = frozenset({"bash", "sh", "zsh", "fish"})
 _MAX_UNWRAP_DEPTH = 4
+# Reserved words that open or continue a compound command: sh runs the word
+# after them (`{ git push; }`, `! git push`, `if git push; then …`,
+# `function f { git push; }; f`), so the floor reads past them.
+_RESERVED_WORDS = frozenset(
+    {"{", "}", "!", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "coproc"}
+)
 
 
 def _strip_env_prefix(tokens: list[str]) -> list[str]:
@@ -596,7 +694,9 @@ def _git_exec_lines(core: Sequence[str]) -> list[str]:
     return []
 
 
-def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None:
+def _unwrap_argv(
+    argv: Sequence[str], _depth: int = 0, *, exact: bool = False
+) -> list[list[str]] | None:
     """The argvs one exec-style argv would run: itself, plus the decomposed
     payload of a ``bash -c``-style wrapper (whose operand is a whole shell
     line), every suffix behind a launcher, ``find -exec``'s command and the
@@ -608,11 +708,13 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
     ``GIT_EXTERNAL_DIFF=``) are code, not shell lines: this cannot read them.
     The sandbox is the wall there; the floor is a sign on it."""
     tokens = [str(token) for token in argv]
+    while tokens and (tokens[0] in _RESERVED_WORDS or tokens[0] == "function"):
+        tokens = tokens[2:] if tokens[0] == "function" else tokens[1:]
     if tokens and _ASSIGNMENT_RE.match(tokens[0]):
         # `A=1 git push` runs git: judge what follows the assignments too,
         # keeping the segment itself for callers that read its tokens.
         index = next((i for i, t in enumerate(tokens) if not _ASSIGNMENT_RE.match(t)), len(tokens))
-        nested = _unwrap_argv(tokens[index:], _depth)
+        nested = _unwrap_argv(tokens[index:], _depth, exact=exact)
         return None if nested is None else [tokens, *nested]
     try:
         tokens = _strip_env_prefix(tokens)
@@ -630,14 +732,17 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
         # launcher option this module does not know cannot hide one.
         if _depth >= _MAX_UNWRAP_DEPTH:
             return None
-        for index in range(1, len(tokens)):
+        start = _launch_index(tokens) if exact and program not in _SHELL_LAUNCHERS else None
+        for index in range(1, len(tokens)) if start is None else (start,):
             if not tokens[index].startswith("-"):
-                nested = _unwrap_argv(tokens[index:], _depth + 1)
+                nested = _unwrap_argv(tokens[index:], _depth + 1, exact=exact)
                 if nested is None:
                     return None
                 result.extend(nested)
                 if program in _SHELL_LAUNCHERS:
-                    nested = command_line_segments(" ".join(tokens[index:]), _depth + 1)
+                    nested = command_line_segments(
+                        " ".join(tokens[index:]), _depth + 1, exact=exact
+                    )
                     if nested is None:
                         return None
                     result.extend(nested)
@@ -651,12 +756,12 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
     if core[:3] == ["git", "bisect", "run"]:
         exec_argvs.append(core[3:])  # judged as an argv too, not only space-joined
     for exec_argv in exec_argvs:
-        nested = _unwrap_argv(exec_argv, _depth + 1)
+        nested = _unwrap_argv(exec_argv, _depth + 1, exact=exact)
         if nested is None:
             return None
         result.extend(nested)
     for line in lines:
-        nested = command_line_segments(line, _depth + 1)
+        nested = command_line_segments(line, _depth + 1, exact=exact)
         if nested is None:
             return None
         result.extend(nested)
@@ -676,7 +781,7 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
                 )
                 break
         if payload is not None:
-            nested = command_line_segments(payload, _depth + 1)
+            nested = command_line_segments(payload, _depth + 1, exact=exact)
             if nested is None:
                 return None
             result.extend(nested)
@@ -717,10 +822,19 @@ def sh_command_list(line: str) -> str:
     return "".join(out)
 
 
-def command_line_segments(command: str, _depth: int = 0) -> list[list[str]] | None:
+def command_line_segments(
+    command: str, _depth: int = 0, *, exact: bool = False
+) -> list[list[str]] | None:
     """Split a raw shell line into the argvs it would execute, or None when it
     cannot be judged (unbalanced quotes, backtick substitution, or wrappers
-    nested past ``_MAX_UNWRAP_DEPTH``)."""
+    nested past ``_MAX_UNWRAP_DEPTH``).
+
+    The floor reads every suffix behind a launcher as a command, so an option
+    it does not know cannot hide one (``nice echo curl`` counts as curl).
+    ``exact=True`` reads only the command a launcher runs when every option
+    before it is one ``_LAUNCHERS`` knows — for a rule that binds a named
+    program (W5), where ``timeout 60 grep curl x`` must not count as curl —
+    and falls back to every suffix otherwise."""
     if _depth >= _MAX_UNWRAP_DEPTH:
         return None
     lexer = shlex.shlex(sh_command_list(command), posix=True, punctuation_chars=True)
@@ -746,7 +860,7 @@ def command_line_segments(command: str, _depth: int = 0) -> list[list[str]] | No
         segments.append(current)
     unwrapped: list[list[str]] = []
     for segment in segments:
-        expanded = _unwrap_argv(segment, _depth)
+        expanded = _unwrap_argv(segment, _depth, exact=exact)
         if expanded is None:
             return None
         unwrapped.extend(expanded)

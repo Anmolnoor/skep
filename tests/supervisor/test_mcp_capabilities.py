@@ -179,3 +179,14 @@ def test_b09_unreachable_server_cannot_vouch_for_a_read(
         assert (decision.verdict, decision.decided_by) == ("require_approval", "default/unmatched")
     finally:
         store.close()
+
+
+def test_w10_a_mutation_verb_anywhere_in_the_name_is_never_a_read() -> None:
+    """W10 (PR #70): `get_and_transfer` was a read — the server set
+    readOnlyHint and the name led with `get`. A mutation verb anywhere in the
+    name makes the tool not-read whatever the hint says (more calls card)."""
+    for name in ("get_and_transfer", "list_then_delete", "read_and_send", "getAndPay",
+                 "search_purge", "show_submit", "find_update", "get_post_and_create"):  # fmt: skip
+        assert classify_mcp_risk(_tool(name, read_only=True)) != "read", name
+    for name in ("get_user", "list_issues", "read_file", "search_docs", "get_settings"):
+        assert classify_mcp_risk(_tool(name, read_only=True)) == "read", name

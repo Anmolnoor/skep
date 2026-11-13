@@ -2128,6 +2128,56 @@ def test_es_f9_a_timed_out_command_takes_its_children_with_it(tmp_path: Path) ->
     assert _pid_gone(int((tmp_path / "gc.pid").read_text()))
 
 
+def test_w8_the_worker_shell_has_the_command_line_secret_floor(tmp_path: Path) -> None:
+    """W8 (PR #65 review, finding 10; B76): with `cat` allowlisted a worker's
+    `cat .env` ran, though `skep policy why` says the floor binds workers. The
+    worker's shell.run now refuses a line naming a secret, leaves the blocked
+    command pair in its events, and still reads its own ordinary files."""
+    events: list[tuple[EventType, dict[str, object]]] = []
+    (tmp_path / ".env").write_text("NAME=value\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
+    registry = CapabilityRegistry(
+        tmp_path, emit=lambda t, p: events.append((t, p)), shell_allowlist=[["cat"]]
+    )
+    for argv in (["cat", ".env"], ["cat", f"{tmp_path}/.env"], ["cat", "README.md", ".env"]):
+        events.clear()
+        assert registry.shell_decision_preview({"argv": argv}).verdict == "deny"
+        with pytest.raises(CapabilityDenied, match="secret floor"):
+            registry.invoke("shell.run", {"argv": argv, "purpose": "modify"})
+        assert [kind for kind, _payload in events] == [
+            EventType.COMMAND_START,
+            EventType.COMMAND_RESULT,
+        ]
+        decision = events[1][1]["decision"]
+        assert isinstance(decision, dict)
+        assert decision["reason"] == "capability.deny.secret_floor"
+    result = registry.invoke("shell.run", {"argv": ["cat", "README.md"], "purpose": "modify"})
+    assert result.status == "allowed" and result.output == "hello\n"
+
+
+def test_es_f52_review_a_dotenv_template_is_not_a_secret_on_the_shell_lane(
+    tmp_path: Path,
+) -> None:
+    """ES-F52 review: the command-line floor read every `.env.*` as a secret,
+    so a worker's `cat .env.example` and `git diff -- .env.sample` failed —
+    ordinary setup work. A committed template (`.example`, `.sample`,
+    `.template`, `.dist`) reads; `.env`, `.env.local` and a template that is
+    a symlink to a secret are still refused."""
+    (tmp_path / ".env").write_text("NAME=value\n", encoding="utf-8")
+    (tmp_path / ".env.local").write_text("NAME=value\n", encoding="utf-8")
+    for name in (".env.example", ".env.sample", ".ENV.TEMPLATE", ".env.dist"):
+        (tmp_path / name).write_text("NAME=\n", encoding="utf-8")
+    (tmp_path / ".env.linked.example").symlink_to(tmp_path / ".env")
+    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: None, shell_allowlist=[["cat"]])
+    for name in (".env.example", ".env.sample", ".ENV.TEMPLATE", ".env.dist"):
+        result = registry.invoke("shell.run", {"argv": ["cat", name], "purpose": "modify"})
+        assert result.status == "allowed" and result.output == "NAME=\n", name
+    for name in (".env", ".env.local", ".env.linked.example"):
+        assert registry.shell_decision_preview({"argv": ["cat", name]}).reason == (
+            "capability.deny.secret_floor"
+        ), name
+
+
 def test_a_successful_commit_drops_only_the_packed_refs_lock_line(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

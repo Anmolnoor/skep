@@ -482,3 +482,17 @@ def test_the_widened_floor_spares_the_neighbours(fake_home: Path) -> None:
         ".claude.json.backup-not",
     ):
         assert secret_floor_reason(fake_home / rel) is None, rel
+
+
+def test_under_is_the_root_or_below_it_never_a_sibling_with_the_same_prefix() -> None:
+    """W43: ``_under`` compares path parts (the ``parents`` walk it replaced
+    cost most of every floor check); a name that only starts like the root
+    is not under it."""
+    from skep.supervisor.secret_floor import _under
+
+    root = Path("/home/u/.ssh")
+    assert _under(root, root)
+    assert _under(root / "keys" / "id_rsa", root)
+    assert not _under(Path("/home/u/.ssh-config-docs/x"), root)
+    assert not _under(Path("/home/u"), root)
+    assert not _under(Path("/home/v/.ssh/id_rsa"), root)
