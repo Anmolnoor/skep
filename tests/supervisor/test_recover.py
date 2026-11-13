@@ -284,3 +284,33 @@ def test_recovery_rejects_a_deposit_naming_another_task(
         )
     finally:
         store.close()
+
+
+def test_a_recovered_runs_reverify_gets_the_projects_loopback_ports(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-INT (D6 x ADR 0060): R4 moved recovery's G10 call into
+    ``_finish_recovered``; R2a's re-verify loopback argument moves with it,
+    so a late-ingested run re-verifies with the project's ports (I2)."""
+    from skep.supervisor import dispatch
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(dispatch, "reverify_run", lambda **kwargs: seen.update(kwargs))
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"loopback_ports": [5432]},
+        )
+        store.add_project_binding(
+            project_id="app", binding_kind="repo_path", binding_value=str(repo)
+        )
+        task_id, workspace = _strand_run(store, config, repo)
+        _deposit_completed_result(store, config, task_id, workspace)
+        assert recover_interrupted_runs(store, config) == [task_id]
+    finally:
+        store.close()
+    assert seen["loopback_ports"] == (5432,)
