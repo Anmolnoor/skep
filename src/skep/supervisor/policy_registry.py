@@ -274,6 +274,17 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         "and need a pinned verify_command",
     ),
     _knob(
+        "codex_chatgpt_login",
+        scope="coding",
+        type="bool",
+        default=False,
+        layers=("project",),
+        invariant="I12",
+        doc="a codex run with no OPENAI_API_KEY uses the operator's ChatGPT plan login: "
+        "an access-token-only, read-only copy in that run's own CODEX_HOME, never the "
+        "refresh token (docs/codex-chatgpt-login.md)",
+    ),
+    _knob(
         "policy_groups",
         scope="coding",
         type="list[str]",

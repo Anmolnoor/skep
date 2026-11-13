@@ -1881,6 +1881,26 @@ def test_project_setup_engine_flag_saves_and_validates(
     assert "builtin" in err  # the refusal names the valid choices
 
 
+def test_project_setup_opts_a_project_into_the_codex_chatgpt_login(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ES-F121 (D20): the operator face of the opt-in — off unless asked."""
+    home = tmp_path / "home"
+    args = ("project", "setup", str(repo), "--strategy", "trusted_local_dev")
+    assert _run_cli(home, *args, "--project-id", "plain") == 0
+    code = _run_cli(
+        home, *args, "--project-id", "plan", "--engine", "codex", "--codex-chatgpt-login"
+    )
+    assert code == 0, capsys.readouterr()
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        plain, plan = store.get_project_policy("plain"), store.get_project_policy("plan")
+        assert plain is not None and "codex_chatgpt_login" not in plain.policy
+        assert plan is not None and plan.policy["codex_chatgpt_login"] is True
+    finally:
+        store.close()
+
+
 def _pin_engine(home: Path, repo: Path, engine: str) -> None:
     code = _run_cli(
         home,

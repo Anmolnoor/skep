@@ -76,6 +76,9 @@ def test_the_trust_ramp_is_enforced_at_project_and_never_groupable() -> None:
         "worker_protocol",
         "allowed_plugin_risks",
         "default_execution_mode",
+        # ES-F121: whose login a codex run spends is a per-project choice,
+        # never bundled into a group, and not a landing/dispatch ramp step
+        "codex_chatgpt_login",
     }
     assert set(PROJECT_POLICY_KEYS) - set(GROUPABLE_POLICY_KEYS) - off_ramp_project_only == (
         TRUST_RAMP_KEYS

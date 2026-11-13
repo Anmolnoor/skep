@@ -135,3 +135,20 @@ def test_an_unusable_login_writes_nothing(codex_home: Path, tmp_path: Path) -> N
     with pytest.raises(ValueError, match="expires"):
         codex_login.write_run_login(run_home, min_seconds=600)
     assert not (run_home / "auth.json").exists()
+
+
+def test_the_opt_in_is_a_bool_project_key_off_by_default() -> None:
+    from skep.supervisor.policy_registry import registry_keys
+    from skep.supervisor.projects import (
+        GROUPABLE_POLICY_KEYS,
+        PROJECT_POLICY_KEYS,
+        validate_project_policy,
+    )
+
+    assert codex_login.POLICY_KEY in PROJECT_POLICY_KEYS
+    # a trust-like knob: per project, never bundled into a shared group
+    assert codex_login.POLICY_KEY not in GROUPABLE_POLICY_KEYS
+    knob = next(k for k in registry_keys(system="run_policy") if k.name == codex_login.POLICY_KEY)
+    assert knob.default is False
+    with pytest.raises(ValueError, match=codex_login.POLICY_KEY):
+        validate_project_policy({codex_login.POLICY_KEY: "yes"})

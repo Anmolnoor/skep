@@ -1663,6 +1663,20 @@ def test_setup_project_takes_the_engine_first_class(repo: Path, config: Supervis
     assert result["policy"]["coding_engine"] == "claude_code"
 
 
+def test_setup_project_carries_the_codex_chatgpt_login_opt_in(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F121 (D20): the chat face of the opt-in rides setup_project, a
+    carded mutation — the model proposes, the operator confirms."""
+    from skep.supervisor.serve.tools import MUTATING_TOOL_NAMES, MUTATING_TOOL_SPECS
+
+    assert "setup_project" in MUTATING_TOOL_NAMES
+    schema = next(t for t in MUTATING_TOOL_SPECS if t["function"]["name"] == "setup_project")
+    assert "codex_chatgpt_login" in schema["function"]["parameters"]["properties"]
+    result = _setup_project(config, repo, engine="codex", codex_chatgpt_login=True)
+    assert result["policy"]["codex_chatgpt_login"] is True
+
+
 def test_setup_project_refuses_an_unknown_engine_naming_the_choices(
     repo: Path, config: SupervisorConfig
 ) -> None:
