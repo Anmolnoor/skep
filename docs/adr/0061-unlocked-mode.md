@@ -90,13 +90,29 @@ After the run lane answers and before the role, the chain and taint:
   named `ask make deploy` lives on the operator lane (setup document,
   overlay, locked baseline — D2: a template's denies and named asks are a
   ceiling). Where one names any part of the line, the step declines and the
-  run lane's ask stands, for a human to answer.
+  run lane's ask stands, for a human to answer;
+- the gate's answer resumes the run with the command as an approved argv
+  **prefix** (the worker contract's matcher), so the step also declines a
+  command whose grant would cover a line a deny or named ask names: `make`
+  (it would also run `make deploy`) and `env` or `timeout 5` (they would
+  launch `curl`).
+
+These rules read command words, as every shell rule does. A line that hides
+what it runs from a word matcher — an interpreter given code (`python3 -c
+'…'`, a script the worker wrote), or a spelling the rule does not cover
+(`make -C . deploy` for a named `make deploy`) — reads as unmatched and is
+answered. On an unlocked project a shell deny or named ask is a stop for the
+words it names, not a boundary; the sandbox is the boundary. The git,
+secret and catastrophic floors still hold on every line, because the worker's
+own capability layer re-checks them before any grant.
 
 Everything after it still applies: a role's denies and asks (including its
 catch-all ask, which only a human grant answers, P3-2), the delegation cap (a
 delegated run's chain may turn the allow into a deferred ask a human answers,
-D3), and taint (D5). HIGH is a card property and `vet_write` a write-time
-check; neither is reached by a worker gate.
+D3), and taint (D5). The worker-gate auto-answer decides with no chat, so on
+that path taint is the dispatch's: a tainted chat's dispatch already asks
+(`taint/untrusted-action`). HIGH is a card property and `vet_write` a
+write-time check; neither is reached by a worker gate.
 
 ### Worker gates
 
