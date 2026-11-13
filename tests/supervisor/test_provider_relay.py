@@ -651,3 +651,35 @@ def test_an_unreachable_provider_is_a_502_that_names_no_key() -> None:
         assert (proxy.relayed_count, proxy.relay_refused_count) == (0, 1)
     assert reply.startswith(b"HTTP/1.1 502 ")
     assert key.encode() not in reply and token.encode() not in reply
+
+
+@pytest.mark.parametrize("value", [True, False], ids=["on", "off"])
+def test_turning_the_relay_on_or_off_from_chat_is_a_high_card_that_flips_the_switch(
+    tmp_path: Path, value: bool
+) -> None:
+    """Off puts the key back in every builtin worker; on changes how every
+    run reaches its model. Both reshape standing policy, so both are HIGH by
+    the existing rule (``set_policy`` is a HIGH policy tool), no new tier."""
+    from skep.supervisor.config import SupervisorConfig
+    from skep.supervisor.serve.cards import high_tier
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import execute_mutation
+    from skep.supervisor.store import RunStore
+
+    args = {"provider_key_relay": value}
+    assert high_tier("set_policy", args) == "it changes standing policy"
+    config = SupervisorConfig(home=tmp_path / "home" / "supervisor", worker_command=("true",))
+    store = RunStore(config.db_path)
+    store.set_setting("provider_key_relay", not value)
+    try:
+        execute_mutation(
+            "set_policy",
+            args,
+            store=store,
+            holder=ConfigHolder(config, store),
+            runner=None,  # type: ignore[arg-type]
+            actor="operator",
+        )
+        assert store.get_setting("provider_key_relay") is value
+    finally:
+        store.close()
