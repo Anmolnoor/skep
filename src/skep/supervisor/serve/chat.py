@@ -406,7 +406,10 @@ def duplicate_proposal_result(action_id: str) -> dict[str, Any]:
 _SUPERSEDED_BY_NEWER = "superseded by a newer proposal for the same subject"
 
 
-APPROVED_NOTE = "the operator confirmed this on a card; it was not auto-allowed"
+def approved_note(*, high: bool) -> str:
+    """L7: what a confirmed result tells the model; L29: and the card's tier."""
+    tier = "HIGH" if high else "normal"
+    return f"the operator confirmed this on a card (tier: {tier}); it was not auto-allowed"
 
 
 def high_tier_decision(high: str, allowed: Any) -> Any:
@@ -2767,7 +2770,9 @@ class ChatEngine:
                 raise card_taken(self.store, action_id) from None
             raise
         try:
-            payload = self._record_verdict(chat_id, action, confirm=confirm, actor=actor, keep=keep)
+            payload = self._record_verdict(
+                chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
+            )
             more_pending = bool(blocking_cards(self.store, chat_id))
         except BaseException:
             lock.release()
@@ -2865,7 +2870,14 @@ class ChatEngine:
         return payload
 
     def _record_verdict(
-        self, chat_id: str, action: ChatActionRecord, *, confirm: bool, actor: str, keep: str
+        self,
+        chat_id: str,
+        action: ChatActionRecord,
+        *,
+        confirm: bool,
+        actor: str,
+        keep: str,
+        high: bool = False,
     ) -> dict[str, Any]:
         """Claim, execute (or deny) and record one card; the tool row's payload.
 
@@ -2924,7 +2936,7 @@ class ChatEngine:
             # L7: the model reads this row — say a person approved it, or it
             # tells the user no card was needed (a run_shell result names the
             # rule that ASKED as its decided_by)
-            payloads = [{**p, "approved": APPROVED_NOTE} for p in payloads]
+            payloads = [{**p, "approved": approved_note(high=high)} for p in payloads]
             payload = (
                 payloads[0]
                 if len(payloads) == 1

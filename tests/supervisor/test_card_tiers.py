@@ -420,7 +420,24 @@ def test_l7_a_confirmed_result_tells_the_model_a_person_approved_it(live: Any) -
     env.ollama.script_reply("ok")
     env.verdict(chat, card["action_id"], confirm=True)
     row = next(r for r in env.store.chat_messages(chat) if r.tool_name == "run_shell")
-    assert json.loads(row.content)["approved"] == chat_module.APPROVED_NOTE
+    assert json.loads(row.content)["approved"] == chat_module.approved_note(high=False)
+
+
+def test_l29_a_confirmed_result_names_the_cards_tier(live: Any) -> None:
+    """L29 (ES-F105): the model told the user "no card was HIGH" after six —
+    the confirmed row now says which tier the card was."""
+    env = live("builder")
+    chat = env.chat()
+    set_taint(env.store, chat, "both")
+    env.ollama.script_tool_call("set_personality", {"value": "terse"})
+    (card,) = cards(env.turn(chat, "be terse"))
+    assert card["card"]["tier"] == "high"
+    env.ollama.script_reply("ok")
+    env.verdict(chat, card["action_id"], confirm=True)
+    row = next(r for r in env.store.chat_messages(chat) if r.tool_name == "set_personality")
+    approved = json.loads(row.content)["approved"]
+    assert approved == chat_module.approved_note(high=True)
+    assert "tier: HIGH" in approved and "tier: normal" in chat_module.approved_note(high=False)
 
 
 def test_l4_a_read_in_skeps_own_home_is_not_called_outside_your_folders(live: Any) -> None:
