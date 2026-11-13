@@ -166,10 +166,16 @@ Bubblewrap enforces:
 - deny-all network with `--unshare-net`
 - allow-all network by omitting `--unshare-net`
 - concrete per-domain allowlists (v28): the netns keeps `--unshare-net` (no
-  route out), the host filtering proxy's AF_UNIX socket is bind-mounted in, and
-  `skep.netshim` presents the proxy port on the sandbox loopback and bridges it
-  to that socket. Egress is exactly as tight as deny-all, plus one filtered
-  pipe — the same guarantee Seatbelt gives on macOS.
+  route out), the private host directory holding the filtering proxy's AF_UNIX
+  socket is bind-mounted in read-only, and `skep.netshim` presents the proxy
+  port on the sandbox loopback and bridges it to that socket. Egress is exactly
+  as tight as deny-all, plus one filtered pipe — the same guarantee Seatbelt
+  gives on macOS.
+- `--die-with-parent` in every invocation. With serve's restart re-adoption on
+  (the default, ADR 0060), bwrap's parent is a small host keeper process
+  rather than serve, so a sandbox outlives a serve restart and is re-adopted;
+  the keeper kills it a minute past its wall-clock budget if no serve comes
+  back. `skep serve --no-readopt` makes bwrap serve's child again.
 
 ## Running With The Sandbox
 

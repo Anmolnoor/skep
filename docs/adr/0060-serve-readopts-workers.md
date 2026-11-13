@@ -148,8 +148,12 @@ worker was never intended.
 - A pid is never trusted alone; a reused pid is left alone (I8, I12).
 - A worker runs without a filtering proxy between serve's death and the next
   serve's start; its egress is refused for that window, as before.
-- If no serve comes back, nothing enforces a macOS worker's budget; it runs
-  until it ends on its own. A Linux sandboxed worker is killed by its keeper
-  a minute past its wall clock + grace.
+- If no serve comes back, nothing enforces the budget of a macOS worker, a
+  workspace-mode worker or a podman one; it runs until it ends on its own. A
+  Linux bubblewrap worker is killed by its keeper a minute past its wall
+  clock + grace.
+- A service manager that stops a whole cgroup on restart (systemd's default
+  `KillMode=control-group`) kills the workers with serve, and there is
+  nothing left to re-adopt; skep ships no unit file.
 - Rows written before this change carry no start time and are killed, as
   before. No migration rewrites them.
