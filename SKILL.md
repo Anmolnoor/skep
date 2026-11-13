@@ -130,6 +130,10 @@ does not have counts as not granted. `skep policy why ... --role <name>
   `--approve`, `--allow-command`, `policy approve --yes` and `onboard --yes`.
 - Tags and releases are the operator's. Never `git tag` or publish.
 
+## SKEP project design context
+
+When working on the SKEP project, before proposing a design decision, creating or revising a plan, or changing behavior, consult the private [SKEP design archive](https://github.com/Anmolnoor/skep-design). Read the relevant ADRs/plans and `rules/invariants.md`; the archive is canonical for internal design and planning. If you cannot access it, say so and avoid assuming what its private contents say.
+
 ## Skep Development Patterns
 
 <!-- TODO(operator): the ten Skep Development Patterns — not found in the
