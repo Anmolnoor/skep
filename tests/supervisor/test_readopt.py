@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import sqlite3
@@ -23,9 +24,9 @@ from pathlib import Path
 
 import pytest
 
-from skep.supervisor import RunStore, SupervisorConfig, run_task
+from skep.supervisor import RunStore, SupervisorConfig, run_task, sandbox
 from skep.supervisor.dispatch import recover_interrupted_runs
-from skep.supervisor.monitor import AdoptedWorker, synthesize_terminal, watch_worker
+from skep.supervisor.monitor import AdoptedWorker, kill_session, synthesize_terminal, watch_worker
 from skep.supervisor.store import process_owner
 from skep.worker_contract import TaskState
 
@@ -196,10 +197,11 @@ import sys
 from pathlib import Path
 from skep.supervisor import SupervisorConfig, run_task
 from skep.supervisor.contracts_io import DEFAULT_PERMISSIONS
-home, worker, repo, instructions, mode = sys.argv[1:6]
+home, worker, repo, instructions, mode, readopt = sys.argv[1:7]
 config = SupervisorConfig(
     home=Path(home), worker_command=(sys.executable, worker),
     grace_seconds=0.5, heartbeat_seconds=2.0, poll_seconds=0.01,
+    readopt_workers=readopt == "1",
 )
 run_task(Path(repo), instructions, config=config, execution_mode=mode,
          permissions=DEFAULT_PERMISSIONS.model_copy(update={"network": ["example.com"]}))
@@ -207,7 +209,7 @@ run_task(Path(repo), instructions, config=config, execution_mode=mode,
 
 
 def _kill_serve_mid_run(
-    config: SupervisorConfig, repo: Path, instructions: str, mode: str
+    config: SupervisorConfig, repo: Path, instructions: str, mode: str, *, readopt: bool = True
 ) -> tuple[str, int]:
     """Start the old serve, wait until its worker runs (pid + start time
     recorded), SIGKILL the serve. Returns the task id and the worker pid."""
@@ -223,6 +225,7 @@ def _kill_serve_mid_run(
             str(repo),
             instructions,
             mode,
+            "1" if readopt else "0",
         ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
@@ -313,6 +316,65 @@ def test_restart_readopts_a_gated_run_and_keeps_its_worktree(
         assert record.workspace is not None and Path(record.workspace).is_dir()
     finally:
         store.close()
+
+
+_LINUX_BWRAP = pytest.mark.skipif(
+    not sys.platform.startswith("linux") or sandbox.availability().backend != "bubblewrap",
+    reason="real bubblewrap (runs where bwrap is the backend)",
+)
+
+
+@_LINUX_BWRAP
+@pytest.mark.parametrize("readopt", [True, False])
+def test_a_linux_sandboxed_worker_outlives_serve_only_while_readopting(
+    repo: Path, config: SupervisorConfig, readopt: bool
+) -> None:
+    """ES-F211 (ADR 0060 §1, §6): bwrap's --die-with-parent used to kill a
+    sandboxed worker with serve. With re-adoption on, bwrap's parent is the
+    keeper, which outlives serve, and the worker inside keeps working; the
+    kill switch restores bwrap as serve's child, dying with it."""
+    from .test_recover import _gone
+
+    task_id, pid = _kill_serve_mid_run(
+        config, repo, "Fix it. MODE:happy GATE", "sandbox", readopt=readopt
+    )
+    try:
+        assert _gone(pid, 3.0) is not readopt
+        store = RunStore(config.db_path)
+        try:
+            record = store.get_run(task_id)
+        finally:
+            store.close()
+        assert record is not None and record.workspace
+        events = Path(record.workspace) / ".events" / f"{task_id}.ndjson"
+        before = events.stat().st_size if events.exists() else 0
+        time.sleep(1.5)  # the gated worker heartbeats every 0.3 s
+        after = events.stat().st_size if events.exists() else 0
+        assert (after > before) is readopt
+    finally:
+        kill_session(pid)
+
+
+@_LINUX_BWRAP
+def test_the_keeper_kills_a_sandbox_no_serve_comes_back_for(tmp_path: Path) -> None:
+    """ES-F211 (ADR 0060 §1): with no serve to enforce the budget, the keeper
+    kills bwrap at its deadline and the sandbox dies with it — the bound
+    --die-with-parent gave. It runs isolated (-I): a module planted in the
+    worktree it starts in is never imported on the host."""
+    from skep.supervisor.spawner import BWRAP_KEEPER
+
+    (tmp_path / "subprocess.py").write_text("raise SystemExit(99)\n")
+    marker = f"{time.time_ns() % 10**6 + 1000}.25"  # a unique `sleep` to find
+    bwrap = [shutil.which("bwrap") or "bwrap", *sandbox._BUBBLEWRAP_BASE_ARGS, "--"]
+    keeper = subprocess.run(
+        [sys.executable, "-I", "-c", BWRAP_KEEPER, "1", *bwrap, "sleep", marker],
+        cwd=tmp_path,
+        timeout=30,
+        check=False,
+    )
+    assert keeper.returncode == 128 + signal.SIGKILL
+    time.sleep(0.5)
+    assert subprocess.run(["pgrep", "-f", f"sleep {marker}"], check=False).returncode == 1
 
 
 def _strand_with_live_worker(

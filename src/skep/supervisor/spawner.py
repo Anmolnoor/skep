@@ -165,6 +165,19 @@ def effective_network_domains(task: CodingWorkerTask) -> tuple[str, ...]:
     return ()
 
 
+# ADR 0060 §1: runs bwrap as its child and exits with its status (128 + n
+# for signal n). argv: <deadline seconds> <bwrap argv...>. Run with -I: its
+# cwd is the worktree, and it runs on the host.
+BWRAP_KEEPER = (
+    "import subprocess, sys\n"
+    "try:\n"
+    "    rc = subprocess.call(sys.argv[2:], timeout=float(sys.argv[1]))\n"
+    "except subprocess.TimeoutExpired:\n"
+    "    rc = -9\n"
+    "sys.exit(rc if rc >= 0 else 128 - rc)\n"
+)
+
+
 def spawn_worker(
     config: SupervisorConfig,
     task: CodingWorkerTask,
@@ -247,6 +260,14 @@ def spawn_worker(
             write_denied=write_denied,
         )
         argv = sandbox.wrap_command(argv, profile_path, backend=backend)
+        if own_netns and config.readopt_workers:  # own_netns: the backend is bubblewrap
+            # ADR 0060 §1: bwrap's --die-with-parent ties the sandbox to its
+            # parent; the keeper is that parent instead of serve, so the
+            # sandbox outlives serve for re-adoption, still dies with
+            # kill_session, and dies a minute past its budget if no serve
+            # ever comes back for it.
+            deadline = task.budget.wall_clock_seconds + config.grace_seconds + 60
+            argv = [sys.executable, "-I", "-c", BWRAP_KEEPER, str(deadline), *argv]
     env = build_worker_env(task.permissions.env_allowlist, baseline=config.env_baseline)
     # Needed: the builtin worker reads its provider profile, LLM key and
     # plugin shelf from here (llm_plan.py, capabilities.py). The control-plane
