@@ -4742,16 +4742,27 @@ def dispatch_manifest(
     except (HTTPException, ValueError, OSError) as exc:
         detail = exc.detail if isinstance(exc, HTTPException) else exc
         return {"error": str(detail)}
+    from ..codex_login import run_auth_source
     from ..provider_hosts import provider_hosts_for
 
     permissions, resolved_policy = compiled.permissions, compiled.policy
+    # ES-F124 (D20): whose login a codex run spends is on the card.
+    engine_auth = run_auth_source(
+        resolved_policy.coding_engine,
+        resolved_policy.policy,
+        min_seconds=resolved_policy.budget.wall_clock_seconds,
+    )
     return {
         "repo": str(compiled.repo),
         "network": list(permissions.network),
         # L10: an explicit network replaces the project's hosts — say which
         "network_dropped": list(resolved_policy.network_dropped),
         "provider_hosts": provider_hosts_for(
-            store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
+            store,
+            holder.current.home.parent,
+            caste=caste,
+            engine=resolved_policy.coding_engine,
+            chatgpt_login=engine_auth is not None,
         ),
         "network_ask": list(permissions.network_ask),
         "shell_ask": [list(p) for p in permissions.shell_ask],
@@ -4768,6 +4779,7 @@ def dispatch_manifest(
         "auto_apply_verified_patch": compiled.auto_apply_verified_patch,
         "auto_apply_branch": compiled.auto_apply_branch,
         "engine": resolved_policy.coding_engine,
+        "engine_auth": engine_auth,
         "execution_mode": resolved_policy.execution_mode,
         "verify_command": str(resolved_policy.policy.get("verify_command") or ""),
         "chain": list(delegation_chain),
@@ -4868,7 +4880,9 @@ _MANIFEST_SETS = (
     "allowed_plugin_risks",
 )  # fmt: skip
 _MANIFEST_FLAGS = ("allow_git_mutation", "auto_apply_verified_patch")
-_MANIFEST_EXACT = ("repo", "engine", "execution_mode", "verify_command", "auto_apply_branch")
+_MANIFEST_EXACT = (
+    "repo", "engine", "engine_auth", "execution_mode", "verify_command", "auto_apply_branch",
+)  # fmt: skip
 
 
 def manifest_widening(shown: dict[str, Any], fresh: dict[str, Any]) -> str | None:

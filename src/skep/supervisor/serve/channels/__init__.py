@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...codex_login import AUTH_SOURCE, CARD_LINE
+
 CHANNELS: frozenset[str] = frozenset({"discord", "telegram", "slack"})
 
 # The ONLY action classes a channel may confirm (fail-closed allow-list). Shell
@@ -229,6 +231,7 @@ def manifest_lines(manifest: Mapping[str, Any]) -> list[str]:
         *_grant_lines(manifest),
         f"engine: {manifest.get('engine')} · mode: {manifest.get('execution_mode')}"
         f" · verify: {manifest.get('verify_command') or 'the worker picks'}",
+        *([f"login: {CARD_LINE}"] if manifest.get("engine_auth") == AUTH_SOURCE else []),
     ]
     asks = [
         *(manifest.get("network_ask") or []),

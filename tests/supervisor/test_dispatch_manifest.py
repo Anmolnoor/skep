@@ -509,3 +509,44 @@ def test_a_call_network_that_replaces_the_project_hosts_says_what_the_run_loses(
     (spec,) = [s for s in TOOL_SPECS if s["function"]["name"] == "dispatch_run"]
     described = spec["function"]["parameters"]["properties"]["network"]["description"]
     assert "REPLACES" in described
+
+
+def test_a_codex_card_on_the_chatgpt_login_says_so_and_a_change_is_stale(
+    desk: Desk, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F124 (D20, I8): whose login a codex run spends is on the card,
+    with the one host that login reaches; flipping it after the card was
+    shown is a widening the confirm refuses."""
+    import os
+
+    from skep.supervisor.codex_login import CARD_LINE
+    from skep.supervisor.serve.actions import dispatch_manifest, manifest_widening
+
+    from .test_codex_login import write_fake_login
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    write_fake_login(Path(os.environ["CODEX_HOME"]))
+    policy = {"coding_engine": "codex", "verify_command": "true"}
+
+    def manifest(**extra: Any) -> dict[str, Any]:
+        desk.store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={**policy, **extra},
+        )
+        return dispatch_manifest(desk.holder, desk.store, repo=str(desk.repo))
+
+    keyless = manifest()
+    assert keyless["engine_auth"] is None
+    assert CARD_LINE not in "\n".join(manifest_lines(keyless))
+    plan = manifest(codex_chatgpt_login=True)
+    assert plan["engine_auth"] == "chatgpt_login"
+    assert plan["provider_hosts"] == ["chatgpt.com:443"]
+    assert CARD_LINE in "\n".join(manifest_lines(plan))
+    assert manifest_widening(keyless, plan) is not None
+    same_hosts = {**keyless, "provider_hosts": plan["provider_hosts"]}
+    assert "engine_auth" in (manifest_widening(same_hosts, plan) or "")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-value")
+    assert manifest(codex_chatgpt_login=True)["engine_auth"] is None  # a key still wins

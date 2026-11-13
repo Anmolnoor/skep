@@ -374,6 +374,11 @@ test("manifestNode: the dispatch card lists what the run gets and the asks it ap
   const lost = app.manifestNode({ manifest: { network: ["example.com"],
     network_dropped: ["pypi.org"] } }).textContent;
   assert.ok(lost.includes("loses the project's own hosts for this run") && lost.includes("pypi.org"));
+  // ES-F124: a codex run on the operator's ChatGPT plan login says so
+  const plan = app.manifestNode({ manifest: { network: [], engine: "codex",
+    engine_auth: "chatgpt_login" } }).textContent;
+  assert.ok(plan.includes("uses your ChatGPT plan login (Codex)"));
+  assert.ok(!old.includes("ChatGPT"));
 });
 
 test("offersRemember: a delegated ask is approve-once, so no remember button is offered", () => {

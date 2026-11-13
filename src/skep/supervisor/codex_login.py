@@ -115,6 +115,20 @@ def login_status(min_seconds: float = 0) -> LoginStatus:
     return _load(min_seconds)[0]
 
 
+def run_auth_source(engine: str, policy: dict[str, Any], *, min_seconds: float) -> str | None:
+    """``AUTH_SOURCE`` when a dispatch of ``engine`` under ``policy`` would run
+    on the plan login now (what the card shows; run_task decides the same way,
+    refusing where this returns None)."""
+    from .engines import resolve_engine
+
+    chosen = resolve_engine(engine)
+    if chosen.login_host is None or any(os.environ.get(var) for var in chosen.auth_env):
+        return None  # no plan login for this engine, or an API key wins
+    if policy.get(POLICY_KEY) is not True or login_status(min_seconds).problem is not None:
+        return None
+    return AUTH_SOURCE
+
+
 def write_run_login(codex_home: Path, *, min_seconds: float) -> Path:
     """Write the run's own login into ``codex_home`` (the run's redirected
     ``CODEX_HOME``, never the real one): 0700 dir, 0400 file, access token
