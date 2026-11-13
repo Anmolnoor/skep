@@ -635,6 +635,7 @@ def create_app(
             tasks=tasks,
             delegation_chain=body.delegation_chain,
         )
+        answer = answered_hosts(run_store, manifests, body.answer_hosts, how="answer_hosts")
         return submit_team(
             holder,
             runner,
@@ -643,7 +644,7 @@ def create_app(
             tasks=tasks,
             delegation_chain=body.delegation_chain,
             deferred_asks=True,
-            preanswered=answered_hosts(run_store, manifests, body.answer_hosts, how="answer_hosts"),
+            preanswered=[answer] * len(tasks),  # D9's one answer, a copy per member
         )
 
     @app.get("/api/policy")

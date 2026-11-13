@@ -1084,7 +1084,7 @@ def cmd_team(args: argparse.Namespace) -> int:
                 tasks=tasks,
                 delegation_chain=args.delegated_by or [],
                 deferred_asks=True,
-                preanswered=answer,
+                preanswered=[answer] * len(tasks),  # D9's one answer, a copy per member
             )
         except HTTPException as exc:
             return _err(str(exc.detail), next_command="skep role list")

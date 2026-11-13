@@ -187,3 +187,27 @@ def test_cli_team_refuses_off_a_terminal_and_a_no_at_the_prompt(
     assert main(team) != 0
     assert "pypi.org" in capsys.readouterr().out
     assert captured == []  # nothing dispatched either way
+
+
+def test_a_team_answer_reaches_every_member_rest_and_cli(
+    config: SupervisorConfig, repo: Path, captured: list[dict[str, Any]]
+) -> None:
+    """ES-INT (D9 x D23): ``submit_team`` takes one manifest per member (D23);
+    D9's one team answer reaches it as a copy per member, so the second
+    member's asks are answered too, not only the first's."""
+    tasks = [{"repo": str(repo), "instructions": "one"}, {"repo": str(repo), "instructions": "two"}]
+    with serve_client(config) as client:
+        body = {"manager": "builder", "tasks": tasks, "answer_hosts": ["pypi.org"]}
+        ok = client.post("/api/teams", json=body)
+        assert ok.status_code == 202, ok.text
+    home = str(config.home.parent)
+    team = ["--home", home, "team", "--manager", "builder"]
+    members = ["--task", str(repo), "one", "--task", str(repo), "two"]
+    main([*team, *members, "--answer-host", "pypi.org"])  # exit 3: the fake runs are "gone"
+    assert len(captured) == 4
+    for call in captured:
+        assert "pypi.org" in call["permissions"].network
+        assert "pypi.org" not in call["permissions"].network_ask
+        assert call["dispatch_decision"].constraints["manifest_preanswered"]["network"] == [
+            "pypi.org"
+        ]
