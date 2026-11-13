@@ -301,20 +301,33 @@ def test_b78_search_web_follows_the_chats_role(
         deny = LayerRule("network", "deny", "no-search", "search", "*")
         return Layer(base.name, base.label, rules=(deny, *base.rules))
 
+    from skep.supervisor.serve import tools
+
     monkeypatch.setattr(Role, "layer", layer)
+    # the hidden-tool table is cached per role (P3-6): read it with this layer
+    tools._hidden_tools.cache_clear()
     _paths, store, holder, _fetched = net("assistant")
     plain = store.create_chat(
         title="p", model=None, role=no_layer_role(holder.current.home)
     ).chat_id
     role = store.create_chat(title="a", model=None, role="assistant").chat_id
     null = store.create_chat(title="n", model=None).chat_id
-    ran = execute_read_tool("search_web", {"query": "q"}, store=store, holder=holder, chat_id=plain)
-    assert ran["results"] and ran["decided_by"] == "template:assistant/net-search"
-    for chat_id in (role, null):
-        refused = execute_read_tool(
-            "search_web", {"query": "q"}, store=store, holder=holder, chat_id=chat_id
+    try:
+        ran = execute_read_tool(
+            "search_web", {"query": "q"}, store=store, holder=holder, chat_id=plain
         )
-        assert refused["results"] == [] and refused["decided_by"] == "role:assistant/no-search"
+        assert ran["results"] and ran["decided_by"] == "template:assistant/net-search"
+        refusals = [
+            execute_read_tool(
+                "search_web", {"query": "q"}, store=store, holder=holder, chat_id=chat_id
+            )
+            for chat_id in (role, null)
+        ]
+    finally:
+        tools._hidden_tools.cache_clear()
+    for refused in refusals:
+        # P3-6: a tool the role denies outright is refused before it runs, naming the rule
+        assert not refused.get("results") and "role:assistant/no-search" in refused["error"]
 
 
 def test_b56_a_session_fetch_grant_in_a_role_chat_runs_the_url_with_no_second_card(
