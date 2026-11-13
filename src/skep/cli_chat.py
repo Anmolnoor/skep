@@ -392,6 +392,11 @@ def _render_card(action: dict[str, Any]) -> None:
         lines.append(_c(DIM, "  " + " ".join(part for part in parts if part)))
     if action.get("why"):
         lines.append(_c(DIM, f"  why: {action['why']}"))  # first-run O4 (ADR 0056 D6)
+    from .supervisor.serve.channels import card_notes
+
+    card = action.get("card")
+    for note in card_notes(card if isinstance(card, dict) else None, messenger=False):
+        lines.append(f"  {note}")  # P4-2: HIGH and why, the taint, folded items
     _box(lines)
 
 
@@ -659,6 +664,17 @@ class ChatRepl:
                     _c(
                         DIM,
                         f"--yes does not cover a policy card ({action.get('tool', '?')}) — "
+                        f"left pending ({action_id}): /approve {action_id} confirms it by name",
+                    )
+                )
+                return
+            if (action.get("card") or {}).get("tier") == "high":
+                # P4-2 (ADR 0059 D6): a HIGH card is confirmed by name, never
+                # by a flag given before it existed.
+                print(
+                    _c(
+                        DIM,
+                        f"--yes does not cover a HIGH card ({action.get('tool', '?')}) — "
                         f"left pending ({action_id}): /approve {action_id} confirms it by name",
                     )
                 )

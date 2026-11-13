@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import sys
 import tempfile
 from collections.abc import Iterator
@@ -119,13 +120,28 @@ def _baseline(name: str, *extra: dict[str, str]) -> PolicyTemplate:
     return pb._load_layer(layer)
 
 
+def _fake_user_home() -> Path:
+    """``$HOME``, refused when it is the account's real home. ``build_home``
+    writes CANARY over credential paths under it (``.ssh/id_rsa``,
+    ``.config/gh/hosts.yml``, …): fine in the suite's throwaway HOME, and it
+    once overwrote an operator's real ``gh`` login when this module was run
+    from a plain script."""
+    home = Path(os.environ["HOME"])
+    if home.resolve() == Path(pwd.getpwuid(os.getuid()).pw_dir).resolve():
+        raise RuntimeError(
+            f"build_home would write canary credentials into the real home {home}: "
+            "run it under the test suite, or point HOME at a temp directory first"
+        )
+    return home
+
+
 def build_home(root: Path, kind: str) -> dict[str, Path]:
     """A home of ``kind``: one workon-bound repo (an operator root), a
     directory outside every root, credential files under a fake user home."""
     paths = {
         "repo": root / "repo",
         "outside": root / "outside",
-        "home": Path(os.environ["HOME"]),
+        "home": _fake_user_home(),
         "personal": root / "personal",
     }
     for name in ("repo", "outside"):

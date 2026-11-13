@@ -781,6 +781,7 @@ pre.log, pre.diff {
 }
 /* P4-1 (ADR 0059 D5): a doubly tainted chat's card looks different (HIGH). */
 .confirm-card.card-high { border: 2px solid var(--bad); }
+.card-high-label { color: var(--bad); margin: 0 0 .4rem; }
 .confirm-card .card-taint { color: var(--warn); margin: 6px 0 0; }
 .confirm-card pre.args {
   background: var(--panel-2); border-radius: var(--radius-sm); padding: 10px;

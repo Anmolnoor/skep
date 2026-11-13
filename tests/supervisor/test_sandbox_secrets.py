@@ -13,6 +13,7 @@ LLM with them until V6 moves the credential into the proxy.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -271,6 +272,103 @@ def test_a_real_sandboxed_worker_cannot_read_the_canaries(
     assert proc.returncode == 0, proc.stderr
     assert "CANARY" not in proc.stdout.replace("CANARY llm-secret", ""), proc.stdout
     assert "READ " + str(sup / "llm-secret") in proc.stdout  # the worker's own LLM key (V6)
+
+
+_SEATBELT_PROBE = """
+import json, os, sys
+seen = {}
+for path in sys.argv[1:]:
+    try:
+        os.listdir(path) if os.path.isdir(path) else open(path).read()
+        seen[path] = "read"
+    except OSError as exc:
+        seen[path] = type(exc).__name__
+print(json.dumps(seen))
+"""
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not sandbox.availability().usable,
+    reason="real Seatbelt proof (runs where sandbox-exec can apply a profile)",
+)
+@pytest.mark.parametrize("worker_llm_key", [True, False])
+def test_a_real_seatbelt_worker_cannot_read_the_canaries(
+    fake_homes: tuple[Path, Path], tmp_path: Path, worker_llm_key: bool
+) -> None:
+    """The macOS twin of the bubblewrap proof: secret_paths() resolves under
+    the fake HOME the fixture exports, never the operator's."""
+    from skep.supervisor import RunStore
+    from skep.supervisor.providers import ProviderProfile
+
+    home, skep_home = fake_homes
+    sup = skep_home / "supervisor"
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    for path in (
+        *(home / rel for rel in (".zshrc", ".bashrc", ".profile", ".zsh_history")),
+        home / ".bash_history",
+        home / ".cargo" / "credentials.toml",
+        home / ".claude.json",
+        sup / "llm-secret-p2",
+        sup / "audit" / "t-other" / "worker.log",
+        sup / "chat-attachments" / "a.txt",
+        workspace / "plain.txt",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"CANARY {path.name}\n", encoding="utf-8")
+    (workspace / "link").symlink_to(home / ".ssh" / "id_rsa")
+    store = RunStore(sup / "supervisor.sqlite3")
+    try:
+        for pid in ("p1", "p2"):
+            store.upsert_provider_profile(
+                ProviderProfile(
+                    provider_id=pid, protocol="ollama", base_url=f"http://{pid}.example", model="m"
+                )
+            )
+        store.set_active_provider("p1")
+    finally:
+        store.close()
+    profile = sandbox.write_profile(
+        tmp_path / "p.sb", workspace=workspace, skep_home=skep_home, worker_llm_key=worker_llm_key
+    )
+    refused = [
+        *(home / rel for rel in (".zshrc", ".bashrc", ".profile", ".zsh_history")),
+        home / ".bash_history",
+        home / ".ssh" / "id_rsa",
+        home / ".aws" / "credentials",
+        home / ".cargo" / "credentials.toml",
+        home / ".claude.json",
+        home / ".netrc",
+        sup / "serve-token",
+        skep_home / "serve.env",
+        sup / "mail-secret",
+        sup / "llm-secret-p2",  # an inactive profile's key
+        sup / "audit",
+        sup / "audit" / "t-other" / "worker.log",
+        sup / "chat-attachments",
+        workspace / "link",  # a symlink to ~/.ssh/id_rsa
+    ]
+    if (home / ".SSH").exists():  # the fold only exists on a case-insensitive volume
+        refused.append(home / ".SSH" / "id_rsa")
+    readable = [workspace / "plain.txt"]
+    own_keys = [sup / "llm-secret", sup / "llm-secret-p1"]  # the active profile's key
+    (readable if worker_llm_key else refused).extend(own_keys)
+    # Not pinned either way: Library/Keychains, .claude/.credentials.json,
+    # .codex/auth.json, .npmrc and supervisor.sqlite3 stay readable on purpose
+    # today (SANDBOX_READABLE_SECRETS) and are an open operator decision.
+    proc = subprocess.run(
+        sandbox.wrap_command(
+            [sys.executable, "-c", _SEATBELT_PROBE, *map(str, refused + readable)], profile
+        ),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    # PermissionError, not FileNotFoundError: the wall refused a path that exists.
+    expected = {str(p): "PermissionError" for p in refused} | {str(p): "read" for p in readable}
+    assert json.loads(proc.stdout) == expected
 
 
 def test_fast_lane_code_does_not_inherit_the_daemon_environment(

@@ -290,6 +290,70 @@ function cardClass(card) {
   return card && card.tier === "high" ? "confirm-card card-high" : "confirm-card";
 }
 
+// P4-2 (ADR 0059 D6): a HIGH card says so in words, not only with a red
+// border — and why, and that it holds once and no messenger can confirm it.
+function tierNote(card) {
+  if (!card || card.tier !== "high") return null;
+  return el("p", { class: "card-high-label" },
+    el("strong", {}, "HIGH risk: "), card.high || "see details",
+    ". It holds once, and only the web UI or the CLI can confirm it.");
+}
+
+// P4-2 (ADR 0059 D6): a folded card lists every call one approval covers —
+// exactly what the server recorded; nothing beyond this list runs.
+function foldItems(card) {
+  if (!card || !Array.isArray(card.items) || card.items.length < 2) return null;
+  return el("div", { class: "card-items" },
+    el("p", { class: "note" }, `${card.items.length} items, one approval covers exactly these:`),
+    el("ul", {}, ...card.items.map((item) => el("li", { class: "mono" }, String(item)))));
+}
+
+// P4-2 (ADR 0059 D6): the dispatch manifest — what the run will get, as the
+// server compiled it when the card was shown. Approving the card approves the
+// listed asks for that run only; anything else the run asks for cards then.
+function manifestNode(card) {
+  const m = card && card.manifest;
+  if (!m) return null;
+  if (m.error) {
+    return el("p", { class: "note card-manifest" }, `The run's envelope could not be compiled: ${m.error}`);
+  }
+  const list = (values) => (Array.isArray(values) && values.length
+    ? values.map((v) => (Array.isArray(v) ? v.join(" ") : String(v))).join(", ") : "none");
+  const row = (label, value) => el("div", { class: "arg-row" },
+    el("span", { class: "arg-key" }, `${label}:`), el("span", { class: "arg-value mono" }, value));
+  const asks = [...(m.network_ask || []), ...(m.shell_ask || [])];
+  return el("div", { class: "card-manifest" },
+    el("p", { class: "note" }, "What this run gets:"),
+    row("hosts", list(m.network)),
+    row("model provider", list(m.provider_hosts)),
+    row("commands it may run", list(m.shell_allowlist)),
+    row("may write", list(m.write)),
+    row("engine · mode", `${m.engine} · ${m.execution_mode}`),
+    row("verify", m.verify_command || "the worker picks"),
+    asks.length ? row("also approved, this run only", list(asks)) : null,
+    Array.isArray(m.chain) && m.chain.length ? row("delegated by", m.chain.join(" → ")) : null,
+    Array.isArray(m.taint) && m.taint.length ? row("from a chat that has", m.taint.join(" + ")) : null);
+}
+
+// P4-2 (ADR 0059 D6, F3 lesson 1): a script, chained or replacing schedule
+// shows what it will really do — the server computed every line (the env the
+// script gets, the scheduler's next fire times), the card only lists them.
+function scheduleNode(card) {
+  const s = card && card.schedule;
+  if (!s) return null;
+  const row = (label, value) => el("div", { class: "arg-row" },
+    el("span", { class: "arg-key" }, `${label}:`), el("span", { class: "arg-value mono" }, value));
+  return el("div", { class: "card-schedule" },
+    s.command ? row("command", s.command) : null,
+    s.every ? row("every", s.every) : null,
+    Array.isArray(s.next) ? row("next runs", s.next.join(", ")) : null,
+    s.error ? row("will not save", s.error) : null,
+    Array.isArray(s.env) ? row("environment", s.env.join(", ") || "(empty)") : null,
+    Array.isArray(s.chain) ? row("reads the output of", s.chain.join(" ← ")) : null,
+    s.replaces ? row("replaces", s.replaces) : null,
+    s.runs ? el("p", { class: "card-risk" }, el("strong", {}, s.runs)) : null);
+}
+
 // P4-1 (ADR 0059 D5): a run dispatched from a tainted chat says so on its card.
 function taintChip(decision) {
   const bits = decision?.constraints?.chat_taint;
@@ -3047,7 +3111,11 @@ async function viewChat(main, chatId) {
     const args = renderArgs(d.args);
     if (args) details.push(args);
     return [
+      tierNote(card),
       el("p", { class: "card-headline mono" }, card.headline || d.tool),
+      foldItems(card),
+      scheduleNode(card),
+      manifestNode(card),
       card.purpose ? el("p", { class: "card-purpose" }, card.purpose) : null,
       card.risk
         ? el("p", { class: "card-risk" },

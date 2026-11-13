@@ -156,6 +156,14 @@ class Ticker(threading.Thread):
                 tool_name=card.tool,
                 content=json.dumps(payload, ensure_ascii=True),
             )
+            for item in card.fold_items()[1:]:  # P4-2: a folded card denies every item
+                self._store.add_chat_message(
+                    card.chat_id,
+                    role="tool",
+                    tool_name=card.tool,
+                    tool_call_id=item.get("tool_call_id"),
+                    content=json.dumps(payload, ensure_ascii=True),
+                )
             self._notify(
                 card.chat_id,
                 f"⏰ card auto-denied: {card.tool} — timed out after {timeout}s",

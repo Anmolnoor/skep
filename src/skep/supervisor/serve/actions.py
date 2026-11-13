@@ -4257,6 +4257,7 @@ def submit_run(
     team: str | None = None,
     deferred_asks: bool = False,
     chat_taint: Sequence[str] = (),
+    preanswered: dict[str, Any] | None = None,
 ) -> str:
     """Resolve the repo, fill policy defaults (A5), and dispatch in background.
 
@@ -4279,7 +4280,15 @@ def submit_run(
 
     ADR 0059 D5 (P4-1): ``chat_taint`` is the dispatching chat's taint bits;
     the dispatch decision records them (``constraints.chat_taint``) so every
-    run card shows them. The worker's own permissions do not change."""
+    run card shows them. The worker's own permissions do not change.
+
+    ADR 0059 D6 (P4-2): ``preanswered`` is the manifest a human approved on
+    the dispatch card (``dispatch_manifest`` at card time). Each deferred ask
+    it LISTED that this compile asks again is answered for this run only: it
+    moves into the run's own allowlist (the proxy admits it for this run and
+    no other), recorded as ``constraints.manifest_preanswered``. An ask the
+    card did not list stays an ask; nothing reaches a session, project or
+    global grant."""
     # v101-F10: F1 wrote a resolver that refuses an unknown caste by name, and
     # nothing called it — so an unknown caste reached the contract validator
     # deep in dispatch and surfaced as a 500 with no usable detail. Every
@@ -4402,6 +4411,13 @@ def submit_run(
             effective_dispatch_decision = replace(
                 effective_dispatch_decision, constraints=constraints
             )
+        permissions, answered = _preanswer(permissions, preanswered)
+        if answered:
+            constraints = {**(effective_dispatch_decision.constraints or {})}
+            constraints["manifest_preanswered"] = answered
+            effective_dispatch_decision = replace(
+                effective_dispatch_decision, constraints=constraints
+            )
         task_id = runner.submit(
             resolved,
             instructions,
@@ -4430,6 +4446,117 @@ def submit_run(
     if delegation is not None:
         record_delegation(holder.current.audit_dir, delegation, repo=str(resolved), task=task_id)
     return task_id
+
+
+def _preanswer(
+    permissions: Permissions, manifest: dict[str, Any] | None
+) -> tuple[Permissions, dict[str, Any]]:
+    """ADR 0059 D6 (P4-2): the deferred asks the approved manifest listed,
+    answered for this run — the intersection of what the card showed and
+    what this compile asks, nothing more."""
+    if not manifest:
+        return permissions, {}
+    shown_hosts = {str(h) for h in manifest.get("network_ask") or []}
+    shown_prefixes = [list(map(str, p)) for p in manifest.get("shell_ask") or []]
+    hosts = [h for h in permissions.network_ask if h in shown_hosts]
+    prefixes = [p for p in permissions.shell_ask if list(p) in shown_prefixes]
+    if not hosts and not prefixes:
+        return permissions, {}
+    updated = permissions.model_copy(
+        update={
+            "network": [*permissions.network, *(h for h in hosts if h not in permissions.network)],
+            "network_ask": [h for h in permissions.network_ask if h not in hosts],
+            "shell_allowlist": [*permissions.shell_allowlist, *prefixes],
+            "shell_ask": [p for p in permissions.shell_ask if p not in prefixes],
+        }
+    )
+    return updated, {"network": hosts, "shell": prefixes}
+
+
+def dispatch_manifest(
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    repo: str,
+    caste: str = "coding",
+    network: list[str] | None = None,
+    wall_clock_seconds: int | None = None,
+    max_iterations: int | None = None,
+    max_actions: int | None = None,
+    max_provider_calls: int | None = None,
+    execution_mode: str | None = None,
+    engine: str | None = None,
+    delegation_chain: Sequence[str] = (),
+    role: str | None = None,
+    deferred_asks: bool = False,
+    chat_taint: Sequence[str] = (),
+) -> dict[str, Any]:
+    """ADR 0059 D6 (P4-2): what a dispatch's run will get, compiled the way
+    ``submit_run`` compiles it but with no side effect (no git init, no run):
+    hosts, the provider hosts, the deferred asks, shell prefixes, write
+    roots, engine, mode, verify pin, the chain and the chat's taint. The
+    dispatch card shows it and records it; approving the card answers the
+    listed asks for that run (``submit_run(preanswered=)``). ``{"error"}``
+    when it cannot be compiled — the dispatch then fails the same way;
+    ``"refused": True`` when the policy refuses it outright."""
+    try:
+        resolve_caste(caste)
+        if is_git_url(repo):
+            raise ValueError("a Git URL dispatches only after register_repo")
+        resolved = resolve_repo_arg(repo, repos_root(holder), store)
+        binding = [("repo_slug", repo)] if (repos_root(holder) / repo / ".git").exists() else []
+        resolved_policy = resolve_run_policy(
+            store=store,
+            config=holder.current,
+            repo=resolved,
+            caste=caste,
+            network=network,
+            env_allowlist=None,
+            wall_clock_seconds=wall_clock_seconds,
+            max_iterations=max_iterations,
+            max_actions=max_actions,
+            max_provider_calls=max_provider_calls,
+            execution_mode=execution_mode,
+            binding_candidates=binding,
+            engine=engine,
+        )
+        permissions, _, _ = delegate_permissions(
+            holder,
+            store,
+            resolved,
+            resolved_policy.permissions,
+            role=role,
+            delegation_chain=delegation_chain,
+            deferred_asks=deferred_asks,
+        )
+    except PolicyResolutionError as exc:
+        # The policy itself refuses this dispatch (an execution_mode it
+        # requires, a tampered baseline, an untrusted root…): no git init or
+        # confirm changes that, so the card could never succeed — the chat
+        # answers it at proposal.
+        return {"error": str(exc), "refused": True}
+    except (HTTPException, ValueError, OSError) as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else exc
+        return {"error": str(detail)}
+    from ..provider_hosts import provider_hosts_for
+
+    return {
+        "repo": str(resolved),
+        "network": list(permissions.network),
+        "provider_hosts": provider_hosts_for(
+            store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
+        ),
+        "network_ask": list(permissions.network_ask),
+        "shell_ask": [list(p) for p in permissions.shell_ask],
+        "shell_allowlist": [list(p) for p in permissions.shell_allowlist],
+        "write": list(permissions.write),
+        "engine": resolved_policy.coding_engine,
+        "execution_mode": resolved_policy.execution_mode,
+        "verify_command": str(resolved_policy.policy.get("verify_command") or ""),
+        "chain": list(delegation_chain),
+        "role": role,
+        "taint": list(chat_taint),
+    }
 
 
 MAX_DELEGATION_DEPTH = 1  # ADR 0055 D4: lifted only once a harness proves deeper chains
@@ -5224,29 +5351,37 @@ def _taint_keep_refusal(tool: str, keep: str, taint: ChatTaint | None) -> str | 
     return None
 
 
+_HIGH_KEEP = "this is a HIGH card, so its approval holds once"
+
+
 def keep_refusal(
     tool: str,
     args: dict[str, Any],
     keep: str,
     taint: ChatTaint | None = None,
     store: RunStore | None = None,
+    *,
+    high: bool = False,
 ) -> str | None:
     """Why the server would refuse this keep on this card, or None (B32: a
     keep the tool cannot honour is refused up front, never a false
     "remembered"). ``once`` always holds. ``taint`` is the confirming chat's
     (P4-1): a tainted chat is offered fewer keeps. With ``store``, also a
     grant that store_grant would refuse for reaching into a deny — checked
-    BEFORE the card runs, not after it already ran."""
+    BEFORE the card runs, not after it already ran. P4-2 (ADR 0059 D6): a
+    ``high`` card holds once."""
     if keep == "once":
         return None
     if keep not in KEEP_TIERS:
         return "keep must be one of 'once', 'session', 'always'"
     found = _grant_subjects(tool, args)
     if isinstance(found, str):
-        return found
+        return _HIGH_KEEP if high else found
     refused = _taint_keep_refusal(tool, keep, taint)
     if refused is not None:
         return refused
+    if high:
+        return _HIGH_KEEP
     return None if store is None else _denied_grant(store, found)
 
 
@@ -5299,15 +5434,19 @@ def vet_keep(
     )
 
 
-def keep_options(tool: str, args: dict[str, Any], taint: ChatTaint | None = None) -> list[str]:
+def keep_options(
+    tool: str, args: dict[str, Any], taint: ChatTaint | None = None, *, high: bool = False
+) -> list[str]:
     """The keep choices a card offers — the card never offers what the
-    server refuses (``keep_refusal`` with the same taint)."""
-    return [keep for keep in KEEP_TIERS if keep_refusal(tool, args, keep, taint) is None]
+    server refuses (``keep_refusal`` with the same taint and tier)."""
+    return [keep for keep in KEEP_TIERS if keep_refusal(tool, args, keep, taint, high=high) is None]
 
 
-def default_keep(tool: str, args: dict[str, Any], taint: ChatTaint | None = None) -> str:
+def default_keep(
+    tool: str, args: dict[str, Any], taint: ChatTaint | None = None, *, high: bool = False
+) -> str:
     """The keep a confirm with none named stores: ``session`` where offered."""
-    return "session" if "session" in keep_options(tool, args, taint) else "once"
+    return "session" if "session" in keep_options(tool, args, taint, high=high) else "once"
 
 
 def keep_covers(tool: str, args: dict[str, Any]) -> str | None:

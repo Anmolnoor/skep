@@ -295,3 +295,55 @@ test("keepCovers: the card says what a keep would allow, and nothing when it all
   const line = app.keepCovers({ keep: ["once", "session", "always"], keep_covers: "a keep allows each of these on its own, exactly: `ls`; `make`" });
   assert.equal(line.textContent, "a keep allows each of these on its own, exactly: `ls`; `make`");
 });
+
+// ---------- P4-2: HIGH cards, folds, the dispatch manifest, the schedule card ----------
+
+test("tierNote: a HIGH card says so in words, not only by colour", () => {
+  const app = loadApp();
+  assert.equal(app.tierNote({ headline: "x" }), null);
+  assert.equal(app.tierNote(undefined), null);
+  const note = app.tierNote({ tier: "high", high: "it changes standing policy" });
+  assert.equal(note.textContent,
+    "HIGH risk: it changes standing policy. It holds once, and only the web UI or the CLI can confirm it.");
+});
+
+test("foldItems: a folded card lists every item; a plain card lists none", () => {
+  const app = loadApp();
+  assert.equal(app.foldItems({ headline: "x" }), null);
+  assert.equal(app.foldItems({ items: ["only one"] }), null);
+  const node = app.foldItems({ items: ["read_url — https://a.example/1", "read_url — https://a.example/2"] });
+  assert.deepEqual(node.querySelectorAll("li").map(li => li.textContent),
+    ["read_url — https://a.example/1", "read_url — https://a.example/2"]);
+  assert.equal(texts(node, "note")[0], "2 items, one approval covers exactly these:");
+});
+
+test("scheduleNode: a script schedule shows the server's facts and the sentence", () => {
+  const app = loadApp();
+  assert.equal(app.scheduleNode({ headline: "x" }), null);
+  const node = app.scheduleNode({ schedule: {
+    command: "df -h /", every: "1d", next: ["2026-11-12T10:00:00Z", "2026-11-13T10:00:00Z"],
+    env: ["HOME", "PATH"], chain: ["disk"], replaces: "your note schedule 'x'",
+    runs: "runs as you, on this host, unattended, until disabled" } });
+  const text = node.textContent;
+  for (const part of ["df -h /", "1d", "2026-11-13T10:00:00Z", "HOME, PATH", "disk",
+    "your note schedule 'x'", "runs as you, on this host, unattended, until disabled"]) {
+    assert.ok(text.includes(part), part);
+  }
+});
+
+test("manifestNode: the dispatch card lists what the run gets and the asks it approves", () => {
+  const app = loadApp();
+  assert.equal(app.manifestNode({ headline: "x" }), null);
+  assert.ok(app.manifestNode({ manifest: { error: "no such repo" } }).textContent.includes("no such repo"));
+  const node = app.manifestNode({ manifest: {
+    network: ["pypi.org"], provider_hosts: ["ollama.com:443"], shell_allowlist: [["uv", "sync"]],
+    write: ["workspace"], engine: "builtin", execution_mode: "sandbox", verify_command: "uv run pytest",
+    network_ask: ["files.pythonhosted.org"], shell_ask: [["npm", "ci"]], chain: ["queen@builder"],
+    taint: ["private"] } });
+  const text = node.textContent;
+  for (const part of ["pypi.org", "ollama.com:443", "uv sync", "workspace", "builtin · sandbox",
+    "uv run pytest", "files.pythonhosted.org, npm ci", "queen@builder", "private"]) {
+    assert.ok(text.includes(part), part);
+  }
+  assert.ok(!app.manifestNode({ manifest: { network: [] } }).textContent.includes("this run only"));
+});

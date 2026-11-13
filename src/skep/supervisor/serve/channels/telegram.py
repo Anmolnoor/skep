@@ -12,7 +12,8 @@ getUpdates/send in tests; no live Telegram.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
 from . import (
     ChannelConfig,
@@ -74,14 +75,20 @@ def poll_updates(
     return routed
 
 
-def confirmation_text(action_class: str, commands: Sequence[Sequence[str]], web_ui_url: str) -> str:
+def confirmation_text(
+    action_class: str,
+    commands: Sequence[Sequence[str]],
+    web_ui_url: str,
+    card: Mapping[str, Any] | None = None,
+) -> str:
     """The web-UI pointer text — the v16 default, and the fallback whenever the
     shared gate would not allow an inline verdict."""
-    card = render_confirm_card(action_class, commands)
-    lines = "\n".join(f"  {line}" for line in card.commands)
+    view = render_confirm_card(action_class, commands, card)
     body = f"Action '{action_class}' needs confirmation."
-    if lines:
-        body += f"\nCommands:\n{lines}"
+    if view.commands:
+        body += "\nCommands:\n" + "\n".join(f"  {line}" for line in view.commands)
+    if view.notes:  # P4-2: HIGH and why, the taint, folded items
+        body += "\n" + "\n".join(view.notes)
     return f"{body}\nOpen the skep web UI to review and confirm: {web_ui_url}"
 
 
@@ -90,17 +97,20 @@ def confirmation_card(
     commands: Sequence[Sequence[str]],
     config: ChannelConfig,
     web_ui_url: str,
+    card: Mapping[str, Any] | None = None,
 ) -> tuple[str, dict[str, object] | None]:
     """v41-F2: the confirm-card text and, only when the shared gate could allow
     an inline verdict, a Confirm/Deny inline keyboard. Web-UI-only action
     classes and channels without ``channel_can_confirm`` keep the v16 text."""
-    card = render_confirm_card(action_class, commands)
-    if card.web_ui_only or not config.channel_can_confirm:
-        return confirmation_text(action_class, commands, web_ui_url), None
-    lines = "\n".join(f"  {line}" for line in card.commands)
+    view = render_confirm_card(action_class, commands, card)
+    if view.web_ui_only or not config.channel_can_confirm:
+        return confirmation_text(action_class, commands, web_ui_url, card), None
+    lines = "\n".join(f"  {line}" for line in view.commands)
     body = f"Action '{action_class}' needs confirmation."
     if lines:
         body += f"\nCommands:\n{lines}"
+    if view.notes:
+        body += "\n" + "\n".join(view.notes)
     keyboard: dict[str, object] = {
         "inline_keyboard": [
             [

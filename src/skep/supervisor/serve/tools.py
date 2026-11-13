@@ -2624,6 +2624,35 @@ def _human_answers(store: RunStore, chat_id: str | None) -> bool:
     return channel is None or channel.channel_can_confirm
 
 
+def dispatch_manifest_for(
+    store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
+) -> dict[str, Any]:
+    """P4-2 (ADR 0059 D6): the manifest of a ``dispatch_run`` this chat
+    proposes — compiled exactly as the confirm will compile it."""
+    try:
+        return actions.dispatch_manifest(
+            holder,
+            store,
+            repo=str(args.get("repo") or ""),
+            caste=str(args.get("caste") or "coding"),
+            execution_mode=(
+                None if args.get("execution_mode") is None else str(args["execution_mode"])
+            ),
+            network=None if args.get("network") is None else [str(d) for d in args["network"]],
+            wall_clock_seconds=_optional_int(args, "wall_clock_seconds"),
+            max_iterations=_optional_int(args, "max_iterations"),
+            max_actions=_optional_int(args, "max_actions"),
+            max_provider_calls=_optional_int(args, "max_provider_calls"),
+            engine=None if args.get("engine") is None else str(args["engine"]),
+            delegation_chain=_queen_chain(store, holder, chat_id, "chat-user"),
+            role=None if args.get("role") is None else str(args["role"]),
+            deferred_asks=_human_answers(store, chat_id),
+            chat_taint=chat_taint_bits(store, chat_id),
+        )
+    except (ValueError, TypeError) as exc:  # malformed args: the confirm says so too
+        return {"error": f"bad arguments: {exc}"}
+
+
 def fetch_grant_decision(
     store: RunStore,
     holder: ConfigHolder,
@@ -3829,11 +3858,14 @@ def execute_mutation(
     actor: str,
     decision: AutonomyDecision | None = None,
     chat_id: str | None = None,
+    preanswered: dict[str, Any] | None = None,
 ) -> Any:
     """Run one confirmed mutation through the shared supervisor verbs.
 
     ``chat_id`` is the chat the mutation was confirmed in, when there is one —
     note schedules bind to it so their ticks deliver into that chat (v43-F6).
+    ``preanswered`` (P4-2): the manifest the operator approved on a
+    dispatch card — only ``chat.verdict_events`` passes it.
     """
     result = _execute_mutation(
         name,
@@ -3844,6 +3876,7 @@ def execute_mutation(
         actor=actor,
         decision=decision,
         chat_id=chat_id,
+        preanswered=preanswered,
     )
     if chat_id is not None:
         _bind_chat_project(store, holder, chat_id, name, args, result)
@@ -3860,6 +3893,7 @@ def _execute_mutation(
     actor: str,
     decision: AutonomyDecision | None = None,
     chat_id: str | None = None,
+    preanswered: dict[str, Any] | None = None,
 ) -> Any:
     if name == "search_web":
         # P4-1: a taint card the operator confirmed (chat.py cards search_web
@@ -4994,6 +5028,7 @@ def _execute_mutation(
             protocol=None if args.get("protocol") is None else str(args["protocol"]),
             engine=None if args.get("engine") is None else str(args["engine"]),
             chat_taint=chat_taint_bits(store, chat_id),
+            preanswered=preanswered,
         )
         # v40-F2 (v35): repo + caste ride the result so both the live SSE tool
         # event and the stored transcript row can render a human summary —

@@ -16,9 +16,10 @@ contract and — the security core — the confirmation gating:
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 CHANNELS: frozenset[str] = frozenset({"discord", "telegram", "slack"})
 
@@ -121,18 +122,143 @@ class ConfirmCard:
     action_class: str
     commands: tuple[str, ...]
     web_ui_only: bool
+    # P4-2 (ADR 0059 D6): plain lines from the server's card — a HIGH card's
+    # "needs the web UI" and why, the chat's taint, every folded item.
+    notes: tuple[str, ...] = ()
+    high: bool = False
 
 
-def render_confirm_card(action_class: str, commands: Sequence[Sequence[str]] = ()) -> ConfirmCard:
+# A messenger lists a folded card's items in full or not at all — Discord caps
+# a message at 25 fields of 1024 characters, Telegram at 4096 characters. A
+# fold past these limits is web-UI-only (and ``chat.verdict_events`` refuses
+# a channel confirm of it): no reaction may approve an item nobody could read.
+MESSENGER_FOLD_ITEMS = 15
+MESSENGER_FOLD_CHARS = 2500
+MESSENGER_ITEM_CHARS = 1000
+
+
+def fold_fits_a_messenger(items: Sequence[str]) -> bool:
+    """Can a messenger list every item of this fold, whole?"""
+    return (
+        len(items) <= MESSENGER_FOLD_ITEMS
+        and sum(len(item) for item in items) <= MESSENGER_FOLD_CHARS
+        and all(len(item) <= MESSENGER_ITEM_CHARS for item in items)
+    )
+
+
+def card_notes(card: Mapping[str, Any] | None, *, messenger: bool = True) -> tuple[str, ...]:
+    """The lines a messenger shows from the server's card (``card_summary``):
+    a HIGH card says it needs the web UI and why, then the taint line; a
+    folded card lists every item it would approve — on a messenger only when
+    it fits whole (``fold_fits_a_messenger``); the CLI (``messenger`` False)
+    always lists them."""
+    if not card:
+        return ()
+    notes: list[str] = []
+    if card.get("tier") == "high":
+        notes.append(
+            f"HIGH risk: {card.get('high') or 'see the web UI'}. No messenger can confirm "
+            "this: open the skep web UI or the CLI."
+        )
+    if card.get("taint"):
+        notes.append(str(card["taint"]))
+    manifest = card.get("manifest")
+    if isinstance(manifest, Mapping):  # P4-2: what the dispatched run gets
+        notes.extend(manifest_lines(manifest))
+    schedule = card.get("schedule")
+    if isinstance(schedule, Mapping):  # P4-2: what a script schedule really does
+        notes.extend(schedule_lines(schedule))
+    items = card.get("items")
+    if isinstance(items, list) and len(items) > 1:
+        lines = [str(item) for item in items]
+        if messenger and not fold_fits_a_messenger(lines):
+            notes.append(
+                f"{len(items)} items, too many or too long to list here: open the skep "
+                "web UI to read every one and confirm them there."
+            )
+        else:
+            notes.append(f"{len(items)} items, one approval covers exactly these:")
+            notes.extend(f"- {line}" for line in lines)
+    return tuple(notes)
+
+
+def _hosts(values: Any) -> str:
+    return ", ".join(str(v) for v in values) if values else "none"
+
+
+def manifest_lines(manifest: Mapping[str, Any]) -> list[str]:
+    """A dispatch card's manifest as plain lines (``actions.dispatch_manifest``).
+    A long shell list is counted, with the first few named."""
+    if manifest.get("error"):
+        return [f"the run's envelope could not be compiled: {manifest['error']}"]
+    prefixes = [" ".join(map(str, p)) for p in manifest.get("shell_allowlist") or []]
+    shown = ", ".join(prefixes[:8]) + (f" (+{len(prefixes) - 8} more)" if len(prefixes) > 8 else "")
+    lines = [
+        f"hosts: {_hosts(manifest.get('network'))}",
+        f"model provider: {_hosts(manifest.get('provider_hosts'))}",
+        f"commands it may run: {shown or 'none'}",
+        f"may write: {_hosts(manifest.get('write'))}",
+        f"engine: {manifest.get('engine')} · mode: {manifest.get('execution_mode')}"
+        f" · verify: {manifest.get('verify_command') or 'the worker picks'}",
+    ]
+    asks = [
+        *(manifest.get("network_ask") or []),
+        *(" ".join(map(str, p)) for p in manifest.get("shell_ask") or []),
+    ]
+    if asks:
+        lines.append(
+            "approving this also approves, for this run only: " + ", ".join(map(str, asks))
+        )
+    if manifest.get("chain"):
+        lines.append("delegated by: " + " -> ".join(map(str, manifest["chain"])))
+    if manifest.get("taint"):
+        lines.append("from a chat that has: " + " + ".join(map(str, manifest["taint"])))
+    return lines
+
+
+def schedule_lines(facts: Mapping[str, Any]) -> list[str]:
+    """The schedule card's facts as plain lines (``cards.schedule_facts``)."""
+    lines: list[str] = []
+    if facts.get("command"):
+        lines.append(f"command: {facts['command']}")
+    if facts.get("every"):
+        lines.append(f"every: {facts['every']}")
+    if facts.get("next"):
+        lines.append("next runs: " + ", ".join(str(t) for t in facts["next"]))
+    if facts.get("error"):
+        lines.append(f"will not save: {facts['error']}")
+    if "env" in facts:
+        lines.append("environment: " + (", ".join(facts["env"]) or "(empty)"))
+    if facts.get("chain"):
+        lines.append("reads the output of: " + " <- ".join(str(c) for c in facts["chain"]))
+    if facts.get("replaces"):
+        lines.append(f"replaces {facts['replaces']}")
+    if facts.get("runs"):
+        lines.append(str(facts["runs"]))
+    return lines
+
+
+def render_confirm_card(
+    action_class: str,
+    commands: Sequence[Sequence[str]] = (),
+    card: Mapping[str, Any] | None = None,
+) -> ConfirmCard:
     """A platform-neutral confirm-card view. Renders the v19-F1 multi-command
-    payload as a LIST of command strings (never a single joined string)."""
+    payload as a LIST of command strings (never a single joined string).
+    P4-2: a HIGH ``card`` is web-UI-only whatever its class (the server
+    refuses a channel confirm of it too: ``chat.verdict_events``)."""
     from shlex import join as _join
 
     command_lines = tuple(_join([str(part) for part in command]) for command in commands)
+    high = bool(card) and card.get("tier") == "high"  # type: ignore[union-attr]
+    items = [str(item) for item in ((card or {}).get("items") or [])]
+    too_long = len(items) > 1 and not fold_fits_a_messenger(items)
     return ConfirmCard(
         action_class=action_class,
         commands=command_lines,
-        web_ui_only=action_class not in CHANNEL_CONFIRMABLE_ACTIONS,
+        web_ui_only=action_class not in CHANNEL_CONFIRMABLE_ACTIONS or high or too_long,
+        notes=card_notes(card),
+        high=high,
     )
 
 
