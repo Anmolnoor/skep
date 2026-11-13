@@ -402,6 +402,21 @@ def high_tier_decision(high: str, allowed: Any) -> Any:
     )
 
 
+def manifest_ask_decision(allowed: Any) -> Any:
+    """B147 residue: an auto-allowed dispatch whose chain turned a grant into
+    an ask cards with its manifest — only a confirmed card pre-answers those
+    asks, and a subprocess (``uv sync`` through the proxy) cannot ask."""
+    from ..autonomy import AutonomyDecision
+
+    return AutonomyDecision(
+        verdict="require_approval",
+        reason="dispatch.require_approval.manifest_asks",
+        detail=f"{allowed.decided_by or allowed.reason} would allow this dispatch, but its "
+        "run would ask about what the card lists; approving answers them for that run",
+        decided_by=allowed.decided_by,
+    )
+
+
 def manifest_refusal(manifest: dict[str, Any]) -> Any:
     """P4-2: the refusal a dispatch gets when its manifest cannot compile
     because the policy refuses it — the model reads why and can correct it."""
@@ -1981,6 +1996,13 @@ class ChatEngine:
                     )
                     if high is not None and decision is not None and decision.allows_execution():
                         decision = high_tier_decision(high, decision)
+                    elif (
+                        manifest is not None
+                        and (manifest.get("network_ask") or manifest.get("shell_ask"))
+                        and decision is not None
+                        and decision.allows_execution()
+                    ):
+                        decision = manifest_ask_decision(decision)
                     # P4-2: a card this round already opened for the same
                     # subject takes this call as one more item (never a HIGH
                     # one, never unattended). Folds live for ONE round: the

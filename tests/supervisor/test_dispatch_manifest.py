@@ -297,3 +297,57 @@ def test_a_zero_state_home_lists_the_registry_and_the_desk_answer_opens_it_for_t
 
     assert admitted(approved)
     assert not admitted(second) and "pypi.org" in second.network_ask
+
+
+def _auto_dispatch(desk: Desk, network: list[str]) -> None:
+    project = desk.store.get_project_policy("app")
+    assert project is not None
+    desk.store.add_project_policy(
+        project_id="app",
+        name="app",
+        strategy=project.strategy,
+        phase=project.phase,
+        policy={
+            **project.policy,
+            "default_network": network,
+            "auto_dispatch_allowed": True,
+            "default_execution_mode": "sandbox",
+        },
+    )
+
+
+def test_an_auto_dispatch_whose_run_would_ask_cards_with_its_manifest(desk: Desk) -> None:
+    """B147 residue: a project that auto-dispatches let a role chat's
+    dispatch run unasked while its chain turned a grant into an ask. Nothing
+    pre-answered it, so a sandboxed `uv sync` met the proxy's 403 ("approve
+    it on the dispatch card") for a card that was never shown. Such a
+    dispatch now cards, listing the asks; one confirm answers them."""
+    _auto_dispatch(desk, ["pypi.org", "example.com"])
+    chat, card = desk.propose()
+    assert desk.runner.submitted == []  # not auto-run
+    assert card["card"]["manifest"]["network_ask"] == ["example.com"]
+    desk.confirm(chat, card["action_id"])
+    (submitted,) = desk.runner.submitted
+    assert "example.com" in submitted["permissions"].network
+    assert submitted["permissions"].network_ask == []
+
+
+def test_an_auto_dispatch_whose_run_asks_nothing_still_runs_unasked(desk: Desk) -> None:
+    _auto_dispatch(desk, ["pypi.org"])  # queen@builder allows pypi.org: nothing narrows
+    made = desk.store.create_chat(title="c", model=None, role="builder", source="web")
+    desk.ollama.script_tool_call(
+        "dispatch_run", {"repo": str(desk.repo), "instructions": "fix hello.py"}
+    )
+    desk.ollama.script_reply("dispatched")
+    desk.store.add_chat_message(made.chat_id, role="user", content="fix it")
+    base_url, api_key, model, protocol = desk.engine.resolved_llm(
+        desk.store.get_chat(made.chat_id)
+    )
+    events = list(
+        desk.engine.turn_events(
+            made.chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
+        )
+    )
+    assert cards(events) == []
+    (submitted,) = desk.runner.submitted
+    assert submitted["permissions"].network_ask == []
