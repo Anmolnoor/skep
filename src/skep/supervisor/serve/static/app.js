@@ -328,6 +328,17 @@ function manifestNode(card) {
     row("model provider", list(m.provider_hosts)),
     row("commands it may run", list(m.shell_allowlist)),
     row("may write", list(m.write)),
+    // W13: the other task grants; a key an older card did not record stays off
+    "read" in m ? row("may read", list(m.read)) : null,
+    "env_allowlist" in m ? row("environment", list(m.env_allowlist)) : null,
+    m.allow_git_mutation ? row("git", "may commit and branch in its own worktree") : null,
+    Array.isArray(m.allowed_plugin_risks) && m.allowed_plugin_risks.length
+      ? row("plugin risks allowed", list(m.allowed_plugin_risks)) : null,
+    "allowed_tools" in m
+      ? row("tools", m.allowed_tools === null ? "all its tools" : list(m.allowed_tools)) : null,
+    m.auto_apply_verified_patch
+      ? row("auto-apply", `a re-verified patch lands on ${m.auto_apply_branch || "a new skep/<task> branch"} without asking`)
+      : null,
     row("engine · mode", `${m.engine} · ${m.execution_mode}`),
     row("verify", m.verify_command || "the worker picks"),
     asks.length ? row("also approved, this run only", list(asks)) : null,

@@ -186,6 +186,27 @@ def _hosts(values: Any) -> str:
     return ", ".join(str(v) for v in values) if values else "none"
 
 
+def _grant_lines(manifest: Mapping[str, Any]) -> list[str]:
+    """W13: the task grants beyond hosts, commands and writes. A key a card
+    from before W13 did not record is left out, never guessed."""
+    lines: list[str] = []
+    if "read" in manifest:
+        lines.append(f"may read: {_hosts(manifest.get('read'))}")
+    if "env_allowlist" in manifest:
+        lines.append(f"environment: {_hosts(manifest.get('env_allowlist'))}")
+    if manifest.get("allow_git_mutation"):
+        lines.append("git: may commit and branch in its own worktree")
+    if manifest.get("allowed_plugin_risks"):
+        lines.append(f"plugin risks allowed: {_hosts(manifest['allowed_plugin_risks'])}")
+    if "allowed_tools" in manifest:
+        tools = manifest.get("allowed_tools")
+        lines.append(f"tools: {'all its tools' if tools is None else _hosts(tools)}")
+    if manifest.get("auto_apply_verified_patch"):
+        branch = manifest.get("auto_apply_branch") or "a new skep/<task> branch"
+        lines.append(f"auto-apply: a re-verified patch lands on {branch} without asking")
+    return lines
+
+
 def manifest_lines(manifest: Mapping[str, Any]) -> list[str]:
     """A dispatch card's manifest as plain lines (``actions.dispatch_manifest``).
     A long shell list is counted, with the first few named."""
@@ -198,6 +219,7 @@ def manifest_lines(manifest: Mapping[str, Any]) -> list[str]:
         f"model provider: {_hosts(manifest.get('provider_hosts'))}",
         f"commands it may run: {shown or 'none'}",
         f"may write: {_hosts(manifest.get('write'))}",
+        *_grant_lines(manifest),
         f"engine: {manifest.get('engine')} · mode: {manifest.get('execution_mode')}"
         f" · verify: {manifest.get('verify_command') or 'the worker picks'}",
     ]

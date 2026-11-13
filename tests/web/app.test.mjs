@@ -346,4 +346,15 @@ test("manifestNode: the dispatch card lists what the run gets and the asks it ap
     assert.ok(text.includes(part), part);
   }
   assert.ok(!app.manifestNode({ manifest: { network: [] } }).textContent.includes("this run only"));
+  // W13: the other task grants, shown when the server recorded them
+  const full = app.manifestNode({ manifest: {
+    network: [], read: ["/home/me/repo"], env_allowlist: ["CI"], allow_git_mutation: true,
+    allowed_plugin_risks: ["filesystem"], allowed_tools: null, auto_apply_verified_patch: true,
+    auto_apply_branch: "skep/maintain" } }).textContent;
+  for (const part of ["/home/me/repo", "CI", "may commit and branch", "filesystem",
+    "all its tools", "lands on skep/maintain without asking"]) {
+    assert.ok(full.includes(part), part);
+  }
+  const old = app.manifestNode({ manifest: { network: [] } }).textContent;
+  assert.ok(!old.includes("may read") && !old.includes("tools") && !old.includes("auto-apply"));
 });

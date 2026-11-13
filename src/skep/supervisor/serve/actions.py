@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
@@ -4423,17 +4423,11 @@ def submit_run(
                 "then call dispatch_run with the returned slug"
             ),
         )
-    delegation_inputs(holder, delegation_chain, role, team=team)  # refuse before the repo resolves
-    resolved = resolve_repo_arg(repo, repos_root(holder), store)
-    ensure_repo_baseline(resolved)
-    binding_candidates: list[tuple[str, str]] = []
-    if (repos_root(holder) / repo / ".git").exists():
-        binding_candidates.append(("repo_slug", repo))
     try:
-        resolved_policy = resolve_run_policy(
-            store=store,
-            config=holder.current,
-            repo=resolved,
+        compiled = compile_run(
+            holder,
+            store,
+            repo=repo,
             caste=caste,
             network=network,
             env_allowlist=env_allowlist,
@@ -4442,33 +4436,23 @@ def submit_run(
             max_actions=max_actions,
             max_provider_calls=max_provider_calls,
             execution_mode=execution_mode,
-            binding_candidates=binding_candidates,
             engine=engine,
+            role=role,
+            delegation_chain=delegation_chain,
+            team=team,
+            deferred_asks=deferred_asks,
+            init_baseline=True,
         )
     except PolicyResolutionError as exc:
         detail = str(exc)
         status = 400 if "must be 'workspace' or 'sandbox'" in detail else 409
         raise HTTPException(status_code=status, detail=detail) from exc
-    permissions, delegation, delegation_note = delegate_permissions(
-        holder,
-        store,
-        resolved,
-        resolved_policy.permissions,
-        role=role,
-        delegation_chain=delegation_chain,
-        team=team,
-        deferred_asks=deferred_asks,
-    )
+    resolved, resolved_policy = compiled.repo, compiled.policy
+    permissions, delegation = compiled.permissions, compiled.delegation
+    delegation_note = compiled.note
+    auto_apply_verified_patch = compiled.auto_apply_verified_patch
+    auto_apply_branch = compiled.auto_apply_branch
     try:
-        auto_apply_verified_patch = None
-        if "auto_apply_verified_patch" in resolved_policy.policy:
-            raw = resolved_policy.policy.get("auto_apply_verified_patch")
-            auto_apply_verified_patch = raw if isinstance(raw, bool) else None
-        # v30: a project's maintain-phase integration branch (skep/maintain) —
-        # auto-applied patches accumulate there instead of a fresh per-task
-        # branch. main never advances; the human merges when they choose.
-        raw_branch = resolved_policy.policy.get("auto_apply_branch")
-        auto_apply_branch = raw_branch if isinstance(raw_branch, str) else None
         effective_dispatch_decision = dispatch_decision
         if effective_dispatch_decision is None:
             default_dispatch_decision = run_request_resolved_decision()
@@ -4604,31 +4588,23 @@ def dispatch_manifest(
         resolve_caste(caste)
         if is_git_url(repo):
             raise ValueError("a Git URL dispatches only after register_repo")
-        resolved = resolve_repo_arg(repo, repos_root(holder), store)
-        binding = [("repo_slug", repo)] if (repos_root(holder) / repo / ".git").exists() else []
-        resolved_policy = resolve_run_policy(
-            store=store,
-            config=holder.current,
-            repo=resolved,
+        compiled = compile_run(
+            holder,
+            store,
+            repo=repo,
             caste=caste,
             network=network,
-            env_allowlist=None,
+            env_allowlist=None,  # dispatch_run passes none either
             wall_clock_seconds=wall_clock_seconds,
             max_iterations=max_iterations,
             max_actions=max_actions,
             max_provider_calls=max_provider_calls,
             execution_mode=execution_mode,
-            binding_candidates=binding,
             engine=engine,
-        )
-        permissions, _, _ = delegate_permissions(
-            holder,
-            store,
-            resolved,
-            resolved_policy.permissions,
             role=role,
             delegation_chain=delegation_chain,
             deferred_asks=deferred_asks,
+            init_baseline=False,
         )
     except PolicyResolutionError as exc:
         # The policy itself refuses this dispatch (an execution_mode it
@@ -4641,8 +4617,9 @@ def dispatch_manifest(
         return {"error": str(detail)}
     from ..provider_hosts import provider_hosts_for
 
+    permissions, resolved_policy = compiled.permissions, compiled.policy
     return {
-        "repo": str(resolved),
+        "repo": str(compiled.repo),
         "network": list(permissions.network),
         "provider_hosts": provider_hosts_for(
             store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
@@ -4651,6 +4628,16 @@ def dispatch_manifest(
         "shell_ask": [list(p) for p in permissions.shell_ask],
         "shell_allowlist": [list(p) for p in permissions.shell_allowlist],
         "write": list(permissions.write),
+        # W13: every other grant the task really gets
+        "read": list(permissions.read),
+        "env_allowlist": list(permissions.env_allowlist),
+        "allow_git_mutation": permissions.allow_git_mutation,
+        "allowed_plugin_risks": list(permissions.allowed_plugin_risks),
+        "allowed_tools": (
+            None if permissions.allowed_tools is None else list(permissions.allowed_tools)
+        ),
+        "auto_apply_verified_patch": compiled.auto_apply_verified_patch,
+        "auto_apply_branch": compiled.auto_apply_branch,
         "engine": resolved_policy.coding_engine,
         "execution_mode": resolved_policy.execution_mode,
         "verify_command": str(resolved_policy.policy.get("verify_command") or ""),
@@ -4658,6 +4645,127 @@ def dispatch_manifest(
         "role": role,
         "taint": list(chat_taint),
     }
+
+
+@dataclass(frozen=True)
+class CompiledRun:
+    repo: Path
+    policy: ResolvedRunPolicy
+    permissions: Permissions
+    delegation: dict[str, Any] | None
+    note: str | None
+    auto_apply_verified_patch: bool | None
+    auto_apply_branch: str | None
+
+
+def compile_run(
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    repo: str,
+    caste: str,
+    network: list[str] | None,
+    env_allowlist: list[str] | None,
+    wall_clock_seconds: int | None,
+    max_iterations: int | None,
+    max_actions: int | None,
+    max_provider_calls: int | None,
+    execution_mode: str | None,
+    engine: str | None,
+    role: str | None,
+    delegation_chain: Sequence[str],
+    team: str | None = None,
+    deferred_asks: bool = False,
+    init_baseline: bool,
+) -> CompiledRun:
+    """W13: what a dispatch's run gets — ``submit_run`` and
+    ``dispatch_manifest`` both compile here, so the card cannot drift from
+    the run. ``init_baseline`` (submit only) git-inits the repo; the
+    manifest has no side effect. Raises ``PolicyResolutionError`` when the
+    policy refuses, ``HTTPException`` for a bad chain or repo."""
+    delegation_inputs(holder, delegation_chain, role, team=team)  # refuse before the repo resolves
+    resolved = resolve_repo_arg(repo, repos_root(holder), store)
+    if init_baseline:
+        ensure_repo_baseline(resolved)
+    binding_candidates: list[tuple[str, str]] = []
+    if (repos_root(holder) / repo / ".git").exists():
+        binding_candidates.append(("repo_slug", repo))
+    resolved_policy = resolve_run_policy(
+        store=store,
+        config=holder.current,
+        repo=resolved,
+        caste=caste,
+        network=network,
+        env_allowlist=env_allowlist,
+        wall_clock_seconds=wall_clock_seconds,
+        max_iterations=max_iterations,
+        max_actions=max_actions,
+        max_provider_calls=max_provider_calls,
+        execution_mode=execution_mode,
+        binding_candidates=binding_candidates,
+        engine=engine,
+    )
+    permissions, delegation, note = delegate_permissions(
+        holder,
+        store,
+        resolved,
+        resolved_policy.permissions,
+        role=role,
+        delegation_chain=delegation_chain,
+        team=team,
+        deferred_asks=deferred_asks,
+    )
+    raw = resolved_policy.policy.get("auto_apply_verified_patch")
+    # v30: a project's maintain-phase integration branch (skep/maintain) —
+    # auto-applied patches accumulate there instead of a fresh per-task
+    # branch. main never advances; the human merges when they choose.
+    raw_branch = resolved_policy.policy.get("auto_apply_branch")
+    return CompiledRun(
+        repo=resolved,
+        policy=resolved_policy,
+        permissions=permissions,
+        delegation=delegation,
+        note=note,
+        auto_apply_verified_patch=raw if isinstance(raw, bool) else None,
+        auto_apply_branch=raw_branch if isinstance(raw_branch, str) else None,
+    )
+
+
+# W13: how a fresh compile at confirm may differ from the manifest the card
+# showed. A set grows, a flag turns on, a scalar changes, allowed_tools
+# loses its list: the run would get more than the operator approved.
+_MANIFEST_SETS = (
+    "network", "provider_hosts", "shell_allowlist", "write", "read", "env_allowlist",
+    "allowed_plugin_risks",
+)  # fmt: skip
+_MANIFEST_FLAGS = ("allow_git_mutation", "auto_apply_verified_patch")
+_MANIFEST_EXACT = ("repo", "engine", "execution_mode", "verify_command", "auto_apply_branch")
+
+
+def manifest_widening(shown: dict[str, Any], fresh: dict[str, Any]) -> str | None:
+    """Which field of ``fresh`` gives the run more than ``shown`` did, as
+    words — or None. A key the shown card did not carry (a card from before
+    W13) is not compared; an uncompilable manifest compares nothing."""
+    if "error" in shown or "error" in fresh:
+        return None
+
+    def items(value: Any) -> set[str]:  # a shell prefix is a list: compare it as one line
+        return {shlex.join(v) if isinstance(v, list) else str(v) for v in value or []}
+
+    for key in _MANIFEST_SETS:
+        if key in shown and (added := items(fresh.get(key)) - items(shown[key])):
+            return f"{key} gained {', '.join(sorted(added))}"
+    for key in _MANIFEST_FLAGS:
+        if key in shown and fresh.get(key) is True and shown[key] is not True:
+            return f"{key} is now on"
+    for key in _MANIFEST_EXACT:
+        if key in shown and fresh.get(key) != shown[key]:
+            return f"{key} changed from {shown[key]!r} to {fresh.get(key)!r}"
+    if "allowed_tools" in shown and shown["allowed_tools"] is not None:
+        tools = fresh.get("allowed_tools")
+        if tools is None or set(tools) - set(shown["allowed_tools"]):
+            return "allowed_tools widened"
+    return None
 
 
 MAX_DELEGATION_DEPTH = 1  # ADR 0055 D4: lifted only once a harness proves deeper chains
