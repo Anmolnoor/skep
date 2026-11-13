@@ -728,3 +728,21 @@ def test_an_open_pr_card_names_the_push_url_git_push_uses(desk: Desk) -> None:
     )
     line = pr_push_target(desk.holder, desk.store, {"branch": "feat", "repo": str(desk.repo)})
     assert "(https://push.invalid/x.git)" in line and login not in line, line
+
+
+def test_an_open_pr_url_whose_port_does_not_parse_is_never_shown(desk: Desk) -> None:
+    """L30 follow-up: urlsplit's .port raised on a port that is not a number,
+    so proposing the open-PR card crashed the round. The login is cut from
+    the netloc as written (no port parse), and it never shows."""
+    import subprocess
+
+    from skep.supervisor.serve.actions import pr_push_target
+
+    login = "u" + ":" + "p" * 3
+    subprocess.run(
+        ["git", "-C", str(desk.repo), "remote", "add", "origin",
+         f"https://{login}@example.invalid:port/x.git"],
+        check=True,
+    )  # fmt: skip
+    line = pr_push_target(desk.holder, desk.store, {"branch": "feat", "repo": str(desk.repo)})
+    assert line.startswith("pushes feat to origin") and login not in line, line

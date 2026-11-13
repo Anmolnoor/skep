@@ -2944,11 +2944,11 @@ def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) 
     if probe.returncode != 0 or not url:
         return f"pushes {branch} to origin, but this repo has no origin remote: the push will fail"
     if "://" in url:  # a login in the URL never reaches a card
-        parts = urllib.parse.urlsplit(url)
-        host = parts.hostname or ""
-        url = urllib.parse.urlunsplit(
-            parts._replace(netloc=host + (f":{parts.port}" if parts.port else ""))
-        )
+        try:
+            parts = urllib.parse.urlsplit(url)
+        except ValueError:  # a URL git stores but Python cannot split: name no URL
+            return f"pushes {branch} to origin and opens a PR into {base}"
+        url = urllib.parse.urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2]))
     return f"pushes {branch} to origin ({url}) and opens a PR into {base}"
 
 
