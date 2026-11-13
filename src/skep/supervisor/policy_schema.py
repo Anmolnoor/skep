@@ -33,6 +33,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 from pydantic import BaseModel, Field, model_validator
 
 from .netproxy import domain_allowed
+from .secret_floor import path_spellings
 from .shell_prefixes import dangerous_prefix_reason, sh_command_list
 
 if TYPE_CHECKING:
@@ -336,8 +337,35 @@ def pattern_matches(scope: str, pattern: str, value: str, *, exact: bool = False
         if exact:
             return got == want
         return len(got) >= len(want) and got[: len(want)] == want
-    # coding / filesystem / mcp / email: glob over paths and tool names.
+    if scope == "filesystem":
+        return any(
+            fnmatch(path, glob)
+            for path in _path_spellings(value)
+            for glob in _rule_spellings(pattern)
+        )
+    # coding / mcp / email: glob over paths and tool names.
     return fnmatch(value, pattern)
+
+
+def _path_spellings(value: str) -> set[str]:
+    """W32 (B44): an absolute path as typed and resolved — ``/tmp/x`` and
+    ``/private/tmp/x`` on macOS — so a rule binds whichever one a face
+    passes (read_file resolves, REST / the CLI / the hook do not)."""
+    if not value.startswith("/"):
+        return {value}
+    return {value, *(str(p) for p in path_spellings(value))}
+
+
+def _rule_spellings(pattern: str) -> set[str]:
+    """W32: the pattern as written and with its literal prefix (the
+    components before the first glob) resolved, the glob tail kept."""
+    if not pattern.startswith("/"):
+        return {pattern}
+    parts = pattern.split("/")
+    cut = next((i for i, part in enumerate(parts) if any(c in part for c in "*?[")), len(parts))
+    literal, tail = "/".join(parts[:cut]) or "/", "/".join(parts[cut:])
+    real = str(path_spellings(literal)[1])
+    return {pattern, f"{real.rstrip('/')}/{tail}" if tail else real}
 
 
 def rule_matches(rule: ResolvedRule, scope: str, value: str, *, url: str | None = None) -> bool:
@@ -408,6 +436,8 @@ def _specificity(scope: str, pattern: str) -> tuple[int, int]:
     """Higher sorts more specific: exact beats glob; longer beats shorter."""
     if scope == "shell":
         return (0 if "*" in pattern else 1, len(_shell_tokens(pattern)))
+    if scope == "filesystem":  # W32: a longer spelling of one directory is not narrower
+        pattern = max(_rule_spellings(pattern), key=len)
     return (0 if any(ch in pattern for ch in "*?[") else 1, len(pattern))
 
 
