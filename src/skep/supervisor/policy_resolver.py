@@ -92,6 +92,8 @@ class ResolvedRunPolicy:
     # and the final resolved allowlist that landed in permissions.network.
     network_requested: list[str] | None = None
     network_resolved: list[str] | None = None
+    # L10: the hosts an explicit network took away from the project's own.
+    network_dropped: list[str] = field(default_factory=list)
     # v23-F1: which trusted root satisfied workspace trust for this repo
     # (an operator root, the project binding, or the managed repos dir); None
     # when nothing did — i.e. the shell allowlist resolved to [].
@@ -692,8 +694,11 @@ def resolve_run_policy(
     # every surface shows (I8); dispatch backs this with a hard refusal.
     if chosen_engine.external:
         resolved_execution_mode = "sandbox"
-    default_network = list(policy["default_network"])
-    chosen_network = list(default_network if network is None else network)
+    # L10: what the run gets with no explicit network — the project's default,
+    # its registries and remembered hosts. An explicit list REPLACES it (the
+    # documented override, frozen in the policy regression fixtures); the
+    # card names what that drops (``network_dropped``), never silently.
+    omitted_network = list(policy["default_network"])
     # v19-F2 → ADR 0059 D3 (V6a): a worker that cannot reach its LLM provider
     # cannot work at all, so every needs_provider caste gets the provider on
     # every creation path — as provider_hosts (host:port), NOT merged into
@@ -712,21 +717,20 @@ def resolve_run_policy(
         resolved_execution_mode == "sandbox" and per_domain_egress_enforceable()
     )
     if (
-        network is None
-        and chosen_network != ["*"]
+        omitted_network != ["*"]
         and registry_merge_enforced
         and project_context is not None
         and project_context.strategy == "trusted_local_dev"
     ):
-        seen = set(chosen_network)
+        seen = set(omitted_network)
         for host in TRUSTED_DEV_REGISTRY_HOSTS:
             if host not in seen:
-                chosen_network.append(host)
+                omitted_network.append(host)
                 seen.add(host)
-    if network is None and chosen_network != ["*"]:
+    if omitted_network != ["*"]:
         # W28: hosts a human remembered for this project (or repo) — a grant,
         # so a locked baseline's enforced default_network does not shadow it.
-        chosen_network.extend(
+        omitted_network.extend(
             worker_network_grants(
                 store,
                 config.home,
@@ -737,7 +741,11 @@ def resolve_run_policy(
     # v19-F11: sort + dedupe so equal inputs give a byte-equal task.json
     # allowlist regardless of creation path or merge order. ``["*"]`` is left
     # as-is (a single element sorts to itself anyway).
-    chosen_network = sorted(dict.fromkeys(chosen_network))
+    omitted_network = sorted(dict.fromkeys(omitted_network))
+    chosen_network = omitted_network if network is None else sorted(dict.fromkeys(network))
+    network_dropped = (
+        [] if "*" in chosen_network else [h for h in omitted_network if h not in chosen_network]
+    )
     # v40-F7 (v36-F3): compile the resolved knobs into ONE policy document and
     # read the legacy fields back out of it — Permissions is the compiled
     # artifact of resolved policy, which is why this needs no contract bump
@@ -800,6 +808,7 @@ def resolve_run_policy(
         project_context=project_context,
         network_requested=None if network is None else list(network),
         network_resolved=list(chosen_network),
+        network_dropped=network_dropped,
         trust_root=granting_root(repo, trusted_roots),
         document=document,
         resolved_scopes=resolved_scopes,

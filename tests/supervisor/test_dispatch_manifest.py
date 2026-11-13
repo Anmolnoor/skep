@@ -485,3 +485,27 @@ def test_a_research_card_lists_its_source_hosts_and_the_desk_confirm_answers_the
     assert submitted["dispatch_decision"].constraints["manifest_preanswered"]["network"] == [
         "example.com"
     ]
+
+
+def test_a_call_network_that_replaces_the_project_hosts_says_what_the_run_loses(
+    desk: Desk,
+) -> None:
+    """L10: a dispatch's ``network`` replaces the project's own hosts (the
+    documented override, pinned by the policy regression fixtures), and the
+    card showed only what was left. The manifest now names the hosts the run
+    loses, and the tool description says a list replaces the default."""
+    from skep.supervisor.serve.tools import TOOL_SPECS
+
+    omitted = dispatch_manifest_for(desk.store, desk.holder, {"repo": str(desk.repo)}, None)
+    assert "pypi.org" in omitted["network"] and omitted["network_dropped"] == []
+    named = dispatch_manifest_for(
+        desk.store, desk.holder, {"repo": str(desk.repo), "network": ["example.com"]}, None
+    )
+    assert "pypi.org" in named["network_dropped"] and "pypi.org" not in named["network"]
+    assert any(
+        line.startswith("loses the project's own hosts for this run: ") and "pypi.org" in line
+        for line in manifest_lines(named)
+    )
+    (spec,) = [s for s in TOOL_SPECS if s["function"]["name"] == "dispatch_run"]
+    described = spec["function"]["parameters"]["properties"]["network"]["description"]
+    assert "REPLACES" in described

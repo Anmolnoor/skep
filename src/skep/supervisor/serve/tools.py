@@ -1855,7 +1855,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "domain allowlist; omit for policy default; [] = only the worker's own LLM"
+                    "omit: project hosts; a list REPLACES them (registries too); []: own LLM"
                 ),
             },
             "wall_clock_seconds": {"type": "integer"},

@@ -4725,6 +4725,8 @@ def dispatch_manifest(
     return {
         "repo": str(compiled.repo),
         "network": list(permissions.network),
+        # L10: an explicit network replaces the project's hosts — say which
+        "network_dropped": list(resolved_policy.network_dropped),
         "provider_hosts": provider_hosts_for(
             store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
         ),
