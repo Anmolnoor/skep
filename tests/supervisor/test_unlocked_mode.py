@@ -603,3 +603,30 @@ def test_the_chat_face_sets_unlocked_through_the_same_write(
         assert saved["policy"]["unlocked"] is True
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("value", ["false", "true", 1])
+def test_the_chat_face_refuses_an_unlocked_that_is_not_a_boolean(
+    repo: Path, unlockable: SupervisorConfig, value: Any
+) -> None:
+    """``"false"`` is truthy: coerced, it turned the mode ON for a project
+    whose verify is already pinned, behind an ordinary card (the HIGH tier
+    reads ``is True``)."""
+    from skep.supervisor.serve.cards import high_tier
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import _execute_mutation
+
+    assert _setup(serve_client(unlockable), repo, {"verify_command": "true"}).status_code == 201
+    args = {"project_id": "unlockable", "name": "Unlockable", "strategy": "trusted_local_dev",
+            "repo_path": str(repo), "unlocked": value, "seed_default_schedules": False}  # fmt: skip
+    assert high_tier("setup_project", args) is None  # so it must never save as on
+    store = RunStore(unlockable.db_path)
+    try:
+        holder = ConfigHolder(unlockable, store)
+        with pytest.raises(Exception, match="unlocked must be a boolean"):
+            _execute_mutation("setup_project", args, store=store, holder=holder,
+                              runner=None, actor="chat-user")  # type: ignore[arg-type]  # fmt: skip
+        record = store.get_project_policy("unlockable")
+        assert record is not None and record.policy.get("unlocked") is not True
+    finally:
+        store.close()

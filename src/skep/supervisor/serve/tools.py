@@ -5256,7 +5256,8 @@ def _execute_mutation(
         if args.get("unlocked") is not None:
             # ES-F141: sugar like engine=; the preconditions are vetted where
             # every face's write lands (registry.unlocked_block_reason, I5).
-            overrides.setdefault("unlocked", bool(args["unlocked"]))
+            # Uncoerced: bool("false") is True, and the HIGH tier reads `is True`.
+            overrides.setdefault("unlocked", args["unlocked"])
         return setup_project_record(
             run_store=store,
             root=repos_root(holder),
