@@ -18,6 +18,7 @@ from pathlib import Path
 from skep.worker_contract import CodingWorkerTask
 
 from . import sandbox
+from .castes import CASTES
 from .config import SupervisorConfig
 from .worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
@@ -80,6 +81,18 @@ def build_worker_env(
         ]
         env["PATH"] = os.pathsep.join(kept)
     return env
+
+
+# B144: git inside a worker may use only its local ``file`` transport. The
+# git floor reads command lines, so a script's own ``subprocess.run(['git',
+# 'push'])`` slipped past it; this env reaches every git the worker tree
+# starts (engines, scripts, grandchildren via the capability passthrough) and
+# outranks ``-c protocol.*.allow``. https, ssh, git:// and ext:: all fail with
+# "transport not allowed"; worktree, commit, diff and local clones still work.
+# Supervisor-side pushes (open_pr, push) never run in this env.
+# ponytail: env, so a script that rebuilds its env from scratch drops it; the
+# sandbox's network policy is the wall, this closes the inherited-env path.
+WORKER_GIT_ENV = {"GIT_ALLOW_PROTOCOL": "file"}
 
 
 _LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1"
@@ -208,6 +221,11 @@ def spawn_worker(
             unix_socket_path=network_proxy_unix_path if proxy_port is not None else None,
             backend=backend,
             skep_home=config.home.parent,
+            # B125: only skep's own LLM-calling workers read the LLM key; an
+            # external engine (worker_argv) authenticates from its env, and an
+            # unregistered caste falls back to the coding worker.
+            worker_llm_key=worker_argv is None
+            and getattr(CASTES.get(task.worker_kind), "needs_provider", True),
         )
         argv = sandbox.wrap_command(argv, profile_path, backend=backend)
     env = build_worker_env(task.permissions.env_allowlist, baseline=config.env_baseline)
@@ -221,6 +239,7 @@ def spawn_worker(
         env.update(extra_env)
     if proxy_port is not None:
         env.update(_proxy_env(proxy_port, loopback_direct=not own_netns))
+    env.update(WORKER_GIT_ENV)  # last: nothing above may loosen it
     log_handle = log_path.open("ab")
     try:
         return subprocess.Popen(

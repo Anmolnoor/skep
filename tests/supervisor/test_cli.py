@@ -258,6 +258,79 @@ def test_run_status_review_approve_full_loop(
     assert f"already landed on skep/{task_id}" in captured.err
 
 
+def test_review_approve_never_lands_a_review_serve_is_already_applying(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B150: the CLI applied the patch without claiming the review, so while
+    serve was mid-landing it applied it again, then died in resolve_approval
+    ("already resolved as 'applying'"). It now takes the same claim."""
+    home = tmp_path / "home"
+    db = home / "supervisor" / "supervisor.sqlite3"
+    db.parent.mkdir(parents=True)
+    store = RunStore(db)
+    try:
+        task = mint_task(workspace=repo, instructions="land me")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "completed")
+        patch = tmp_path / "task.patch"
+        patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
+        store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+        review_id = store.enqueue_approval(task.task_id, action="apply_patch", reason="land")
+        assert store.claim_approval(review_id)  # serve is mid-landing
+    finally:
+        store.close()
+    applied: list[object] = []
+    monkeypatch.setattr(cli_cmds, "land_patch", lambda *a, **k: applied.append(a))
+
+    code = _run_cli(home, "review", task.task_id, "--approve", "--actor", "tester")
+
+    assert code == 2
+    assert "already being applied" in capsys.readouterr().err
+    assert applied == []
+    store = RunStore(db)
+    try:
+        [approval] = store.approvals_for(task.task_id)
+        assert approval.status == "applying"  # serve's landing still owns it
+    finally:
+        store.close()
+
+
+def test_review_approve_hands_the_review_back_when_git_blows_up(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    db = home / "supervisor" / "supervisor.sqlite3"
+    db.parent.mkdir(parents=True)
+    store = RunStore(db)
+    try:
+        task = mint_task(workspace=repo, instructions="land me")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "completed")
+        patch = tmp_path / "task.patch"
+        patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
+        store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+    finally:
+        store.close()
+
+    def boom(*_: object, **__: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli_cmds, "land_patch", boom)
+    with pytest.raises(OSError):
+        _run_cli(home, "review", task.task_id, "--approve", "--actor", "tester")
+    monkeypatch.setattr(cli_cmds, "land_patch", lambda *a, **k: "patch does not apply")
+    assert _run_cli(home, "review", task.task_id, "--approve", "--actor", "tester") == 2
+    store = RunStore(db)
+    try:
+        # The blow-up handed the review back; the clean failure denied it
+        # with its reason, as serve does (v81-F2) — no stray pending review.
+        [approval] = store.approvals_for(task.task_id)
+        assert approval.status == "denied"
+        assert approval.resolution_note == "apply failed: patch does not apply"
+    finally:
+        store.close()
+
+
 def test_review_approve_lands_on_named_branch(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

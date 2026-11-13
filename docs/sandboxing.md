@@ -38,10 +38,19 @@ This blocks writes outside the workspace/results boundary. Reads are open so
 the toolchain works, except the secret floor, which is hidden on every
 backend: `~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials
 ~/.docker/config.json ~/.kube ~/.secrets ~/.config/gcloud ~/.azure ~/.pypirc
-~/.vault-token ~/.terraform.d/credentials.tfrc.json ~/.config/op` and the skep
-home's `serve.env`, `supervisor/serve-token` and `supervisor/*-secret`.
-`llm-secret*` stays readable: the builtin worker authenticates to its model
-with it. So do `~/.npmrc` (npm install), `~/.claude/.credentials.json`,
+~/.vault-token ~/.terraform.d/credentials.tfrc.json ~/.config/op
+~/.cargo/credentials{,.toml} ~/.claude.json ~/.password-store`, the shell rc
+files (`~/.bashrc ~/.bash_profile ~/.profile ~/.zshrc ~/.zshenv ~/.zprofile`)
+and REPL histories (`~/.bash_history ~/.zsh_history ~/.python_history
+~/.node_repl_history ~/.psql_history ~/.mysql_history ~/.sqlite_history`),
+and the skep home's `serve.env`, `supervisor/serve-token`,
+`supervisor/*-secret`, `supervisor/llm-secret*`, `supervisor/audit/` (every
+run's audit trail) and `supervisor/chat-attachments/`. One carve-out: a
+worker whose caste calls the LLM (coding, document, reviewer) reads
+`llm-secret` and the active provider profile's `llm-secret-<id>`, its own
+model credential; external engines and every other sandboxed lane see no LLM
+key. `supervisor/supervisor.sqlite3` stays readable (that worker reads its
+provider settings from it). So do `~/.npmrc` (npm install), `~/.claude/.credentials.json`,
 `~/.codex/auth.json` and `~/Library/Keychains` (engine logins): the sandbox
 leaves them readable, while the policy floor still refuses every Queen and
 worker read tool on them (`sandbox.SANDBOX_READABLE_SECRETS`).
@@ -59,6 +68,14 @@ Skep models network access as a domain list:
 - empty list: deny all outbound network
 - `*`: allow all outbound network
 - concrete domains: allow only those domains, when the backend can enforce it
+
+Whatever the mode, every worker env carries `GIT_ALLOW_PROTOCOL=file`: git
+inside a worker (and every process it starts) uses only its local transport,
+so a push, fetch, clone or submodule update over https, ssh or git:// fails
+with "transport not allowed". That includes a package manager's git-sourced
+dependencies (`git+https://…` in uv/pip, `github:` in npm) unless they are
+already in the cache. A process that rewrites its own env can drop the variable; the
+network mode above is the wall.
 
 ### macOS
 

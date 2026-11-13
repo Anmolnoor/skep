@@ -45,6 +45,25 @@ HOME_SECRETS: tuple[str, ...] = (
     ".vault-token",
     ".terraform.d/credentials.tfrc.json",
     ".config/op",
+    # B125: what a sandboxed worker could still read after #64. Shell rc and
+    # history files routinely hold exported tokens and pasted secrets.
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".claude.json",
+    ".password-store",
+    ".bashrc",
+    ".bash_profile",
+    ".profile",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".bash_history",
+    ".zsh_history",
+    ".python_history",
+    ".node_repl_history",
+    ".psql_history",
+    ".mysql_history",
+    ".sqlite_history",
 )
 # skep's own secrets, by file name, anywhere under the skep (supervisor) home:
 # serve-token (auth.py), llm-secret / llm-secret-<id> (llm.py), and every

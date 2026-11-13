@@ -12,7 +12,7 @@ import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi import HTTPException
@@ -687,6 +687,121 @@ def test_a_late_approve_names_the_landing_that_won(
 
     assert late.value.detail == f"already landed on skep/{task_id}"
     assert dead.value.detail == f"approval {denied!r} already denied"
+
+
+# ---------- B142: one resume per mid-run gate ----------
+
+
+def _gated_run(rig: Rig, repo: Any) -> tuple[dict[str, Any], str]:
+    from skep.supervisor import mint_task
+    from skep.supervisor.serve.actions import require_run
+
+    config = rig.holder.current
+    task = mint_task(workspace=repo, instructions="gate me")
+    rig.store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+    rig.store.transition(task.task_id, "pending_approval")
+    envelope = config.audit_dir / task.task_id / "task.json"
+    envelope.parent.mkdir(parents=True)
+    envelope.write_text(task.model_dump_json(), encoding="utf-8")
+    review_id = rig.store.enqueue_approval(task.task_id, action="git.commit", reason="gate")
+    return require_run(rig.store, task.task_id), review_id
+
+
+class _HeldRunner:
+    def __init__(self, held: _HeldMutation) -> None:
+        self.held = held
+
+    def submit(self, *_: Any, **__: Any) -> str:
+        self.held("submit", {})
+        return f"resumed-{self.held.calls}"
+
+
+def _runner(held: _HeldMutation) -> Dispatcher:
+    return cast(Dispatcher, _HeldRunner(held))
+
+
+def test_two_gate_approvals_resume_the_run_once(rig: Rig, repo: Any) -> None:
+    """B142: approving a mid-run gate checked 'pending', dispatched the
+    resume, and only then resolved — two approves (web + Discord) each
+    dispatched a resume. The gate is now claimed first; the loser is told."""
+    from skep.supervisor.serve import actions
+
+    run, review_id = _gated_run(rig, repo)
+    held = _HeldMutation()
+    runner = _runner(held)
+
+    def approve() -> Any:
+        try:
+            return actions.resume_past_gate(
+                rig.store, rig.holder.current, runner, run, review_id, "operator"
+            )
+        finally:
+            held.release.set()  # the first to answer (the loser) frees the winner
+
+    outcomes = race(approve, approve)
+
+    assert held.calls == 1
+    assert sorted(type(o).__name__ for o in outcomes) == ["HTTPException", "str"]
+    [loser] = [o for o in outcomes if isinstance(o, HTTPException)]
+    assert loser.status_code == 409
+    assert "already being approved" in str(loser.detail)
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "approved"
+    # A late approve names the resume that won.
+    with pytest.raises(HTTPException) as late:
+        actions.resume_past_gate(rig.store, rig.holder.current, runner, run, review_id, "x")
+    assert late.value.status_code == 409
+    assert "resumed as resumed-1" in str(late.value.detail)
+
+
+def test_a_gate_left_claimed_by_a_crash_says_so_on_restart(
+    rig: Rig, repo: Any, config: SupervisorConfig
+) -> None:
+    _run, review_id = _gated_run(rig, repo)
+    assert rig.store.claim_approval(review_id)
+
+    with serve_client(config, start_ticker=False):
+        pass
+
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "denied"
+    assert "gate's resume" in (approval.resolution_note or "")
+
+
+def test_a_gate_whose_dispatch_fails_hands_the_approval_back(rig: Rig, repo: Any) -> None:
+    from skep.supervisor.serve import actions
+
+    run, review_id = _gated_run(rig, repo)
+    held = _HeldMutation(error=OSError("pool gone"))
+    held.release.set()
+
+    with pytest.raises(OSError):
+        actions.resume_past_gate(
+            rig.store, rig.holder.current, _runner(held), run, review_id, "operator"
+        )
+
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "pending"
+
+
+def test_a_gate_the_pool_refuses_hands_the_approval_back(rig: Rig, repo: Any) -> None:
+    """The pool's own refusal (DispatchError → 500) un-claims too: the gate
+    stays approvable instead of sitting 'applying' until a restart."""
+    from skep.supervisor.serve import actions
+    from skep.supervisor.serve.jobs import DispatchError
+
+    run, review_id = _gated_run(rig, repo)
+    held = _HeldMutation(error=DispatchError("pool full"))
+    held.release.set()
+
+    with pytest.raises(HTTPException) as refused:
+        actions.resume_past_gate(
+            rig.store, rig.holder.current, _runner(held), run, review_id, "operator"
+        )
+
+    assert refused.value.status_code == 500
+    approval = rig.store.get_approval(review_id)
+    assert approval is not None and approval.status == "pending"
 
 
 # ---------- ES-F5: gate-mirror cards ----------
