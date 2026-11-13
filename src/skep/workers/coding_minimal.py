@@ -1587,7 +1587,9 @@ def _execute_react(
                 workspace=workspace,
                 stream=stream,
                 out_path=out_path,
-                summary="react run failed.",
+                # L31: the cause, one line — never a bare "react run failed."
+                summary=f"react run failed: {type(exc).__name__}: "
+                + " ".join(str(exc).split())[:200],
                 details=str(exc),
                 usage=_tallied_usage(tokens, provider_calls),
             )
@@ -1698,7 +1700,7 @@ def _execute_react(
             workspace=workspace,
             stream=stream,
             out_path=out_path,
-            summary="react run failed.",
+            summary="react run failed: hollow trace, every action was a read.",
             details=(
                 "hollow trace: every action was a read — nothing was written, run, or verified"
             ),

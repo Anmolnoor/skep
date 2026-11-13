@@ -2944,6 +2944,35 @@ def test_react_hollow_trace_fails_honestly(
 
     assert outcome.record.state == "failed"
     assert "hollow trace" in (outcome.record.verification_details or "")
+    # L31: the summary states the cause, never a bare "react run failed."
+    assert (outcome.record.summary or "").startswith("react run failed: hollow trace")
+
+
+def test_react_invalid_replies_fail_naming_the_error(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L31: a run whose replies stayed invalid ended "react run failed." —
+    the cause sat only in the verify details. The summary now names it."""
+    config = build_config(tmp_path / "home", None)
+    server = FakeOpenAI(api_key="sk-fake").start()
+    try:
+        permissions = _repair_test_setup(config, server, monkeypatch)
+        for _ in range(4):  # the first reply and every repair round
+            server.script_reply(_react_reply({"neither": 1}))
+        outcome = run_task(
+            repo,
+            "Add the feature.",
+            config=config,
+            permissions=permissions,
+            planning_protocol="react",
+        )
+    finally:
+        server.stop()
+
+    assert outcome.record.state == "failed"
+    summary = outcome.record.summary or ""
+    assert summary.startswith("react run failed: LlmPlanError: "), summary
+    assert "\n" not in summary and len(summary) < 400
 
 
 def test_react_done_verify_runs_through_the_same_gate(
