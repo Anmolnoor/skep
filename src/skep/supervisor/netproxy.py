@@ -25,7 +25,6 @@ import hmac
 import http.client
 import ipaddress
 import socket
-import ssl
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
@@ -620,11 +619,15 @@ class _ProxyHandler(StreamRequestHandler):
             self._reply(403, "Forbidden: the provider relay token does not match this run")
             return
         body = self.rfile.read(content_length) if content_length else None
+        import httpx  # the worker's own HTTP library: same trust, same decoders
+
         host, port = upstream.hostname or "", upstream.port
         conn: http.client.HTTPConnection
         if upstream.scheme == "https":
+            # The direct client's own trust (httpx: certifi, or SSL_CERT_FILE /
+            # SSL_CERT_DIR), so a relayed call verifies exactly as a direct one.
             conn = http.client.HTTPSConnection(
-                host, port, timeout=_CONNECT_TIMEOUT, context=ssl.create_default_context()
+                host, port, timeout=_CONNECT_TIMEOUT, context=httpx.create_ssl_context()
             )
         else:
             conn = http.client.HTTPConnection(host, port, timeout=_CONNECT_TIMEOUT)
@@ -646,8 +649,6 @@ class _ProxyHandler(StreamRequestHandler):
         # the key: the reply is decoded with the worker's own HTTP library (so
         # any encoding the worker can ask for, the relay can read) and the key
         # is masked, byte for byte, in the status line, headers and body.
-        import httpx
-
         secret = relay.key.encode()
         coding = response.getheader("Content-Encoding") or "identity"
         decoded = httpx.Response(

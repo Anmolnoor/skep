@@ -683,3 +683,82 @@ def test_turning_the_relay_on_or_off_from_chat_is_a_high_card_that_flips_the_swi
         assert store.get_setting("provider_key_relay") is value
     finally:
         store.close()
+
+
+def _https_upstream(tmp_path: Path) -> tuple[Path, int, object]:
+    """A local HTTPS provider whose certificate chains to a CA made here and
+    now (the openssl CLI; nothing credential-shaped is committed)."""
+    import shutil
+    import ssl
+    import subprocess
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    if shutil.which("openssl") is None:
+        pytest.skip("no openssl CLI to mint a test CA")
+
+    def run(*argv: str) -> None:
+        subprocess.run(["openssl", *argv], cwd=tmp_path, check=True, capture_output=True)
+
+    try:
+        run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=t-ca",
+            "-keyout", "ca.key", "-out", "ca.pem")  # fmt: skip
+        run("req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=127.0.0.1",
+            "-keyout", "srv.key", "-out", "srv.csr")  # fmt: skip
+        (tmp_path / "ext").write_text("subjectAltName=IP:127.0.0.1\n")
+        run("x509", "-req", "-in", "srv.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
+            "-CAcreateserial", "-days", "1", "-extfile", "ext", "-out", "srv.pem")  # fmt: skip
+    except subprocess.CalledProcessError as exc:
+        pytest.skip(f"openssl could not mint a test CA: {exc.stderr!r}")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = b'{"data": []}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(tmp_path / "srv.pem", tmp_path / "srv.key")
+    server.socket = tls.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return tmp_path / "ca.pem", int(server.server_address[1]), server
+
+
+@pytest.mark.parametrize("trusted", [True, False], ids=["trusted", "untrusted"])
+def test_an_https_provider_is_verified_against_the_same_roots_as_a_direct_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trusted: bool
+) -> None:
+    """The direct client (httpx) trusts certifi's roots, or SSL_CERT_FILE /
+    SSL_CERT_DIR; the relay must trust exactly those, and nothing less."""
+    import certifi
+    import httpx
+
+    ca, port, server = _https_upstream(tmp_path)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    if trusted:
+        monkeypatch.setattr(certifi, "where", lambda: str(ca))
+    url = f"https://127.0.0.1:{port}"
+    key, token = _fake_key(), secrets.token_hex(16)
+    relay = ProviderRelay(upstream=url, token=token, key=key, protocol="openai-compat")
+    try:
+        direct_ok = True
+        try:
+            httpx.get(url + "/v1/models", headers={"Authorization": f"Bearer {key}"})
+        except httpx.ConnectError:
+            direct_ok = False
+        with FilteringProxy((), relay=relay) as proxy:
+            reply = _raw(
+                proxy.port,
+                f"GET /v1/models HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n".encode(),
+            )
+    finally:
+        server.shutdown()  # type: ignore[attr-defined]
+        server.server_close()  # type: ignore[attr-defined]
+    assert direct_ok is trusted
+    assert reply.startswith(b"HTTP/1.1 200 " if trusted else b"HTTP/1.1 502 "), reply
