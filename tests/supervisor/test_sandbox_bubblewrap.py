@@ -135,14 +135,16 @@ def test_linux_bubblewrap_enforces_a_domain_allowlist_via_the_shim(
 
     # The netns still has NO route out; the only pipe is the bound socket.
     assert "--unshare-net" in argv
-    assert _contains_arg_triple(argv, "--bind", "/tmp/skep-x/p.sock", sandbox.SANDBOX_PROXY_SOCKET)
+    # ES-F212 (ADR 0060): its private dir, read-only — a re-adopting serve's
+    # socket at the same path shows through; a file bind pinned the dead one.
+    assert _contains_arg_triple(argv, "--ro-bind", "/tmp/skep-x", sandbox.SANDBOX_PROXY_DIR)
     # The shim runs before the worker, presenting the proxy port on loopback.
     shim = [
         sys.executable,
         "-m",
         "skep.netshim",
         "--unix",
-        sandbox.SANDBOX_PROXY_SOCKET,
+        f"{sandbox.SANDBOX_PROXY_DIR}/p.sock",
         "--port",
         "54321",
     ]

@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS runs (
     updated_at TEXT NOT NULL,
     base_commit TEXT,
     worker_kind TEXT,
-    coding_engine TEXT
+    coding_engine TEXT,
+    supervisor_owner TEXT
 );
 CREATE TABLE IF NOT EXISTS run_transitions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1094,6 +1095,9 @@ class RunStore:
             # v101-F4: and which AGENT edited the repo — builtin or a CLI engine.
             # Resolved at dispatch (policy_resolver) and then discarded.
             self._conn.execute("ALTER TABLE runs ADD COLUMN coding_engine TEXT")
+        if "supervisor_owner" not in run_columns:
+            # ADR 0060: the W27 owner ({"pid", "started"}) supervising the run.
+            self._conn.execute("ALTER TABLE runs ADD COLUMN supervisor_owner TEXT")
         chat_message_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(chat_messages)")
         }
@@ -1278,6 +1282,27 @@ class RunStore:
             "INSERT INTO run_transitions (task_id, state, detail, created_at) VALUES (?, ?, ?, ?)",
             (task_id, state, detail, _now()),
         )
+
+    @_locked
+    def run_supervisor(self, task_id: str) -> str | None:
+        """ADR 0060: the W27 owner supervising this run, or None."""
+        row = self._conn.execute(
+            "SELECT supervisor_owner FROM runs WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
+
+    @_locked
+    def claim_run_supervisor(
+        self, task_id: str, *, expected: str | None, owner: str | None
+    ) -> bool:
+        """ADR 0060: compare-and-set the run's supervisor in ONE UPDATE, so of
+        two serves adopting one worker exactly one wins (across processes)."""
+        cursor = self._conn.execute(
+            "UPDATE runs SET supervisor_owner = ? WHERE task_id = ? AND supervisor_owner IS ?",
+            (owner, task_id, expected),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     @_locked
     def record_result(self, task_id: str, result: CodingWorkerResult) -> None:

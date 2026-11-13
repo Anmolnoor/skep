@@ -24,6 +24,7 @@ from typing import Literal
 from skep.worker_contract import CONTRACT_VERSION, Event, EventType, TaskState
 
 from .contracts_io import read_event_log
+from .store import owner_alive
 
 VerdictKind = Literal["worker_reported", "wall_clock", "heartbeat_lost", "worker_crashed"]
 
@@ -44,8 +45,34 @@ class MonitorVerdict:
         return None
 
 
-def kill_process_tree(process: subprocess.Popen[bytes]) -> None:
+class AdoptedWorker:
+    """ADR 0060: a worker a previous serve spawned. It is not our child, so
+    there is no waitpid: it is alive while the W27 owner pair holds (same pid,
+    same start time), and its exit code is unknowable — ``poll`` never has one
+    and the verdict carries None, as recovery's always did."""
+
+    returncode: int | None = None
+
+    def __init__(self, pid: int, started: str) -> None:
+        self.pid = pid
+        self._owner = json.dumps({"pid": pid, "started": started})
+
+    def poll(self) -> int | None:
+        return None
+
+    @property
+    def exited(self) -> bool:
+        return not owner_alive(self._owner)
+
+
+def kill_process_tree(process: subprocess.Popen[bytes] | AdoptedWorker) -> None:
     """SIGKILL the worker's whole session; never leave zombies (Q3)."""
+    if isinstance(process, AdoptedWorker):
+        kill_session(process.pid)  # init reaps a non-child; wait for that
+        deadline = time.monotonic() + 5.0
+        while not process.exited and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return
     try:
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
@@ -116,7 +143,7 @@ def append_event(path: Path, event: Event) -> None:
 
 
 def watch_worker(
-    process: subprocess.Popen[bytes],
+    process: subprocess.Popen[bytes] | AdoptedWorker,
     events_path: Path,
     *,
     task_id: str,
@@ -126,6 +153,7 @@ def watch_worker(
     heartbeat_seconds: float,
     poll_seconds: float = 0.05,
     startup_seconds: float = 120.0,
+    elapsed_seconds: float = 0.0,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> MonitorVerdict:
@@ -138,9 +166,13 @@ def watch_worker(
       a cold start is not a lost heartbeat)
     Either way the tree is killed, and a ``task.terminal`` is synthesized if the
     worker did not write one. Process exit without a terminal event → crash.
+
+    ADR 0060: an ``AdoptedWorker`` (spawned by a previous serve) is watched the
+    same way; ``elapsed_seconds`` is how long it already ran, so a restart
+    never extends its budget.
     """
     started = clock()
-    deadline = started + wall_clock_seconds + grace_seconds
+    deadline = started + wall_clock_seconds + grace_seconds - elapsed_seconds
     last_activity = started
     seen_bytes = 0
     breach: VerdictKind | None = None
@@ -154,7 +186,7 @@ def watch_worker(
         if size > seen_bytes:
             seen_bytes = size
             last_activity = clock()
-        if exit_code is not None:
+        if exit_code is not None or (isinstance(process, AdoptedWorker) and process.exited):
             break
         now = clock()
         if now > deadline:

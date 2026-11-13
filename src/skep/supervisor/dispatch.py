@@ -31,7 +31,9 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -66,7 +68,13 @@ from .contracts_io import (
     write_task_file,
 )
 from .ingest import IngestOutcome, ingest_run
-from .monitor import MonitorVerdict, kill_session, synthesize_terminal, watch_worker
+from .monitor import (
+    AdoptedWorker,
+    MonitorVerdict,
+    kill_session,
+    synthesize_terminal,
+    watch_worker,
+)
 from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
 from .provider_hosts import provider_hosts_for
@@ -75,7 +83,7 @@ from .reverify import reverify_run
 from .sandbox import NetworkPolicy, SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
 from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
-from .store import RunStore
+from .store import RunRecord, RunStore, owner_alive, process_owner
 from .worker_state import (
     prior_task_from_audit,
     resume_checkpoint_version,
@@ -709,6 +717,9 @@ def run_task(
             # inheriting a default that never ran (I8).
             coding_engine=engine.name if worker_kind == "coding" else None,
         )
+        # ADR 0060 §5: named with the row, not at spawn — a serve starting while
+        # this run is still being set up must see it is supervised.
+        run_store.claim_run_supervisor(task.task_id, expected=None, owner=process_owner())
         if on_run_created is not None:
             on_run_created(task.task_id)
 
@@ -872,7 +883,17 @@ def run_task(
                 reason="spawn_failed",
                 summary=f"Worker process could not be started: {exc}",
             )
-        run_store.transition(task.task_id, "running", f"pid {process.pid}")
+        # ADR 0060: pid AND start time (a pid alone is reused) and the proxy
+        # port a re-adopting serve must rebind.
+        owner = process_owner(process.pid)
+        running_detail = f"pid {process.pid}"
+        if owner is not None:
+            running_detail += f" started {json.loads(owner)['started']}"
+        if proxy is not None:
+            running_detail += f" proxy port {proxy.port}"
+        if proxy_unix_path is not None:
+            running_detail += f" proxy socket {proxy_unix_path}"
+        run_store.transition(task.task_id, "running", running_detail)
 
         verdict = watch_worker(
             process,
@@ -1069,21 +1090,36 @@ def dispatch_parallel(
             run_store.close()
 
 
+# ADR 0060: "pid N[ started <lstart>][ proxy port P][ proxy socket S]" — the
+# running transition.
+_WORKER_DETAIL = re.compile(
+    r"pid (\d+)(?: started (.+?))?(?: proxy port (\d+))?(?: proxy socket (.+))?"
+)
+
+
+def _recorded_worker(run_store: RunStore, task_id: str) -> re.Match[str] | None:
+    """The run's last ``running`` transition parsed (ADR 0060): pid, start
+    time (None on rows written before ES-F131) and proxy port."""
+    for state, detail, _ in reversed(run_store.transitions_for(task_id)):
+        match = _WORKER_DETAIL.fullmatch(detail or "") if state == "running" else None
+        if match is not None:
+            return match
+    return None
+
+
 def _live_worker_pid(run_store: RunStore, task_id: str) -> int | None:
     """The recorded worker pid when that process is still THIS run's worker.
 
     ES-F5 (B10): a pid outlives a reboot as a number only — it is ours when
     its command line still names this task (the worker argv carries the task
-    file path); a zombie's or a stranger's does not."""
-    pid = next(
-        (
-            int(detail.split()[1])
-            for state, detail, _ in reversed(run_store.transitions_for(task_id))
-            if state == "running" and detail and re.fullmatch(r"pid \d+", detail)
-        ),
-        None,
-    )
-    if pid is None:
+    file path); a zombie's or a stranger's does not. ADR 0060: when the start
+    time was recorded, the process must also have started then (W27's pair) —
+    a reused pid is a stranger even if its argv happens to match."""
+    worker = _recorded_worker(run_store, task_id)
+    if worker is None:
+        return None
+    pid, started = int(worker[1]), worker[2]
+    if started is not None and not owner_alive(json.dumps({"pid": pid, "started": started})):
         return None
     probe = subprocess.run(
         ["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True, check=False
@@ -1129,6 +1165,7 @@ def recover_interrupted_runs(
     config: SupervisorConfig,
     *,
     on_run_finished: Callable[[str], None] | None = None,
+    on_adopted_finished: Callable[[str], None] | None = None,
 ) -> list[str]:
     """Reap runs stranded by a supervisor death (v59-F10).
 
@@ -1138,18 +1175,41 @@ def recover_interrupted_runs(
     valid result envelope that nobody ingested. On startup: a run with a valid
     envelope takes the STANDARD ingest path (a late deposit is still a
     deposit, G10 re-verification included); anything else becomes an honest
-    ``worker_crashed`` with reason ``supervisor_restart``. Returns the task
-    ids it touched.
+    ``worker_crashed`` with reason ``supervisor_restart``. ADR 0060: a live,
+    verified worker is re-adopted instead and finishes on a daemon thread
+    (``on_adopted_finished`` — a live run's finish, chat turn included —
+    else ``on_run_finished`` fires from there); a run whose supervisor is
+    still alive is left alone. Returns the task ids it touched.
     """
     recovered: list[str] = []
+    me = process_owner()
     for record in run_store.runs_with_states(_INTERRUPTED_STATES):
         task_id = record.task_id
+        supervisor = run_store.run_supervisor(task_id)
+        if supervisor is not None and supervisor != me and owner_alive(supervisor):
+            continue  # ADR 0060 §5: a live serve or CLI still supervises it
+        if not run_store.claim_run_supervisor(task_id, expected=supervisor, owner=me):
+            continue  # §5: another serve starting with this one took it first
         # ES-F5 (B10, I1 I12): the detached worker may still be alive — with no
         # babysitter, no budget, and the proxy gone. Kill its whole session
         # BEFORE reading its evidence or touching its worktree: nothing may
-        # write there once recovery decides. (Re-adopting would need a monitor
-        # for a non-child; the kill is the smaller honest answer.)
+        # write there once recovery decides. ADR 0060 (D2): unless the worker is
+        # verifiably the one a serve started (pid + start time) — then this
+        # serve re-adopts it and supervises it to completion, kill switch
+        # (`readopt_workers`) permitting.
         live_pid = _live_worker_pid(run_store, task_id)
+        worker = _recorded_worker(run_store, task_id)
+        if (
+            live_pid is not None
+            and worker is not None
+            and worker[2]
+            and config.readopt_workers
+            and _adopt_worker(
+                run_store, config, record, worker, on_adopted_finished or on_run_finished
+            )
+        ):
+            recovered.append(task_id)
+            continue
         if live_pid is not None:
             kill_session(live_pid)
             deadline = time.monotonic() + 5.0
@@ -1202,72 +1262,178 @@ def recover_interrupted_runs(
                     reason="supervisor_restart",
                 ),
             )
-        repo = Path(record.repo)
-        outcome = ingest_run(
+        _finish_recovered(
+            run_store,
+            config,
+            record,
+            task,
+            verdict,
+            result if worker_reported else None,
+            result_path,
+            on_run_finished,
+        )
+        recovered.append(task_id)
+    return recovered
+
+
+def _finish_recovered(
+    run_store: RunStore,
+    config: SupervisorConfig,
+    record: RunRecord,
+    task: CodingWorkerTask,
+    verdict: MonitorVerdict,
+    result: CodingWorkerResult | None,
+    result_path: Path,
+    on_run_finished: Callable[[str], None] | None,
+) -> None:
+    """Ingest a recovered (or re-adopted, ADR 0060) run: the standard ingest,
+    worktree keep rules and G10 re-verification, then the finish notice."""
+    task_id = record.task_id
+    workspace = Path(record.workspace or task.workspace)
+    repo = Path(record.repo)
+    outcome = ingest_run(
+        store=run_store,
+        task=task,
+        verdict=verdict,
+        result=result,
+        workspace=workspace,
+        audit_dir=config.audit_dir,
+        result_path=result_path,
+        contract_range=config.contract_range,
+        # ADR 0060: as the live path — an adopted run lands as if never restarted.
+        delivery_root=config.home.parent / "workspace",
+    )
+    # v72-F8: the whole point of the salvaged checkpoint — a restart-
+    # crashed run keeps its worktree so resume_run continues in place.
+    keep_for_resume = outcome.record.state == TaskState.FAILED.value or (
+        outcome.record.state in _RESUMABLE_CRASH_STATES
+        and salvaged_checkpoint_version(config, task_id) >= 2
+    )
+    recovered_completed = outcome.record.state == TaskState.COMPLETED.value
+    if (
+        outcome.record.state != TaskState.PENDING_APPROVAL.value
+        and not keep_for_resume
+        and not recovered_completed
+    ):
+        remove_worktree(repo, workspace)
+    if recovered_completed:
+        # G10 unchanged: a late-ingested completed claim is re-verified in
+        # a clean worktree before anyone may trust it. Auto-apply rules are
+        # deliberately NOT replayed on recovery — landing stays human.
+        # v88-F4: the recovery path has no ResolvedRunPolicy in hand, so it
+        # re-resolves the project's pinned verify_command from the repo. A
+        # crash must not silently downgrade G10 to the worker's own claim.
+        from .policy_resolver import run_policy_for_repo
+
+        # Slug-bound projects keep their pin on recovery too (0bda59d
+        # closed this for the live path; same candidates here).
+        recovery_candidates = (
+            [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+        )
+        recovery_policy = run_policy_for_repo(
+            run_store, config, repo, binding_candidates=recovery_candidates
+        )
+        reverify_run(
             store=run_store,
-            task=task,
-            verdict=verdict,
-            result=result if worker_reported else None,
-            workspace=workspace,
-            audit_dir=config.audit_dir,
-            result_path=result_path,
-            contract_range=config.contract_range,
+            task_id=task_id,
+            worker_outcome=outcome.record.verification_outcome,
+            repo=repo,
+            ref=record.ref,
+            config=config,
+            changed_files=tuple(result.changed_files) if result is not None else None,
+            verify_command=str(recovery_policy.get("verify_command") or ""),
+            # D6 (I2): the project's loopback ports, as the worker had them.
+            loopback_ports=tuple(recovery_policy.get("loopback_ports") or ()),
+            timeout_seconds=float(task.budget.wall_clock_seconds),  # as the live path
         )
-        # v72-F8: the whole point of the salvaged checkpoint — a restart-
-        # crashed run keeps its worktree so resume_run continues in place.
-        keep_for_resume = outcome.record.state == TaskState.FAILED.value or (
-            outcome.record.state in _RESUMABLE_CRASH_STATES
-            and salvaged_checkpoint_version(config, task_id) >= 2
-        )
-        recovered_completed = outcome.record.state == TaskState.COMPLETED.value
+        # v107-F1: same post-reverify keep answer as the live path.
+        reverify_record = run_store.reverification_for(task_id)
         if (
-            outcome.record.state != TaskState.PENDING_APPROVAL.value
-            and not keep_for_resume
-            and not recovered_completed
+            reverify_record is None
+            or reverify_record.confirmed
+            or (reverify_record.outcome == "not_applicable")
         ):
             remove_worktree(repo, workspace)
-        if recovered_completed:
-            # G10 unchanged: a late-ingested completed claim is re-verified in
-            # a clean worktree before anyone may trust it. Auto-apply rules are
-            # deliberately NOT replayed on recovery — landing stays human.
-            # v88-F4: the recovery path has no ResolvedRunPolicy in hand, so it
-            # re-resolves the project's pinned verify_command from the repo. A
-            # crash must not silently downgrade G10 to the worker's own claim.
-            from .policy_resolver import run_policy_for_repo
+    if on_run_finished is not None:
+        on_run_finished(task_id)
 
-            # Slug-bound projects keep their pin on recovery too (0bda59d
-            # closed this for the live path; same candidates here).
-            recovery_candidates = (
-                [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+
+def _adopt_worker(
+    run_store: RunStore,
+    config: SupervisorConfig,
+    record: RunRecord,
+    worker: re.Match[str],
+    on_run_finished: Callable[[str], None] | None,
+) -> bool:
+    """ADR 0060 (D2): supervise a live worker a previous serve started, on a
+    daemon thread, to the same ingest a never-restarted serve would run.
+    False when it cannot be adopted honestly — recovery then kills it."""
+    task_id = record.task_id
+    pid, started, port, unix_path = int(worker[1]), worker[2], worker[3], worker[4]
+    task = _task_from_audit(config, task_id)
+    if task is None or not record.workspace:
+        return False
+    proxy: FilteringProxy | None = None
+    if port is not None:
+        # Its Seatbelt profile and env name this port: rebind it or kill it —
+        # whatever else holds the port is not skep's filter (I12). On Linux
+        # the sandbox reaches the proxy through its socket's directory: listen
+        # again at the same path, in place of the dead listener's socket.
+        try:
+            if unix_path is not None and Path(unix_path).is_socket():
+                Path(unix_path).unlink()
+            proxy = FilteringProxy(
+                effective_network_domains(task),
+                unix_socket_path=unix_path,
+                denied_loopback_ports=control_plane_ports(config.home),
+                asks=task.permissions.network_ask,
+                port=int(port),
+            ).start()
+        except OSError as exc:
+            run_store.transition(
+                task_id, record.state, f"supervisor restart: proxy port {port} not rebound: {exc}"
             )
-            recovery_policy = run_policy_for_repo(
-                run_store, config, repo, binding_candidates=recovery_candidates
+            return False
+    elapsed = (
+        time.time()
+        - datetime.strptime(started, "%a %b %d %H:%M:%S %Y").replace(tzinfo=UTC).timestamp()
+    )
+    run_store.transition(
+        task_id, record.state, f"supervisor restart: adopted live worker pid {pid} ({started})"
+    )
+
+    def supervise() -> None:
+        try:
+            try:
+                verdict = watch_worker(
+                    AdoptedWorker(pid, started),
+                    Path(record.workspace or "") / ".events" / f"{task_id}.ndjson",
+                    task_id=task_id,
+                    trace_id=task.trace_id,
+                    wall_clock_seconds=float(task.budget.wall_clock_seconds),
+                    grace_seconds=config.grace_seconds,
+                    heartbeat_seconds=config.heartbeat_seconds,
+                    # ponytail: liveness is a `ps` per poll; twice a second at most.
+                    poll_seconds=max(config.poll_seconds, 0.5),
+                    startup_seconds=config.startup_seconds,
+                    elapsed_seconds=elapsed,
+                )
+            finally:
+                if proxy is not None:
+                    proxy.stop()
+                if unix_path is not None:  # stop() unlinked the socket; its dir
+                    with suppress(OSError):
+                        Path(unix_path).parent.rmdir()
+            result_path = config.result_path(task_id)
+            result = _run_result(run_store, task_id, result_path)
+            _finish_recovered(
+                run_store, config, record, task, verdict, result, result_path, on_run_finished
             )
-            reverify_run(
-                store=run_store,
-                task_id=task_id,
-                worker_outcome=outcome.record.verification_outcome,
-                repo=repo,
-                ref=record.ref,
-                config=config,
-                changed_files=tuple(result.changed_files)
-                if worker_reported and result is not None
-                else None,
-                verify_command=str(recovery_policy.get("verify_command") or ""),
-                loopback_ports=tuple(recovery_policy.get("loopback_ports") or ()),
-            )
-            # v107-F1: same post-reverify keep answer as the live path.
-            reverify_record = run_store.reverification_for(task_id)
-            if (
-                reverify_record is None
-                or reverify_record.confirmed
-                or (reverify_record.outcome == "not_applicable")
-            ):
-                remove_worktree(repo, workspace)
-        recovered.append(task_id)
-        if on_run_finished is not None:
-            on_run_finished(task_id)
-    return recovered
+        except Exception:
+            logger.exception("supervising re-adopted run %s failed", task_id)
+
+    threading.Thread(target=supervise, name=f"skep-adopt-{task_id}", daemon=True).start()
+    return True
 
 
 def _task_from_audit(config: SupervisorConfig, task_id: str) -> CodingWorkerTask | None:

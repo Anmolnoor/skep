@@ -369,6 +369,8 @@ def create_app(
                 on_run_finished=lambda task_id: notify_run_terminal(
                     run_store, config.home, task_id, web_ui_url=web_ui_url
                 ),
+                # ADR 0060 (D2): an adopted run finishes as a live one does.
+                on_adopted_finished=runner.on_run_finished,
             )
         except Exception:
             logging.getLogger("skep.serve").exception("interrupted-run recovery failed")

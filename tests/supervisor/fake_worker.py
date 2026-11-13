@@ -34,6 +34,11 @@ task instructions:
             command that cannot fail, so re-running "the worker's verification"
             confirms a broken patch. Only a project-pinned verify_command
             (v88-F4) catches this one.
+
+A ``GATE`` token (with any mode) holds the worker after ``task.start``,
+heartbeating, until a ``gate`` file appears beside --out; it then records
+whether its proxy answers on its port (``proxy-probe.txt``) and goes on
+— the shape of a worker that outlives a serve restart (ADR 0060).
 """
 
 from __future__ import annotations
@@ -146,6 +151,27 @@ def main() -> int:
     if task.get("landing_decision") is not None:
         start_payload["landing_decision"] = task["landing_decision"]
     stream.emit("task.start", start_payload)
+
+    if "GATE" in instructions.split():
+        gate_deadline = time.monotonic() + 120  # never outlive a failed test long
+        while not (args.out.parent / "gate").exists() and time.monotonic() < gate_deadline:
+            stream.emit("heartbeat", {"phase": "gated"})
+            time.sleep(0.3)
+        proxy = os.environ.get("HTTP_PROXY", "")
+        proxy_probe = "no proxy"
+        if proxy:
+            import socket
+
+            # A reply, not just an accept: on Linux the netshim inside the
+            # sandbox accepts even when no proxy answers behind it.
+            try:
+                with socket.create_connection(("127.0.0.1", int(proxy.rsplit(":", 1)[1])), 5) as s:
+                    s.sendall(b"CONNECT probe.invalid:443 HTTP/1.1\r\n\r\n")
+                    reply = s.recv(16)
+                proxy_probe = "connected" if reply.startswith(b"HTTP/1.") else f"no reply {reply!r}"
+            except OSError as exc:
+                proxy_probe = f"refused: {exc}"
+        (args.out.parent / "proxy-probe.txt").write_text(proxy_probe)
 
     if mode == "crash":
         stream.emit("plan.created", {"steps": ["about to die"]})

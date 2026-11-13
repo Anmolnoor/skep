@@ -533,3 +533,16 @@ def test_malformed_targets_and_unresolvable_names_answer_not_crash(origin: int) 
         assert "400" in _raw(proxy.port, b"GET /relative HTTP/1.1\r\n\r\n")
     finally:
         proxy.stop()
+
+
+def test_a_proxy_rebinds_the_port_a_previous_serve_used() -> None:
+    """ES-F135 (ADR 0060 §3): an adopted worker's Seatbelt profile names its
+    proxy's port, so the re-adopting serve restarts the filter ON that port."""
+    first = FilteringProxy(["example.com"]).start()
+    port = first.port
+    first.stop()
+    second = FilteringProxy(["example.com"], port=port).start()
+    try:
+        assert second.port == port
+    finally:
+        second.stop()
