@@ -484,15 +484,17 @@ def onboard_check(supervisor_home: Path) -> dict[str, Any]:
     try:
         scopes = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
         backend = store.get_setting(SANDBOX_BACKEND)
-        hosts = configured_provider_hosts(store, home)
+        hosts = list(dict.fromkeys(configured_provider_hosts(store, home)))  # L2: once each
     finally:
         store.close()
     # O5: a fresh home seeds every scope, so anything less is a narrowed switch.
     missing = [scope for scope in SCOPES if scope not in scopes]
-    checks["engine v2"] = _check(
+    # L2: ADR 0059 has no v1/v2 engine split; the switch only picks the scopes
+    # a home with no approved baseline holds to "ask" (policy_layers.baseline_guard)
+    checks["policy scopes"] = _check(
         not missing,
         f"{len(scopes)}/{len(SCOPES)} scopes — the baseline governs these"
-        + (f"; not routed (engine v1): {', '.join(missing)}" if missing else ""),
+        + (f"; switched off (no baseline guard): {', '.join(missing)}" if missing else ""),
     )
 
     if backend not in SANDBOX_BACKENDS:

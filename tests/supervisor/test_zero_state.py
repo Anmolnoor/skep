@@ -194,15 +194,17 @@ def test_install_hint_names_the_baseline_or_sends_you_to_onboard(
 def test_onboard_check_wants_every_scope_routed(tmp_path: Path) -> None:
     home, _ = _demo_home(tmp_path, fresh=True)
     supervisor = build_config(home, None).home
-    assert onboard_check(supervisor)["checks"]["engine v2"]["status"] == "ready"
+    assert onboard_check(supervisor)["checks"]["policy scopes"]["status"] == "ready"
     store = RunStore(build_config(home, None).db_path)
     try:
         store.set_setting("policy_engine_v2_scopes", ["filesystem", "shell"])
     finally:
         store.close()
-    probe = onboard_check(supervisor)["checks"]["engine v2"]
+    probe = onboard_check(supervisor)["checks"]["policy scopes"]
     assert probe["status"] == "blocked"
-    assert probe["detail"].endswith("not routed (engine v1): coding, network, mcp, email, browse")
+    assert probe["detail"].endswith(
+        "switched off (no baseline guard): coding, network, mcp, email, browse"
+    )
 
 
 # --- T1: the zero state's edges ---------------------------------------------------
