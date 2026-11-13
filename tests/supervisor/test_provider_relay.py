@@ -497,3 +497,92 @@ def test_a_truncated_relay_secret_is_replaced_never_used(tmp_path: Path) -> None
     assert stat.S_IMODE(os.stat(home / "relay-secret").st_mode) == 0o600
     assert relay_token(home, "task-1") == token
     assert [p.name for p in home.iterdir()] == ["relay-secret"]
+
+
+def _reflecting_upstream(*, gzip: bool = False) -> tuple[socket.socket, list[bytes]]:
+    """A provider that echoes the credential it received, in a header and in
+    its error body (the shape of a provider that reflects the auth header)."""
+    import gzip as gz
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    seen: list[bytes] = []
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                head = b""
+                while b"\r\n\r\n" not in head:
+                    head += conn.recv(65536)
+                seen.append(head)
+                auth = next(
+                    line.split(b":", 1)[1].strip()
+                    for line in head.split(b"\r\n")
+                    if line.lower().startswith(b"authorization:")
+                )
+                body = b'{"error": "bad credential: ' + auth + b'"}'
+                extra = b""
+                if gzip:
+                    body, extra = gz.compress(body), b"Content-Encoding: gzip\r\n"
+                conn.sendall(
+                    b"HTTP/1.1 401 Unauthorized\r\nX-Echo: "
+                    + auth
+                    + b"\r\n"
+                    + extra
+                    + b"Content-Length: "
+                    + str(len(body)).encode()
+                    + b"\r\n\r\n"
+                    + body
+                )
+
+    threading.Thread(target=serve, daemon=True).start()
+    return listener, seen
+
+
+@pytest.mark.parametrize("gzip", [False, True], ids=["identity", "gzip"])
+def test_a_reply_that_reflects_the_key_reaches_the_worker_with_the_key_masked(gzip: bool) -> None:
+    listener, seen = _reflecting_upstream(gzip=gzip)
+    key, token = _fake_key(), secrets.token_hex(16)
+    relay = ProviderRelay(
+        upstream=f"http://127.0.0.1:{listener.getsockname()[1]}",
+        token=token,
+        key=key,
+        protocol="openai-compat",
+    )
+    with FilteringProxy((), relay=relay) as proxy:
+        reply = _raw(
+            proxy.port,
+            f"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\n"
+            "Accept-Encoding: gzip, deflate\r\nContent-Length: 2\r\n\r\n{}".encode(),
+        )
+        import httpx
+
+        parsed = httpx.post(
+            f"http://127.0.0.1:{proxy.port}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {token}"},
+            content=b"{}",
+        )
+    listener.close()
+    assert f"Bearer {key}".encode() in seen[0]  # the provider did get the key ...
+    assert key.encode() not in reply  # ... and the worker never sees it back
+    assert reply.startswith(b"HTTP/1.1 401 ")
+    assert b"*" * len(key) in reply
+    assert parsed.json() == {"error": "bad credential: Bearer " + "*" * len(key)}
+    assert parsed.headers["x-echo"] == "Bearer " + "*" * len(key)
+
+
+def test_the_key_is_masked_across_chunk_boundaries_and_a_stream_is_not_held_back() -> None:
+    from skep.supervisor.netproxy import _masked
+
+    secret = _fake_key().encode()
+    stream = b"data: " + secret + b" and again " + secret + b"\n\n"
+    for cut in range(1, len(stream)):
+        out = list(_masked([stream[:cut], stream[cut:]], secret))
+        assert b"".join(out) == stream.replace(secret, b"*" * len(secret))
+    # A chunk whose tail cannot start the key goes out whole, at once.
+    assert list(_masked([b"data: first\n"], secret)) == [b"data: first\n"]

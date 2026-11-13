@@ -27,7 +27,7 @@ import ipaddress
 import socket
 import ssl
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from socketserver import StreamRequestHandler, ThreadingTCPServer, ThreadingUnixStreamServer
@@ -278,6 +278,28 @@ _HOP_BY_HOP = frozenset(
 )
 # Above the worker's own 300 s provider timeout: the worker gives up first.
 _RELAY_READ_TIMEOUT = 600.0
+
+
+def _mask(data: bytes, secret: bytes) -> bytes:
+    return data.replace(secret, b"*" * len(secret))
+
+
+def _masked(chunks: Iterable[bytes], secret: bytes) -> Iterator[bytes]:
+    """``chunks`` with every ``secret`` masked, across chunk boundaries. Holds
+    back only a tail that could start the secret, so a stream still reaches
+    the worker chunk by chunk. ponytail: exact bytes only; a provider that
+    echoes the key re-encoded (JSON-escaped, base64) is not caught."""
+    tail = b""
+    for chunk in chunks:
+        buf = _mask(tail + chunk, secret)
+        top = min(len(buf), len(secret) - 1)
+        hold = next((n for n in range(top, 0, -1) if secret.startswith(buf[-n:])), 0)
+        cut = len(buf) - hold
+        if cut:
+            yield buf[:cut]
+        tail = buf[cut:]
+    if tail:
+        yield tail
 
 
 @dataclass(frozen=True)
@@ -617,17 +639,36 @@ class _ProxyHandler(StreamRequestHandler):
             self._reply(502, "Bad Gateway: the provider relay could not reach the provider")
             return
         self.server.note_relay(relayed=True)
+        # A provider that reflects the auth header must not hand the worker
+        # the key: the reply is decoded with the worker's own HTTP library (so
+        # any encoding the worker can ask for, the relay can read) and the key
+        # is masked, byte for byte, in the status line, headers and body.
+        import httpx
+
+        secret = relay.key.encode()
+        coding = response.getheader("Content-Encoding") or "identity"
+        decoded = httpx.Response(
+            response.status,
+            headers={"Content-Encoding": coding},
+            content=iter(lambda: response.read1(65536), b""),
+        )
         try:
-            self.wfile.write(f"HTTP/1.1 {response.status} {response.reason}\r\n".encode("latin-1"))
+            status = f"HTTP/1.1 {response.status} {response.reason}\r\n".encode("latin-1")
+            self.wfile.write(_mask(status, secret))
             for name_s, value in response.getheaders():
-                if name_s.lower().encode("latin-1") not in _HOP_BY_HOP:
-                    self.wfile.write(f"{name_s}: {value}\r\n".encode("latin-1"))
+                name_b = name_s.lower().encode("latin-1")
+                if name_b in _HOP_BY_HOP or (
+                    coding.strip().lower() != "identity"
+                    and name_b in (b"content-encoding", b"content-length")
+                ):
+                    continue
+                self.wfile.write(_mask(f"{name_s}: {value}\r\n".encode("latin-1"), secret))
             self.wfile.write(b"Connection: close\r\n\r\n")
             self.wfile.flush()
-            while chunk := response.read1(65536):
+            for chunk in _masked(decoded.iter_bytes(), secret):
                 self.wfile.write(chunk)
                 self.wfile.flush()
-        except (OSError, http.client.HTTPException):
+        except (OSError, http.client.HTTPException, httpx.HTTPError):
             pass
         finally:
             conn.close()
