@@ -392,8 +392,14 @@ def test_doctor_names_each_custom_role_with_no_template_acting_as_assistant(
         "— set policy_layer (builder, operator or assistant) in "
         f"{roles_dir(config.home)}/<name>.json"
     )
-    (roles_dir(config.home) / "broken.json").write_text("{")  # refuses by name elsewhere
-    assert not [a for a in build_status(tmp_path)["advisories"] if "no template" in a]
+    # A role file that does not load denies every chat's own tools — doctor
+    # names it instead (the template-less roles are not acting as anything).
+    (roles_dir(config.home) / "broken.json").write_text("{")
+    advisories = build_status(tmp_path)["advisories"]
+    assert not [a for a in advisories if "no template" in a]
+    (line,) = [a for a in advisories if "broken.json" in a]
+    assert line.startswith(f"role file {roles_dir(config.home) / 'broken.json'} does not load")
+    assert line.endswith("every chat's own tools refuse until it loads or is removed")
 
 
 @pytest.mark.parametrize("face", ["turn", "btw", "continuation", "unattended", "channel"])

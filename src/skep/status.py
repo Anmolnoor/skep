@@ -441,8 +441,8 @@ def _template_less_role_advisories(home: Path) -> list[str]:
     supervisor = home / "supervisor"
     try:
         roles = all_roles(supervisor)
-    except ValueError:
-        return []  # ponytail: a role file that does not load already refuses by name everywhere
+    except ValueError as exc:  # every chat's tool lane resolves roles through this load
+        return [f"{exc} — every chat's own tools refuse until it loads or is removed"]
     names = sorted(name for name, role in roles.items() if role.policy_layer is None)
     if not names:
         return []
