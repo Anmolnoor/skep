@@ -561,6 +561,9 @@ def _opaque(
         layer = hit.layer or "global"
         bound = Verdict(hit.verdict, layer, hit.rule_id, f"{layer}/{hit.rule_id}", unmatched.source)
         return max((bound, unmatched), key=lambda v: _VERDICT_RANK[v.verdict])
+    argvs = command_line_segments(value, exact=True)
+    if argvs is not None and not any(a and (a[0] == "eval" or "$" in a[0]) for a in argvs):
+        return unmatched  # every program it runs was read, and no deny named one
     policy = scopes.get(scope)
     denies = sorted(
         {

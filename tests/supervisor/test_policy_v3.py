@@ -936,6 +936,23 @@ def test_l13_an_unreadable_line_under_a_deny_asks_and_says_so(line: str, tmp_pat
 
 
 @pytest.mark.parametrize(
+    "line", ["sh -c 'ls'", "sh -c 'echo curl'", "bash -c 'grep curl notes.txt'", "echo $(date)"]
+)
+def test_l13_a_readable_line_under_a_deny_carries_no_cannot_read_warning(
+    line: str, tmp_path: Path
+) -> None:
+    """ES-F60 review: every `sh -c` line under any deny said "skep cannot read
+    which command this line runs" — but `sh -c 'ls'` is read (the floor
+    unwraps it) and runs no denied program. Only a line whose program is
+    really hidden (`$(…)` as the program, a variable, eval) says so."""
+    home, _repo = build_home(tmp_path, "legacy")
+    _lock(home, "builder", NO_CURL)
+    hit = _decide(home, scope="shell", action="run", value=line)
+    assert hit["verdict"] == "require_approval", hit
+    assert hit.get("note") is None, hit
+
+
+@pytest.mark.parametrize(
     "line",
     ["timeout 60 grep curl README.md", "time grep -r curl src", "nohup grep curl notes.txt",
      "xargs grep -l curl", "nice -n 5 echo curl", "grep curl README.md", "ls /usr/bin/curl"],
