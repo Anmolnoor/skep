@@ -1,6 +1,7 @@
 # ADR 0060 — serve re-adopts a live worker after a restart
 
-**Status:** accepted (edge sweep decision D2, round R4; ES-F130–ES-F136).
+**Status:** accepted (edge sweep decision D2, round R4; ES-F130–ES-F136;
+Linux bubblewrap ES-F210–ES-F212).
 **Related:** ADR 0006 (supervisor re-verification), ADR 0008 (suspend and
 resume), ADR 0011 (network proxy), ADR 0017 (the serve daemon). Invariants
 touched: I1, I2, I8, I12.
@@ -30,14 +31,41 @@ Linux), which reaps it when it exits.
   same start time, no signal handling of its own. A sandboxed worker
   survives serve's exit. Its only egress is `localhost:<proxy port>`, which
   is baked into its Seatbelt profile and its environment.
-- **Linux (bubblewrap).** bwrap runs with `--die-with-parent` (ES-F2, B50):
-  when serve dies the kernel SIGKILLs the whole sandbox. That flag is part
-  of the isolation set the tests pin, and this ADR does **not** remove it.
-  So on Linux a sandboxed worker dies with serve and is handled as before
-  (dead worker → crash path, checkpoint salvage). Workspace-mode runs (no
-  sandbox) survive on Linux as on macOS. Re-adopting bwrap workers needs a
-  Linux round of its own (drop the flag only when re-adoption is on, and
-  re-bridge the proxy's unix socket); it is out of scope here.
+- **Linux (bubblewrap).** bwrap keeps `--die-with-parent` (ES-F2, B50) in
+  every invocation; what changes is who its parent is (ES-F210–ES-F212).
+  Dropping the flag would be unsafe: bwrap runs the sandbox in a session of
+  its own (`--new-session`) under a pid namespace whose init is bwrap's
+  child, so `kill_session` on bwrap's group would kill only the outer bwrap
+  and leave the sandbox running, reparented to init, with nobody to reap or
+  bound it (measured on bwrap 0.13). With re-adoption on, the spawner starts
+  a **keeper** in bwrap's place: a `python -c` one-liner that runs bwrap as
+  its child, waits for it and exits with its status. The keeper is what
+  serve spawns (`start_new_session`), so its pid and start time are what the
+  run records and what a new serve verifies; pids inside the namespace are
+  never recorded. Serve's death no longer reaches bwrap. Killing the
+  keeper's session (a breach, `kill_session`) kills the keeper and bwrap
+  together, bwrap's death still takes the sandbox down, and if the keeper
+  alone dies bwrap dies with it — the keeper lives exactly as long as the
+  sandbox. The keeper also bounds a sandbox no serve comes back for: it
+  kills bwrap at the run's wall clock + grace + 60 s, a minute after the
+  monitor would have, so a live monitor always acts first. With
+  `--no-readopt` there is no keeper: bwrap is serve's child and dies with
+  it, as before this ADR.
+
+  The proxy bridge: bwrap used to bind the host proxy's socket *file* into
+  the sandbox, which pins the inode of a listener that dies with serve; a
+  re-adopting serve's proxy listens on a new inode at the same path. bwrap
+  now binds the socket's private directory (it holds only that socket)
+  read-only, and the shim connects through it on every connection, so it
+  reaches whichever proxy listens there now. The run records the socket
+  path; the new serve removes the stale socket file and listens on the same
+  path and the same port. The netns is untouched by a restart (the shim
+  inside keeps listening on the sandbox loopback), and the R5 socket masks
+  are unchanged.
+- **podman** never carried `--die-with-parent`: the container runs under
+  conmon, outside serve's process tree, and the podman client serve spawns
+  leads its own session, so a podman worker already outlives serve and is
+  adopted like a workspace-mode one. No test covers podman across a restart.
 
 ### 2. What serve records, and how it knows the worker is the same one
 
@@ -101,16 +129,21 @@ serves starting together, exactly one wins; the loser leaves the run alone.
 
 `skep serve --no-readopt` (or `SKEP_READOPT_WORKERS=0` in the environment
 or in `serve.env`) restores the old behaviour: a live worker is killed with
-its session and the run is recovered as before. The skip of runs whose
+its session and the run is recovered as before. On Linux it also drops the
+keeper (section 1), so a sandboxed worker dies with the serve that spawned
+it. The skip of runs whose
 supervisor is still alive (5) stays on either way: killing a live sibling's
 worker was never intended.
 
 ## Consequences
 
-- A serve restart on macOS no longer costs a plan run its work; on Linux a
-  sandboxed run still dies with serve (section 1).
+- A serve restart no longer costs a plan run its work, sandboxed or not, on
+  macOS and on Linux (section 1).
 - A pid is never trusted alone; a reused pid is left alone (I8, I12).
 - A worker runs without a filtering proxy between serve's death and the next
   serve's start; its egress is refused for that window, as before.
+- If no serve comes back, nothing enforces a macOS worker's budget; it runs
+  until it ends on its own. A Linux sandboxed worker is killed by its keeper
+  a minute past its wall clock + grace.
 - Rows written before this change carry no start time and are killed, as
   before. No migration rewrites them.
