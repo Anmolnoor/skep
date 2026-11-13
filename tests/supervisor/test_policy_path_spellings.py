@@ -152,6 +152,50 @@ def test_the_real_tmp_and_private_tmp_are_one_directory_to_a_rule(
         shutil.rmtree(made, ignore_errors=True)
 
 
+def _outside_file(tmp_path: Path) -> Path:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "notes.txt").write_text("CANARY-outside\n", encoding="utf-8")
+    return outside / "notes.txt"
+
+
+def test_an_allow_grants_only_the_file_a_link_really_opens(
+    store: RunStore, holder: ConfigHolder, tmp_path: Path
+) -> None:
+    """A link inside an allowed directory (or an operator root) pointing out
+    of it is the file outside: an allow judges only the resolved spelling, on
+    every face. Before, REST / the CLI / the hook and ACP write faces (which
+    pass the path as typed) allowed it while read_file asked."""
+    target = _outside_file(tmp_path)
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    (allowed / "out").symlink_to(target)
+    (allowed / "outdir").symlink_to(target.parent, target_is_directory=True)
+    _rules(store, allow=[f"{allowed}/**"])
+    for path in (f"{allowed}/out", f"{allowed}/outdir/notes.txt"):
+        for action in ("read", "write"):
+            assert _every_face(store, holder, action, path) == {"require_approval"}, (path, action)
+    (holder.current.home / "out-link.txt").symlink_to(target)  # the skep home is an operator root
+    got = _every_face(store, holder, "read", f"{holder.current.home}/out-link.txt")
+    assert got == {"require_approval"}
+
+
+def test_a_path_typed_in_the_rules_other_spelling_is_still_resolved(
+    store: RunStore, holder: ConfigHolder, spellings: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The rule is written through the link (``/tmp/d/**``); a path typed in
+    the real spelling (``/private/tmp/d/escape``) that is itself a link out
+    matched the rule's resolved spelling as typed and was allowed."""
+    link, real = spellings
+    (real / "canary-dir" / "escape").symlink_to(_outside_file(tmp_path))
+    _rules(store, allow=[f"{link}/canary-dir/**"])
+    for root in (link, real):
+        for action in ("read", "write"):
+            got = _every_face(store, holder, action, f"{root}/canary-dir/escape")
+            assert got == {"require_approval"}, (root, action)
+        assert _every_face(store, holder, "read", f"{root}/canary-dir/a.txt") == {"allow"}, root
+
+
 def test_a_rule_spelled_through_a_long_link_does_not_outrank_a_narrower_deny(
     store: RunStore, holder: ConfigHolder, tmp_path: Path
 ) -> None:

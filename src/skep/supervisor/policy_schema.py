@@ -324,9 +324,12 @@ def backgrounds(value: str) -> bool:
         return False
 
 
-def pattern_matches(scope: str, pattern: str, value: str, *, exact: bool = False) -> bool:
+def pattern_matches(
+    scope: str, pattern: str, value: str, *, exact: bool = False, grants: bool = False
+) -> bool:
     """Does ``pattern`` cover ``value`` under this scope's matcher?
-    ``exact`` (learned shell grants, ES-F4): the whole argv, not a prefix."""
+    ``exact`` (learned shell grants, ES-F4): the whole argv, not a prefix.
+    ``grants`` (an allow rule): a filesystem path counts only as resolved."""
     if pattern == "*":
         return True
     if scope == "network":
@@ -338,11 +341,11 @@ def pattern_matches(scope: str, pattern: str, value: str, *, exact: bool = False
             return got == want
         return len(got) >= len(want) and got[: len(want)] == want
     if scope == "filesystem":
-        return any(
-            fnmatch(path, glob)
-            for path in _path_spellings(value)
-            for glob in _rule_spellings(pattern)
-        )
+        # W32: a deny or ask binds either spelling of the path; an allow grants
+        # only the file a read or write really opens — a link inside an allowed
+        # directory pointing out of it is the file outside.
+        paths = {_real_path(value)} if grants else _path_spellings(value)
+        return any(fnmatch(path, glob) for path in paths for glob in _rule_spellings(pattern))
     # coding / mcp / email: glob over paths and tool names.
     return fnmatch(value, pattern)
 
@@ -354,6 +357,10 @@ def _path_spellings(value: str) -> set[str]:
     if not value.startswith("/"):
         return {value}
     return {value, *(str(p) for p in path_spellings(value))}
+
+
+def _real_path(value: str) -> str:
+    return str(path_spellings(value)[1]) if value.startswith("/") else value
 
 
 def _rule_spellings(pattern: str) -> set[str]:
@@ -379,7 +386,9 @@ def rule_matches(rule: ResolvedRule, scope: str, value: str, *, url: str | None 
     matches it."""
     if rule.matcher == "url_prefix":
         return url is not None and url_prefix_matches(rule.pattern, url)
-    return pattern_matches(scope, rule.pattern, value, exact=rule.exact)
+    return pattern_matches(
+        scope, rule.pattern, value, exact=rule.exact, grants=rule.verdict == "allow"
+    )
 
 
 def _url_parts(url: str) -> tuple[str, str, str, str] | None:
