@@ -58,6 +58,7 @@ from .apply import RefreshError, refresh_clone, repo_default_branch, resolve_com
 from .autonomy import AutonomyDecision, AutonomyVerdict
 from .config import SupervisorConfig
 from .contracts_io import (
+    DEFAULT_BUDGET,
     DEFAULT_PERMISSIONS,
     mint_task,
     read_event_log,
@@ -229,6 +230,43 @@ def _resume_workspace(
     if workspace.parent not in roots or not is_linked_worktree(repo, workspace):
         return None
     return workspace
+
+
+def _binding_candidates(config: SupervisorConfig, repo: Path) -> list[tuple[str, str]]:
+    # Managed clones are slug-bound (registry name == directory name), so
+    # the safety-net lookup must offer the slug too — path-only matching
+    # dropped the pin for every slug-bound project that reached run_task
+    # without an explicit verify_command (the authwapi acceptance hole).
+    return [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+
+
+def _project_policy(run_store: RunStore, config: SupervisorConfig, repo: Path) -> dict[str, Any]:
+    """The project policy run_task falls back to for knobs its caller did
+    not pass (the verify pin, the landing branch, the codex login opt-in)."""
+    from .policy_resolver import run_policy_for_repo
+
+    candidates = _binding_candidates(config, repo)
+    return run_policy_for_repo(run_store, config, repo, binding_candidates=candidates)
+
+
+def _codex_login_setup_command(run_store: RunStore, config: SupervisorConfig, repo: Path) -> str:
+    """ES-F123 follow-up (I9): the CLI line that opts this repo in and changes
+    nothing else — a re-setup needs the strategy again, and its default
+    ``--phase build`` would move a project in another phase."""
+    import shlex
+
+    from .policy_resolver import _match_project_for_repo
+
+    match = _match_project_for_repo(
+        run_store, repo, binding_candidates=_binding_candidates(config, repo)
+    )
+    where = (
+        "--strategy <strategy>"
+        if match is None
+        else f"--project-id {shlex.quote(match.project.project_id)} "
+        f"--strategy {match.project.strategy} --phase {match.project.phase}"
+    )
+    return f"skep project setup {shlex.quote(str(repo))} {where} --codex-chatgpt-login"
 
 
 def _toolchain_env(workspace: Path, engine: CodingEngine, cache_root: Path) -> dict[str, str]:
@@ -411,6 +449,8 @@ def run_task(
     # config.command_for so SKEP_WORKER_CMD / --worker-cmd (and the test fake
     # worker) keep working exactly as before.
     worker_argv = engine.argv if (worker_kind == "coding" and engine.external) else None
+    codex_auth: str | None = None  # ES-F122: set only when the plan login is used
+    run_login: Path | None = None
     if execution_mode == "sandbox" and config.sandbox:
         # ES-F1 (B47, I12): every sandbox-mode run, not only external engines
         # (v94-F4) — the builtin worker and run_code's script caste took the
@@ -454,23 +494,48 @@ def run_task(
                 "to another engine (`skep project setup --engine builtin`)"
             )
         if engine.auth_env and not any(os.environ.get(var) for var in engine.auth_env):
-            raise ValueError(
+            refusal = (
                 f"coding_engine {engine.name!r}: NO AUTH ENV — set one of "
                 f"{'/'.join(engine.auth_env)} in the environment the worker inherits "
                 "(the daemon reads <home>/serve.env at startup; `skep run` uses your "
                 "shell) — the line `skep doctor` prints for this engine"
             )
-    if not verify_command or auto_apply_branch is None:
-        from .policy_resolver import run_policy_for_repo
+            # ES-F122 (D20): a codex run on a project that opted in may use the
+            # operator's ChatGPT plan login instead — checked HERE, before any
+            # run record, against the run's whole budget (codex_login.py).
+            if engine.login_host is None:
+                raise ValueError(refusal)
+            from .codex_login import AUTH_SOURCE, POLICY_KEY, login_status
 
-        # Managed clones are slug-bound (registry name == directory name), so
-        # the safety-net lookup must offer the slug too — path-only matching
-        # dropped the pin for every slug-bound project that reached run_task
-        # without an explicit verify_command (the authwapi acceptance hole).
-        candidates = (
-            [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
-        )
-        project_policy = run_policy_for_repo(run_store, config, repo, binding_candidates=candidates)
+            if _project_policy(run_store, config, repo).get(POLICY_KEY) is not True:
+                if login_status().present:
+                    # ES-F123 (I9): name the other way in when it is right here.
+                    refusal += (
+                        " — or let this project's codex runs use your ChatGPT plan "
+                        f"login: `{_codex_login_setup_command(run_store, config, repo)}` "
+                        "(chat: setup_project codex_chatgpt_login=true)"
+                    )
+                raise ValueError(refusal)
+            login = login_status(min_seconds=(budget or DEFAULT_BUDGET).wall_clock_seconds)
+            if login.problem is not None:
+                raise ValueError(
+                    f"coding_engine {engine.name!r}: this project uses your ChatGPT plan "
+                    f"login, but {login.problem} (or set OPENAI_API_KEY instead)"
+                )
+            codex_auth = AUTH_SOURCE
+            permissions = permissions.model_copy(
+                update={
+                    "provider_hosts": provider_hosts_for(
+                        run_store,
+                        config.home.parent,
+                        caste=worker_kind,
+                        engine=engine.name,
+                        chatgpt_login=True,
+                    )
+                }
+            )
+    if not verify_command or auto_apply_branch is None:
+        project_policy = _project_policy(run_store, config, repo)
         if not verify_command:
             pinned = project_policy.get("verify_command")
             # A non-string overlay value is treated as unset; resolve_run_policy is
@@ -750,8 +815,31 @@ def run_task(
 
         cache_root = project_cache_root(run_store, config, repo)
         routed_env.update(_toolchain_env(workspace, engine, cache_root))
+        if codex_auth is not None:
+            # ES-F122 (D20): the run's own login copy — in its audit dir, which
+            # every other run's sandbox masks, linked from its CODEX_HOME and
+            # bound back for this run only; removed in the finally below
+            # however the run ends. The record names the source, never a
+            # value (I8).
+            from .codex_login import write_run_login
+            from .secret_floor import CODEX_RUN_LOGIN
+
+            try:
+                run_login = write_run_login(
+                    Path(routed_env["CODEX_HOME"]),
+                    audit_task_dir / CODEX_RUN_LOGIN,
+                    min_seconds=task.budget.wall_clock_seconds,
+                )
+            except (ValueError, OSError) as exc:
+                return finish_before_worker(reason="codex_login_unusable", summary=str(exc))
+            detail = json.loads(dispatched_detail) if dispatched_detail else {}
+            dispatched_detail = json.dumps({**detail, "codex_auth": codex_auth})
         run_store.transition(task.task_id, "dispatched", dispatched_detail)
         log_path = audit_task_dir / "worker.log"
+        if codex_auth is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"codex_auth={codex_auth}: the operator's ChatGPT plan login\n")
         # W31: the second carrier of GIT_ALLOW_PROTOCOL=file — git config only
         # task worktrees include, which an emptied env still meets; read-only
         # in the sandbox, editable in workspace mode (there is no wall).
@@ -772,6 +860,7 @@ def run_task(
                 # must outlive the worktree), so the wall needs a door for it.
                 extra_writable=(cache_root,),
                 write_denied=() if git_pin is None else (git_pin,),
+                unmasked=() if run_login is None else (run_login,),
             )
         except SandboxUnavailableError as exc:
             # ES-F1 backstop: the up-front check passed but the backend the
@@ -886,6 +975,8 @@ def run_task(
                 cleanup_orphans(repo, worktrees_root, keep=_keep_worktree_names(run_store))
         return outcome
     finally:
+        if run_login is not None:
+            run_login.unlink(missing_ok=True)
         _ACTIVE.discard(*active_names)
         if proxy is not None:
             proxy.stop()

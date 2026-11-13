@@ -218,6 +218,13 @@ def high_tier(
         # the overlay spells any knob (coding_engine, default_network, …) and
         # groups= is attach_policy_group: both write the project's policy
         return "it writes the project's policy (policy_overrides or groups)"
+    if tool == "setup_project" and safe.get("codex_chatgpt_login") not in (None, False):
+        # ES-F121 follow-up: the same policy write through its own sugar arg —
+        # every later codex run spends the operator's plan on chatgpt.com
+        return (
+            "it lets the project's codex runs use your ChatGPT plan login "
+            "(repo content goes to chatgpt.com)"
+        )
     if manifest is not None and any(
         "*" in (m.get("network") or []) for m in [manifest, *(manifest.get("members") or [])]
     ):  # D23: a batch is HIGH when any of its runs may reach any host

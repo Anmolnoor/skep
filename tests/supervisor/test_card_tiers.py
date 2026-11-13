@@ -70,6 +70,10 @@ HIGH_KINDS: list[tuple[str, str, dict[str, Any], str]] = [
       "policy_overrides": {"default_network": ["*"]}}, "none"),
     ("policy write", "setup_project",
      {"project_id": "p", "name": "p", "strategy": "trusted_local_dev", "groups": ["g"]}, "none"),
+    # ES-F121 follow-up: it spends the operator's plan and sends repo content to chatgpt.com
+    ("plan login", "setup_project",
+     {"project_id": "p", "name": "p", "strategy": "trusted_local_dev",
+      "codex_chatgpt_login": True}, "none"),
     ("network *", "dispatch_run", {"repo": "r", "instructions": "i", "network": ["*"]}, "none"),
     ("network *", "batch_dispatch",
      {"tasks": [{"repo": "r", "instructions": "i", "network": ["*"]}]}, "none"),
@@ -109,6 +113,8 @@ MEDIUM_KINDS: list[tuple[str, dict[str, Any], str]] = [
     ("forge_tool", {"name": "t", "purpose": "p"}, "none"),  # lands as a patch first
     ("setup_project", {"project_id": "p", "name": "p", "strategy": "trusted_local_dev",
                        "policy_overrides": {}, "groups": []}, "none"),
+    ("setup_project", {"project_id": "p", "name": "p", "strategy": "trusted_local_dev",
+                       "codex_chatgpt_login": False}, "none"),  # turning it off narrows
     ("workon", {"path": "/x"}, "none"),
     ("set_assistant_model", {"model": "m"}, "none"),  # same provider, another model
     ("set_assistant_model", {"model": "m", "scope": "chat"}, "none"),

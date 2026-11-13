@@ -2439,6 +2439,9 @@ def _project_policy_overrides(args: argparse.Namespace) -> dict[str, Any]:
     loopback_ports = getattr(args, "loopback_ports", None)
     if loopback_ports:  # D6: validated by validate_project_policy on the write
         overrides["loopback_ports"] = loopback_ports
+    if getattr(args, "codex_chatgpt_login", None) is not None:
+        # ES-F121 (D20); --no-... turns it back off (a re-setup keeps stored keys)
+        overrides["codex_chatgpt_login"] = args.codex_chatgpt_login
     return overrides
 
 
@@ -3695,6 +3698,15 @@ def register_supervisor_commands(
         help="a loopback port this project's sandboxed workers may reach (repeatable, "
         "D6); loopback is otherwise closed but for a local model provider's own port",
     )
+    project_preview.add_argument(
+        "--codex-chatgpt-login",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="let this project's codex runs use your ChatGPT plan login when no "
+        "OPENAI_API_KEY is set: an access-token-only copy per run, never the "
+        "refresh token (ES-F121; `skep doctor` shows the login); "
+        "--no-codex-chatgpt-login turns it off",
+    )
     project_preview.set_defaults(func=cmd_project_preview)
 
     project_setup = project_sub.add_parser("setup", help="save a project policy setup")
@@ -3748,6 +3760,15 @@ def register_supervisor_commands(
         help="a loopback port this project's sandboxed workers may reach (repeatable, "
         "D6; name every port, the list replaces the project's); loopback is otherwise "
         "closed but for a local model provider's own port",
+    )
+    project_setup.add_argument(
+        "--codex-chatgpt-login",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="let this project's codex runs use your ChatGPT plan login when no "
+        "OPENAI_API_KEY is set: an access-token-only copy per run, never the "
+        "refresh token (ES-F121; `skep doctor` shows the login); "
+        "--no-codex-chatgpt-login turns it off",
     )
     project_setup.set_defaults(func=cmd_project_setup)
 

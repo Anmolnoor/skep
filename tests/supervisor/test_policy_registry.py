@@ -79,6 +79,9 @@ def test_the_trust_ramp_is_enforced_at_project_and_never_groupable() -> None:
         # D6: which loopback ports a project's workers reach — a project fact,
         # not a trust step and never bundled into a group.
         "loopback_ports",
+        # ES-F121: whose login a codex run spends is a per-project choice,
+        # never bundled into a group, and not a landing/dispatch ramp step
+        "codex_chatgpt_login",
     }
     assert set(PROJECT_POLICY_KEYS) - set(GROUPABLE_POLICY_KEYS) - off_ramp_project_only == (
         TRUST_RAMP_KEYS

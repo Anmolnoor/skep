@@ -46,6 +46,9 @@ PROJECT_POLICY_KEYS = frozenset(
         # tasks — "builtin" (skep's own worker) or a CLI-agent adapter. An
         # external engine is confined by the SANDBOX, not the capability layer.
         "coding_engine",
+        # ES-F121 (D20): a codex run with no OPENAI_API_KEY may use the
+        # operator's ChatGPT plan login (codex_login.py). Off by default.
+        "codex_chatgpt_login",
         # v97-F2 (ADR 0048): names of attached policy groups, live-composed in
         # run_policy_for_repo (list keys union; project scalars beat groups).
         # Shape-validated here; known-name checks live at attach time and,
@@ -242,7 +245,12 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
             normalized["allowed_plugin_risks"],
             field="allowed_plugin_risks",
         )
-    for field in ("allow_git_mutation", "auto_apply_verified_patch", "auto_dispatch_allowed"):
+    for field in (
+        "allow_git_mutation",
+        "auto_apply_verified_patch",
+        "auto_dispatch_allowed",
+        "codex_chatgpt_login",
+    ):
         if field in normalized:
             normalized[field] = _require_bool(normalized[field], field=field)
     if normalized.get("auto_apply_branch") is not None:

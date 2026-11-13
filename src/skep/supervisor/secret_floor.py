@@ -89,7 +89,10 @@ HOME_DIRS: tuple[str, ...] = (
 # serve-token (auth.py), llm-secret / llm-secret-<id> (llm.py), and every
 # ``<name>-secret`` — channel, webhook (channels.channel_secret_path) and
 # mail (mcp_servers/mail.py). serve.env sits one level up, in the skep root.
-SKEP_SECRET_NAMES: tuple[str, ...] = ("serve-token", "llm-secret*", "*-secret")
+# ES-F122: a codex run's ChatGPT login copy (in its audit dir, dispatch.py) —
+# the worktree's CODEX_HOME/auth.json links to it, and its realpath is judged.
+CODEX_RUN_LOGIN = "codex-login.json"
+SKEP_SECRET_NAMES: tuple[str, ...] = ("serve-token", "llm-secret*", "*-secret", CODEX_RUN_LOGIN)
 SERVE_ENV = "serve.env"
 
 

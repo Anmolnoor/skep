@@ -59,7 +59,13 @@ logins — `~/Library/Keychains`, `~/.claude/.credentials.json`,
 `~/.codex/auth.json` — are masked like every other credential (W33): an
 external engine's config dir is redirected per run and it authenticates only
 from its auth env (`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`); a dispatch without one is refused (NO AUTH ENV).
+`OPENAI_API_KEY`); a dispatch without one is refused (NO AUTH ENV). One
+exception, opt-in per project: a codex run with no `OPENAI_API_KEY` may use
+the operator's ChatGPT plan login through an access-token-only, read-only
+copy that only that run's sandbox can read (it sits in the masked audit dir
+and is bound back for its own run) and that is deleted when it ends — the
+real `~/.codex/auth.json` stays masked and the refresh token never enters the
+sandbox ([`codex-chatgpt-login.md`](codex-chatgpt-login.md)).
 
 On Linux the worker also gets its own PID and IPC namespaces and an empty
 `/run` (no host D-Bus or systemd sockets).

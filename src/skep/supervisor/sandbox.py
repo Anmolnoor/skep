@@ -447,6 +447,11 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
         for rel in (*HOME_SECRETS, *AGENT_SOCKETS)
     ]
     candidates += _env_sockets()
+    # W33 where the operator moved it: skep reads the Codex login from
+    # $CODEX_HOME when set (codex_login.auth_file), so the mask follows it.
+    from .codex_login import auth_file
+
+    candidates.append(auth_file())
     candidates += [skep_home / SERVE_ENV, supervisor / "audit", supervisor / "chat-attachments"]
     readable = {"llm-secret", *_active_llm_key_names(supervisor)} if worker_llm_key else set()
     if supervisor.is_dir():
@@ -455,7 +460,8 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
             for p in supervisor.iterdir()
             if p.name not in readable and any(fnmatch(p.name, pat) for pat in SKEP_SECRET_NAMES)
         )
-    return [path.resolve() for path in candidates if _exists(path)]
+    # dict: the default ~/.codex/auth.json is already in HOME_SECRETS
+    return list(dict.fromkeys(path.resolve() for path in candidates if _exists(path)))
 
 
 def _exists(path: Path) -> bool:
@@ -617,6 +623,7 @@ def _bubblewrap_args(
     readable_roots: Iterable[Path] = (),
     write_denied: Iterable[Path] = (),
     loopback_ports: Iterable[int] = (),
+    unmasked: Iterable[Path] = (),
 ) -> list[str]:
     # D6: the netns has its own loopback, so the host's is reachable only
     # through the proxy bridge, which admits the run's loopback ports alone;
@@ -669,6 +676,8 @@ def _bubblewrap_args(
                 tmpfs=["--tmpfs", str(denied)],
             )
         )
+    for own in unmasked:  # after the masks: this run's own file in a masked dir
+        args.extend(["--ro-bind", str(own), str(own)])
     if network.is_domain_list:
         assert unix_socket_path is not None and proxy_port is not None
         args.extend(["--bind", unix_socket_path, SANDBOX_PROXY_SOCKET])
@@ -707,6 +716,7 @@ def _podman_args(
     read_denied: Iterable[Path] = (),
     readable_roots: Iterable[Path] = (),
     write_denied: Iterable[Path] = (),
+    unmasked: Iterable[Path] = (),
 ) -> list[str]:
     """v44-F7: the container equivalent of the bwrap invocation.
 
@@ -751,6 +761,8 @@ def _podman_args(
                 tmpfs=["--tmpfs", f"{denied}:notmpcopyup"],
             )
         )
+    for own in unmasked:  # podman mounts a child over its parent's tmpfs
+        args.extend(["-v", f"{own}:{own}:ro"])
     if roots:
         # Popen(cwd=workspace) only moves the podman CLIENT; the container's
         # workdir needs pinning explicitly (workspace is always the first root).
@@ -812,6 +824,7 @@ def build_profile(
     skep_home: Path | None = None,
     write_denied: Iterable[Path] = (),
     loopback_ports: Iterable[int] = (),
+    unmasked: Iterable[Path] = (),
 ) -> str:
     """Return the SBPL text confining writes to ``writable_roots`` and gating network.
 
@@ -848,6 +861,8 @@ def build_profile(
     for denied in read_denied:
         kind = "subpath" if denied.is_dir() else "literal"
         lines.append(f'(deny file-read* ({kind} "{_sbpl_quote(denied)}"))')
+    for own in unmasked:  # last match wins: this run's own file in a masked dir
+        lines.append(f'(allow file-read* (literal "{_sbpl_quote(own)}"))')
     return "\n".join(lines) + "\n"
 
 
@@ -865,6 +880,7 @@ def write_profile(
     worker_llm_key: bool = False,
     write_denied: Iterable[Path] = (),
     loopback_ports: Iterable[int] = (),
+    unmasked: Iterable[Path] = (),
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -888,8 +904,13 @@ def write_profile(
 
     ``loopback_ports`` (D6): the only loopback ports the run reaches
     (``netproxy.run_loopback_ports``); the default closes loopback.
+
+    ``unmasked`` (ES-F122 follow-up): files inside a masked directory that
+    THIS run alone may read, bound back read-only after the masks — a codex
+    run's own login copy under the audit dir every other run cannot see.
     """
     write_denied = list(write_denied)
+    unmasked = [Path(own).resolve() for own in unmasked]
     probe = require_usable(backend)
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
@@ -906,6 +927,7 @@ def write_profile(
                 read_denied=read_denied,
                 readable_roots=extra_readable,
                 write_denied=write_denied,
+                unmasked=unmasked,
             ),
             header=_PODMAN_HEADER,
         )
@@ -922,6 +944,7 @@ def write_profile(
                 readable_roots=extra_readable,
                 write_denied=write_denied,
                 loopback_ports=loopback_ports,
+                unmasked=unmasked,
             ),
         )
     # ES-F5 (B11): no blanket /tmp, /private/tmp, /var/folders roots — they
@@ -940,6 +963,7 @@ def write_profile(
             skep_home=skep_home,
             write_denied=write_denied,
             loopback_ports=loopback_ports,
+            unmasked=unmasked,
         )
     )
     return profile_path

@@ -370,6 +370,8 @@ function manifestNode(card) {
       : null,
     row("engine · mode", `${m.engine} · ${m.execution_mode}`),
     row("verify", m.verify_command || "the worker picks"),
+    // ES-F124: whose login a codex run spends (the server decided it)
+    m.engine_auth === "chatgpt_login" ? row("login", "uses your ChatGPT plan login (Codex)") : null,
     asks.length ? row("also approved, this run only", list(asks)) : null,
     Array.isArray(m.chain) && m.chain.length ? row("delegated by", m.chain.join(" → ")) : null,
     Array.isArray(m.taint) && m.taint.length ? row("from a chat that has", m.taint.join(" + ")) : null);

@@ -17,7 +17,15 @@ CODEX_SPEC = AdapterSpec(
     default_command=("codex",),
     # Codex's non-interactive one-shot: `codex exec <prompt>` edits the tree and
     # exits without committing, so the working-tree diff is the patch.
-    build_argv=lambda base, instructions: [*base, "exec", instructions],
+    # ES-F128: its own sandbox defaults to read-only, which refuses every
+    # edit; workspace-write scopes it to the worktree inside skep's sandbox.
+    build_argv=lambda base, instructions: [
+        *base,
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        instructions,
+    ],
     plan_steps=("run codex exec", "capture git diff"),
 )
 

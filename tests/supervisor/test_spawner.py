@@ -173,6 +173,7 @@ def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
         worker_llm_key: bool = False,
         write_denied: tuple[Path, ...] = (),
         loopback_ports: tuple[int, ...] = (),
+        unmasked: tuple[Path, ...] = (),
     ) -> Path:
         captured["workspace"] = workspace
         captured["extra_writable"] = tuple(extra_writable)

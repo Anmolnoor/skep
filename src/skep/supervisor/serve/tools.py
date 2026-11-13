@@ -1707,6 +1707,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "description": "the project's coding agent — use this, not a "
                 "policy_overrides blob, to pick claude_code/codex/aider/pi",
             },
+            "codex_chatgpt_login": {
+                "type": "boolean",
+                "description": "true lets this project's codex runs use the "
+                "operator's ChatGPT plan login when no OPENAI_API_KEY is set "
+                "(only when the user asks for it; off by default)",
+            },
             "groups": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -5320,6 +5326,9 @@ def _execute_mutation(
 
             resolve_engine(str(args["engine"]))
             overrides.setdefault("coding_engine", str(args["engine"]))
+        if args.get("codex_chatgpt_login") is not None:
+            # ES-F121 (D20): same sugar shape; validated as a bool at setup.
+            overrides.setdefault("codex_chatgpt_login", args["codex_chatgpt_login"])
         if args.get("groups"):
             # v97-F4: same sugar shape as engine= — known-name vetting happens
             # in setup_project_record (one point for chat/CLI/HTTP, I5).
