@@ -3068,11 +3068,35 @@ def pending_approval_or_409(store: RunStore, review_id: str) -> dict[str, Any]:
                 "land_run(task_id=...) to land a completed run",
             )
         raise HTTPException(status_code=404, detail=f"no approval {review_id!r}")
+    if approval.status == "applying":
+        raise being_resolved(store, review_id)
     if approval.status != "pending":
         raise HTTPException(
             status_code=409, detail=f"approval {review_id!r} already {approval.status}"
         )
     return asdict(approval)
+
+
+def being_resolved(store: RunStore, review_id: str) -> HTTPException:
+    """W27c: the 409 for a verb that met a claimed review — resume or landing
+    in flight; its outcome is the verdict, so nothing is resolved twice."""
+    owner = store.approval_claim_owner(review_id)
+    by = f" (pid {owner['pid']})" if owner else ""
+    return HTTPException(
+        status_code=409,
+        detail=f"approval {review_id!r} is already being resolved by another request{by} — "
+        "its outcome is the verdict; check the run, then act on what it left",
+    )
+
+
+def deny_approval(store: RunStore, review_id: str, actor: str, note: str | None) -> None:
+    """Deny a pending review — REST, chat and the CLI. W27c: an approve that
+    claims it between the check and the write is a 409, never a 500."""
+    pending_approval_or_409(store, review_id)
+    try:
+        store.resolve_approval(review_id, approved=False, actor=actor, note=note)
+    except ValueError as exc:
+        raise being_resolved(store, review_id) from exc
 
 
 def apply_patch(
@@ -3158,9 +3182,9 @@ def gate_taken(store: RunStore, review_id: str) -> HTTPException:
     approval = store.get_approval(review_id)
     status = approval.status if approval is not None else "gone"
     if status == "applying":
-        detail = (
-            "this gate is already being approved by another request — its resume is the verdict"
-        )
+        owner = store.approval_claim_owner(review_id)
+        by = f"another process (pid {owner['pid']})" if owner else "another request"
+        detail = f"this gate is already being resumed by {by} — its resume is the verdict"
     elif approval is not None and status == "approved":
         detail = f"gate already approved: {approval.resolution_note or 'resumed'}"
     else:

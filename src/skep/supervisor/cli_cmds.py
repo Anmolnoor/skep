@@ -1279,7 +1279,19 @@ def cmd_review(args: argparse.Namespace) -> int:
             review_id = _pending_or_new(
                 store, record, reason=landing_reason(record.instructions, None)
             )
-            store.resolve_approval(review_id, approved=False, actor=actor, note=args.note)
+            from fastapi import HTTPException
+
+            from .serve.actions import deny_approval
+
+            try:
+                deny_approval(store, review_id, actor, args.note)
+            except HTTPException as exc:  # W27c: a resume or landing holds it
+                return _err(
+                    str(exc.detail),
+                    state=record.state,
+                    evidence=str(audit_dir),
+                    next_command=f"skep review {record.task_id}  # see what it left",
+                )
             print(f"denied: task {record.task_id} (by {actor})")
             print(f'  next: skep run {record.repo} "..." --resume-of {record.task_id}')
             return 0
@@ -1508,7 +1520,15 @@ def _prompt_inline_approval(
                 print(f"  remembered: {shlex.join(argv)} → {tier}")
             return _resume_pending_approval(config, run_store, record, actor, remembered=True)
         if choice in {"d", "deny", "n", "no"}:
-            run_store.resolve_approval(pending.review_id, approved=False, actor=actor)
+            from fastapi import HTTPException
+
+            from .serve.actions import deny_approval
+
+            try:
+                deny_approval(run_store, pending.review_id, actor, None)
+            except HTTPException as exc:  # W27c
+                print(f"not denied: {exc.detail}")
+                return None
             print(f"denied: task {record.task_id} (by {actor})")
             return STATE_EXIT_CODES.get(record.state, 3)
         print("approval left pending")
@@ -1555,6 +1575,37 @@ def _resume_pending_approval(
         )
     original = CodingWorkerTask.model_validate_json(audit_task.read_text())
     review_id = _pending_or_new(store, record, reason="resumed past approval gate")
+    # W27a: the claim serve's resume_past_gate takes (B142), held across this
+    # foreground run under this process's pid — a serve approve, or a serve
+    # restart's sweep, sees a live owner and leaves the gate alone.
+    if not store.claim_approval(review_id):
+        from .serve.actions import gate_taken
+
+        return _err(
+            str(gate_taken(store, review_id).detail),
+            state=record.state,
+            evidence=str(config.audit_dir / record.task_id),
+            next_command=f"skep review {record.task_id}  # see the resume that won",
+        )
+    try:
+        return _resume_claimed_gate(
+            config, store, record, actor, original, review_id, remembered=remembered
+        )
+    except BaseException:
+        store.unclaim_approval(review_id)  # never resolved: hand the gate back
+        raise
+
+
+def _resume_claimed_gate(
+    config: SupervisorConfig,
+    store: RunStore,
+    record: RunRecord,
+    actor: str,
+    original: CodingWorkerTask,
+    review_id: str,
+    *,
+    remembered: bool,
+) -> int:
     approval = store.get_approval(review_id)
     approval_reason = None if approval is None else approval.reason
     approval_action = None if approval is None else approval.action
@@ -1624,6 +1675,7 @@ def _resume_pending_approval(
         note=f"resumed as {outcome.record.task_id} ({outcome.record.state})"
         + ("; approval held for this serve session, in this repo only" if session_kept else ""),
         remembered=remembered,
+        claimed=True,
     )
     # v115-F1: the parent is superseded by its successor, as resume_past_gate
     # has said since v19-F8 — the CLI face left it "pending_approval" forever
