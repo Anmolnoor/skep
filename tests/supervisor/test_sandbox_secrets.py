@@ -46,6 +46,8 @@ def no_other_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from skep.supervisor import secret_floor
 
     monkeypatch.setattr(secret_floor, "HOME_DIRS", (f"{tmp_path}/no-homes/*",))
+    for name in sandbox._SOCKET_ENV:  # R5: nor the sockets this shell's env names
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture()
@@ -538,3 +540,27 @@ def test_known_agent_socket_places_are_masked_under_every_home(
     monkeypatch.setattr(secret_floor, "HOME_DIRS", (f"{tmp_path}/Users/*",))
     masked = set(sandbox.secret_paths(skep_home))
     assert {base / rel for base in (home, other) for rel in sandbox.AGENT_SOCKETS} <= masked
+
+
+def test_the_sockets_the_operators_env_names_are_masked_and_nothing_else(
+    fake_homes: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5: $SSH_AUTH_SOCK and a unix:// DOCKER_HOST point at the operator's
+    agents wherever they listen; a value that is no socket masks nothing (a
+    stray SSH_AUTH_SOCK=$HOME must never lay a tmpfs over the home)."""
+    import os
+    import socket
+
+    home, skep_home = fake_homes
+    monkeypatch.chdir(home)
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind("d.sock")  # relative: AF_UNIX caps a path at 108 bytes
+    try:
+        monkeypatch.setenv("DOCKER_HOST", f"unix://{home / 'd.sock'}")
+        monkeypatch.setenv("SSH_AUTH_SOCK", str(home))
+        monkeypatch.setenv("CONTAINER_HOST", "ssh://core@localhost:22/run/podman.sock")
+        masked = set(sandbox.secret_paths(skep_home))
+    finally:
+        srv.close()
+    assert home / "d.sock" in masked
+    assert home not in masked and Path(os.sep) not in masked

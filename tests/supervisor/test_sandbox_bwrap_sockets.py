@@ -129,7 +129,7 @@ def proxy() -> Iterator[FilteringProxy]:
         shutil.rmtree(sock_dir, ignore_errors=True)
 
 
-_CLOSED = {"home_agent": False, "env_agent": True, "ro_root": True, "own": True}
+_CLOSED = {"home_agent": False, "env_agent": False, "ro_root": True, "own": True}
 
 
 @pytest.mark.parametrize(

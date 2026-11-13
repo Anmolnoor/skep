@@ -368,6 +368,26 @@ AGENT_SOCKETS: tuple[str, ...] = (
     ".orbstack/run",
     ".local/share/containers/podman/machine",
 )
+# R5: wherever the operator's own agents listen (serve's environment).
+_SOCKET_ENV = ("SSH_AUTH_SOCK", "DOCKER_HOST", "CONTAINER_HOST")
+
+
+def _env_sockets() -> list[Path]:
+    """The unix sockets ``$SSH_AUTH_SOCK`` and a ``unix://`` docker/podman
+    host name — only real sockets, so a stray value can never mask a dir."""
+    found = []
+    for name in _SOCKET_ENV:
+        value = os.environ.get(name, "").removeprefix("unix://")
+        if value.startswith("/") and _is_socket(Path(value)):
+            found.append(Path(value))
+    return found
+
+
+def _is_socket(path: Path) -> bool:
+    try:
+        return path.is_socket()
+    except OSError:
+        return False
 
 
 def _refuse_home_inside(skep_home: Path, writable_roots: Iterable[Path]) -> None:
@@ -399,6 +419,7 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
         if other.resolve() not in own
         for rel in (*HOME_SECRETS, *AGENT_SOCKETS)
     ]
+    candidates += _env_sockets()
     candidates += [skep_home / SERVE_ENV, supervisor / "audit", supervisor / "chat-attachments"]
     readable = {"llm-secret", *_active_llm_key_names(supervisor)} if worker_llm_key else set()
     if supervisor.is_dir():
