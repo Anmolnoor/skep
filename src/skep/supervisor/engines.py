@@ -79,7 +79,8 @@ class CodingEngine:
     # the supervisor's OWN process env for the engine to authenticate at all:
     # file-based logins (~/.claude/.credentials.json, ~/.codex/auth.json)
     # never reach the sandbox once the config dir is redirected per-run
-    # (v106-F1), so the environment is the only carrier. Names only, never
+    # (v106-F1), so the environment is the carrier (codex's one exception, an
+    # opted-in plan login, is ``codex_login.py``). Names only, never
     # values (G2); ``skep doctor`` compares them against the process env —
     # the 2026-08-11 restart shed the token and doctor still said "ok".
     auth_env: tuple[str, ...] = ()
@@ -124,8 +125,10 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         # v111-F4: the entry predated the v94-F3/v106-F1 hardening and never
         # got it — zero codex runs ever completed. ~/.codex/auth.json (the
         # ChatGPT login) is file-based and can never reach the sandbox once
-        # CODEX_HOME is redirected per-run; auth rides OPENAI_API_KEY or not
-        # at all — the same story as claude_code's /login. The redirect also
+        # CODEX_HOME is redirected per-run; auth rides OPENAI_API_KEY — or,
+        # ES-F122, for a project that opted in, a refresh-free copy of the
+        # ChatGPT login written into that run's CODEX_HOME (codex_login.py),
+        # talking to login_host instead of network_host. The redirect also
         # gives codex's own sqlite state a writable home: under the read-only
         # / mount it dies opening ~/.codex before auth is even tested (I12).
         env_vars=("USER", "LOGNAME", "OPENAI_API_KEY"),

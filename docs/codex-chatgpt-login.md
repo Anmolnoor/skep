@@ -99,7 +99,10 @@ no key is present.
 
 - The dispatch card and manifest: "uses your ChatGPT plan login (Codex)".
 - The run record (the `dispatched` transition) and the run's
-  `worker.log`: `codex_auth=chatgpt_login`. Never a value.
+  `worker.log`: `codex_auth=chatgpt_login`. Never a value. Not the policy
+  decision log (`<audit>/policy/decisions.jsonl`): that is the ledger of
+  `decide()` verdicts, its replay counts every row as one, and a login
+  choice is not a policy verdict.
 - `skep doctor`: whether a ChatGPT login is saved, its plan and expiry
   when the token names them, which projects opted in, and what a codex
   run would use.
