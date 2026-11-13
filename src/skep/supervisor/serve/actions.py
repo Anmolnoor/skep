@@ -116,7 +116,7 @@ from ..shell_prefixes import (
     normalize_remembered_command,
     worker_allowlist_reason,
 )
-from ..store import ChatTaint, RunStore
+from ..store import ChatTaint, RunStore, owner_alive
 from ..worktree import TREE_LOCK
 from .jobs import Dispatcher, DispatchError
 from .registry import (
@@ -3085,7 +3085,19 @@ def being_resolved(store: RunStore, review_id: str) -> HTTPException:
     return HTTPException(
         status_code=409,
         detail=f"approval {review_id!r} is already being resolved by another request{by} — "
-        "its outcome is the verdict; check the run, then act on what it left",
+        "its outcome is the verdict; check the run, then act on what it left"
+        + _dead_claim_note(owner),
+    )
+
+
+def _dead_claim_note(owner: dict[str, Any] | None) -> str:
+    """W27: a claimer that died (a CLI killed mid-resume) holds its claim
+    until the serve-start sweep; say so, and how to get the review back."""
+    if owner is None or owner_alive(json.dumps(owner)):
+        return ""
+    return (
+        f". pid {owner.get('pid')} is no longer running: restart skep serve to release "
+        "the claim (the restart marks it interrupted; check for its run before redoing it)"
     )
 
 
@@ -3184,7 +3196,10 @@ def gate_taken(store: RunStore, review_id: str) -> HTTPException:
     if status == "applying":
         owner = store.approval_claim_owner(review_id)
         by = f"another process (pid {owner['pid']})" if owner else "another request"
-        detail = f"this gate is already being resumed by {by} — its resume is the verdict"
+        detail = (
+            f"this gate is already being resumed by {by} — its resume is the verdict"
+            + _dead_claim_note(owner)
+        )
     elif approval is not None and status == "approved":
         detail = f"gate already approved: {approval.resolution_note or 'resumed'}"
     else:

@@ -1084,3 +1084,24 @@ def test_a_deny_of_a_claimed_gate_is_a_409_everywhere(
         store.close()
     assert main(["--home", str(home), "review", task.task_id, "--deny"]) == 2
     assert "already being resolved" in capsys.readouterr().err
+
+
+def test_a_claim_whose_owner_died_says_how_to_release_it(rig: Rig, repo: Any) -> None:
+    """W27: a CLI killed mid-resume leaves its claim 'applying' until the
+    next serve start. The 409 named a pid that no longer runs and nothing
+    said how to get the gate back; it now says the owner is gone and that a
+    serve restart releases it (marked interrupted, as the sweep does)."""
+    from skep.supervisor.serve import actions
+
+    _run, review_id = _gated_run(rig, repo)
+    assert rig.store.claim_approval(review_id, owner=_dead_owner())
+    for refusal in (
+        actions.gate_taken(rig.store, review_id),
+        actions.being_resolved(rig.store, review_id),
+    ):
+        assert refusal.status_code == 409
+        assert "no longer running" in str(refusal.detail)
+        assert "restart skep serve" in str(refusal.detail)
+    _run2, live = _gated_run(rig, repo)
+    assert rig.store.claim_approval(live)  # this live process holds it
+    assert "no longer running" not in str(actions.gate_taken(rig.store, live).detail)
