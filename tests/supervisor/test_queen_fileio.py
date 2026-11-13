@@ -519,3 +519,19 @@ def test_deny_rule_still_denies_a_ref_read(config: SupervisorConfig, ollama: Fak
     )
     tools = [d for name, d in events if name == "tool"]
     assert tools[0]["result"]["ok"] is False
+
+
+def test_a_search_cut_at_the_per_file_cap_says_so_and_how_to_see_more(tmp_path: Path) -> None:
+    """L20: rg stopped at 10 matches per file and the result said
+    ``truncated: false`` (11 shown, 15 real). It now says it was cut, names
+    the file, and a search with ``path`` set to that one file lists them all."""
+    from skep.supervisor.serve.fileio import search_files_result
+
+    (tmp_path / "big.txt").write_text("".join(f"name {i}\n" for i in range(14)))
+    (tmp_path / "small.txt").write_text("name\n")
+    result = search_files_result("name", path=str(tmp_path))
+    assert result["truncated"] is True
+    assert "big.txt" in result["note"] and "small.txt" not in result["note"]
+    assert "path" in result["note"]
+    one = search_files_result("name", path=str(tmp_path / "big.txt"))
+    assert len(one["matches"]) == 14 and one["truncated"] is False
