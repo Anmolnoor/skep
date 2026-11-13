@@ -220,7 +220,11 @@ def _relabel(
 
 
 def operator_lane(
-    store: RunStore, *, chat: str | None = None, baseline: PolicyTemplate | None = None
+    store: RunStore,
+    *,
+    chat: str | None = None,
+    baseline: PolicyTemplate | None = None,
+    durable_only: bool = False,
 ) -> tuple[dict[str, ResolvedScopePolicy], tuple[str, ...]]:
     """The Queen's standing policy, rule for rule, each rule labelled: the
     global document and the operator overlay are ``global``, the approved
@@ -254,7 +258,11 @@ def operator_lane(
     setup = queen_global_document(base)
     if template is not None:
         setup = tighten_only(setup)
-    learned = [rule for rule in (*base.learned, *operator.learned) if applies(rule, chat_id=chat)]
+    learned = [
+        rule
+        for rule in (*base.learned, *operator.learned)
+        if applies(rule, chat_id=chat) and not (durable_only and is_session_rule(rule))
+    ]
     # P3-3 operator decision: an overlay ``network fetch`` allow is recorded
     # (``policy why`` shows it) but does not yet let read_url run — before
     # P3-3 read_url never read the overlay. Its fetch denies and asks bind.
@@ -368,6 +376,16 @@ def run_lane(
     return _relabel(resolved.resolved_scopes, label)
 
 
+# W24: the chats whose turn in flight is unattended (a schedule tick, a
+# run-finished continuation) — ``ChatEngine.turn_events`` marks one for the
+# turn, under the chat's turn lock, so no attended turn runs beside it. A
+# session keep is the operator's "for this sitting": such a turn decides
+# with the durable grants only.
+# ponytail: per-process state; serve is one process. Pass ``attended`` down
+# the lanes if decisions ever leave it.
+UNATTENDED_CHATS: set[str] = set()
+
+
 def load_stack(
     holder: ConfigHolder, store: RunStore, *, repo: str | None = None, chat: str | None = None
 ) -> Stack:
@@ -380,7 +398,7 @@ def load_stack(
     from .serve.fileio import operator_roots
 
     home = holder.current.home
-    operator, ignored = operator_lane(store, chat=chat)
+    operator, ignored = operator_lane(store, chat=chat, durable_only=chat in UNATTENDED_CHATS)
     stack = Stack(
         home=home,
         cwd=repo,

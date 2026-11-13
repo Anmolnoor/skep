@@ -45,6 +45,7 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
+from ..policy_v3 import UNATTENDED_CHATS
 from ..policy_write import PolicyWriteRejected
 from . import actions
 from .cards import card_summary, fold_subject, headline, high_tier, recorded_card
@@ -1701,6 +1702,34 @@ class ChatEngine:
         ES-F3 (B08): and they never execute a mutation, even one policy would
         auto-allow — it becomes a card (run-finish continuations).
         """
+        if unattended:
+            # W24: nobody is at the desk — the chat's session keeps sit this out
+            UNATTENDED_CHATS.add(chat_id)
+            try:
+                yield from self._turn_events(
+                    chat_id, base_url=base_url, api_key=api_key, model=model,
+                    protocol=protocol, read_only=read_only, unattended=True,
+                )  # fmt: skip
+            finally:
+                UNATTENDED_CHATS.discard(chat_id)
+            return
+        yield from self._turn_events(
+            chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+            read_only=read_only,
+        )  # fmt: skip
+
+    def _turn_events(
+        self,
+        chat_id: str,
+        *,
+        base_url: str,
+        api_key: str | None,
+        model: str,
+        protocol: LLMProtocol,
+        read_only: bool = False,
+        unattended: bool = False,
+    ) -> Iterator[ChatEvent]:
+        memory_taint(self.store, chat_id)  # W21: memory in the prompt brings its bits
         previous_read_tool: str | None = None
         # v59-F7: byte-identical read call returning a byte-identical result is
         # a loop, not diligence (field test 2026-07-18: ~20 list_runs/repo_state
@@ -1709,7 +1738,6 @@ class ChatEngine:
         # v70-F6: seeded from the transcript tail — the morning-ritual hunt
         # re-ran the same cycle fresh after every "yes do it" because the
         # detector forgot everything at the turn boundary.
-        memory_taint(self.store, chat_id)  # W21: memory in the prompt brings its bits
         seen_reads: dict[tuple[str, str], str] = self._recent_read_results(chat_id)
         # v79-F5: reads nudged once this turn — a second identical attempt is
         # refused un-executed (the nudge is advisory; this is mechanical).

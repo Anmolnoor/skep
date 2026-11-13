@@ -222,3 +222,37 @@ def test_policy_why_and_rsop_answer_for_the_asking_chat(env: Live) -> None:
     assert rsop["this_chat"]["taint"] == ["private"]
     assert "your OK" in rsop["this_chat"]["taint_line"]
     assert "this_chat" not in actions.rsop_view(env.holder, env.store, str(env.paths["repo"]))
+
+
+def test_an_unattended_turn_decides_without_the_chats_session_keeps(env: Live) -> None:
+    """W24: a session keep is the operator's "for this sitting" — an attended
+    turn runs the kept command, an unattended one decides as if the keep were
+    not there (durable grants still count) and the next attended turn has it
+    back."""
+    from skep.supervisor.serve import actions
+
+    chat = env.chat()
+    line = {"command": "python3 build.py --fast", "cwd": str(env.paths["outside"])}
+    actions.remember_action_for_session(
+        env.store, tool="run_shell", args={"command": line["command"]}, actor="op",
+        tier="session", chat_id=chat,
+    )  # fmt: skip
+    env.ollama.script_tool_call("run_shell", line)
+    card = _action(env.turn(chat, "[run finished]", unattended=True))
+    assert card["decision"]["verdict"] == "require_approval", card["decision"]
+    assert "grant" not in str(card["decision"]["decided_by"])
+    env.store.resolve_chat_action(card["action_id"], status="denied", result={"ok": False})
+
+    env.ollama.script_tool_call("run_shell", line)
+    env.ollama.script_reply("built")
+    events = env.turn(chat, "build it")
+    assert not [d for e, d in events if e == "action"]  # the keep holds again
+
+    durable = env.chat()
+    actions.remember_action_for_session(
+        env.store, tool="run_shell", args={"command": line["command"]}, actor="op",
+        tier="always",
+    )  # fmt: skip
+    env.ollama.script_tool_call("run_shell", line)
+    card = _action(env.turn(durable, "[run finished]", unattended=True))
+    assert card["decision"]["verdict"] == "allow"  # a durable grant still counts (still a card)
