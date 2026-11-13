@@ -400,3 +400,38 @@ def test_a_queued_follow_up_after_a_channel_click_replies_in_that_channel(
     env.ollama.script_reply("left the build alone")
     click_mid_turn(again.action_id)
     assert pushed == [(chat, "left the build alone", "reply")]
+
+
+@pytest.mark.parametrize("actor", ["channel:discord:c2", "channel:telegram:c1", "chat-user"])
+def test_a_queued_follow_up_never_replies_to_a_conversation_the_click_did_not_come_from(
+    env: Live, monkeypatch: pytest.MonkeyPatch, actor: str
+) -> None:
+    """ES-F180: the chat is bound to discord:c1; a click from another
+    conversation, another messenger or the web hears nothing pushed there."""
+    from skep.supervisor.serve.channels import outbound
+    from skep.supervisor.serve.chat import chat_turn_lock
+
+    from .test_provider_replay import _wait_follow_ups
+
+    chat = env.chat()
+    env.store.bind_channel_session(
+        session_key="discord:c1", channel="discord", identity_id="c1", chat_id=chat
+    )
+    pushed: list[str] = []
+    monkeypatch.setattr(outbound, "push_to_chat_channel", lambda *a, **k: pushed.append(a[3]))
+    set_taint(env.store, chat, "untrusted")
+    env.ollama.script_tool_call("add_note", {"content": "x"})
+    card = _action(env.turn(chat, "note it"))
+    env.ollama.script_reply("not for discord:c1")
+    lock = chat_turn_lock(chat)
+    lock.acquire()  # another turn runs
+    events = list(
+        env.engine.verdict_events(
+            chat, env.store.get_chat(chat), card["action_id"], confirm=False, actor=actor
+        )
+    )
+    assert events[-1] == ("done", {"state": "queued"})
+    lock.release()
+    _wait_follow_ups()
+    assert "not for discord:c1" in [m.content for m in env.store.chat_messages(chat)]
+    assert pushed == []
