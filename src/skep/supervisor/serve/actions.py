@@ -5188,14 +5188,15 @@ def _within_delegation(
 # D10 (operator decision 2026-11-13): a role chain never holds network `*`; a
 # run that lost it says so, why, and what to do, on its card and its record.
 NO_STAR_NOTE = (
-    "this run holds no hosts: a role chain never holds network *, which is this "
-    "project's default_network; list the hosts in the project policy instead"
+    "this run holds no hosts: its network was *, which a role chain never holds; "
+    "name the hosts instead (the project policy's default_network, or the dispatch's network)"
 )
 
 
 def star_dropped(before: Permissions, after: Permissions) -> bool:
-    """D10: the run policy granted ``*`` and the chain took it away."""
-    return "*" in before.network and "*" not in after.network
+    """D10: the run policy granted ``*`` (the project's or the dispatch's)
+    and the chain left the run no hosts."""
+    return "*" in before.network and not after.network
 
 
 def _delegation_who(chain: Sequence[Delegator], role: Role | None) -> str:

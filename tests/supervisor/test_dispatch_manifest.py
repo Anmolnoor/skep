@@ -603,3 +603,27 @@ def test_a_role_run_card_adds_only_hosts_the_run_holds(tmp_path: Path, repo: Pat
     finally:
         store.close()
 
+
+def test_the_no_hosts_note_is_true_when_the_dispatch_named_star(tmp_path: Path, repo: Path) -> None:
+    """ES-F93 follow-up: the D10 note said ``*`` "is this project's
+    default_network" when the project's hosts were pypi.org and the dispatch
+    itself named ``*``."""
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"default_network": ["pypi.org"]},
+        )
+        holder = ConfigHolder(config, store)
+        manifest = dispatch_manifest_for(
+            store, holder, {"repo": str(repo), "role": "builder", "network": ["*"]}, None
+        )
+        assert manifest["network"] == []
+        why = manifest["network_note"]
+        assert "holds no hosts" in why and "is this project's default_network" not in why
+    finally:
+        store.close()
