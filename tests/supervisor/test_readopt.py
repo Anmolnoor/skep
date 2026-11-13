@@ -787,3 +787,39 @@ def test_serve_takes_the_kill_switch_from_its_flag_or_env(
     with pytest.raises(_Stop):
         serve_cmds.cmd_serve(args)
     assert seen == [readopt]
+
+
+@_LINUX_BWRAP
+def test_a_readopted_landlock_netshim_run_keeps_its_chain_and_reaches_its_proxy(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-INT (R4 x R2a x R5b): one real Linux run holds every layer —
+    R4's keeper outside bwrap, R2a's netshim with the run's loopback port
+    inside it, R5b's Landlock step after the netshim (it alone needs the
+    proxy bridge) and the worker last. After serve dies and the run is
+    re-adopted, the worker still reaches its proxy through the socket dir
+    Landlock's unix-socket scope does not cover."""
+    from skep import landlock
+
+    task_id, pid = _kill_serve_mid_run(
+        config, repo, "Fix it. MODE:happy GATE", "sandbox", loopback_ports=(5432,)
+    )
+    argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    names = [part.decode() for part in argv]
+    assert names[1:3] == ["-I", "-c"]  # the keeper is bwrap's parent
+    bwrap = next(i for i, n in enumerate(names) if Path(n).name == "bwrap")
+    order = [bwrap, *(names.index(n) for n in ("skep.netshim", "--loopback-port"))]
+    if landlock.abi() >= landlock.ABI_SCOPE_ABSTRACT:
+        order.append(names.index("skep.landlock"))
+    order.append(max(i for i, n in enumerate(names) if n.endswith("fake_worker.py")))
+    assert order == sorted(order), names
+    assert names[names.index("--loopback-port") + 1] == "5432"
+    store, recovered = _adopt_and_finish(config, task_id)
+    try:
+        assert recovered == [task_id]
+        record = store.get_run(task_id)
+        assert record is not None and record.state == "completed"
+        probe = config.result_path(task_id).parent / "proxy-probe.txt"
+        assert probe.read_text() == "connected"
+    finally:
+        store.close()
