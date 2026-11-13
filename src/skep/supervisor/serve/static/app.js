@@ -313,6 +313,17 @@ function keepCovers(card) {
   return el("p", { class: "card-keep-covers" }, card.keep_covers);
 }
 
+// P3-5 (V11): what a policy write would change, from the server's write-time
+// check — the replay of recent decisions, the grants it would shadow, and what
+// an "always" keep would flip (or why the card keeps only once).
+function cardReplay(card) {
+  if (!card) return null;
+  const lines = [card.replay, ...(card.policy_warnings || []), card.keep_refused,
+    keepSelect(card) === null ? null : card.keep_replay].filter(Boolean);
+  if (!lines.length) return null;
+  return el("div", { class: "card-replay" }, ...lines.map((line) => el("p", {}, line)));
+}
+
 function receiptNode(d) {
   const card = d.card || {};
   const decision = d.decision || {};
@@ -3079,6 +3090,7 @@ async function viewChat(main, chatId) {
       ...cardBody(d),
       whyLine(d),
       keepCovers(d.card),
+      cardReplay(d.card),
       el("div", { class: "actions" }, approve, refuse, keep));
     const verdict = (verb) => async () => {
       approve.disabled = refuse.disabled = true; // double-click guard

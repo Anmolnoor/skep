@@ -1587,7 +1587,9 @@ def test_set_operator_policy_rule_takes_effect_and_guards_denied_space(
 ) -> None:
     """v52-F4: a confirmed rule governs the next Queen decision; an allow
     into composed deny space is rejected with the deny's rule id; the tool
-    is carded (never free)."""
+    is carded (never free). P3-5: the read sits inside an operator root (the
+    skep home) — outside one, beside the default search allow, it is §5.4
+    check 2 (test_policy_write_v3)."""
     from fastapi import HTTPException
     from pytest import raises
 
@@ -1598,18 +1600,26 @@ def test_set_operator_policy_rule_takes_effect_and_guards_denied_space(
     store = RunStore(predating_home(config.db_path))
     try:
         result = actions.set_operator_policy_rule(
-            store, scope="filesystem", action="read", pattern=f"{tmp_path}/data/*", verdict="allow"
+            store,
+            scope="filesystem",
+            action="read",
+            pattern=f"{config.home}/data/*",
+            verdict="allow",
         )
-        assert result["rule"]["rule_id"] == f"op:filesystem:read:{tmp_path}/data/*"
+        assert result["rule"]["rule_id"] == f"op:filesystem:read:{config.home}/data/*"
         decision = resolve_operator_policy(store).decision(
-            "filesystem", "read", f"{tmp_path}/data/report.csv"
+            "filesystem", "read", f"{config.home}/data/report.csv"
         )
         assert decision.verdict == "allow"
-        assert decision.decided_by.endswith(f"op:filesystem:read:{tmp_path}/data/*")
+        assert decision.decided_by.endswith(f"op:filesystem:read:{config.home}/data/*")
 
         # Idempotent: the same rule again does not duplicate.
         again = actions.set_operator_policy_rule(
-            store, scope="filesystem", action="read", pattern=f"{tmp_path}/data/*", verdict="allow"
+            store,
+            scope="filesystem",
+            action="read",
+            pattern=f"{config.home}/data/*",
+            verdict="allow",
         )
         assert len(again["allow"]) == len(result["allow"])
 

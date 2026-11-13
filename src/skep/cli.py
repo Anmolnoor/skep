@@ -283,30 +283,47 @@ def _setup_template(args: argparse.Namespace) -> int:
         print("dry run — nothing written")
         return 0
 
+    from .supervisor.policy_write import PolicyWriteRejected, keep_grants, vet_write
+    from .supervisor.serve.actions import update_policy
+    from .supervisor.serve.settings import ConfigHolder
+
     config = build_config(args.home, None)
     store = RunStore(config.db_path)
     try:
+        holder = ConfigHolder(config, store)
         existing = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+        # B38: the learned grants survive the switch (a colliding one is
+        # dropped, with a line), and the diff says so.
+        document, grant_lines = keep_grants(holder, store, document)
         if existing is not None and existing.template != document.template:
             diff = diff_resolved_views(resolved_view(existing), view)
-            if diff and not args.apply:
+            if (diff or grant_lines) and not args.apply:
                 print(f"switching {existing.template} -> {document.template} would change:")
-                for line in diff:
+                for line in [*diff, *grant_lines]:
                     print(f"  {line}")
                 print("re-run with --apply to switch", file=sys.stderr)
                 return 1
+        try:
+            # P3-5 (V11): the one write-time check, before the document is written.
+            report = vet_write(
+                store,
+                holder=holder,
+                settings={POLICY_DOCUMENT_SETTINGS_KEY: document.model_dump_json()},
+            )
+        except PolicyWriteRejected as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, document.model_dump_json())
         # The template's knobs (O1: stated in the file, no longer derived from
         # its rules) are written beside the document so the compiled run
         # policy (F7) reflects the template too; machine-specific knobs
         # (trusted roots, execution mode) stay the operator's.
-        from .supervisor.serve.actions import update_policy
-        from .supervisor.serve.settings import ConfigHolder
-
-        update_policy(store, ConfigHolder(config, store), dict(template.settings))
+        update_policy(store, holder, dict(template.settings))
     finally:
         store.close()
     print(f"applied template {document.template!r}")
+    for line in [*grant_lines, *report["warnings"], report["replay_line"]]:
+        print(f"  {line}")
     print("next steps:")
     print("  skep serve     # the daemon + web UI")
     print("  skep chat      # talk to the Queen right here in the terminal")

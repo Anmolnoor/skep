@@ -44,6 +44,7 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
+from ..policy_write import PolicyWriteRejected
 from . import actions
 from .cards import card_summary
 from .jobs import Dispatcher
@@ -77,6 +78,7 @@ from .tools import (
     execute_mutation,
     execute_read_tool,
     mutation_execution_decision,
+    policy_write_preview,
     search_web_verdict,
     taint_decision,
     tool_description,
@@ -1993,6 +1995,22 @@ class ChatEngine:
                             receipt["grant"] = grant
                         yield ("tool", receipt)
                         continue
+                    # P3-5 (V11): a policy write is checked at PROPOSAL — one
+                    # the write-time check refuses gets no card (its confirm
+                    # could only fail, B22); one it passes carries the replay.
+                    try:
+                        checked = policy_write_preview(self.store, self.holder, name, args)
+                    except PolicyWriteRejected as exc:
+                        payload = {"ok": False, "error": str(exc)}
+                        self.store.add_chat_message(
+                            chat_id,
+                            role="tool",
+                            tool_name=name,
+                            tool_call_id=call_id,
+                            content=json.dumps(payload, ensure_ascii=True),
+                        )
+                        yield ("tool", {"tool": name, "result": payload})
+                        continue
                     # v109-F2: a pending twin is not a new question. Identical
                     # args → the model gets the pending card back and the turn
                     # continues; changed args, same subject → the stale card is
@@ -2039,7 +2057,7 @@ class ChatEngine:
                         # v90-F2: and the three lines a human reads first; the
                         # description moves behind the details disclosure.
                         "description": tool_description(name),
-                        "card": self._card(chat_id, name, args),
+                        "card": {**self._card(chat_id, name, args), **checked},
                     }
                     if decision is not None:
                         action_event["decision"] = asdict(decision)
@@ -2303,11 +2321,16 @@ class ChatEngine:
                 status_code=422, detail="keep must be one of 'once', 'session', 'always'"
             )
         taint = self.store.get_chat_taint(chat_id)  # P4-1: a tainted chat keeps less
+        named = keep is not None
         if keep is None:
             keep = actions.default_keep(action.tool, action.args, taint)
         # B32: a keep this card cannot honour is refused BEFORE it runs, never
         # executed with a false "remembered" (the card offers only what holds).
         refused = actions.keep_refusal(action.tool, action.args, keep, taint, store=self.store)
+        if refused is not None and not named:
+            # The write-time check narrowed this card to "once" and the client
+            # named no keep: a plain Approve runs once, it is not a 400.
+            keep, refused = "once", None
         if refused is not None:
             raise HTTPException(status_code=400, detail=f"keep={keep!r} refused: {refused}")
         if action.source in ("operator", "gate"):

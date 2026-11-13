@@ -46,7 +46,7 @@ from .policy_schema import (
     document_from_settings,
     operator_document_from_settings,
 )
-from .policy_templates import TEMPLATE_NAMES
+from .policy_templates import TEMPLATE_NAMES, PolicyTemplate
 from .projects import (
     GROUP_LIST_KEYS,
     PROJECT_POLICY_KEYS,
@@ -185,12 +185,25 @@ def queen_template_layer(home: Path) -> Layer | None:
     and never the operator's host. ES-F7 (B72): its shell denies and asks
     still bind the Queen. Knobs and every other scope ride as-is."""
     layer = template_layer(home)
-    if layer is None:
-        return None
+    return None if layer is None else queen_view(layer)
+
+
+def queen_view(layer: Layer) -> Layer:
+    """``queen_template_layer``'s narrowing of one baseline layer."""
     return replace(
         layer,
         rules=tuple(r for r in layer.rules if r.scope != "shell" or r.verdict != "allow"),
     )
+
+
+def candidate_layer(layer: PolicyTemplate) -> Layer:
+    """P3-5 (V11): the layer ``template_layer`` will compose once ``layer`` is
+    locked — so a write-time check judges a candidate baseline exactly as
+    decide() will (a shipped template's legacy ``filesystem read *`` drops)."""
+    built = layer.layer()
+    if layer.template not in TEMPLATE_NAMES:
+        return built
+    return replace(built, rules=tuple(r for r in built.rules if not _legacy_fs_read(r)))
 
 
 def zero_state_home(store: RunStore) -> bool:
@@ -256,12 +269,14 @@ def flatten(values: dict[str, Any], sources: dict[str, str]) -> dict[str, Any]:
 __all__ = [
     "baseline_guard",
     "baseline_tampered",
+    "candidate_layer",
     "document_layers",
     "flatten",
     "layers_for_repo",
     "legacy_fs_read_dropped",
     "operator_layers",
     "queen_template_layer",
+    "queen_view",
     "store_home",
     "template_layer",
     "zero_state_home",

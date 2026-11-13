@@ -71,7 +71,6 @@ from ..policy_registry import registry_keys
 from ..policy_resolver import (
     PolicyResolutionError,
     ResolvedRunPolicy,
-    engine_v2_scopes,
     grant_repo,
     resolve_operator_policy,
     resolve_run_policy,
@@ -186,7 +185,7 @@ _POSITIVE_POLICY_FIELDS = {
 _NONNEGATIVE_POLICY_FIELDS = {"default_max_provider_calls", "card_timeout_seconds"}
 
 if TYPE_CHECKING:
-    from ..policy_schema import LearnedRule, Scope
+    from ..policy_schema import LearnedRule, PolicyDocument, Scope
 
 
 def _require_string_list(value: Any, *, field: str) -> list[str]:
@@ -1027,7 +1026,9 @@ def set_policy_group(
     The fork validates EVERYTHING before the first write (source exists, name
     fresh, merged policy vets, project attached to the source), so a refusal
     leaves both groups and the project untouched — never create-then-fail."""
+    from ..policy_write import vet_write
     from ..projects import (
+        POLICY_GROUPS_SETTING,
         projects_attached_to_group,
         save_policy_group,
         stored_policy_groups,
@@ -1039,6 +1040,11 @@ def set_policy_group(
         if repoint_project is not None:
             raise ValueError("repoint_project only makes sense with fork_from")
         existed = name in groups
+        group_name, validated = validate_policy_group(name, policy)
+        # P3-5 (V11): the one write-time check, before the group is written.
+        report = vet_write(
+            store, settings={POLICY_GROUPS_SETTING: {**groups, group_name: validated}}
+        )
         saved = save_policy_group(store, name, policy)
         return {
             "name": name,
@@ -1046,6 +1052,7 @@ def set_policy_group(
             "updated_in_place": existed,
             # I8: an in-place edit is an edit to every one of these.
             "attached_projects": projects_attached_to_group(store, name),
+            **_write_report(report),
         }
     if fork_from not in groups:
         raise ValueError(f"no policy group {fork_from!r} to fork; known: {sorted(groups)}")
@@ -1065,6 +1072,9 @@ def set_policy_group(
                 "nothing to repoint (attach_policy_group attaches fresh)"
             )
         repoint_groups = [fork_name if n == fork_from else n for n in current]
+    vet_write(
+        store, settings={POLICY_GROUPS_SETTING: {**groups, fork_name: validated}}, replay=False
+    )
     save_policy_group(store, fork_name, validated)
     result: dict[str, Any] = {
         "name": fork_name,
@@ -1097,7 +1107,14 @@ def attach_policy_group(store: RunStore, *, project_id: str, name: str) -> dict[
     current = [str(n) for n in record.policy.get("policy_groups") or []]
     if name in current:
         return {"project_id": project_id, "policy_groups": current, "already_attached": True}
-    return _update_project_group_list(store, project_id, [*current, name])
+    from ..policy_write import vet_write
+
+    # P3-5 (V11): the one write-time check, before the attach is written.
+    report = vet_write(store)
+    return {
+        **_update_project_group_list(store, project_id, [*current, name]),
+        **_write_report(report),
+    }
 
 
 def detach_policy_group(store: RunStore, *, project_id: str, name: str) -> dict[str, Any]:
@@ -2079,19 +2096,37 @@ def approve_policy_baseline(
     approved_by: str,
     expect_sha256: str | None = None,
     layer: PolicyTemplate | None = None,
+    store: RunStore | None = None,
+    holder: ConfigHolder | None = None,
 ) -> dict[str, Any]:
     """first-run O2 (ADR 0056 D1): lock a layer as the approved baseline —
     ``baseline.json`` (0444, a courtesy), ``baseline.lock`` and a
     ``baseline_approved`` row in ``<audit>/policy/baseline-approvals.jsonl``.
     One verb on three faces (ADR 0050): ``skep policy approve``, ``POST
     /api/policy/baseline/approve`` and the chat card. ``expect_sha256`` is
-    the CLI's guard that what it showed is what gets locked."""
+    the CLI's guard that what it showed is what gets locked.
+
+    P3-5 (V11): the layer passes the one write-time check first, composed in
+    place of the locked one — a new §5.4 forbidden combination refuses the
+    lock (``PolicyWriteRejected``, nothing written); one the locked baseline
+    already held does not, so a re-approval always goes through. The answer
+    carries the replay and the grants the new layer's denies shadow.
+    ``store`` is the home's (opened here when the caller holds none)."""
+    from ..policy_write import vet_write
+
     layer_override = layer
     layer, view = baseline_preview(
         home, template=template, file=file, reapprove=reapprove, layer=layer
     )
     if expect_sha256 is not None and view["sha256"] != expect_sha256:
         raise ValueError("the baseline changed since it was shown — run approve again")
+    owned = store is None
+    store = store or RunStore(home / "supervisor.sqlite3")
+    try:
+        report = vet_write(store, holder=holder, baseline=layer)
+    finally:
+        if owned:
+            store.close()
     if layer_override is not None:
         source = f"onboard:{layer.template}"
     elif template:
@@ -2103,7 +2138,7 @@ def approve_policy_baseline(
     row = write_baseline_lock(
         home, layer, approved_by=approved_by, source=source, changes=view["diff"]
     )
-    return {"approved": row, "diff": view["diff"], "table": view["table"]}
+    return {"approved": row, "diff": view["diff"], "table": view["table"], **_write_report(report)}
 
 
 def policy_note(
@@ -4039,29 +4074,34 @@ OPERATOR_POLICY_SCOPES = ("filesystem", "network")
 
 
 def set_operator_policy_rule(
-    store: RunStore, *, scope: str, action: str, pattern: str, verdict: str
+    store: RunStore,
+    *,
+    scope: str,
+    action: str,
+    pattern: str,
+    verdict: str,
+    holder: ConfigHolder | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Append one rule to the Queen's standing operator document (v52-F4).
 
-    An allow whose pattern intersects composed deny space is rejected with
-    the deny's rule id — denied space stays unreachable by confirmation
-    (v40-F10). A deny that would invalidate an existing learned rule is
-    rejected by a dry-run composition, naming the conflict.
+    P3-5 (V11): the would-be document passes the one write-time check
+    (``policy_write.vet_write``) first — an allow inside a deny at any layer
+    (setup document, overlay, baseline) or the floor, or one that makes a
+    §5.4 forbidden combination, is a 400 naming what it collides with, and
+    nothing is stored. A deny is always accepted (it only tightens); a grant
+    it newly shadows is named in ``warnings`` (decide() ignores it). The
+    answer carries the replay of recent decisions under the new document.
+    ``dry_run`` (the card's proposal) checks and answers, writing nothing.
     """
-    from ..policy_resolver import resolve_operator_policy
     from ..policy_schema import (
         OPERATOR_POLICY_SETTINGS_KEY,
-        POLICY_DOCUMENT_SETTINGS_KEY,
         SCOPE_ACTIONS,
-        LearnedRuleRejected,
-        PolicyDocument,
         PolicyRule,
         ScopePolicy,
-        document_from_settings,
         operator_document_from_settings,
-        patterns_intersect,
-        resolve,
     )
+    from ..policy_write import Allow, PolicyWriteRejected, vet_write
 
     if scope not in OPERATOR_POLICY_SCOPES:
         raise HTTPException(
@@ -4079,19 +4119,6 @@ def set_operator_policy_rule(
     pattern = pattern.strip()
     if not pattern:
         raise HTTPException(status_code=400, detail="pattern must be non-empty")
-    if verdict == "allow":
-        resolved = resolve_operator_policy(store).resolved_scopes.get(scope)
-        for rule in resolved.rules if resolved else ():
-            if (
-                rule.verdict == "deny"
-                and rule.action == action
-                and patterns_intersect(scope, pattern, rule.pattern)
-            ):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"allow {pattern!r} reaches into denied space ({rule.rule_id}); "
-                    "nothing may promote into denied space",
-                )
     document = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
     bucket = next((s for s in document.scopes if s.scope == scope), None)
     if bucket is None:
@@ -4099,27 +4126,39 @@ def set_operator_policy_rule(
         document.scopes.append(bucket)
     rules = bucket.allow if verdict == "allow" else bucket.deny
     rule_id = f"op:{scope}:{action}:{pattern}"
+    report: dict[str, Any] = {}
     if not any(r.action == action and r.pattern == pattern for r in rules):
         rules.append(PolicyRule(rule_id=rule_id, action=action, pattern=pattern))
-        base = (
-            document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
-            or PolicyDocument()
-        )
         try:
-            # Dry-run the composition: a deny that would strand an existing
-            # learned rule fails HERE, naming the conflict, not on every
-            # later Queen decision.
-            resolve(base, overlays=(document,), v2_scopes=engine_v2_scopes(store))
-        except LearnedRuleRejected as exc:
+            report = vet_write(
+                store,
+                holder=holder,
+                settings={OPERATOR_POLICY_SETTINGS_KEY: document.model_dump_json()},
+                new=[Allow(scope, action, pattern, rule_id)] if verdict == "allow" else [],
+            )
+        except PolicyWriteRejected as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        store.set_setting(OPERATOR_POLICY_SETTINGS_KEY, document.model_dump_json())
+        if not dry_run:
+            store.set_setting(OPERATOR_POLICY_SETTINGS_KEY, document.model_dump_json())
     return {
         "scope": scope,
         "verdict": verdict,
         "rule": {"rule_id": rule_id, "action": action, "pattern": pattern},
         "allow": [r.model_dump() for r in bucket.allow],
         "deny": [r.model_dump() for r in bucket.deny],
+        **_write_report(report),
     }
+
+
+def _write_report(report: dict[str, Any]) -> dict[str, Any]:
+    """A policy write's answer fields from its check (P3-5): the replay line
+    and any grant it newly shadows."""
+    out: dict[str, Any] = {}
+    if report.get("replay_line"):
+        out["replay"] = report["replay_line"]
+    if report.get("warnings"):
+        out["warnings"] = report["warnings"]
+    return out
 
 
 def allow_shell_command(
@@ -4950,12 +4989,14 @@ def learn_policy_rule(
     pattern: str,
     scope: Scope,
     provenance: str,
+    report: dict[str, Any] | None = None,
 ) -> str | None:
     """Append one learned rule to the policy document; return its id, or None
     when an identical rule already covers it.
 
     v90-F3: the single writer — ``allow_fetch_domain`` and ``allow_mcp_tool``
-    route through here, the remember paths through ``store_grant`` beneath it.
+    route through here, the remember paths through ``store_grant`` beneath it
+    (whose write-time check fills ``report``, P3-5).
     """
     from ..policy_schema import LearnedRule
 
@@ -4969,12 +5010,17 @@ def learn_policy_rule(
         # unlabelled legacy-host row doctor lists for revocation (P3-4).
         matcher="host" if scope == "network" else None,
     )
-    kept, status = store_grant(store, rule)
+    kept, status = store_grant(store, rule, report=report, replay=True)
     return None if status == "kept" else kept.rule_id
 
 
 def store_grant(
-    store: RunStore, rule: LearnedRule, *, context: dict[str, str] | None = None
+    store: RunStore,
+    rule: LearnedRule,
+    *,
+    context: dict[str, str] | None = None,
+    report: dict[str, Any] | None = None,
+    replay: bool = False,
 ) -> tuple[LearnedRule, str]:
     """Store one grant on the ONE learned list (ADR 0059 D4); return the row
     that now covers its subject and ``added`` / ``upgraded`` / ``kept``.
@@ -4983,18 +5029,57 @@ def store_grant(
     with the same subject and matcher that lives as long or longer and covers
     this binding is ``kept`` (and returned, so the receipt says what holds);
     a shorter-lived one bound like this grant, or to ``context`` (the chat or
-    repo a session keep there would bind), is ``upgraded`` in place. The new
-    rule is vetted against every deny before it is stored, so nothing is
-    learned into denied space (LearnedRuleRejected's write-time half)."""
+    repo a session keep there would bind), is ``upgraded`` in place.
+
+    P3-5 (V11, B23 write half): the would-be list passes the one write-time
+    check (``policy_write.vet_write``) before it is stored — a grant inside a
+    deny at any layer (setup document, overlay, baseline) or the floor is
+    refused with ``PolicyWriteRejected`` naming the deny, and nothing is
+    written. The grant is vetted unbound: a chat- or repo-bound grant must
+    clear the same denies. ``report`` (when given) receives the check's
+    warnings, and with ``replay`` its replay summary. The replay re-decides
+    up to 200 logged rows twice (seconds on a full log), so only a standing
+    write asks for it — the explicit policy verbs and an ``always`` keep —
+    never a session keep or a worker approval, which run on every card."""
+    from ..policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
+
+    rule, status, updated = _grant_plan(store, rule, context)
+    if updated is None:
+        return rule, status
+    found = _vet_grant(store, rule, updated, replay=replay)
+    if report is not None:
+        report.update(found)
+    store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
+    return rule, status
+
+
+def _vet_grant(
+    store: RunStore, rule: LearnedRule, updated: PolicyDocument, *, replay: bool = True
+) -> dict[str, Any]:
+    """The one write-time check over a would-be learned list (P3-5)."""
+    from ..policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
+    from ..policy_write import Allow, vet_write
+
+    return vet_write(
+        store,
+        settings={POLICY_DOCUMENT_SETTINGS_KEY: updated.model_dump_json()},
+        new=[Allow(rule.scope, rule.action, rule.pattern, rule.rule_id)],
+        replay=replay,
+    )
+
+
+def _grant_plan(
+    store: RunStore, rule: LearnedRule, context: dict[str, str] | None
+) -> tuple[LearnedRule, str, PolicyDocument | None]:
+    """store_grant's plan, nothing written: the row that will cover the
+    subject, the status, and the would-be document (None when ``kept``)."""
     from ..policy_schema import (
         LIFETIME_RANK,
         POLICY_DOCUMENT_SETTINGS_KEY,
-        LearnedRuleRejected,
         PolicyDocument,
         document_from_settings,
         lifetime_of,
         matcher_of,
-        resolve,
     )
 
     document = (
@@ -5010,7 +5095,7 @@ def store_grant(
     ]
     for _index, existing in same:
         if LIFETIME_RANK[lifetime_of(existing)] >= rank and existing.bound in ({}, rule.bound):
-            return existing, "kept"
+            return existing, "kept", None
     learned = list(document.learned)
     status = "added"
     for index, existing in same:
@@ -5025,14 +5110,7 @@ def store_grant(
             break
     else:
         learned.append(rule)
-    vetted = document.model_copy(update={"learned": [rule.model_copy(update={"bound": {}})]})
-    try:
-        resolve(vetted, v2_scopes=engine_v2_scopes(store))  # vets against every deny
-    except LearnedRuleRejected as exc:
-        raise ValueError(str(exc)) from exc
-    updated = document.model_copy(update={"learned": learned})
-    store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
-    return rule, status
+    return rule, status, document.model_copy(update={"learned": learned})
 
 
 def learned_rule_grant_view(store: RunStore, rule_id: str | None) -> dict[str, str] | None:
@@ -5173,16 +5251,30 @@ def keep_refusal(
 
 
 def _denied_grant(store: RunStore, subjects: list[tuple[str, str, str, str]]) -> str | None:
-    """store_grant's write-time vet over these subjects: why they land in a
-    deny of the setup document, or None."""
+    """store_grant's write-time check (``policy_write.vet_write``, P3-5) over
+    these subjects, nothing written: why it would refuse them, or None."""
+    from ..policy_write import PolicyWriteRejected
+
+    try:
+        vet_keep(store, subjects, replay=False)
+    except PolicyWriteRejected as exc:
+        return str(exc)
+    return None
+
+
+def vet_keep(
+    store: RunStore, subjects: list[tuple[str, str, str, str]], *, replay: bool = True
+) -> dict[str, Any]:
+    """The write-time check over the unbound grants a keep would store,
+    nothing written (raises ``PolicyWriteRejected``); with ``replay``, what an
+    ``always`` keep would flip — the card shows it (P3-5)."""
     from ..policy_schema import (
         POLICY_DOCUMENT_SETTINGS_KEY,
         LearnedRule,
-        LearnedRuleRejected,
         PolicyDocument,
         document_from_settings,
-        resolve,
     )
+    from ..policy_write import Allow, vet_write
 
     document = (
         document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
@@ -5198,11 +5290,13 @@ def _denied_grant(store: RunStore, subjects: list[tuple[str, str, str, str]]) ->
         )
         for scope, action, pattern, matcher in subjects
     ]
-    try:
-        resolve(document.model_copy(update={"learned": learned}), v2_scopes=engine_v2_scopes(store))
-    except LearnedRuleRejected as exc:
-        return str(exc)
-    return None
+    would_be = document.model_copy(update={"learned": [*document.learned, *learned]})
+    return vet_write(
+        store,
+        settings={POLICY_DOCUMENT_SETTINGS_KEY: would_be.model_dump_json()},
+        new=[Allow(r.scope, r.action, r.pattern, r.rule_id) for r in learned],
+        replay=replay,
+    )
 
 
 def keep_options(tool: str, args: dict[str, Any], taint: ChatTaint | None = None) -> list[str]:
@@ -5271,6 +5365,7 @@ def remember_action_for_session(
     bound = {"chat_id": str(chat_id)} if session else {}
     provenance = f"session:{actor}" if session else f"allow-always:{actor}"
     stored: list[tuple[LearnedRule, str]] = []
+    report: dict[str, Any] = {}
     for scope, action, pattern, matcher in subjects:
         rule = LearnedRule(
             rule_id=f"{scope}:{action}:{pattern}" + (f"@chat:{chat_id}" if session else ""),
@@ -5282,7 +5377,16 @@ def remember_action_for_session(
             matcher=matcher,  # type: ignore[arg-type]
             bound=bound,  # type: ignore[arg-type]
         )
-        stored.append(store_grant(store, rule, context={"chat_id": chat_id} if chat_id else {}))
+        stored.append(
+            store_grant(
+                store,
+                rule,
+                context={"chat_id": chat_id} if chat_id else {},
+                report=report,
+                # A standing grant shows what it flips; a session keep is too frequent.
+                replay=not session,
+            )
+        )
     rules = [rule for rule, _status in stored]
     statuses = {status for _rule, status in stored}
     session_only = all(lifetime_of(rule) == "session" for rule in rules)
@@ -5296,6 +5400,7 @@ def remember_action_for_session(
         "lifetime": "session" if session_only else "global",
         "bound": "this chat" if all(rule.bound for rule in rules) else "everywhere",
         "status": statuses.pop() if len(statuses) == 1 else "mixed",
+        **_write_report(report),
     }
 
 
@@ -5501,8 +5606,12 @@ def _record_engine_flip(audit_dir: Path, before: list[str], after: list[str]) ->
     )
 
 
-def update_policy(store: RunStore, holder: ConfigHolder, updates: dict[str, Any]) -> dict[str, Any]:
-    """Write the provided policy fields and return the rebuilt effective view."""
+def update_policy(
+    store: RunStore, holder: ConfigHolder, updates: dict[str, Any], *, dry_run: bool = False
+) -> dict[str, Any]:
+    """Write the provided policy fields and return the rebuilt effective view.
+    ``dry_run`` (the card's proposal, P3-5) validates and checks, writing
+    nothing, and answers the check's report."""
     unknown = set(updates) - set(POLICY_FIELDS)
     if unknown:
         raise HTTPException(status_code=400, detail=f"unknown policy fields: {sorted(unknown)}")
@@ -5561,10 +5670,23 @@ def update_policy(store: RunStore, holder: ConfigHolder, updates: dict[str, Any]
     for field in _NONNEGATIVE_POLICY_FIELDS:
         if updates.get(field) is not None:
             updates[field] = _require_int(updates[field], field=field, minimum=0)
+    from ..policy_write import PolicyWriteRejected, vet_write
+
+    pending = {
+        key: updates[field]
+        for field, key in POLICY_FIELDS.items()
+        if updates.get(field) is not None
+    }
+    try:
+        # P3-5 (V11): the one write-time check, before any knob is written.
+        report = vet_write(store, holder=holder, settings=pending)
+    except PolicyWriteRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if dry_run:
+        return _write_report(report)
     flips_before = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
-    for field, key in POLICY_FIELDS.items():
-        if updates.get(field) is not None:
-            store.set_setting(key, updates[field])
+    for key, value in pending.items():
+        store.set_setting(key, value)
     flips_after = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
     if flips_before != flips_after:
         _record_engine_flip(holder.current.audit_dir, flips_before, flips_after)
@@ -5577,4 +5699,4 @@ def update_policy(store: RunStore, holder: ConfigHolder, updates: dict[str, Any]
             "`skep project set-phase <project-id> maintain` — the per-project trust "
             "ramp — is the only auto-apply path."
         ]
-    return view
+    return {**view, **_write_report(report)}
