@@ -61,7 +61,7 @@ from .llm import (
     tool_delivery,
 )
 from .settings import ConfigHolder
-from .taint import inherit_taint, record_tool_taint, taint_line
+from .taint import inherit_taint, memory_taint, record_tool_taint, taint_line
 from .tools import (
     CLARIFY_TOOL_NAME,
     COMMAND_TOOL_NAMES,
@@ -70,6 +70,7 @@ from .tools import (
     POLICY_LINE_TOOLS,
     READ_TOOL_NAMES,
     READ_TOOL_SPECS,
+    TAINT_ASKED_STORE_WRITES,
     TOOL_SPECS,
     UNATTENDED_BLOCKED_READ_TOOLS,
     UNATTENDED_BLOCKED_STORE_WRITES,
@@ -84,6 +85,7 @@ from .tools import (
     mutation_execution_decision,
     policy_write_preview,
     search_web_verdict,
+    store_write_taint_ask,
     taint_decision,
     tool_description,
     tool_index_block,
@@ -1707,6 +1709,7 @@ class ChatEngine:
         # v70-F6: seeded from the transcript tail — the morning-ritual hunt
         # re-ran the same cycle fresh after every "yes do it" because the
         # detector forgot everything at the turn boundary.
+        memory_taint(self.store, chat_id)  # W21: memory in the prompt brings its bits
         seen_reads: dict[tuple[str, str], str] = self._recent_read_results(chat_id)
         # v79-F5: reads nudged once this turn — a second identical attempt is
         # refused un-executed (the nudge is advisory; this is mechanical).
@@ -1944,6 +1947,10 @@ class ChatEngine:
                 if name == "search_web" and not read_only and not unattended:
                     verdict = search_web_verdict(self.store, self.holder, chat_id)
                     search_ask = taint_decision(verdict) if verdict.layer == "taint" else None
+                elif name in TAINT_ASKED_STORE_WRITES and not unattended:
+                    # W21: a note or task from an untrusted chat asks (a /btw
+                    # refuses it below: a side turn cannot card)
+                    search_ask = store_write_taint_ask(self.store, chat_id)
                 if name in MUTATING_TOOL_NAMES or search_ask is not None:
                     if read_only:
                         # v67-F3: read-only by construction — a mutation

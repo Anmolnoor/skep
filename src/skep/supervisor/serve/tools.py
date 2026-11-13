@@ -2918,6 +2918,24 @@ def chat_taint_bits(store: RunStore, chat_id: str | None) -> list[str]:
     return [] if chat_id is None else store.get_chat_taint(chat_id).bits()
 
 
+# W21: the store writes that ride READ_TOOL_SPECS and never card — but under
+# ``untrusted`` they are actions like any other and ask (a note or a task an
+# injected page wrote reaches every chat that later reads it).
+TAINT_ASKED_STORE_WRITES = frozenset({"add_note", "add_task"})
+
+
+def store_write_taint_ask(store: RunStore, chat_id: str) -> AutonomyDecision | None:
+    """The taint ask for a TAINT_ASKED_STORE_WRITES call in ``chat_id``, or
+    None (it runs in-turn, as before)."""
+    from ..policy_v3 import ACTION_REQUEST, Verdict, taint_asks, taint_verdict
+
+    taint = store.get_chat_taint(chat_id)
+    if taint_asks(taint, *ACTION_REQUEST) is None:
+        return None
+    held = Verdict("allow", "", "", "notes/inert", "operator")
+    return taint_decision(taint_verdict(held, taint, *ACTION_REQUEST, read_only=False))
+
+
 def taint_decision(verdict: Any) -> AutonomyDecision:
     """P4-1 (ADR 0059 D5): a ``taint/<rule>`` ask as the card's decision —
     the why-line on ``detail``, so the card says in plain words why a granted
@@ -3684,10 +3702,19 @@ def execute_read_tool(
     if name == "list_tasks":
         return {"tasks": [asdict(task) for task in store.list_tasks()]}
     if name == "add_note":
-        note = store.create_note(str(args["content"]).strip(), actor=CHAT_TOOL_ACTOR)
+        # W21: the row carries the writing chat's taint to every later reader
+        note = store.create_note(
+            str(args["content"]).strip(),
+            actor=CHAT_TOOL_ACTOR,
+            taint=chat_taint_bits(store, chat_id),
+        )
         return {"note": asdict(note)}
     if name == "add_task":
-        task = store.create_task(str(args["title"]).strip(), actor=CHAT_TOOL_ACTOR)
+        task = store.create_task(
+            str(args["title"]).strip(),
+            actor=CHAT_TOOL_ACTOR,
+            taint=chat_taint_bits(store, chat_id),
+        )
         return {"task": asdict(task)}
     if name == "complete_task":
         task_id = str(args["task_id"])
@@ -4097,6 +4124,9 @@ def _execute_mutation(
             ),
             "decided_by": "operator/confirmed",
         }
+    if name in TAINT_ASKED_STORE_WRITES:
+        # W21: a store write an untrusted chat had to ask for, now confirmed
+        return execute_read_tool(name, args, store=store, holder=holder, chat_id=chat_id)
     if name == "register_mcp_server":
         from ..mcp_client import MCPError, MCPServerConfig, save_mcp_server
 
@@ -5590,6 +5620,7 @@ def _execute_mutation(
             actor=actor,
             rationale=None if args.get("rationale") is None else str(args["rationale"]),
             project_id=None if args.get("project") is None else str(args["project"]),
+            taint=chat_taint_bits(store, chat_id),  # W21: approval carries it on
         )
         return {
             "proposal_id": proposal.proposal_id,

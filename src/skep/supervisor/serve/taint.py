@@ -33,6 +33,17 @@ from .settings import ConfigHolder
 _PRIVATE_OUTPUT = frozenset({"run_shell", "start_process", "read_process_log"})
 _UNTRUSTED_OUTPUT = frozenset({"read_url", "search_web", "call_mcp_tool"})
 _CHAT_READS = frozenset({"search_chats", "get_chat_messages", "get_chat_context"})
+# W21: a run read carries the worker's own words (its summary, its errors).
+_RUN_READS = frozenset({"get_run", "await_runs"})
+# W21: rows that carry the bits of the chat that wrote them — result key, id
+# field, ``RunStore.content_taint`` kind.
+_STORE_READS = {
+    "list_notes": ("notes", "note_id", "note"),
+    "list_tasks": ("tasks", "task_id", "task"),
+    "list_memory": ("items", "memory_id", "memory"),
+    "search_memory": ("items", "memory_id", "memory"),
+    "list_memory_proposals": ("proposals", "proposal_id", "proposal"),
+}
 
 # How a card names what set a bit, from the tool (or the row's author).
 _SOURCES = {
@@ -48,6 +59,13 @@ _SOURCES = {
     "get_chat_messages": "read another chat",
     "get_chat_context": "read another chat",
     "delegate_analysis": "read an analyst's answer",
+    "get_run": "read a worker's report",
+    "await_runs": "read a worker's report",
+    "list_notes": "read a note a tainted chat wrote",
+    "list_tasks": "read a task a tainted chat wrote",
+    "list_memory": "read memory a tainted chat filed",
+    "search_memory": "read memory a tainted chat filed",
+    "list_memory_proposals": "read memory a tainted chat filed",
 }
 _AUTHORS = {
     "webhook": "received a webhook message",
@@ -67,6 +85,35 @@ def _outside_roots(store: RunStore, holder: ConfigHolder, path: str) -> bool:
     return not any(
         target == root or root in target.parents for root in operator_roots(store, holder)
     )
+
+
+def _home_bits(holder: ConfigHolder, path: str, *, tree: bool = False) -> set[str]:
+    """W21: what a read in skep's own home brings in. The store holds every
+    transcript (private); the audit directory holds transcripts and what
+    workers wrote (private and untrusted); results and worktrees are worker
+    output (untrusted). ``tree``: ``path`` is a search root, so an area under
+    it counts too."""
+    config = holder.current
+    try:
+        target = Path(path).expanduser().resolve()
+        home = config.home.expanduser().resolve()
+    except (OSError, ValueError):
+        return set()
+    areas = {
+        home / "audit": {"private", "untrusted"},
+        home / "results": {"untrusted"},
+        home / "worktrees": {"untrusted"},
+    }
+    bits: set[str] = set()
+    for area, adds in areas.items():
+        if target == area or area in target.parents or (tree and target in area.parents):
+            bits |= adds
+    store_file = config.db_path.name  # and its -wal / -shm siblings
+    if target.parent == home and target.name.startswith(store_file):
+        bits.add("private")
+    if tree and target in (home, *home.parents):
+        bits.add("private")
+    return bits
 
 
 def _read_chats(name: str, args: dict[str, Any], result: dict[str, Any]) -> set[str]:
@@ -93,11 +140,26 @@ def record_tool_taint(
         return store.get_chat_taint(chat_id)
     private = untrusted = False
     if name == "read_file":
-        private = _outside_roots(store, holder, str(args.get("path") or ""))
+        path = str(args.get("path") or "")
+        home = _home_bits(holder, path)
+        private = "private" in home or _outside_roots(store, holder, path)
+        untrusted = "untrusted" in home
     elif name == "search_files":
-        private = bool(result.get("matches")) and _outside_roots(
-            store, holder, str(args.get("path") or "")
+        path = str(args.get("path") or "")
+        home = _home_bits(holder, path, tree=True) if result.get("matches") else set()
+        private = bool(result.get("matches")) and (
+            "private" in home or _outside_roots(store, holder, path)
         )
+        untrusted = "untrusted" in home
+    elif name in _RUN_READS:
+        untrusted = True
+    elif name in _STORE_READS:
+        key, id_field, kind = _STORE_READS[name]
+        rows = result.get(key) or []
+        bits = store.content_taint(
+            kind, [str(r.get(id_field)) for r in rows if isinstance(r, dict) and r.get(id_field)]
+        )
+        private, untrusted = "private" in bits, "untrusted" in bits
     elif name in _PRIVATE_OUTPUT:
         private = True
     elif name in _UNTRUSTED_OUTPUT:
@@ -123,6 +185,28 @@ def record_tool_taint(
         chat_id,
         private=message_id if private else None,
         untrusted=message_id if untrusted else None,
+    )
+
+
+def memory_taint(store: RunStore, chat_id: str) -> ChatTaint:
+    """W21: approved memory a tainted chat filed reaches this chat's prompt
+    (``chat.memory_block``'s items), so the chat takes its bits — set at the
+    newest operator message, the turn that will read it."""
+    chat = store.get_chat(chat_id)
+    project = chat.project_id if chat else None
+    ids = [
+        item.memory_id
+        for item in store.list_memory_items()
+        if item.project_id is None or item.project_id == project
+    ]
+    bits = store.content_taint("memory", ids) if ids else set()
+    if not bits:
+        return store.get_chat_taint(chat_id)
+    turn = max((m.id for m in store.chat_messages(chat_id) if m.role == "user"), default=0)
+    return store.add_chat_taint(
+        chat_id,
+        private=turn if "private" in bits else None,
+        untrusted=turn if "untrusted" in bits else None,
     )
 
 
