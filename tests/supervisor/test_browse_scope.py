@@ -36,6 +36,22 @@ def _rules_home(config: SupervisorConfig) -> None:
     predating_home(config.db_path)
 
 
+_PAGE_READS = ("browser_snapshot", "browser_take_screenshot", "browser_console_messages",
+               "browser_network_requests", "browser_wait_for")  # fmt: skip
+
+
+@pytest.fixture(autouse=True)
+def _fake_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """W9 looks up a browse server's readOnlyHint: never spawn npx here. The
+    fake marks the page-state reads read-only, as Playwright's server does."""
+
+    def runner(method: str, params: object) -> dict[str, object]:
+        assert method == "tools/list"
+        return {"tools": [{"name": n, "annotations": {"readOnlyHint": True}} for n in _PAGE_READS]}
+
+    monkeypatch.setattr("skep.supervisor.mcp_client.runner_for_config", lambda config, **_: runner)
+
+
 def test_classify_browse_action_read_vs_act() -> None:
     reads = (
         "browser_snapshot",
@@ -57,9 +73,20 @@ def test_classify_browse_action_read_vs_act() -> None:
         "utterly_unknown",
     )
     for name in reads:
-        assert classify_browse_action(name) == "read", name
+        assert classify_browse_action(_tool(name, read_only=True)) == "read", name
     for name in acts:
-        assert classify_browse_action(name) == "act", name
+        assert classify_browse_action(_tool(name, read_only=True)) == "act", name
+
+
+def test_w9_browse_read_needs_the_read_only_hint_and_no_act_in_the_name() -> None:
+    """W9 (PR #70): read vs act came from the NAME alone, so
+    `browser_snapshot_and_submit` was a page read. Act unless both the
+    server's readOnlyHint and the name say read — as MCP calls do (#60)."""
+    for read_only in (False, None):
+        assert classify_browse_action(_tool("browser_snapshot", read_only=read_only)) == "act"
+    for name in ("browser_snapshot_and_submit", "browser_screenshot_then_click",
+                 "browser_console_eval_and_send"):  # fmt: skip
+        assert classify_browse_action(_tool(name, read_only=True)) == "act", name
 
 
 def _seed_browse_server(config: SupervisorConfig) -> None:
@@ -78,8 +105,8 @@ def _seed_browse_server(config: SupervisorConfig) -> None:
         store.close()
 
 
-def _tool(name: str) -> MCPTool:
-    return MCPTool(server_id="playwright", name=name, description="")
+def _tool(name: str, read_only: bool | None = None) -> MCPTool:
+    return MCPTool(server_id="playwright", name=name, description="", read_only=read_only)
 
 
 def test_browse_reads_flow_and_acts_card(config: SupervisorConfig) -> None:
@@ -253,7 +280,11 @@ def test_list_mcp_tools_labels_browse_tools_by_browse_action(
         assert method == "tools/list"
         return {
             "tools": [
-                {"name": "browser_snapshot", "description": "read the page"},
+                {
+                    "name": "browser_snapshot",
+                    "description": "read the page",
+                    "annotations": {"readOnlyHint": True},
+                },
                 {"name": "browser_navigate", "description": "go to a url"},
             ]
         }
