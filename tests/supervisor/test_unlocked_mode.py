@@ -184,3 +184,92 @@ def test_turning_unlocked_on_from_chat_is_a_high_card_and_off_is_not() -> None:
         why = high_tier("setup_project", {"project_id": "p", **args})
         assert why is not None and "unlocked" in why, args
     assert high_tier("setup_project", {"project_id": "p", "unlocked": False}) is None
+
+
+# --- ES-F143: what unlocked implies, composed by the resolver -----------------
+
+
+def _bound(config: SupervisorConfig, repo: Path, policy: dict[str, Any]) -> RunStore:
+    store = RunStore(config.db_path)
+    store.add_project_policy(
+        project_id="unlockable",
+        name="Unlockable",
+        strategy="trusted_local_dev",
+        phase="build",
+        policy=policy,
+    )
+    store.add_project_binding(
+        project_id="unlockable", binding_kind="repo_path", binding_value=str(repo.resolve())
+    )
+    return store
+
+
+UNLOCKED = {"unlocked": True, "verify_command": "true"}
+
+
+@pytest.mark.parametrize("v2", [False, True], ids=["engine-v1", "engine-v2"])
+def test_unlocked_implies_auto_dispatch_sandbox_and_verified_landing(
+    repo: Path, config: SupervisorConfig, v2: bool
+) -> None:
+    from skep.supervisor.policy_resolver import run_policy_for_repo
+    from skep.supervisor.policy_schema import SCOPES
+    from skep.supervisor.serve.settings import POLICY_ENGINE_V2_SCOPES
+
+    store = _bound(config, repo, UNLOCKED)
+    store.set_setting(POLICY_ENGINE_V2_SCOPES, list(SCOPES) if v2 else [])
+    try:
+        policy = run_policy_for_repo(store, config, repo.resolve())
+        implied = {"auto_dispatch_allowed": True, "default_execution_mode": "sandbox",
+                   "auto_apply_verified_patch": True}  # fmt: skip
+        for key, value in implied.items():
+            assert policy[key] == value, key
+            assert policy["_provenance"][key] == "unlocked", key
+    finally:
+        store.close()
+
+
+def test_an_unlocked_run_is_sandboxed_whatever_the_request_says(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.policy_resolver import resolve_run_policy
+
+    store = _bound(config, repo, UNLOCKED)
+    try:
+        resolved = resolve_run_policy(
+            store=store, config=config, repo=repo.resolve(), caste="coding", network=None,
+            env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
+            max_actions=None, max_provider_calls=None, execution_mode="workspace",
+        )  # fmt: skip
+        assert resolved.execution_mode == "sandbox"
+    finally:
+        store.close()
+
+
+def test_an_unlocked_dispatch_runs_in_turn_and_says_why(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    from skep.supervisor.serve.actions import dispatch_run_decision
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    store = _bound(config, repo, UNLOCKED)
+    try:
+        holder = ConfigHolder(config, store)
+        decision = dispatch_run_decision(holder, store, repo=str(repo))
+        assert (decision.verdict, decision.reason) == ("allow", "dispatch.auto_allowed.unlocked")
+        # an explicit run override still cards (v95-F3, I6/I7)
+        explicit = dispatch_run_decision(holder, store, repo=str(repo), engine="builtin")
+        assert explicit.verdict == "require_approval"
+    finally:
+        store.close()
+
+
+def test_a_phase_change_drops_unlocked(repo: Path, config: SupervisorConfig) -> None:
+    from skep.supervisor.serve.registry import set_project_phase
+
+    store = _bound(config, repo, UNLOCKED)
+    try:
+        moved = set_project_phase(store, "unlockable", "maintain")
+        assert "unlocked" not in moved["policy"]
+        assert moved["policy"]["verify_command"] == "true"
+    finally:
+        store.close()

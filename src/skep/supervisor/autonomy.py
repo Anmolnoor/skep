@@ -147,7 +147,10 @@ def project_policy_dispatch_decision(
         )
     return AutonomyDecision(
         verdict="allow",
-        reason="dispatch.auto_allowed.project_policy_match",
+        # ES-F143 (ADR 0060, I8): the receipt says WHY nothing asked
+        reason="dispatch.auto_allowed.unlocked"
+        if policy.get("unlocked") is True
+        else "dispatch.auto_allowed.project_policy_match",
     )
 
 
