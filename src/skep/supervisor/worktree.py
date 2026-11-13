@@ -109,6 +109,40 @@ def git_metadata_writable_roots(workspace: Path) -> tuple[Path, ...]:
     return (objects,) if git_dir == common_dir else (git_dir, objects)
 
 
+GIT_PROTOCOL_PIN = '[protocol]\n\tallow = never\n[protocol "file"]\n\tallow = always\n'
+
+
+def pin_git_protocols(workspace: Path) -> Path | None:
+    """W31: the worktree's own git config, the second carrier of the worker's
+    ``GIT_ALLOW_PROTOCOL=file``: ``config.worktree`` in its per-worktree git
+    dir, with ``extensions.worktreeConfig`` on in the shared config. Git reads
+    it with an EMPTY environment (``env -i git push``), where the env var is
+    gone — global config needs HOME, the system file is not ours to write.
+    The sandbox makes the file read-only (``write_denied``). The operator's
+    own checkout, where open_pr and push_branch push, reads none of it.
+    None — the env var alone — for a non-linked checkout, or a shared config
+    that sets core.bare / core.worktree (worktreeConfig would reinterpret
+    them)."""
+    dirs = _git_dirs(workspace)
+    if dirs is None or dirs[0] == dirs[1]:
+        return None
+    git_dir, common_dir = dirs
+    shared = str(common_dir / "config")
+    if (
+        _git(workspace, "config", "--file", shared, "--get", "core.worktree").stdout.strip()
+        or _git(
+            workspace, "config", "--file", shared, "--bool", "--get", "core.bare"
+        ).stdout.strip()
+        == "true"
+    ):
+        return None
+    if _git(workspace, "config", "--file", shared, "extensions.worktreeConfig", "true").returncode:
+        return None
+    pin = git_dir / "config.worktree"
+    pin.write_text(GIT_PROTOCOL_PIN, encoding="utf-8")
+    return pin
+
+
 def git_metadata_readable_roots(workspace: Path) -> tuple[Path, ...]:
     """The shared common dir a linked worktree's git must READ (HEAD, config, refs).
 

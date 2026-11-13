@@ -76,8 +76,21 @@ inside a worker (and every process it starts) uses only its local transport,
 so a push, fetch, clone or submodule update over https, ssh or git:// fails
 with "transport not allowed". That includes a package manager's git-sourced
 dependencies (`git+https://…` in uv/pip, `github:` in npm) unless they are
-already in the cache. A process that rewrites its own env can drop the variable; the
-network mode above is the wall.
+already in the cache.
+
+A process that clears its env (`env -i git push`, `subprocess.run(..., env={})`)
+drops the variable, so the run's worktree carries the same rule as git config:
+`config.worktree` in its own git dir (`protocol.allow=never`,
+`protocol.file.allow=always`, with `extensions.worktreeConfig` on in the
+repo's shared config), which git reads with an empty environment. In sandbox
+mode that file is read-only to the worker (it cannot edit, delete or replace
+it). In workspace mode there is no sandbox: the worker can edit or delete it,
+so there it only stops a script that clears its env and does nothing else.
+Neither carrier stops git told otherwise on its command line
+(`git -c protocol.allow=always`), a `GIT_CONFIG_*` variable, a `.git` file
+repointed at another git dir, or a fresh clone in the workspace: the network
+mode above is the wall. skep's own pushes (open_pr, push_branch) run in your
+checkout, which reads none of this.
 
 ### macOS
 

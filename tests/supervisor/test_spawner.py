@@ -171,6 +171,7 @@ def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
         backend: str | None = None,
         skep_home: Path | None = None,
         worker_llm_key: bool = False,
+        write_denied: tuple[Path, ...] = (),
     ) -> Path:
         captured["workspace"] = workspace
         captured["extra_writable"] = tuple(extra_writable)
@@ -237,6 +238,7 @@ def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(
             *,
             unix_socket_path: str | None = None,
             denied_loopback_ports: tuple[int, ...] = (),
+            asks: tuple[str, ...] | list[str] = (),
         ) -> None:
             captured_domains.append(domains)
             captured_ports.append(denied_loopback_ports)

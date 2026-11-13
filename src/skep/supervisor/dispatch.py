@@ -86,6 +86,7 @@ from .worktree import (
     cleanup_orphans,
     create_worktree,
     is_linked_worktree,
+    pin_git_protocols,
     remove_worktree,
 )
 
@@ -746,6 +747,10 @@ def run_task(
         routed_env.update(_toolchain_env(workspace, engine, cache_root))
         run_store.transition(task.task_id, "dispatched", dispatched_detail)
         log_path = audit_task_dir / "worker.log"
+        # W31: the second carrier of GIT_ALLOW_PROTOCOL=file — the worktree's
+        # own git config, which an emptied env still meets; read-only in the
+        # sandbox, editable in workspace mode (there is no wall to hold it).
+        git_pin = pin_git_protocols(workspace)
         try:
             process = spawn_worker(
                 config,
@@ -761,6 +766,7 @@ def run_task(
                 # v109-F4: the cache is OUTSIDE the workspace by design (it
                 # must outlive the worktree), so the wall needs a door for it.
                 extra_writable=(cache_root,),
+                write_denied=() if git_pin is None else (git_pin,),
             )
         except SandboxUnavailableError as exc:
             # ES-F1 backstop: the up-front check passed but the backend the

