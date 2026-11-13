@@ -30,6 +30,7 @@ def build_status(
     home = Path(home)
     required: dict[str, dict[str, Any]] = {}
     stale_pending = _stale_pending_runs(home, now=now)
+    approvals = _pending_approvals(home, now=now)
 
     if not profile_path(home).exists():
         required["profile"] = {
@@ -60,6 +61,7 @@ def build_status(
             + _channel_user_advisories(home)
         )
         payload["stale_pending"] = stale_pending
+        payload["approvals"] = approvals
         return payload
 
     profile = load_profile(home)
@@ -95,6 +97,7 @@ def build_status(
         + _channel_user_advisories(home)
     )
     payload["stale_pending"] = stale_pending
+    payload["approvals"] = approvals
     return payload
 
 
@@ -154,6 +157,25 @@ def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
             "detail": target,
         }
     return {"status": "ready", "label": f"provider ready ({target})", "detail": target}
+
+
+def _pending_approvals(home: Path, *, now: datetime | None = None) -> dict[str, Any]:
+    """Every approval row the store holds pending, and how many are older
+    than the stale threshold: no auto-deny timeout applies to a gate, and a
+    row whose run moved on still waits (doctor printed a constant 0)."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return {"status": "ready", "pending": 0, "stale": 0}
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=_STALE_PENDING_DAYS)
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path)
+    try:
+        pending = store.pending_approvals()
+    finally:
+        store.close()
+    stale = sum(a.requested_at < cutoff.strftime("%Y-%m-%dT%H:%M:%SZ") for a in pending)
+    return {"status": "ready", "pending": len(pending), "stale": stale}
 
 
 def _stale_pending_runs(home: Path, *, now: datetime | None = None) -> list[dict[str, Any]]:
@@ -660,7 +682,16 @@ def format_doctor_report(status: Mapping[str, Any]) -> str:
         lines.append(f"- engine {name}: {mark} — {engine.get('detail')}{walls}")
 
     approvals = status.get("approvals", {})
-    lines.append(f"- approvals: {approvals.get('pending', 0)} pending")
+    stale = approvals.get("stale", 0)
+    lines.append(
+        f"- approvals: {approvals.get('pending', 0)} pending"
+        + (
+            f" ({stale} stale: pending more than {_STALE_PENDING_DAYS} days, and no auto-deny "
+            "timeout applies to a gate — skep review <task> --deny clears one)"
+            if stale
+            else ""
+        )
+    )
 
     memory = status.get("memory", {})
     if memory:

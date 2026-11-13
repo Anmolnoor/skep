@@ -410,6 +410,39 @@ def test_doctor_reports_stale_pending_runs(tmp_path: Path) -> None:
     assert build_status(home)["stale_pending"] == []
 
 
+def test_doctor_counts_every_pending_approval_row_and_says_which_are_stale(
+    tmp_path: Path,
+) -> None:
+    """Doctor honesty (field test): doctor printed "0 pending" while the store
+    held two approval rows pending for weeks (their runs long past the gate).
+    The count is the store's; rows older than the stale threshold say so —
+    no auto-deny timeout applies to a gate."""
+    from datetime import UTC, datetime
+
+    from skep.status import build_status, format_doctor_report
+
+    home = tmp_path / "personal"
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    db_path.parent.mkdir(parents=True)
+    store = RunStore(db_path)
+    try:
+        for name in ("a", "b"):
+            task = mint_task(workspace=tmp_path / name, instructions="x")
+            store.create_run(task, repo=tmp_path / "repo", ref=None, execution_mode="workspace")
+            store.enqueue_approval(task.task_id, action="shell.run", reason="gate")
+            store.transition(task.task_id, "failed", "gone")
+    finally:
+        store.close()
+
+    fresh = build_status(home)
+    assert fresh["approvals"]["pending"] == 2 and fresh["approvals"]["stale"] == 0
+    assert "- approvals: 2 pending\n" in format_doctor_report(fresh)
+    later = build_status(home, now=datetime(2099, 1, 1, tzinfo=UTC))
+    assert "- approvals: 2 pending (2 stale: pending more than 7 days" in (
+        format_doctor_report(later)
+    )
+
+
 def test_doctor_flags_deprecated_global_auto_approve(tmp_path: Path) -> None:
     """v23-F6 → v81-F14: a store carrying auto_approve=true is told the toggle
     is inert now, and how to clear it."""
