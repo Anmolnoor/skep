@@ -144,6 +144,29 @@ def _browse_read_name(name: str) -> bool:
     )
 
 
+# ES-F161 (R6, D25): Playwright MCP's page-state reads — used only when its
+# server sends no readOnlyHint for the tool (a hint it sends always wins).
+# Each one only reports the page it is on: none navigates, types, clicks,
+# submits or changes page state (an optional `filename` saves the report to
+# the server's output folder). `browser_find` reads too, but its name is not
+# a page-state read here (_BROWSE_READ_KEYWORDS), so it would act anyway.
+PLAYWRIGHT_READ_TOOLS: frozenset[str] = frozenset(
+    {"browser_snapshot", "browser_take_screenshot", "browser_console_messages",
+     "browser_network_requests", "browser_network_request", "browser_wait_for"}
+)  # fmt: skip
+
+
+def _playwright_read(config: MCPServerConfig, name: str) -> bool:
+    """A hint-less tool of a browse server launched from Playwright's MCP
+    package (npx ``@playwright/mcp``, or its ``mcr.microsoft.com/playwright/mcp``
+    image) that is one of its known page-state reads."""
+    return (
+        config.scope == "browse"
+        and name in PLAYWRIGHT_READ_TOOLS
+        and any("playwright/mcp" in part for part in config.command)
+    )
+
+
 def classify_browse_action(tool: MCPTool) -> str:
     """``read`` for a page-state read, ``act`` for everything else. W9: a read
     needs both the server's ``readOnlyHint`` and a page-state name with no
@@ -270,14 +293,16 @@ class MCPClient:
                 continue
             schema = entry.get("inputSchema")
             annotations = entry.get("annotations")
+            hint = annotations.get("readOnlyHint") if isinstance(annotations, dict) else None
             tools.append(
                 MCPTool(
                     server_id=self._config.server_id,
                     name=name,
                     description=str(entry.get("description") or ""),
                     input_schema=dict(schema) if isinstance(schema, dict) else {},
-                    read_only=isinstance(annotations, dict)
-                    and annotations.get("readOnlyHint") is True,
+                    read_only=(
+                        hint if isinstance(hint, bool) else _playwright_read(self._config, name)
+                    ),
                 )
             )
         return tools

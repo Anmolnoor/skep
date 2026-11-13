@@ -375,3 +375,89 @@ def test_es_f160_a_failed_listing_is_not_cached(
         assert mcp_call_is_read(store, "playwright", "browser_snapshot")
     finally:
         store.close()
+
+
+def _hintless_runner(hints: dict[str, bool] | None = None) -> object:
+    names = ("browser_snapshot", "browser_take_screenshot", "browser_console_messages",
+             "browser_network_requests", "browser_network_request", "browser_wait_for",
+             "browser_navigate", "browser_click", "browser_type", "browser_evaluate",
+             "browser_tabs", "browser_find")  # fmt: skip
+
+    def runner(method: str, params: object) -> dict[str, object]:
+        assert method == "tools/list"
+        tools: list[dict[str, object]] = []
+        for name in names:
+            entry: dict[str, object] = {"name": name, "annotations": {"title": name}}
+            if hints and name in hints:
+                entry["annotations"] = {"readOnlyHint": hints[name]}
+            tools.append(entry)
+        return {"tools": tools}
+
+    return runner
+
+
+def test_es_f161_a_playwright_server_without_hints_reads_from_the_built_in_list(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6 (D25): a Playwright server that sends no readOnlyHint made every
+    page read an act — a HIGH card. Its known page-state reads now stand in
+    for the missing hint; every act still cards."""
+    from skep.supervisor.mcp_client import mcp_call_is_read
+    from skep.supervisor.serve.cards import high_tier
+
+    monkeypatch.setattr(
+        "skep.supervisor.mcp_client.runner_for_config", lambda config, **_: _hintless_runner()
+    )
+    _seed_browse_server(config)
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        reads = (*_PAGE_READS, "browser_network_request")
+        for name in reads:
+            assert mcp_tool_scope_action(store, _tool(name)) == ("browse", "read"), name
+            assert mcp_scope_decision(store, holder, _tool(name)).verdict == "allow", name
+            args = {"server_id": "playwright", "tool": name}
+            assert high_tier("call_mcp_tool", args, store=store) is None, name
+        for name in ("browser_navigate", "browser_click", "browser_type", "browser_evaluate",
+                     "browser_tabs", "browser_find"):  # fmt: skip
+            assert mcp_tool_scope_action(store, _tool(name)) == ("browse", "act"), name
+            assert not mcp_call_is_read(store, "playwright", name), name
+    finally:
+        store.close()
+
+
+def test_es_f161_the_servers_own_hint_always_wins_over_the_built_in_list(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "skep.supervisor.mcp_client.runner_for_config",
+        lambda config, **_: _hintless_runner({"browser_snapshot": False}),
+    )
+    _seed_browse_server(config)
+    store = RunStore(config.db_path)
+    try:
+        assert mcp_tool_scope_action(store, _tool("browser_snapshot")) == ("browse", "act")
+        assert mcp_tool_scope_action(store, _tool("browser_console_messages")) == ("browse", "read")
+    finally:
+        store.close()
+
+
+def test_es_f161_the_built_in_list_is_only_for_the_playwright_server(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another browse server's hint-less `browser_snapshot` is not vouched for."""
+    monkeypatch.setattr(
+        "skep.supervisor.mcp_client.runner_for_config", lambda config, **_: _hintless_runner()
+    )
+    store = RunStore(config.db_path)
+    try:
+        save_mcp_server(
+            store,
+            MCPServerConfig(
+                server_id="playwright", transport="stdio", command=("other-browser-mcp",),
+                scope="browse",
+            ),
+        )  # fmt: skip
+        assert mcp_tool_scope_action(store, _tool("browser_snapshot")) == ("browse", "act")
+    finally:
+        store.close()

@@ -31,7 +31,13 @@ Tools on a browse-bound server decide as `browse/read` or `browse/act`
   `network_request`, `wait_for` shaped names that the server itself marks
   read-only (`readOnlyHint` in its tools/list) and that carry no act verb
   (`submit`, `click`, `fill`, …) anywhere in the name (ES-F54). skep asks the
-  server's own tools/list for the hint on each read; a server that does not
+  server's own tools/list for the hint once per registration (ES-F160:
+  registering the server again, or restarting serve, asks afresh). A
+  Playwright server (`@playwright/mcp`) that sends no hint for a tool falls
+  back to skep's list of its page-state reads (ES-F161): `browser_snapshot`,
+  `browser_take_screenshot`, `browser_console_messages`,
+  `browser_network_requests`, `browser_network_request`, `browser_wait_for`;
+  a hint the server does send always wins. Any other server that does not
   send it, or a list that fails, makes every one of its tools an act (a
   card). These run inside the turn
   unless a policy rule asks for them: the builder and operator baselines
