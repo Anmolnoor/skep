@@ -310,6 +310,18 @@ def test_claude_argv_grants_headless_edit_permission() -> None:
     ]
 
 
+def test_codex_argv_lets_it_write_its_own_worktree() -> None:
+    """ES-F128: `codex exec` defaults to a READ-ONLY sandbox of its own, so
+    the 2026-11-13 live run authenticated, answered, and could not edit
+    hello.py ("the sandbox is read-only") — completed, no patch. skep's
+    sandbox is the wall (ADR 0047); codex's own workspace-write mode keeps a
+    second one inside it, scoped to the worktree."""
+    from skep.workers.codex.__main__ import CODEX_SPEC
+
+    argv = CODEX_SPEC.build_argv(["codex"], "add multiply")
+    assert argv == ["codex", "exec", "--sandbox", "workspace-write", "add multiply"]
+
+
 def test_event_streams_survive_the_agent_deleting_the_events_dir(tmp_path: Path) -> None:
     """The event channel lives inside the agent-writable workspace; a tidy
     `git clean -fd` deletes it mid-run (authwapi acceptance, 019fc719 — the
