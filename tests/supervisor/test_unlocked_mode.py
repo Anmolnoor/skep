@@ -537,3 +537,21 @@ def test_a_gate_stays_a_card_when_the_home_runs_no_sandbox(
     client, first = _gated_run(unsandboxed, repo, "rm_-rf_build")
     assert client.get(f"/api/runs/{first}").json()["run"]["state"] == "pending_approval"
     assert _decisions(unsandboxed) == []
+
+
+# --- ES-F146: the mode is visible -----------------------------------------------
+
+
+def test_doctor_names_every_unlocked_project_and_the_way_out(repo: Path, tmp_path: Path) -> None:
+    from skep.status import _unlocked_advisories, build_status
+    from skep.supervisor.cli_cmds import build_config
+
+    root = tmp_path / "doctor-home"
+    config = build_config(root, None)
+    config.home.mkdir(parents=True)
+    assert _unlocked_advisories(root) == []
+    _bound(config, repo, UNLOCKED).close()
+    lines = _unlocked_advisories(root)
+    assert len(lines) == 1
+    assert "unlockable" in lines[0] and "--no-unlocked" in lines[0]
+    assert lines[0] in build_status(root, provider_timeout=0.01)["advisories"]
