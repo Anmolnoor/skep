@@ -214,7 +214,14 @@ def high_tier(
         existing = None if store is None else store.get_schedule(str(safe.get("name") or ""))
         if existing is None or existing.worker_kind == "script":  # unknown: fail closed
             return f"a script schedule {SCRIPT_SENTENCE}"
-    if tool == "setup_project" and (safe.get("policy_overrides") or safe.get("groups")):
+    overrides = safe.get("policy_overrides")
+    if tool == "setup_project" and (
+        safe.get("unlocked") is True
+        or (isinstance(overrides, dict) and overrides.get("unlocked") is True)
+    ):
+        # ES-F142 (ADR 0060): a whole project's worker asks stop asking
+        return "it turns unlocked mode on: the project's sandboxed workers stop asking"
+    if tool == "setup_project" and (overrides or safe.get("groups")):
         # the overlay spells any knob (coding_engine, default_network, …) and
         # groups= is attach_policy_group: both write the project's policy
         return "it writes the project's policy (policy_overrides or groups)"

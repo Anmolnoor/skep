@@ -175,3 +175,12 @@ def test_copy_project_policy_never_copies_unlocked(
         assert "unlocked" not in copied["project"]["policy"]
     finally:
         store.close()
+
+
+def test_turning_unlocked_on_from_chat_is_a_high_card_and_off_is_not() -> None:
+    from skep.supervisor.serve.cards import high_tier
+
+    for args in ({"unlocked": True}, {"policy_overrides": {"unlocked": True}}):
+        why = high_tier("setup_project", {"project_id": "p", **args})
+        assert why is not None and "unlocked" in why, args
+    assert high_tier("setup_project", {"project_id": "p", "unlocked": False}) is None
