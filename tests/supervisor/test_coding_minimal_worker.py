@@ -5645,3 +5645,17 @@ def test_es_f2_snapshot_never_follows_a_symlink_out_of_the_worktree(tmp_path: Pa
     assert "CANARY-DOTENV" not in user
     assert "- deploy_key.txt" in user  # still listed by name
     assert "--- inner.txt ---\ndef add" in user
+
+
+def test_a_failed_runs_cause_masks_a_login_and_the_home() -> None:
+    """L31 follow-up: the summary carried the exception's message as is, and
+    a provider error can name a URL with a login in it or a file under the
+    home — the summary reaches the chat and every messenger notice. The login
+    is masked before the line is cut, and the home reads as ~."""
+    login = "u" + ":" + "p" * 30  # built, never a literal
+    exc = RuntimeError(
+        f"provider failed at https://{login}@llm.invalid/v1 reading {Path.home()}/cfg"
+    )
+    cause = coding_worker._failure_cause(exc)
+    assert cause.startswith("RuntimeError: provider failed at https://u:***@llm.invalid/v1")
+    assert "p" * 30 not in cause and str(Path.home()) not in cause and "~/cfg" in cause
