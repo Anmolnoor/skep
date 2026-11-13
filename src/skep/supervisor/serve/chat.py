@@ -403,16 +403,18 @@ def high_tier_decision(high: str, allowed: Any) -> Any:
 
 
 def manifest_ask_decision(allowed: Any) -> Any:
-    """B147 residue: an auto-allowed dispatch whose chain turned a grant into
-    an ask cards with its manifest — only a confirmed card pre-answers those
-    asks, and a subprocess (``uv sync`` through the proxy) cannot ask."""
+    """B147 residue: an auto-allowed sandboxed dispatch whose chain turned a
+    host into an ask cards with its manifest — only a confirmed card
+    pre-answers it, and a subprocess (``uv sync`` through the proxy) cannot
+    ask. Workspace mode has no proxy; a shell ask is the worker's own card."""
     from ..autonomy import AutonomyDecision
 
     return AutonomyDecision(
         verdict="require_approval",
         reason="dispatch.require_approval.manifest_asks",
         detail=f"{allowed.decided_by or allowed.reason} would allow this dispatch, but its "
-        "run would ask about what the card lists; approving answers them for that run",
+        "sandboxed run would ask about hosts the card lists, which a subprocess cannot "
+        "ask; approving answers them for that run",
         decided_by=allowed.decided_by,
     )
 
@@ -1998,7 +2000,8 @@ class ChatEngine:
                         decision = high_tier_decision(high, decision)
                     elif (
                         manifest is not None
-                        and (manifest.get("network_ask") or manifest.get("shell_ask"))
+                        and manifest.get("network_ask")
+                        and manifest.get("execution_mode") == "sandbox"
                         and decision is not None
                         and decision.allows_execution()
                     ):
