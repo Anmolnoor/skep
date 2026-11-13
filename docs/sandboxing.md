@@ -79,13 +79,26 @@ dependencies (`git+https://…` in uv/pip, `github:` in npm) unless they are
 already in the cache.
 
 A process that clears its env (`env -i git push`, `subprocess.run(..., env={})`)
-drops the variable, so the run's worktree carries the same rule as git config:
-`config.worktree` in its own git dir (`protocol.allow=never`,
-`protocol.file.allow=always`, with `extensions.worktreeConfig` on in the
-repo's shared config), which git reads with an empty environment. In sandbox
-mode that file is read-only to the worker (it cannot edit, delete or replace
-it). In workspace mode there is no sandbox: the worker can edit or delete it,
-so there it only stops a script that clears its env and does nothing else.
+drops the variable, so skep's task worktrees carry the same rule as git
+config, which git reads with an empty environment. The first time skep runs a
+task in a repository it writes `.git/skep-protocol-pin` (`protocol.allow=never`,
+`protocol.file.allow=always`) and adds one section to that repository's
+`.git/config`:
+
+```ini
+[includeIf "gitdir:./worktrees/????????-????-7???-????-????????????*"]
+	path = skep-protocol-pin
+```
+
+It matches only a linked worktree whose git dir is named like a skep task id
+(a UUIDv7): your checkout and your own worktrees read none of it, and it is
+plain config every git client parses (no repository extension). To remove it:
+`git config --remove-section 'includeIf.gitdir:./worktrees/????????-????-7???-????-????????????*'`
+and delete the file; skep writes both again on its next run there. In sandbox
+mode both files are read-only to the worker (it cannot edit, delete or
+replace them). In workspace mode there is no sandbox: the worker can edit or
+delete them, so there the rule only stops a script that clears its env and
+does nothing else.
 Neither carrier stops git told otherwise on its command line
 (`git -c protocol.allow=always`), a `GIT_CONFIG_*` variable, a `.git` file
 repointed at another git dir, or a fresh clone in the workspace: the network

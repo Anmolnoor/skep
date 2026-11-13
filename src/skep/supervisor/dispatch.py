@@ -747,9 +747,9 @@ def run_task(
         routed_env.update(_toolchain_env(workspace, engine, cache_root))
         run_store.transition(task.task_id, "dispatched", dispatched_detail)
         log_path = audit_task_dir / "worker.log"
-        # W31: the second carrier of GIT_ALLOW_PROTOCOL=file — the worktree's
-        # own git config, which an emptied env still meets; read-only in the
-        # sandbox, editable in workspace mode (there is no wall to hold it).
+        # W31: the second carrier of GIT_ALLOW_PROTOCOL=file — git config only
+        # task worktrees include, which an emptied env still meets; read-only
+        # in the sandbox, editable in workspace mode (there is no wall).
         git_pin = pin_git_protocols(workspace)
         try:
             process = spawn_worker(
