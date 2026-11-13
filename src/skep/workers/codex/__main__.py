@@ -17,16 +17,20 @@ CODEX_SPEC = AdapterSpec(
     default_command=("codex",),
     # Codex's non-interactive one-shot: `codex exec <prompt>` edits the tree and
     # exits without committing, so the working-tree diff is the patch.
-    # ES-F128: its own sandbox defaults to read-only, which refuses every
-    # edit; workspace-write scopes it to the worktree inside skep's sandbox.
+    # ES-F220: its own sandbox is OFF. Read-only (the default) refuses every
+    # edit (ES-F128), and any codex sandbox starts its own bubblewrap per
+    # shell call, which the kernel refuses inside skep's Landlock domain.
+    # skep's sandbox is the wall (ADR 0047): external engines are forced
+    # into it (v94-F4), and requires_sandbox refuses a launch outside it.
     build_argv=lambda base, instructions: [
         *base,
         "exec",
         "--sandbox",
-        "workspace-write",
+        "danger-full-access",
         instructions,
     ],
     plan_steps=("run codex exec", "capture git diff"),
+    requires_sandbox=True,
 )
 
 

@@ -643,3 +643,37 @@ def test_the_no_auth_env_opt_in_command_works_as_printed(
         store.close()
     assert plan is not None and plan.policy["codex_chatgpt_login"] is True
     assert plan.phase == "maintain" and plan.policy["verify_command"] == "true"
+
+
+def test_a_codex_dispatch_with_the_sandbox_off_never_runs_codex(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ES-F220: codex runs with its own sandbox off, so skep's is its only
+    wall. A config whose sandbox is off (only tests build one) passes the
+    v94-F4 mode check and spawns unsandboxed — the real codex worker refuses
+    there, before codex starts."""
+    import dataclasses
+    import os
+
+    import skep.supervisor.engines as engines_module
+    from skep.supervisor.dispatch import run_task
+
+    ran = tmp_path / "codex-ran"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "codex").write_text(f"#!/bin/sh\ntouch {ran}\n", encoding="utf-8")
+    (bin_dir / "codex").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-not-a-key")
+    monkeypatch.setattr(engines_module, "engine_available", lambda e: (True, "/usr/bin/agent"))
+    outcome = run_task(
+        repo,
+        "add a docstring",
+        config=dataclasses.replace(config, sandbox=False),
+        execution_mode="sandbox",
+        coding_engine="codex",
+        verify_command="true",
+    )
+    assert outcome.record.state == "rejected"
+    assert "outside skep's sandbox" in (outcome.record.summary or "")
+    assert not ran.exists()

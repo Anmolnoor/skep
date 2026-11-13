@@ -20,6 +20,7 @@ from skep.worker_contract.worker_state import (
     approval_grants_from_state,
     approved_network_hosts_from_verdict,
 )
+from skep.workers.cli_adapter import SANDBOX_MARKER_ENV
 
 from . import sandbox
 from .castes import CASTES
@@ -231,7 +232,8 @@ def spawn_worker(
     if use_sandbox:
         # ES-F1 (B47): no usable backend raises here — the worker never starts
         # unconfined under a "sandbox" record.
-        bubblewrap = sandbox.require_usable(backend).backend == "bubblewrap"
+        backend_name = sandbox.require_usable(backend).backend
+        bubblewrap = backend_name == "bubblewrap"
         workspace = Path(task.workspace)
         # v109-F4: ``extra_writable`` is per-run (the project dependency-cache
         # root); every backend consumes this one list (Seatbelt subpaths,
@@ -296,6 +298,11 @@ def spawn_worker(
         env.update(extra_env)
     if proxy_port is not None:
         env.update(_proxy_env(proxy_port))
+    # ES-F220: the codex worker (its own sandbox off) starts only with this
+    # set — so only a sandboxed launch carries it, never a host value.
+    env.pop(SANDBOX_MARKER_ENV, None)
+    if use_sandbox:
+        env[SANDBOX_MARKER_ENV] = backend_name or "sandbox"
     env.update(WORKER_GIT_ENV)  # last: nothing above may loosen it
     log_handle = log_path.open("ab")
     try:

@@ -48,6 +48,9 @@ EXIT_INVOCATION_ERROR = 2
 EXIT_FAILED = 3
 EXIT_REJECTED = 5
 
+# ES-F220: set by the supervisor's spawner on a sandboxed launch alone.
+SANDBOX_MARKER_ENV = "SKEP_SANDBOX"
+
 
 @dataclass(frozen=True)
 class AdapterSpec:
@@ -60,6 +63,9 @@ class AdapterSpec:
     # (base_command, instructions) -> the full headless argv.
     build_argv: Callable[[list[str], str], list[str]]
     plan_steps: tuple[str, ...] = ("run the agent CLI", "capture git diff")
+    # ES-F220: an agent whose own sandbox is off runs only where the spawner
+    # marked the launch as inside skep's (SKEP_SANDBOX).
+    requires_sandbox: bool = False
 
     def command_from_env(self) -> list[str]:
         raw = os.environ.get(self.command_env, "")
@@ -395,6 +401,21 @@ def run_cli_agent_task(task_path: Path, out_path: Path, spec: AdapterSpec) -> in
         workspace / ".events" / f"{task_id}.ndjson", task_id=task_id, trace_id=trace_id
     )
 
+    if spec.requires_sandbox and not os.environ.get(SANDBOX_MARKER_ENV):
+        return _reject(
+            spec=spec,
+            task_id=task_id,
+            trace_id=trace_id,
+            workspace=workspace,
+            stream=stream,
+            out_path=out_path,
+            reason=(
+                f"the {spec.default_command[0]} worker runs with its own sandbox off "
+                "because skep's sandbox is its wall (ADR 0047), and it was started "
+                f"outside skep's sandbox ({SANDBOX_MARKER_ENV} unset) — dispatch it "
+                "with execution mode 'sandbox'"
+            ),
+        )
     skew = check_supported(str(raw.get("contract_version") or ""), SUPPORTED_CONTRACT_RANGE)
     if skew is not None:
         return _reject(

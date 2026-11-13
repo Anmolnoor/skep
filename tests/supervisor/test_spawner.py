@@ -122,6 +122,62 @@ def test_spawn_worker_uses_proxy_env_for_resume_approved_network_host(
     assert env["HTTPS_PROXY"] == "http://127.0.0.1:8765"
 
 
+@pytest.mark.parametrize("sandboxed", [True, False])
+def test_spawn_worker_marks_a_sandboxed_launch_and_only_that(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandboxed: bool
+) -> None:
+    """ES-F220: SKEP_SANDBOX is how the codex worker (its own sandbox off)
+    knows skep's wall is up. The spawner sets it for a sandboxed launch and
+    strips it from every other one — even one whose allowlist passes a value
+    through from the host."""
+    from skep.supervisor import sandbox as supervisor_sandbox
+    from skep.supervisor import spawner as supervisor_spawner
+
+    monkeypatch.setenv("SKEP_SANDBOX", "forged")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task = mint_task(
+        workspace=workspace,
+        instructions="Edit one file.",
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=[], env_allowlist=["SKEP_SANDBOX"]
+        ),
+        budget=DEFAULT_BUDGET,
+    )
+    config = SupervisorConfig(home=tmp_path / "home", worker_command=("w",), sandbox=sandboxed)
+    captured: dict[str, dict[str, str]] = {}
+
+    class _DummyPopen:
+        def __init__(self, argv: list[str], *, env: dict[str, str], **_kw: object) -> None:
+            captured["env"] = env
+            self.pid = 12345
+
+    monkeypatch.setattr(
+        supervisor_sandbox,
+        "availability",
+        lambda backend=None: supervisor_sandbox.SandboxAvailability(True, backend="bubblewrap"),
+    )
+    monkeypatch.setattr(
+        supervisor_sandbox, "write_profile", lambda profile_path, **_kw: profile_path
+    )
+    monkeypatch.setattr(
+        supervisor_sandbox, "wrap_command", lambda argv, profile_path, backend=None: argv
+    )
+    monkeypatch.setattr(supervisor_spawner, "git_metadata_writable_roots", lambda _ws: ())
+    monkeypatch.setattr(supervisor_spawner, "git_metadata_readable_roots", lambda _ws: ())
+    monkeypatch.setattr(subprocess, "Popen", _DummyPopen)
+
+    supervisor_spawner.spawn_worker(
+        config,
+        task,
+        tmp_path / "task.json",
+        tmp_path / "results" / "result.json",
+        log_path=tmp_path / "logs" / "worker.log",
+    )
+
+    assert captured["env"].get("SKEP_SANDBOX") == ("bubblewrap" if sandboxed else None)
+
+
 def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
