@@ -310,11 +310,28 @@ def test_claude_argv_grants_headless_edit_permission() -> None:
     argv = CLAUDE_SPEC.build_argv(["claude"], "add multiply")
     assert argv == [
         "claude",
+        "--settings",
+        '{"sandbox": {"enabled": false}}',
         "--permission-mode",
         "bypassPermissions",
         "--print",
         "add multiply",
     ]
+
+
+def test_claude_argv_turns_its_own_bash_sandbox_off() -> None:
+    """ES-F221: Claude Code's Bash sandbox is bubblewrap on Linux. Off by
+    default, but the operator's settings or the repo's own
+    .claude/settings.json can turn it on, and inside skep's Landlock domain
+    every Bash call then dies (`bwrap: Failed to make / slave: Operation not
+    permitted`, reproduced 2026-11-13). --settings outranks user and project
+    settings, so skep's sandbox stays the only wall (ADR 0047)."""
+    import json
+
+    from skep.workers.claude_code.__main__ import CLAUDE_SPEC
+
+    argv = CLAUDE_SPEC.build_argv(["claude"], "x")
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"sandbox": {"enabled": False}}
 
 
 def test_codex_argv_turns_its_own_sandbox_off() -> None:
