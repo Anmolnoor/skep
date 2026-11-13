@@ -1,6 +1,6 @@
 # ADR 0060 — unlocked mode on policy v3
 
-**Status:** proposed (round ES-F140..ES-F149, branch `es-unlocked-v3`).
+**Status:** implemented on branch `es-unlocked-v3` (ES-F140..ES-F147), not merged.
 **Replaces:** the August `unlocked` branch's ADR (numbered 0052 there; the
 design archive keeps it as accepted ADR 9999). **Builds on:** ADR 0059
 (policy v3), ADR 0048 (policy groups), ADR 0047 (engines), ADR 0044
@@ -75,13 +75,22 @@ After the run lane answers and before the role, the chain and taint:
 
 - it applies only on the run lane (`stack.run`), for a project whose
   effective policy has `unlocked: true` (`Stack.unlocked`), to a sandboxed
-  request;
+  `shell.run` or `network.connect` request — the two asks the worker-gate
+  auto-answer understands (`UNLOCKED_REQUESTS`); nothing else is ever the
+  layer's (a write outside the workspace keeps its verdict);
 - it turns an **ask that is only a default** into `allow`, labelled
   `unlocked:<project>/zero-ask`: `default/unmatched`, or a catch-all `*` ask
   (ADR 0059 D2: "a `*` ask is a default, not a ceiling");
 - it never touches a deny, a named ask, the floor (checked before any lane:
   the git floor and the secret floor), the baseline guard (a zero-state or
-  tampered home still asks), or a line skep cannot read (`sh -c '…'`, `$(…)`).
+  tampered home still asks), a line skep cannot read (`sh -c '…'`, `$(…)`)
+  or a background line (`… &`);
+- the operator's standing denies and named asks bind too. The run lane is
+  compiled from knobs and holds allows only; a baseline `deny curl` or a
+  named `ask make deploy` lives on the operator lane (setup document,
+  overlay, locked baseline — D2: a template's denies and named asks are a
+  ceiling). Where one names any part of the line, the step declines and the
+  run lane's ask stands, for a human to answer.
 
 Everything after it still applies: a role's denies and asks (including its
 catch-all ask, which only a human grant answers, P3-2), the delegation cap (a
