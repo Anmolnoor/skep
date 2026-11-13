@@ -18,6 +18,33 @@
       "provider_hosts_out": ["provider.example:443"]
     },
     {
+      "why": "D5 (operator decision 2026-11-13): a named network ADDS to the project's hosts; until then it replaced them and this run lost pypi.org.",
+      "caste": "coding",
+      "project_network": ["pypi.org"],
+      "network": ["api.example.com"],
+      "provider_hosts": ["provider.example"],
+      "network_out": ["api.example.com", "pypi.org"],
+      "provider_hosts_out": ["provider.example:443"]
+    },
+    {
+      "why": "D5 (operator decision 2026-11-13): an explicit [] still means only the worker's own LLM, nothing from the project.",
+      "caste": "coding",
+      "project_network": ["pypi.org"],
+      "network": [],
+      "provider_hosts": ["provider.example"],
+      "network_out": [],
+      "provider_hosts_out": ["provider.example:443"]
+    },
+    {
+      "why": "D5 (operator decision 2026-11-13), stricter reading: a named list on a project whose hosts are * stays the named list; it never widens to *.",
+      "caste": "coding",
+      "project_network": ["*"],
+      "network": ["api.example.com"],
+      "provider_hosts": ["provider.example"],
+      "network_out": ["api.example.com"],
+      "provider_hosts_out": ["provider.example:443"]
+    },
+    {
       "caste": "audit",
       "network": [],
       "provider_hosts": ["provider.example"],

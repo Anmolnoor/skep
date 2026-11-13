@@ -76,6 +76,9 @@ def test_the_trust_ramp_is_enforced_at_project_and_never_groupable() -> None:
         "worker_protocol",
         "allowed_plugin_risks",
         "default_execution_mode",
+        # D6: which loopback ports a project's workers reach — a project fact,
+        # not a trust step and never bundled into a group.
+        "loopback_ports",
     }
     assert set(PROJECT_POLICY_KEYS) - set(GROUPABLE_POLICY_KEYS) - off_ramp_project_only == (
         TRUST_RAMP_KEYS

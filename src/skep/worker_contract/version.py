@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-CONTRACT_VERSION = "0.3.7"
+CONTRACT_VERSION = "0.3.8"
 
 # v39-F3: the one declaration of what this tree's supervisor and first-party
 # workers accept. Six modules used to carry their own copy of this literal;

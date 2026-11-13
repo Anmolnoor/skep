@@ -4741,6 +4741,55 @@ def _preanswer(
     return updated, {"network": hosts, "shell": prefixes}
 
 
+def unanswerable_hosts(store: RunStore, manifests: Sequence[dict[str, Any]]) -> list[str]:
+    """D9: the hosts these runs would ask about on a home with no approved
+    baseline where ``no_baseline`` binds (``zero_state_home``: every grant is
+    an ask, which nothing answers once a sandboxed subprocess meets it). []
+    elsewhere — on an upgraded home the asks are a role's own (V7), which
+    the worker cards and ``skep review`` answers."""
+    from ..policy_baseline import NoBaseline, verify
+    from ..policy_layers import store_home, zero_state_home
+
+    if not isinstance(verify(store_home(store)), NoBaseline) or not zero_state_home(store):
+        return []
+    return sorted({str(h) for manifest in manifests for h in manifest.get("network_ask") or []})
+
+
+def answered_hosts(
+    store: RunStore,
+    manifests: Sequence[dict[str, Any]],
+    answer: Sequence[str] | None,
+    *,
+    how: str,
+) -> dict[str, Any] | None:
+    """D9 (operator decision 2026-11-13): a role or team run the operator
+    starts. ``answer`` becomes the pre-answer (``submit_run(preanswered=)``,
+    the dispatch card's own mechanism) — refused unless every host is one
+    the manifests list as an ask. With no answer on a home with no approved
+    baseline (where every grant is an ask nothing answers once the run is
+    going) the run is refused, naming the hosts. ``how`` names this face's
+    way to answer (``answer_hosts`` / ``--answer-host``)."""
+    asked = sorted({str(h) for manifest in manifests for h in manifest.get("network_ask") or []})
+    if answer is not None:
+        beyond = sorted(set(answer) - set(asked))
+        if beyond:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{', '.join(beyond)}: not a host this run asks about "
+                f"({', '.join(asked) or 'none'})",
+            )
+        return {"network_ask": list(answer)} if answer else None
+    unanswered = unanswerable_hosts(store, manifests)
+    if unanswered:
+        raise HTTPException(
+            status_code=400,
+            detail=f"this home has no approved policy baseline, so this run would ask about "
+            f"{', '.join(unanswered)} and nothing could answer once it runs; name the hosts to "
+            f"answer for this run only in {how}, or approve a baseline (skep policy approve)",
+        )
+    return None
+
+
 def dispatch_manifest(
     holder: ConfigHolder,
     store: RunStore,
@@ -4798,16 +4847,30 @@ def dispatch_manifest(
     except (HTTPException, ValueError, OSError) as exc:
         detail = exc.detail if isinstance(exc, HTTPException) else exc
         return {"error": str(detail)}
+    from ..netproxy import run_loopback_ports
     from ..provider_hosts import provider_hosts_for
 
     permissions, resolved_policy = compiled.permissions, compiled.policy
+    provider_hosts = provider_hosts_for(
+        store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
+    )
+    # D10: a role chain dropped the project's `*` — one line on the card
+    star = (
+        {"network_note": NO_STAR_NOTE}
+        if star_dropped(resolved_policy.permissions, permissions)
+        else {}
+    )
     return {
+        **star,
         "repo": str(compiled.repo),
         "network": list(permissions.network),
-        # L10: an explicit network replaces the project's hosts — say which
+        # D5: a named network adds to the project's hosts; [] drops them
+        "network_added": [h for h in resolved_policy.network_added if h in permissions.network],
         "network_dropped": list(resolved_policy.network_dropped),
-        "provider_hosts": provider_hosts_for(
-            store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
+        "provider_hosts": provider_hosts,
+        # D6: the only loopback ports the run reaches (project list + local provider)
+        "loopback_ports": list(
+            run_loopback_ports(permissions.loopback_ports, provider_hosts, holder.current.home)
         ),
         "network_ask": list(permissions.network_ask),
         "shell_ask": [list(p) for p in permissions.shell_ask],
@@ -4921,7 +4984,7 @@ def compile_run(
 # loses its list: the run would get more than the operator approved.
 _MANIFEST_SETS = (
     "network", "provider_hosts", "shell_allowlist", "write", "read", "env_allowlist",
-    "allowed_plugin_risks",
+    "allowed_plugin_risks", "loopback_ports",
 )  # fmt: skip
 _MANIFEST_FLAGS = ("allow_git_mutation", "auto_apply_verified_patch")
 _MANIFEST_EXACT = ("repo", "engine", "execution_mode", "verify_command", "auto_apply_branch")
@@ -5168,6 +5231,7 @@ def _within_delegation(
         who
         + (f"; beyond {beyond}, asks a human (this run only): {named(asks)}" if asks else "")
         + (f"; beyond {beyond}, dropped: {named(rows)}" if rows else "")
+        + (f"; {NO_STAR_NOTE}" if star_dropped(permissions, narrowed) else "")
     )
     delegation = {
         "chain": [hop.entry for hop in chain],
@@ -5175,6 +5239,20 @@ def _within_delegation(
         "team": team,
     }
     return narrowed, delegation, note
+
+
+# D10 (operator decision 2026-11-13): a role chain never holds network `*`; a
+# run that lost it says so, why, and what to do, on its card and its record.
+NO_STAR_NOTE = (
+    "this run holds no hosts: its network was *, which a role chain never holds; "
+    "name the hosts instead (the project policy's default_network, or the dispatch's network)"
+)
+
+
+def star_dropped(before: Permissions, after: Permissions) -> bool:
+    """D10: the run policy granted ``*`` (the project's or the dispatch's)
+    and the chain left the run no hosts."""
+    return "*" in before.network and not after.network
 
 
 def _delegation_who(chain: Sequence[Delegator], role: Role | None) -> str:
@@ -5251,6 +5329,7 @@ def submit_team(
     delegation_chain: Sequence[str] = (),
     dispatch_decision: AutonomyDecision | None = None,
     deferred_asks: bool = False,
+    preanswered: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """R3 (ADR 0055 D5): a team run — v51's batch dispatch with a manager as
     the dispatcher. The manager is a hop, ``manager@<role>``, under whoever
@@ -5300,6 +5379,9 @@ def submit_team(
             role=str(task.get("role") or manager),
             team=team,
             deferred_asks=deferred_asks,
+            # D9: the hosts the operator answered for this team, each member
+            # taking the ones it asks (``_preanswer`` intersects).
+            preanswered=preanswered,
         )
         for task in tasks
     ]
@@ -5310,6 +5392,35 @@ def submit_team(
         "dispatched": dispatched,
         "count": len(dispatched),
     }
+
+
+def team_manifests(
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    manager: str,
+    tasks: Sequence[dict[str, Any]],
+    delegation_chain: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    """D9: what each member of ``submit_team`` would get, compiled the way
+    it compiles them (``dispatch_manifest``, no side effect)."""
+    chain = [*delegation_chain, f"manager@{manager}"]
+    return [
+        dispatch_manifest(
+            holder,
+            store,
+            repo=str(task.get("repo") or ""),
+            caste=str(task.get("caste") or "coding"),
+            execution_mode=(
+                None if task.get("execution_mode") is None else str(task["execution_mode"])
+            ),
+            engine=None if task.get("engine") is None else str(task["engine"]),
+            delegation_chain=chain,
+            role=str(task.get("role") or manager),
+            deferred_asks=True,
+        )
+        for task in tasks
+    ]
 
 
 def dispatch_run_auto_allowed(

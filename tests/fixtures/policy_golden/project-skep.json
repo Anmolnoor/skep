@@ -106,6 +106,7 @@
       "allowed_plugin_risks": [],
       "allowed_tools": null,
       "env_allowlist": [],
+      "loopback_ports": [],
       "network": [
         "files.pythonhosted.org",
         "proxy.golang.org",

@@ -311,7 +311,11 @@ as `GET` / `DELETE /api/policy/rules` and the chat `revoke_policy_rule` card.
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
 from the repo's own entry point (v91); an explicit `--verify-command` always
-wins. `set-phase` moves the trust-ramp defaults (build → maintain).
+wins. `set-phase` moves the trust-ramp defaults (build → maintain). Run
+again on an existing project with no `--pack` or `--strategy` (for example
+`skep project setup REPO --loopback-port 5432`), it keeps the project's strategy
+and phase and changes only what the flags name; `--loopback-port` lists every
+port, replacing the project's list.
 `policy registry` lists every policy setting skep has (type, default, the
 layers that may set it); `policy rsop` is the resultant policy for a repo —
 each key with the layer that decided it and the layers it overrode, the
@@ -412,6 +416,16 @@ policy decisions --team ID` reads it in order. `skep team` waits for its
 members like `skep run`; the same verb is `POST /api/teams` and the chat's
 `batch_dispatch` with `manager` (dispatched as `queen@<chat role>`). The
 manager writes no briefs of its own — the Queen or the operator does.
+
+On a home with no approved baseline (a fresh or onboarded one, where every
+grant is an ask), a role run or team run asks first: a `skep run` with `--role` and
+`skep team …` print the hosts the run would ask about and, on a terminal, ask
+y/n; yes answers them for that run only (the same pre-answer a confirmed
+dispatch card gives). Off a terminal they refuse unless `--answer-host HOST`
+(repeatable) names the hosts to answer, each one a host the run asks about.
+`POST /api/runs` with a role and `POST /api/teams` refuse with a 400 listing
+the hosts unless the body's `answer_hosts` names them (a subset of what the
+run asks).
 
 ## skep acp
 

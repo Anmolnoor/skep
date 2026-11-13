@@ -339,10 +339,17 @@ function manifestNode(card) {
   return el("div", { class: "card-manifest" },
     el("p", { class: "note" }, "What this run gets:"),
     row("hosts", list(m.network)),
-    // L10: an explicit network replaces the project's hosts — name what goes
+    // D10: a role chain dropped the project's `*` — say so and why
+    m.network_note ? el("p", { class: "note" }, String(m.network_note)) : null,
+    // D5: a named network adds to the project's hosts; only [] drops them
+    Array.isArray(m.network_added) && m.network_added.length
+      ? row("adds to the project's hosts for this run", list(m.network_added)) : null,
     Array.isArray(m.network_dropped) && m.network_dropped.length
       ? row("loses the project's own hosts for this run", list(m.network_dropped)) : null,
     row("model provider", list(m.provider_hosts)),
+    // D6: loopback is closed but for these ports; an older card has no key
+    "loopback_ports" in m
+      ? row("loopback ports", m.loopback_ports.length ? list(m.loopback_ports) : "closed") : null,
     row("commands it may run", list(m.shell_allowlist)),
     row("may write", list(m.write)),
     // W13: the other task grants; a key an older card did not record stays off

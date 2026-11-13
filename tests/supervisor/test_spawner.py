@@ -172,6 +172,7 @@ def test_spawn_worker_grants_sandbox_write_to_worktree_gitdir(
         skep_home: Path | None = None,
         worker_llm_key: bool = False,
         write_denied: tuple[Path, ...] = (),
+        loopback_ports: tuple[int, ...] = (),
     ) -> Path:
         captured["workspace"] = workspace
         captured["extra_writable"] = tuple(extra_writable)
@@ -239,6 +240,7 @@ def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(
             unix_socket_path: str | None = None,
             denied_loopback_ports: tuple[int, ...] = (),
             asks: tuple[str, ...] | list[str] = (),
+            loopback_ports: tuple[int, ...] = (),
         ) -> None:
             captured_domains.append(domains)
             captured_ports.append(denied_loopback_ports)
@@ -292,19 +294,16 @@ def test_run_task_starts_filtering_proxy_for_resume_approved_network_host(
     assert transitions == ["created", "dispatched", "worker_crashed"]
 
 
-def test_proxy_env_keeps_loopback_direct_only_where_the_sandbox_shares_the_host_loopback() -> None:
-    """v115-F9 made loopback direct for Seatbelt, whose loopback is the host's.
-    Under bubblewrap --unshare-net the sandbox loopback is its own namespace, so a
-    worker's own test server on host 127.0.0.1 is reachable only through the
-    netshim bridge — the NO_PROXY exemption must be off there (the proxy admits
-    loopback), or every LLM-worker run against a loopback provider is refused."""
-    from skep.supervisor.spawner import _LOOPBACK_NO_PROXY, _proxy_env
+def test_proxy_env_sends_loopback_through_the_proxy_on_every_backend() -> None:
+    """D6 (operator decision 2026-11-13) superseded v115-F9's NO_PROXY loopback
+    exemption: loopback HTTP goes through the proxy on every backend, so a
+    closed loopback port answers with a 403 naming the port and the command
+    that opens it, not a bare "Operation not permitted"."""
+    from skep.supervisor.spawner import _proxy_env
 
-    direct = _proxy_env(8080)
-    assert direct["NO_PROXY"] == direct["no_proxy"] == _LOOPBACK_NO_PROXY
-    bridged = _proxy_env(8080, loopback_direct=False)
-    assert "NO_PROXY" not in bridged and "no_proxy" not in bridged
-    assert bridged["HTTP_PROXY"] == bridged["https_proxy"] == "http://127.0.0.1:8080"
+    env = _proxy_env(8080)
+    assert "NO_PROXY" not in env and "no_proxy" not in env
+    assert env["HTTP_PROXY"] == env["https_proxy"] == "http://127.0.0.1:8080"
 
 
 @pytest.mark.parametrize("worker_argv", [None, ("claude-adapter",)])

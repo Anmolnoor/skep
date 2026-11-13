@@ -66,7 +66,7 @@ from .contracts_io import (
 )
 from .ingest import IngestOutcome, ingest_run
 from .monitor import MonitorVerdict, kill_session, synthesize_terminal, watch_worker
-from .netproxy import FilteringProxy, control_plane_ports
+from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
 from .policy import VERIFIED_PATCH_RULE, AutoApprovalRule, maybe_auto_approve
 from .provider_hosts import provider_hosts_for
 from .providers import ProviderProfile
@@ -700,14 +700,19 @@ def run_task(
                 proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
                 proxy_unix_path = str(Path(proxy_socket_dir) / "p.sock")
             try:
-                # ES-F6 (B05): loopback stays open for the project's own test
-                # servers, never for skep serve's port (the control plane).
+                # D6: loopback only on the run's ports; ES-F6 (B05): never on
+                # skep serve's port (the control plane).
                 proxy = FilteringProxy(
                     domains,
                     unix_socket_path=proxy_unix_path,
                     denied_loopback_ports=control_plane_ports(config.home),
                     # W30: named in the 403 as needing approval, never admitted.
                     asks=task.permissions.network_ask,
+                    loopback_ports=run_loopback_ports(
+                        task.permissions.loopback_ports,
+                        task.permissions.provider_hosts,
+                        config.home,
+                    ),
                 ).start()
             except OSError as exc:
                 return finish_before_worker(
@@ -843,6 +848,8 @@ def run_task(
                 # v88-F4 (I2): when the project pinned what verification means,
                 # G10 re-runs THAT — not the command the worker nominated.
                 verify_command=verify_command,
+                # D6 (I2): the project's loopback ports, as the worker had them.
+                loopback_ports=tuple(task.permissions.loopback_ports),
                 # The re-run is afforded the run's own wall-clock budget —
                 # the flat 300s cap timed out a healthy 10-minute pinned
                 # suite (dogfood 019fc72c, exit -1).
@@ -1156,6 +1163,7 @@ def recover_interrupted_runs(
                 if worker_reported and result is not None
                 else None,
                 verify_command=str(recovery_policy.get("verify_command") or ""),
+                loopback_ports=tuple(recovery_policy.get("loopback_ports") or ()),
             )
             # v107-F1: same post-reverify keep answer as the live path.
             reverify_record = run_store.reverification_for(task_id)

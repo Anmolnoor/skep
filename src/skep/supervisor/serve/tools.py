@@ -1855,9 +1855,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "network": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": (
-                    "omit: project hosts; a list REPLACES them (registries too); []: own LLM"
-                ),
+                "description": "omit: project hosts; a list ADDS to them; []: own LLM only",
             },
             "wall_clock_seconds": {"type": "integer"},
             "max_iterations": {"type": "integer"},

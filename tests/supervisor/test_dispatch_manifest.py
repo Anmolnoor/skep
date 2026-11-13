@@ -114,7 +114,9 @@ def test_the_manifest_lists_what_the_compiled_task_holds(desk: Desk) -> None:
     # until it is shown or excluded.
     answered = {"network", "network_ask", "shell_allowlist", "shell_ask"}  # pinned above
     not_shown = {"provider_hosts": "filled at spawn from the provider registry; shown"
-                 " from provider_hosts_for, not from the task"}  # fmt: skip
+                 " from provider_hosts_for, not from the task",
+                 "loopback_ports": "D6: shown with a local provider's port added and"
+                 " serve's removed (run_loopback_ports), the set the wall enforces"}  # fmt: skip
     for field in Permissions.model_fields:
         if field in answered or field in not_shown:
             continue
@@ -487,25 +489,141 @@ def test_a_research_card_lists_its_source_hosts_and_the_desk_confirm_answers_the
     ]
 
 
-def test_a_call_network_that_replaces_the_project_hosts_says_what_the_run_loses(
+def test_a_call_network_adds_to_the_project_hosts_and_only_an_empty_list_drops_them(
     desk: Desk,
 ) -> None:
-    """L10: a dispatch's ``network`` replaces the project's own hosts (the
-    documented override, pinned by the policy regression fixtures), and the
-    card showed only what was left. The manifest now names the hosts the run
-    loses, and the tool description says a list replaces the default."""
+    """D5 (operator decision 2026-11-13): a dispatch's ``network`` ADDS to the
+    project's own hosts (it used to replace them, so naming one API host cost
+    the run PyPI). The card names what it adds; ``network_dropped`` is left
+    only for ``[]`` (the worker's own LLM and nothing from the project)."""
     from skep.supervisor.serve.tools import TOOL_SPECS
 
     omitted = dispatch_manifest_for(desk.store, desk.holder, {"repo": str(desk.repo)}, None)
     assert "pypi.org" in omitted["network"] and omitted["network_dropped"] == []
+    assert omitted["network_added"] == []
     named = dispatch_manifest_for(
-        desk.store, desk.holder, {"repo": str(desk.repo), "network": ["example.com"]}, None
+        desk.store, desk.holder, {"repo": str(desk.repo), "network": ["api.example.org"]}, None
     )
-    assert "pypi.org" in named["network_dropped"] and "pypi.org" not in named["network"]
+    assert "pypi.org" in named["network"] and "api.example.org" in named["network"]
+    assert named["network_dropped"] == [] and named["network_added"] == ["api.example.org"]
+    lines = manifest_lines(named)
+    assert "adds to the project's hosts for this run: api.example.org" in lines
+    assert not any(line.startswith("loses") for line in lines)
+    empty = dispatch_manifest_for(
+        desk.store, desk.holder, {"repo": str(desk.repo), "network": []}, None
+    )
+    assert empty["network"] == [] and "pypi.org" in empty["network_dropped"]
     assert any(
         line.startswith("loses the project's own hosts for this run: ") and "pypi.org" in line
-        for line in manifest_lines(named)
+        for line in manifest_lines(empty)
     )
     (spec,) = [s for s in TOOL_SPECS if s["function"]["name"] == "dispatch_run"]
     described = spec["function"]["parameters"]["properties"]["network"]["description"]
-    assert "REPLACES" in described
+    assert "ADDS" in described and "REPLACES" not in described
+
+
+def test_the_terminal_card_names_what_a_named_network_adds(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D5: the CLI chat's card shows the same added-hosts line as web and channels."""
+    from skep.cli_chat import _render_card
+
+    manifest = {"network": ["api.example.org", "pypi.org"], "network_added": ["api.example.org"]}
+    _render_card({"tool": "dispatch_run", "card": {"manifest": manifest}})
+    assert "adds to the project's hosts for this run: api.example.org" in capsys.readouterr().out
+
+
+def test_a_role_run_on_a_star_project_says_it_holds_no_hosts_and_why(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D10 (operator decision 2026-11-13): a role chain never holds network
+    ``*`` (already true). When the project's default_network is ``*`` and the
+    chain drops it, the card and the run record say in one line that the run
+    holds no hosts, why, and what to do instead."""
+    from skep.cli_chat import _render_card
+    from skep.supervisor.serve import actions
+
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"default_network": ["*"]},
+        )
+        holder = ConfigHolder(config, store)
+        manifest = dispatch_manifest_for(
+            store, holder, {"repo": str(repo), "role": "builder"}, None
+        )
+        assert manifest["network"] == []
+        why = manifest["network_note"]
+        assert "holds no hosts" in why and "*" in why and "default_network" in why
+        assert why in manifest_lines(manifest)
+        _render_card({"tool": "dispatch_run", "card": {"manifest": manifest}})
+        assert why in capsys.readouterr().out
+        runner = _Runner()
+        actions.submit_run(
+            holder,
+            runner,  # type: ignore[arg-type]
+            store,
+            repo=str(repo),
+            instructions="go",
+            role="builder",
+        )
+        assert why in (runner.submitted[0]["dispatch_decision"].detail or "")
+        plain = dispatch_manifest_for(store, holder, {"repo": str(repo)}, None)
+        assert "network_note" not in plain and plain["network"] == ["*"]
+    finally:
+        store.close()
+
+
+def test_a_role_run_card_adds_only_hosts_the_run_holds(tmp_path: Path, repo: Path) -> None:
+    """ES-F90 follow-up: ``network_added`` was computed before the role chain
+    narrowed the run, so a builder dispatch naming ``*`` or a host its role
+    drops carded "adds to the project's hosts for this run: *" for a run
+    that holds neither."""
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"default_network": ["pypi.org"]},
+        )
+        holder = ConfigHolder(config, store)
+        for network in (["*"], ["*", "api.example.org"], ["api.example.org"]):
+            manifest = dispatch_manifest_for(
+                store, holder, {"repo": str(repo), "role": "builder", "network": network}, None
+            )
+            assert set(manifest["network_added"]) <= set(manifest["network"]), network
+    finally:
+        store.close()
+
+
+def test_the_no_hosts_note_is_true_when_the_dispatch_named_star(tmp_path: Path, repo: Path) -> None:
+    """ES-F93 follow-up: the D10 note said ``*`` "is this project's
+    default_network" when the project's hosts were pypi.org and the dispatch
+    itself named ``*``."""
+    config = _upgraded(tmp_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="app",
+            name="app",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"default_network": ["pypi.org"]},
+        )
+        holder = ConfigHolder(config, store)
+        manifest = dispatch_manifest_for(
+            store, holder, {"repo": str(repo), "role": "builder", "network": ["*"]}, None
+        )
+        assert manifest["network"] == []
+        why = manifest["network_note"]
+        assert "holds no hosts" in why and "is this project's default_network" not in why
+    finally:
+        store.close()

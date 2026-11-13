@@ -64,7 +64,8 @@ class PolicyKey:
     # Which of the four systems owns it today — the P1 migration reads this.
     system: str  # "run_policy" | "scope_document" | "operator_document" | "auto_approval" | "floor"
     kind: str  # "knob" (typed value) | "rule" (scope·action·pattern → verdict)
-    type: str  # "bool" | "int" | "str" | "list[str]" | "list[argv]" | "enum[...]" | "rule"
+    # "bool" | "int" | "str" | "list[str]" | "list[int]" | "list[argv]" | "enum[...]" | "rule"
+    type: str
     default: Any
     layers: tuple[str, ...]
     invariant: str
@@ -272,6 +273,16 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         invariant="I12",
         doc="which agent runs coding tasks (ADR 0047); external engines are sandbox-only "
         "and need a pinned verify_command",
+    ),
+    _knob(
+        "loopback_ports",
+        scope="network",
+        type="list[int]",
+        default=[],
+        layers=("project",),
+        invariant="I12",
+        doc="loopback ports this project's sandboxed workers may reach (D6); loopback is "
+        "otherwise closed but for a local provider's own port; serve's port never opens",
     ),
     _knob(
         "policy_groups",

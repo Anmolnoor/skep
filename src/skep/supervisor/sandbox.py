@@ -502,25 +502,39 @@ def _serve_ports(skep_home: Path | None) -> set[int]:
     return ports
 
 
-# v115-F9: loopback is not egress. The project's own tests start servers on
-# 127.0.0.1 and talk to them; with loopback denied, skep's own suite lost 210
-# tests inside the wall on its first self-maintenance run. The wall still
-# governs what leaves the machine — and it is STATED (I12): a sandboxed worker
-# can reach services listening on the host's loopback; those must carry their
-# own auth (the serve API does, G2).
-# Seatbelt accepts only "*" or "localhost" in a network address filter (an IP
-# literal is a profile syntax error), and "localhost" matches every address
-# this host owns. So the wall, stated exactly: a sandboxed worker can reach
-# listeners on THIS host; it cannot reach any other machine.
-_LOOPBACK_RULES = (
-    '(allow network-bind (local ip "localhost:*"))',
-    '(allow network-inbound (local ip "localhost:*"))',
-    '(allow network-outbound (remote ip "localhost:*"))',
-    # v115-F14: Unix-domain sockets are files, and "(deny network*)" covers
-    # them too — skep's own netshim/netproxy tests bind one and died with
-    # EPERM inside the re-verify wall. Creating one still needs a writable
-    # root (file-write says where); which ones it may CONNECT to is
-    # _unix_socket_rules (W34).
+# D6 (operator decision 2026-11-13, supersedes v115-F9's open loopback):
+# loopback is closed to a sandboxed worker in every network mode except the
+# ports the run was given — the project's ``loopback_ports`` and a local
+# model provider's own port (``netproxy.run_loopback_ports``); serve's port is
+# denied last, so no list reopens it. Seatbelt accepts only "*" or
+# "localhost" in a network address filter (an IP literal is a profile syntax
+# error), and "localhost" matches every address this host owns, so a closed
+# port is closed on every address of this host. What closes is the worker
+# REACHING a port (connect); binding and accepting stay open as before —
+# per-port bind/inbound filters refused listen() on allowed ports under
+# allow-default on this Seatbelt (measured 2026-11-13), and binding reaches
+# nothing.
+def _loopback_rules(ports: Iterable[int], *, open_bind: bool) -> list[str]:
+    rules = (
+        [
+            '(allow network-bind (local ip "localhost:*"))',
+            '(allow network-inbound (local ip "localhost:*"))',
+        ]
+        if open_bind  # under (deny network*); allow-default already allows both
+        else []
+    )
+    rules.append('(deny network-outbound (remote ip "localhost:*"))')
+    rules += [
+        f'(allow network-outbound (remote ip "localhost:{port}"))' for port in sorted(set(ports))
+    ]
+    return rules
+
+
+# v115-F14: Unix-domain sockets are files, and "(deny network*)" covers them
+# too — skep's own netshim/netproxy tests bind one and died with EPERM inside
+# the re-verify wall. Creating one still needs a writable root (file-write
+# says where); which ones it may CONNECT to is _unix_socket_rules (W34).
+_UNIX_SOCKET_BIND_RULES = (
     "(allow network-bind (local unix-socket))",
     "(allow network-inbound (local unix-socket))",
 )
@@ -544,13 +558,30 @@ def _unix_socket_rules(roots: Iterable[Path], network: NetworkPolicy) -> list[st
     return rules
 
 
-def _network_rules(network: NetworkPolicy, proxy_port: int | None) -> list[str]:
+def _network_rules(
+    network: NetworkPolicy,
+    proxy_port: int | None,
+    loopback_ports: Iterable[int] = (),
+    unix_rules: Iterable[str] = (),
+) -> list[str]:
+    """The per-port allows come LAST: on this Seatbelt any network-outbound
+    deny after a one-port allow (the unix-socket deny, a serve-port deny)
+    also refused some of those ports — 20000 and 50000 did, 5432 and 40000
+    did not (measured 2026-11-13)."""
     if network.is_deny_all:
-        return ["(deny network*)", *_LOOPBACK_RULES]
+        return [
+            "(deny network*)",
+            *_UNIX_SOCKET_BIND_RULES,
+            *unix_rules,
+            *_loopback_rules(loopback_ports, open_bind=True),
+        ]
     if network.is_allow_all:
-        # allow-default already permits network; an explicit comment keeps the
-        # generated profile self-documenting.
-        return ["; network: allow-all (manual real-provider path; allow-default)"]
+        # allow-default already permits network; loopback is still closed (D6).
+        return [
+            "; network: allow-all (manual real-provider path; allow-default)",
+            *unix_rules,
+            *_loopback_rules(loopback_ports, open_bind=False),
+        ]
     # Concrete domain allowlist (D1, v3): deny all egress except the loopback port
     # of the filtering proxy that enforces the domains. Seatbelt gates by IP/port,
     # so pinning egress to the proxy is the half it *can* enforce; netproxy.py
@@ -564,7 +595,9 @@ def _network_rules(network: NetworkPolicy, proxy_port: int | None) -> list[str]:
         )
     return [
         "(deny network*)",
-        *_LOOPBACK_RULES,
+        *_UNIX_SOCKET_BIND_RULES,
+        *unix_rules,
+        *_loopback_rules(loopback_ports, open_bind=True),
         f'(allow network-outbound (remote ip "localhost:{proxy_port}"))',
     ]
 
@@ -583,7 +616,11 @@ def _bubblewrap_args(
     read_denied: Iterable[Path] = (),
     readable_roots: Iterable[Path] = (),
     write_denied: Iterable[Path] = (),
+    loopback_ports: Iterable[int] = (),
 ) -> list[str]:
+    # D6: the netns has its own loopback, so the host's is reachable only
+    # through the proxy bridge, which admits the run's loopback ports alone;
+    # netshim presents each of them on the netns loopback over that bridge.
     # v28-F3: a domain list is now enforceable on Linux. Keep --unshare-net
     # (the deny-all pin Linux already trusts — the netns has NO route out),
     # bind-mount the host FilteringProxy's unix socket in, and prefix the
@@ -647,6 +684,11 @@ def _bubblewrap_args(
                 SANDBOX_PROXY_SOCKET,
                 "--port",
                 str(proxy_port),
+                *(
+                    arg
+                    for port in sorted(set(loopback_ports))
+                    for arg in ("--loopback-port", str(port))
+                ),
             ]
         )
     return args
@@ -769,6 +811,7 @@ def build_profile(
     read_denied: Iterable[Path] = (),
     skep_home: Path | None = None,
     write_denied: Iterable[Path] = (),
+    loopback_ports: Iterable[int] = (),
 ) -> str:
     """Return the SBPL text confining writes to ``writable_roots`` and gating network.
 
@@ -784,8 +827,15 @@ def build_profile(
     lines = [
         "(version 1)",
         "(allow default)",
-        *_network_rules(network, proxy_port),
-        *_unix_socket_rules(roots, network),
+        # ES-F4 (B05) + D6: serve's port never opens, even when a project lists
+        # it — dropped from the allows (the loopback deny covers it), never a
+        # trailing per-port deny (see _network_rules).
+        *_network_rules(
+            network,
+            proxy_port,
+            set(loopback_ports) - _serve_ports(skep_home),
+            _unix_socket_rules(roots, network),
+        ),
         "(deny file-write*)",
     ]
     if roots:
@@ -795,11 +845,6 @@ def build_profile(
     lines.append(f"(allow file-write* {dev_nodes})")
     for pinned in write_denied:  # W31: last match wins over its writable root
         lines.append(f'(deny file-write* (literal "{_sbpl_quote(pinned)}"))')
-    # ES-F4 (B05): last match wins, so these follow every allow above. The
-    # loopback allow (v115-F9) keeps a worker's own test servers reachable;
-    # serve's port is the one listener on this host it must never dial.
-    for port in sorted(_serve_ports(skep_home)):
-        lines.append(f'(deny network-outbound (remote ip "localhost:{port}"))')
     for denied in read_denied:
         kind = "subpath" if denied.is_dir() else "literal"
         lines.append(f'(deny file-read* ({kind} "{_sbpl_quote(denied)}"))')
@@ -819,6 +864,7 @@ def write_profile(
     skep_home: Path,
     worker_llm_key: bool = False,
     write_denied: Iterable[Path] = (),
+    loopback_ports: Iterable[int] = (),
 ) -> Path:
     """Materialize the profile for one task and return its path (kept as evidence).
 
@@ -839,6 +885,9 @@ def write_profile(
 
     ``write_denied`` (W31): files inside a writable root the worker may read
     but never write, rename or delete — the run's git protocol pin.
+
+    ``loopback_ports`` (D6): the only loopback ports the run reaches
+    (``netproxy.run_loopback_ports``); the default closes loopback.
     """
     write_denied = list(write_denied)
     probe = require_usable(backend)
@@ -872,6 +921,7 @@ def write_profile(
                 read_denied=read_denied,
                 readable_roots=extra_readable,
                 write_denied=write_denied,
+                loopback_ports=loopback_ports,
             ),
         )
     # ES-F5 (B11): no blanket /tmp, /private/tmp, /var/folders roots — they
@@ -889,6 +939,7 @@ def write_profile(
             read_denied=read_denied,
             skep_home=skep_home,
             write_denied=write_denied,
+            loopback_ports=loopback_ports,
         )
     )
     return profile_path

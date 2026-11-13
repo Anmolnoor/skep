@@ -62,6 +62,11 @@ class Permissions(BaseModel):
     # egress, never an allow. Absent on older tasks (= []).
     network_ask: list[str] = Field(default_factory=list)
     shell_ask: list[list[str]] = Field(default_factory=list)
+    # D6 (operator decision 2026-11-13, contract 0.3.8, additive): the loopback
+    # ports the PROJECT policy opens to this run (``loopback_ports``). Loopback
+    # is otherwise closed but for a local model provider's own port; serve's
+    # port never opens. Absent on older tasks (= []).
+    loopback_ports: list[int] = Field(default_factory=list)
 
     def egress(self) -> list[str]:
         """Everything the run may reach: ``network`` plus ``provider_hosts``
@@ -86,6 +91,14 @@ class Permissions(BaseModel):
             match = _PROVIDER_HOST_RE.match(entry)
             if match is None or not 0 < int(match.group(1)) < 65536:
                 raise ValueError(f"provider_hosts entries must be host:port; got {entry!r}")
+        return value
+
+    @field_validator("loopback_ports")
+    @classmethod
+    def _validate_loopback_ports(cls, value: list[int]) -> list[int]:
+        for port in value:
+            if isinstance(port, bool) or not 0 < port < 65536:
+                raise ValueError(f"loopback_ports entries must be ports 1-65535; got {port!r}")
         return value
 
     @field_validator("network_ask")

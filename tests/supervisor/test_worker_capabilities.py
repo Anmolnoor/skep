@@ -2067,20 +2067,34 @@ def test_shell_run_timeout_is_an_honest_failed_command_not_a_crash(tmp_path: Pat
     assert roomy.invoke("shell.run", {"argv": [sys.executable, "-c", "print('ok')"]}).exit_code == 0
 
 
-def test_network_fetch_loopback_is_allowed_in_its_own_words(
+def test_network_fetch_loopback_is_allowed_in_its_own_words_only_on_its_ports(
     tmp_path: Path, origin_url: str
 ) -> None:
-    """v115-F9: with NO allowlist at all a loopback fetch is allowed — and the
-    record names the reason as loopback, not a grant or an allowlist match."""
+    """v115-F9 → D6 (operator decision 2026-11-13): a loopback fetch is allowed
+    only on the run's loopback ports — and the record names the reason as
+    loopback, not a grant or an allowlist match. Any other loopback port is a
+    flat deny that names the port and the command that opens it."""
+    from urllib.parse import urlparse
+
+    port = urlparse(origin_url).port
+    assert port is not None
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
+    registry = CapabilityRegistry(
+        tmp_path, emit=lambda t, p: events.append((t, p)), loopback_ports=(port,)
+    )
     result = registry.invoke("network.fetch", {"url": origin_url})
     assert result.status == "allowed" and result.output == "ORIGIN-OK"
+    host = "localhost" if "localhost" in origin_url else "127.0.0.1"
     assert events[0][1]["decision"] == {
         "verdict": "allow_with_constraints",
         "reason": "capability.allow.network_loopback",
-        "detail": "localhost" if "localhost" in origin_url else "127.0.0.1",
+        "detail": f"{host}:{port}",
     }
+    closed = CapabilityRegistry(tmp_path, emit=lambda t, p: None)
+    with pytest.raises(CapabilityDenied) as excinfo:
+        closed.invoke("network.fetch", {"url": origin_url})
+    assert f"loopback port {port} is closed" in str(excinfo.value)
+    assert f"--loopback-port {port}" in str(excinfo.value)
 
 
 def test_es_f2_repo_search_never_reads_through_an_out_of_tree_symlink(
@@ -2176,6 +2190,75 @@ def test_es_f52_review_a_dotenv_template_is_not_a_secret_on_the_shell_lane(
         assert registry.shell_decision_preview({"argv": ["cat", name]}).reason == (
             "capability.deny.secret_floor"
         ), name
+
+
+def test_d21_a_worker_may_create_a_dotenv_from_a_template_and_nothing_more(
+    tmp_path: Path,
+) -> None:
+    """D21 (operator decision 2026-11-13): `cp .env.example .env` was refused
+    because the secret floor cannot tell reading from writing. A worker's
+    shell may now CREATE a new `.env` / `.env.<name>` inside its worktree
+    from a template (`.example`, `.sample`, `.template`, `.dist`), as plain
+    `cp A B` or `cp -n A B`. Reading, printing, copying out, overwriting an
+    existing `.env`, a source that is a link to a secret, a destination
+    outside the worktree and any other shape stay refused."""
+    work = tmp_path / "work"
+    (work / "config").mkdir(parents=True)
+    (work / ".env.example").write_text("NAME=\n", encoding="utf-8")
+    (work / "config" / ".env.sample").write_text("NAME=\n", encoding="utf-8")
+    (work / ".env.linked.example").symlink_to(tmp_path / "outside.env")
+    (tmp_path / "outside.env").write_text("NAME=value\n", encoding="utf-8")
+    registry = CapabilityRegistry(work, emit=lambda t, p: None, shell_allowlist=[["cp"]])
+    created = registry.invoke(
+        "shell.run", {"argv": ["cp", ".env.example", ".env"], "purpose": "modify"}
+    )
+    assert created.status == "allowed" and (work / ".env").read_text() == "NAME=\n"
+    nested = registry.invoke(
+        "shell.run",
+        {"argv": ["cp", "-n", "config/.env.sample", "config/.env.local"], "purpose": "modify"},
+    )
+    assert nested.status == "allowed" and (work / "config" / ".env.local").is_file()
+    refused = [
+        ["cp", ".env.example", ".env"],  # .env exists now: an overwrite
+        ["cp", ".env", ".env.copy"],  # the source is a secret, not a template
+        ["cp", ".env.example", "../.env"],  # outside the worktree
+        ["cp", ".env.example", f"{tmp_path}/.env.out"],  # outside, absolute
+        ["cp", ".env.linked.example", ".env.two"],  # a template that links out
+        ["cp", "-r", ".env.example", ".env.two"],  # not a plain shape
+        ["cp", ".env.example", ".env.two", ".env.three"],
+        ["cat", ".env"],
+    ]
+    for argv in refused:
+        assert registry.shell_decision_preview({"argv": argv}).reason == (
+            "capability.deny.secret_floor"
+        ), argv
+    assert not (work / ".env.two").exists() and not (tmp_path / ".env").exists()
+
+
+def test_d21_dotdot_after_a_linked_directory_is_judged_where_the_kernel_lands(
+    tmp_path: Path,
+) -> None:
+    """D21 follow-up: ``sub/../.env`` with ``sub`` a link out of the worktree
+    (a tracked symlink, ES-F2's threat) lands beside the link's TARGET, not in
+    the worktree, so the check judges the path the kernel resolves; collapsing
+    ``..`` first let ``cp`` overwrite a ``.env`` outside the worktree."""
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".env.example").write_text("NAME=\n", encoding="utf-8")
+    (tmp_path / "outside" / "inner").mkdir(parents=True)
+    (tmp_path / "outside" / ".env").write_text("REAL=1\n", encoding="utf-8")
+    (tmp_path / "outside" / ".env.example").write_text("X=\n", encoding="utf-8")
+    (work / "sub").symlink_to(tmp_path / "outside" / "inner")
+    registry = CapabilityRegistry(work, emit=lambda t, p: None, shell_allowlist=[["cp"]])
+    for argv in (
+        ["cp", ".env.example", "sub/../.env"],  # overwrites outside/.env
+        ["cp", ".env.example", "sub/../.env.new"],  # creates outside the worktree
+        ["cp", "sub/../.env.example", ".env"],  # reads a template outside it
+    ):
+        assert registry.shell_decision_preview({"argv": argv}).reason == (
+            "capability.deny.secret_floor"
+        ), argv
+    assert (tmp_path / "outside" / ".env").read_text() == "REAL=1\n"
 
 
 def test_a_successful_commit_drops_only_the_packed_refs_lock_line(

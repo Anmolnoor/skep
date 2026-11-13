@@ -659,12 +659,27 @@ def migration_report(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
             f"B31: this home predates the engine-v2 scope switch — its approved baseline now "
             f"composes in {len(missing)} scope(s) it did not before ({', '.join(missing)})"
         )
+    # D6 (operator decision 2026-11-13, supersedes v115-F9): loopback closed.
+    # A project that sets the key (even to []) has decided; the rest are named.
+    closed = sorted(
+        p.project_id for p in store.list_project_policies() if "loopback_ports" not in p.policy
+    )
+    loopback = (
+        f"D6: loopback is closed to sandboxed workers but for a local model provider's "
+        f"port; {len(closed)} project(s) open no loopback port ({', '.join(closed[:3])}"
+        f"{', ...' if len(closed) > 3 else ''}) — open one with `skep project setup <repo> "
+        "--loopback-port <port>`; setting loopback_ports (even to []) records the decision"
+        if closed
+        else None
+    )
     return {
         "replay": summary,
         "replay_line": line,
         "held": [f.message for f in findings(stack) if f.check != 2],  # W16: 2 only warns
         "b31": b31,
         "standing": unaccepted_standing_shell(store),
+        "loopback": loopback,
+        "has_runs": bool(store.recent_runs(1)),
     }
 
 
@@ -714,6 +729,10 @@ def migration_line(report: Mapping[str, Any]) -> str | None:
             f"{len(report['standing'])} standing shell grant(s) a new one would refuse (D13): "
             f"{names} — still held; revoke on the Policies page"
         )
+    if report.get("loopback") and report.get("has_runs"):
+        # doctor's line only for a home that has run workers (the ones D6
+        # changed); `skep policy migrate --dry-run` always prints it.
+        parts.append(report["loopback"])
     if not parts:
         return None
     return "policy v3: " + "; ".join(parts) + " — `skep policy migrate --dry-run` lists them"
