@@ -229,6 +229,11 @@ def manifest_lines(manifest: Mapping[str, Any]) -> list[str]:
             else []
         ),
         f"model provider: {_hosts(manifest.get('provider_hosts'))}",
+        *(
+            [f"loopback ports: {', '.join(map(str, manifest['loopback_ports'])) or 'closed'}"]
+            if "loopback_ports" in manifest
+            else []
+        ),
         f"commands it may run: {shown or 'none'}",
         f"may write: {_hosts(manifest.get('write'))}",
         *_grant_lines(manifest),

@@ -24,7 +24,7 @@ import contextlib
 import ipaddress
 import socket
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from socketserver import StreamRequestHandler, ThreadingTCPServer, ThreadingUnixStreamServer
 from types import TracebackType
@@ -54,8 +54,8 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
-# ES-F6 (B05/B54): loopback is not egress (v115-F9), but skep serve's own port
-# is the control plane — never reachable from a run. `skep serve` records the
+# ES-F6 (B05/B54): skep serve's own port is the control plane — never
+# reachable from a run, even when a project lists it (D6). `skep serve` records the
 # port it binds; the default is always refused too.
 SERVE_PORT_FILE = "serve-port"
 DEFAULT_SERVE_PORT = 8765
@@ -72,6 +72,30 @@ def control_plane_ports(home: Path) -> tuple[int, ...]:
     with contextlib.suppress(OSError, ValueError):
         ports.add(int((home / SERVE_PORT_FILE).read_text(encoding="utf-8").strip()))
     return tuple(sorted(ports))
+
+
+def closed_loopback_reason(port: int) -> str:
+    """D6: what a worker sees at a closed loopback port (ASCII: it rides the
+    HTTP status line)."""
+    return (
+        f"loopback port {port} is closed for this run; a project opens it with "
+        f"`skep project setup <repo> --loopback-port {port}` "
+        f"(chat: setup_project policy_overrides loopback_ports=[{port}])"
+    )
+
+
+def run_loopback_ports(
+    ports: Iterable[int], provider_hosts: Iterable[str], home: Path | None
+) -> tuple[int, ...]:
+    """D6 (operator decision 2026-11-13, supersedes v115-F9): the loopback
+    ports a run reaches — the project's ``loopback_ports`` and a local model
+    provider's own port, never serve's (``home`` is the supervisor home)."""
+    opened = set(ports)
+    for entry in provider_hosts:
+        pinned = split_authority(entry)
+        if pinned is not None and _plain_loopback(pinned[0]):
+            opened.add(pinned[1])
+    return tuple(sorted(opened - set(control_plane_ports(home) if home else ())))
 
 
 def _plain_loopback(host: str) -> bool:
@@ -119,6 +143,7 @@ def admit_target(
     denied_ports: tuple[int, ...],
     resolve: Resolver = socket.getaddrinfo,
     asks: tuple[str, ...] = (),
+    loopback_ports: tuple[int, ...] = (),
 ) -> tuple[int, str, list[tuple[str, int]]]:
     """ES-F6 (B54): (200, "", addresses to dial) or (status, reason, []).
 
@@ -127,10 +152,13 @@ def admit_target(
     vetted IPs, so DNS cannot rebind between the check and the connect. An
     IP literal the operator allowlisted is taken as stated. W30: a refusal
     names host and port, where else the host is allowed, and whether it is
-    one of the run's deferred asks (``asks``: ``network_ask``)."""
+    one of the run's deferred asks (``asks``: ``network_ask``). D6: loopback
+    is admitted only on ``loopback_ports`` (``run_loopback_ports``)."""
     if _plain_loopback(host):
         if port in denied_ports:
             return 403, "Forbidden: the skep control plane is not reachable from a run", []
+        if port not in loopback_ports:
+            return 403, f"Forbidden: {closed_loopback_reason(port)}", []
         return 200, "", [(host.strip("[]"), port)]
     if not domain_allowed(host, allowlist, port=port):
         return 403, _refusal(host, port, allowlist, asks), []
@@ -265,11 +293,13 @@ class _ProxyServer(ThreadingTCPServer):
         allowlist: tuple[str, ...],
         denied_ports: tuple[int, ...] = (),
         asks: tuple[str, ...] = (),
+        loopback_ports: tuple[int, ...] = (),
     ) -> None:
         super().__init__(("127.0.0.1", 0), _ProxyHandler)
         self.allowlist = allowlist
         self.denied_ports = denied_ports
         self.asks = asks  # W30: named in the 403, never admitted
+        self.loopback_ports = loopback_ports  # D6: the only loopback it admits
         self._counts_lock = threading.Lock()
         self.allowed = 0
         self.denied = 0
@@ -307,6 +337,10 @@ class _ProxyUnixServer(ThreadingUnixStreamServer):
     @property
     def asks(self) -> tuple[str, ...]:
         return self._tcp.asks
+
+    @property
+    def loopback_ports(self) -> tuple[int, ...]:
+        return self._tcp.loopback_ports
 
     def note(self, *, allowed: bool) -> None:
         self._tcp.note(allowed=allowed)
@@ -364,17 +398,17 @@ class _ProxyHandler(StreamRequestHandler):
         self._tunnel(self.connection, upstream)
 
     def _admitted(self, host: str, port: int, headers: list[bytes]) -> bool:
-        """v115-F9: loopback is not egress — a project's own test servers on
-        127.0.0.1 stay reachable through the proxied client (the first
-        skep-maintains-skep run lost 210 tests to a 403). ES-F6: but never
-        serve's port, never a loopback alias, never a name that resolves to a
-        local address, and never under a Host header naming someone else."""
+        """D6 (supersedes v115-F9): loopback only on the run's loopback ports.
+        ES-F6: never serve's port, never a loopback alias, never a name that
+        resolves to a local address, never under a Host header naming someone
+        else."""
         status, reason, self._addresses = admit_target(
             host,
             port,
             self.server.allowlist,
             denied_ports=self.server.denied_ports,
             asks=self.server.asks,
+            loopback_ports=self.server.loopback_ports,
         )
         if status == 200:
             mismatch = _host_header_mismatch(headers, host, port)
@@ -507,8 +541,11 @@ class FilteringProxy:
         unix_socket_path: str | None = None,
         denied_loopback_ports: tuple[int, ...] = (),
         asks: tuple[str, ...] | list[str] = (),
+        loopback_ports: Iterable[int] = (),
     ) -> None:
-        self._server = _ProxyServer(tuple(allowlist), tuple(denied_loopback_ports), tuple(asks))
+        self._server = _ProxyServer(
+            tuple(allowlist), tuple(denied_loopback_ports), tuple(asks), tuple(loopback_ports)
+        )
         self._unix_path = unix_socket_path
         self._unix_server = (
             _ProxyUnixServer(unix_socket_path, self._server)

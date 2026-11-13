@@ -747,6 +747,7 @@ def _execute(
         env_allowlist=task.permissions.env_allowlist,
         network_allowlist=task.permissions.network,
         provider_hosts=task.permissions.provider_hosts,
+        loopback_ports=task.permissions.loopback_ports,
         approved_network_hosts=_approved_network_hosts(
             task.approval_verdict, granted_network_hosts
         ),

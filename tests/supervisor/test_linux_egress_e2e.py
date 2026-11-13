@@ -85,14 +85,18 @@ def _run_in_sandbox(
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _proxy_with_bridge(allow: tuple[str, ...]) -> tuple[FilteringProxy, str]:
+def _proxy_with_bridge(
+    allow: tuple[str, ...], loopback_ports: tuple[int, ...] = ()
+) -> tuple[FilteringProxy, str]:
     sock_dir = tempfile.mkdtemp(prefix="skep-e2e-nx-", dir="/tmp")
     sock_path = str(Path(sock_dir) / "p.sock")
-    return FilteringProxy(allow, unix_socket_path=sock_path).start(), sock_dir
+    proxy = FilteringProxy(allow, unix_socket_path=sock_path, loopback_ports=loopback_ports)
+    return proxy.start(), sock_dir
 
 
 def test_allowlisted_host_reachable_denied_host_403_direct_egress_blocked(origin: int) -> None:
-    proxy, sock_dir = _proxy_with_bridge(("localhost",))
+    # D6: the origin is a loopback port the run was given; others are closed.
+    proxy, sock_dir = _proxy_with_bridge(("localhost",), loopback_ports=(origin,))
     try:
         # The worker's HTTP tooling honors HTTP_PROXY, which the netshim presents
         # on the sandbox loopback and bridges to the host FilteringProxy.
@@ -104,8 +108,16 @@ def test_allowlisted_host_reachable_denied_host_403_direct_egress_blocked(origin
                 return opener.open(f"http://{{host}}:{origin}/", timeout=8)
             # allowed origin answers
             print("ALLOWED", via_proxy("localhost").read().decode())
-            # v115-F9: loopback is not egress — the proxy admits 127.0.0.1 too
+            # D6: the run's loopback port passes as 127.0.0.1 too
             print("LOOPBACK", via_proxy("127.0.0.1").read().decode())
+            # D6: a loopback port the run was not given -> proxy 403 naming it
+            try:
+                urllib.request.build_opener(urllib.request.ProxyHandler(
+                    {{"http": "http://127.0.0.1:{proxy.port}"}})).open(
+                    "http://127.0.0.1:{origin + 1}/", timeout=8)
+                print("CLOSED-REACHED")
+            except urllib.error.HTTPError as e:
+                print("CLOSED-STATUS", e.code, "--loopback-port" in str(e.reason))
             # a host outside the allowlist -> proxy 403, decided on the name before any DNS
             try:
                 via_proxy("denied.example")
@@ -125,6 +137,7 @@ def test_allowlisted_host_reachable_denied_host_403_direct_egress_blocked(origin
         assert "ALLOWED ORIGIN-OK" in out
         assert "LOOPBACK ORIGIN-OK" in out
         assert "DENIED-STATUS 403" in out
+        assert "CLOSED-STATUS 403 True" in out
         assert "DIRECT-BLOCKED" in out
         assert "DIRECT-REACHED" not in out
         assert proxy.allowed_count >= 1

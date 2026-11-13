@@ -374,6 +374,10 @@ test("manifestNode: the dispatch card lists what the run gets and the asks it ap
   const added = app.manifestNode({ manifest: { network: ["example.com", "pypi.org"],
     network_added: ["example.com"] } }).textContent;
   assert.ok(added.includes("adds to the project's hosts for this run") && !added.includes("loses"));
+  // D6: the loopback ports a run gets; "closed" when none; an old card has no row
+  const loop = app.manifestNode({ manifest: { network: [], loopback_ports: [5432] } }).textContent;
+  assert.ok(loop.includes("loopback ports") && loop.includes("5432"));
+  assert.ok(app.manifestNode({ manifest: { network: [], loopback_ports: [] } }).textContent.includes("closed"));
   const lost = app.manifestNode({ manifest: { network: [],
     network_dropped: ["pypi.org"] } }).textContent;
   assert.ok(lost.includes("loses the project's own hosts for this run") && lost.includes("pypi.org"));

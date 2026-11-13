@@ -22,7 +22,12 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
-from skep.supervisor.netproxy import domain_allowed, is_loopback_host
+from skep.supervisor.netproxy import (
+    closed_loopback_reason,
+    domain_allowed,
+    is_loopback_host,
+    run_loopback_ports,
+)
 from skep.supervisor.secret_floor import (
     is_dotenv,
     secret_floor_reason,
@@ -451,6 +456,15 @@ def _argv_matches_prefix(argv: Sequence[str], prefixes: Sequence[Sequence[str]])
     return False
 
 
+def _url_port(url: str) -> int:
+    """The port an http(s) URL dials (its scheme's default when unstated)."""
+    parsed = urllib.parse.urlparse(url)
+    try:
+        return parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return 0  # a malformed port opens nothing
+
+
 def _normalized_shell_argv(argv: Sequence[object]) -> tuple[str, ...]:
     normalized = tuple(str(arg) for arg in argv)
     if normalized and normalized[0] == "python":
@@ -489,6 +503,7 @@ class CapabilityRegistry:
         env_baseline: Sequence[str] = ("PATH", "HOME"),
         network_allowlist: Sequence[str] = (),
         provider_hosts: Sequence[str] = (),
+        loopback_ports: Sequence[int] = (),
         shell_allowlist: Sequence[Sequence[str]] = (),
         approved_shell_commands: Sequence[Sequence[str]] = (),
         plugin_tools: Sequence[PluginToolSpec] = (),
@@ -533,6 +548,8 @@ class CapabilityRegistry:
         # host grant — it only keeps "no allowlist at all" (which cards)
         # from describing a run that does reach the network.
         self._has_egress = bool(network_allowlist or provider_hosts)
+        # D6: the loopback ports this run reaches (the wall enforces the same set).
+        self._loopback_ports = run_loopback_ports(loopback_ports, provider_hosts, None)
         self._approved_network_hosts = tuple(approved_network_hosts)
         # V7: never egress, never an allow — only the gate below reads them.
         self._network_ask = tuple(network_ask)
@@ -609,8 +626,8 @@ class CapabilityRegistry:
         if capability_id in {"git.stage", "git.unstage", "git.restore", "git.commit"}:
             return self._git_mutation_decision(capability_id)
         if capability_id in {"network.fetch", "network.read"}:
-            _url, hostname = self._network_fetch_inputs(arguments)
-            return self._network_fetch_decision(hostname)
+            url, hostname = self._network_fetch_inputs(arguments)
+            return self._network_fetch_decision(hostname, _url_port(url))
         spec = self._plugin_tools.get(capability_id)
         if spec is not None:
             return self._plugin_decision(spec)
@@ -941,7 +958,7 @@ class CapabilityRegistry:
             detail=capability_id,
         )
 
-    def _network_fetch_decision(self, hostname: str) -> CapabilityDecision:
+    def _network_fetch_decision(self, hostname: str, port: int) -> CapabilityDecision:
         if domain_allowed(hostname, self._approved_network_hosts):
             return CapabilityDecision(
                 verdict="allow_with_constraints",
@@ -955,12 +972,18 @@ class CapabilityRegistry:
                 detail=hostname,
             )
         if is_loopback_host(hostname):
-            # v115-F9: loopback is not egress; the record says so in its own
-            # words rather than borrowing a grant or an allowlist match (I8).
+            # D6 (supersedes v115-F9): loopback only on the run's ports; the
+            # record says so in its own words, never as an allowlist match (I8).
+            if port in self._loopback_ports:
+                return CapabilityDecision(
+                    verdict="allow_with_constraints",
+                    reason="capability.allow.network_loopback",
+                    detail=f"{hostname}:{port}",
+                )
             return CapabilityDecision(
-                verdict="allow_with_constraints",
-                reason="capability.allow.network_loopback",
-                detail=hostname,
+                verdict="deny",
+                reason="capability.deny.network_loopback_closed",
+                detail=closed_loopback_reason(port),
             )
         if domain_allowed(hostname, self._network_ask):
             return CapabilityDecision(
@@ -1866,7 +1889,7 @@ class CapabilityRegistry:
         network.read (HTML→readable text). Same allowlist gate, events, and
         approval flow for both — ``as_text`` only changes the body transform."""
         url, hostname = self._network_fetch_inputs(arguments)
-        decision = self._network_fetch_decision(hostname)
+        decision = self._network_fetch_decision(hostname, _url_port(url))
         command = f"GET {url}"
         if decision.verdict == "require_approval":
             approval_error = (
@@ -1891,7 +1914,9 @@ class CapabilityRegistry:
             # so the model reaches for one instead of retrying blind.
             allowed = ", ".join(self._network_allowlist) or "(empty)"
             deny_error = (
-                f"host {hostname!r} is not in the task network allowlist — "
+                str(decision.detail)
+                if decision.reason == "capability.deny.network_loopback_closed"
+                else f"host {hostname!r} is not in the task network allowlist — "
                 f"allowed hosts: {allowed}; use one of those or work offline"
             )
             self._emit_blocked_command(

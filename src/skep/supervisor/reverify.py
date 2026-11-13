@@ -157,6 +157,7 @@ def reverify(
     timeout_seconds: float | None = None,
     uv_cache_dir: Path | None = None,
     evidence_dir: Path | None = None,
+    loopback_ports: tuple[int, ...] = (),
 ) -> ReverifyOutcome:
     """Apply the patch to a clean worktree and re-run the verification command(s).
 
@@ -168,6 +169,9 @@ def reverify(
     ``uv_cache_dir`` (v109-F4) is the per-project cache dispatch already
     uses; when set, priming resolves into it instead of a worktree-local
     throwaway, so the work survives across runs. None keeps the throwaway.
+
+    ``loopback_ports`` (D6, I2): the project's loopback ports, so a verify
+    that talks to a local service it lists runs as the worker's did.
     """
     if patch_path is None or not patch_path.is_file():
         # v65-F1: 58 of the first 94 reverifications were patch-less runs
@@ -266,6 +270,7 @@ def reverify(
                 extra_readable=git_metadata_readable_roots(worktree),
                 network=sandbox.DENY_ALL_NETWORK,
                 skep_home=config.home.parent,
+                loopback_ports=loopback_ports,
             )
         applied = subprocess.run(
             ["git", "-C", str(worktree), "apply", str(patch_path)],
@@ -366,6 +371,7 @@ def reverify_run(
     changed_files: tuple[str, ...] | None = None,
     verify_command: str = "",
     timeout_seconds: float | None = None,
+    loopback_ports: tuple[int, ...] = (),
 ) -> ReverifyOutcome:
     """Re-verify one completed run from its stored evidence; record the result.
 
@@ -433,6 +439,7 @@ def reverify_run(
         changed_files=changed_files,
         timeout_seconds=timeout_seconds,
         uv_cache_dir=uv_cache_dir,
+        loopback_ports=loopback_ports,
     )
     # I8: the record says WHAT it re-ran, not just how it went — "passed" means
     # something different when the worker chose the command than when the

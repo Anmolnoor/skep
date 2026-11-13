@@ -2067,20 +2067,34 @@ def test_shell_run_timeout_is_an_honest_failed_command_not_a_crash(tmp_path: Pat
     assert roomy.invoke("shell.run", {"argv": [sys.executable, "-c", "print('ok')"]}).exit_code == 0
 
 
-def test_network_fetch_loopback_is_allowed_in_its_own_words(
+def test_network_fetch_loopback_is_allowed_in_its_own_words_only_on_its_ports(
     tmp_path: Path, origin_url: str
 ) -> None:
-    """v115-F9: with NO allowlist at all a loopback fetch is allowed — and the
-    record names the reason as loopback, not a grant or an allowlist match."""
+    """v115-F9 → D6 (operator decision 2026-11-13): a loopback fetch is allowed
+    only on the run's loopback ports — and the record names the reason as
+    loopback, not a grant or an allowlist match. Any other loopback port is a
+    flat deny that names the port and the command that opens it."""
+    from urllib.parse import urlparse
+
+    port = urlparse(origin_url).port
+    assert port is not None
     events: list[tuple[EventType, dict[str, object]]] = []
-    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: events.append((t, p)))
+    registry = CapabilityRegistry(
+        tmp_path, emit=lambda t, p: events.append((t, p)), loopback_ports=(port,)
+    )
     result = registry.invoke("network.fetch", {"url": origin_url})
     assert result.status == "allowed" and result.output == "ORIGIN-OK"
+    host = "localhost" if "localhost" in origin_url else "127.0.0.1"
     assert events[0][1]["decision"] == {
         "verdict": "allow_with_constraints",
         "reason": "capability.allow.network_loopback",
-        "detail": "localhost" if "localhost" in origin_url else "127.0.0.1",
+        "detail": f"{host}:{port}",
     }
+    closed = CapabilityRegistry(tmp_path, emit=lambda t, p: None)
+    with pytest.raises(CapabilityDenied) as excinfo:
+        closed.invoke("network.fetch", {"url": origin_url})
+    assert f"loopback port {port} is closed" in str(excinfo.value)
+    assert f"--loopback-port {port}" in str(excinfo.value)
 
 
 def test_es_f2_repo_search_never_reads_through_an_out_of_tree_symlink(

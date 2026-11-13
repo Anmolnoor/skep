@@ -194,17 +194,20 @@ def test_seatbelt_profile_denies_secret_reads_and_the_serve_port(
             proxy_port=port,
             read_denied=sandbox.secret_paths(skep_home),
             skep_home=skep_home,
+            loopback_ports=[5432, 8765, 8771, 8772],
         )
         lines = text.splitlines()
         assert f'(deny file-read* (literal "{skep_home / "supervisor" / "serve-token"}"))' in lines
         assert f'(deny file-read* (subpath "{Path.home() / ".ssh"}"))' in lines
         # B125: a profile that is not an LLM worker's hides the LLM key too.
         assert f'(deny file-read* (literal "{skep_home / "supervisor" / "llm-secret"}"))' in lines
+        # D6: loopback is denied and only the run's ports are allowed back; a
+        # serve port is never among them, even listed (no trailing per-port
+        # deny: on this Seatbelt one also refused unrelated allowed ports).
+        assert '(deny network-outbound (remote ip "localhost:*"))' in lines
+        assert '(allow network-outbound (remote ip "localhost:5432"))' in lines
         for serve_port in ("8765", "8771", "8772"):
-            deny = f'(deny network-outbound (remote ip "localhost:{serve_port}"))'
-            # Last match wins in SBPL: the deny must follow every loopback allow.
-            allows = [i for i, line in enumerate(lines) if "(allow network-outbound" in line]
-            assert lines.index(deny) > max(allows, default=-1)
+            assert f'(allow network-outbound (remote ip "localhost:{serve_port}"))' not in lines
 
 
 def test_bwrap_and_podman_mask_the_secret_paths(fake_homes: tuple[Path, Path]) -> None:
@@ -490,8 +493,12 @@ def test_serve_records_its_port_for_cli_runs_on_the_same_home(
         home=home, worker_cmd=None, auto_approve=False, host="127.0.0.1", port=9187
     )
     assert serve_cmds.cmd_serve(args) == 0
-    text = sandbox.build_profile(writable_roots=[tmp_path / "ws"], skep_home=home)
-    assert '(deny network-outbound (remote ip "localhost:9187"))' in text
+    # D6: a profile that lists serve's recorded port still does not open it.
+    text = sandbox.build_profile(
+        writable_roots=[tmp_path / "ws"], skep_home=home, loopback_ports=[9187, 5432]
+    )
+    assert '(allow network-outbound (remote ip "localhost:5432"))' in text
+    assert "localhost:9187" not in text
 
 
 def test_the_sandbox_masks_the_policy_floor_minus_what_engines_and_installs_read(

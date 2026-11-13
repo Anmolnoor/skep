@@ -4742,17 +4742,23 @@ def dispatch_manifest(
     except (HTTPException, ValueError, OSError) as exc:
         detail = exc.detail if isinstance(exc, HTTPException) else exc
         return {"error": str(detail)}
+    from ..netproxy import run_loopback_ports
     from ..provider_hosts import provider_hosts_for
 
     permissions, resolved_policy = compiled.permissions, compiled.policy
+    provider_hosts = provider_hosts_for(
+        store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
+    )
     return {
         "repo": str(compiled.repo),
         "network": list(permissions.network),
         # D5: a named network adds to the project's hosts; [] drops them
         "network_added": list(resolved_policy.network_added),
         "network_dropped": list(resolved_policy.network_dropped),
-        "provider_hosts": provider_hosts_for(
-            store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
+        "provider_hosts": provider_hosts,
+        # D6: the only loopback ports the run reaches (project list + local provider)
+        "loopback_ports": list(
+            run_loopback_ports(permissions.loopback_ports, provider_hosts, holder.current.home)
         ),
         "network_ask": list(permissions.network_ask),
         "shell_ask": [list(p) for p in permissions.shell_ask],
@@ -4866,7 +4872,7 @@ def compile_run(
 # loses its list: the run would get more than the operator approved.
 _MANIFEST_SETS = (
     "network", "provider_hosts", "shell_allowlist", "write", "read", "env_allowlist",
-    "allowed_plugin_risks",
+    "allowed_plugin_risks", "loopback_ports",
 )  # fmt: skip
 _MANIFEST_FLAGS = ("allow_git_mutation", "auto_apply_verified_patch")
 _MANIFEST_EXACT = ("repo", "engine", "execution_mode", "verify_command", "auto_apply_branch")

@@ -791,6 +791,8 @@ def resolve_run_policy(
         allowed_plugin_risks=list(policy.get("allowed_plugin_risks") or []),
         allow_git_mutation=bool(policy.get("allow_git_mutation") is True),
         provider_hosts=provider_hosts,
+        # D6: the project's loopback ports (validated at every project write).
+        loopback_ports=sorted(set(policy.get("loopback_ports") or [])),
     )
     budget = Budget(
         wall_clock_seconds=(

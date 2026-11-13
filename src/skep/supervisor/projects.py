@@ -51,6 +51,9 @@ PROJECT_POLICY_KEYS = frozenset(
         # Shape-validated here; known-name checks live at attach time and,
         # fail-closed, at resolve time.
         "policy_groups",
+        # D6 (operator decision 2026-11-13): the loopback ports this project's
+        # sandboxed workers may reach; loopback is otherwise closed.
+        "loopback_ports",
     }
 )
 
@@ -178,6 +181,16 @@ def _require_auto_apply_branch(value: object) -> str:
     return name
 
 
+def require_loopback_ports(value: object) -> list[int]:
+    """D6: loopback ports as sorted, distinct integers 1-65535."""
+    if not isinstance(value, list) or any(
+        isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536
+        for port in value
+    ):
+        raise ValueError("loopback_ports must be a list of port numbers 1-65535, e.g. [5432]")
+    return sorted(set(value))
+
+
 def _require_bool(value: object, *, field: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{field} must be a boolean")
@@ -244,6 +257,8 @@ def validate_project_policy(policy: dict[str, Any]) -> dict[str, Any]:
             field="default_max_provider_calls",
             minimum=0,
         )
+    if "loopback_ports" in normalized:
+        normalized["loopback_ports"] = require_loopback_ports(normalized["loopback_ports"])
     if "policy_groups" in normalized:
         names = _require_string_list(normalized["policy_groups"], field="policy_groups")
         malformed = sorted(name for name in names if not POLICY_GROUP_NAME_RE.match(name))

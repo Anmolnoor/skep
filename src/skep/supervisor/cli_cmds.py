@@ -575,6 +575,9 @@ def _print_project_setup_summary(result: dict[str, Any], *, preview: bool) -> No
     engine = str((policy or {}).get("coding_engine") or "").strip()
     if engine:
         print(f"  coding engine: {engine}")
+    # D6: loopback is closed to workers unless the project lists the port.
+    ports = ", ".join(str(p) for p in (policy or {}).get("loopback_ports") or [])
+    print(f"  loopback ports: {ports or 'closed (--loopback-port PORT opens one)'}")
 
 
 def _status_autonomy_summary(task: CodingWorkerTask | None) -> str:
@@ -2371,6 +2374,9 @@ def _project_policy_overrides(args: argparse.Namespace) -> dict[str, Any]:
     groups = getattr(args, "groups", None)
     if groups:
         overrides["policy_groups"] = groups
+    loopback_ports = getattr(args, "loopback_ports", None)
+    if loopback_ports:  # D6: validated by validate_project_policy on the write
+        overrides["loopback_ports"] = loopback_ports
     return overrides
 
 
@@ -3070,6 +3076,8 @@ def cmd_policy_migrate(args: argparse.Namespace) -> int:
         print(f"already held (decide() still binds it; no write can add one): {line}")
     if report["b31"]:
         print(report["b31"])
+    if report["loopback"]:
+        print(report["loopback"])
     return 0
 
 
@@ -3589,6 +3597,16 @@ def register_supervisor_commands(
         "re-verification (v100-F9); REQUIRED before a CLI engine such as "
         "claude_code can dispatch at all",
     )
+    project_preview.add_argument(
+        "--loopback-port",
+        type=int,
+        action="append",
+        default=None,
+        dest="loopback_ports",
+        metavar="PORT",
+        help="a loopback port this project's sandboxed workers may reach (repeatable, "
+        "D6); loopback is otherwise closed but for a local model provider's own port",
+    )
     project_preview.set_defaults(func=cmd_project_preview)
 
     project_setup = project_sub.add_parser("setup", help="save a project policy setup")
@@ -3629,6 +3647,16 @@ def register_supervisor_commands(
         dest="groups",
         help="attach a policy group at setup (repeatable, v97-F4); "
         "`skep policy` groups or list_policy_groups names the known set",
+    )
+    project_setup.add_argument(
+        "--loopback-port",
+        type=int,
+        action="append",
+        default=None,
+        dest="loopback_ports",
+        metavar="PORT",
+        help="a loopback port this project's sandboxed workers may reach (repeatable, "
+        "D6); loopback is otherwise closed but for a local model provider's own port",
     )
     project_setup.set_defaults(func=cmd_project_setup)
 

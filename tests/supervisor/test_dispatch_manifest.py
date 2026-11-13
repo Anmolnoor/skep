@@ -114,7 +114,9 @@ def test_the_manifest_lists_what_the_compiled_task_holds(desk: Desk) -> None:
     # until it is shown or excluded.
     answered = {"network", "network_ask", "shell_allowlist", "shell_ask"}  # pinned above
     not_shown = {"provider_hosts": "filled at spawn from the provider registry; shown"
-                 " from provider_hosts_for, not from the task"}  # fmt: skip
+                 " from provider_hosts_for, not from the task",
+                 "loopback_ports": "D6: shown with a local provider's port added and"
+                 " serve's removed (run_loopback_ports), the set the wall enforces"}  # fmt: skip
     for field in Permissions.model_fields:
         if field in answered or field in not_shown:
             continue

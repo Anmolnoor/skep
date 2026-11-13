@@ -125,7 +125,7 @@ rather than shipping.
 
 ## Worker Contract Stability
 
-The launch build ships worker contract 0.3.7. Check the exact package and
+The launch build ships worker contract 0.3.8. Check the exact package and
 contract versions with:
 
 ```sh
@@ -145,6 +145,12 @@ never emit — so the claude adapter's `>=0.1,<0.3` range still holds.
 Contract 0.2.2 (v13) added one optional, additive field — `memory` on the task
 envelope, a list of curated memory items the supervisor injects as *context, not
 authority*. Workers that ignore it behave exactly as before.
+
+Contract 0.3.8 (operator decision D6, 2026-11-13) adds one optional, additive
+field on `permissions` — `loopback_ports` (integers): the loopback ports the
+project policy opens to the run. Loopback is otherwise closed to a sandboxed
+worker, except a local model provider's own port; serve's port never opens. A
+task persisted before 0.3.8 has none (= `[]`).
 
 Contract 0.3.7 (ADR 0059 D3, V7) adds two optional, additive fields on
 `permissions` — `network_ask` (bare hosts) and `shell_ask` (argv prefixes): the

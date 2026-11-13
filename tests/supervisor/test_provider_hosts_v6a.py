@@ -92,15 +92,28 @@ def test_proxy_admits_the_provider_port_and_refuses_another() -> None:
     assert status == 403 and "not in the task network allowlist" in reason
 
 
-def test_a_loopback_provider_never_opens_serve() -> None:
+def test_a_loopback_provider_never_opens_serve(tmp_path: Path) -> None:
     """f1-30 / B05: a provider on localhost:11434 is reachable; serve's port
-    stays refused whatever the allowlist says."""
+    stays refused whatever the allowlist says. D6: the provider's own port is
+    one of the run's loopback ports (``run_loopback_ports``); serve's never is."""
+    from skep.supervisor.netproxy import run_loopback_ports
+
     allow = ("localhost:11434",)
-    assert admit_target("localhost", 11434, allow, denied_ports=(8765,))[0] == 200
-    status, reason, _ = admit_target("localhost", 8765, allow, denied_ports=(8765,))
+    ports = run_loopback_ports((), allow, tmp_path)
+    assert ports == (11434,)
+    assert (
+        admit_target("localhost", 11434, allow, denied_ports=(8765,), loopback_ports=ports)[0]
+        == 200
+    )
+    status, reason, _ = admit_target(
+        "localhost", 8765, allow, denied_ports=(8765,), loopback_ports=ports
+    )
     assert status == 403 and "control plane" in reason
-    # Even a provider entry naming serve's port does not open it.
-    status, _, _ = admit_target("localhost", 8765, ("localhost:8765",), denied_ports=(8765,))
+    # Even a provider entry, or a project port, naming serve's port does not open it.
+    assert run_loopback_ports((8765,), ("localhost:8765",), tmp_path) == ()
+    status, _, _ = admit_target(
+        "localhost", 8765, ("localhost:8765",), denied_ports=(8765,), loopback_ports=(8765,)
+    )
     assert status == 403
 
 
@@ -210,11 +223,11 @@ def test_the_capability_layer_does_not_treat_the_provider_as_a_fetch_grant(
     registry = CapabilityRegistry(
         tmp_path, emit=lambda _t, _p: None, provider_hosts=("ollama.com:443",)
     )
-    assert registry._network_fetch_decision("example.com").verdict == "deny"
-    assert registry._network_fetch_decision("ollama.com").verdict == "deny"
+    assert registry._network_fetch_decision("example.com", 443).verdict == "deny"
+    assert registry._network_fetch_decision("ollama.com", 443).verdict == "deny"
     assert registry._child_env.get("HTTPS_PROXY") == "http://127.0.0.1:1"
     bare = CapabilityRegistry(tmp_path, emit=lambda _t, _p: None)
-    assert bare._network_fetch_decision("example.com").verdict == "require_approval"
+    assert bare._network_fetch_decision("example.com", 443).verdict == "require_approval"
     assert "HTTPS_PROXY" not in bare._child_env
 
 

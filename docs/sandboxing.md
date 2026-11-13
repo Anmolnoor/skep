@@ -100,10 +100,46 @@ path-socket right refuses a connect to a path socket outside the rules
 standard library (no new dependency); older kernels would keep the gap
 above. Not built yet.
 
-On macOS the profile allows
-loopback (a worker's own test servers) except serve's port: 8765,
+### Loopback
+
+Loopback is closed to a sandboxed worker by default. A run reaches a port on
+this host only when it is:
+
+- its own model provider's port, when that provider is local (for example
+  Ollama on `127.0.0.1:11434`), or
+- a port the project policy lists in `loopback_ports`.
+
+Serve's port is never reachable, even when a project lists it: 8765,
 `$SKEP_SERVE_URL`'s port, and the port `skep serve` records in
-`supervisor/serve-port` under the same home, so a CLI `skep run` denies it too.
+`supervisor/serve-port` under the same home, so a CLI `skep run` refuses it
+too. The dispatch card and manifest show the loopback ports a run gets.
+
+To open a port for a project's workers (a local database or test server):
+
+```sh
+skep project setup /path/to/repo --loopback-port 5432
+```
+
+From chat, `setup_project` with `policy_overrides: {"loopback_ports": [5432]}`
+(it shows a card). HTTP to a closed port answers `403` naming the port and that
+command; a raw connection on macOS fails with "Operation not permitted".
+Re-verification gets the same project ports. `skep doctor` and
+`skep policy migrate --dry-run` name the projects that open none.
+
+How each backend enforces it:
+
+- **macOS (Seatbelt):** the profile refuses every connection to `localhost`
+  except the run's ports and the filtering proxy's port. Binding and
+  accepting stay open (they reach nothing). Loopback HTTP goes through the
+  proxy, so a closed port gets the explanatory `403`.
+- **Linux (bubblewrap):** a deny-all or domain-list run has its own network
+  namespace, so its loopback is not the host's. The host's loopback is
+  reachable only through the proxy bridge, which admits the run's ports
+  alone, and `skep.netshim` presents each of them on the sandbox loopback
+  (raw TCP too). A run with no proxy (no provider, no hosts) reaches no host
+  port. A `*` run shares the host network namespace: bubblewrap has no port
+  filter there, so its loopback is the host's, serve's port included.
+
 A Seatbelt worker connects only to unix sockets under its own writable roots
 (W34): the operator's ssh-agent, Docker, gpg-agent and other local daemons are
 refused in every network mode. An allow-all run may also reach
