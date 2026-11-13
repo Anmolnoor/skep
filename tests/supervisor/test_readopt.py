@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from contextlib import closing, suppress
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -381,3 +382,63 @@ def _pid_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     return True
+
+
+def test_the_kill_switch_restores_kill_on_restart(repo: Path, config: SupervisorConfig) -> None:
+    """ES-F137 (ADR 0060 §6): with re-adoption off, a live verified worker is
+    killed with its session and the run crashes — the pre-D2 behaviour."""
+    store = RunStore(config.db_path)
+    try:
+        task_id, pid = _strand_with_live_worker(store, config, repo)
+
+        recover_interrupted_runs(store, replace(config, readopt_workers=False))
+
+        from .test_recover import _gone
+
+        assert _gone(pid)
+        record = store.get_run(task_id)
+        assert record is not None and record.state == "worker_crashed"
+        details = " ".join(d or "" for _, d, _ in store.transitions_for(task_id))
+        assert "killed" in details and "adopted" not in details
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("argv", "env", "readopt"),
+    [([], None, True), (["--no-readopt"], None, False), ([], "0", False)],
+)
+def test_serve_takes_the_kill_switch_from_its_flag_or_env(
+    config: SupervisorConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    env: str | None,
+    readopt: bool,
+) -> None:
+    """ES-F137: `skep serve --no-readopt`, or SKEP_READOPT_WORKERS=0 in the
+    environment or serve.env, reaches the config recovery reads."""
+    import argparse
+
+    from skep.supervisor.serve import serve_cmds
+
+    class _Stop(Exception):
+        pass
+
+    seen: list[bool] = []
+
+    def _create_app(cfg: SupervisorConfig, **_kwargs: object) -> None:
+        seen.append(cfg.readopt_workers)
+        raise _Stop
+
+    monkeypatch.setattr("skep.supervisor.serve.app.create_app", _create_app)
+    if env is None:
+        monkeypatch.delenv("SKEP_READOPT_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("SKEP_READOPT_WORKERS", env)
+    parser = argparse.ArgumentParser()
+    serve_cmds.register_serve_command(parser.add_subparsers())
+    args = parser.parse_args(["serve", *argv])
+    args.home = config.home
+    with pytest.raises(_Stop):
+        serve_cmds.cmd_serve(args)
+    assert seen == [readopt]
