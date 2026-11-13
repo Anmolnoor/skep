@@ -411,3 +411,68 @@ def test_only_an_allow_all_run_reaches_the_name_resolver(
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.split("\n")[0] == "80"
     assert proc.stdout.split("\n")[1].startswith(f"{dns} /var/run/mDNSResponder")
+
+
+_COMMIT_IN_THE_WALL = """
+import json, sys
+from pathlib import Path
+from skep.workers.capabilities import CapabilityRegistry
+registry = CapabilityRegistry(
+    Path(sys.argv[1]), emit=lambda _t, _p: None, allow_git_mutation=True,
+    approved_capability_ids=("git.commit",),
+)
+registry.invoke("git.stage", {"paths": ["b.txt"]})
+commit = registry.invoke("git.commit", {"message": "from the wall"})
+print(json.dumps({"exit": commit.exit_code, "error": commit.error}))
+"""
+
+
+def test_a_worker_commits_in_its_worktree_and_reads_no_packed_refs_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W35 (B108) and W34: the worker's git.commit inside a real Seatbelt wall
+    on a linked worktree succeeds, moves only the worktree's HEAD, and its
+    output carries no ``packed-refs.lock: Operation not permitted`` — git's
+    AUTO_MERGE cleanup trying to lock the read-only common dir (ES-F3)."""
+    import json
+
+    from skep.supervisor.worktree import (
+        create_worktree,
+        git_metadata_readable_roots,
+        git_metadata_writable_roots,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str, cwd: Path = repo) -> str:
+        argv = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args]
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=True).stdout
+
+    git("init", "-q", "-b", "main")
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    git("add", "a.txt")
+    git("commit", "-qm", "init")
+    main_before = git("rev-parse", "refs/heads/main")
+    workspace = create_worktree(repo, tmp_path / "wts", "t1")
+    (workspace / "b.txt").write_text("b\n", encoding="utf-8")
+    profile = sandbox.write_profile(
+        tmp_path / "p.sb",
+        workspace=workspace,
+        extra_writable=git_metadata_writable_roots(workspace),
+        extra_readable=git_metadata_readable_roots(workspace),
+        skep_home=tmp_path / "skep",
+    )
+    argv = sandbox.wrap_command(
+        [sys.executable, "-c", _COMMIT_IN_THE_WALL, str(workspace)], profile
+    )
+    env = {**os.environ, "TMPDIR": str(workspace)}
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["exit"] == 0, result
+    assert "packed-refs" not in result["error"], result
+    assert git("log", "-1", "--pretty=%s", cwd=workspace).strip() == "from the wall"
+    assert git("rev-parse", "refs/heads/main") == main_before  # refs/ stayed read-only
+    assert not (repo / ".git" / "packed-refs.lock").exists()
