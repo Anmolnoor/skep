@@ -215,3 +215,31 @@ def test_doctor_reports_the_login_the_opt_in_and_what_a_run_would_use(
     assert "not usable now" in report and "expires" in report
     assert check["chatgpt_login"]["uses"] is None  # type: ignore[index]
     assert "refused" in report
+
+
+@pytest.mark.parametrize(
+    ("content", "why"),
+    [
+        ("{not json", "could not be read"),
+        (json.dumps({"tokens": {"access_token": "not-a-jwt"}}), "no expiry"),
+        (json.dumps(["a", "list"]), "not a ChatGPT sign-in"),
+    ],
+)
+def test_a_malformed_login_is_reported_never_raised(
+    codex_home: Path, content: str, why: str
+) -> None:
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(content, encoding="utf-8")
+    problem = codex_login.login_status().problem
+    assert problem is not None and why in problem
+
+
+def test_a_login_naming_no_account_is_refused(codex_home: Path) -> None:
+    path = write_fake_login(codex_home)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["tokens"]["account_id"] = None
+    claims: dict[str, object] = {"exp": int(time.time()) + 86400}
+    doc["tokens"]["access_token"] = f"{_b64({'alg': 'none'})}.{_b64(claims)}.c2ln"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    problem = codex_login.login_status().problem
+    assert problem is not None and "account" in problem
