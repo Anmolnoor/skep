@@ -80,7 +80,7 @@ EGRESS_PROBES = {
     "search": "ddgs",
 }
 _HINTS = {
-    1: "allow a narrower path that misses the credential files",
+    1: "allow (or bind) a narrower path that misses the credential files",
     2: "a read inside the operator roots (the skep home, the repos root, a /workon "
     "directory), or deny the egress first (set_operator_policy deny network search *)",
     3: "keep the exact command from its card instead (an exact-argv grant)",
@@ -240,12 +240,25 @@ def _outside(stack: Stack, rule: ResolvedRule) -> bool:
     return not any(rule_matches(r, "filesystem", path) for r in stack.roots)
 
 
-def findings(stack: Stack, new: Sequence[Allow] = (), role: Role | None = None) -> list[Finding]:
+def findings(
+    stack: Stack,
+    new: Sequence[Allow] = (),
+    role: Role | None = None,
+    roots: Sequence[Path] = (),
+) -> list[Finding]:
     """Every §5.4 check this code base can evaluate, over one stack; check 6
-    only for ``new`` (the allows this write adds)."""
+    only for ``new`` (the allows this write adds), check 1 on ``roots`` (the
+    operator roots this write adds: the Queen reads all of one)."""
     out: list[Finding] = []
     reads = [r for r in _rules(stack, "filesystem", "allow") if r.action == "read"]
     secrets = _secret_probes(stack.home)
+    for root in roots:
+        probe = next((p for p in secrets if Path(p) == root or root in Path(p).parents), None)
+        if probe is not None:
+            out.append(
+                Finding(1, f"1:root:{root}", f"binding {root} makes it an operator root, and it "
+                        f"holds {probe}, a secret-floor path (§5.4 check 1)")
+            )  # fmt: skip
     for rule in reads:
         probe = next((p for p in secrets if rule_matches(rule, "filesystem", p)), None)
         if probe is not None:
@@ -358,6 +371,7 @@ def vet_write(
     baseline: PolicyTemplate | None = None,
     new: Sequence[Allow] = (),
     role: Role | None = None,
+    roots: Sequence[Path] = (),
     replay: bool = True,
 ) -> dict[str, Any]:
     """The one write-time check every policy writer calls BEFORE it stores
@@ -369,7 +383,11 @@ def vet_write(
     before = load_stack(holder, store)
     after = would_be_stack(holder, store, settings=settings, baseline=baseline)
     held = {f.key for f in findings(before)}
-    fresh = [f for f in findings(after, new, role) if f.key not in held]
+    if roots:  # W15: the would-be stack reads inside the roots this write binds
+        from .policy_v3 import root_rules
+
+        after = replace(after, roots=(*after.roots, *root_rules(roots)))
+    fresh = [f for f in findings(after, new, role, roots) if f.key not in held]
     if fresh:
         raise PolicyWriteRejected(rejection(fresh))
     warnings = [

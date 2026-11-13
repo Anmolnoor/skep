@@ -128,6 +128,7 @@ from .registry import (
     repos_root,
     resolve_repo_arg,
     setup_project_record,
+    too_broad_root,
 )
 from .remediation import remediation_for
 from .settings import (
@@ -1562,12 +1563,10 @@ def _workon_path_or_400(config: SupervisorConfig, raw: str) -> Path:
     error = existing_dir_error(resolved)  # v73-F11: one story per path
     if error is not None:
         raise HTTPException(status_code=400, detail=error)
-    if resolved == Path("/") or resolved == Path.home():
-        raise HTTPException(
-            status_code=400,
-            detail="too broad — name a project subdirectory, not your home directory or /",
-        )
     store_root = config.home.parent
+    broad = too_broad_root(resolved, store_root)  # W15: the list every binding face shares
+    if broad is not None:
+        raise HTTPException(status_code=400, detail=broad)
     managed = (config.home, store_root / "repos")
     in_managed = any(root == resolved or root in resolved.parents for root in managed)
     if resolved == store_root or in_managed:

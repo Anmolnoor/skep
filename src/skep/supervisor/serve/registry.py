@@ -528,6 +528,23 @@ def _suggestion_view(suggestion: TemplateSuggestion) -> dict[str, Any]:
     }
 
 
+def too_broad_root(path: Path, store_root: Path) -> str | None:
+    """W15: why ``path`` may not become an operator root (the Queen reads
+    all of a bound repo path), or None. ``/``, ``/home``, ``/Users``, your
+    home directory, any ancestor of it or of the skep store (``store_root``,
+    the parent of the skep home). One list for every face that binds one."""
+    user = Path.home().resolve()
+    store = store_root.expanduser().resolve()
+    broad = {Path("/"), Path("/home"), Path("/Users"), user, *user.parents, store, *store.parents}
+    if path.resolve() in broad:
+        return (
+            f"too broad — {path} would let the assistant read everything under it "
+            "(your home directory, / and their parents are never a workspace): "
+            "name a project subdirectory"
+        )
+    return None
+
+
 def _validate_project_binding(*, root: Path, run_store: RunStore, kind: str, value: str) -> None:
     if kind == "repo_slug":
         if not _SLUG_RE.match(value) or not (root / value / ".git").exists():
@@ -537,6 +554,9 @@ def _validate_project_binding(*, root: Path, run_store: RunStore, kind: str, val
         repo = Path(value).expanduser().resolve()
         if not repo.is_dir():
             raise HTTPException(status_code=400, detail=f"repo path {value!r} does not exist")
+        broad = too_broad_root(repo, root.parent)  # root is <store>/repos
+        if broad is not None:
+            raise HTTPException(status_code=400, detail=broad)
         return
     if kind == "template_name" and run_store.get_template(value) is None:
         raise HTTPException(status_code=400, detail=f"unknown template {value!r}")
@@ -959,8 +979,15 @@ def setup_project_record(
 
     with policy_write():  # W14: checked and written as one step
         try:
-            # P3-5 (V11): the one write-time check, before the project is written.
-            vet_write(run_store, replay=False)
+            # P3-5 (V11): the one write-time check, before the project is written —
+            # W15: with the repo paths it binds, which become operator roots.
+            vet_write(
+                run_store,
+                roots=[
+                    Path(b.value).expanduser().resolve() for b in supplied if b.kind == "repo_path"
+                ],
+                replay=False,
+            )
         except PolicyWriteRejected as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         result = _persist_project(run_store, project)
