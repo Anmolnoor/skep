@@ -953,7 +953,9 @@ def owner_alive(owner: str | None) -> bool:
         return False
     except PermissionError:
         pass  # alive, another user's
-    return bool(_process_started(pid) == record.get("started"))
+    started = _process_started(pid)
+    # the pid exists and ps could not say when it started: not shown to be gone
+    return started is None or started == record.get("started")
 
 
 class RunStore:

@@ -1200,3 +1200,20 @@ def test_a_dead_claimer_whose_resume_already_dispatched_keeps_its_gate_claim(
     assert refused.value.status_code == 409
     approval = rig.store.get_approval(gate)
     assert approval is not None and approval.status == "applying"
+
+
+def test_a_live_pid_whose_start_time_cannot_be_read_counts_as_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D24 follow-up: owner_alive read "ps could not answer" (a timeout under
+    load) as "a different process", so a live claimer looked gone and an
+    answer could release its claim. A pid that exists with an unreadable
+    start time is not shown to be gone: it counts as alive."""
+    import json
+    import os
+
+    from skep.supervisor import store as store_mod
+
+    owner = json.dumps({"pid": os.getpid(), "started": "Thu Jan  1 00:00:00 1970"})
+    monkeypatch.setattr(store_mod, "_process_started", lambda pid: None)
+    assert store_mod.owner_alive(owner)
