@@ -79,6 +79,7 @@ from .tools import (
     READ_TOOL_NAMES,
     READ_TOOL_SPECS,
     TAINT_ASKED_STORE_WRITES,
+    TOOL_SCOPES,
     TOOL_SPECS,
     UNATTENDED_BLOCKED_READ_TOOLS,
     UNATTENDED_BLOCKED_STORE_WRITES,
@@ -97,6 +98,13 @@ from .tools import (
     taint_decision,
     tool_description,
     tool_index_block,
+)
+
+# L3r: the scoped tools that only read files (``filesystem.read``)
+_FILE_READS = frozenset(
+    tool
+    for tool, (scope, action, _) in TOOL_SCOPES.items()
+    if (scope, action) == ("filesystem", "read")
 )
 
 DEFAULT_TITLE = "New chat"
@@ -2243,7 +2251,13 @@ class ChatEngine:
                     # policy-allowed mutation becomes a card a human pulls.
                     # That also bounds the run-finish chain: no continuation
                     # can dispatch the run that earns the next continuation.
-                    if decision is not None and decision.allows_execution() and not unattended:
+                    # L3r: a file read decide() allows is no mutation — it runs
+                    # unattended exactly as it does in an attended turn.
+                    if (
+                        decision is not None
+                        and decision.allows_execution()
+                        and (not unattended or name in _FILE_READS)
+                    ):
                         try:
                             result = execute_mutation(
                                 name,

@@ -440,6 +440,37 @@ def test_l4_a_read_in_skeps_own_home_is_not_called_outside_your_folders(live: An
     assert line is not None and "it read skep's own records" in line, line
 
 
+def test_l3r_an_unattended_follow_up_reads_inside_its_roots_as_an_attended_turn_does(
+    live: Any,
+) -> None:
+    """L3r (ES-F103): the run-finish follow-up of a doubly tainted chat carded
+    in-root reads HIGH — an unattended turn executed nothing allowed. A read
+    ``decide()`` allows now runs there as in an attended turn; a read outside
+    the roots still cards, and a mutation still never executes unattended."""
+    from skep.supervisor.serve import actions
+
+    env = live("builder")
+    chat = env.chat()
+    set_taint(env.store, chat, "both")
+    actions.remember_action_for_session(
+        env.store, tool="run_shell", args={"command": "python3 build.py"}, actor="op",
+        tier="always",
+    )  # fmt: skip
+    env.ollama.script_tool_calls(
+        ("read_file", {"path": str(env.paths["repo"] / "README.md")}),
+        ("read_file", {"path": str(env.paths["outside"] / "notes.txt")}),
+        ("run_shell", {"command": "python3 build.py", "cwd": str(env.paths["outside"])}),
+    )
+    found = cards(env.turn(chat, "[run finished]", unattended=True))
+    assert [c["tool"] for c in found] == ["read_file"]
+    assert found[0]["args"]["path"].endswith("notes.txt")
+    rows = env.store.chat_messages(chat)
+    readme = next(r for r in rows if r.role == "tool" and "README" in r.content)
+    assert json.loads(readme.content)["ok"] is True
+    shell = [json.loads(r.content) for r in rows if r.tool_name == "run_shell"]
+    assert shell and not any(row.get("ok") for row in shell)  # never ran unattended
+
+
 def test_an_mcp_tool_the_operator_allowed_by_name_is_not_high(live: Any) -> None:
     from skep.supervisor.serve import actions
 
