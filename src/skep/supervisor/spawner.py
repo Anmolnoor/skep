@@ -226,7 +226,7 @@ def spawn_worker(
     if use_sandbox:
         # ES-F1 (B47): no usable backend raises here — the worker never starts
         # unconfined under a "sandbox" record.
-        sandbox.require_usable(backend)
+        bubblewrap = sandbox.require_usable(backend).backend == "bubblewrap"
         workspace = Path(task.workspace)
         # v109-F4: ``extra_writable`` is per-run (the project dependency-cache
         # root); every backend consumes this one list (Seatbelt subpaths,
@@ -259,7 +259,7 @@ def spawn_worker(
             unmasked=unmasked,
         )
         argv = sandbox.wrap_command(argv, profile_path, backend=backend)
-        if own_netns and config.readopt_workers:  # own_netns: the backend is bubblewrap
+        if bubblewrap and config.readopt_workers:
             # ADR 0060 §1: bwrap's --die-with-parent ties the sandbox to its
             # parent; the keeper is that parent instead of serve, so the
             # sandbox outlives serve for re-adoption, still dies with
