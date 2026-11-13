@@ -489,6 +489,7 @@ def test_a_project_wide_network_is_high_for_every_dispatch_verb(
         ):
             chat = new_chat()
             ollama.script_tool_call(tool, args)
+            ollama.script_reply("not available here")  # the turn goes on after the refusal
             events = sse_events(
                 client.post(f"/api/chats/{chat}/messages", json={"content": "go"}).text
             )
