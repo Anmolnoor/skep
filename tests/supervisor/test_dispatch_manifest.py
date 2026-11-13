@@ -812,7 +812,7 @@ def test_a_run_that_lost_the_project_hosts_says_so_on_its_terminal_notice(desk: 
     runner = _Recording()
     task_id = actions.submit_run(
         desk.holder, runner, desk.store, repo=str(desk.repo), instructions="x",  # type: ignore[arg-type]
-        network=["example.com"],
+        network=[],  # D5 (R2a): only an empty list drops the project's hosts
     )  # fmt: skip
     dropped = runner.kwargs["dispatch_decision"].constraints["network_dropped"]
     assert "pypi.org" in dropped
@@ -827,6 +827,12 @@ def test_a_run_that_lost_the_project_hosts_says_so_on_its_terminal_notice(desk: 
     assert "network_dropped" not in (runner.kwargs["dispatch_decision"].constraints or {})
     desk.store.transition(kept, "failed", "boom")
     assert "lost the project" not in run_terminal_text(desk.store, kept)[0]  # type: ignore[index]
+    actions.submit_run(
+        desk.holder, runner, desk.store, repo=str(desk.repo), instructions="z",  # type: ignore[arg-type]
+        network=["example.com"],
+    )  # fmt: skip
+    # D5: a named list ADDS to the project's hosts, so nothing is lost
+    assert "network_dropped" not in (runner.kwargs["dispatch_decision"].constraints or {})
 
 
 def test_an_open_pr_card_names_the_push_url_git_push_uses(desk: Desk) -> None:
