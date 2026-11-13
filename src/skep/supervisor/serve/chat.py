@@ -2266,7 +2266,14 @@ class ChatEngine:
                         decided_by=(
                             None if decision is None else decision.decided_by or decision.reason
                         ),
-                        card=recorded_card(name, args, high, self.store, manifest),
+                        # W39: the decision and a policy write's replay ride
+                        # the record, so a reloaded card is the live one
+                        card={
+                            **(recorded_card(name, args, high, self.store, manifest) or {}),
+                            **({"decision": asdict(decision)} if decision is not None else {}),
+                            **({"checked": checked} if checked else {}),
+                        }
+                        or None,
                     )
                     if fold_key:
                         round_folds[fold_key] = action_id
@@ -2279,11 +2286,7 @@ class ChatEngine:
                         # v90-F2: and the three lines a human reads first; the
                         # description moves behind the details disclosure.
                         "description": tool_description(name),
-                        # P3-5: laid over the card when the round closes.
-                        "_checked": checked,
                     }
-                    if decision is not None:
-                        action_event["decision"] = asdict(decision)
                     # P4-2: shown when the round closes, with every item.
                     round_cards.append(action_event)
                     paused = True
@@ -2396,10 +2399,8 @@ class ChatEngine:
             for action_event in round_cards:
                 # P4-2: the card as the server recorded it — every folded item.
                 record = self.store.get_chat_action(str(action_event["action_id"]))
-                tool = str(action_event["tool"])
-                checked = action_event.pop("_checked", {})  # P3-5: replay, a narrowed keep
-                card = {**self._card(chat_id, tool, action_event["args"], action=record), **checked}
-                yield ("action", {**action_event, "card": card})
+                assert record is not None
+                yield ("action", {**action_event, **self.card_fields(chat_id, record)})
             if paused:
                 # The turn waits for the human; verdict endpoints resume it.
                 yield ("done", {"state": "awaiting_confirmation"})
@@ -2815,6 +2816,19 @@ class ChatEngine:
                 )  # fmt: skip
         return payload
 
+    def card_fields(self, chat_id: str, action: ChatActionRecord) -> dict[str, Any]:
+        """W39: the card and its decision, from what the server recorded when
+        it proposed them — one function for the live event and the fetch."""
+        recorded = action.card or {}
+        fields: dict[str, Any] = {
+            # P3-5: a policy write's replay and narrowed keep, laid over the card
+            "card": {**self._card(chat_id, action.tool, action.args, action=action),
+                     **(recorded.get("checked") or {})},
+        }  # fmt: skip
+        if recorded.get("decision") is not None:
+            fields["decision"] = recorded["decision"]
+        return fields
+
     def _card(
         self,
         chat_id: str,
@@ -3137,6 +3151,17 @@ def add_chat_routes(
     @app.get("/api/chats/{chat_id}")
     def chat_detail(chat_id: str) -> dict[str, Any]:
         chat = _require_chat(chat_id)
+        detail = _chat_detail(chat_id, chat)
+        from ..onboard import transparency_active, verdict_why
+
+        if transparency_active(holder.current.home.parent):
+            # W39: a pending card's why-line, as first_run_events adds it live
+            for action in detail["actions"]:
+                if action["status"] == "proposed":
+                    action["why"] = verdict_why(action.get("decision"))
+        return detail
+
+    def _chat_detail(chat_id: str, chat: Any) -> dict[str, Any]:
         return {
             "chat": asdict(chat),
             "messages": [asdict(m) for m in run_store.chat_messages(chat_id)],
@@ -3146,7 +3171,8 @@ def add_chat_routes(
                 {
                     **asdict(a),
                     "description": tool_description(a.tool),
-                    "card": engine._card(chat_id, a.tool, a.args, action=a),
+                    # W39: the same card, decision and why-line the live event had
+                    **engine.card_fields(chat_id, a),
                 }
                 for a in run_store.chat_actions(chat_id)
             ],

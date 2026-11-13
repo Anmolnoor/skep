@@ -354,7 +354,10 @@ def test_a_granted_non_read_mcp_call_cards_high_instead_of_running(live: Any) ->
     assert "always asks" in card["decision"]["detail"]
     assert card["card"]["tier"] == "high"
     (pending,) = env.store.pending_chat_actions(chat)
-    assert pending.card == {"tier": "high", "high": card["card"]["high"]}
+    # W39: the decision rides the record too, so a reloaded card is the live one
+    assert pending.card == {
+        "tier": "high", "high": card["card"]["high"], "decision": card["decision"],
+    }  # fmt: skip
 
 
 def test_an_mcp_tool_the_operator_allowed_by_name_is_not_high(live: Any) -> None:
