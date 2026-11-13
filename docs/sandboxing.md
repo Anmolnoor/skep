@@ -51,7 +51,12 @@ run's audit trail) and `supervisor/chat-attachments/`. One carve-out: a
 worker whose caste calls the LLM (coding, document, reviewer) reads
 `llm-secret` and the active provider profile's `llm-secret-<id>`, its own
 model credential; external engines and every other sandboxed lane see no LLM
-key. `supervisor/supervisor.sqlite3` stays readable (that worker reads its
+key. With the provider-key relay on (`provider_key_relay`, ADR 0062; off by
+default), a builtin worker gets no carve-out: its model calls go through a
+token-checked route on its run's filtering proxy, which adds the key, so the
+key files stay masked and no variable carrying the key reaches its env. Not
+relayed: bedrock (SigV4 signs with the key), a provider with no key, and the
+external engines, which keep their own auth env (`skep doctor` says which). `supervisor/supervisor.sqlite3` stays readable (that worker reads its
 provider settings from it). So does `~/.npmrc` (npm install): the sandbox
 leaves it readable, while the policy floor still refuses every Queen and
 worker read tool on it (`sandbox.SANDBOX_READABLE_SECRETS`). The engine

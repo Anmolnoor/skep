@@ -24,6 +24,7 @@ from skep.worker_contract.worker_state import (
 from . import sandbox
 from .castes import CASTES
 from .config import SupervisorConfig
+from .netproxy import ProviderRelay
 from .worktree import git_metadata_readable_roots, git_metadata_writable_roots
 
 logger = logging.getLogger("skep.spawner")
@@ -179,6 +180,7 @@ def spawn_worker(
     worker_argv: tuple[str, ...] | None = None,
     extra_writable: Iterable[Path] = (),
     write_denied: Iterable[Path] = (),
+    relay: ProviderRelay | None = None,
 ) -> subprocess.Popen[bytes]:
     """Start the headless worker in its own session (so the whole tree is killable).
 
@@ -192,6 +194,10 @@ def spawn_worker(
 
     ``write_denied`` (W31): files inside a writable root the sandbox keeps
     read-only — the run's git protocol pin (``worktree.pin_git_protocols``).
+
+    ``relay`` (ADR 0062): the run's provider-key relay. A relayed worker
+    holds no copy of the key: its key files stay masked (no B125 carve-out)
+    and no env variable carrying the key reaches it.
     """
     argv = [
         # D2: route by caste. v90-F1: a coding run may override this with a
@@ -243,11 +249,16 @@ def spawn_worker(
             # external engine (worker_argv) authenticates from its env, and an
             # unregistered caste falls back to the coding worker.
             worker_llm_key=worker_argv is None
+            and relay is None
             and getattr(CASTES.get(task.worker_kind), "needs_provider", True),
             write_denied=write_denied,
         )
         argv = sandbox.wrap_command(argv, profile_path, backend=backend)
     env = build_worker_env(task.permissions.env_allowlist, baseline=config.env_baseline)
+    if relay is not None:
+        # ADR 0062: by value, so the key leaves under any name (api_key_env,
+        # SKEP_LLM_API_KEY, a profile's own variable) the allowlist named.
+        env = {name: value for name, value in env.items() if relay.key not in value}
     # Needed: the builtin worker reads its provider profile, LLM key and
     # plugin shelf from here (llm_plan.py, capabilities.py). The control-plane
     # secrets under it are hidden by the profile (ES-F4), not by omission.

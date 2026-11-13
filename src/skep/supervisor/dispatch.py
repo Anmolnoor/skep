@@ -782,6 +782,7 @@ def run_task(
                 # must outlive the worktree), so the wall needs a door for it.
                 extra_writable=(cache_root,),
                 write_denied=() if git_pin is None else (git_pin,),
+                relay=relay if proxy is not None else None,
             )
         except SandboxUnavailableError as exc:
             # ES-F1 backstop: the up-front check passed but the backend the

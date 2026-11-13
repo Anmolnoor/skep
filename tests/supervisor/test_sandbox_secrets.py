@@ -593,3 +593,93 @@ def test_rancher_desktops_socket_is_masked_but_its_tools_stay_on_path(
     masked = set(sandbox.secret_paths(skep_home))
     assert home / ".rd" / "docker.sock" in masked
     assert not {home / ".rd", home / ".rd" / "bin"} & masked
+
+
+# ADR 0062: the worker reports what it can see of the key, from inside.
+_KEY_PROBE = """
+import json, os, sys
+from pathlib import Path
+out = Path(sys.argv[sys.argv.index("--out") + 1])
+secrets_dir = Path(sys.argv[1])
+seen = {"env": sorted(k for k, v in os.environ.items() if v and v in sys.argv[2])}
+for name in ("llm-secret", "llm-secret-p1"):
+    try:
+        seen[name] = "read: " + str((secrets_dir / name).read_text().strip() == sys.argv[2])
+    except OSError as exc:
+        seen[name] = type(exc).__name__
+out.write_text(json.dumps(seen))
+"""
+
+
+@pytest.mark.parametrize("relayed", [False, True], ids=["off", "on"])
+def test_a_relayed_worker_holds_no_provider_key_in_its_env_or_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relayed: bool
+) -> None:
+    """ADR 0062 strangler step 4: a real sandboxed worker reads its own env
+    and its key files. Off, it holds the key (today's path, pinned so the
+    test proves the difference); relayed, it holds only the run's token."""
+    from skep.supervisor import RunStore, SupervisorConfig, spawner
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+    from skep.supervisor.netproxy import ProviderRelay
+    from skep.supervisor.providers import ProviderProfile
+    from skep.worker_contract import Permissions
+
+    if not sandbox.available():
+        pytest.skip("no usable sandbox backend on this host")
+    import secrets
+
+    key = "fk-" + secrets.token_hex(12)
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    monkeypatch.setenv("SKEP_TEST_RELAY_KEY", key)
+    sup = tmp_path / "skep" / "supervisor"
+    sup.mkdir(parents=True)
+    for name in ("llm-secret", "llm-secret-p1"):
+        (sup / name).write_text(key + "\n", encoding="utf-8")
+    store = RunStore(sup / "supervisor.sqlite3")
+    try:
+        store.upsert_provider_profile(
+            ProviderProfile(provider_id="p1", protocol="ollama", base_url="http://p1.x", model="m")
+        )
+        store.set_active_provider("p1")
+    finally:
+        store.close()
+    probe = tmp_path / "probe.py"
+    probe.write_text(_KEY_PROBE, encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config = SupervisorConfig(
+        home=sup, worker_command=(sys.executable, str(probe), str(sup), key), sandbox=True
+    )
+    task = mint_task(
+        workspace=workspace,
+        instructions="x",
+        budget=DEFAULT_BUDGET,
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], env_allowlist=["SKEP_TEST_RELAY_KEY"]
+        ),
+    )
+    out = tmp_path / "results" / "o.json"
+    out.parent.mkdir()
+    relay = ProviderRelay(upstream="http://p1.x", token="t" * 64, key=key, protocol="ollama")
+    proc = spawner.spawn_worker(
+        config,
+        task,
+        tmp_path / "t.json",
+        out,
+        log_path=tmp_path / "w.log",
+        relay=relay if relayed else None,
+    )
+    assert proc.wait(timeout=60) == 0, (tmp_path / "w.log").read_text()
+    seen = json.loads(out.read_text())
+    if relayed:
+        assert seen == {
+            "env": [],
+            "llm-secret": "PermissionError",
+            "llm-secret-p1": "PermissionError",
+        }
+    else:
+        assert seen == {
+            "env": ["SKEP_TEST_RELAY_KEY"],
+            "llm-secret": "read: True",
+            "llm-secret-p1": "read: True",
+        }

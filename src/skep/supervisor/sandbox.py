@@ -338,9 +338,10 @@ def available() -> bool:
 # ``*-secret`` and ``llm-secret*`` file (secret_floor.SKEP_SECRET_NAMES), the
 # other runs' audit trails and the chat attachments (B125). One carve-out:
 # a worker whose caste calls the LLM reads ``llm-secret`` and the ACTIVE
-# profile's ``llm-secret-<id>`` (llm_plan.py) until V6 moves the credential
-# into the proxy. The store (supervisor.sqlite3) stays readable: that same
-# worker reads its provider settings from it. Checked when the profile is
+# profile's ``llm-secret-<id>`` (llm_plan.py) unless its run is relayed
+# (ADR 0062, ``provider_key_relay``): then the proxy holds the credential.
+# The store (supervisor.sqlite3) stays readable: that same worker reads its
+# provider settings from it. Checked when the profile is
 # built, so a secret file created mid-run is not covered.
 # W33: the engine logins (~/Library/Keychains, ~/.claude/.credentials.json,
 # ~/.codex/auth.json) are masked too — each external engine's config dir is
