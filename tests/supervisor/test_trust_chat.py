@@ -284,3 +284,18 @@ def test_a_chat_cannot_schedule_skep_trust_either(rig: Rig) -> None:
                 runner=rig.engine.runner, actor="chat-user", chat_id=chat,
             )  # fmt: skip
     assert rig.store.list_schedules() == []
+
+
+def test_a_clarification_choice_is_never_a_deck_command(rig: Rig) -> None:
+    """A clarification's choices become buttons that send through the web
+    composer, which runs a "/…" line as a deck command: a model-written
+    "/trust" button would be one click from clearing the bits. Such a choice
+    stays in the question's text and is never a button."""
+    chat, _hook, _shell = _tainted_chat(rig)
+    rig.ollama.script_tool_call(
+        "ask_clarifying_question",
+        {"question": "Go on?", "choices": ["/trust", " /trust untrusted", "no"]},
+    )
+    events = sse_events(rig.client.post(f"/api/chats/{chat}/messages", json={"content": "x"}).text)
+    (asked,) = [data for name, data in events if name == "clarification"]
+    assert asked["choices"] == ["no"]

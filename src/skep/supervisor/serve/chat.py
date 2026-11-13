@@ -1972,10 +1972,13 @@ class ChatEngine:
                     # free; the chat's own turn cycle is the pause, and the
                     # user's next message is the answer.
                     question = str(args.get("question") or "").strip()
+                    # W20 review: a choice is a button the web composer sends,
+                    # and a "/…" line there is a deck command — a model-written
+                    # "/trust" would be one click from clearing the bits
                     choices = [
                         str(choice).strip()
                         for choice in (args.get("choices") or [])
-                        if str(choice).strip()
+                        if str(choice).strip() and not str(choice).strip().startswith("/")
                     ]
                     if question:
                         self.store.add_chat_message(
