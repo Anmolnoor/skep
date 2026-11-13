@@ -243,6 +243,21 @@ def test_bwrap_skips_masks_already_hidden_by_its_tmpfs() -> None:
     assert "/tmp/x/serve-token" not in args and "/run/user/1/y" not in args
 
 
+def test_bwrap_masks_a_socket_inside_a_root_it_binds_back_into_tmp() -> None:
+    """R5: /tmp is a fresh tmpfs except where a root is bound back in (a repo
+    under /tmp): a socket in that git dir stayed connectable, its mask skipped."""
+    sock = "/tmp/repo/.git/fsmonitor--daemon.ipc"
+    args = sandbox._bubblewrap_args(
+        writable_roots=[],
+        network=sandbox.DENY_ALL_NETWORK,
+        proxy_port=None,
+        read_denied=[Path(sock), Path("/tmp/x/serve-token")],
+        readable_roots=[Path("/tmp/repo/.git")],
+    )
+    assert args[args.index(sock) - 2 : args.index(sock)] == ["--ro-bind", "/dev/null"]
+    assert "/tmp/x/serve-token" not in args
+
+
 _READER = """
 import sys
 for path in sys.argv[1:]:

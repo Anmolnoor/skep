@@ -612,8 +612,11 @@ def _bubblewrap_args(
         args.extend(["--ro-bind", str(pinned), str(pinned)])
     for denied in read_denied:
         # ES-F4: after the writable binds, so a mask wins inside one too.
-        # /tmp and /run are fresh tmpfs here: their host paths do not exist.
-        if denied.parts[1:2] in (("tmp",), ("run",)):
+        # /tmp and /run are fresh tmpfs here: their host paths do not exist,
+        # except inside a root bound back in (R5: a repo's git dir under /tmp).
+        if denied.parts[1:2] in (("tmp",), ("run",)) and not any(
+            denied.is_relative_to(root) for root in [*readable_roots, *writable_roots]
+        ):
             continue
         args.extend(
             _mask_args(
