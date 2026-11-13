@@ -121,7 +121,9 @@ skep project setup /path/to/repo --loopback-port 5432
 ```
 
 From chat, `setup_project` with `policy_overrides: {"loopback_ports": [5432]}`
-(it shows a card). HTTP to a closed port answers `403` naming the port and that
+(it shows a card). Ports run 1024-65535: a port below 1024 is privileged inside
+bubblewrap's network namespace, netshim could not present it and the worker
+would not start, so setup refuses it. HTTP to a closed port answers `403` naming the port and that
 command; a raw connection on macOS fails with "Operation not permitted".
 Re-verification gets the same project ports. `skep doctor` and
 `skep policy migrate --dry-run` name the projects that open none.

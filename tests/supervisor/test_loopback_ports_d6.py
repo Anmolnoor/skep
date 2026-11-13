@@ -210,6 +210,40 @@ def test_project_setup_opens_a_loopback_port_from_the_cli(
         store.close()
 
 
+def test_setup_refuses_a_port_below_1024_and_says_why(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Inside bubblewrap's netns ports below 1024 are privileged: netshim
+    cannot present one and the worker would never start (exit 3). Setup
+    refuses such a port up front instead, naming the range and the reason."""
+    from skep.supervisor.cli_cmds import cmd_project_setup
+
+    for bad in ([80], [1023, 5432]):
+        with pytest.raises(ValueError, match=r"1024-65535.*below 1024"):
+            validate_project_policy({"loopback_ports": bad})
+    assert validate_project_policy({"loopback_ports": [1024]}) == {"loopback_ports": [1024]}
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    args = argparse.Namespace(
+        home=tmp_path / "home",
+        repo=repo,
+        pack=None,
+        strategy="trusted_local_dev",
+        phase="build",
+        project_id="proj",
+        name=None,
+        no_seed_schedules=True,
+        no_seed_commands=True,
+        engine=None,
+        verify_command=None,
+        groups=None,
+        loopback_ports=[80],
+    )
+    assert cmd_project_setup(args) != 0
+    captured = capsys.readouterr()
+    assert "below 1024" in captured.out + captured.err
+
+
 def test_chat_setup_project_takes_the_ports_as_a_policy_override(tmp_path: Path) -> None:
     """The chat face is the carded setup_project; its policy_overrides carry
     the knob through the same validator (a bad value refuses)."""

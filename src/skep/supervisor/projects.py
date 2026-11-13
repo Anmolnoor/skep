@@ -182,12 +182,17 @@ def _require_auto_apply_branch(value: object) -> str:
 
 
 def require_loopback_ports(value: object) -> list[int]:
-    """D6: loopback ports as sorted, distinct integers 1-65535."""
+    """D6: loopback ports as sorted, distinct integers 1024-65535."""
     if not isinstance(value, list) or any(
-        isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536
+        isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port < 65536
         for port in value
     ):
-        raise ValueError("loopback_ports must be a list of port numbers 1-65535, e.g. [5432]")
+        # A port below 1024 is privileged inside bubblewrap's netns: netshim
+        # cannot present it there and the worker would never start.
+        raise ValueError(
+            "loopback_ports must be a list of port numbers 1024-65535, e.g. [5432]; "
+            "a port below 1024 cannot be opened inside a Linux sandbox"
+        )
     return sorted(set(value))
 
 
