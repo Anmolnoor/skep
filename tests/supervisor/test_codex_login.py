@@ -179,6 +179,14 @@ def test_doctor_reports_the_login_the_opt_in_and_what_a_run_would_use(
     from skep.supervisor.store import RunStore
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # doctor reads the auth lines only for a codex that is on PATH; a host
+    # without the CLI (CI) would print MISSING instead, so give it a stub.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "codex"
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     home = tmp_path / "home"
     (home / "supervisor").mkdir(parents=True)
 
