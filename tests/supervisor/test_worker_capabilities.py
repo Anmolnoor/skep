@@ -2153,3 +2153,26 @@ def test_w8_the_worker_shell_has_the_command_line_secret_floor(tmp_path: Path) -
         assert decision["reason"] == "capability.deny.secret_floor"
     result = registry.invoke("shell.run", {"argv": ["cat", "README.md"], "purpose": "modify"})
     assert result.status == "allowed" and result.output == "hello\n"
+
+
+def test_es_f52_review_a_dotenv_template_is_not_a_secret_on_the_shell_lane(
+    tmp_path: Path,
+) -> None:
+    """ES-F52 review: the command-line floor read every `.env.*` as a secret,
+    so a worker's `cat .env.example` and `git diff -- .env.sample` failed —
+    ordinary setup work. A committed template (`.example`, `.sample`,
+    `.template`, `.dist`) reads; `.env`, `.env.local` and a template that is
+    a symlink to a secret are still refused."""
+    (tmp_path / ".env").write_text("NAME=value\n", encoding="utf-8")
+    (tmp_path / ".env.local").write_text("NAME=value\n", encoding="utf-8")
+    for name in (".env.example", ".env.sample", ".ENV.TEMPLATE", ".env.dist"):
+        (tmp_path / name).write_text("NAME=\n", encoding="utf-8")
+    (tmp_path / ".env.linked.example").symlink_to(tmp_path / ".env")
+    registry = CapabilityRegistry(tmp_path, emit=lambda t, p: None, shell_allowlist=[["cat"]])
+    for name in (".env.example", ".env.sample", ".ENV.TEMPLATE", ".env.dist"):
+        result = registry.invoke("shell.run", {"argv": ["cat", name], "purpose": "modify"})
+        assert result.status == "allowed" and result.output == "NAME=\n", name
+    for name in (".env", ".env.local", ".env.linked.example"):
+        assert registry.shell_decision_preview({"argv": ["cat", name]}).reason == (
+            "capability.deny.secret_floor"
+        ), name

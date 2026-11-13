@@ -82,13 +82,26 @@ def is_dotenv(name: str) -> bool:
     return name == ".env" or name.startswith(".env.")
 
 
+# Committed templates of a .env, never the secrets themselves.
+_DOTENV_TEMPLATES = (".example", ".sample", ".template", ".dist")
+
+
+def _is_dotenv_template(name: str) -> bool:
+    return is_dotenv(name) and name.casefold().endswith(_DOTENV_TEMPLATES)
+
+
 def _under(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _reason(path: Path, user_homes: tuple[Path, ...], skep_homes: tuple[Path, ...]) -> str | None:
+def _reason(
+    path: Path,
+    user_homes: tuple[Path, ...],
+    skep_homes: tuple[Path, ...],
+    templates_ok: bool = False,
+) -> str | None:
     folded = _fold(path)
-    if is_dotenv(folded.name):
+    if is_dotenv(folded.name) and not (templates_ok and _is_dotenv_template(folded.name)):
         return f"{path} is a .env file"
     for home in user_homes:
         for rel in HOME_SECRETS:
@@ -103,9 +116,14 @@ def _reason(path: Path, user_homes: tuple[Path, ...], skep_homes: tuple[Path, ..
     return None
 
 
-def secret_floor_reason(path: str | Path, *, skep_home: Path | None = None) -> str | None:
+def secret_floor_reason(
+    path: str | Path, *, skep_home: Path | None = None, templates_ok: bool = False
+) -> str | None:
     """Why ``path`` is never readable, or None. Judges the requested path
-    (``~`` expanded, made absolute without following links) and its realpath."""
+    (``~`` expanded, made absolute without following links) and its realpath.
+    ``templates_ok``: a ``.env.example`` (``.sample``/``.template``/``.dist``)
+    is not a secret — the command-line floor's reading (ES-F52 review); its
+    realpath is still judged, so a template symlinked at a secret is not."""
     requested = Path(os.path.abspath(Path(path).expanduser()))
     try:
         real = requested.resolve()
@@ -118,7 +136,7 @@ def secret_floor_reason(path: str | Path, *, skep_home: Path | None = None) -> s
         skep_abs = Path(os.path.abspath(skep_home.expanduser()))
         skep_homes = tuple({skep_abs, skep_abs.resolve()})
     for candidate in (requested, real):
-        reason = _reason(candidate, user_homes, skep_homes)
+        reason = _reason(candidate, user_homes, skep_homes, templates_ok)
         if reason is not None:
             return (
                 f"{reason} — credential files are never readable by the Queen or a "
@@ -157,7 +175,7 @@ def shell_secret_floor_reason(
             if any(char in part for char in "*?["):
                 candidates += [Path(hit) for hit in islice(iglob(str(path)), 200)]
     for candidate in candidates:
-        reason = secret_floor_reason(candidate, skep_home=skep_home)
+        reason = secret_floor_reason(candidate, skep_home=skep_home, templates_ok=True)
         if reason is not None:
             return reason
     return None
