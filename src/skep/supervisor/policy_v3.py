@@ -59,6 +59,7 @@ from .policy_schema import (
     PolicyDocument,
     ResolvedRule,
     ResolvedScopePolicy,
+    _binding,
     action_binds,
     applies,
     backgrounds,
@@ -522,10 +523,13 @@ def _match(
     )
     parts = [value]
     background = False
-    if scope == "shell" and action == "run":
-        parts = shell_segments(value) or []  # opaque text matches nothing
-        background = backgrounds(value)
     found: list[Verdict] = []
+    if scope == "shell" and action == "run":
+        segments = shell_segments(value)
+        background = backgrounds(value)
+        if segments is None:
+            return _opaque(scopes, req, unmatched, url)
+        parts = segments
     for part in parts:
         hit = _hit(scopes, scope, action, part, url)
         if hit is not None and background and (hit.layer or "").startswith("grant:"):
@@ -540,6 +544,40 @@ def _match(
         found,
         key=lambda v: (_VERDICT_RANK[v.verdict], v.layer not in GRANT_LAYERS),
         default=unmatched,
+    )
+
+
+def _opaque(
+    scopes: dict[str, ResolvedScopePolicy], req: Request, unmatched: Verdict, url: str | None
+) -> Verdict:
+    """L13: a line the segment reader cannot split (``sh -c '…'``, ``$(…)``,
+    ``$P x``) is allowed by nothing, but a deny or named ask still reads it
+    the way the floor does (``shell_deny_binds`` unwraps ``-c`` payloads), so
+    ``sh -c 'curl x'`` is denied by a curl deny. What even that cannot read
+    asks, and says which denies it may be getting around."""
+    scope, action, value = req
+    hit = _hit(scopes, scope, action, value, url)
+    if hit is not None and _binding(hit.verdict, hit.pattern):
+        layer = hit.layer or "global"
+        bound = Verdict(hit.verdict, layer, hit.rule_id, f"{layer}/{hit.rule_id}", unmatched.source)
+        return max((bound, unmatched), key=lambda v: _VERDICT_RANK[v.verdict])
+    policy = scopes.get(scope)
+    denies = sorted(
+        {
+            rule.pattern
+            for rule in (policy.rules if policy else ())
+            if rule.verdict == "deny" and action_binds(scope, "deny", rule.action, action)
+        }
+    )
+    if not denies:
+        return unmatched
+    named = ", ".join(f"`{pattern}`" for pattern in denies[:3])
+    return replace(
+        unmatched,
+        note=(
+            f"skep cannot read which command this line runs, and a deny on {named} exists "
+            "that it may be getting around; approve once only if you can see it does not"
+        ),
     )
 
 

@@ -671,7 +671,7 @@ def catastrophic_command_line_reason(command: str) -> str | None:
 # card, so a human reads the raw string; persistence and worker lanes: fail
 # closed — an entry we cannot judge is an entry we do not trust).
 _SEGMENT_OPERATOR_CHARS = frozenset("|&;()<>")
-_WRAPPER_SHELLS = frozenset({"bash", "sh", "zsh", "fish"})
+_WRAPPER_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
 _MAX_UNWRAP_DEPTH = 4
 # Reserved words that open or continue a compound command: sh runs the word
 # after them (`{ git push; }`, `! git push`, `if git push; then …`,

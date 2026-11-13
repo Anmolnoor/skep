@@ -3150,6 +3150,14 @@ def queen_shell_decision(
         )
     if verdict.layer == "taint":
         return taint_decision(verdict)
+    if verdict.note is not None and verdict.layer == "default":
+        # L13: an unreadable line under a deny — the card's risk line says so
+        return AutonomyDecision(
+            verdict="require_approval",
+            reason="shell.require_approval.unreadable_under_deny",
+            detail=verdict.note,
+            decided_by=verdict.decided_by,
+        )
     # B79: the card names the rule that asked — never "no rule covers this".
     asked = "role_layer" if verdict.layer.startswith("role:") else verdict.rule_id
     return AutonomyDecision(

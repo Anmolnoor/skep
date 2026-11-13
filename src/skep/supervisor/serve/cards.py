@@ -529,6 +529,9 @@ def card_summary(
     if why is not None:
         summary["purpose"] = why
     danger = risk(tool, safe_args)
+    decision = (recorded or {}).get("decision") or {}
+    if decision.get("reason") == "shell.require_approval.unreadable_under_deny":
+        danger = str(decision.get("detail"))  # L13: the deny this line may get around
     if danger is not None:
         summary["risk"] = danger
     if tool in _POLICY_TOOLS:
