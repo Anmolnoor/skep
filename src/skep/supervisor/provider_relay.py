@@ -7,6 +7,7 @@ for it: whether a run is relayed, the per-run token, and the worker's env.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -29,19 +30,33 @@ if TYPE_CHECKING:
 RELAY_SECRET_FILE = "relay-secret"
 
 
+_SECRET_BYTES = 32
+
+
 def _relay_secret(supervisor_home: Path) -> bytes:
+    """The supervisor's relay secret, made once. Written whole to a private
+    temp file and moved into place, so no reader ever sees it half-written;
+    a short one (a crash before this rule) is replaced, never used."""
     path = supervisor_home / RELAY_SECRET_FILE
     try:
-        return path.read_bytes()
+        secret: bytes | None = path.read_bytes()
     except FileNotFoundError:
-        pass
+        secret = None
+    if secret is not None and len(secret) >= _SECRET_BYTES:
+        return secret
     supervisor_home.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:  # another dispatch made it first
-        return path.read_bytes()
+    tmp = supervisor_home / f".{RELAY_SECRET_FILE}.{os.getpid()}.{secrets.token_hex(4)}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as handle:
-        handle.write(secrets.token_bytes(32))
+        handle.write(secrets.token_bytes(_SECRET_BYTES))
+    try:
+        if secret is not None:  # short: replace it
+            os.replace(tmp, path)
+        else:  # absent: the first of two racing dispatches wins
+            with contextlib.suppress(FileExistsError):
+                os.link(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
     return path.read_bytes()
 
 

@@ -480,3 +480,20 @@ def test_a_podman_allow_all_run_is_not_relayed_because_it_cannot_reach_host_loop
     finally:
         store.close()
     assert "a podman run cannot reach the host loopback" in (dispatched[0] or "")
+
+
+def test_a_truncated_relay_secret_is_replaced_never_used(tmp_path: Path) -> None:
+    """A crash between creating relay-secret and writing it left it empty;
+    an empty HMAC key would make every token computable from its task id."""
+    import hashlib
+    import hmac
+
+    home = tmp_path / "supervisor"
+    home.mkdir()
+    (home / "relay-secret").write_bytes(b"")
+    token = relay_token(home, "task-1")
+    assert token != hmac.new(b"", b"task-1", hashlib.sha256).hexdigest()
+    assert len((home / "relay-secret").read_bytes()) == 32
+    assert stat.S_IMODE(os.stat(home / "relay-secret").st_mode) == 0o600
+    assert relay_token(home, "task-1") == token
+    assert [p.name for p in home.iterdir()] == ["relay-secret"]
