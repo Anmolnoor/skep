@@ -645,3 +645,35 @@ def test_w6_the_operators_ca_bundle_still_counts(
     with pytest.raises(ssl.SSLError):
         fetch_url_text("https://site.example/", resolve=_resolver({"site.example": _PUBLIC_IP}))
     assert web.sent == []
+
+
+def test_w6_a_failed_read_behind_a_proxy_says_the_proxy_is_not_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W6 trade-off, stated where it bites: a proxy resolves the name out of
+    the guard's sight, so read_url never uses one. On a proxy-only network
+    the connect failure names the variable it ignored."""
+    import httpx
+
+    from skep.supervisor.serve.websearch import fetch_url_text
+
+    def refuse(*_a: object, **_k: object) -> httpx.Response:
+        raise httpx.ConnectError("unreachable")
+
+    monkeypatch.setattr(httpx.Client, "send", refuse)
+    for name in (
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    resolve = _resolver({"site.example": _PUBLIC_IP})
+    with pytest.raises(httpx.ConnectError) as plain:
+        fetch_url_text("https://site.example/", resolve=resolve)
+    assert "PROXY" not in str(plain.value)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    with pytest.raises(httpx.ConnectError, match="does not use HTTPS_PROXY"):
+        fetch_url_text("https://site.example/", resolve=resolve)

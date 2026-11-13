@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import ipaddress
+import os
 import re
 import socket
 import urllib.parse
@@ -53,6 +54,7 @@ _READ_HEADERS = {
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+_PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
 # Every dot-label a decimal, octal or hex number: an IPv4 spelling.
 _NUMERIC_HOST = re.compile(r"(?:0x[0-9a-f]*|[0-9]+)(?:\.(?:0x[0-9a-f]*|[0-9]+))*\.?", re.I)
 
@@ -186,6 +188,14 @@ def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
             return client.send(request)
         except httpx.ConnectError as exc:
             error = exc
+    proxy = next((k for k in _PROXY_VARS if os.environ.get(k)), None)
+    if proxy is not None:
+        # W6 trade-off: a proxy resolves the name itself, out of the guard's
+        # sight, so read_url never uses one — say so where it bites.
+        raise httpx.ConnectError(
+            f"{error} — read_url dials the address it checked directly and does not "
+            f"use {proxy}; on a network that only allows a proxy it cannot read pages"
+        ) from error
     raise error
 
 
