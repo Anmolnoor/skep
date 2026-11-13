@@ -110,6 +110,16 @@ _MCP_WRITE_KEYWORDS = (
     "put",
 )
 _MCP_READ_VERBS = ("get", "list", "read", "search", "describe", "show", "find")
+# W10: a verb that changes or sends something. Anywhere in a name it makes the
+# tool not-read whatever the server's hint says (`get_and_transfer`). Nouns
+# that double as verbs (`run`, `order`, `email`) are left out: `get_run` reads.
+_MCP_MUTATION_VERBS = frozenset(
+    (*_MCP_WRITE_KEYWORDS, "send", "post", "notify", "publish", "deploy", "exec", "execute",
+     "transfer", "pay", "purge", "submit", "insert", "upload", "move", "rename", "drop",
+     "revoke", "grant", "reset", "kill", "cancel", "approve", "archive", "destroy", "wipe",
+     "merge", "push", "invite", "share", "reply", "forward", "refund", "withdraw", "click",
+     "fill", "press", "navigate", "eval", "evaluate")
+)  # fmt: skip
 
 
 def _name_tokens(name: str) -> list[str]:
@@ -137,12 +147,18 @@ def classify_mcp_risk(tool: MCPTool) -> str:
     """Classify an MCP tool into a capability risk class.
 
     ``read`` only for a server-marked read-only tool whose leading verb is a
-    read verb (B09). Otherwise external_side_effect > network > write >
-    unknown by whole name token. Every non-read class requires approval
+    read verb (B09) and whose name has no mutation verb anywhere (W10).
+    Otherwise external_side_effect > network > write > unknown by whole name
+    token. Every non-read class requires approval
     (fail closed); a project may grant a risk explicitly — a visible act.
     """
     tokens = _name_tokens(tool.name)
-    if tool.read_only is True and tokens and tokens[0] in _MCP_READ_VERBS:
+    if (
+        tool.read_only is True
+        and tokens
+        and tokens[0] in _MCP_READ_VERBS
+        and _MCP_MUTATION_VERBS.isdisjoint(tokens)
+    ):
         return "read"
     for risk, keywords in (
         ("external_side_effect", _MCP_EXTERNAL_KEYWORDS),
