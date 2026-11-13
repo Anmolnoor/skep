@@ -2127,7 +2127,17 @@ class ChatEngine:
                         store=self.store,
                         manifest=manifest or reach,
                     )
-                    if high is not None and decision is not None and decision.allows_execution():
+                    if (
+                        high is not None
+                        and decision is not None
+                        and decision.allows_execution()
+                        # L3: double taint raises a card's tier; it never makes
+                        # an allow ask — decide() and mutation_execution_decision
+                        # already asked on every lane D5 names (a read inside
+                        # the roots is none of them)
+                        and high_tier(name, args, store=self.store, manifest=manifest or reach)
+                        is not None
+                    ):
                         decision = high_tier_decision(high, decision)
                     elif (
                         manifest is not None

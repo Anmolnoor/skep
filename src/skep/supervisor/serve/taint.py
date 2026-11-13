@@ -227,7 +227,10 @@ def taint_line(store: RunStore, chat_id: str, taint: ChatTaint) -> str | None:
         how = _source(store, chat_id, taint.untrusted)
         parts.append("taken in outside content" + (f" (it {how})" if how else ""))
     if len(parts) == 2:
-        tail = "anything it sends out or changes needs your OK, one approval at a time"
+        tail = (
+            "anything it sends out or changes needs your OK, one approval at a time "
+            "(/trust clears this once you have checked what came in)"
+        )
     elif taint.private is not None:
         tail = "sending anything out from it needs your OK, even where a rule or grant allows it"
     else:

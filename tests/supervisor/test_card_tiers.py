@@ -387,6 +387,27 @@ def test_a_granted_non_read_mcp_call_cards_high_instead_of_running(live: Any) ->
     }  # fmt: skip
 
 
+def test_l3_a_doubly_tainted_chat_still_reads_inside_its_roots_with_no_card(live: Any) -> None:
+    """L3 (field test): once a chat held both bits, a read_file INSIDE the
+    workon'd repo — allowed by ``global/operator-root`` — became a HIGH card
+    (``tier/high``). D5 moves an allow to an ask only on the egress and action
+    lanes; a read inside the roots is neither. The tier still rises on a card
+    that asks for its own reason (a read outside the roots), with the line
+    that says how to clear the bits."""
+    env = live("builder")
+    chat = env.chat()
+    set_taint(env.store, chat, "both")
+    env.ollama.script_tool_call("read_file", {"path": str(env.paths["repo"] / "README.md")})
+    env.ollama.script_tool_call("read_file", {"path": str(env.paths["outside"] / "notes.txt")})
+    (card,) = cards(env.turn(chat, "read the readme and my notes"))
+    assert card["args"]["path"].endswith("notes.txt")
+    assert card["card"]["tier"] == "high"
+    assert "/trust" in card["card"]["taint"]
+    rows = env.store.chat_messages(chat)
+    readme = next(r for r in rows if r.role == "tool" and "README" in r.content)
+    assert json.loads(readme.content)["ok"] is True
+
+
 def test_an_mcp_tool_the_operator_allowed_by_name_is_not_high(live: Any) -> None:
     from skep.supervisor.serve import actions
 
