@@ -1372,9 +1372,12 @@ def test_with_two_cards_waiting_a_reaction_or_slash_verdict_resolves_neither(
                 store.add_chat_action(
                     chat.chat_id,
                     tool="dispatch_run",
-                    args={"repo": str(repo), "instructions": f"{v} MODE:happy",
-                          "execution_mode": "sandbox"},
-                )  # fmt: skip
+                    args={
+                        "repo": str(repo),
+                        "instructions": f"{v} MODE:happy",
+                        "execution_mode": "sandbox",
+                    },
+                )
                 for v in ("Fix the bug.", "Add a test.")
             ]
         finally:
