@@ -2235,6 +2235,32 @@ def test_d21_a_worker_may_create_a_dotenv_from_a_template_and_nothing_more(
     assert not (work / ".env.two").exists() and not (tmp_path / ".env").exists()
 
 
+def test_d21_dotdot_after_a_linked_directory_is_judged_where_the_kernel_lands(
+    tmp_path: Path,
+) -> None:
+    """D21 follow-up: ``sub/../.env`` with ``sub`` a link out of the worktree
+    (a tracked symlink, ES-F2's threat) lands beside the link's TARGET, not in
+    the worktree, so the check judges the path the kernel resolves; collapsing
+    ``..`` first let ``cp`` overwrite a ``.env`` outside the worktree."""
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".env.example").write_text("NAME=\n", encoding="utf-8")
+    (tmp_path / "outside" / "inner").mkdir(parents=True)
+    (tmp_path / "outside" / ".env").write_text("REAL=1\n", encoding="utf-8")
+    (tmp_path / "outside" / ".env.example").write_text("X=\n", encoding="utf-8")
+    (work / "sub").symlink_to(tmp_path / "outside" / "inner")
+    registry = CapabilityRegistry(work, emit=lambda t, p: None, shell_allowlist=[["cp"]])
+    for argv in (
+        ["cp", ".env.example", "sub/../.env"],  # overwrites outside/.env
+        ["cp", ".env.example", "sub/../.env.new"],  # creates outside the worktree
+        ["cp", "sub/../.env.example", ".env"],  # reads a template outside it
+    ):
+        assert registry.shell_decision_preview({"argv": argv}).reason == (
+            "capability.deny.secret_floor"
+        ), argv
+    assert (tmp_path / "outside" / ".env").read_text() == "REAL=1\n"
+
+
 def test_a_successful_commit_drops_only_the_packed_refs_lock_line(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

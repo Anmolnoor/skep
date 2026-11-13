@@ -141,7 +141,9 @@ def creates_dotenv_from_template(argv: Sequence[str], workspace: Path) -> bool:
     if len(args) != 3 or args[0] != "cp" or any(a.startswith("-") for a in args[1:]):
         return False
     root = workspace.resolve()
-    source, target = (Path(os.path.abspath(workspace / arg)) for arg in args[1:])
+    # never collapse ``..`` lexically: after a linked directory the kernel
+    # lands beside the link's target, and ``resolve`` follows it the same way
+    source, target = (workspace / arg for arg in args[1:])
     real = source.resolve()
     return (
         _is_dotenv_template(source.name)
