@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import unicodedata
 from collections import Counter, deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -490,6 +491,7 @@ def replay_decisions(
     skipped: Counter[str] = Counter()
     flips: Counter[str] = Counter()
     examples: dict[str, list[str]] = {}
+    rules: dict[str, list[str]] = {}
     replayed = 0
     for row in rows:
         why = _unreplayable(row)
@@ -521,25 +523,38 @@ def replay_decisions(
         flips[label] += 1
         shown = examples.setdefault(label, [])
         if len(shown) < 2:
-            text = " ".join(req.value.split())[:48].replace("`", "'")
-            shown.append(f"{req.scope}.{req.action} `{text}` ({old_by} → {new.decided_by})")
+            # W17: the value is model- or attacker-chosen: plain text, and
+            # only in ``examples`` (the operator's CLI); ``rules`` (rule ids,
+            # no value) is what a card or a tool result shows.
+            text = plain(req.value)[:48].replace("`", "'")
+            why = f"({plain(str(old_by))} → {plain(str(new.decided_by))})"
+            shown.append(f"{req.scope}.{req.action} `{text}` {why}")
+            rules.setdefault(label, []).append(f"{req.scope}.{req.action} {why}")
     return {
         "rows": len(rows),
         "replayed": replayed,
         "flips": dict(flips),
         "examples": examples,
+        "rules": rules,
         "not_replayable": dict(skipped),
     }
 
 
+def plain(text: str) -> str:
+    """W17: logged text as one plain line — every control, format and
+    escape character (C0, C1, DEL, ESC, bidi and zero-width) removed."""
+    return "".join(ch for ch in " ".join(text.split()) if unicodedata.category(ch)[0] != "C")
+
+
 def replay_line(summary: Mapping[str, Any]) -> str:
-    """The summary in one line, for a card, a tool result and the CLI."""
+    """The summary in one line, for a card, a tool result and the CLI —
+    counts and rule ids, never a logged value (W17)."""
     if not summary["rows"]:
         return "replay: the decision log is empty — no past decision to compare"
     parts = []
     for label, n in summary["flips"].items():
         old, _, new = label.partition("->")
-        shown = "; ".join(summary["examples"].get(label, []))
+        shown = "; ".join(dict.fromkeys(summary.get("rules", {}).get(label, [])))
         parts.append(f"now {VERDICT_WORDS[new]} {n} past {VERDICT_WORDS[old]}: {shown}")
     head = f"replay of the last {summary['rows']} decisions: " + (
         "; ".join(parts) if parts else f"none of {summary['replayed']} replayed flips"
