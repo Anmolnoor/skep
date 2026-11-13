@@ -994,7 +994,12 @@ def create_app(
         resumed_id = allow_network_host_and_resume(
             run_store, holder, runner, run, approval, review_id, principal(request)
         )
-        return {"action": "allowed_host", "resumed_as": resumed_id}
+        # W28 (B18): the host is a project grant; the receipt says where.
+        return {
+            "action": "allowed_host",
+            "resumed_as": resumed_id,
+            "remembered": remembered_where(run_store, Path(str(run["repo"]))),
+        }
 
     @app.post("/api/approvals/{review_id}/deny")
     def deny(review_id: str, body: ResolveRequest, request: Request) -> dict[str, str]:

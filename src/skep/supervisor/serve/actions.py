@@ -3707,41 +3707,40 @@ def granted_commands(store: RunStore, holder: ConfigHolder, repo: Path) -> list[
     return [shlex.split(pattern) for pattern in grants]
 
 
-def _persist_remembered_network_host(
+def persist_remembered_network_host(
     store: RunStore, holder: ConfigHolder, repo: Path, host: str
-) -> None:
-    """v109-F7: the network twin of ``persist_remembered_command``. Prefers
-    the repo's bound project policy (``default_network``) so remembering does
-    not silently widen every repo's egress; falls back to the global setting
-    when the repo is unbound."""
+) -> str:
+    """v109-F7: the network twin of ``persist_remembered_command``; returns
+    where it holds (``project:<id>`` / ``repo:<path>``).
+
+    W28 (B18's network half): a ``project`` grant on the one learned list —
+    ``network.connect <host>``, matcher ``host``, bound to the repo's project
+    or to the repo when it has none — that the run compile reads
+    (``worker_network_grants``). It no longer writes the project's (or the
+    global) ``default_network`` knob, which a locked baseline enforces and so
+    silently ignored while the receipt said remembered. Through the one
+    write-time check (``store_grant``): a remember inside a deny is refused."""
+    from ..policy_schema import LearnedRule
+
     project = store.project_for_binding("repo_path", str(repo))
-    if project is not None:
-        existing = [str(entry) for entry in (project.policy.get("default_network") or [])]
-        if host not in existing:
-            existing.append(host)
-            updated = dict(project.policy)
-            updated["default_network"] = existing
-            store.add_project_policy(
-                project_id=project.project_id,
-                name=project.name,
-                strategy=project.strategy,
-                phase=project.phase,
-                policy=updated,
-                pack_name=project.pack_name,
-                pack_version=project.pack_version,
-            )
-    else:
-        existing = [
-            str(entry) for entry in (policy_view(store, holder.current).get(DEFAULT_NETWORK) or [])
-        ]
-        if host not in existing:
-            existing.append(host)
-            store.set_setting(DEFAULT_NETWORK, existing)
-            holder.rebuild()
+    bound = {"repo": grant_repo(repo)} if project is None else {"project_id": project.project_id}
+    ((key, value),) = bound.items()
+    rule = LearnedRule(
+        rule_id=f"network:connect:{host}@{'project' if key == 'project_id' else key}:{value}",
+        action="connect",
+        pattern=host,
+        scope="network",
+        provenance="remember:worker",
+        lifetime="project",
+        matcher="host",
+        bound=bound,  # type: ignore[arg-type]
+    )
+    store_grant(store, rule, context={"repo": grant_repo(repo)})
     # v109-F8: every historical approval of this host now has a standing
     # grant — its ledger rows say so, whichever door persisted it (I13).
     for network_action in ("network.fetch", "network.read"):
         store.mark_ledger_remembered(action=network_action, resource=host, repo_path=str(repo))
+    return remembered_where(store, repo)
 
 
 def allow_network_host_and_resume(
@@ -3759,8 +3758,8 @@ def allow_network_host_and_resume(
     say "this host is fine for this project, stop asking" (the field ledger
     holds the same install host approved twice in one workspace). The blocked
     hostname rides the approval decision's detail (the same slot the resume
-    verdict grants from, v90-F3); it lands in the project's ``default_network``
-    and the gated run resumes with the grant.
+    verdict grants from, v90-F3); it is stored as a project grant
+    (``persist_remembered_network_host``) and the gated run resumes with it.
     """
     if run["state"] != "pending_approval":
         raise HTTPException(status_code=409, detail="allow-host only applies to pending runs")
@@ -3791,7 +3790,7 @@ def allow_network_host_and_resume(
         )
     _refuse_remembering_an_ask(holder.current, str(run["task_id"]), host=host)
     repo = Path(str(run["repo"]))
-    _persist_remembered_network_host(store, holder, repo, host)
+    persist_remembered_network_host(store, holder, repo, host)
     return resume_past_gate(
         store,
         holder.current,
@@ -3992,20 +3991,26 @@ def remember_ledger_entry(
         guard_reason = dangerous_prefix_reason(argv)
         if guard_reason is not None:
             raise HTTPException(status_code=409, detail=guard_reason)
-        persist_remembered_command(store, holder, repo_path, argv)
+        where = persist_remembered_command(store, holder, repo_path, argv)
     elif action in ("network.fetch", "network.read"):
         host = resource.strip()
         if not host or host == "*" or "/" in host or ":" in host:
             raise HTTPException(
                 status_code=409, detail=f"{host!r} is not a rememberable bare hostname"
             )
-        _persist_remembered_network_host(store, holder, repo_path, host)
+        where = persist_remembered_network_host(store, holder, repo_path, host)
     else:
         raise HTTPException(
             status_code=409,
             detail="only shell.run and network.fetch/network.read approvals can be remembered",
         )
-    return {"remembered": True, "action": action, "resource": resource, "repo": repo}
+    return {
+        "remembered": True,
+        "holds": where,  # W28: a project grant, not a knob
+        "action": action,
+        "resource": resource,
+        "repo": repo,
+    }
 
 
 def allow_shell_command_and_resume(

@@ -340,6 +340,83 @@ def test_b18_allow_and_remember_under_a_locked_baseline_takes_effect(home: Any) 
     )
 
 
+def _egress(h: Any, repo: Path) -> list[str]:
+    resolved = resolve_run_policy(
+        store=h.store, config=h.config, repo=repo, caste="coding", network=None,
+        env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
+        max_actions=None, max_provider_calls=None, execution_mode="sandbox",
+    )  # fmt: skip
+    return list(resolved.permissions.network)
+
+
+def _setup_document_denies(h: Any, host: str) -> None:
+    from skep.supervisor.policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        PolicyDocument,
+        PolicyRule,
+        ScopePolicy,
+        document_from_settings,
+    )
+
+    document = (
+        document_from_settings(h.store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+        or PolicyDocument()
+    )
+    deny = PolicyRule(rule_id=f"no-{host}", action="connect", pattern=host)
+    others = [scope for scope in document.scopes if scope.scope != "network"]
+    updated = document.model_copy(
+        update={"scopes": [*others, ScopePolicy(scope="network", deny=[deny])]}
+    )
+    h.store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
+
+
+def test_b18_allow_host_and_remember_under_a_locked_baseline_takes_effect(home: Any) -> None:
+    """W28 (B18's network half): the allow-host remember wrote the project's
+    default_network, which the locked baseline's enforced knobs ignored while
+    the receipt said remembered. Now a project grant, bound like the shell
+    remember, that the run compile reads."""
+    h = home("builder")
+    repo = h.paths["repo"]
+    assert "docs.example.com" not in _egress(h, repo)
+    assert (
+        actions.persist_remembered_network_host(h.store, h.holder, repo, "docs.example.com")
+        == "project:app"
+    )
+    assert "default_network" not in (h.store.get_project_policy("app").policy or {})
+    assert "docs.example.com" in _egress(h, repo)
+    [rule] = [rule for rule in h.learned() if rule.scope == "network"]
+    assert (rule.action, rule.pattern, rule.lifetime, rule.matcher, rule.bound) == (
+        "connect", "docs.example.com", "project", "host", {"project_id": "app"},
+    )  # fmt: skip
+    unbound = repo.parent / "loose-net"
+    unbound.mkdir()
+    assert (
+        actions.persist_remembered_network_host(h.store, h.holder, unbound, "docs.example.com")
+        == f"repo:{unbound.resolve()}"
+    )
+    assert "docs.example.com" in _egress(h, unbound)
+
+
+def test_a_remembered_host_a_later_deny_covers_is_dropped_at_compile(home: Any) -> None:
+    h = home("builder")
+    repo = h.paths["repo"]
+    actions.persist_remembered_network_host(h.store, h.holder, repo, "docs.example.com")
+    _setup_document_denies(h, "docs.example.com")
+    assert "docs.example.com" not in _egress(h, repo)
+
+
+def test_a_remember_inside_a_deny_is_refused_at_write_time(home: Any) -> None:
+    from skep.supervisor.policy_write import PolicyWriteRejected
+
+    h = home("builder")
+    _setup_document_denies(h, "docs.example.com")
+    with pytest.raises(PolicyWriteRejected):
+        actions.persist_remembered_network_host(
+            h.store, h.holder, h.paths["repo"], "docs.example.com"
+        )
+    assert not [rule for rule in h.learned() if rule.scope == "network"]
+
+
 def test_b101_grants_apply_on_a_home_with_no_baseline_never_a_tampered_one(home: Any) -> None:
     zero = home("zero")
     zero.keep("run_shell", command=GRANTED)

@@ -723,6 +723,17 @@ def resolve_run_policy(
             if host not in seen:
                 chosen_network.append(host)
                 seen.add(host)
+    if network is None and chosen_network != ["*"]:
+        # W28: hosts a human remembered for this project (or repo) — a grant,
+        # so a locked baseline's enforced default_network does not shadow it.
+        chosen_network.extend(
+            worker_network_grants(
+                store,
+                config.home,
+                repo,
+                project_context.project_id if project_context is not None else None,
+            )
+        )
     # v19-F11: sort + dedupe so equal inputs give a byte-equal task.json
     # allowlist regardless of creation path or merge order. ``["*"]`` is left
     # as-is (a single element sorts to itself anyway).
@@ -916,6 +927,41 @@ def worker_shell_grants(
         if granted.get(rule.pattern) != "grant:project":
             granted[rule.pattern] = label
     return granted
+
+
+def worker_network_grants(
+    store: RunStore, home: Path, repo: Path, project_id: str | None
+) -> list[str]:
+    """W28 (B18's network half): the hosts an "Allow host & remember" granted
+    a run in ``repo`` — ``project`` grants on ``network.connect``, bound to the
+    project, else the repo. Never one in denied space: a host a network
+    connect deny of the setup document or the approved baseline covers is
+    left out, as ``worker_shell_grants`` leaves out a denied prefix."""
+    from .policy_layers import template_layer
+
+    document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    if document is None or not document.learned:
+        return []
+    template = template_layer(home)
+    denies = [
+        rule.pattern
+        for rule in (template.rules if template is not None else ())
+        if (rule.scope, rule.verdict, rule.action) == ("network", "deny", "connect")
+    ] + [
+        rule.pattern
+        for scope in document.scopes
+        if scope.scope == "network"
+        for rule in scope.deny
+        if rule.action == "connect"
+    ]
+    return [
+        rule.pattern
+        for rule in document.learned
+        if (rule.scope, rule.action, matcher_of(rule), lifetime_of(rule))
+        == ("network", "connect", "host", "project")
+        and applies(rule, repo=grant_repo(repo), project_id=project_id)
+        and not any(patterns_intersect("network", rule.pattern, deny) for deny in denies)
+    ]
 
 
 # -- the operator policy: the Queen's standing rules (v52-F2) ------------------

@@ -5,9 +5,10 @@ workspace with `remembered=0` on every row: a network approval was
 approve-once or resume-grant only — nothing could say "this host is fine for
 this project, stop asking". The blocked hostname rides the approval
 decision's detail (the slot the resume verdict already grants from, v90-F3);
-allow-host persists it into the bound project's ``default_network`` (global
-when unbound) and resumes the gated run with ``remembered=True`` so the
-ledger row finally says so (I13).
+allow-host stores it as a project grant bound to the repo's project (the
+repo itself when unbound; W28, B18's network half — never the
+``default_network`` knob a locked baseline ignores) and resumes the gated run
+with ``remembered=True`` so the ledger row finally says so (I13).
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ def _pending_network_run(
                 Event.model_validate(
                     {
                         "contract_version": CONTRACT_VERSION,
-                        "event_id": "approval-requested-1",
+                        "event_id": f"approval-requested-{task.task_id}",
                         "seq": 1,
                         "task_id": task.task_id,
                         "trace_id": task.trace_id,
@@ -67,7 +68,19 @@ def _pending_network_run(
     return task.task_id, review_id
 
 
-def test_persist_prefers_the_bound_project_policy(repo: Path, config: SupervisorConfig) -> None:
+def _network_grants(store: RunStore) -> list[tuple[str, dict[str, str]]]:
+    from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY, document_from_settings
+
+    document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    learned = [] if document is None else document.learned
+    return [
+        (rule.pattern, {str(k): v for k, v in rule.bound.items()})
+        for rule in learned
+        if rule.scope == "network"
+    ]
+
+
+def test_persist_binds_a_grant_to_the_repos_project(repo: Path, config: SupervisorConfig) -> None:
     store = RunStore(config.db_path)
     try:
         store.add_project_policy(
@@ -81,17 +94,19 @@ def test_persist_prefers_the_bound_project_policy(repo: Path, config: Supervisor
             project_id="proj-net", binding_kind="repo_path", binding_value=str(repo)
         )
         holder = ConfigHolder(config, store)
-        actions._persist_remembered_network_host(store, holder, repo, "docs.example.com")
+        where = actions.persist_remembered_network_host(store, holder, repo, "docs.example.com")
         # Idempotent — a second remember writes nothing new.
-        actions._persist_remembered_network_host(store, holder, repo, "docs.example.com")
+        actions.persist_remembered_network_host(store, holder, repo, "docs.example.com")
+        assert where == "project:proj-net"
+        assert _network_grants(store) == [("docs.example.com", {"project_id": "proj-net"})]
         project = store.project_for_binding("repo_path", str(repo))
         assert project is not None
-        assert project.policy["default_network"] == ["pypi.org", "docs.example.com"]
+        assert project.policy["default_network"] == ["pypi.org"]  # the knob is untouched
     finally:
         store.close()
 
 
-def test_persist_falls_back_to_the_global_setting_for_unbound_repos(
+def test_persist_binds_an_unbound_repos_grant_to_the_repo(
     repo: Path, config: SupervisorConfig
 ) -> None:
     from skep.supervisor.serve.settings import DEFAULT_NETWORK
@@ -99,9 +114,10 @@ def test_persist_falls_back_to_the_global_setting_for_unbound_repos(
     store = RunStore(config.db_path)
     try:
         holder = ConfigHolder(config, store)
-        actions._persist_remembered_network_host(store, holder, repo, "docs.example.com")
-        stored = store.get_setting(DEFAULT_NETWORK)
-        assert isinstance(stored, list) and "docs.example.com" in stored
+        where = actions.persist_remembered_network_host(store, holder, repo, "docs.example.com")
+        assert where == f"repo:{repo.resolve()}"
+        assert _network_grants(store) == [("docs.example.com", {"repo": str(repo.resolve())})]
+        assert "docs.example.com" not in (store.get_setting(DEFAULT_NETWORK) or [])
     finally:
         store.close()
 
@@ -201,9 +217,7 @@ def test_allow_host_persists_and_resumes_remembered(
         )
         assert resumed == "resumed-task-1"
         assert seen == {"review_id": review_id, "remembered": True}
-        project = store.project_for_binding("repo_path", str(repo))
-        assert project is not None
-        assert project.policy["default_network"] == ["docs.example.com"]
+        assert _network_grants(store) == [("docs.example.com", {"project_id": "proj-net"})]
     finally:
         store.close()
 
@@ -220,3 +234,39 @@ def test_allow_command_review_routes_network_approvals() -> None:
     assert "network" in description and "host" in description
     line = risk("allow_command_review", {"review_id": "r"})
     assert line is not None and "without asking" in line
+
+
+def test_every_allow_host_receipt_says_where_the_grant_holds(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W28: REST, the chat tool and the ledger remember name the binding."""
+    from skep.supervisor.serve.tools import execute_mutation
+
+    from .conftest import serve_client
+
+    monkeypatch.setattr(actions, "resume_past_gate", lambda *a, **k: "resumed-1")
+    client = serve_client(config)
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        where = f"repo:{repo.resolve()}"
+        _task, review = _pending_network_run(store, repo)
+        response = client.post(f"/api/approvals/{review}/allow-host", json={})
+        assert response.status_code == 200, response.text
+        assert response.json()["remembered"] == where
+        _task, review = _pending_network_run(store, repo, host="api.example.com")
+        receipt = execute_mutation(
+            "allow_command_review",
+            {"review_id": review},
+            store=store,
+            holder=holder,
+            runner=Dispatcher(holder, store),
+            actor="chat-user",
+        )
+        assert receipt["remembered"] == where
+        ledger = actions.remember_ledger_entry(
+            store, holder, action="network.fetch", resource="cdn.example.com", repo=str(repo)
+        )
+        assert ledger["holds"] == where
+    finally:
+        store.close()
