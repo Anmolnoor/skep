@@ -592,3 +592,44 @@ def test_no_auth_env_names_the_chatgpt_login_when_one_exists(
     assert "NO AUTH ENV" in message
     assert "ChatGPT plan login" in message
     assert "--codex-chatgpt-login" in message and "codex_chatgpt_login=true" in message
+
+
+def test_the_no_auth_env_opt_in_command_works_as_printed(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F123 follow-up (I9): the refusal printed `skep project setup <repo>
+    --engine codex --codex-chatgpt-login`, which the CLI refuses for every
+    project ("requires a pack or strategy"), and whose default --phase build
+    would have moved a maintain project's trust flags. The command it names
+    now runs as printed and changes only the opt-in."""
+    import os
+    import re
+    import shlex
+
+    import skep.supervisor.engines as engines_module
+    from skep.cli import main
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.dispatch import run_task
+    from tests.supervisor.test_codex_login import write_fake_login
+
+    home = tmp_path / "home"
+    setup = ["--home", str(home), "project", "setup", str(repo), "--project-id", "plan"]
+    flags = ["--strategy", "trusted_local_dev", "--phase", "maintain", "--engine", "codex"]
+    assert main([*setup, *flags, "--verify-command", "true"]) == 0
+    _usable_sandbox(monkeypatch)
+    monkeypatch.setattr(engines_module, "engine_available", lambda e: (True, "/usr/bin/codex"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    write_fake_login(Path(os.environ["CODEX_HOME"]))
+    config = build_config(home, None)
+    with pytest.raises(ValueError) as excinfo:
+        run_task(repo, "add a docstring", config=config, coding_engine="codex")
+    found = re.search(r"`(skep project setup [^`]+)`", str(excinfo.value))
+    assert found is not None, str(excinfo.value)
+    assert main(["--home", str(home), *shlex.split(found.group(1))[1:]]) == 0
+    store = RunStore(config.db_path)
+    try:
+        plan = store.get_project_policy("plan")
+    finally:
+        store.close()
+    assert plan is not None and plan.policy["codex_chatgpt_login"] is True
+    assert plan.phase == "maintain" and plan.policy["verify_command"] == "true"

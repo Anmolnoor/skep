@@ -232,17 +232,41 @@ def _resume_workspace(
     return workspace
 
 
+def _binding_candidates(config: SupervisorConfig, repo: Path) -> list[tuple[str, str]]:
+    # Managed clones are slug-bound (registry name == directory name), so
+    # the safety-net lookup must offer the slug too — path-only matching
+    # dropped the pin for every slug-bound project that reached run_task
+    # without an explicit verify_command (the authwapi acceptance hole).
+    return [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+
+
 def _project_policy(run_store: RunStore, config: SupervisorConfig, repo: Path) -> dict[str, Any]:
     """The project policy run_task falls back to for knobs its caller did
     not pass (the verify pin, the landing branch, the codex login opt-in)."""
     from .policy_resolver import run_policy_for_repo
 
-    # Managed clones are slug-bound (registry name == directory name), so
-    # the safety-net lookup must offer the slug too — path-only matching
-    # dropped the pin for every slug-bound project that reached run_task
-    # without an explicit verify_command (the authwapi acceptance hole).
-    candidates = [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+    candidates = _binding_candidates(config, repo)
     return run_policy_for_repo(run_store, config, repo, binding_candidates=candidates)
+
+
+def _codex_login_setup_command(run_store: RunStore, config: SupervisorConfig, repo: Path) -> str:
+    """ES-F123 follow-up (I9): the CLI line that opts this repo in and changes
+    nothing else — a re-setup needs the strategy again, and its default
+    ``--phase build`` would move a project in another phase."""
+    import shlex
+
+    from .policy_resolver import _match_project_for_repo
+
+    match = _match_project_for_repo(
+        run_store, repo, binding_candidates=_binding_candidates(config, repo)
+    )
+    where = (
+        "--strategy <strategy>"
+        if match is None
+        else f"--project-id {shlex.quote(match.project.project_id)} "
+        f"--strategy {match.project.strategy} --phase {match.project.phase}"
+    )
+    return f"skep project setup {shlex.quote(str(repo))} {where} --codex-chatgpt-login"
 
 
 def _toolchain_env(workspace: Path, engine: CodingEngine, cache_root: Path) -> dict[str, str]:
@@ -488,9 +512,8 @@ def run_task(
                     # ES-F123 (I9): name the other way in when it is right here.
                     refusal += (
                         " — or let this project's codex runs use your ChatGPT plan "
-                        f"login: `skep project setup {repo} --engine codex "
-                        "--codex-chatgpt-login` (chat: setup_project "
-                        "codex_chatgpt_login=true)"
+                        f"login: `{_codex_login_setup_command(run_store, config, repo)}` "
+                        "(chat: setup_project codex_chatgpt_login=true)"
                     )
                 raise ValueError(refusal)
             login = login_status(min_seconds=(budget or DEFAULT_BUDGET).wall_clock_seconds)

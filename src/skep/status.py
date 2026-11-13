@@ -788,8 +788,9 @@ def _codex_login_lines(login: Mapping[str, Any]) -> list[str]:
         lines.append(f"  opted in to the plan login: {', '.join(login['opted_in'])}")
     else:
         lines.append(
-            "  no project opted in — `skep project setup <repo> --engine codex "
-            "--codex-chatgpt-login`"
+            "  no project opted in — `skep project setup <repo> --strategy <strategy> "
+            "--phase <phase> --codex-chatgpt-login` (an existing project's own "
+            "strategy and phase: `skep project show <id>`)"
         )
     uses = {
         "OPENAI_API_KEY": "OPENAI_API_KEY (an API key wins over the plan login)",

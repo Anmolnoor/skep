@@ -96,8 +96,12 @@ The refresh token never leaves the host.
 
 Off by default. A project-policy key, `codex_chatgpt_login` (bool):
 
-- CLI: `skep project setup <repo> --engine codex --codex-chatgpt-login`
-  (`--no-codex-chatgpt-login` turns it off again)
+- CLI: `skep project setup <repo> --strategy <strategy> --phase <phase>
+  --codex-chatgpt-login` (`--no-codex-chatgpt-login` turns it off again).
+  A repeated setup keeps every stored key but needs the strategy again, and
+  `--phase` defaults to `build`, so name an existing project's own strategy
+  and phase (`skep project show <id>`); the NO AUTH ENV refusal prints the
+  exact line for the repo it refused.
 - chat: `setup_project ... codex_chatgpt_login=true` (a HIGH confirmation
   card: it holds once and is never confirmable from a messenger channel);
   `codex_chatgpt_login=false` turns it off
