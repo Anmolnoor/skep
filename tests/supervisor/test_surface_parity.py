@@ -391,3 +391,35 @@ def test_onboard_steps_are_called_from_the_cli_and_rest() -> None:
             assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
                 f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
             )
+
+
+# W20 (ADR 0050, ADR 0059 D5): verbs that are the OPERATOR's alone. The
+# command deck (/trust in app.js and `skep chat`), REST and the CLI reach
+# them; the model's tool surface, the messenger channels and webhooks never
+# do — an injected page would ask for exactly this.
+OPERATOR_ONLY_VERBS: dict[str, str] = {
+    "trust_chat": "/trust clears a chat's taint bits — `skep trust`, POST "
+    "/api/chats/{id}/trust behind the deck; never a model tool (W20)",
+}
+OPERATOR_ONLY_FACES: tuple[Path, ...] = (SUPERVISOR / "cli_cmds.py", SUPERVISOR / "serve/chat.py")
+MODEL_SURFACES: tuple[Path, ...] = (
+    TOOLS,
+    SUPERVISOR / "serve/webhooks.py",
+    *sorted((SUPERVISOR / "serve" / "channels").glob("*.py")),
+)
+
+
+def test_operator_only_verbs_have_operator_faces_and_no_model_face() -> None:
+    for function, why in OPERATOR_ONLY_VERBS.items():
+        assert len(why.strip()) >= 20, function
+        for face in OPERATOR_ONLY_FACES:
+            assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
+                f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
+            )
+        for surface in MODEL_SURFACES:
+            assert function not in surface.read_text(), (
+                f"{function} must never be reachable from {surface.relative_to(ROOT)}"
+            )
+    assert not {name for name in MUTATING_TOOL_NAMES if "trust" in name}
+    app_js = (SUPERVISOR / "serve/static/app.js").read_text()
+    assert "/trust`" in app_js and "/api/chats/${activeChatId}/trust" in app_js

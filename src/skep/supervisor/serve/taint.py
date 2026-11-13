@@ -24,10 +24,13 @@ one — a clean chat cannot launder a tainted one.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..store import ChatTaint, RunStore
+from ..store import TAINT_BITS, ChatTaint, RunStore
 from .settings import ConfigHolder
 
 _PRIVATE_OUTPUT = frozenset({"run_shell", "start_process", "read_process_log"})
@@ -251,3 +254,60 @@ def taint_line(store: RunStore, chat_id: str, taint: ChatTaint) -> str | None:
     else:
         tail = "actions it takes need your OK, even where a rule or grant allows them"
     return f"this chat has {' and has '.join(parts)}, so {tail}"
+
+
+class TrustRefused(ValueError):
+    """W20: why /trust did not clear anything."""
+
+
+def trust_chat(
+    store: RunStore, audit_dir: Path, chat_id: str, bits: Iterable[str], *, actor: str
+) -> dict[str, Any]:
+    """W20: the operator trusts one chat again — clears ``bits`` (both when
+    empty). The one way a bit is cleared, and an operator face only: no model
+    tool, no channel and no unattended turn reaches it (ADR 0050 faces: the
+    command deck's /trust, ``POST /api/chats/{id}/trust``, ``skep trust``).
+
+    It records who cleared which bit, when and the message that had set it, in
+    ``<audit>/policy/taint-cleared.jsonl`` and as a visible line in the chat.
+    Rows already in the chat stay wrapped as outside content; new outside
+    content sets the bit again."""
+    from ..policy_v3 import UNATTENDED_CHATS
+
+    if store.get_chat(chat_id) is None:
+        raise TrustRefused(f"no chat {chat_id!r}")
+    wanted = set(bits) or set(TAINT_BITS)
+    unknown = sorted(wanted - set(TAINT_BITS))
+    if unknown:
+        raise TrustRefused(f"unknown taint bit(s) {unknown} — name private, untrusted or neither")
+    if chat_id in UNATTENDED_CHATS:
+        raise TrustRefused("an unattended turn is running in this chat — /trust after it ends")
+    taint = store.get_chat_taint(chat_id)
+    cleared = {bit: getattr(taint, bit) for bit in TAINT_BITS if bit in wanted}
+    cleared = {bit: origin for bit, origin in cleared.items() if origin is not None}
+    if not cleared:
+        return {"chat_id": chat_id, "cleared": {}, "taint": taint.bits(),
+                "note": "this chat carries none of those bits — nothing to clear"}  # fmt: skip
+    said = ", ".join(
+        f"{bit} (set by message {origin})" if origin else f"{bit} (origin unknown)"
+        for bit, origin in cleared.items()
+    )
+    line = store.add_chat_message(
+        chat_id,
+        role="system",
+        content=f"[{actor} trusted this chat again: cleared {said}. Rows already here stay "
+        "marked as outside content; new outside content sets the bit again.]",
+    )
+    after = store.clear_chat_taint(chat_id, list(cleared), through=line)
+    record = {
+        "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "actor": actor,
+        "chat_id": chat_id,
+        "cleared": cleared,
+        "line": line,
+    }
+    path = audit_dir / "policy" / "taint-cleared.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+    return {"chat_id": chat_id, "cleared": cleared, "line_id": line, "taint": after.bits()}

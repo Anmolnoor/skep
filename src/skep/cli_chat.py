@@ -260,6 +260,11 @@ COMMANDS: dict[str, dict[str, str]] = {
         "desc": "ask a side question WITHOUT touching running work — "
         "read-only turn: no cards, no mutations, runs beside a pending card",
     },
+    "trust": {
+        "usage": "/trust [private|untrusted]",
+        "desc": "trust this chat again: clear its taint (both bits by default) — "
+        "yours only, never the model's; outside content read later sets it again",
+    },
     "steer": {
         "usage": "/steer <task-id> <text…>",
         "desc": "send a steering note into a RUNNING react run — "
@@ -930,6 +935,15 @@ class ChatRepl:
             if len(args) > 1:
                 body["branch"] = args[1]
             self._propose_command("land_run", body)
+            return
+        if name == "trust":
+            if any(bit not in ("private", "untrusted") for bit in args):
+                print(usage)
+                return
+            # W20: typed by the operator — the decision itself, no card.
+            trusted = self.client.post(f"/api/chats/{self.chat_id}/trust", {"bits": args})
+            cleared = ", ".join(sorted(trusted.get("cleared") or {})) or "nothing"
+            print(_c(DIM, f"trusted again — cleared: {cleared}"))
             return
         if name == "steer":
             if len(args) < 2:

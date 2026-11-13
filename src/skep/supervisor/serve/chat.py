@@ -63,7 +63,14 @@ from .llm import (
     tool_delivery,
 )
 from .settings import ConfigHolder
-from .taint import inherit_taint, memory_taint, record_tool_taint, taint_line
+from .taint import (
+    TrustRefused,
+    inherit_taint,
+    memory_taint,
+    record_tool_taint,
+    taint_line,
+    trust_chat,
+)
 from .tools import (
     CLARIFY_TOOL_NAME,
     COMMAND_TOOL_NAMES,
@@ -1214,6 +1221,12 @@ class MessageRequest(BaseModel):
     read_only: bool = False
 
 
+class TrustRequest(BaseModel):
+    """W20: the bits /trust clears — empty clears both."""
+
+    bits: list[str] = Field(default_factory=list)
+
+
 class CommandRequest(BaseModel):
     """v25-F1: a deck mutation the operator typed — audited like a chat action."""
 
@@ -1427,6 +1440,7 @@ class ChatEngine:
         messages: list[dict[str, Any]] = []
         last_user_index: int | None = None
         untrusted_row = 0
+        trusted_through = self.store.chat_trusted_through(chat_id)  # W20: /trust
         # An outside row that landed inside an open tool round (a webhook while
         # a card waits) replays after that round's results: between a call and
         # its result a user turn is refused by the strict providers.
@@ -1489,7 +1503,8 @@ class ChatEngine:
                 )
                 if not open_calls:
                     flush()
-                untrusted_row = untrusted_row or record.id
+                if record.id > trusted_through:
+                    untrusted_row = untrusted_row or record.id
                 continue
             elif record.role == "user" and record.attachments:
                 messages.append(self._user_message_with_images(chat_id, record, vision))
@@ -3311,6 +3326,21 @@ def add_chat_routes(
     # -- the command deck (v25-F1): operator-typed /commands. The model is not
     # in this loop — no transcript writes, no continuation stream. The card +
     # the chat_actions row keep the same audit shape as a Queen proposal.
+
+    @app.post("/api/chats/{chat_id}/trust")
+    def trust(chat_id: str, body: TrustRequest) -> dict[str, Any]:
+        """W20: the operator's /trust — never a model tool, never a channel.
+        Refused while any turn runs in the chat (an unattended one included)."""
+        _require_chat(chat_id)
+        lock = take_turn(chat_id)
+        try:
+            return trust_chat(
+                run_store, holder.current.audit_dir, chat_id, body.bits, actor=COMMAND_ACTOR
+            )
+        except TrustRefused as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            lock.release()
 
     @app.post("/api/chats/{chat_id}/commands", status_code=201)
     def propose_command(chat_id: str, body: CommandRequest) -> dict[str, Any]:

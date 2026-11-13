@@ -2604,6 +2604,24 @@ def cmd_pr_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_trust(args: argparse.Namespace) -> int:
+    """W20: ``skep trust CHAT_ID [--bit private|untrusted]`` — the operator
+    trusts one chat again (the command deck's /trust; ADR 0050)."""
+    from .serve.taint import TrustRefused, trust_chat
+
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        result = trust_chat(store, config.audit_dir, args.chat_id, args.bit, actor="operator-cli")
+    except TrustRefused as exc:
+        return _err(str(exc))
+    finally:
+        store.close()
+    cleared = ", ".join(sorted(result["cleared"])) or "nothing — " + result.get("note", "")
+    print(f"chat {args.chat_id}: cleared {cleared}")
+    return 0
+
+
 def cmd_repo_list(args: argparse.Namespace) -> int:
     """v116-F4: every repo skep can reach — the list_repos chat read and the
     /repos deck had it; the CLI had only refresh and push-baseline."""
@@ -3711,6 +3729,20 @@ def register_supervisor_commands(
     policy_decisions.add_argument("--limit", type=int, default=200, help="max rows (default 200)")
     policy_decisions.add_argument("--team", help="one team run's thread (first-run R3)")
     policy_decisions.set_defaults(func=cmd_policy_decisions)
+
+    trust = subcommands.add_parser(
+        "trust",
+        help="trust a chat again: clear its taint bits (W20; the deck's /trust)",
+    )
+    trust.add_argument("chat_id")
+    trust.add_argument(
+        "--bit",
+        action="append",
+        default=[],
+        choices=["private", "untrusted"],
+        help="clear only this bit (repeatable; default: both)",
+    )
+    trust.set_defaults(func=cmd_trust)
 
     repo_group = subcommands.add_parser("repo", help="registered repositories (v104)")
     repo_group.set_defaults(func=_group_usage(repo_group))

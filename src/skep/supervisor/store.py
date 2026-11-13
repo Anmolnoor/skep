@@ -4031,11 +4031,42 @@ class RunStore:
             untrusted=current.untrusted if current.untrusted is not None else untrusted,
         )
         if merged != current:
-            self._conn.execute(
-                "UPDATE chats SET taint = ? WHERE chat_id = ?",
-                (json.dumps({"private": merged.private, "untrusted": merged.untrusted}), chat_id),
-            )
+            self._write_taint(chat_id, merged, self.chat_trusted_through(chat_id))
         return merged
+
+    def _write_taint(self, chat_id: str, taint: ChatTaint, through: int) -> None:
+        payload: dict[str, int | None] = {"private": taint.private, "untrusted": taint.untrusted}
+        if through:
+            payload["trusted_through"] = through
+        self._conn.execute(
+            "UPDATE chats SET taint = ? WHERE chat_id = ?", (json.dumps(payload), chat_id)
+        )
+
+    @_locked
+    def chat_trusted_through(self, chat_id: str) -> int:
+        """W20: the newest row an operator's /trust covered (0 = none). The
+        rows up to it stay wrapped on replay but never set a bit again."""
+        row = self._conn.execute("SELECT taint FROM chats WHERE chat_id = ?", (chat_id,)).fetchone()
+        try:
+            raw = json.loads(str(row[0])) if row and row[0] else {}
+        except ValueError:
+            return 0
+        through = raw.get("trusted_through") if isinstance(raw, dict) else None
+        return through if type(through) is int else 0
+
+    @_locked
+    def clear_chat_taint(self, chat_id: str, bits: Sequence[str], *, through: int) -> ChatTaint:
+        """W20: the one way a bit is cleared — ``taint.trust_chat``, the
+        operator's /trust (never a model tool). ``through`` is the newest row
+        it covers. Returns the chat's taint after."""
+        current = self.get_chat_taint(chat_id)
+        cleared = ChatTaint(
+            private=None if "private" in bits else current.private,
+            untrusted=None if "untrusted" in bits else current.untrusted,
+        )
+        self._write_taint(chat_id, cleared, through)
+        self._conn.commit()
+        return cleared
 
     _ACTION_COLS = (
         "action_id, chat_id, tool, args_json, status, result_json, created_at, resolved_at,"
