@@ -2126,3 +2126,30 @@ def test_es_f9_a_timed_out_command_takes_its_children_with_it(tmp_path: Path) ->
     result = registry.invoke("shell.run", {"argv": [sys.executable, "-c", script]})
     assert result.exit_code == 124
     assert _pid_gone(int((tmp_path / "gc.pid").read_text()))
+
+
+def test_w8_the_worker_shell_has_the_command_line_secret_floor(tmp_path: Path) -> None:
+    """W8 (PR #65 review, finding 10; B76): with `cat` allowlisted a worker's
+    `cat .env` ran, though `skep policy why` says the floor binds workers. The
+    worker's shell.run now refuses a line naming a secret, leaves the blocked
+    command pair in its events, and still reads its own ordinary files."""
+    events: list[tuple[EventType, dict[str, object]]] = []
+    (tmp_path / ".env").write_text("NAME=value\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
+    registry = CapabilityRegistry(
+        tmp_path, emit=lambda t, p: events.append((t, p)), shell_allowlist=[["cat"]]
+    )
+    for argv in (["cat", ".env"], ["cat", f"{tmp_path}/.env"], ["cat", "README.md", ".env"]):
+        events.clear()
+        assert registry.shell_decision_preview({"argv": argv}).verdict == "deny"
+        with pytest.raises(CapabilityDenied, match="secret floor"):
+            registry.invoke("shell.run", {"argv": argv, "purpose": "modify"})
+        assert [kind for kind, _payload in events] == [
+            EventType.COMMAND_START,
+            EventType.COMMAND_RESULT,
+        ]
+        decision = events[1][1]["decision"]
+        assert isinstance(decision, dict)
+        assert decision["reason"] == "capability.deny.secret_floor"
+    result = registry.invoke("shell.run", {"argv": ["cat", "README.md"], "purpose": "modify"})
+    assert result.status == "allowed" and result.output == "hello\n"
