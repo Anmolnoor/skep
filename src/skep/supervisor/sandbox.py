@@ -683,14 +683,15 @@ def _bubblewrap_args(
 def _landlock_step(writable_roots: Iterable[Path]) -> list[str]:
     """R5b: the in-sandbox step that scopes the worker's unix sockets with
     what the running kernel's Landlock ABI offers; none below ABI 6 (the
-    run carries on with the masks alone, and doctor says so). ``-P``: the
-    worker's cwd must not shadow skep's own module."""
+    run carries on with the masks alone, and doctor says so). ``-E -P``:
+    neither the worker's cwd nor a worktree entry on PYTHONPATH may shadow
+    skep's own module (the env still reaches the worker through exec)."""
     abi = landlock.abi()
     flags = ["--scope-abstract"] if abi >= landlock.ABI_SCOPE_ABSTRACT else []
     if abi >= landlock.ABI_RESOLVE_UNIX:
         for root in writable_roots:
             flags += ["--unix-root", str(root)]
-    return [sys.executable, "-P", "-m", "skep.landlock", *flags] if flags else []
+    return [sys.executable, "-E", "-P", "-m", "skep.landlock", *flags] if flags else []
 
 
 def _mask_args(path: Path, *, dev_null: list[str], tmpfs: list[str]) -> list[str]:

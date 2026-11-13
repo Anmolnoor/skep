@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -173,7 +174,7 @@ def test_linux_bubblewrap_domain_list_still_needs_a_proxy_and_socket(
 
 
 def _landlock_step(*flags: str) -> list[str]:
-    return [sys.executable, "-P", "-m", "skep.landlock", *flags, "--"]
+    return [sys.executable, "-E", "-P", "-m", "skep.landlock", *flags, "--"]
 
 
 @pytest.mark.parametrize("abi", [0, 5, 6, 8, 9, 10])
@@ -200,6 +201,28 @@ def test_linux_bubblewrap_runs_the_landlock_step_the_kernel_supports(
     tail = [*_landlock_step(*flags), "python", "worker.py"] if flags else ["python", "worker.py"]
     assert argv[-len(tail) - 1 :] == ["--", *tail]  # bwrap's own separator, then the step
     assert ("skep.landlock" in argv) == bool(flags)
+
+
+def test_landlock_step_never_imports_a_planted_skep_from_the_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5b: neither the worker's cwd nor a worktree-relative PYTHONPATH entry
+    (serve's env, allowlisted by a contract) may shadow skep.landlock: a
+    planted module would exec the worker unscoped."""
+    monkeypatch.setattr(landlock, "abi", lambda: 6)
+    planted = tmp_path / "skep"
+    planted.mkdir()
+    (planted / "__init__.py").write_text("")
+    (planted / "landlock.py").write_text("print('PLANTED')\n")
+    step = sandbox._landlock_step([])
+    done = subprocess.run(
+        [*step, "--", sys.executable, "-c", "pass"],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": "."},
+        capture_output=True,
+        text=True,
+    )
+    assert "PLANTED" not in done.stdout
 
 
 def test_linux_bubblewrap_proxied_run_scopes_the_worker_not_the_netshim(

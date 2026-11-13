@@ -116,7 +116,7 @@ def test_podman_runs_the_landlock_step_inside_the_container(
         backend="podman",
     )
     argv = sandbox.wrap_command(["python", "-m", "worker"], profile, backend="podman")
-    step = [sys.executable, "-P", "-m", "skep.landlock", "--scope-abstract"]
+    step = [sys.executable, "-E", "-P", "-m", "skep.landlock", "--scope-abstract"]
     step += ["--unix-root", str(workspace), "--", "python", "-m", "worker"]
     assert argv[-len(step) :] == step
     assert argv[-len(step) - 1].endswith(":O")

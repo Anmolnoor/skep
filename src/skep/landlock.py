@@ -1,7 +1,7 @@
 """R5b: Landlock for a sandboxed worker's unix sockets (docs/sandboxing.md).
 
 Runs INSIDE the sandbox, before the worker:
-``python -P -m skep.landlock [--scope-abstract] [--unix-root DIR]... -- argv``
+``python -E -P -m skep.landlock [--scope-abstract] [--unix-root DIR]... -- argv``
 sets no_new_privs, restricts itself and execs the worker, which inherits
 the restriction. Serve only calls :func:`abi` (when it writes the profile);
 it never restricts itself. If restricting fails the worker does not start.
