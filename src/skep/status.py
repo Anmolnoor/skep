@@ -653,11 +653,16 @@ def format_doctor_report(status: Mapping[str, Any]) -> str:
     engines = status.get("coding_engines", {})
     for name, engine in engines.items():
         mark = "ok" if engine.get("present") else "MISSING"
-        if engine.get("present") and not engine.get("auth_ok", True):
+        login = engine.get("chatgpt_login") or {}
+        if engine.get("present") and login.get("uses") == "chatgpt_login":
+            mark = "ok via your ChatGPT plan login (opted-in projects only)"
+        elif engine.get("present") and not engine.get("auth_ok", True):
             # v111-F3: binary present but no way to authenticate headlessly.
             mark = f"NO AUTH ENV — set one of {'/'.join(engine.get('auth_env', []))}"
         walls = "" if not engine.get("external") else " (sandbox-confined; needs verify_command)"
         lines.append(f"- engine {name}: {mark} — {engine.get('detail')}{walls}")
+        if login:
+            lines.extend(_codex_login_lines(login))
 
     approvals = status.get("approvals", {})
     lines.append(f"- approvals: {approvals.get('pending', 0)} pending")
@@ -728,7 +733,70 @@ def _coding_engine_checks(home: Path) -> dict[str, dict[str, Any]]:
             "auth_ok": auth_ok,
             "auth_env": list(engine.auth_env),
         }
+        if engine.login_host is not None:
+            checks[name]["chatgpt_login"] = _codex_login_check(home, key_set=auth_ok)
     return checks
+
+
+def _codex_login_check(home: Path, *, key_set: bool) -> dict[str, Any]:
+    """ES-F125 (D20): the operator's Codex ChatGPT login as doctor may say it
+    — presence, plan, expiry (never a value) — which projects opted in, and
+    what a codex run would authenticate with."""
+    from skep.supervisor.codex_login import AUTH_SOURCE, POLICY_KEY, login_status
+
+    status = login_status()
+    opted_in: list[str] = []
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if db_path.is_file():
+        from skep.supervisor.store import RunStore
+
+        store = RunStore(db_path)
+        try:
+            opted_in = sorted(
+                p.project_id for p in store.list_project_policies() if p.policy.get(POLICY_KEY)
+            )
+        finally:
+            store.close()
+    uses = "OPENAI_API_KEY" if key_set else None
+    if uses is None and opted_in and status.problem is None:
+        uses = AUTH_SOURCE
+    return {
+        "present": status.present,
+        "plan": status.plan,
+        "expires_at": status.expires_at.isoformat() if status.expires_at else None,
+        "problem": status.problem,
+        "opted_in": opted_in,
+        "uses": uses,
+    }
+
+
+def _codex_login_lines(login: Mapping[str, Any]) -> list[str]:
+    if not login.get("present"):
+        return [f"  ChatGPT login: none ({login.get('problem')})"]
+    facts = ", ".join(
+        part
+        for part in (
+            f"plan {login['plan']}" if login.get("plan") else "",
+            f"access token expires {login['expires_at']}" if login.get("expires_at") else "",
+        )
+        if part
+    )
+    lines = [f"  ChatGPT login: yes{f' ({facts})' if facts else ''}"]
+    if login.get("problem"):
+        lines.append(f"  ChatGPT login not usable now: {login['problem']}")
+    if login.get("opted_in"):
+        lines.append(f"  opted in to the plan login: {', '.join(login['opted_in'])}")
+    else:
+        lines.append(
+            "  no project opted in — `skep project setup <repo> --engine codex "
+            "--codex-chatgpt-login`"
+        )
+    uses = {
+        "OPENAI_API_KEY": "OPENAI_API_KEY (an API key wins over the plan login)",
+        "chatgpt_login": "your ChatGPT plan login (opted-in projects; others need OPENAI_API_KEY)",
+    }.get(str(login.get("uses")), "nothing — it would be refused")
+    lines.append(f"  a codex run would use: {uses}")
+    return lines
 
 
 def _memory_status(home: Path, has_profile: bool) -> dict[str, Any]:

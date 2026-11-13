@@ -152,3 +152,66 @@ def test_the_opt_in_is_a_bool_project_key_off_by_default() -> None:
     assert knob.default is False
     with pytest.raises(ValueError, match=codex_login.POLICY_KEY):
         validate_project_policy({codex_login.POLICY_KEY: "yes"})
+
+
+def _doctor_codex(home: Path) -> tuple[dict[str, object], str]:
+    from skep.status import _coding_engine_checks, format_doctor_report
+
+    checks = _coding_engine_checks(home)
+    report = format_doctor_report(
+        {"overall": "ready", "required": {}, "coding_engines": {"codex": checks["codex"]}}
+    )
+    return checks["codex"], report
+
+
+def test_doctor_reports_the_login_the_opt_in_and_what_a_run_would_use(
+    codex_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F125 (D20, I8): presence, plan, expiry, who opted in, and what a
+    codex run would authenticate with — never a value."""
+    from skep.supervisor.store import RunStore
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    home = tmp_path / "home"
+    (home / "supervisor").mkdir(parents=True)
+
+    check, report = _doctor_codex(home)
+    assert check["chatgpt_login"]["present"] is False  # type: ignore[index]
+    assert "ChatGPT login: none" in report
+    assert "NO AUTH ENV" in report
+
+    write_fake_login(codex_home, plan="plus")
+    check, report = _doctor_codex(home)
+    login = check["chatgpt_login"]
+    assert isinstance(login, dict) and login["present"] and login["plan"] == "plus"
+    assert login["expires_at"] and login["opted_in"] == [] and login["uses"] is None
+    assert "plan plus" in report and "expires" in report
+    assert "--codex-chatgpt-login" in report  # how to opt in
+    assert "fake-refresh-material" not in report and "fake-refresh-material" not in repr(check)
+
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    try:
+        store.add_project_policy(
+            project_id="plan-project",
+            name="p",
+            strategy="trusted_local_dev",
+            phase="build",
+            policy={"codex_chatgpt_login": True},
+        )
+    finally:
+        store.close()
+    check, report = _doctor_codex(home)
+    assert check["chatgpt_login"]["uses"] == "chatgpt_login"  # type: ignore[index]
+    assert "plan-project" in report
+    assert "your ChatGPT plan login" in report and "NO AUTH ENV" not in report
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-value")
+    check, report = _doctor_codex(home)
+    assert check["chatgpt_login"]["uses"] == "OPENAI_API_KEY"  # type: ignore[index]
+
+    monkeypatch.delenv("OPENAI_API_KEY")
+    write_fake_login(codex_home, expires_in=60)
+    check, report = _doctor_codex(home)
+    assert "not usable now" in report and "expires" in report
+    assert check["chatgpt_login"]["uses"] is None  # type: ignore[index]
+    assert "refused" in report
