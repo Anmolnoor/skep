@@ -400,11 +400,20 @@ def test_an_operator_overlay_fetch_allow_does_not_let_read_url_run(
     overlay fetch allow is recorded and `policy why` names it, but read_url
     still cards — on the Queen, REST and the CLI alike, in every role. An
     overlay fetch deny binds: refused, no card, nothing fetched."""
+    from fastapi import HTTPException
+
     from skep.supervisor.serve.actions import policy_why, set_operator_policy_rule
 
     paths, store, holder, fetched = net(kind)
-    set_operator_policy_rule(store, scope="network", action="fetch", pattern="written.example",
-                             verdict="allow")  # fmt: skip
+    if kind == "builder":
+        # D7: a locked baseline takes no allow from set_operator_policy; the
+        # rows below still hold with nothing written
+        with pytest.raises(HTTPException, match="skep policy approve"):
+            set_operator_policy_rule(store, scope="network", action="fetch",
+                                     pattern="written.example", verdict="allow")  # fmt: skip
+    else:
+        set_operator_policy_rule(store, scope="network", action="fetch",
+                                 pattern="written.example", verdict="allow")  # fmt: skip
     set_operator_policy_rule(store, scope="network", action="fetch", pattern="refused.example",
                              verdict="deny")  # fmt: skip
     for role in ROLES:
@@ -428,7 +437,8 @@ def test_an_operator_overlay_fetch_allow_does_not_let_read_url_run(
     assert len(fetched) == before
     why = policy_why(holder, store, "", "network", "fetch", "written.example")
     assert why["operator"]["verdict"] == "require_approval"
-    assert "op:network:fetch:written.example" in why["overlay_fetch_allow"]
+    if kind != "builder":  # D7: nothing was written on the locked home
+        assert "op:network:fetch:written.example" in why["overlay_fetch_allow"]
     assert "overlay_fetch_allow" not in policy_why(
         holder, store, "", "network", "fetch", "unknown.example"
     )

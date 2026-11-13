@@ -21,8 +21,11 @@ from skep.supervisor.serve.tools import execute_read_tool
 from .conftest import serve_client
 
 
-def _home(tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> SupervisorConfig:
-    """A bound repo, every scope on engine v2, the builder baseline approved."""
+def _home(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str], *, approve: bool = True
+) -> SupervisorConfig:
+    """A bound repo, every scope on engine v2, the builder baseline approved
+    (unless ``approve`` is False)."""
     config = build_config(tmp_path, None)
     store = RunStore(config.db_path)
     try:
@@ -36,9 +39,11 @@ def _home(tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]) -> Sup
         )
     finally:
         store.close()
-    assert (
-        main(["--home", str(tmp_path), "policy", "approve", "--template", "builder", "--yes"]) == 0
-    )
+    if approve:
+        assert (
+            main(["--home", str(tmp_path), "policy", "approve", "--template", "builder", "--yes"])
+            == 0
+        )
     capsys.readouterr()
     return config
 

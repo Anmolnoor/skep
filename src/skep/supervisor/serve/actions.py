@@ -4259,6 +4259,8 @@ def set_operator_policy_rule(
     answer carries the replay of recent decisions under the new document.
     ``dry_run`` (the card's proposal) checks and answers, writing nothing.
     """
+    from ..policy_baseline import NoBaseline, verify
+    from ..policy_layers import store_home
     from ..policy_schema import (
         OPERATOR_POLICY_SETTINGS_KEY,
         SCOPE_ACTIONS,
@@ -4284,6 +4286,13 @@ def set_operator_policy_rule(
     pattern = pattern.strip()
     if not pattern:
         raise HTTPException(status_code=400, detail="pattern must be non-empty")
+    if verdict == "allow" and not isinstance(verify(store_home(store)), NoBaseline):
+        # D7: under an approved baseline (tampered too) this verb only tightens
+        detail = (
+            "a locked baseline takes no new allow from set_operator_policy; "
+            "re-approve the baseline to allow this: `skep policy approve`"
+        )
+        raise HTTPException(status_code=400, detail=detail) from PolicyWriteRejected(detail)
     if scope == "shell" and verdict == "allow":
         return _queen_shell_allow(store, action, pattern, holder=holder, dry_run=dry_run)
     rule_id = f"op:{scope}:{action}:{pattern}"
