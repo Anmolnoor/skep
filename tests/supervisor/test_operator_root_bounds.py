@@ -101,3 +101,21 @@ def test_rest_refuses(config: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPat
               "bindings": [{"kind": "repo_path", "value": str(tmp_path / "user")}]},
     )  # fmt: skip
     assert response.status_code == 400 and "too broad" in response.text
+
+
+def test_rest_project_write_sees_the_would_be_root(
+    config: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """POST /api/projects binds repo paths too: it runs the same write check
+    (check 1 on the would-be root) as project setup."""
+    from .conftest import serve_client
+
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))
+    secrets = tmp_path / "user" / ".ssh"
+    secrets.mkdir(parents=True)
+    response = serve_client(config).post(
+        "/api/projects",
+        json={"project_id": "q", "name": "q", "strategy": "trusted_local_dev", "phase": "build",
+              "bindings": [{"kind": "repo_path", "value": str(secrets)}]},
+    )  # fmt: skip
+    assert response.status_code == 400 and "check 1" in response.text, response.text

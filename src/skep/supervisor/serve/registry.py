@@ -582,6 +582,20 @@ def _persist_project(run_store: RunStore, project: Any) -> dict[str, Any]:
     return project_to_dict(project)
 
 
+def _vetted_persist(run_store: RunStore, project: Any, bindings: Any) -> dict[str, Any]:
+    """P3-5 (V11): the one write-time check, then the write, as one step
+    (W14) — W15: with the repo paths it binds, which become operator roots."""
+    from ..policy_write import PolicyWriteRejected, policy_write, vet_write
+
+    roots = [Path(b.value).expanduser().resolve() for b in bindings if b.kind == "repo_path"]
+    with policy_write():
+        try:
+            vet_write(run_store, roots=roots, replay=False)
+        except PolicyWriteRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _persist_project(run_store, project)
+
+
 def _pack_view(pack: PolicyPack) -> dict[str, str]:
     return {
         "name": pack.name,
@@ -975,22 +989,7 @@ def setup_project_record(
             kind=binding.kind,
             value=binding.value,
         )
-    from ..policy_write import PolicyWriteRejected, policy_write, vet_write
-
-    with policy_write():  # W14: checked and written as one step
-        try:
-            # P3-5 (V11): the one write-time check, before the project is written —
-            # W15: with the repo paths it binds, which become operator roots.
-            vet_write(
-                run_store,
-                roots=[
-                    Path(b.value).expanduser().resolve() for b in supplied if b.kind == "repo_path"
-                ],
-                replay=False,
-            )
-        except PolicyWriteRejected as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        result = _persist_project(run_store, project)
+    result = _vetted_persist(run_store, project, supplied)
     seeded_templates: list[dict[str, Any]] = []
     seeds_skipped: list[str] = []
     if pack is not None:
@@ -1678,7 +1677,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                 kind=binding.kind,
                 value=binding.value,
             )
-        return _persist_project(run_store, project)
+        return _vetted_persist(run_store, project, project.bindings)
 
     @app.delete("/api/projects/{project_id}")
     def delete_project(project_id: str) -> dict[str, bool]:
