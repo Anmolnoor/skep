@@ -323,10 +323,10 @@ def inside_a_deny(stack: Stack, allow: Allow, role: Role | None = None) -> list[
         if reason is not None and not hits:
             hits.append(f"floor/{reason}")
     denies = _rules(stack, allow.scope, "deny")
-    if role is not None and (layer := role.layer()) is not None:
+    if role is not None:
         denies += [
             ResolvedRule("deny", r.rule_id, r.action, r.pattern, layer=role.label)
-            for r in layer.rules
+            for r in role.layer().rules
             if (r.scope, r.verdict) == (allow.scope, "deny")
         ]
     hits += [

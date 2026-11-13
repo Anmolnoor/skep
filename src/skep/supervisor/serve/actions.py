@@ -2309,7 +2309,7 @@ def policy_why(
         view["role"] = {
             "name": role_record.name,
             "layer": role_record.label,
-            "binds": role_record.policy_layer,
+            "binds": role_record.template,
             "verdict": hit.verdict if hit else None,
             "decided_by": hit.decided_by if hit else None,
             "note": (

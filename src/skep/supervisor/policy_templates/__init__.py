@@ -399,18 +399,18 @@ def explain_view(subject: str, home: Path | None = None) -> dict[str, Any]:
         if name not in roles:
             raise ValueError(f"no role {name!r}; known: {', '.join(roles)}")
         role = roles[name]
-        bound = load_policy_template(role.policy_layer) if role.policy_layer else None
+        bound = load_policy_template(role.template)
         view.update(
             kind="role",
             layer="role",
             name=role.name,
             note=(
-                f"{role.label} binds template {role.policy_layer!r}; it only tightens: "
-                "the stricter of this layer and the baseline stands"
-                if bound is not None
-                else f"{role.label} has no policy layer: the baseline decides alone"
-            ),
-            rules=_rule_rows(bound) if bound is not None else [],
+                f"{role.label} binds template {role.policy_layer!r}"
+                if role.policy_layer
+                else f"{role.label} names no template: it acts as assistant until it gets one"
+            )
+            + "; it only tightens: the stricter of this layer and the baseline stands",
+            rules=_rule_rows(bound),
         )
     else:
         template = load_policy_template(subject)

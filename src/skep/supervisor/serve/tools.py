@@ -2319,11 +2319,6 @@ def hidden_tools(role: Role | None) -> dict[str, str]:
 def _hidden_tools(role: Role) -> dict[str, str]:
     hidden = {}
     for tool, (scope, action, value) in TOOL_SCOPES.items():
-        if value is _workspace and role.layer() is None:
-            # decision #7: a hop whose role has no rule delegates nothing — the
-            # chain refuses every worker write, so no dispatcher can succeed.
-            hidden[tool] = f"delegation:queen@{role.name}/unset"
-            continue
         constant = value({}) if value in (_workspace, _ddgs) else None
         hit = role_denies_every(role, scope, action, constant)
         if hit is not None:
