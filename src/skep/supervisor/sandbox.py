@@ -368,13 +368,20 @@ AGENT_SOCKETS: tuple[str, ...] = (
     ".orbstack/run",
     ".local/share/containers/podman/machine",
 )
-# R5 (I12): what bubblewrap alone cannot close, said wherever the wall is
-# described (doctor's sandbox line, docs/sandboxing.md).
-BUBBLEWRAP_SOCKET_GAP = (
-    "Not walled on Linux: an allow-all run can connect to abstract unix sockets "
-    "(session D-Bus, X11), and any run to a unix socket at a path outside /tmp "
-    "and /run that the mask list does not name."
-)
+# R5 (I12): what each Linux backend alone cannot close, said wherever the
+# wall is described (doctor's sandbox line, docs/sandboxing.md). A podman run
+# always gets its own network namespace, so no abstract socket reaches it.
+SOCKET_GAP = {
+    "bubblewrap": (
+        "Not walled on Linux: an allow-all run can connect to abstract unix sockets "
+        "(session D-Bus, X11), and any run to a unix socket at a path outside /tmp "
+        "and /run that the mask list does not name."
+    ),
+    PODMAN: (
+        "Not walled on podman: any run can connect to a unix socket under the host "
+        "dirs it binds (/home /var /etc /usr /opt) at a path the mask list does not name."
+    ),
+}
 # R5: wherever the operator's own agents listen (serve's environment).
 _SOCKET_ENV = ("SSH_AUTH_SOCK", "DOCKER_HOST", "CONTAINER_HOST")
 
