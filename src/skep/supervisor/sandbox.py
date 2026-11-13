@@ -35,6 +35,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .. import landlock
 from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, other_homes
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
@@ -355,8 +356,8 @@ _HOME_SECRET_PATHS = tuple(rel for rel in HOME_SECRETS if rel not in SANDBOX_REA
 # / /`` left an agent socket outside /tmp and /run reachable. These hold one
 # (relative to every home; ~/.ssh and ~/.gnupg are already in HOME_SECRETS).
 # Hidden like a secret on every backend; Seatbelt refuses the connect anyway
-# (W34). ponytail: known places only — a socket at a path nobody listed stays
-# reachable on bubblewrap (docs/sandboxing.md says what would close it).
+# (W34). ponytail: known places only — on a kernel below Landlock ABI 9 a
+# socket at a path nobody listed stays reachable (R5b, socket_gap).
 AGENT_SOCKETS: tuple[str, ...] = (
     ".1password",  # 1Password SSH agent: agent.sock
     ".bitwarden-ssh-agent.sock",
@@ -371,17 +372,44 @@ AGENT_SOCKETS: tuple[str, ...] = (
 # R5 (I12): what each Linux backend alone cannot close, said wherever the
 # wall is described (doctor's sandbox line, docs/sandboxing.md). A podman run
 # always gets its own network namespace, so no abstract socket reaches it.
-SOCKET_GAP = {
-    "bubblewrap": (
-        "Not walled on Linux: an allow-all run can connect to abstract unix sockets "
-        "(session D-Bus, X11), and any run to a unix socket at a path outside /tmp "
-        "and /run that the mask list does not name."
-    ),
-    PODMAN: (
-        "Not walled on podman: any run can connect to a unix socket under the host "
-        "dirs it binds (/home /var /etc /usr /opt) at a path the mask list does not name."
-    ),
+_UNLISTED_SOCKET = {
+    "bubblewrap": "a unix socket at a path outside /tmp and /run that the mask list does not name",
+    PODMAN: "a unix socket under the host dirs it binds (/home /var /etc /usr /opt) at a path "
+    "the mask list does not name",
 }
+
+
+def socket_gap(backend: str) -> str:
+    """R5b: the unix sockets a worker on ``backend`` still reaches under this
+    kernel's Landlock ABI (ABI 6 scopes abstract sockets, ABI 9 path
+    sockets); "" for a backend with no gap (Seatbelt, W34)."""
+    if backend not in _UNLISTED_SOCKET:
+        return ""
+    abi = landlock.abi()
+    if abi >= landlock.ABI_RESOLVE_UNIX:
+        return (
+            f"Landlock ABI {abi}: a worker connects only to unix sockets in its own "
+            "roots or ones it made itself."
+        )
+    path = _UNLISTED_SOCKET[backend]
+    if backend == PODMAN:
+        return (
+            f"Not walled on podman: any run can connect to {path} "
+            f"(path sockets need Landlock ABI 9; this kernel has {abi})."
+        )
+    if abi >= landlock.ABI_SCOPE_ABSTRACT:
+        return (
+            f"Landlock ABI {abi} refuses abstract unix sockets made outside the worker. "
+            f"Not walled on Linux: any run can connect to {path} "
+            "(path sockets need Landlock ABI 9)."
+        )
+    return (
+        "Not walled on Linux: an allow-all run can connect to abstract unix sockets "
+        f"(session D-Bus, X11), and any run to {path}. Landlock is off or too old here "
+        f"(ABI {abi}; 6 scopes abstract sockets, 9 path sockets)."
+    )
+
+
 # R5: wherever the operator's own agents listen (serve's environment).
 _SOCKET_ENV = ("SSH_AUTH_SOCK", "DOCKER_HOST", "CONTAINER_HOST")
 
@@ -707,6 +735,20 @@ def _bubblewrap_args(
     return args
 
 
+def _landlock_step(writable_roots: Iterable[Path]) -> list[str]:
+    """R5b: the in-sandbox step that scopes the worker's unix sockets with
+    what the running kernel's Landlock ABI offers; none below ABI 6 (the
+    run carries on with the masks alone, and doctor says so). ``-E -P``:
+    neither the worker's cwd nor a worktree entry on PYTHONPATH may shadow
+    skep's own module (the env still reaches the worker through exec)."""
+    abi = landlock.abi()
+    flags = ["--scope-abstract"] if abi >= landlock.ABI_SCOPE_ABSTRACT else []
+    if abi >= landlock.ABI_RESOLVE_UNIX:
+        for root in writable_roots:
+            flags += ["--unix-root", str(root)]
+    return [sys.executable, "-E", "-P", "-m", "skep.landlock", *flags] if flags else []
+
+
 def _mask_args(path: Path, *, dev_null: list[str], tmpfs: list[str]) -> list[str]:
     """An empty tmpfs over a secret directory, /dev/null over a secret file."""
     return tmpfs if path.is_dir() else dev_null
@@ -922,35 +964,38 @@ def write_profile(
         extra_readable = list(extra_readable)
         read_denied += _sockets_under(extra_readable)
     if probe.backend == PODMAN:
-        return _write_argv_profile(
-            profile_path,
-            _podman_args(
-                writable_roots=[workspace, *extra_writable],
-                network=network,
-                rootfs=_podman_rootfs_skeleton(profile_path.parent),
-                read_denied=read_denied,
-                readable_roots=extra_readable,
-                write_denied=write_denied,
-                unmasked=unmasked,
-            ),
-            header=_PODMAN_HEADER,
+        extra_writable = list(extra_writable)
+        args = _podman_args(
+            writable_roots=[workspace, *extra_writable],
+            network=network,
+            rootfs=_podman_rootfs_skeleton(profile_path.parent),
+            read_denied=read_denied,
+            readable_roots=extra_readable,
+            write_denied=write_denied,
+            unmasked=unmasked,
         )
+        # podman's command slot follows rootfs:O; the worker argv lands after "--"
+        if step := _landlock_step([workspace, *extra_writable]):
+            args += [*step, "--"]
+        return _write_argv_profile(profile_path, args, header=_PODMAN_HEADER)
     if probe.backend == "bubblewrap":
         writable_roots = [workspace, *extra_writable]
-        return _write_bubblewrap_profile(
-            profile_path,
-            _bubblewrap_args(
-                writable_roots=writable_roots,
-                network=network,
-                proxy_port=proxy_port,
-                unix_socket_path=unix_socket_path,
-                read_denied=read_denied,
-                readable_roots=extra_readable,
-                write_denied=write_denied,
-                loopback_ports=loopback_ports,
-                unmasked=unmasked,
-            ),
+        args = _bubblewrap_args(
+            writable_roots=writable_roots,
+            network=network,
+            proxy_port=proxy_port,
+            unix_socket_path=unix_socket_path,
+            read_denied=read_denied,
+            readable_roots=extra_readable,
+            write_denied=write_denied,
+            loopback_ports=loopback_ports,
+            unmasked=unmasked,
         )
+        # After the netshim when there is one (it alone needs the proxy
+        # bridge); wrap_command's "--" then ends the step's options.
+        if step := _landlock_step(writable_roots):
+            args += step if network.is_domain_list else ["--", *step]
+        return _write_bubblewrap_profile(profile_path, args)
     # ES-F5 (B11): no blanket /tmp, /private/tmp, /var/folders roots — they
     # were shared by every run (run B read run A's files) and held any
     # SKEP_HOME placed under $TMPDIR. Each run's TMPDIR is already private,

@@ -83,28 +83,67 @@ serve's own `$SSH_AUTH_SOCK`, or a `unix://` `DOCKER_HOST` or
 binds (the repo's git dir: git's fsmonitor socket). A worker still uses
 sockets in its own roots, and a proxied run its proxy bridge.
 
-Still reachable on Linux, and stated by `skep doctor`:
+Still reachable on Linux, by the kernel's Landlock ABI (see Landlock below),
+and stated by `skep doctor` in its sandbox line:
 
-- a unix socket at any other path outside `/tmp` and `/run` (an app socket
-  somewhere under a home), in every network mode; on podman, any such path
-  under the host dirs it binds (`/home /var /etc /usr /opt`);
-- an abstract socket (a name starting with a NUL byte: the session D-Bus
-  where it listens abstractly, X11's `@/tmp/.X11-unix/X0`) in a bubblewrap
-  allow-all run. Abstract sockets belong to the network namespace, so
-  deny-all and proxied runs (`--unshare-net`) cannot reach them, nor can any
-  podman run (it always gets its own network namespace).
+- ABI 9 and later: no socket the worker did not make, except those inside
+  its own writable roots. Neither the masks nor Landlock touch a descriptor
+  the worker already holds when it starts.
+- ABI 6 to 8: a unix socket at any other path outside `/tmp` and `/run` (an
+  app socket somewhere under a home), in every network mode; on podman, any
+  such path under the host dirs it binds (`/home /var /etc /usr /opt`).
+- Below ABI 6, or Landlock off: that path socket, and an abstract socket (a
+  name starting with a NUL byte: the session D-Bus where it listens
+  abstractly, X11's `@/tmp/.X11-unix/X0`) in a bubblewrap allow-all run.
+  Abstract sockets belong to the network namespace, so deny-all and proxied
+  runs (`--unshare-net`) cannot reach them, nor can any podman run (it
+  always gets its own network namespace).
 
 Bubblewrap has no socket filter of its own. A seccomp filter (`--seccomp`)
 cannot do it either: classic BPF sees only the `connect()` arguments, not
 the address the pointer leads to, so it cannot tell an abstract name from a
-path. What would close both is Landlock, the kernel's unprivileged access
-control, applied by a small step inside the sandbox before the worker
-starts: `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` (Landlock ABI 6, Linux 6.12)
-refuses abstract sockets made outside the worker, and the newer
-path-socket right refuses a connect to a path socket outside the rules
-(the worker's own roots and the proxy bridge). Both can be called from the
-standard library (no new dependency); older kernels would keep the gap
-above. Not built yet.
+path.
+
+### Landlock (Linux)
+
+Landlock, the kernel's unprivileged access control, closes what the masks
+cannot. Where it is applied: inside the sandbox, by `skep.landlock`, a
+standard-library step (ctypes and `syscall()`, no dependency) that bubblewrap
+or podman runs first; it sets `PR_SET_NO_NEW_PRIVS`, restricts itself and
+then execs the worker, which inherits the restriction and cannot lift it.
+In a proxied run it runs after `skep.netshim` (which needs the proxy
+bridge) and before the worker. It never runs in serve: serve only reads the
+kernel's Landlock ABI number when it writes the run's profile and puts the
+step, with what it must scope, into the argv (kept as evidence).
+
+What is scoped, by the ABI the running kernel reports:
+
+- ABI 6 and later (Linux 6.12+): `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET`. The
+  worker cannot connect to an abstract socket made outside its own process
+  tree; ones it makes itself still work.
+- ABI 9 and later: `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`. The worker connects to
+  a path socket only inside its writable roots (workspace, results, git
+  metadata, caches) or one it made itself; any other path socket, listed or
+  not, is refused with `EACCES`.
+- With `RESOLVE_UNIX` the step also handles `LANDLOCK_ACCESS_FS_REFER` and
+  grants it on `/`: the kernel otherwise refuses every cross-directory
+  rename and hard link once any filesystem right is handled. Its no-gain
+  rule still refuses moving or linking a socket into a writable root. No
+  other right is handled: file access stays the mount layout's job.
+
+On an older kernel, or with Landlock disabled at boot, serve leaves the step
+out, `skep doctor` says so in one line, and runs carry on exactly as before
+with the gaps below. If the kernel reports the ABI but applying it fails,
+the run fails: it never runs unscoped while the doctor says scoped.
+
+Podman runs the same step inside the container (its default seccomp profile
+allows the Landlock calls). Abstract sockets cannot reach a podman run
+anyway (its own network namespace), so there it is the path-socket right
+that matters.
+
+Landlock only ever narrows. Every bubblewrap and podman mask above stays:
+they also hide what a socket file reveals by being read, and they are the
+wall on a kernel without Landlock.
 
 ### Loopback
 
