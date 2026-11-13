@@ -62,7 +62,43 @@ from its auth env (`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`); a dispatch without one is refused (NO AUTH ENV).
 
 On Linux the worker also gets its own PID and IPC namespaces and an empty
-`/run` (no host D-Bus or systemd sockets). On macOS the profile allows
+`/run` (no host D-Bus or systemd sockets).
+
+Unix sockets on Linux: a read-only bind does not stop `connect()`, so
+bubblewrap closes a socket only by hiding it. Hidden in every network mode:
+everything under `/tmp` and `/run` (fresh tmpfs: the session D-Bus,
+systemd, rootless Docker and podman, gpg-agent's runtime dir, most
+ssh-agents); the agent places under every home (`~/.ssh`, `~/.gnupg` and
+`sandbox.AGENT_SOCKETS`: `~/.1password`, `~/.bitwarden-ssh-agent.sock`,
+`~/.docker/desktop`, `~/.docker/run`, `~/.colima`, `~/.lima`, `~/.rd`,
+`~/.orbstack/run`, `~/.local/share/containers/podman/machine`); the socket
+serve's own `$SSH_AUTH_SOCK`, or a `unix://` `DOCKER_HOST` or
+`CONTAINER_HOST`, names; and every socket inside a read-only root the sandbox
+binds (the repo's git dir: git's fsmonitor socket). A worker still uses
+sockets in its own roots, and a proxied run its proxy bridge.
+
+Still reachable on Linux, and stated by `skep doctor`:
+
+- a unix socket at any other path outside `/tmp` and `/run` (an app socket
+  somewhere under a home), in every network mode;
+- an abstract socket (a name starting with a NUL byte: the session D-Bus
+  where it listens abstractly, X11's `@/tmp/.X11-unix/X0`) in an allow-all
+  run. Abstract sockets belong to the network namespace, so deny-all and
+  proxied runs (`--unshare-net`) cannot reach them.
+
+Bubblewrap has no socket filter of its own. A seccomp filter (`--seccomp`)
+cannot do it either: classic BPF sees only the `connect()` arguments, not
+the address the pointer leads to, so it cannot tell an abstract name from a
+path. What would close both is Landlock, the kernel's unprivileged access
+control, applied by a small step inside the sandbox before the worker
+starts: `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` (Landlock ABI 6, Linux 6.12)
+refuses abstract sockets made outside the worker, and the newer
+path-socket right refuses a connect to a path socket outside the rules
+(the worker's own roots and the proxy bridge). Both can be called from the
+standard library (no new dependency); older kernels would keep the gap
+above. Not built yet.
+
+On macOS the profile allows
 loopback (a worker's own test servers) except serve's port: 8765,
 `$SKEP_SERVE_URL`'s port, and the port `skep serve` records in
 `supervisor/serve-port` under the same home, so a CLI `skep run` denies it too.

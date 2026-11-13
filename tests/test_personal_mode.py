@@ -560,6 +560,8 @@ class PersonalModeTests(unittest.TestCase):
             self.assertEqual(status["sandbox"]["backend"], "bubblewrap")
             self.assertIn("sandbox: ready", report)
             self.assertIn("bubblewrap", report)
+            # R5 (I12): the socket residual bubblewrap cannot close is stated
+            self.assertIn("abstract unix sockets", report)
 
     def test_unavailable_sandbox_is_reported_without_blocking_workspace_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
