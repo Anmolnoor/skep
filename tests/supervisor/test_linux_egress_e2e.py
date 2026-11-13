@@ -11,17 +11,23 @@ positive enforcement proof Linux lacked while v14-7 was skipped.
 from __future__ import annotations
 
 import shutil
+import socketserver
 import tempfile
 import textwrap
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
 
 from skep.supervisor import sandbox
-from skep.supervisor.netproxy import FilteringProxy
+from skep.supervisor.netproxy import (
+    SERVE_PORT_FILE,
+    FilteringProxy,
+    control_plane_ports,
+    run_loopback_ports,
+)
 
 pytestmark = pytest.mark.skipif(
     sandbox.availability().backend != "bubblewrap",
@@ -53,7 +59,10 @@ def origin() -> Iterator[int]:
 
 
 def _run_in_sandbox(
-    network: sandbox.NetworkPolicy, proxy: FilteringProxy, probe: str
+    network: sandbox.NetworkPolicy,
+    proxy: FilteringProxy,
+    probe: str,
+    loopback_ports: tuple[int, ...] = (),
 ) -> tuple[int, str]:
     """Wrap a probe script in a real bwrap sandbox with the given network policy
     and run it — the same write_profile/wrap_command the dispatcher uses."""
@@ -70,6 +79,7 @@ def _run_in_sandbox(
             network=network,
             proxy_port=proxy.port if network.is_domain_list else None,
             unix_socket_path=proxy.unix_socket_path if network.is_domain_list else None,
+            loopback_ports=loopback_ports,
         )
         import sys as _sys
 
@@ -163,6 +173,138 @@ def test_deny_all_sandbox_has_no_egress_at_all(origin: int) -> None:
         code, out = _run_in_sandbox(sandbox.DENY_ALL_NETWORK, proxy, probe)
         assert code == 0, out
         assert "BLOCKED" in out
+    finally:
+        proxy.stop()
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+class _Echo(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        self.request.sendall(b"ECHO:" + self.request.recv(64))
+
+
+@pytest.fixture()
+def listeners() -> Iterator[Callable[[], int]]:
+    """Raw TCP echo servers on the host loopback; each call opens one."""
+    servers: list[socketserver.ThreadingTCPServer] = []
+
+    def open_one() -> int:
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _Echo)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        return int(server.server_address[1])
+
+    yield open_one
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+_RAW_PROBE = """
+import socket, sys
+for port in sys.argv[1:] or PORTS:
+    s = socket.socket(); s.settimeout(5)
+    try:
+        s.connect(("127.0.0.1", int(port)))
+        s.sendall(b"ping")
+        print(port, "GOT", s.recv(64).decode() or "EOF")
+    except OSError as e:
+        print(port, "REFUSED", type(e).__name__)
+    finally:
+        s.close()
+"""
+
+
+def _raw_probe(ports: list[int]) -> str:
+    return f"PORTS = {[str(p) for p in ports]!r}\n{_RAW_PROBE}"
+
+
+def _dispatch_like_run(
+    home: Path,
+    project_ports: tuple[int, ...],
+    provider_hosts: tuple[str, ...],
+    probe_ports: list[int],
+) -> str:
+    """The proxy and profile composed exactly as dispatch and the spawner do:
+    run_loopback_ports for both, serve's ports denied at the proxy."""
+    ports = run_loopback_ports(project_ports, provider_hosts, home)
+    sock_dir = tempfile.mkdtemp(prefix="skep-e2e-nx-", dir="/tmp")
+    proxy = FilteringProxy(
+        ("pypi.org", *provider_hosts),
+        unix_socket_path=str(Path(sock_dir) / "p.sock"),
+        denied_loopback_ports=control_plane_ports(home),
+        loopback_ports=ports,
+    ).start()
+    try:
+        code, out = _run_in_sandbox(
+            sandbox.NetworkPolicy(allow=("pypi.org", *provider_hosts)),
+            proxy,
+            _raw_probe(probe_ports),
+            loopback_ports=ports,
+        )
+        assert code == 0, out
+        return out
+    finally:
+        proxy.stop()
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def test_a_listed_loopback_port_answers_raw_tcp_and_an_unlisted_one_is_refused(
+    listeners: Callable[[], int], tmp_path: Path
+) -> None:
+    listed, unlisted = listeners(), listeners()
+    out = _dispatch_like_run(tmp_path, (listed,), (), [listed, unlisted])
+    assert f"{listed} GOT ECHO:ping" in out, out
+    assert f"{unlisted} REFUSED ConnectionRefusedError" in out, out
+
+
+def test_serves_port_stays_closed_even_when_the_project_lists_it(
+    listeners: Callable[[], int], tmp_path: Path
+) -> None:
+    serve, listed = listeners(), listeners()
+    (tmp_path / SERVE_PORT_FILE).write_text(f"{serve}\n", encoding="utf-8")
+    out = _dispatch_like_run(tmp_path, (serve, listed), (), [serve, listed])
+    assert f"{serve} REFUSED" in out, out
+    assert f"{listed} GOT ECHO:ping" in out, out
+
+
+def test_a_local_providers_port_is_open_without_listing_and_only_that_port(
+    listeners: Callable[[], int], tmp_path: Path
+) -> None:
+    provider, other = listeners(), listeners()
+    out = _dispatch_like_run(tmp_path, (), (f"127.0.0.1:{provider}",), [provider, other])
+    assert f"{provider} GOT ECHO:ping" in out, out
+    assert f"{other} REFUSED ConnectionRefusedError" in out, out
+
+
+def test_a_deny_all_run_reaches_no_port_even_a_listed_one(
+    listeners: Callable[[], int],
+) -> None:
+    listed = listeners()
+    proxy, sock_dir = _proxy_with_bridge(())
+    try:
+        code, out = _run_in_sandbox(
+            sandbox.DENY_ALL_NETWORK, proxy, _raw_probe([listed]), loopback_ports=(listed,)
+        )
+        assert code == 0, out
+        assert f"{listed} REFUSED" in out, out
+    finally:
+        proxy.stop()
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+def test_an_allow_all_run_shares_the_host_loopback_as_documented(
+    listeners: Callable[[], int],
+) -> None:
+    """docs/sandboxing.md: a bubblewrap * run shares the host network, so every
+    host loopback port answers, listed or not (the documented gap)."""
+    unlisted = listeners()
+    proxy, sock_dir = _proxy_with_bridge(())
+    try:
+        code, out = _run_in_sandbox(sandbox.ALLOW_ALL_NETWORK, proxy, _raw_probe([unlisted]))
+        assert code == 0, out
+        assert f"{unlisted} GOT ECHO:ping" in out, out
     finally:
         proxy.stop()
         shutil.rmtree(sock_dir, ignore_errors=True)
