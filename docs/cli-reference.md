@@ -307,7 +307,11 @@ as `GET` / `DELETE /api/policy/rules` and the chat `revoke_policy_rule` card.
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
 from the repo's own entry point (v91); an explicit `--verify-command` always
-wins. `set-phase` moves the trust-ramp defaults (build → maintain).
+wins. `set-phase` moves the trust-ramp defaults (build → maintain). Run
+again on an existing project with no `--pack` or `--strategy` (for example
+`skep project setup REPO --loopback-port 5432`), it keeps the project's strategy
+and phase and changes only what the flags name; `--loopback-port` lists every
+port, replacing the project's list.
 `policy registry` lists every policy setting skep has (type, default, the
 layers that may set it); `policy rsop` is the resultant policy for a repo —
 each key with the layer that decided it and the layers it overrode, the

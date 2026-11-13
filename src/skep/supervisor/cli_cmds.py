@@ -2487,14 +2487,18 @@ def cmd_project_setup(args: argparse.Namespace) -> int:
     name = args.name or project_id
     store = RunStore(config.db_path)
     try:
+        # A re-run that names no pack or strategy (`--loopback-port N` alone)
+        # updates the project as it stands, never resets its phase to build.
+        stored = store.get_project_policy(project_id)
+        keep = stored is not None and args.pack is None and args.strategy is None
         result = setup_project_record(
             run_store=store,
             root=_project_root(config),
             project_id=project_id,
             name=name,
-            strategy=args.strategy,
-            phase=args.phase,
-            pack_name=args.pack,
+            strategy=stored.strategy if keep and stored else args.strategy,
+            phase=args.phase or (stored.phase if stored else "build"),
+            pack_name=stored.pack_name if keep and stored else args.pack,
             repo_path=str(repo),
             repo_slug=_managed_repo_slug(repo, config),
             template_names=[],
@@ -3692,7 +3696,9 @@ def register_supervisor_commands(
     project_setup.add_argument("repo", type=Path)
     project_setup.add_argument("--pack", default=None)
     project_setup.add_argument("--strategy", default=None)
-    project_setup.add_argument("--phase", default="build")
+    project_setup.add_argument(
+        "--phase", default=None, help="default: the project's own phase, else build"
+    )
     project_setup.add_argument("--project-id", default=None)
     project_setup.add_argument("--name", default=None)
     project_setup.add_argument(
@@ -3735,7 +3741,8 @@ def register_supervisor_commands(
         dest="loopback_ports",
         metavar="PORT",
         help="a loopback port this project's sandboxed workers may reach (repeatable, "
-        "D6); loopback is otherwise closed but for a local model provider's own port",
+        "D6; name every port, the list replaces the project's); loopback is otherwise "
+        "closed but for a local model provider's own port",
     )
     project_setup.set_defaults(func=cmd_project_setup)
 

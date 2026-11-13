@@ -312,3 +312,31 @@ def test_a_loopback_port_outside_the_range_never_opens(tmp_path: Path) -> None:
     assert (
         registry.decision_for("network.fetch", {"url": "http://127.0.0.1:99999/"}).verdict == "deny"
     )
+
+
+def test_the_advised_command_opens_a_port_on_an_existing_project(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ES-F91 follow-up: the 403, doctor, the docs and the setup summary say
+    `skep project setup <repo> --loopback-port N`, which refused ("requires a
+    pack or strategy"); with --strategy alone it reset the phase to build. On
+    an existing project it now keeps the stored strategy and phase."""
+    from skep.cli import main
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    home = tmp_path / "home"
+    base = ["--home", str(home), "project", "setup", str(repo), "--project-id", "proj"]
+    flags = ["--no-seed-schedules", "--no-seed-commands"]
+    assert main([*base, "--strategy", "trusted_local_dev", "--phase", "maintain", *flags]) == 0
+    capsys.readouterr()
+    assert main([*base, "--loopback-port", "5432", *flags]) == 0
+    assert "loopback ports: 5432" in capsys.readouterr().out
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    try:
+        record = store.get_project_policy("proj")
+        assert record is not None and record.policy["loopback_ports"] == [5432]
+        assert (record.strategy, record.phase) == ("trusted_local_dev", "maintain")
+    finally:
+        store.close()
+    assert main(["--home", str(tmp_path / "fresh"), "project", "setup", str(repo)]) != 0
