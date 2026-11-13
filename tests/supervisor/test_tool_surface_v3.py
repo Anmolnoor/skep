@@ -790,3 +790,25 @@ def test_hiding_and_role_defaults_only_tighten_against_the_frozen_surface(
         w2 = {"w2:card->deny": len(HIDDEN_YET_CARDS[home])}
         expected = {**expected, "web:assistant": {**expected["web:assistant"], **w2}}
     assert {kind: dict(found) for kind, found in flips.items()} == expected
+
+
+# --- review follow-ups ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("role", ["builder", "assistant"])
+def test_a_dispatch_with_no_repo_is_answered_as_a_model_error(
+    locked: SupervisorConfig, role: str
+) -> None:
+    """A missing argument is the model's mistake: it hears what to send, the
+    turn does not die on a KeyError."""
+    store = RunStore(locked.db_path)
+    try:
+        chat = store.create_chat(title="x", model=None, role=role).chat_id
+        decision = mutation_execution_decision(
+            "dispatch_run", {"instructions": "fix"}, store=store,
+            holder=ConfigHolder(locked, store), chat_id=chat,
+        )  # fmt: skip
+    finally:
+        store.close()
+    assert decision is not None and decision.verdict == "deny"
+    assert "repo" in (decision.detail or "")

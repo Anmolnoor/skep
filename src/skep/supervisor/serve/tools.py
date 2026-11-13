@@ -5852,6 +5852,12 @@ def _mutation_execution_decision(
         return fetch_grant_decision(store, holder, host, role=role, chat_id=chat_id, url=url)
     if name != "dispatch_run":
         return None
+    if not str(args.get("repo") or "").strip():
+        return AutonomyDecision(
+            verdict="deny",
+            reason="dispatch.deny.no_repo",
+            detail="dispatch_run needs repo: a registered repo slug or host path (list_repos)",
+        )
     return actions.dispatch_run_decision(
         holder,
         store,
