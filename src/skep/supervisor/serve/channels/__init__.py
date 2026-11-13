@@ -211,7 +211,15 @@ def _grant_lines(manifest: Mapping[str, Any]) -> list[str]:
 
 def manifest_lines(manifest: Mapping[str, Any]) -> list[str]:
     """A dispatch card's manifest as plain lines (``actions.dispatch_manifest``).
-    A long shell list is counted, with the first few named."""
+    A long shell list is counted, with the first few named. D23: a batch's
+    ``members`` are listed run by run."""
+    members = manifest.get("members")
+    if isinstance(members, list):
+        return [
+            line
+            for index, member in enumerate(members, 1)
+            for line in [f"run {index} of {len(members)}:", *manifest_lines(member)]
+        ]
     if manifest.get("error"):
         return [f"the run's envelope could not be compiled: {manifest['error']}"]
     prefixes = [" ".join(map(str, p)) for p in manifest.get("shell_allowlist") or []]

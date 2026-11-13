@@ -427,6 +427,16 @@ def _plan_failure_summary(reason: str) -> str:
     return f"LLM coding plan failed: {flat}" if flat else "LLM coding plan failed."
 
 
+def _failure_cause(exc: BaseException) -> str:
+    """L31: a failed run's cause on one line for its summary (the chat and
+    every messenger notice read it): a login or token masked BEFORE the cut,
+    so a cut never leaves half of one, and the home shown as ``~``."""
+    from skep.supervisor.policy_v3 import redact
+
+    text = redact(" ".join(str(exc).split()).replace(str(Path.home()), "~"))
+    return f"{type(exc).__name__}: {text[:200]}"
+
+
 def _failure_result(
     *,
     task: CodingWorkerTask,
@@ -1588,7 +1598,8 @@ def _execute_react(
                 workspace=workspace,
                 stream=stream,
                 out_path=out_path,
-                summary="react run failed.",
+                # L31: the cause, one line — never a bare "react run failed."
+                summary=f"react run failed: {_failure_cause(exc)}",
                 details=str(exc),
                 usage=_tallied_usage(tokens, provider_calls),
             )
@@ -1699,7 +1710,7 @@ def _execute_react(
             workspace=workspace,
             stream=stream,
             out_path=out_path,
-            summary="react run failed.",
+            summary="react run failed: hollow trace, every action was a read.",
             details=(
                 "hollow trace: every action was a read — nothing was written, run, or verified"
             ),

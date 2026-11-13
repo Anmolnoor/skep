@@ -2944,6 +2944,35 @@ def test_react_hollow_trace_fails_honestly(
 
     assert outcome.record.state == "failed"
     assert "hollow trace" in (outcome.record.verification_details or "")
+    # L31: the summary states the cause, never a bare "react run failed."
+    assert (outcome.record.summary or "").startswith("react run failed: hollow trace")
+
+
+def test_react_invalid_replies_fail_naming_the_error(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L31: a run whose replies stayed invalid ended "react run failed." —
+    the cause sat only in the verify details. The summary now names it."""
+    config = build_config(tmp_path / "home", None)
+    server = FakeOpenAI(api_key="sk-fake").start()
+    try:
+        permissions = _repair_test_setup(config, server, monkeypatch)
+        for _ in range(4):  # the first reply and every repair round
+            server.script_reply(_react_reply({"neither": 1}))
+        outcome = run_task(
+            repo,
+            "Add the feature.",
+            config=config,
+            permissions=permissions,
+            planning_protocol="react",
+        )
+    finally:
+        server.stop()
+
+    assert outcome.record.state == "failed"
+    summary = outcome.record.summary or ""
+    assert summary.startswith("react run failed: LlmPlanError: "), summary
+    assert "\n" not in summary and len(summary) < 400
 
 
 def test_react_done_verify_runs_through_the_same_gate(
@@ -5616,3 +5645,17 @@ def test_es_f2_snapshot_never_follows_a_symlink_out_of_the_worktree(tmp_path: Pa
     assert "CANARY-DOTENV" not in user
     assert "- deploy_key.txt" in user  # still listed by name
     assert "--- inner.txt ---\ndef add" in user
+
+
+def test_a_failed_runs_cause_masks_a_login_and_the_home() -> None:
+    """L31 follow-up: the summary carried the exception's message as is, and
+    a provider error can name a URL with a login in it or a file under the
+    home — the summary reaches the chat and every messenger notice. The login
+    is masked before the line is cut, and the home reads as ~."""
+    login = "u" + ":" + "p" * 30  # built, never a literal
+    exc = RuntimeError(
+        f"provider failed at https://{login}@llm.invalid/v1 reading {Path.home()}/cfg"
+    )
+    cause = coding_worker._failure_cause(exc)
+    assert cause.startswith("RuntimeError: provider failed at https://u:***@llm.invalid/v1")
+    assert "p" * 30 not in cause and str(Path.home()) not in cause and "~/cfg" in cause

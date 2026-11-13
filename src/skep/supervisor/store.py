@@ -956,7 +956,9 @@ def owner_alive(owner: str | None) -> bool:
         return False
     except PermissionError:
         pass  # alive, another user's
-    return bool(_process_started(pid) == record.get("started"))
+    started = _process_started(pid)
+    # the pid exists and ps could not say when it started: not shown to be gone
+    return started is None or started == record.get("started")
 
 
 class RunStore:
@@ -1647,6 +1649,36 @@ class RunStore:
         return owner if isinstance(owner, dict) else None
 
     @_locked
+    def release_dead_gate_claim(self, review_id: str) -> bool:
+        """D24: a mid-run gate's claim whose recorded claimer is gone (a CLI
+        killed mid-resume: same pid + start time check as the restart sweep)
+        goes back to pending, so the answer that met it applies. Never a
+        live claimer, never an owner that was not recorded, never a landing
+        (git may have half run: the restart sweep owns that one), never a gate
+        whose resume the claimer already dispatched (a second would follow)."""
+        row = self._conn.execute(
+            "SELECT claim_owner FROM approvals WHERE review_id = ? AND status = 'applying'"
+            " AND action != 'apply_patch'"
+            " AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.resume_of = approvals.task_id)",
+            (review_id,),
+        ).fetchone()
+        if row is None or not row[0] or owner_alive(row[0]):
+            return False
+        pid = json.loads(row[0]).get("pid")  # owner_alive parsed it: a dict
+        # I13: the verdict's note will say another process held this gate
+        cursor = self._conn.execute(
+            "UPDATE approvals SET status = 'pending', claim_owner = NULL, resolution_note = ?"
+            " WHERE review_id = ? AND status = 'applying' AND claim_owner = ?",
+            (
+                f"released the claim of pid {pid}: that process is no longer running",
+                review_id,
+                row[0],
+            ),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
     def unclaim_approval(self, review_id: str) -> None:
         """An apply that blew up unexpectedly hands the review back, pending."""
         self._conn.execute(
@@ -1729,12 +1761,14 @@ class RunStore:
         claimer holds it there); everything else from 'pending'.
         """
         row = self._conn.execute(
-            "SELECT status FROM approvals WHERE review_id = ?", (review_id,)
+            "SELECT status, resolution_note FROM approvals WHERE review_id = ?", (review_id,)
         ).fetchone()
         if row is None:
             raise KeyError(f"no approval {review_id!r}")
         if row[0] != ("applying" if claimed else "pending"):
             raise ValueError(f"approval {review_id!r} already resolved as {row[0]!r}")
+        if row[1]:  # D24: a released dead claim's line leads the verdict's note
+            note = f"{row[1]}; {note}" if note else str(row[1])
         resolved_at = _now()
         self._conn.execute(
             "UPDATE approvals SET status = ?, resolved_at = ?, resolved_by = ?,"

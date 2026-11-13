@@ -561,6 +561,30 @@ def test_check_tells_the_egress_truth_and_each_blocked_reason(tmp_path: Path) ->
     assert not result["ready"]
 
 
+@pytest.mark.parametrize("provider", ["ready", "blocked"])
+def test_check_steps_read_the_model_step_from_the_model_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    """Doctor honesty (field test): "steps: pending: model" printed under a
+    "model: ready" line — the step read onboard.json, the check probed the
+    provider. Both now read the model check."""
+    import skep.status
+    from skep.supervisor.onboard import onboard_check
+
+    real = skep.status.build_status
+
+    def build_status(home: Path) -> dict[str, Any]:
+        status = real(home)
+        status["required"]["provider"] = {"status": provider, "detail": "probe"}
+        return status
+
+    monkeypatch.setattr(skep.status, "build_status", build_status)
+    supervisor = build_config(tmp_path / "home", None).home
+    checks = onboard_check(supervisor)["checks"]
+    assert checks["model"]["status"] == provider
+    assert ("model" in checks["steps"]["detail"]) is (provider != "ready")
+
+
 def test_the_last_step_attaches_to_a_running_daemon_and_opens_chat(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

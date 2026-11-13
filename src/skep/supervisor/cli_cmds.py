@@ -1524,6 +1524,7 @@ def _pending_or_new(store: RunStore, record: RunRecord, *, reason: str) -> str:
         record.task_id, action="apply_patch", reason=reason
     )
     assert review_id is not None  # create=True always mints
+    store.release_dead_gate_claim(review_id)  # D24, as serve's answers do
     return review_id
 
 

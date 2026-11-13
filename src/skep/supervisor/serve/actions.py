@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -2916,6 +2917,42 @@ def open_pr_from_branch(
     }
 
 
+def pr_push_target(holder: ConfigHolder, store: RunStore, args: dict[str, Any]) -> str:
+    """L30: what an open_pr card pushes, and where — the branch each mode
+    lands on, ``origin``'s URL (any login stripped) and the PR base."""
+    base = str(args.get("base") or "main")
+    try:
+        if args.get("branch"):
+            repo = resolve_repo_arg(str(args.get("repo") or ""), repos_root(holder), store)
+            branch = str(args["branch"])
+        else:
+            ids = [str(t) for t in args.get("task_ids") or [args.get("task_id")]]
+            repo = Path(str(require_run(store, ids[0])["repo"]))
+            branch = (
+                _grouped_branch(None if args.get("title") is None else str(args["title"]), ids[0])
+                if args.get("task_ids")
+                else applied_branch_for(store, ids[0]) or f"skep/{ids[0]}"
+            )
+    except (HTTPException, IndexError, TypeError, ValueError, OSError):
+        return f"pushes to origin and opens a PR into {base}"
+    probe = subprocess.run(
+        ["git", "-C", str(repo), "remote", "get-url", "--push", "origin"],  # what push uses
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    url = probe.stdout.strip()
+    if probe.returncode != 0 or not url:
+        return f"pushes {branch} to origin, but this repo has no origin remote: the push will fail"
+    if "://" in url:  # a login in the URL never reaches a card
+        try:
+            parts = urllib.parse.urlsplit(url)
+        except ValueError:  # a URL git stores but Python cannot split: name no URL
+            return f"pushes {branch} to origin and opens a PR into {base}"
+        url = urllib.parse.urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2]))
+    return f"pushes {branch} to origin ({url}) and opens a PR into {base}"
+
+
 def open_pr_for_branch(
     holder: ConfigHolder,
     store: RunStore | None,
@@ -3110,6 +3147,7 @@ def open_pr_for_runs(
 
 
 def pending_approval_or_409(store: RunStore, review_id: str) -> dict[str, Any]:
+    store.release_dead_gate_claim(review_id)  # D24: a gone claimer's gate claim
     approval = store.get_approval(review_id)
     if approval is None:
         # v24-F3: the most common misuse is passing a TASK id here — teach the
@@ -4673,6 +4711,12 @@ def submit_run(
         effective_dispatch_decision = delegated_decision(
             effective_dispatch_decision, delegation, delegation_note
         )
+        if resolved_policy.network_dropped:  # L32: the terminal notice says it too
+            constraints = {**(effective_dispatch_decision.constraints or {})}
+            constraints["network_dropped"] = list(resolved_policy.network_dropped)
+            effective_dispatch_decision = replace(
+                effective_dispatch_decision, constraints=constraints
+            )
         if chat_taint:
             constraints = {**(effective_dispatch_decision.constraints or {})}
             constraints["chat_taint"] = list(chat_taint)
@@ -4999,6 +5043,12 @@ def manifest_widening(shown: dict[str, Any], fresh: dict[str, Any]) -> str | Non
         return None
     if "error" in shown:
         return "the card showed no envelope (it could not be compiled) and it compiles now"
+    if "members" in shown:  # D23: a batch widens when any of its runs does
+        pairs = zip(shown["members"], fresh.get("members") or [], strict=False)
+        for index, (was, now) in enumerate(pairs, 1):
+            if (widened := manifest_widening(was, now)) is not None:
+                return f"run {index}: {widened}"
+        return None
 
     def items(value: Any) -> set[str]:  # a shell prefix is a list: compare it as one line
         return {shlex.join(v) if isinstance(v, list) else str(v) for v in value or []}
@@ -5329,7 +5379,7 @@ def submit_team(
     delegation_chain: Sequence[str] = (),
     dispatch_decision: AutonomyDecision | None = None,
     deferred_asks: bool = False,
-    preanswered: dict[str, Any] | None = None,
+    preanswered: Sequence[dict[str, Any] | None] = (),
 ) -> dict[str, Any]:
     """R3 (ADR 0055 D5): a team run — v51's batch dispatch with a manager as
     the dispatcher. The manager is a hop, ``manager@<role>``, under whoever
@@ -5379,11 +5429,12 @@ def submit_team(
             role=str(task.get("role") or manager),
             team=team,
             deferred_asks=deferred_asks,
-            # D9: the hosts the operator answered for this team, each member
-            # taking the ones it asks (``_preanswer`` intersects).
-            preanswered=preanswered,
+            # D23: the member's manifest the batch card listed and a human
+            # approved; D9's team answer arrives as one copy per member, each
+            # taking the hosts it asks (``_preanswer`` intersects).
+            preanswered=preanswered[index] if index < len(preanswered) else None,
         )
-        for task in tasks
+        for index, task in enumerate(tasks)
     ]
     return {
         "team": team,
