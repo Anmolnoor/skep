@@ -351,6 +351,71 @@ SANDBOX_READABLE_SECRETS: dict[str, str] = {
 }
 _HOME_SECRET_PATHS = tuple(rel for rel in HOME_SECRETS if rel not in SANDBOX_READABLE_SECRETS)
 
+# R5 (D19): a read-only bind does not stop connect(), so bwrap's ``--ro-bind
+# / /`` left an agent socket outside /tmp and /run reachable. These hold one
+# (relative to every home; ~/.ssh and ~/.gnupg are already in HOME_SECRETS).
+# Hidden like a secret on every backend; Seatbelt refuses the connect anyway
+# (W34). ponytail: known places only — a socket at a path nobody listed stays
+# reachable on bubblewrap (docs/sandboxing.md says what would close it).
+AGENT_SOCKETS: tuple[str, ...] = (
+    ".1password",  # 1Password SSH agent: agent.sock
+    ".bitwarden-ssh-agent.sock",
+    ".docker/desktop",  # Docker Desktop for Linux: docker.sock
+    ".docker/run",
+    ".colima",
+    ".lima",
+    ".rd/docker.sock",  # Rancher Desktop (its bin/ holds kubectl, helm: on PATH)
+    ".orbstack/run",
+    ".local/share/containers/podman/machine",
+)
+# R5 (I12): what each Linux backend alone cannot close, said wherever the
+# wall is described (doctor's sandbox line, docs/sandboxing.md). A podman run
+# always gets its own network namespace, so no abstract socket reaches it.
+SOCKET_GAP = {
+    "bubblewrap": (
+        "Not walled on Linux: an allow-all run can connect to abstract unix sockets "
+        "(session D-Bus, X11), and any run to a unix socket at a path outside /tmp "
+        "and /run that the mask list does not name."
+    ),
+    PODMAN: (
+        "Not walled on podman: any run can connect to a unix socket under the host "
+        "dirs it binds (/home /var /etc /usr /opt) at a path the mask list does not name."
+    ),
+}
+# R5: wherever the operator's own agents listen (serve's environment).
+_SOCKET_ENV = ("SSH_AUTH_SOCK", "DOCKER_HOST", "CONTAINER_HOST")
+
+
+def _env_sockets() -> list[Path]:
+    """The unix sockets ``$SSH_AUTH_SOCK`` and a ``unix://`` docker/podman
+    host name — only real sockets, so a stray value can never mask a dir."""
+    found = []
+    for name in _SOCKET_ENV:
+        value = os.environ.get(name, "").removeprefix("unix://")
+        if value.startswith("/") and _is_socket(Path(value)):
+            found.append(Path(value))
+    return found
+
+
+def _sockets_under(roots: Iterable[Path]) -> list[Path]:
+    """R5: the sockets inside a read-only root (git's fsmonitor socket in the
+    common dir): bound read-only they stay connectable, so each gets
+    /dev/null laid over it. ponytail: ``objects/`` is skipped — git keeps
+    only object files there, and it is the one big subtree."""
+    found = []
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [name for name in dirnames if name != "objects"]
+            found += [path for name in filenames if _is_socket(path := Path(dirpath, name))]
+    return found
+
+
+def _is_socket(path: Path) -> bool:
+    try:
+        return path.is_socket()
+    except OSError:
+        return False
+
 
 def _refuse_home_inside(skep_home: Path, writable_roots: Iterable[Path]) -> None:
     """ES-F5 (B46): a skep home under a worker-writable root hands the worker
@@ -372,12 +437,16 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
     dir secret_floor takes (B148)."""
     home = Path.home()
     supervisor = skep_home / "supervisor"
-    candidates = [home / rel for rel in _HOME_SECRET_PATHS]
+    candidates = [home / rel for rel in (*_HOME_SECRET_PATHS, *AGENT_SOCKETS)]
     # W40: every other home's credential files, its engine logins included
     own = {home.resolve(), Path(os.path.abspath(home))}
     candidates += [
-        other / rel for other in other_homes() if other.resolve() not in own for rel in HOME_SECRETS
+        other / rel
+        for other in other_homes()
+        if other.resolve() not in own
+        for rel in (*HOME_SECRETS, *AGENT_SOCKETS)
     ]
+    candidates += _env_sockets()
     candidates += [skep_home / SERVE_ENV, supervisor / "audit", supervisor / "chat-attachments"]
     readable = {"llm-secret", *_active_llm_key_names(supervisor)} if worker_llm_key else set()
     if supervisor.is_dir():
@@ -550,10 +619,19 @@ def _bubblewrap_args(
         args.extend(["--ro-bind", str(pinned), str(pinned)])
     for denied in read_denied:
         # ES-F4: after the writable binds, so a mask wins inside one too.
-        # /tmp and /run are fresh tmpfs here: their host paths do not exist.
-        if denied.parts[1:2] in (("tmp",), ("run",)):
+        # /tmp and /run are fresh tmpfs here: their host paths do not exist,
+        # except inside a root bound back in (R5: a repo's git dir under /tmp).
+        if denied.parts[1:2] in (("tmp",), ("run",)) and not any(
+            denied.is_relative_to(root) for root in [*readable_roots, *writable_roots]
+        ):
             continue
-        args.extend(_mask_args(denied, dev_null=["--ro-bind", "/dev/null", str(denied)]))
+        args.extend(
+            _mask_args(
+                denied,
+                dev_null=["--ro-bind", "/dev/null", str(denied)],
+                tmpfs=["--tmpfs", str(denied)],
+            )
+        )
     if network.is_domain_list:
         assert unix_socket_path is not None and proxy_port is not None
         args.extend(["--bind", unix_socket_path, SANDBOX_PROXY_SOCKET])
@@ -574,9 +652,9 @@ def _bubblewrap_args(
     return args
 
 
-def _mask_args(path: Path, *, dev_null: list[str]) -> list[str]:
+def _mask_args(path: Path, *, dev_null: list[str], tmpfs: list[str]) -> list[str]:
     """An empty tmpfs over a secret directory, /dev/null over a secret file."""
-    return ["--tmpfs", str(path)] if path.is_dir() else dev_null
+    return tmpfs if path.is_dir() else dev_null
 
 
 def _podman_args(
@@ -622,7 +700,15 @@ def _podman_args(
     for pinned in write_denied:  # W31: read-only over its writable root
         args.extend(["-v", f"{pinned}:{pinned}:ro"])
     for denied in read_denied:  # ES-F4: /home rides in read-only; hide these
-        args.extend(_mask_args(denied, dev_null=["-v", f"/dev/null:{denied}:ro"]))
+        # R5: podman's --tmpfs copies the directory it covers into the tmpfs
+        # by default (tmpcopyup), so the mask showed every secret under it.
+        args.extend(
+            _mask_args(
+                denied,
+                dev_null=["-v", f"/dev/null:{denied}:ro"],
+                tmpfs=["--tmpfs", f"{denied}:notmpcopyup"],
+            )
+        )
     if roots:
         # Popen(cwd=workspace) only moves the podman CLIENT; the container's
         # workdir needs pinning explicitly (workspace is always the first root).
@@ -758,6 +844,9 @@ def write_profile(
     probe = require_usable(backend)
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
+    if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
+        extra_readable = list(extra_readable)
+        read_denied += _sockets_under(extra_readable)
     if probe.backend == PODMAN:
         return _write_argv_profile(
             profile_path,

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .profile import PersonalProfile, load_profile, profile_path
+from .supervisor.sandbox import SOCKET_GAP
 from .supervisor.sandbox import availability as sandbox_availability
 
 _STALE_PENDING_DAYS = 7
@@ -866,9 +867,10 @@ def _sandbox_check() -> dict[str, Any]:
     probe = sandbox_availability()
     if probe.usable:
         backend = probe.backend or "native"
+        gap = f" {SOCKET_GAP[backend]}" if backend in SOCKET_GAP else ""
         return {
             "status": "ready",
-            "detail": f"{backend} backend is usable.",
+            "detail": f"{backend} backend is usable.{gap}",
             "backend": probe.backend,
         }
 

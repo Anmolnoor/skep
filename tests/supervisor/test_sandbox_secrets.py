@@ -46,6 +46,8 @@ def no_other_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from skep.supervisor import secret_floor
 
     monkeypatch.setattr(secret_floor, "HOME_DIRS", (f"{tmp_path}/no-homes/*",))
+    for name in sandbox._SOCKET_ENV:  # R5: nor the sockets this shell's env names
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture()
@@ -227,7 +229,8 @@ def test_bwrap_and_podman_mask_the_secret_paths(fake_homes: tuple[Path, Path]) -
         read_denied=masked,
     )
     assert f"/dev/null:{token}:ro" in pod
-    assert pod[pod.index(str(home / ".ssh")) - 1] == "--tmpfs"
+    # R5: notmpcopyup, or podman copies the secrets into the mask
+    assert pod[pod.index(f"{home / '.ssh'}:notmpcopyup") - 1] == "--tmpfs"
 
 
 def test_bwrap_skips_masks_already_hidden_by_its_tmpfs() -> None:
@@ -238,6 +241,21 @@ def test_bwrap_skips_masks_already_hidden_by_its_tmpfs() -> None:
         read_denied=[Path("/tmp/x/serve-token"), Path("/run/user/1/y")],
     )
     assert "/tmp/x/serve-token" not in args and "/run/user/1/y" not in args
+
+
+def test_bwrap_masks_a_socket_inside_a_root_it_binds_back_into_tmp() -> None:
+    """R5: /tmp is a fresh tmpfs except where a root is bound back in (a repo
+    under /tmp): a socket in that git dir stayed connectable, its mask skipped."""
+    sock = "/tmp/repo/.git/fsmonitor--daemon.ipc"
+    args = sandbox._bubblewrap_args(
+        writable_roots=[],
+        network=sandbox.DENY_ALL_NETWORK,
+        proxy_port=None,
+        read_denied=[Path(sock), Path("/tmp/x/serve-token")],
+        readable_roots=[Path("/tmp/repo/.git")],
+    )
+    assert args[args.index(sock) - 2 : args.index(sock)] == ["--ro-bind", "/dev/null"]
+    assert "/tmp/x/serve-token" not in args
 
 
 _READER = """
@@ -519,3 +537,59 @@ def test_the_mask_list_covers_every_home_and_spares_only_the_workers_own_npmrc(
     assert other / "code" / "x.py" not in masked
     assert home / ".claude" / ".credentials.json" in masked
     assert home / ".npmrc" not in masked
+
+
+def test_known_agent_socket_places_are_masked_under_every_home(
+    fake_homes: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5 (D19): a read-only bind does not stop connect(), so bwrap hides the
+    places an agent socket lives (1Password, Docker Desktop, colima, ...)
+    under this home and every other one, like the secret floor."""
+    from skep.supervisor import secret_floor
+
+    home, skep_home = fake_homes
+    other = tmp_path / "Users" / "bob"
+    for base in (home, other):
+        for rel in sandbox.AGENT_SOCKETS:
+            (base / rel).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(secret_floor, "HOME_DIRS", (f"{tmp_path}/Users/*",))
+    masked = set(sandbox.secret_paths(skep_home))
+    assert {base / rel for base in (home, other) for rel in sandbox.AGENT_SOCKETS} <= masked
+
+
+def test_the_sockets_the_operators_env_names_are_masked_and_nothing_else(
+    fake_homes: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5: $SSH_AUTH_SOCK and a unix:// DOCKER_HOST point at the operator's
+    agents wherever they listen; a value that is no socket masks nothing (a
+    stray SSH_AUTH_SOCK=$HOME must never lay a tmpfs over the home)."""
+    import os
+    import socket
+
+    home, skep_home = fake_homes
+    monkeypatch.chdir(home)
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind("d.sock")  # relative: AF_UNIX caps a path at 108 bytes
+    try:
+        monkeypatch.setenv("DOCKER_HOST", f"unix://{home / 'd.sock'}")
+        monkeypatch.setenv("SSH_AUTH_SOCK", str(home))
+        monkeypatch.setenv("CONTAINER_HOST", "ssh://core@localhost:22/run/podman.sock")
+        masked = set(sandbox.secret_paths(skep_home))
+    finally:
+        srv.close()
+    assert home / "d.sock" in masked
+    assert home not in masked and Path(os.sep) not in masked
+
+
+def test_rancher_desktops_socket_is_masked_but_its_tools_stay_on_path(
+    fake_homes: tuple[Path, Path],
+) -> None:
+    """R5: ~/.rd holds Rancher Desktop's docker.sock AND its bin/ (kubectl,
+    helm, nerdctl) that a worker's PATH may name; only the socket is hidden."""
+    home, skep_home = fake_homes
+    (home / ".rd" / "bin").mkdir(parents=True)
+    (home / ".rd" / "bin" / "kubectl").write_text("#!/bin/sh\n", encoding="utf-8")
+    (home / ".rd" / "docker.sock").write_text("", encoding="utf-8")
+    masked = set(sandbox.secret_paths(skep_home))
+    assert home / ".rd" / "docker.sock" in masked
+    assert not {home / ".rd", home / ".rd" / "bin"} & masked
