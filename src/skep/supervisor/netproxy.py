@@ -33,7 +33,7 @@ from pathlib import Path
 from socketserver import StreamRequestHandler, ThreadingTCPServer, ThreadingUnixStreamServer
 from types import TracebackType
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 _CONNECT_TIMEOUT = 10.0
 # v100-F6: a POLL interval, not a deadline. Both relay loops treat a recv
@@ -552,7 +552,11 @@ class _ProxyHandler(StreamRequestHandler):
         upstream and stream the reply back. Logs nothing but a counter."""
         upstream = urlsplit(relay.upstream)
         base = upstream.path.rstrip("/")
-        if base and path.split("?", 1)[0] != base and not path.startswith(base + "/"):
+        bare = path.split("?", 1)[0]
+        # A dot segment (also percent-encoded) would walk out of the base path
+        # at the provider, which normalizes after this check.
+        dotted = any(seg in (".", "..") for seg in unquote(bare).split("/"))
+        if dotted or (base and bare != base and not bare.startswith(base + "/")):
             self.server.note_relay(relayed=False)
             self._reply(403, f"Forbidden: the provider relay serves {base}/ only")
             return

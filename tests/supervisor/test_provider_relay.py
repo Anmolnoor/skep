@@ -102,13 +102,20 @@ def test_a_wrong_or_missing_token_is_refused_before_any_upstream_connection(
     assert fake.requests == []
 
 
-def test_the_relay_is_pinned_to_the_upstream_base_path(upstream: tuple[FakeOpenAI, str]) -> None:
+@pytest.mark.parametrize(
+    "path", [b"/admin", b"/v1/../admin", b"/v1/%2e%2e/admin", b"/v1/./../admin?x=1"]
+)
+def test_the_relay_is_pinned_to_the_upstream_base_path(
+    upstream: tuple[FakeOpenAI, str], path: bytes
+) -> None:
     fake, key = upstream
     token = secrets.token_hex(16)
     with FilteringProxy((), relay=_relay(fake, key, token)) as proxy:
         reply = _raw(
             proxy.port,
-            b"GET /admin HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "
+            b"GET "
+            + path
+            + b" HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "
             + token.encode()
             + b"\r\n\r\n",
         )
