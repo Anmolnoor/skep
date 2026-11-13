@@ -259,8 +259,16 @@ def spawn_worker(
             and relay is None
             and getattr(CASTES.get(task.worker_kind), "needs_provider", True),
             write_denied=write_denied,
-            loopback_ports=run_loopback_ports(
-                task.permissions.loopback_ports, task.permissions.provider_hosts, config.home
+            loopback_ports=(
+                *run_loopback_ports(
+                    task.permissions.loopback_ports, task.permissions.provider_hosts, config.home
+                ),
+                # ADR 0062 x D6: an allow-all run's relay-only proxy is one of its ports.
+                *(
+                    (network_proxy_port,)
+                    if relay is not None and network.is_allow_all and network_proxy_port
+                    else ()
+                ),
             ),
             unmasked=unmasked,
         )

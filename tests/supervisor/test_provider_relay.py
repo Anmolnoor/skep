@@ -762,3 +762,60 @@ def test_an_https_provider_is_verified_against_the_same_roots_as_a_direct_call(
         server.server_close()  # type: ignore[attr-defined]
     assert direct_ok is trusted
     assert reply.startswith(b"HTTP/1.1 200 " if trusted else b"HTTP/1.1 502 "), reply
+
+
+@pytest.mark.parametrize(
+    ("network", "relayed", "opened"),
+    [(["*"], True, True), (["*"], False, False), (["pypi.org"], True, False)],
+    ids=["allow-all-relayed", "allow-all-direct", "domain-list"],
+)
+def test_an_allow_all_relayed_run_opens_its_relay_port_in_the_loopback_wall(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    network: list[str],
+    relayed: bool,
+    opened: bool,
+) -> None:
+    """ES-INT (V6b x R2a D6): an allow-all profile keeps loopback closed but
+    for the run's ports. Its relay-only proxy port must be one of them, or a
+    Seatbelt worker cannot reach its model at all. A domain-list run already
+    pins its egress to the proxy port; a direct run opens nothing new."""
+    import subprocess
+
+    from skep.supervisor import SupervisorConfig, sandbox, spawner
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+    from skep.worker_contract import Permissions
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        sandbox, "require_usable", lambda backend=None: sandbox.SandboxAvailability(True)
+    )
+    monkeypatch.setattr(sandbox, "write_profile", lambda path, **kw: seen.update(kw) or path)
+    monkeypatch.setattr(sandbox, "wrap_command", lambda argv, profile, backend=None: argv)
+    monkeypatch.setattr(spawner, "git_metadata_writable_roots", lambda _ws: ())
+    monkeypatch.setattr(spawner, "git_metadata_readable_roots", lambda _ws: ())
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("P", (), {"pid": 1})())
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config = SupervisorConfig(
+        home=tmp_path / "skep" / "supervisor", worker_command=("w",), sandbox=True
+    )
+    task = mint_task(
+        workspace=workspace,
+        instructions="x",
+        budget=DEFAULT_BUDGET,
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=network, env_allowlist=[]
+        ),
+    )
+    relay = ProviderRelay(upstream="http://p.test", token="t", key="k", protocol="ollama")
+    spawner.spawn_worker(
+        config,
+        task,
+        tmp_path / "t.json",
+        tmp_path / "o.json",
+        log_path=tmp_path / "w.log",
+        network_proxy_port=43210,
+        relay=relay if relayed else None,
+    )
+    assert (43210 in tuple(seen["loopback_ports"])) is opened  # type: ignore[arg-type]
