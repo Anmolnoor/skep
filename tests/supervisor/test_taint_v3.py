@@ -942,3 +942,4 @@ def test_w7_every_check_3_probe_is_a_network_line() -> None:
                  "env curl https://x.example/", "ls && curl https://x.example/"):  # fmt: skip
         assert reaches_network(line), line
     assert not reaches_network("ls -la ; git status")
+    assert reaches_network("echo `whoami`")  # unreadable: counts
