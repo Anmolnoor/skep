@@ -555,3 +555,32 @@ def test_a_login_that_fails_at_spawn_time_ends_the_run_honestly(
     assert outcome.record.state == "worker_crashed"
     log = (config.audit_dir / outcome.record.task_id / "worker.log").read_text(encoding="utf-8")
     assert "codex_login_unusable" in log
+
+
+def test_no_auth_env_names_the_chatgpt_login_when_one_exists(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F123 (I9): a refusal that says only "set OPENAI_API_KEY" to someone
+    whose plan login is right there teaches the wrong fix."""
+    import os
+
+    import skep.supervisor.engines as engines_module
+    from skep.supervisor.dispatch import run_task
+    from tests.supervisor.test_codex_login import write_fake_login
+
+    _usable_sandbox(monkeypatch)
+    monkeypatch.setattr(engines_module, "engine_available", lambda e: (True, "/usr/bin/codex"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    _bind(config, repo, {"coding_engine": "codex", "verify_command": "true"})
+
+    def refusal() -> str:
+        with pytest.raises(ValueError) as excinfo:
+            run_task(repo, "add a docstring", config=config, coding_engine="codex")
+        return str(excinfo.value)
+
+    assert "--codex-chatgpt-login" not in refusal()  # no login on this host
+    write_fake_login(Path(os.environ["CODEX_HOME"]))
+    message = refusal()
+    assert "NO AUTH ENV" in message
+    assert "ChatGPT plan login" in message
+    assert "--codex-chatgpt-login" in message and "codex_chatgpt_login=true" in message

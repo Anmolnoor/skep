@@ -484,6 +484,14 @@ def run_task(
             from .codex_login import AUTH_SOURCE, POLICY_KEY, login_status
 
             if _project_policy(run_store, config, repo).get(POLICY_KEY) is not True:
+                if login_status().present:
+                    # ES-F123 (I9): name the other way in when it is right here.
+                    refusal += (
+                        " — or let this project's codex runs use your ChatGPT plan "
+                        f"login: `skep project setup {repo} --engine codex "
+                        "--codex-chatgpt-login` (chat: setup_project "
+                        "codex_chatgpt_login=true)"
+                    )
                 raise ValueError(refusal)
             login = login_status(min_seconds=(budget or DEFAULT_BUDGET).wall_clock_seconds)
             if login.problem is not None:
