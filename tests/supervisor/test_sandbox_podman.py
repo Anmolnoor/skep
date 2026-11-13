@@ -6,10 +6,12 @@ can actually run overlay-rootfs podman.
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from skep import landlock
 from skep.supervisor import sandbox
 from skep.supervisor.config import SupervisorConfig
 from skep.supervisor.sandbox import (
@@ -76,6 +78,7 @@ def test_write_profile_and_wrap_command_roundtrip_podman(
         lambda backend=None: SandboxAvailability(True, backend=backend or "bubblewrap"),
     )
     monkeypatch.setattr(sandbox, "_podman_binary", lambda: "/usr/bin/podman")
+    monkeypatch.setattr(landlock, "abi", lambda: 0)  # no Landlock: argv as before R5b
     profile = sandbox.write_profile(
         tmp_path / "sandbox.profile.sb",
         workspace=tmp_path / "ws",
@@ -93,6 +96,30 @@ def test_write_profile_and_wrap_command_roundtrip_podman(
     bwrap_profile.write_text('# bubblewrap argv\n["--ro-bind"]\n')
     with pytest.raises(sandbox.SandboxUnavailableError):
         sandbox.wrap_command(["x"], bwrap_profile, backend="podman")
+
+
+def test_podman_runs_the_landlock_step_inside_the_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5b: the same step as bubblewrap, in the command slot after rootfs:O."""
+    monkeypatch.setattr(
+        sandbox, "availability", lambda backend=None: SandboxAvailability(True, backend=backend)
+    )
+    monkeypatch.setattr(sandbox, "_podman_binary", lambda: "/usr/bin/podman")
+    monkeypatch.setattr(landlock, "abi", lambda: 9)
+    workspace = tmp_path / "ws"
+    profile = sandbox.write_profile(
+        tmp_path / "sandbox.profile",
+        workspace=workspace,
+        skep_home=tmp_path / "skep-home",
+        network=DENY_ALL_NETWORK,
+        backend="podman",
+    )
+    argv = sandbox.wrap_command(["python", "-m", "worker"], profile, backend="podman")
+    step = [sys.executable, "-P", "-m", "skep.landlock", "--scope-abstract"]
+    step += ["--unix-root", str(workspace), "--", "python", "-m", "worker"]
+    assert argv[-len(step) :] == step
+    assert argv[-len(step) - 1].endswith(":O")
 
 
 def test_resolve_sandbox_backend_falls_back_loudly_never_openly(
@@ -251,3 +278,66 @@ def test_podman_args_bind_readable_roots_read_only_before_writable(tmp_path: Pat
         readable_roots=[common],
     )
     assert args.index(f"{common}:{common}:ro") < args.index(f"{objects}:{objects}")
+
+
+_PROBE_CONNECT = """
+import socket, sys
+c = socket.socket(socket.AF_UNIX)
+try:
+    c.connect(sys.argv[1])
+    print("CONNECTED")
+except OSError as exc:
+    print(type(exc).__name__)
+"""
+
+
+@pytest.mark.skipif(
+    not _PODMAN_LIVE.usable, reason=f"podman overlay-rootfs unusable: {_PODMAN_LIVE.detail}"
+)
+@pytest.mark.parametrize("scoping", ["masks-only", "landlock"])
+def test_a_real_podman_worker_reaches_an_unlisted_home_socket_only_without_landlock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scoping: str
+) -> None:
+    """R5b: podman binds /home read-only, so a socket there at a path no mask
+    names was connectable; Landlock ABI 9's path-socket right refuses it."""
+    import socket
+
+    from skep.supervisor import secret_floor
+
+    abi = landlock.abi() if scoping == "landlock" else 0
+    if scoping == "landlock" and abi < landlock.ABI_RESOLVE_UNIX:
+        pytest.skip(f"this kernel's Landlock ABI is {abi}; path sockets need 9")
+    monkeypatch.setattr(landlock, "abi", lambda: abi)
+    home = tmp_path / "fakehome"
+    (home / "apps").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(secret_floor, "HOME_DIRS", (f"{tmp_path}/no-homes/*",))
+    monkeypatch.chdir(home / "apps")
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind("app.sock")  # relative: AF_UNIX caps a path at 108 bytes
+    srv.listen(1)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    try:
+        profile = sandbox.write_profile(
+            tmp_path / "sandbox.profile",
+            workspace=workspace,
+            skep_home=tmp_path / "skep-home",
+            network=DENY_ALL_NETWORK,
+            backend="podman",
+        )
+        argv = sandbox.wrap_command(
+            [
+                "/bin/sh",
+                "-c",
+                f"cd {home / 'apps'} && {sys.executable} -c '{_PROBE_CONNECT}' app.sock",
+            ],
+            profile,
+            backend="podman",
+        )
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    finally:
+        srv.close()
+    assert proc.returncode == 0, proc.stderr
+    expected = "PermissionError" if scoping == "landlock" else "CONNECTED"
+    assert proc.stdout.split() == [expected], proc.stdout

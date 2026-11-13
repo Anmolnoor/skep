@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from skep import landlock
 from skep.supervisor import sandbox
 
 
@@ -169,6 +170,60 @@ def test_linux_bubblewrap_domain_list_still_needs_a_proxy_and_socket(
             network=sandbox.NetworkPolicy(allow=("pypi.org",)),
             proxy_port=54321,  # port but no socket path
         )
+
+
+def _landlock_step(*flags: str) -> list[str]:
+    return [sys.executable, "-P", "-m", "skep.landlock", *flags, "--"]
+
+
+@pytest.mark.parametrize("abi", [0, 5, 6, 8, 9, 10])
+def test_linux_bubblewrap_runs_the_landlock_step_the_kernel_supports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, abi: int
+) -> None:
+    """R5b: abstract sockets scoped from ABI 6, path sockets from ABI 9 (the
+    worker's writable roots are the only rules); below 6 the argv is as before."""
+    _linux_with_bwrap(monkeypatch)
+    monkeypatch.setattr(landlock, "abi", lambda: abi)
+    workspace, results = tmp_path / "workspace", tmp_path / "results"
+    evidence = sandbox.write_profile(
+        tmp_path / "sandbox.profile",
+        workspace=workspace,
+        skep_home=tmp_path / "skep-home",
+        extra_writable=[results],
+        network=sandbox.ALLOW_ALL_NETWORK,
+    )
+    argv = sandbox.wrap_command(["python", "worker.py"], evidence)
+
+    flags = ["--scope-abstract"] if abi >= 6 else []
+    if abi >= 9:
+        flags += ["--unix-root", str(workspace), "--unix-root", str(results)]
+    tail = [*_landlock_step(*flags), "python", "worker.py"] if flags else ["python", "worker.py"]
+    assert argv[-len(tail) - 1 :] == ["--", *tail]  # bwrap's own separator, then the step
+    assert ("skep.landlock" in argv) == bool(flags)
+
+
+def test_linux_bubblewrap_proxied_run_scopes_the_worker_not_the_netshim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R5b: the netshim reaches the proxy bridge (a path socket outside the
+    worker's roots), so the Landlock step runs after it, before the worker."""
+    _linux_with_bwrap(monkeypatch)
+    monkeypatch.setattr(landlock, "abi", lambda: 10)
+    workspace = tmp_path / "workspace"
+    evidence = sandbox.write_profile(
+        tmp_path / "sandbox.profile",
+        workspace=workspace,
+        skep_home=tmp_path / "skep-home",
+        network=sandbox.NetworkPolicy(allow=("pypi.org",)),
+        proxy_port=54321,
+        unix_socket_path="/tmp/skep-x/p.sock",
+    )
+    argv = sandbox.wrap_command(["python", "worker.py"], evidence)
+
+    step = _landlock_step("--scope-abstract", "--unix-root", str(workspace))
+    assert argv[-len(step) - 2 :] == [*step, "python", "worker.py"]
+    assert argv.index("skep.netshim") < argv.index("skep.landlock")
+    assert argv.count("--") == 2  # bwrap's, then the step's (netshim passes it on)
 
 
 def _contains_arg_triple(argv: list[str], flag: str, first: str, second: str) -> bool:

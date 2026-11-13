@@ -35,6 +35,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .. import landlock
 from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, other_homes
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
@@ -652,6 +653,19 @@ def _bubblewrap_args(
     return args
 
 
+def _landlock_step(writable_roots: Iterable[Path]) -> list[str]:
+    """R5b: the in-sandbox step that scopes the worker's unix sockets with
+    what the running kernel's Landlock ABI offers; none below ABI 6 (the
+    run carries on with the masks alone, and doctor says so). ``-P``: the
+    worker's cwd must not shadow skep's own module."""
+    abi = landlock.abi()
+    flags = ["--scope-abstract"] if abi >= landlock.ABI_SCOPE_ABSTRACT else []
+    if abi >= landlock.ABI_RESOLVE_UNIX:
+        for root in writable_roots:
+            flags += ["--unix-root", str(root)]
+    return [sys.executable, "-P", "-m", "skep.landlock", *flags] if flags else []
+
+
 def _mask_args(path: Path, *, dev_null: list[str], tmpfs: list[str]) -> list[str]:
     """An empty tmpfs over a secret directory, /dev/null over a secret file."""
     return tmpfs if path.is_dir() else dev_null
@@ -848,32 +862,35 @@ def write_profile(
         extra_readable = list(extra_readable)
         read_denied += _sockets_under(extra_readable)
     if probe.backend == PODMAN:
-        return _write_argv_profile(
-            profile_path,
-            _podman_args(
-                writable_roots=[workspace, *extra_writable],
-                network=network,
-                rootfs=_podman_rootfs_skeleton(profile_path.parent),
-                read_denied=read_denied,
-                readable_roots=extra_readable,
-                write_denied=write_denied,
-            ),
-            header=_PODMAN_HEADER,
+        extra_writable = list(extra_writable)
+        args = _podman_args(
+            writable_roots=[workspace, *extra_writable],
+            network=network,
+            rootfs=_podman_rootfs_skeleton(profile_path.parent),
+            read_denied=read_denied,
+            readable_roots=extra_readable,
+            write_denied=write_denied,
         )
+        # podman's command slot follows rootfs:O; the worker argv lands after "--"
+        if step := _landlock_step([workspace, *extra_writable]):
+            args += [*step, "--"]
+        return _write_argv_profile(profile_path, args, header=_PODMAN_HEADER)
     if probe.backend == "bubblewrap":
         writable_roots = [workspace, *extra_writable]
-        return _write_bubblewrap_profile(
-            profile_path,
-            _bubblewrap_args(
-                writable_roots=writable_roots,
-                network=network,
-                proxy_port=proxy_port,
-                unix_socket_path=unix_socket_path,
-                read_denied=read_denied,
-                readable_roots=extra_readable,
-                write_denied=write_denied,
-            ),
+        args = _bubblewrap_args(
+            writable_roots=writable_roots,
+            network=network,
+            proxy_port=proxy_port,
+            unix_socket_path=unix_socket_path,
+            read_denied=read_denied,
+            readable_roots=extra_readable,
+            write_denied=write_denied,
         )
+        # After the netshim when there is one (it alone needs the proxy
+        # bridge); wrap_command's "--" then ends the step's options.
+        if step := _landlock_step(writable_roots):
+            args += step if network.is_domain_list else ["--", *step]
+        return _write_bubblewrap_profile(profile_path, args)
     # ES-F5 (B11): no blanket /tmp, /private/tmp, /var/folders roots — they
     # were shared by every run (run B read run A's files) and held any
     # SKEP_HOME placed under $TMPDIR. Each run's TMPDIR is already private,
