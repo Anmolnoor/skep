@@ -265,8 +265,9 @@ class _ProxyServer(ThreadingTCPServer):
         allowlist: tuple[str, ...],
         denied_ports: tuple[int, ...] = (),
         asks: tuple[str, ...] = (),
+        port: int = 0,
     ) -> None:
-        super().__init__(("127.0.0.1", 0), _ProxyHandler)
+        super().__init__(("127.0.0.1", port), _ProxyHandler)
         self.allowlist = allowlist
         self.denied_ports = denied_ports
         self.asks = asks  # W30: named in the 403, never admitted
@@ -507,8 +508,11 @@ class FilteringProxy:
         unix_socket_path: str | None = None,
         denied_loopback_ports: tuple[int, ...] = (),
         asks: tuple[str, ...] | list[str] = (),
+        port: int = 0,  # ADR 0060: a re-adopted worker's profile names its port
     ) -> None:
-        self._server = _ProxyServer(tuple(allowlist), tuple(denied_loopback_ports), tuple(asks))
+        self._server = _ProxyServer(
+            tuple(allowlist), tuple(denied_loopback_ports), tuple(asks), port
+        )
         self._unix_path = unix_socket_path
         self._unix_server = (
             _ProxyUnixServer(unix_socket_path, self._server)
