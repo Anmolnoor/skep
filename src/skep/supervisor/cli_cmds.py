@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -761,6 +762,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     resolved_policy: ResolvedRunPolicy | None = None
     delegation: dict[str, Any] | None = None
     delegation_note: str | None = None
+    answered: dict[str, Any] = {}
     try:
         if args.template:
             template_bound = (
@@ -859,7 +861,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             # first-run R3 (ADR 0055 D5): the same narrowing POST /api/runs does.
             from fastapi import HTTPException
 
-            from .serve.actions import delegate_permissions
+            from .serve.actions import _preanswer, delegate_permissions
             from .serve.settings import ConfigHolder
 
             try:
@@ -875,6 +877,12 @@ def cmd_run(args: argparse.Namespace) -> int:
                 )
             except HTTPException as exc:
                 return _err(str(exc.detail), next_command="skep role list")
+            # D9: on a home with no approved baseline these asks have nobody
+            # to answer them once the run is going — ask now, or refuse.
+            answer = _answer_hosts(store, [{"network_ask": permissions.network_ask}], args)
+            if isinstance(answer, int):
+                return answer
+            permissions, answered = _preanswer(permissions, answer)
     except PolicyResolutionError as exc:
         return _err(
             str(exc),
@@ -921,6 +929,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         from .serve.actions import delegated_decision, record_delegation
 
         dispatch_decision = delegated_decision(dispatch_decision, delegation, delegation_note)
+        if answered:  # D9: what the operator answered at the prompt or by flag
+            dispatch_decision = replace(
+                dispatch_decision,
+                constraints={
+                    **(dispatch_decision.constraints or {}),
+                    "manifest_preanswered": answered,
+                },
+            )
         hop = delegation
 
         def on_run_created(task_id: str) -> None:
@@ -990,6 +1006,36 @@ def cmd_run(args: argparse.Namespace) -> int:
     return STATE_EXIT_CODES.get(record.state, 3)
 
 
+def _answer_hosts(
+    store: RunStore, manifests: list[dict[str, Any]], args: argparse.Namespace
+) -> dict[str, Any] | None | int:
+    """D9: a role or team run on a home with no approved baseline. With
+    ``--answer-host`` those hosts are answered (a subset of the asks); on a
+    terminal the operator is asked y/n for all of them; otherwise refused.
+    Returns the pre-answer for ``_preanswer``/``submit_team``, or an exit code."""
+    from fastapi import HTTPException
+
+    from .serve.actions import answered_hosts, unanswerable_hosts
+
+    flag = getattr(args, "answer_hosts", None)
+    hosts = unanswerable_hosts(store, manifests)
+    if flag is None and hosts and _stdin_is_interactive():
+        print("this home has no approved policy baseline; the run would ask about:")
+        for host in hosts:
+            print(f"  {host}")
+        reply = input("answer these for this run only? [y/N] ").strip().lower()
+        if reply not in ("y", "yes"):
+            return _err("not dispatched", next_command="skep policy approve  # lock a baseline")
+        flag = hosts
+    try:
+        return answered_hosts(store, manifests, flag, how="--answer-host HOST (repeatable)")
+    except HTTPException as exc:
+        return _err(
+            str(exc.detail),
+            next_command=" ".join(f"--answer-host {h}" for h in hosts) or "skep role list",
+        )
+
+
 def cmd_team(args: argparse.Namespace) -> int:
     """first-run R3 (ADR 0055 D5): `skep team` — a manager in ``--manager``'s
     role dispatches every ``--task``; one ledger thread. The same
@@ -997,7 +1043,7 @@ def cmd_team(args: argparse.Namespace) -> int:
     manager=``, in-process like ``skep run``: it waits for every member."""
     from fastapi import HTTPException
 
-    from .serve.actions import submit_team
+    from .serve.actions import submit_team, team_manifests
     from .serve.jobs import Dispatcher
     from .serve.settings import ConfigHolder
 
@@ -1016,6 +1062,20 @@ def cmd_team(args: argparse.Namespace) -> int:
     runner = Dispatcher(holder, store)
     try:
         try:
+            # D9: the team's hosts, asked about up front on a no-baseline home.
+            answer = _answer_hosts(
+                store,
+                team_manifests(
+                    holder,
+                    store,
+                    manager=args.manager,
+                    tasks=tasks,
+                    delegation_chain=args.delegated_by or [],
+                ),
+                args,
+            )
+            if isinstance(answer, int):
+                return answer
             team = submit_team(
                 holder,
                 runner,
@@ -1024,6 +1084,7 @@ def cmd_team(args: argparse.Namespace) -> int:
                 tasks=tasks,
                 delegation_chain=args.delegated_by or [],
                 deferred_asks=True,
+                preanswered=answer,
             )
         except HTTPException as exc:
             return _err(str(exc.detail), next_command="skep role list")
@@ -3296,6 +3357,15 @@ def register_supervisor_commands(
         help="dispatch as this delegator (repeat outermost first); the worker holds "
         "no more than it does (ADR 0055)",
     )
+    run.add_argument(
+        "--answer-host",
+        action="append",
+        default=None,
+        dest="answer_hosts",
+        metavar="HOST",
+        help="on a home with no approved baseline, answer this host the run would ask "
+        "about, for this run only (repeatable, D9); off a terminal it is required",
+    )
     run.add_argument("--quiet", action="store_true", help="suppress the live phase tail")
     run.set_defaults(func=cmd_run)
 
@@ -3321,6 +3391,15 @@ def register_supervisor_commands(
         help="the dispatcher above the manager, e.g. queen@operator",
     )
     team.add_argument("--execution-mode", choices=("workspace", "sandbox"), default=None)
+    team.add_argument(
+        "--answer-host",
+        action="append",
+        default=None,
+        dest="answer_hosts",
+        metavar="HOST",
+        help="on a home with no approved baseline, answer this host the run would ask "
+        "about, for this run only (repeatable, D9); off a terminal it is required",
+    )
     team.add_argument("--worker-cmd", default=None, help="worker argv prefix, as for `skep run`")
     team.set_defaults(func=cmd_team)
 

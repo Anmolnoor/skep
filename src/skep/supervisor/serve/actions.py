@@ -4685,6 +4685,55 @@ def _preanswer(
     return updated, {"network": hosts, "shell": prefixes}
 
 
+def unanswerable_hosts(store: RunStore, manifests: Sequence[dict[str, Any]]) -> list[str]:
+    """D9: the hosts these runs would ask about on a home with no approved
+    baseline where ``no_baseline`` binds (``zero_state_home``: every grant is
+    an ask, which nothing answers once a sandboxed subprocess meets it). []
+    elsewhere — on an upgraded home the asks are a role's own (V7), which
+    the worker cards and ``skep review`` answers."""
+    from ..policy_baseline import NoBaseline, verify
+    from ..policy_layers import store_home, zero_state_home
+
+    if not isinstance(verify(store_home(store)), NoBaseline) or not zero_state_home(store):
+        return []
+    return sorted({str(h) for manifest in manifests for h in manifest.get("network_ask") or []})
+
+
+def answered_hosts(
+    store: RunStore,
+    manifests: Sequence[dict[str, Any]],
+    answer: Sequence[str] | None,
+    *,
+    how: str,
+) -> dict[str, Any] | None:
+    """D9 (operator decision 2026-11-13): a role or team run the operator
+    starts. ``answer`` becomes the pre-answer (``submit_run(preanswered=)``,
+    the dispatch card's own mechanism) — refused unless every host is one
+    the manifests list as an ask. With no answer on a home with no approved
+    baseline (where every grant is an ask nothing answers once the run is
+    going) the run is refused, naming the hosts. ``how`` names this face's
+    way to answer (``answer_hosts`` / ``--answer-host``)."""
+    asked = sorted({str(h) for manifest in manifests for h in manifest.get("network_ask") or []})
+    if answer is not None:
+        beyond = sorted(set(answer) - set(asked))
+        if beyond:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{', '.join(beyond)}: not a host this run asks about "
+                f"({', '.join(asked) or 'none'})",
+            )
+        return {"network_ask": list(answer)} if answer else None
+    unanswered = unanswerable_hosts(store, manifests)
+    if unanswered:
+        raise HTTPException(
+            status_code=400,
+            detail=f"this home has no approved policy baseline, so this run would ask about "
+            f"{', '.join(unanswered)} and nothing could answer once it runs; name the hosts to "
+            f"answer for this run only in {how}, or approve a baseline (skep policy approve)",
+        )
+    return None
+
+
 def dispatch_manifest(
     holder: ConfigHolder,
     store: RunStore,
@@ -5202,6 +5251,7 @@ def submit_team(
     delegation_chain: Sequence[str] = (),
     dispatch_decision: AutonomyDecision | None = None,
     deferred_asks: bool = False,
+    preanswered: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """R3 (ADR 0055 D5): a team run — v51's batch dispatch with a manager as
     the dispatcher. The manager is a hop, ``manager@<role>``, under whoever
@@ -5251,6 +5301,9 @@ def submit_team(
             role=str(task.get("role") or manager),
             team=team,
             deferred_asks=deferred_asks,
+            # D9: the hosts the operator answered for this team, each member
+            # taking the ones it asks (``_preanswer`` intersects).
+            preanswered=preanswered,
         )
         for task in tasks
     ]
@@ -5261,6 +5314,35 @@ def submit_team(
         "dispatched": dispatched,
         "count": len(dispatched),
     }
+
+
+def team_manifests(
+    holder: ConfigHolder,
+    store: RunStore,
+    *,
+    manager: str,
+    tasks: Sequence[dict[str, Any]],
+    delegation_chain: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    """D9: what each member of ``submit_team`` would get, compiled the way
+    it compiles them (``dispatch_manifest``, no side effect)."""
+    chain = [*delegation_chain, f"manager@{manager}"]
+    return [
+        dispatch_manifest(
+            holder,
+            store,
+            repo=str(task.get("repo") or ""),
+            caste=str(task.get("caste") or "coding"),
+            execution_mode=(
+                None if task.get("execution_mode") is None else str(task["execution_mode"])
+            ),
+            engine=None if task.get("engine") is None else str(task["engine"]),
+            delegation_chain=chain,
+            role=str(task.get("role") or manager),
+            deferred_asks=True,
+        )
+        for task in tasks
+    ]
 
 
 def dispatch_run_auto_allowed(

@@ -283,5 +283,7 @@ def test_the_403_for_a_deferred_ask_says_it_needs_approval() -> None:
     )
     assert status == 403
     assert reason.startswith("Forbidden: example.com:443 needs approval for this run")
-    assert "dispatch card" in reason
+    # D9: it names how each face answers it, and no dispatch card that a
+    # `skep run --role` / REST run never had.
+    assert "dispatch card" not in reason and "--answer-host" in reason
     reason.encode("latin-1")

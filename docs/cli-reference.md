@@ -408,6 +408,16 @@ members like `skep run`; the same verb is `POST /api/teams` and the chat's
 `batch_dispatch` with `manager` (dispatched as `queen@<chat role>`). The
 manager writes no briefs of its own — the Queen or the operator does.
 
+On a home with no approved baseline (a fresh or onboarded one, where every
+grant is an ask), a role run or team run asks first: a `skep run` with `--role` and
+`skep team …` print the hosts the run would ask about and, on a terminal, ask
+y/n; yes answers them for that run only (the same pre-answer a confirmed
+dispatch card gives). Off a terminal they refuse unless `--answer-host HOST`
+(repeatable) names the hosts to answer, each one a host the run asks about.
+`POST /api/runs` with a role and `POST /api/teams` refuse with a 400 listing
+the hosts unless the body's `answer_hosts` names them (a subset of what the
+run asks).
+
 ## skep acp
 
 ```sh

@@ -218,8 +218,9 @@ def _refusal(host: str, port: int, allowlist: tuple[str, ...], asks: tuple[str, 
     if domain_allowed(host, asks):
         return (
             f"Forbidden: {target} needs approval for this run (a deferred ask) and a "
-            "subprocess cannot ask; approve it on the dispatch card, or remember the "
-            "host for the project"
+            "subprocess cannot ask; answer it when the run starts (chat: confirm the "
+            "dispatch; skep run/team: --answer-host; API: answer_hosts), or remember "
+            "the host for the project"
         )
     ports = sorted(
         pinned[1]
