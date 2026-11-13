@@ -376,8 +376,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "policy_why",
         "Verdict and deciding rule for one action. Would <scope>.<action> <value> "
-        "be allowed in this repo? Answered for the run and for the Queen; "
-        "no dispatch.",
+        "be allowed in this repo? Answered for the run and for the Queen in this "
+        "chat (its role, grants and taint); no dispatch.",
         {
             "repo": {"type": "string", "description": "repo slug or path"},
             "scope": {"type": "string", "description": "shell, network, filesystem, …"},
@@ -1116,7 +1116,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "Search file CONTENTS (ripgrep regex) or list matching FILE NAMES "
         "under one directory. Same governance as read_file: operator roots "
         "run immediately, other paths card, filesystem deny rules refuse. "
-        "Hits in credential files are left out (the result's note says so).",
+        "Hits in credential files are left out (the result's note says so). "
+        "Symlinks are listed with their targets, never followed.",
         {
             "pattern": {
                 "type": "string",
@@ -2930,6 +2931,24 @@ def chat_taint_bits(store: RunStore, chat_id: str | None) -> list[str]:
     return [] if chat_id is None else store.get_chat_taint(chat_id).bits()
 
 
+# W21: the store writes that ride READ_TOOL_SPECS and never card — but under
+# ``untrusted`` they are actions like any other and ask (a note or a task an
+# injected page wrote reaches every chat that later reads it).
+TAINT_ASKED_STORE_WRITES = frozenset({"add_note", "add_task"})
+
+
+def store_write_taint_ask(store: RunStore, chat_id: str) -> AutonomyDecision | None:
+    """The taint ask for a TAINT_ASKED_STORE_WRITES call in ``chat_id``, or
+    None (it runs in-turn, as before)."""
+    from ..policy_v3 import ACTION_REQUEST, Verdict, taint_asks, taint_verdict
+
+    taint = store.get_chat_taint(chat_id)
+    if taint_asks(taint, *ACTION_REQUEST) is None:
+        return None
+    held = Verdict("allow", "", "", "notes/inert", "operator")
+    return taint_decision(taint_verdict(held, taint, *ACTION_REQUEST, read_only=False))
+
+
 def taint_decision(verdict: Any) -> AutonomyDecision:
     """P4-1 (ADR 0059 D5): a ``taint/<rule>`` ask as the card's decision —
     the why-line on ``detail``, so the card says in plain words why a granted
@@ -3535,8 +3554,25 @@ def execute_read_tool(
 
         return registry_view()
     if name == "policy_rsop":
-        return actions.rsop_view(holder, store, str(args["repo"]))
+        rsop = actions.rsop_view(holder, store, str(args["repo"]))
+        if chat_id is not None:  # W22: what this chat adds on top
+            from .taint import taint_line
+
+            role = _chat_role(store, holder, chat_id)
+            taint = store.get_chat_taint(chat_id)
+            rsop["this_chat"] = {
+                "role": role.name if role else None,
+                "taint": taint.bits(),
+                "taint_line": taint_line(store, chat_id, taint),
+                "note": "this chat's own grants and taint apply on top of the rules "
+                "above — policy_why answers with them",
+            }
+        return rsop
     if name == "policy_why":
+        role_name = None if args.get("role") is None else str(args["role"])
+        if role_name is None and chat_id is not None:
+            chat_role = _chat_role(store, holder, chat_id)  # W22: the lane's own role
+            role_name = chat_role.name if chat_role else None
         return actions.policy_why(
             holder,
             store,
@@ -3544,8 +3580,9 @@ def execute_read_tool(
             str(args["scope"]),
             str(args["action"]),
             str(args["value"]),
-            role=None if args.get("role") is None else str(args["role"]),
+            role=role_name,
             delegation_chain=[str(hop) for hop in args.get("delegation_chain") or []],
+            chat_id=chat_id,
         )
     if name == "policy_explain":
         from ..policy_templates import explain_view
@@ -3702,10 +3739,19 @@ def execute_read_tool(
     if name == "list_tasks":
         return {"tasks": [asdict(task) for task in store.list_tasks()]}
     if name == "add_note":
-        note = store.create_note(str(args["content"]).strip(), actor=CHAT_TOOL_ACTOR)
+        # W21: the row carries the writing chat's taint to every later reader
+        note = store.create_note(
+            str(args["content"]).strip(),
+            actor=CHAT_TOOL_ACTOR,
+            taint=chat_taint_bits(store, chat_id),
+        )
         return {"note": asdict(note)}
     if name == "add_task":
-        task = store.create_task(str(args["title"]).strip(), actor=CHAT_TOOL_ACTOR)
+        task = store.create_task(
+            str(args["title"]).strip(),
+            actor=CHAT_TOOL_ACTOR,
+            taint=chat_taint_bits(store, chat_id),
+        )
         return {"task": asdict(task)}
     if name == "complete_task":
         task_id = str(args["task_id"])
@@ -4115,6 +4161,9 @@ def _execute_mutation(
             ),
             "decided_by": "operator/confirmed",
         }
+    if name in TAINT_ASKED_STORE_WRITES:
+        # W21: a store write an untrusted chat had to ask for, now confirmed
+        return execute_read_tool(name, args, store=store, holder=holder, chat_id=chat_id)
     if name == "register_mcp_server":
         from ..mcp_client import MCPError, MCPServerConfig, save_mcp_server
 
@@ -5309,6 +5358,16 @@ def _execute_mutation(
                     f"a {caste} schedule needs instructions "
                     f"(the {'shell command' if caste == 'script' else 'text to run'})"
                 )
+            if caste == "script":
+                from ..shell_prefixes import (
+                    SKEP_TRUST_REFUSAL,
+                    command_line_segments,
+                    is_skep_trust_command,
+                )
+
+                segments = command_line_segments(str(args["instructions"])) or []
+                if any(is_skep_trust_command(segment) for segment in segments):
+                    raise ValueError(SKEP_TRUST_REFUSAL)  # W20 review: nor on a timer
             if caste == "prompt" and chat_id is None:
                 raise ValueError(
                     "a prompt schedule runs its Queen turn in the chat that "
@@ -5608,6 +5667,7 @@ def _execute_mutation(
             actor=actor,
             rationale=None if args.get("rationale") is None else str(args["rationale"]),
             project_id=None if args.get("project") is None else str(args["project"]),
+            taint=chat_taint_bits(store, chat_id),  # W21: approval carries it on
         )
         return {
             "proposal_id": proposal.proposal_id,

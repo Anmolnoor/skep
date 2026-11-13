@@ -2407,6 +2407,10 @@ const COMMANDS = {
     usage: "/browser",
     desc: "register the built-in Playwright browser under the browse scope (confirm card)",
   },
+  trust: {
+    usage: "/trust [private|untrusted]",
+    desc: "trust this chat again: clear its taint (both bits by default) — yours only, never the model's; outside content read later sets it again",
+  },
 };
 
 function parseSlashCommand(text) {
@@ -3374,6 +3378,17 @@ async function viewChat(main, chatId) {
       }
       if (name === "browser") {
         await proposeCommand("setup_browser", {});
+        return;
+      }
+      if (name === "trust") {
+        // W20: typed by the operator — the decision itself, no card. The model
+        // has no tool for this and no channel reaches it.
+        if (args.some((bit) => !["private", "untrusted"].includes(bit))) {
+          commandHelp(`usage: ${spec.usage}`);
+          return;
+        }
+        commandResult("/trust",
+          await api("POST", `/api/chats/${activeChatId}/trust`, { bits: args }));
         return;
       }
       if (name === "phase") {

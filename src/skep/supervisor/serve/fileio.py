@@ -17,7 +17,9 @@ first (plans/v51 — deferred).
 
 from __future__ import annotations
 
+import os
 import subprocess
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -239,6 +241,45 @@ def read_file_branch_aware(
     return {"error": (f"not a file on the checked-out branch ({checked_out!r}): {target}{hint}")}
 
 
+def resolves_elsewhere(path: str) -> str | None:
+    """W38: where ``path`` really leads when a link makes it differ from the
+    path as written (``~`` expanded, made absolute) — None when it does not."""
+    try:
+        written = Path(os.path.abspath(Path(path).expanduser()))
+        real = written.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return None if real == written else str(real)
+
+
+# W38: how many symlinks a search lists, and how many directory entries it
+# walks to find them.
+MAX_SYMLINKS = 20
+SYMLINK_WALK_LIMIT = 20_000
+
+
+def _symlinks(root: Path, name_glob: str | None, skep_home: Path | None) -> list[dict[str, str]]:
+    """The symlinks under ``root`` (not followed — rg skips them too), each
+    with where it leads; a link into a credential file is left out.
+    ponytail: a bounded os.walk that ignores .gitignore; skips dot dirs."""
+    found: list[dict[str, str]] = []
+    seen = 0
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in [*files, *dirs]:
+            seen += 1
+            link = Path(directory) / name
+            if not link.is_symlink() or (name_glob and not fnmatch(name, name_glob)):
+                continue
+            if secret_floor_reason(link, skep_home=skep_home) is None:
+                found.append({"path": str(link), "target": str(link.resolve())})
+            if len(found) >= MAX_SYMLINKS:
+                return found
+        if seen > SYMLINK_WALK_LIMIT:
+            break
+    return found
+
+
 def read_file_result(
     path: str, *, offset: int | None = None, limit: int | None = None
 ) -> dict[str, Any]:
@@ -330,9 +371,27 @@ def search_files_result(
         "matches": hits[:MAX_SEARCH_HITS],
         "truncated": len(hits) > MAX_SEARCH_HITS,
     }
+    notes: list[str] = []
     if skipped:
-        result["note"] = (
+        notes.append(
             f"{skipped} hit(s) in credential files were left out — the secret floor "
             "(.env files, ~/.ssh and friends, skep's own tokens) is never searched or read"
         )
+    if root.is_dir():
+        name_glob: str | None
+        if target == "files" and pattern.strip():
+            name_glob = pattern if any(ch in pattern for ch in "*?[") else f"*{pattern}*"
+        else:
+            name_glob = file_glob
+        links = _symlinks(root, name_glob, skep_home)
+        if links:
+            # W38: a link is listed, never followed — the model must not report
+            # "no such file" for one, nor read through it without a card
+            result["symlinks"] = links
+            notes.append(
+                "symlinks are listed with their targets, not followed or searched — "
+                "read_file a link to read it (a card names where it resolves)"
+            )
+    if notes:
+        result["note"] = "; ".join(notes)
     return result

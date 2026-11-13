@@ -65,6 +65,23 @@ HOME_SECRETS: tuple[str, ...] = (
     ".mysql_history",
     ".sqlite_history",
 )
+# W40: where a home directory can sit (fnmatch, one path part per ``*``).
+# The floor holds under every one of them, not only under this process's
+# $HOME: another user's ~/.ssh is as secret as ours.
+# Realpath spellings too: macOS resolves /home to its data volume and
+# /var to /private/var; Fedora Atomic links /home to /var/home.
+# ponytail: the common layouts only — a home elsewhere (NFS, /export/home)
+# is covered when it is this process's own $HOME.
+HOME_DIRS: tuple[str, ...] = (
+    "/Users/*",
+    "/home/*",
+    "/root",
+    "/var/root",
+    "/private/var/root",
+    "/var/home/*",
+    "/System/Volumes/Data/Users/*",
+    "/System/Volumes/Data/home/*",
+)
 # skep's own secrets, by file name, anywhere under the skep (supervisor) home:
 # serve-token (auth.py), llm-secret / llm-secret-<id> (llm.py), and every
 # ``<name>-secret`` — channel, webhook (channels.channel_secret_path) and
@@ -108,6 +125,23 @@ def _under(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
+def _any_home(folded: Path) -> Path | None:
+    """The home directory (by HOME_DIRS) ``folded`` sits under, if any."""
+    for pattern in HOME_DIRS:
+        depth = len(Path(pattern).parts)
+        if len(folded.parts) > depth:
+            home = Path(*folded.parts[:depth])
+            if fnmatch(str(home), pattern.casefold()):
+                return home
+    return None
+
+
+def other_homes() -> list[Path]:
+    """Every existing home directory HOME_DIRS names (the sandbox masks
+    their credential files too)."""
+    return sorted({Path(hit) for pattern in HOME_DIRS for hit in iglob(pattern)})
+
+
 def _reason(
     path: Path,
     user_homes: tuple[Path, ...],
@@ -117,7 +151,10 @@ def _reason(
     folded = alias_key(path)
     if is_dotenv(folded.name) and not (templates_ok and _is_dotenv_template(folded.name)):
         return f"{path} is a .env file"
-    for home in user_homes:
+    any_home = _any_home(folded)
+    if any_home in {alias_key(home) for home in user_homes}:
+        any_home = None  # our own home: judged once, above
+    for home in (*user_homes, *([any_home] if any_home else [])):
         for rel in HOME_SECRETS:
             if _under(folded, alias_key(home / rel)):
                 return f"{path} is under ~/{rel}"

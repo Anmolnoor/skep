@@ -2224,6 +2224,7 @@ def policy_why(
     *,
     role: str | None = None,
     delegation_chain: Sequence[str] = (),
+    chat_id: str | None = None,
 ) -> dict[str, Any]:
     """P0-3 (ADR 0052 D4): would <scope>.<action> <value> be allowed in <repo>?
     No dispatch, no record. Unknown scope or action refuses naming the known
@@ -2243,7 +2244,9 @@ def policy_why(
     home = holder.current.home
     chain = parse_delegation_chain(delegation_chain, home)
     role_record = resolve_role(role, home) if role is not None else None
-    stack = load_stack(holder, store, repo=repo)
+    # W22: asked from a chat (the server's id, never the model's), both faces
+    # read that chat's taint and its own grants — the verdict its lane gives
+    stack = load_stack(holder, store, repo=repo, chat=chat_id)
     req = Request(scope, action, value)
     run, operator = _why_faces(req, stack, role_record, chain)
     view: dict[str, Any] = {

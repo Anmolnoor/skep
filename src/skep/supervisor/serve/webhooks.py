@@ -154,5 +154,6 @@ def add_webhook_routes(
             )
             push(run_store, home, hook.chat_id, text)
             return {"ok": True, "delivered": "chat"}
-        run_store.create_note(text, actor=f"webhook:{name}")
+        # W21 review: outside text — a chat that lists the note takes ``untrusted``
+        run_store.create_note(text, actor=f"webhook:{name}", taint=("untrusted",))
         return {"ok": True, "delivered": "note"}
