@@ -147,6 +147,43 @@ def test_a_hidden_tool_called_anyway_is_refused_at_proposal_and_says_what_to_do(
     )
 
 
+@pytest.mark.parametrize("kind", ["tampered", "assistant"])
+def test_a_hidden_dispatch_tool_is_refused_even_where_the_run_policy_cannot_resolve(
+    kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W2: on a tampered baseline (and the assistant baseline's gated repo)
+    the dispatch lane cannot resolve the run, so it used to card — a card
+    that could only fail on confirm. A hidden tool is refused at proposal on
+    every home, saying what to do."""
+    from skep.supervisor.cli_cmds import build_config
+
+    from .net_lane_grid import build_net_home
+
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    paths = build_net_home(tmp_path / kind, kind)
+    config = build_config(paths["personal"], None)
+    repo = str(paths["repo"].resolve())  # the home's repo: its project does not auto-dispatch
+    probes: dict[str, dict[str, Any]] = {
+        "dispatch_run": {"repo": repo, "instructions": "x"},
+        "quick_edit": {"repo": repo, "path": "a", "instructions": "x"},
+        "run_code": {"repo": repo, "code": "print(1)"},
+        "batch_dispatch": {"tasks": [{"repo": repo, "instructions": "x"}]},
+    }
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        chat = store.create_chat(title="a", model=None, role="assistant").chat_id
+        for tool, args in probes.items():
+            decision = mutation_execution_decision(
+                tool, args, store=store, holder=holder, chat_id=chat
+            )
+            assert decision is not None and decision.verdict == "deny", (tool, decision)
+            assert decision.reason == "role.deny.tool_hidden", (tool, decision)
+            assert "/role <name>" in (decision.detail or "")
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("batch", [False, True])
 def test_a_builder_chat_may_not_dispatch_a_worker_role_that_cannot_write(
     locked: SupervisorConfig, repo: Path, batch: bool
@@ -643,10 +680,10 @@ _RANK = {"allow": 0, "card": 1, "require_approval": 1, "deny": 2}
 # P3-6 (decision #4): a stored NULL role reads as assistant, so web:null is
 # the assistant row too.
 ROLE_LESS_KINDS = ("web:null", "channel", "analysis", "hermes")
-# Hidden in an assistant chat, yet the dispatch lane still cards as it did
-# (byte-identical: the frozen taint table holds it) — a home whose run policy
-# cannot resolve the dispatch: the tampered baseline, and the assistant
-# baseline's gated repo. Such a card can never succeed on confirm.
+# Hidden in an assistant chat, yet the dispatch lane carded before P3-6 — a
+# home whose run policy cannot resolve the dispatch: the tampered baseline,
+# and the assistant baseline's gated repo. Such a card could never succeed on
+# confirm; it is refused at proposal now (W2: ``w2:card->deny``).
 HIDDEN_YET_CARDS = {
     "tampered": {"batch_dispatch", "dispatch_run", "dispatch_run@gated",
                  "dispatch_run@role-assistant", "quick_edit", "run_code"},
@@ -675,6 +712,9 @@ def _surface_flip(home: str, key: str, old: str, new: str) -> str:
             ), (key, call, SURFACE_FROZEN[call])
         return "hidden"
     assert new.startswith("deny") and not old.startswith("deny"), (key, old, new)
+    if kind == "web:assistant" and probe in HIDDEN_YET_CARDS.get(home, ()):
+        assert new.startswith("deny role:assistant/"), (key, old, new)
+        return "w2:card->deny"  # carded, then failed on confirm
     if probe == "dispatch_run@role-assistant":
         return "b22:role="  # carded or ran, then 403'd at the dispatch
     assert kind == "web:assistant" and tool in ("start_research", "forge_tool"), key
@@ -710,4 +750,7 @@ def test_hiding_and_role_defaults_only_tighten_against_the_frozen_surface(
     expected = (
         {"web:assistant": SURFACE_FLIPS["web:assistant"]} if home == "tampered" else SURFACE_FLIPS
     )
+    if home in HIDDEN_YET_CARDS:
+        w2 = {"w2:card->deny": len(HIDDEN_YET_CARDS[home])}
+        expected = {**expected, "web:assistant": {**expected["web:assistant"], **w2}}
     assert {kind: dict(found) for kind, found in flips.items()} == expected

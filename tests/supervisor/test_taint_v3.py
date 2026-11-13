@@ -68,6 +68,12 @@ def classify(key: str, old: str, new: str) -> str:
         # silent on (decision #7), so it may not hand a worker a write: deny.
         assert new.startswith("deny "), f"only a deny: {key}: {old} -> {new}"
         return "no-layer:dispatch"
+    if role == "assistant" and lane == "dispatch":
+        # W2 (P3-6): a tool the assistant role hides is refused at proposal on
+        # every home — where the run policy could not resolve, it carded.
+        assert old.startswith("require_approval "), f"only a card: {key}: {old} -> {new}"
+        assert new.startswith("deny role:assistant/"), f"not hidden: {key}: {old} -> {new}"
+        return "hidden:dispatch"
     assert taint != "none", f"taint none changed: {key}: {old} -> {new}"
     assert old.startswith("allow "), f"only an allow may move: {key}: {old} -> {new}"
     assert (lane, probe) in GATED[taint], f"not a D5 cell: {key}: {old} -> {new}"
@@ -104,10 +110,14 @@ EXPECTED_FLIPS: dict[str, dict[str, int]] = {
     "legacy": _flips(fetch=8, both_mcp=29, search=0) | _NO_LAYER,
     "zero": _flips(fetch=8, both_mcp=8, search=0) | _NO_LAYER,
     "builder": _flips(fetch=11, both_mcp=11, search=12) | _NO_LAYER,
-    "assistant": _flips(fetch=11, both_mcp=23, search=12) | {"no-layer:dispatch": 48},
+    # hidden:dispatch (W2) = the assistant row's dispatch probes that carded
+    # where the run policy cannot resolve, x 3 grant states x 4 taint states:
+    # the gated repo here, all five on the tampered home.
+    "assistant": _flips(fetch=11, both_mcp=23, search=12)
+    | {"no-layer:dispatch": 48, "hidden:dispatch": 12},
     "operator": _flips(fetch=17, both_mcp=11, search=12) | _NO_LAYER,
     # tampered: nothing allows but remember (an inert proposal, outside decide)
-    "tampered": {"untrusted:other": 12, "both:other": 12},
+    "tampered": {"untrusted:other": 12, "both:other": 12, "hidden:dispatch": 60},
 }
 
 

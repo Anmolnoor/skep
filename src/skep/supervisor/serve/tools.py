@@ -5635,12 +5635,13 @@ def mutation_execution_decision(
     from ..policy_v3 import ACTION_REQUEST, Verdict, taint_asks, taint_verdict
 
     decision = _mutation_execution_decision(name, args, store=store, holder=holder, chat_id=chat_id)
-    if decision is None:
-        # P3-6 (D7, B22): a tool the chat's role hides is refused, not given
-        # the default card — hiding is advertisement, this is the boundary. A
-        # lane that decides (the dispatch lanes consult the chain) keeps its
-        # own verdict, byte for byte.
-        decision = _hidden_decision(name, store=store, holder=holder, chat_id=chat_id)
+    if decision is None or decision.verdict != "deny":
+        # P3-6 (D7, B22): a tool the chat's role hides is refused at proposal on
+        # every home — hiding is advertisement, this is the boundary. A lane
+        # that refuses (the dispatch lanes consult the chain) keeps its own
+        # words; one that would card (a run policy that cannot resolve: a
+        # tampered baseline, a gated repo) or allow is overruled (W2).
+        decision = _hidden_decision(name, store=store, holder=holder, chat_id=chat_id) or decision
     if (
         chat_id is None
         or name in _DECIDED_LANES
