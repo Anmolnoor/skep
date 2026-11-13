@@ -54,6 +54,11 @@ for name in ("llm-secret", "llm-secret-p1"):
         scan(name, (home / "supervisor" / name).read_bytes())
     except OSError:
         pass
+try:  # the token's secret: whoever reads it can mint any run's token
+    (home / "supervisor" / "relay-secret").read_bytes()
+    hits.append("relay-secret")
+except OSError:
+    pass
 roots = [home, Path.cwd(), Path("/tmp")] + [Path(a).parent for a in sys.argv[2:]]
 for root in roots:
     for dirpath, _dirs, files in os.walk(root):
