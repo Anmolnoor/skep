@@ -20,6 +20,8 @@ that), so if you can't find it below, it doesn't exist yet.
   contract, and the life of a task
 - [`sandboxing.md`](sandboxing.md) — macOS Seatbelt and Linux bubblewrap,
   and the network allowlist boundary
+- [`codex-chatgpt-login.md`](codex-chatgpt-login.md) — how a codex run uses
+  a ChatGPT plan login without ever holding the refresh token
 - [`verification.md`](verification.md) — independent patch re-verification
   (G10)
 - [`approvals.md`](approvals.md) — inline approvals and learned command
