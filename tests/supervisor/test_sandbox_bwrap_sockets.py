@@ -58,7 +58,8 @@ for label, address in mine.items():
         seen[label] = "CONNECTED"
     except OSError as exc:
         seen[label] = type(exc).__name__
-for label, (directory, name) in json.loads(sys.argv[1]).items():
+found = json.loads(sys.argv[1])
+for label, (directory, name) in found.items():
     c = socket.socket(socket.AF_UNIX)
     try:
         if directory:
@@ -66,6 +67,23 @@ for label, (directory, name) in json.loads(sys.argv[1]).items():
             c.connect(name)
         else:
             c.connect("\\0" + name)
+        seen[label] = "CONNECTED"
+    except OSError as exc:
+        seen[label] = type(exc).__name__
+# R5b: a symlink in the worktree to that unlisted socket is checked at the
+# path it resolves to; and a cross-directory rename in the worktree still
+# works ("CONNECTED" = it did), though Landlock handles a filesystem right.
+os.chdir(found["own"][0])
+os.symlink(os.path.join(*found["home_other"]), "link.sock")
+os.makedirs("r/a")
+os.makedirs("r/b")
+open("r/a/f", "w").close()
+for label, act in [
+    ("symlinked_other", lambda: socket.socket(socket.AF_UNIX).connect("link.sock")),
+    ("rename_across", lambda: os.rename("r/a/f", "r/b/f")),
+]:
+    try:
+        act()
         seen[label] = "CONNECTED"
     except OSError as exc:
         seen[label] = type(exc).__name__
@@ -151,6 +169,7 @@ _CLOSED = {
     "own": True,
     "self_abstract": True,
     "self_path": True,
+    "rename_across": True,
 }
 _KERNEL_ABI = landlock.abi()
 
@@ -182,6 +201,7 @@ def test_which_unix_sockets_a_bwrap_worker_reaches(
         expected = {**expected, "abstract": False}
         if _KERNEL_ABI >= landlock.ABI_RESOLVE_UNIX:
             expected["home_other"] = False
+    expected = {**expected, "symlinked_other": expected["home_other"]}
     found, ro_root = canaries
     network = {
         "deny-all": sandbox.DENY_ALL_NETWORK,
