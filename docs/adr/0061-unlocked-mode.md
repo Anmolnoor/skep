@@ -1,6 +1,6 @@
 # ADR 0061 — unlocked mode on policy v3
 
-**Status:** implemented on branch `es-unlocked-v3` (ES-F140..ES-F147), not merged.
+**Status:** accepted (ES-F140–ES-F147).
 **Replaces:** the August `unlocked` branch's ADR (numbered 0052 there; the
 design archive keeps it as accepted ADR 9999). **Builds on:** ADR 0059
 (policy v3), ADR 0048 (policy groups), ADR 0047 (engines), ADR 0044
