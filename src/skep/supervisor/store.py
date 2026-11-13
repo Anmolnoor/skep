@@ -384,7 +384,10 @@ CREATE TABLE IF NOT EXISTS chat_actions (
     -- P4-2 (ADR 0059 D6): what the server recorded on the card when it was
     -- proposed — the HIGH tier, the folded items, the dispatch manifest. A
     -- confirm acts on exactly this, never on a later recomputation.
-    card_json TEXT
+    card_json TEXT,
+    -- D18: who clicked, while the model's follow-up for this verdict waits
+    -- its turn; cleared when that follow-up starts (a restart resumes it).
+    follow_up TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chat_actions_pending ON chat_actions (chat_id, status);
 -- v7 Stage B: inert notes and tasks the assistant may append to freely; due
@@ -1141,6 +1144,9 @@ class RunStore:
             # P4-2 (ADR 0059 D6): the card as the server recorded it (tier,
             # folded items, manifest). NULL = a card from before P4-2.
             self._conn.execute("ALTER TABLE chat_actions ADD COLUMN card_json TEXT")
+        if "follow_up" not in action_columns:
+            # D18: a queued follow-up turn survives a serve restart.
+            self._conn.execute("ALTER TABLE chat_actions ADD COLUMN follow_up TEXT")
         chat_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(chats)")}
         if "personality" not in chat_columns:
             # v44-F10: per-chat style preamble.
@@ -4477,6 +4483,35 @@ class RunStore:
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    @_locked
+    def queue_follow_up(self, action_id: str, actor: str) -> None:
+        """D18: the model's follow-up for this card's verdict waits its turn."""
+        self._conn.execute(
+            "UPDATE chat_actions SET follow_up = ? WHERE action_id = ?", (actor, action_id)
+        )
+        self._conn.commit()
+
+    @_locked
+    def claim_follow_up(self, action_id: str) -> bool:
+        """D18: one conditional UPDATE — exactly one caller starts the
+        follow-up, and once started no restart starts it again."""
+        cursor = self._conn.execute(
+            "UPDATE chat_actions SET follow_up = NULL"
+            " WHERE action_id = ? AND follow_up IS NOT NULL",
+            (action_id,),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
+    def queued_follow_ups(self) -> list[tuple[str, str]]:
+        """D18: (action_id, actor) of every follow-up not yet started, in click order."""
+        rows = self._conn.execute(
+            "SELECT action_id, follow_up FROM chat_actions"
+            " WHERE follow_up IS NOT NULL ORDER BY resolved_at, action_id"
+        ).fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
 
     @_locked
     def unclaim_chat_action(self, action_id: str) -> None:

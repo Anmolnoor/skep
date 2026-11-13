@@ -554,11 +554,12 @@ def test_d18_a_verdict_racing_the_end_of_the_turn_replays(
         store.close()
 
 
-def test_d18_a_serve_restart_with_a_queued_follow_up_replays(
+def test_d18_a_serve_restart_runs_a_queued_follow_up_once(
     config: SupervisorConfig, provider: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The follow-up waits on a thread; a restart loses it. The verdict and
-    its result were stored at the click, so the next turn replays them."""
+    """A follow-up queued when serve stops is stored with its card: the next
+    serve start runs it, and claims it before its turn, so a restart during
+    or after that turn never runs it again."""
     from skep.supervisor.serve import chat as chat_module
 
     client, chat_id, store, _engine = _d18_rig(config, provider)
@@ -566,16 +567,57 @@ def test_d18_a_serve_restart_with_a_queued_follow_up_replays(
         action_id = _card(client, provider, chat_id, ("set_policy", {"auto_approve": True}))
         lock = chat_module.chat_turn_lock(chat_id)
         lock.acquire()
-        lost: list[Any] = []
-        monkeypatch.setattr(chat_module, "_queue_follow_up", lambda *a, **k: lost.append(a))
-        events = sse_events(client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm").text)
-        assert events[-1] == ("done", {"state": "queued"}) and lost
+        with monkeypatch.context() as died:  # serve stops before the follow-up runs
+            died.setattr(chat_module, "_queue_follow_up", lambda *a, **k: None)
+            events = sse_events(
+                client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm").text
+            )
+        assert events[-1] == ("done", {"state": "queued"})
         lock.release()
-        restarted = serve_client(config)
-        bodies = _next_turn_replays(restarted, provider, chat_id)
+        held: list[Any] = []
+        real_turn = chat_module.ChatEngine.turn_events
+
+        def turn(engine: Any, *args: Any, **kwargs: Any) -> Any:
+            held.append(engine.store.queued_follow_ups())  # what a restart now would see
+            return real_turn(engine, *args, **kwargs)
+
+        monkeypatch.setattr(chat_module.ChatEngine, "turn_events", turn)
+        provider.script_reply("resumed after the restart")
+        with serve_client(config, start_ticker=False):
+            _wait_follow_ups()
+        assert held == [[]]
+        with serve_client(config, start_ticker=False):  # and again: nothing left to run
+            _wait_follow_ups()
+        assert held == [[]]
+        rows = store.chat_messages(chat_id)
+        assert [m.content for m in rows].count("resumed after the restart") == 1
+        assert len([m for m in rows if m.role == "user" and m.provenance == "queen"]) == 1
+        bodies = _next_turn_replays(client, provider, chat_id)
         assert "auto_approve" in json.dumps(bodies[-1])
     finally:
         store.close()
+
+
+def test_d18_an_old_database_gains_the_follow_up_column(tmp_path: Any) -> None:
+    import sqlite3
+
+    db = tmp_path / "old.sqlite3"
+    store = RunStore(db)
+    chat = store.create_chat(title="t", model=None).chat_id
+    action_id = store.add_chat_action(chat, tool="set_policy", args={})
+    store.close()
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE chat_actions DROP COLUMN follow_up")
+    reopened = RunStore(db)
+    try:
+        assert reopened.queued_follow_ups() == []
+        reopened.queue_follow_up(action_id, "chat-user")
+        assert reopened.queued_follow_ups() == [(action_id, "chat-user")]
+        assert reopened.claim_follow_up(action_id)
+        assert not reopened.claim_follow_up(action_id)  # once
+        assert reopened.queued_follow_ups() == []
+    finally:
+        reopened.close()
 
 
 def test_d18_a_card_from_the_round_still_open_cannot_be_answered_yet(

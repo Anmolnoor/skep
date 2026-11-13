@@ -504,24 +504,28 @@ QUEUED_FOLLOW_UP = (
 )
 
 
-def _queue_follow_up(engine: ChatEngine, chat_id: str, tool: str, confirm: bool) -> None:
+def _queue_follow_up(engine: ChatEngine, action_id: str) -> None:
     """D18: the model's turn for a verdict recorded while another turn ran —
     it waits for that turn, the way a run-finish follow-up does, and runs
     unattended (it fires whether or not anyone is watching). A card still
-    pending by then holds it: that card's verdict resumes the model."""
+    pending by then holds it: that card's verdict resumes the model. The
+    card row holds it until it starts (``store.queue_follow_up``)."""
 
     def follow() -> None:
-        chat = engine.store.get_chat(chat_id)
-        if chat is None:
+        action = engine.store.get_chat_action(action_id)
+        chat = engine.store.get_chat(action.chat_id) if action is not None else None
+        if action is None or chat is None:
             return
+        chat_id = action.chat_id
         base_url, api_key, model, protocol = engine.resolved_llm(chat)
         with chat_turn_lock(chat_id):
-            if blocking_cards(engine.store, chat_id):
+            # claimed before the turn: a restart from here on never reruns it
+            if not engine.store.claim_follow_up(action_id) or blocking_cards(engine.store, chat_id):
                 return
-            verdict = "confirmed" if confirm else "denied"
+            verdict = "denied" if action.status == "denied" else "confirmed"
             engine.store.add_chat_message(
                 chat_id, role="user", provenance="queen",
-                content=QUEUED_FOLLOW_UP.format(verdict=verdict, tool=tool),
+                content=QUEUED_FOLLOW_UP.format(verdict=verdict, tool=action.tool),
             )  # fmt: skip
             for _event in engine.turn_events(
                 chat_id, base_url=base_url, api_key=api_key, model=model,
@@ -529,7 +533,16 @@ def _queue_follow_up(engine: ChatEngine, chat_id: str, tool: str, confirm: bool)
             ):  # fmt: skip
                 pass
 
-    threading.Thread(target=follow, name=f"skep-verdict-{chat_id[:8]}", daemon=True).start()
+    threading.Thread(target=follow, name=f"skep-verdict-{action_id[:8]}", daemon=True).start()
+
+
+def resume_follow_ups(engine: ChatEngine) -> int:
+    """D18: at serve start, the follow-ups a stopped serve never started —
+    each runs once (its claim is the once). Returns how many."""
+    queued = engine.store.queued_follow_ups()
+    for action_id, _actor in queued:
+        _queue_follow_up(engine, action_id)
+    return len(queued)
 
 
 def chat_turn_lock(chat_id: str) -> threading.Lock:
@@ -2833,7 +2846,8 @@ class ChatEngine:
                 )
             queued = not blocking_cards(self.store, chat_id)
             if queued:
-                _queue_follow_up(self, chat_id, action.tool, confirm)
+                self.store.queue_follow_up(action_id, actor)
+                _queue_follow_up(self, action_id)
             return iter([
                 *(("tool", {"tool": action.tool, "result": item})
                   for item in payload.get("items", [payload])),
