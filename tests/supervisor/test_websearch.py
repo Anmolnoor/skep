@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -69,7 +69,6 @@ def test_search_web_times_out_instead_of_hanging_the_queen(
     # Hermes #36776: the retry loop has no overall cap; ours must have one.
     monkeypatch.setattr("skep.supervisor.serve.websearch.SEARCH_TIMEOUT_SECS", 0.05)
     import time
-    from typing import Any
 
     def hang(query: str, limit: int) -> list[dict[str, Any]]:
         time.sleep(5)
@@ -356,20 +355,133 @@ def test_fetch_url_text_markdown_mode_and_truncation_marker(
         + '</p><a href="https://x.example/a">link</a></body></html>'
     )
 
-    class _Resp:
-        def __init__(self, text: str, url: str) -> None:
-            self.text = text
-            self.url = url
-
-        def raise_for_status(self) -> None:
-            pass
-
-    monkeypatch.setattr("httpx.get", lambda url, **kw: _Resp(html, url))
-    full = fetch_url_text("https://site.example/page", markdown=True)
+    _FakeWeb(monkeypatch, {"site.example/page": (200, html)})
+    resolve = _resolver({"site.example": _PUBLIC_IP})
+    full = fetch_url_text("https://site.example/page", markdown=True, resolve=resolve)
     assert full["text"].startswith("# Title")
     assert "[link](https://x.example/a)" in full["text"]
     assert full["truncated"] is False
 
-    cut = fetch_url_text("https://site.example/page", markdown=True, max_chars=40)
+    cut = fetch_url_text("https://site.example/page", markdown=True, max_chars=40, resolve=resolve)
     assert cut["truncated"] is True
     assert "the page continues" in cut["text"]
+
+
+# --- W6: read_url reads public addresses only, judged on the resolved IP -------------------
+
+_PUBLIC_IP = "93.184.216.34"  # a documentation-style public address, never dialled
+
+
+def _resolver(names: dict[str, str]) -> Callable[..., list[Any]]:
+    """A getaddrinfo stand-in: names map to an address, literals resolve to themselves."""
+    import socket
+
+    def resolve(host: str, port: int, **_kw: object) -> list[Any]:
+        if host in names:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (names[host], port))]
+        return socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)  # literals only
+
+    return resolve
+
+
+class _FakeWeb:
+    """Patches ``httpx.Client.send``: records what would be dialled and
+    answers by Host header + path. Nothing leaves the process."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, pages: dict[str, tuple[int, str]]):
+        import httpx
+
+        self.sent: list[tuple[str, str, object]] = []
+
+        def send(_client: object, request: httpx.Request, **_kw: object) -> httpx.Response:
+            host = request.headers["host"]
+            self.sent.append((str(request.url), host, request.extensions.get("sni_hostname")))
+            status, body = pages[f"{host}{request.url.raw_path.decode()}"]
+            headers = {"location": body} if 300 <= status < 400 else {}
+            text = "" if headers else body
+            return httpx.Response(status, headers=headers, text=text, request=request)
+
+        monkeypatch.setattr(httpx.Client, "send", send)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8765/api/chats",
+        "http://localhost:8765/api/chats",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://0.0.0.0:8765/",
+        "http://10.0.0.1/",
+        "http://192.168.1.1/",
+        "http://172.16.0.1/",
+        "http://100.64.0.1/",
+        "http://[::1]:8765/",
+        "http://[fd00::1]/",
+        "http://[fe80::1]/",
+        "http://[::ffff:127.0.0.1]:8765/",
+        "http://[::ffff:169.254.169.254]/",
+        "http://2130706433:8765/",
+        "http://0x7f.0.0.1:8765/",
+        "http://0177.0.0.1:8765/",
+        "http://127.1:8765/",
+    ],
+)
+def test_w6_read_url_refuses_every_non_public_address_before_dialling(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W6 (PR #70): a confirmed card reached skep's own API and the cloud
+    metadata address. Every loopback, private, link-local, CGNAT and
+    unique-local address — however the IP is spelled — is refused before a
+    socket opens, with a reason; there is no knob to lift it."""
+    from skep.supervisor.serve.websearch import fetch_url_text
+
+    web = _FakeWeb(monkeypatch, {})
+    with pytest.raises(ValueError, match="only reads public internet addresses"):
+        fetch_url_text(url, resolve=_resolver({}))
+    assert web.sent == []
+
+
+def test_w6_a_name_that_resolves_to_loopback_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DNS rebinding: the hostname looks public, its answer is 127.0.0.1."""
+    from skep.supervisor.serve.websearch import fetch_url_text
+
+    web = _FakeWeb(monkeypatch, {})
+    with pytest.raises(ValueError, match="non-public address"):
+        fetch_url_text(
+            "http://rebind.example:8765/api", resolve=_resolver({"rebind.example": "127.0.0.1"})
+        )
+    assert web.sent == []
+
+
+def test_w6_the_read_dials_the_vetted_address_with_the_name_as_host_and_sni(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve once, connect to that address: the request goes to the IP that
+    was checked (no second lookup to rebind), the name rides Host and SNI."""
+    from skep.supervisor.serve.websearch import fetch_url_text
+
+    web = _FakeWeb(monkeypatch, {"site.example/page": (200, "<p>hello</p>")})
+    got = fetch_url_text(
+        "https://site.example/page", resolve=_resolver({"site.example": _PUBLIC_IP})
+    )
+    assert "hello" in got["text"] and got["url"] == "https://site.example/page"
+    assert web.sent == [(f"https://{_PUBLIC_IP}/page", "site.example", "site.example")]
+
+
+@pytest.mark.parametrize("guard", [None, lambda host: True])
+def test_w6_a_redirect_into_a_private_address_is_refused_on_both_lanes(
+    guard: Callable[[str], bool] | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every hop: a public page that redirects to the metadata address or to
+    a name resolving to loopback fails closed on the card lane (no guard) and
+    the granted lane (a guard that would allow the host)."""
+    from skep.supervisor.serve.websearch import fetch_url_text
+
+    names = {"site.example": _PUBLIC_IP, "inside.example": "127.0.0.1"}
+    for target in ("http://169.254.169.254/latest/meta-data/", "http://inside.example:8765/"):
+        web = _FakeWeb(monkeypatch, {"site.example/hop": (302, target)})
+        with pytest.raises(ValueError, match="only reads public internet addresses"):
+            fetch_url_text(
+                "https://site.example/hop", redirect_guard=guard, resolve=_resolver(names)
+            )
+        assert [host for _url, host, _sni in web.sent] == ["site.example"]

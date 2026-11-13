@@ -17,9 +17,12 @@ operator approves.
 from __future__ import annotations
 
 import concurrent.futures
+import socket
 import urllib.parse
 from collections.abc import Callable
 from typing import Any
+
+from ..netproxy import UNRESOLVED, Resolver, resolve_public
 
 MAX_RESULTS_CAP = 8
 # Hermes #36776: DDGS(timeout=) bounds individual HTTP requests, but the
@@ -47,6 +50,9 @@ _READ_HEADERS = {
 }
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
 class WebSearchError(Exception):
     """The search backend failed or timed out (distinct from zero hits)."""
 
@@ -56,6 +62,7 @@ def fetch_url_text(
     *,
     redirect_guard: Callable[[str], bool] | None = None,
     markdown: bool = False,
+    resolve: Resolver = socket.getaddrinfo,
     max_bytes: int = READ_URL_MAX_BYTES,
     max_chars: int = READ_URL_MAX_CHARS,
 ) -> dict[str, Any]:
@@ -70,31 +77,30 @@ def fetch_url_text(
     every redirect hop and a hop it refuses fails closed (a redirect must
     never widen a grant).
 
+    W6: on both lanes every hop is dialled at the address its host resolves
+    to, and only a public one (``_pinned_get``).
+
     v83-F1: ``markdown=True`` keeps headings/links/lists/code as markdown
     (web_extract parity); callers pick the caps per lane (granted domains
     read more). A cut is never silent: ``truncated`` rides the result and
     the excerpt ends with a visible marker.
     """
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ValueError(f"read_url needs an http(s) URL, got {url!r}")
     import httpx
 
     from skep.workers.html_text import html_to_markdown, html_to_text
 
-    timeout = httpx.Timeout(10.0, connect=5.0)
-    if redirect_guard is None:
-        response = httpx.get(url, headers=_READ_HEADERS, timeout=timeout, follow_redirects=True)
-    else:
+    # W6: no env proxy — a proxy would resolve the name itself, out of sight
+    # of the resolved-address check below.
+    with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0), trust_env=False) as client:
         current = url
         for _hop in range(5):
-            response = httpx.get(
-                current, headers=_READ_HEADERS, timeout=timeout, follow_redirects=False
-            )
+            response = _pinned_get(client, current, resolve)
             if response.status_code in (301, 302, 303, 307, 308):
-                target = str(response.next_request.url) if response.next_request is not None else ""
+                target = urllib.parse.urljoin(current, response.headers.get("location", ""))
                 target_host = urllib.parse.urlparse(target).hostname or ""
-                if not target_host or not redirect_guard(target_host):
+                if not target_host or (
+                    redirect_guard is not None and not redirect_guard(target_host)
+                ):
                     raise ValueError(
                         f"redirect to {target_host or 'nowhere'!r} is refused: it leaves "
                         "the granted domain or a policy rule denies it — read_url that "
@@ -113,7 +119,47 @@ def fetch_url_text(
     excerpt = text[:max_chars]
     if truncated:
         excerpt += f"\n\n[truncated at {max_chars} chars — the page continues]"
-    return {"url": str(response.url), "text": excerpt, "truncated": truncated}
+    return {"url": current, "text": excerpt, "truncated": truncated}
+
+
+def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
+    """W6: GET ``url`` from the address its host resolves to — resolved once
+    here and vetted public, then dialled by IP with the name as Host and SNI
+    (so TLS still verifies the name). Every hop of a redirect comes here."""
+    import httpx
+
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname
+    if parts.scheme not in ("http", "https") or not host:
+        raise ValueError(f"read_url needs an http(s) URL, got {url!r}")
+    addresses, why = resolve_public(host, parts.port or _DEFAULT_PORTS[parts.scheme], resolve)
+    if why == UNRESOLVED:
+        raise httpx.ConnectError(f"{host!r} does not resolve")
+    if not addresses:
+        raise ValueError(
+            f"read_url only reads public internet addresses: {host!r} {why}. Loopback, "
+            "LAN, link-local and metadata addresses (skep's own API among them) are "
+            "never read, by card or grant — open that page yourself"
+        )
+    userinfo, _, authority = parts.netloc.rpartition("@")
+    error: Exception = httpx.ConnectError(f"{host!r} has no address to dial")
+    for address in addresses:
+        netloc = f"[{address}]" if ":" in address else address
+        if parts.port:
+            netloc = f"{netloc}:{parts.port}"
+        if userinfo:
+            netloc = f"{userinfo}@{netloc}"
+        request = client.build_request(
+            "GET",
+            urllib.parse.urlunsplit(parts._replace(netloc=netloc)),
+            headers={**_READ_HEADERS, "Host": authority},
+            extensions={"sni_hostname": host},
+        )
+        try:
+            return client.send(request)
+        except httpx.ConnectError as exc:
+            error = exc
+    raise error
 
 
 def _run_ddgs(query: str, limit: int) -> list[dict[str, Any]]:

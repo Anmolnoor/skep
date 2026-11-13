@@ -8,10 +8,8 @@ policy (a redirect must never widen a grant). Deny always wins (v40).
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, cast
+from typing import cast
 
 import pytest
 
@@ -33,6 +31,7 @@ from skep.supervisor.serve.tools import (
 from skep.supervisor.serve.websearch import fetch_url_text
 
 from .conftest import predating_home
+from .test_websearch import _PUBLIC_IP, _FakeWeb, _resolver
 
 
 @pytest.fixture()
@@ -157,54 +156,21 @@ def test_allow_fetch_domain_refuses_non_domains(
         )
 
 
-class _PageServer:
-    """Two-endpoint local server: /page serves text, /hop redirects."""
-
-    def __init__(self, redirect_to: str | None = None) -> None:
-        outer = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args: Any) -> None:
-                pass
-
-            def do_GET(self) -> None:
-                if self.path == "/hop":
-                    self.send_response(302)
-                    self.send_header("Location", outer.redirect_to or f"{outer.base_url}/page")
-                    self.end_headers()
-                    return
-                body = b"<html><body>granted page body</body></html>"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-        self.redirect_to = redirect_to
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._thread.start()
-
-    @property
-    def base_url(self) -> str:
-        return f"http://127.0.0.1:{self._server.server_address[1]}"
-
-    def stop(self) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-
-
-def test_redirect_within_the_grant_flows_and_off_domain_fails_closed() -> None:
-    server = _PageServer()
-    try:
-        same = fetch_url_text(
-            f"{server.base_url}/hop", redirect_guard=lambda host: host == "127.0.0.1"
-        )
-        assert "granted page body" in same["text"]
-        server.redirect_to = f"http://localhost:{server._server.server_address[1]}/page"
-        with pytest.raises(ValueError, match="leaves the granted domain"):
-            fetch_url_text(
-                f"{server.base_url}/hop", redirect_guard=lambda host: host == "127.0.0.1"
-            )
-    finally:
-        server.stop()
+def test_redirect_within_the_grant_flows_and_off_domain_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v72-F7 on fakes (W6: a page on 127.0.0.1 is never read, so the old
+    local server cannot stand in for a granted host)."""
+    names = {"docs.example": _PUBLIC_IP, "other.example": _PUBLIC_IP}
+    pages = {
+        "docs.example/hop": (302, "https://docs.example/page"),
+        "docs.example/page": (200, "<html><body>granted page body</body></html>"),
+    }
+    _FakeWeb(monkeypatch, pages)
+    resolve = _resolver(names)
+    guard = lambda host: host == "docs.example"  # noqa: E731
+    same = fetch_url_text("https://docs.example/hop", redirect_guard=guard, resolve=resolve)
+    assert "granted page body" in same["text"]
+    pages["docs.example/hop"] = (302, "https://other.example/page")
+    with pytest.raises(ValueError, match="leaves the granted domain"):
+        fetch_url_text("https://docs.example/hop", redirect_guard=guard, resolve=resolve)
