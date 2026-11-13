@@ -2609,6 +2609,10 @@ def cmd_trust(args: argparse.Namespace) -> int:
     trusts one chat again (the command deck's /trust; ADR 0050)."""
     from .serve.taint import TrustRefused, trust_chat
 
+    if not _stdin_is_interactive():
+        # a pipe is a script — a chat's own shell among them; trusting a chat
+        # is the operator's act at a terminal (W20 review)
+        return _err("skep trust needs you at a terminal; it never runs from a pipe or a script")
     config = build_config(args.home, None)
     store = RunStore(config.db_path)
     try:

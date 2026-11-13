@@ -940,6 +940,10 @@ class ChatRepl:
             if any(bit not in ("private", "untrusted") for bit in args):
                 print(usage)
                 return
+            if not sys.stdin.isatty():
+                # `echo /trust | skep chat` is a script, not the operator (W20 review)
+                print(_c(RED, "/trust needs you at a terminal; it never runs from a pipe"))
+                return
             # W20: typed by the operator — the decision itself, no card.
             trusted = self.client.post(f"/api/chats/{self.chat_id}/trust", {"bits": args})
             cleared = ", ".join(sorted(trusted.get("cleared") or {})) or "nothing"

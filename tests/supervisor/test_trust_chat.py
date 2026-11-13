@@ -106,9 +106,12 @@ def test_trust_can_clear_one_bit_and_refuses_an_unknown_one(rig: Rig) -> None:
 
 
 def test_the_cli_face_clears_and_says_so(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    from skep.supervisor import cli_cmds
     from skep.supervisor.cli_cmds import build_config
+
+    monkeypatch.setattr(cli_cmds, "_stdin_is_interactive", lambda: True)
 
     config = build_config(tmp_path / "cli-home", None)
     store = RunStore(config.db_path)
@@ -182,3 +185,85 @@ def test_a_channel_cannot_reach_trust(rig: Rig) -> None:
     for source in [*channels.glob("*.py"), channels.parent / "webhooks.py"]:
         text = source.read_text()
         assert "trust_chat" not in text and "/trust" not in text, source
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "skep trust c1",
+        "/opt/venv/bin/skep --home /x trust c1 --bit untrusted",
+        "uv run skep trust c1",
+        "python3 -m skep trust c1",
+        "timeout 5 skep trust c1",
+        "cd /tmp && skep trust c1",
+        "echo /trust | skep chat c1",
+        "script -q /dev/null skep chat c1",
+        "bash -c 'skep trust c1'",
+    ],
+)
+def test_the_models_shell_can_never_run_skep_trust(line: str) -> None:
+    """Review of W20: the Queen's run_shell is a host shell, and ``skep
+    trust`` (or a ``skep chat`` fed "/trust") is the model clearing its own
+    guard. The floor refuses it outright — no card a tired operator could
+    approve — and no grant or worker allowlist can hold it."""
+    import shlex
+
+    from skep.supervisor.shell_prefixes import (
+        dangerous_prefix_reason,
+        queen_command_line_refusal,
+    )
+
+    assert queen_command_line_refusal(line) is not None
+    assert dangerous_prefix_reason(shlex.split(line)) is not None
+
+
+def test_a_run_shell_skep_trust_is_refused_without_a_card(rig: Rig) -> None:
+    chat, _hook, _shell = _tainted_chat(rig)
+    rig.ollama.script_tool_call("run_shell", {"command": f"skep trust {chat}"})
+    rig.ollama.script_reply("refused")
+    events = sse_events(rig.client.post(f"/api/chats/{chat}/messages", json={"content": "go"}).text)
+    assert not [e for e in events if e[0] == "action"]
+    row = [json.loads(m.content) for m in rig.store.chat_messages(chat) if m.role == "tool"
+           and m.tool_name == "run_shell"][-1]  # fmt: skip
+    assert row["ok"] is False and "skep trust" in row["detail"], row
+    assert rig.store.get_chat_taint(chat).bits() == ["private", "untrusted"]
+
+
+def test_the_cli_and_terminal_deck_trust_need_a_person_at_a_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``echo /trust | skep chat`` and a piped ``skep trust`` are a script,
+    not the operator at the desk: both refuse and clear nothing."""
+    from typing import Any, cast
+
+    from skep import cli_chat
+    from skep.supervisor import cli_cmds
+    from skep.supervisor.cli_cmds import build_config
+
+    monkeypatch.setattr(cli_cmds, "_stdin_is_interactive", lambda: False)
+    config = build_config(tmp_path / "cli-home", None)
+    store = RunStore(config.db_path)
+    try:
+        chat = store.create_chat(title="t", model=None).chat_id
+        store.add_chat_taint(chat, private=1, untrusted=2)
+        assert main(["--home", str(tmp_path / "cli-home"), "trust", chat]) != 0
+        assert "terminal" in capsys.readouterr().err
+        assert store.get_chat_taint(chat).bits() == ["private", "untrusted"]
+    finally:
+        store.close()
+
+    posted: list[str] = []
+
+    class Client:
+        def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+            posted.append(path)
+            return {"cleared": {"private": 1}}
+
+    repl = cli_chat.ChatRepl(cast(Any, Client()), {"chat_id": "c1"}, show_thinking=False)
+    monkeypatch.setattr(cli_chat.sys.stdin, "isatty", lambda: False)
+    repl.run_command("/trust")
+    assert posted == [] and "terminal" in capsys.readouterr().out
+    monkeypatch.setattr(cli_chat.sys.stdin, "isatty", lambda: True)
+    repl.run_command("/trust private")
+    assert posted == ["/api/chats/c1/trust"]
+    assert "cleared: private" in capsys.readouterr().out
