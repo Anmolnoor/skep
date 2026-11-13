@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 from fnmatch import fnmatch
+from functools import lru_cache
 from glob import iglob
 from itertools import islice
 from pathlib import Path
@@ -91,7 +92,16 @@ def _is_dotenv_template(name: str) -> bool:
 
 
 def _under(path: Path, root: Path) -> bool:
-    return path == root or root in path.parents
+    # parts, not ``root in path.parents``: that walk builds a Path per ancestor
+    # and made one floor check cost milliseconds (W43)
+    return path.parts[: len(root.parts)] == root.parts
+
+
+@lru_cache(maxsize=256)
+def _secret_roots(home: Path, rels: tuple[str, ...]) -> tuple[tuple[Path, str], ...]:
+    """``home``'s credential paths, folded once: every floor check compares
+    against all of them."""
+    return tuple((_fold(home / rel), rel) for rel in rels)
 
 
 def _reason(
@@ -104,8 +114,8 @@ def _reason(
     if is_dotenv(folded.name) and not (templates_ok and _is_dotenv_template(folded.name)):
         return f"{path} is a .env file"
     for home in user_homes:
-        for rel in HOME_SECRETS:
-            if _under(folded, _fold(home / rel)):
+        for root, rel in _secret_roots(home, HOME_SECRETS):
+            if _under(folded, root):
                 return f"{path} is under ~/{rel}"
     for home in skep_homes:
         if folded == _fold(home.parent / SERVE_ENV) or (
