@@ -340,3 +340,37 @@ def test_a_fold_a_messenger_cannot_show_in_full_needs_the_web_ui(live: Any) -> N
     env.ollama.script_reply("read")
     env.verdict(short, small["action_id"], confirm=True, actor="channel:discord:42")
     assert env.store.get_chat_action(small["action_id"]).status == "confirmed"
+
+
+def test_an_item_that_raises_mid_fold_finishes_the_card_and_never_reruns_the_rest(
+    live: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W12: the second item raises something nobody expected after the first
+    ran. The card ends in one final state, the failing item says why, the
+    rest are marked interrupted (never run: the PR #61 rule), and the model
+    gets one result per item."""
+    env = live("builder")
+    calls: list[str] = []
+
+    def execute(tool: str, args: dict[str, Any], **_: Any) -> Any:
+        calls.append(str(args["url"]))
+        if args["url"] == A2:
+            raise RuntimeError("disk full")
+        return {"text": "page"}
+
+    monkeypatch.setattr(chat_module, "execute_mutation", execute)
+    chat = env.chat()
+    action_id = _folded_card(env, chat)
+    env.store.fold_into_chat_action(action_id, args={"url": A3}, tool_call_id="c3")
+    env.ollama.script_reply("noted")
+    events = env.verdict(chat, action_id, confirm=True, keep="once")
+    assert calls == [A1, A2]  # A3 never ran
+    action = env.store.get_chat_action(action_id)
+    assert action is not None and action.status == "failed"
+    rows = _tool_rows(env, chat, "read_url")
+    assert len(rows) == 3
+    assert rows[0]["ok"] is True
+    assert rows[1]["ok"] is False and "disk full" in rows[1]["error"]
+    assert rows[2]["ok"] is False and rows[2]["interrupted"] is True
+    assert len([e for e, d in events if e == "tool" and d["tool"] == "read_url"]) == 3
+    assert env.store.interrupt_executing_chat_actions() == 0  # nothing left executing

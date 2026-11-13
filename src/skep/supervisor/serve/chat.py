@@ -2685,8 +2685,22 @@ class ChatEngine:
                             preanswered=preanswered,
                         )
                     )
-            except BaseException:
+            except Exception as exc:
                 if not payloads:  # nothing ran: hand the card back, as always
+                    self.store.unclaim_chat_action(action_id)
+                    raise
+                # W12: something ran — this item failed and the rest never run
+                # (PR #61): the card ends now, one result per item.
+                payloads.append({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+                payloads += [
+                    {
+                        "ok": False,
+                        "interrupted": True,
+                        "note": "not run: an earlier item of this card failed",
+                    }
+                ] * (len(items) - len(payloads))
+            except BaseException:
+                if not payloads:
                     self.store.unclaim_chat_action(action_id)
                 raise  # something ran: it stays claimed (restart marks it interrupted)
             payload = (
