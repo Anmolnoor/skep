@@ -433,14 +433,47 @@ def test_a_linux_sandboxed_worker_under_a_reused_pid_is_neither_adopted_nor_kill
 
 
 def _strand_with_live_worker(
-    store: RunStore, config: SupervisorConfig, repo: Path, extra: str = ""
+    store: RunStore,
+    config: SupervisorConfig,
+    repo: Path,
+    extra: str = "",
+    *,
+    worker: str = "time.sleep(60)",
 ) -> tuple[str, int]:
     """A stranded run whose recorded worker is a live non-child naming it."""
     task_id, _workspace = _strand(store, config, repo)
-    pid = _orphan("import time; time.sleep(60)", f"--task={task_id}")
+    pid = _orphan(f"import time; {worker}", f"--task={task_id}")
     started = json.loads(process_owner(pid) or "{}")["started"]
     store.transition(task_id, "running", f"pid {pid} started {started}{extra}")
     return task_id, pid
+
+
+def test_an_adopted_runs_finish_reaches_its_chat_as_a_live_runs_does(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F136 follow-up (D2: as if serve never restarted): a finished run
+    gets its one-line notice AND the Queen's continuation turn (v105-F1).
+    The adopted run got only the notice — the restart showed in the chat."""
+    from skep.supervisor.serve import app as app_module
+
+    from .conftest import serve_client
+
+    continued = threading.Event()
+    seen: list[str] = []
+
+    def _turn(*args: object) -> None:
+        seen.append(str(args[4]))
+        continued.set()
+
+    monkeypatch.setattr(app_module, "run_completion_turn", _turn)
+    store = RunStore(config.db_path)
+    try:
+        task_id, _pid = _strand_with_live_worker(store, config, repo, worker="time.sleep(1)")
+        with serve_client(config, start_ticker=False):  # the lifespan is the restart
+            assert continued.wait(30), "the adopted run's finish never reached its chat"
+        assert seen == [task_id]
+    finally:
+        store.close()
 
 
 def test_restart_kills_a_worker_whose_proxy_port_is_taken(

@@ -96,7 +96,8 @@ Everything else is the existing loop: the event log under
 `results/<task>/result.json` is the claim, and a breach kills the session
 with the existing `kill_session`. After the worker exits, the run takes the
 same ingest → G10 re-verification → approval path recovery already uses
-(I1, I2). Auto-apply rules are not replayed on this path, as for every
+(I1, I2), and its finish reaches the dispatching chat as a live run's does:
+the one-line notice and the Queen's continuation turn (v105-F1). Auto-apply rules are not replayed on this path, as for every
 recovered run: an adopted run lands only by a human approval.
 
 The filtering proxy lived in the old serve. Before watching, the new serve

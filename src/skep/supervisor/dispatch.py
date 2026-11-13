@@ -1067,6 +1067,7 @@ def recover_interrupted_runs(
     config: SupervisorConfig,
     *,
     on_run_finished: Callable[[str], None] | None = None,
+    on_adopted_finished: Callable[[str], None] | None = None,
 ) -> list[str]:
     """Reap runs stranded by a supervisor death (v59-F10).
 
@@ -1078,8 +1079,9 @@ def recover_interrupted_runs(
     deposit, G10 re-verification included); anything else becomes an honest
     ``worker_crashed`` with reason ``supervisor_restart``. ADR 0060: a live,
     verified worker is re-adopted instead and finishes on a daemon thread
-    (``on_run_finished`` fires from there); a run whose supervisor is still
-    alive is left alone. Returns the task ids it touched.
+    (``on_adopted_finished`` — a live run's finish, chat turn included —
+    else ``on_run_finished`` fires from there); a run whose supervisor is
+    still alive is left alone. Returns the task ids it touched.
     """
     recovered: list[str] = []
     me = process_owner()
@@ -1104,7 +1106,9 @@ def recover_interrupted_runs(
             and worker is not None
             and worker[2]
             and config.readopt_workers
-            and _adopt_worker(run_store, config, record, worker, on_run_finished)
+            and _adopt_worker(
+                run_store, config, record, worker, on_adopted_finished or on_run_finished
+            )
         ):
             recovered.append(task_id)
             continue
