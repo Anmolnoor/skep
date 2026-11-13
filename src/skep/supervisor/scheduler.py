@@ -559,9 +559,14 @@ def compose_digest(store: RunStore) -> str:
         item for item in store.list_memory_items() if item.memory_class == "observation"
     ][:5]
     if observations:
+        from .serve.chat import wrap_untrusted
+
         lines.append("recent observations:")
         for item in observations:
-            lines.append(f"  - {item.content[:80]}")
+            text = item.content[:80]
+            if item.provenance is not None:  # D15: a worker's words, outside content
+                text = wrap_untrusted(item.provenance, text)
+            lines.append(f"  - {text}")
     # v53-F1: the curator SURFACES the aging skill queue — it never acts.
     from .skill_curator import stale_drafts
 
