@@ -175,13 +175,24 @@ OUTBOUND_CONTENT_PREFIXES: tuple[tuple[str, ...], ...] = (
 # W7: programs whose job is reaching another host. One list: the trifecta
 # guard's shell-egress row (``reaches_network``) and P3-6's refusal of a
 # standing Queen shell allow (serve/actions.py) both read it.
-# ponytail: named programs only; an interpreter (`python3 -c 'urllib…'`) or
-# git reaches the network too, and is judged by its own rules, not this list.
+# ES-F51 review: plus the programs whose only job is sending (mail, file
+# sync, raw sockets). Left out on purpose — each also does local work, and a
+# standing allow on it is the operator's call: gh, docker, kubectl, aws,
+# gcloud, az, openssl, open/xdg-open. Remote git is the floor's (I4).
+# ponytail: named programs only; a script an interpreter runs (`python3 x.py`)
+# can reach the network too and is not seen — inline code is (``reaches_network``).
 NETWORK_PROGRAMS: frozenset[str] = frozenset(
     {"curl", "wget", "nc", "ncat", "netcat", "socat", "ssh", "scp", "sftp", "ftp", "tftp",
      "telnet", "rsync", "dig", "nslookup", "host", "drill", "ping", "ping6", "traceroute",
-     "whois", "aria2c", "lftp", "http", "https", "xh"}
+     "whois", "aria2c", "lftp", "http", "https", "xh", "mail", "mailx", "sendmail", "mutt",
+     "msmtp", "nmap", "rclone", "s3cmd", "smbclient", "websocat", "grpcurl", "mosquitto_pub"}
 )  # fmt: skip
+# Interpreters and the flag that hands them inline code (`python3 -c '…'`).
+_INLINE_CODE_FLAGS: dict[str, frozenset[str]] = {
+    "python": frozenset({"-c"}), "python3": frozenset({"-c"}), "node": frozenset({"-e", "-p"}),
+    "perl": frozenset({"-e", "-E"}), "ruby": frozenset({"-e"}), "php": frozenset({"-r"}),
+    "deno": frozenset({"eval"}), "bun": frozenset({"-e", "--eval"}),
+}  # fmt: skip
 PACKAGE_MANAGERS: frozenset[str] = frozenset(
     {"pip", "pip3", "pipx", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
      "gem", "go", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk"}
@@ -197,17 +208,37 @@ def is_package_install(argv: Sequence[str]) -> bool:
     return bool(argv) and program_name(argv[0]) in PACKAGE_MANAGERS and bool(INSTALL_VERBS & verbs)
 
 
+def _inline_code(argv: Sequence[str]) -> bool:
+    """Inline code, its flag alone or in a short cluster (``perl -pe``)."""
+    flags = _INLINE_CODE_FLAGS.get(program_name(argv[0]), frozenset())
+    letters = {flag[1] for flag in flags if len(flag) == 2 and flag[0] == "-"}
+    for token in argv[1:]:
+        if token in flags:
+            return True
+        if token[:1] != "-":
+            return False  # a script path: what follows is the script's
+        if token[1:2] != "-" and letters & set(token[1:]):
+            return True
+    return False
+
+
 def reaches_network(command: str) -> bool:
-    """W7: does the line run a network program or a package install (in any
-    argv the floor reads: launchers, ``env``, ``sh -c``), or write to bash's
-    ``/dev/tcp`` / ``/dev/udp``? A line that cannot be read counts."""
+    """W7: does the line run a network program, a package install or inline
+    interpreter code (``python3 -c``, ``node -e``: code this cannot read) in
+    any argv the floor reads (launchers, ``env``, ``sh -c``), or write to
+    bash's ``/dev/tcp`` / ``/dev/udp``? A line that cannot be read counts."""
     if "/dev/tcp/" in command or "/dev/udp/" in command:
         return True
     segments = command_line_segments(command)
     if segments is None:
         return True
     return any(
-        argv and (program_name(argv[0]) in NETWORK_PROGRAMS or is_package_install(argv))
+        argv
+        and (
+            program_name(argv[0]) in NETWORK_PROGRAMS
+            or is_package_install(argv)
+            or _inline_code(argv)
+        )
         for argv in segments
     )
 

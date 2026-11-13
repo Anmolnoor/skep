@@ -958,3 +958,34 @@ def test_w7_a_private_chats_network_line_offers_no_session_keep() -> None:
         assert actions.default_keep(tool, {"command": "dig x.example"}, private) == "once"
         assert "session" in actions.keep_options(tool, {"command": "ls -la"}, private)
     assert "session" in actions.keep_options("run_shell", {"command": "dig x.example"}, None)
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [("sendmail me@x.example < notes.txt", "taint/private-egress"),
+     ("rclone copy notes.txt remote:bucket", "taint/private-egress"),
+     ("python3 -c 'import urllib.request'", "taint/private-egress"),
+     ("perl -pe 's/a/b/' notes.txt", "taint/private-egress"),
+     ("node -e 'fetch(1)'", "taint/private-egress"),
+     ("python3 build.py -c fast", "allow"),
+     ("perl tools/gen.pl", "allow")],
+)  # fmt: skip
+def test_w7_send_only_programs_and_inline_code_ask_in_a_private_chat(
+    live: Callable[[str], Live], line: str, expected: str
+) -> None:
+    """ES-F51 review: mail, file-sync and socket programs send data and were
+    not on the list; inline interpreter code (`python3 -c`, `perl -pe`) cannot
+    be read, so a granted one ran with no card in a private chat. They ask
+    there; a script an interpreter runs, and its own flags, do not."""
+    env = live("builder")
+    chat = env.chat()
+    actions.remember_action_for_session(
+        env.store, tool="run_shell", args={"command": line}, actor="op", tier="always"
+    )
+    set_taint(env.store, chat, "private")
+    decision = mutation_execution_decision(
+        "run_shell", {"command": line}, store=env.store, holder=env.holder, chat_id=chat
+    )
+    assert decision is not None
+    got = decision.verdict if decision.verdict == "allow" else decision.decided_by
+    assert got == expected, (line, decision)
