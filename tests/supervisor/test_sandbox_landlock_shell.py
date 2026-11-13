@@ -79,7 +79,14 @@ def test_a_nested_bwrap_is_refused_inside_landlock(tmp_path: Path) -> None:
         tmp_path, workspace, [bwrap, "--ro-bind", "/", "/", "--unshare-user", "--", "true"]
     )
     assert proc.returncode != 0
-    assert "Operation not permitted" in proc.stderr
+    # Landlock refuses the mount ("Operation not permitted"); a host that
+    # also forbids nested user namespaces (Ubuntu's AppArmor default, as on
+    # CI) refuses one step earlier. Either way the inner sandbox cannot start.
+    assert proc.stderr.startswith("bwrap: "), proc.stderr
+    assert (
+        "Operation not permitted" in proc.stderr
+        or "No permissions to create a new namespace" in proc.stderr
+    ), proc.stderr
 
 
 def test_the_codex_worker_makes_a_patch_through_shell_inside_the_wall(tmp_path: Path) -> None:
