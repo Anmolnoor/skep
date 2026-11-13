@@ -489,7 +489,7 @@ def _final(client: TestClient, config: SupervisorConfig, task_id: str) -> dict[s
 
 
 @_SANDBOX
-@pytest.mark.parametrize(("mode", "gate"), [("shellgate", "rm_-rf_build"),
+@pytest.mark.parametrize(("mode", "gate"), [("shellgate", "make_lint"),
                                              ("hostgate", "files.example")])  # fmt: skip
 def test_a_gate_on_an_unlocked_project_answers_itself_once(
     repo: Path, config: SupervisorConfig, mode: str, gate: str
@@ -504,10 +504,11 @@ def test_a_gate_on_an_unlocked_project_answers_itself_once(
     try:
         resolved = store.approvals_for(first)
         assert [(a.status, a.resolved_by) for a in resolved] == [("approved", "auto:unlocked")]
-        # once: no session grant was written for the command (B39)
+        # once: no session grant was written for the command (B39) — `make
+        # lint`, not a guarded class a human's approve never remembers either
         from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
 
-        assert "rm -rf build" not in str(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+        assert "make lint" not in str(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
     finally:
         store.close()
     rows = _decisions(config)
