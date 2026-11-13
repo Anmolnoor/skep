@@ -72,6 +72,8 @@ def _allowed_kind(grant: str, old_by: str, new_by: str) -> str | None:
     granted = grant != "none" and new_by.startswith(("grant:session/", "grant:global/"))
     if granted and (not old_by or old_by == "-" or old_by.endswith(CATCH_ALL_ASKS)):
         return "looser:grant"
+    if granted and old_by == "baseline/no_baseline":
+        return "looser:b101"  # P3-4: on a home with no baseline a human's grant applies
     if new_by == "global/overlay-fetch":  # never a grant this round (operator decision)
         raise AssertionError(f"an overlay fetch allow granted: {new_by}")
     if new_by.endswith(NAMED_ALLOWS) or any(new_by.startswith(n) for n in NAMED_ALLOWS):
@@ -147,8 +149,10 @@ def test_no_network_lane_verdict_is_more_permissive_than_before(
     monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
     monkeypatch.chdir(tmp_path)
     seen = flips(kind, tmp_path)
-    if kind in ("zero", "tampered"):  # the baseline guard answers: nothing loosens
+    if kind == "tampered":  # the baseline guard answers: nothing loosens
         assert not any(k.startswith("looser") for k in seen), seen
+    if kind == "zero":  # P3-4 (B101): only a human's grant, nothing else
+        assert {k for k in seen if k.startswith("looser")} <= {"looser:b101", "looser:grant"}, seen
 
 
 # --- the regressions, one per ledger row ---------------------------------------------------
@@ -327,16 +331,17 @@ def test_b56_a_session_fetch_grant_in_a_role_chat_runs_the_url_with_no_second_ca
         "require_approval",
         "template:builder/net-fetch-gated",
     )
-    remember_action_for_session(store, tool="read_url", args={"url": url}, actor="op")
+    remember_action_for_session(store, tool="read_url", args={"url": url}, actor="op", chat_id=chat)
     again = decide()
     assert (again.verdict, again.decided_by) == (
         "allow",
-        "grant:session/network:fetch:granted.example",
+        f"grant:session/network:fetch:https://granted.example/@chat:{chat}",
     )
     _execute(store, holder, "read_url", {"url": url}, again, chat)
-    # Only the granted host: in a builder chat the role's catch-all ask still
-    # binds the baseline's docs.python.org allow — a template allow is no grant.
-    assert fetched[-1]["hops"] == "TFFF"
+    # No hop: a redirect is known by its host only, which a URL-directory
+    # grant never covers (P3-4, B74); in a builder chat the role's catch-all
+    # ask still binds the baseline's docs.python.org allow.
+    assert fetched[-1]["hops"] == "FFFF"
     assert decide("https://other.example/").verdict == "require_approval"
 
 
@@ -414,8 +419,9 @@ def test_an_operator_overlay_fetch_allow_does_not_let_read_url_run(
 def test_b56_a_stored_grant_matches_exactly_what_it_matched_before(
     kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """P3-4 owns the matchers: no role in the way, a stored fetch or MCP grant
-    decides exactly the probes it decided before P3-3 — no more, no less."""
+    """No role in the way, a stored fetch or MCP grant decides no probe it did
+    not decide before P3-3 — and since P3-4 (B74) a read_url keep covers its
+    URL's directory with no other query, so the query probe asks."""
     monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
     monkeypatch.chdir(tmp_path)
     for key, shown in rows(tmp_path, kind):
@@ -425,7 +431,11 @@ def test_b56_a_stored_grant_matches_exactly_what_it_matched_before(
         old = FROZEN[key].split(" ")[1]
         was = old.endswith(("/network:fetch:granted.example", "/mcp:tracker:update_issue"))
         now = shown.split(" ")[1].startswith("grant:")
-        assert was == now, (key, FROZEN[key], shown)
+        assert now <= was, (key, FROZEN[key], shown)
+        if lane == "mcp" or _probe in ("granted", "granted-path", "uppercase"):
+            assert was == now, (key, FROZEN[key], shown)
+        if _probe in ("granted-query", "userinfo", "port"):
+            assert not now, (key, FROZEN[key], shown)
 
 
 def _cli(home: Path, capsys: pytest.CaptureFixture[str], *argv: str) -> dict[str, Any]:
@@ -465,7 +475,8 @@ def test_the_queen_rest_cli_and_hook_give_one_network_verdict_and_one_label(
     )
 
     paths, store, holder, _fetched = net(kind)
-    _grant(store, "session")
+    # P3-4: REST, the CLI and the hook have no chat — the unbound tier.
+    _grant(store, "always", [store.create_chat(title="g", model=None).chat_id])
     hook = {"allow": "allow", "require_approval": "ask", "deny": "deny"}
     for role in ROLES:
         flags = ["--role", role] if role else []

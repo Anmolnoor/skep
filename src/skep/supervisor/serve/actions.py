@@ -72,10 +72,12 @@ from ..policy_resolver import (
     PolicyResolutionError,
     ResolvedRunPolicy,
     engine_v2_scopes,
+    grant_repo,
     resolve_operator_policy,
     resolve_run_policy,
     resolved_shell_allowlist,
     run_policy_for_repo,
+    worker_shell_grants,
 )
 from ..policy_schema import (
     _VERDICT_RANK,
@@ -145,7 +147,6 @@ from .settings import (
     SANDBOX_BACKEND,
     SANDBOX_BACKENDS,
     SANDBOX_REQUIRED_FOR,
-    SESSION_ALLOWED_SHELL_COMMANDS,
     SHELL_COMMAND_PRESETS,
     TICKER_INTERVAL_SECONDS,
     TRUSTED_WORKSPACE_ROOTS,
@@ -185,7 +186,7 @@ _POSITIVE_POLICY_FIELDS = {
 _NONNEGATIVE_POLICY_FIELDS = {"default_max_provider_calls", "card_timeout_seconds"}
 
 if TYPE_CHECKING:
-    from ..policy_schema import Scope
+    from ..policy_schema import LearnedRule, Scope
 
 
 def _require_string_list(value: Any, *, field: str) -> list[str]:
@@ -1743,8 +1744,9 @@ def _compiled_rule_source(rule: Any, resolved: ResolvedRunPolicy) -> str:
         if argv in [list(a) for a in resolved.policy.get("allowed_shell_commands") or []]:
             label = resolved.provenance.get("allowed_shell_commands", "global")
             return f"allowed_shell_commands@{label}"
-        if argv in [list(a) for a in resolved.policy.get("session_allowed_shell_commands") or []]:
-            return "session_allowed_shell_commands@session"
+        grant = resolved.shell_grants.get(rule.pattern)
+        if grant is not None:  # P3-4: a worker grant on the learned list
+            return f"learned@{grant}"
         return "compiled"
     for prefix, knob in _RULE_KNOBS:
         if rule_id.startswith(prefix):
@@ -3381,32 +3383,46 @@ def preserved_resumable_hint(
     return None
 
 
-def remember_commands_for_session(store: RunStore, commands: list[list[str]]) -> list[list[str]]:
-    """v86-F1: a plain approve holds for the serve session — persist the
-    eligible approved commands into the session tier (cleared at serve
-    startup, merged read-side by ``_shell_allowlist_for``). Guarded classes
-    (remote git, dangerous/outbound prefixes) are NEVER session-persisted:
-    they stay approve-once, so denied space gains no standing grant."""
-    eligible: list[list[str]] = []
+def remember_commands_for_session(
+    store: RunStore, commands: list[list[str]], *, repo: Path | str
+) -> list[list[str]]:
+    """v86-F1 → ADR 0059 D4: a plain approve holds for the serve session, in
+    THIS repo only (B39: the old tier was one list every repo's runs read).
+    Each eligible command becomes a session grant on the one learned list,
+    bound to ``repo`` — an argv prefix, as every worker allowlist entry is —
+    dropped at serve startup. Guarded classes (remote git, dangerous/outbound
+    prefixes) are NEVER session-persisted: they stay approve-once, so denied
+    space gains no standing grant. Returns the commands newly granted."""
+    added: list[list[str]] = []
     for raw in commands:
         command = normalize_remembered_command(list(raw))
         if not command or is_remote_git_command(command):
             continue
         if dangerous_prefix_reason(command) is not None:
             continue
-        eligible.append(command)
-    if not eligible:
-        return []
-    stored = store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS)
-    existing = [list(command) for command in stored] if isinstance(stored, list) else []
-    added: list[list[str]] = []
-    for command in eligible:
-        if command not in existing:
-            existing.append(command)
+        grant = _worker_grant(command, "session", {"repo": grant_repo(repo)})
+        _, status = store_grant(store, grant)
+        if status != "kept" and command not in added:
             added.append(command)
-    if added:
-        store.set_setting(SESSION_ALLOWED_SHELL_COMMANDS, existing)
     return added
+
+
+def _worker_grant(command: Sequence[str], lifetime: str, bound: dict[str, str]) -> LearnedRule:
+    """A worker shell grant: an argv prefix (the worker contract's matcher)."""
+    from ..policy_schema import LearnedRule
+
+    pattern = shlex.join(command)
+    ((key, value),) = bound.items()
+    return LearnedRule(
+        rule_id=f"shell:run:{pattern}@{'project' if key == 'project_id' else key}:{value}",
+        action="run",
+        pattern=pattern,
+        scope="shell",
+        provenance="session:worker-approve" if lifetime == "session" else "remember:worker",
+        lifetime=lifetime,  # type: ignore[arg-type]
+        matcher="prefix",
+        bound=bound,  # type: ignore[arg-type]
+    )
 
 
 def _deferred_asks(config: SupervisorConfig, task_id: str) -> Permissions | None:
@@ -3534,6 +3550,7 @@ def resume_past_gate(
         session_kept = remember_commands_for_session(
             store,
             [list(command) for command in approval_commands if not _asked(command, permissions)],
+            repo=str(run["repo"]),
         )
     verdict = ApprovalVerdict(
         approved=True,
@@ -3575,7 +3592,7 @@ def resume_past_gate(
         approved=True,
         actor=actor,
         note=f"resumed as {resumed_id} (dispatched)"
-        + ("; approval held for this serve session" if session_kept else ""),
+        + ("; approval held for this serve session, in this repo only" if session_kept else ""),
         remembered=remembered,
         claimed=True,
     )
@@ -3590,47 +3607,42 @@ def resume_past_gate(
 def persist_remembered_command(
     store: RunStore, holder: ConfigHolder, repo: Path, command: list[str]
 ) -> str:
-    """Persist an exact remembered command (v19-F4); returns the tier written.
+    """Persist an exact remembered command (v19-F4); returns where it holds.
 
-    Prefers the repo's bound project policy so remembering does not silently
-    widen every repo's global allowlist; falls back to the global setting when
-    the repo is not bound to a project. v114-F2: this is the ONE writer every
-    face shares (CLI, REST, chat — ADR 0050), and the tier it wrote
-    (``project:<id>`` or ``global``) is part of its answer: a project's own
-    ``allowed_shell_commands`` shadows the global list, so a global write for
-    project work clears no gate — the field test's "the gate is cleared" lie.
+    ADR 0059 D4 (B18): a ``project`` grant on the one learned list — bound to
+    the repo's project, or to the repo itself when it is bound to none — an
+    argv prefix in every run there. It no longer writes the project's
+    ``allowed_shell_commands`` knob, which a locked baseline enforces and so
+    silently refused while the ledger said "remembered", and which shadowed
+    the global list. v114-F2: this is the ONE writer every face shares (CLI,
+    REST, chat — ADR 0050), and its answer — ``project:<id>`` or
+    ``repo:<path>`` — is what the receipt names.
     """
     project = store.project_for_binding("repo_path", str(repo))
-    tier = "global" if project is None else f"project:{project.project_id}"
-    if project is not None:
-        existing = [list(entry) for entry in (project.policy.get("allowed_shell_commands") or [])]
-        if command not in existing:
-            existing.append(command)
-            updated = dict(project.policy)
-            updated["allowed_shell_commands"] = existing
-            store.add_project_policy(
-                project_id=project.project_id,
-                name=project.name,
-                strategy=project.strategy,
-                phase=project.phase,
-                policy=updated,
-                pack_name=project.pack_name,
-                pack_version=project.pack_version,
-            )
-    else:
-        existing_global = list(
-            policy_view(store, holder.current).get("allowed_shell_commands") or []
-        )
-        if command not in existing_global:
-            existing_global.append(command)
-            store.set_setting(ALLOWED_SHELL_COMMANDS, existing_global)
-            holder.rebuild()
+    bound = {"repo": grant_repo(repo)} if project is None else {"project_id": project.project_id}
+    store_grant(store, _worker_grant(command, "project", bound), context={"repo": grant_repo(repo)})
     # v109-F8: every historical approval of this exact command now has a
     # standing grant — its ledger rows say so (I13).
     store.mark_ledger_remembered(
         action="shell.run", resource=shlex.join(command), repo_path=str(repo)
     )
-    return tier
+    return remembered_where(store, repo)
+
+
+def remembered_where(store: RunStore, repo: Path | str) -> str:
+    """Where a worker "remember" in ``repo`` holds: ``project:<id>``, or
+    ``repo:<path>`` for a repo bound to no project."""
+    project = store.project_for_binding("repo_path", str(repo))
+    return f"repo:{grant_repo(repo)}" if project is None else f"project:{project.project_id}"
+
+
+def granted_commands(store: RunStore, holder: ConfigHolder, repo: Path) -> list[list[str]]:
+    """The worker grants a run in ``repo`` holds (session and project), argv."""
+    project = store.project_for_binding("repo_path", str(repo))
+    grants = worker_shell_grants(
+        store, holder.current.home, repo, None if project is None else project.project_id
+    )
+    return [shlex.split(pattern) for pattern in grants]
 
 
 def _persist_remembered_network_host(
@@ -3969,14 +3981,17 @@ def allow_shell_command_and_resume(
             raise HTTPException(status_code=409, detail=guard_reason)
     _refuse_remembering_an_ask(holder.current, str(run["task_id"]), commands=normalized_commands)
     repo = Path(str(run["repo"]))
-    # v19-F4: prefer the repo's bound project policy; fall back to global.
+    # ADR 0059 D4 (B18): a project grant — the repo's project, else the repo.
     for command in normalized_commands:
         persist_remembered_command(store, holder, repo, command)
     # Re-resolve the allowlist so the just-persisted command reaches the
     # immediate resume, not only future runs.
     execution_mode = str(run.get("execution_mode") or "sandbox")
     allowlist = resolved_shell_allowlist(
-        run_policy_for_repo(store, holder.current, repo), repo, execution_mode
+        run_policy_for_repo(store, holder.current, repo),
+        repo,
+        execution_mode,
+        granted_commands(store, holder, repo),
     )
     return resume_past_gate(
         store,
@@ -4117,8 +4132,9 @@ def allow_shell_command(
     way a PUT-shaped set_policy field could.
 
     v114-F2: with ``repo`` the grant goes through ``persist_remembered_command``
-    — the bound project's overlay, global only when unbound — and the list
-    returned is that tier's. Without ``repo`` it is the global list, as before."""
+    — a project grant (the repo's project, else the repo; ADR 0059 D4) — and
+    the list returned is every worker grant that holds there. Without
+    ``repo`` it is the global list, as before."""
     try:
         argv = shlex.split(command)
     except ValueError as exc:
@@ -4131,15 +4147,8 @@ def allow_shell_command(
     if guard_reason is not None:
         raise HTTPException(status_code=409, detail=guard_reason)
     normalized = normalize_remembered_command(argv)
-    tier = persist_remembered_command(store, holder, repo, normalized)
-    if tier == "global":
-        return [
-            list(entry)
-            for entry in policy_view(store, holder.current).get("allowed_shell_commands") or []
-        ]
-    project = store.project_for_binding("repo_path", str(repo))
-    assert project is not None  # tier said so
-    return [list(entry) for entry in (project.policy.get("allowed_shell_commands") or [])]
+    persist_remembered_command(store, holder, repo, normalized)
+    return granted_commands(store, holder, repo)
 
 
 def allow_shell_command_scoped(
@@ -4151,15 +4160,19 @@ def allow_shell_command_scoped(
     result says which list changed so the Queen cannot report a gate as
     cleared when it is not (I8)."""
     allowed = allow_shell_command(store, holder, command, repo=repo)
-    bound = store.project_for_binding("repo_path", str(repo)) if repo is not None else None
     result: dict[str, Any] = {
         "action": "shell_command_allowed",
-        "tier": "global" if bound is None else f"project:{bound.project_id}",
+        "tier": "global" if repo is None else remembered_where(store, repo),
         "allowed_shell_commands": allowed,
     }
     if repo is not None:
         result["repo"] = str(repo)
-    if bound is None:
+        # P3-4 (B18): a project grant, not the knob a locked baseline enforces.
+        result["note"] = (
+            f"a standing grant for {result['tier']} (a command prefix in every run "
+            "there); the list is every worker grant that holds there"
+        )
+    else:
         result["note"] = (
             "written to the GLOBAL allowlist (repos with no project overlay); a "
             "project's own allowed_shell_commands shadows it, so for project work "
@@ -4928,50 +4941,87 @@ def learn_policy_rule(
     provenance: str,
 ) -> str | None:
     """Append one learned rule to the policy document; return its id, or None
-    when an identical rule is already there.
+    when an identical rule already covers it.
 
-    v90-F3: the single writer. ``allow_fetch_domain`` and ``allow_mcp_tool``
-    each carried their own copy of this block, and the session tier would have
-    been a third — so it is one function that every grant path routes through.
-    ``resolve()`` vets the rule against every deny before it is stored, so
-    nothing can be learned into denied space (the write-time half of
-    LearnedRuleRejected's defense in depth).
+    v90-F3: the single writer — ``allow_fetch_domain`` and ``allow_mcp_tool``
+    route through here, the remember paths through ``store_grant`` beneath it.
     """
-    from ..policy_schema import (
-        POLICY_DOCUMENT_SETTINGS_KEY,
-        LearnedRule,
-        LearnedRuleRejected,
-        PolicyDocument,
-        document_from_settings,
-        resolve,
-    )
+    from ..policy_schema import LearnedRule
 
-    raw = store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)
-    document = document_from_settings(raw) or PolicyDocument()
     rule = LearnedRule(
         rule_id=rule_id,
         action=action,
         pattern=pattern,
         scope=scope,
         provenance=provenance,
-        created_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        # allow_fetch_domain grants a host on purpose: ``host``, not the
+        # unlabelled legacy-host row doctor lists for revocation (P3-4).
+        matcher="host" if scope == "network" else None,
     )
-    for existing in document.learned:
-        if (
-            existing.scope == rule.scope
-            and existing.action == rule.action
-            and existing.pattern == rule.pattern
-        ):
-            # Already granted (possibly at a durable tier) — a session rule must
-            # never shadow or downgrade a standing one.
-            return None
-    updated = document.model_copy(update={"learned": [*document.learned, rule]})
+    kept, status = store_grant(store, rule)
+    return None if status == "kept" else kept.rule_id
+
+
+def store_grant(
+    store: RunStore, rule: LearnedRule, *, context: dict[str, str] | None = None
+) -> tuple[LearnedRule, str]:
+    """Store one grant on the ONE learned list (ADR 0059 D4); return the row
+    that now covers its subject and ``added`` / ``upgraded`` / ``kept``.
+
+    B59: a keep on a subject already granted no longer writes nothing — a row
+    with the same subject and matcher that lives as long or longer and covers
+    this binding is ``kept`` (and returned, so the receipt says what holds);
+    a shorter-lived one bound like this grant, or to ``context`` (the chat or
+    repo a session keep there would bind), is ``upgraded`` in place. The new
+    rule is vetted against every deny before it is stored, so nothing is
+    learned into denied space (LearnedRuleRejected's write-time half)."""
+    from ..policy_schema import (
+        LIFETIME_RANK,
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        LearnedRuleRejected,
+        PolicyDocument,
+        document_from_settings,
+        lifetime_of,
+        matcher_of,
+        resolve,
+    )
+
+    document = (
+        document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
+    )
+    rule = rule.model_copy(update={"created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")})
+    subject = (rule.scope, rule.action, rule.pattern, matcher_of(rule))
+    rank = LIFETIME_RANK[lifetime_of(rule)]
+    same = [
+        (index, existing)
+        for index, existing in enumerate(document.learned)
+        if (existing.scope, existing.action, existing.pattern, matcher_of(existing)) == subject
+    ]
+    for _index, existing in same:
+        if LIFETIME_RANK[lifetime_of(existing)] >= rank and existing.bound in ({}, rule.bound):
+            return existing, "kept"
+    learned = list(document.learned)
+    status = "added"
+    for index, existing in same:
+        if existing.bound in (rule.bound, context or {}):
+            learned[index] = existing.model_copy(
+                update={
+                    key: getattr(rule, key)
+                    for key in ("rule_id", "provenance", "lifetime", "bound", "created_at")
+                }
+            )
+            status = "upgraded"
+            break
+    else:
+        learned.append(rule)
+    vetted = document.model_copy(update={"learned": [rule.model_copy(update={"bound": {}})]})
     try:
-        resolve(updated, v2_scopes=engine_v2_scopes(store))  # vets against every deny
+        resolve(vetted, v2_scopes=engine_v2_scopes(store))  # vets against every deny
     except LearnedRuleRejected as exc:
         raise ValueError(str(exc)) from exc
+    updated = document.model_copy(update={"learned": learned})
     store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
-    return rule.rule_id
+    return rule, status
 
 
 def learned_rule_grant_view(store: RunStore, rule_id: str | None) -> dict[str, str] | None:
@@ -4999,6 +5049,138 @@ def learned_rule_grant_view(store: RunStore, rule_id: str | None) -> dict[str, s
     return None
 
 
+# The tools whose card keep can store a grant (v90-F3) — the web card offers a
+# keep selector only where ``keep_options`` says one exists.
+REMEMBERABLE_TOOLS = frozenset({"read_url", "run_shell", "start_process"})
+KEEP_TIERS = ("once", "session", "always")
+
+
+def _grant_subjects(tool: str, args: dict[str, Any]) -> list[tuple[str, str, str, str]] | str:
+    """What a keep on this card would store — ``(scope, action, pattern,
+    matcher)`` per grant — or why nothing may be (ADR 0059 D4: never ``*``,
+    a guarded class, an opaque line). One grant per segment of a compound
+    line, and only if every segment is grantable (B61)."""
+    from ..policy_schema import url_prefix_of
+    from ..shell_prefixes import is_outbound_content_prefix, queen_command_line_refusal
+
+    if tool not in REMEMBERABLE_TOOLS:
+        return (
+            f"{tool} has no standing grant: only read_url, run_shell and start_process "
+            "approvals can be kept, so this card is approve-once"
+        )
+    if tool == "read_url":
+        prefix = url_prefix_of(str(args.get("url") or ""))
+        if prefix is None:
+            return (
+                "this URL cannot be granted (not http/https, credentials in it, or "
+                "'..' in its path), so it is approve-once"
+            )
+        return [("network", "fetch", prefix, "url_prefix")]
+    raw = str(args.get("command") or "").strip()
+    refusal = queen_command_line_refusal(raw) if raw else "the command is empty"
+    segments = shell_segments(raw) if refusal is None else None
+    if segments is None:
+        opaque = refusal or "part of the line is opaque ($(…), backticks, sh -c, eval)"
+        return f"{opaque} — approve-once"
+    action = "run_background" if tool == "start_process" else "run"
+    subjects: list[tuple[str, str, str, str]] = []
+    for segment in segments:
+        try:
+            argv = normalize_remembered_command(shlex.split(segment))
+        except ValueError:
+            return f"{segment!r} does not parse, so the line is approve-once"
+        # The never-grantable classes stay approve-once, exactly as ADR 0046
+        # holds them for the worker tier.
+        why = (
+            "a wildcard is never a grant"
+            if not argv or argv == ["*"]
+            else "remote git is never granted"
+            if is_remote_git_command(argv)
+            else "an outbound post/send is never granted"
+            if is_outbound_content_prefix(argv)
+            else dangerous_prefix_reason(argv)
+        )
+        if why is not None:
+            return f"{shlex.join(argv) or segment!r}: {why} — the line is approve-once"
+        subjects.append(("shell", action, shlex.join(argv), "exact_argv"))
+    return list(dict.fromkeys(subjects))
+
+
+def keep_refusal(
+    tool: str, args: dict[str, Any], keep: str, store: RunStore | None = None
+) -> str | None:
+    """Why the server would refuse this keep on this card, or None (B32: a
+    keep the tool cannot honour is refused up front, never a false
+    "remembered"). ``once`` always holds. With ``store``, also a grant that
+    store_grant would refuse for reaching into a deny — checked BEFORE the
+    card runs, not after it already ran."""
+    if keep == "once":
+        return None
+    if keep not in KEEP_TIERS:
+        return "keep must be one of 'once', 'session', 'always'"
+    found = _grant_subjects(tool, args)
+    if isinstance(found, str):
+        return found
+    return None if store is None else _denied_grant(store, found)
+
+
+def _denied_grant(store: RunStore, subjects: list[tuple[str, str, str, str]]) -> str | None:
+    """store_grant's write-time vet over these subjects: why they land in a
+    deny of the setup document, or None."""
+    from ..policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        LearnedRule,
+        LearnedRuleRejected,
+        PolicyDocument,
+        document_from_settings,
+        resolve,
+    )
+
+    document = (
+        document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
+    )
+    learned = [
+        LearnedRule(
+            rule_id=f"{scope}:{action}:{pattern}",
+            action=action,
+            pattern=pattern,
+            scope=scope,  # type: ignore[arg-type]
+            provenance="keep-check",
+            matcher=matcher,  # type: ignore[arg-type]
+        )
+        for scope, action, pattern, matcher in subjects
+    ]
+    try:
+        resolve(document.model_copy(update={"learned": learned}), v2_scopes=engine_v2_scopes(store))
+    except LearnedRuleRejected as exc:
+        return str(exc)
+    return None
+
+
+def keep_options(tool: str, args: dict[str, Any]) -> list[str]:
+    """The keep choices a card offers: all three where a grant can be stored,
+    else only ``once`` — the card never offers what the server refuses."""
+    return list(KEEP_TIERS) if keep_refusal(tool, args, "session") is None else ["once"]
+
+
+def keep_covers(tool: str, args: dict[str, Any]) -> str | None:
+    """What a keep on this card would allow, in words — the card says it, so
+    "always" never hides that a compound line's commands are each granted on
+    their own (B61) or that a URL keep covers its whole directory (B74)."""
+    found = _grant_subjects(tool, args)
+    if isinstance(found, str):
+        return None
+    if tool == "read_url":
+        base, _, query = found[0][2].partition("?")
+        return f"a keep allows any page under {base} with no query" + (
+            f" or ?{query}" if query else ""
+        )
+    commands = "; ".join(f"`{pattern}`" for _scope, _action, pattern, _matcher in found)
+    head = "each of these on its own, exactly: " if len(found) > 1 else "exactly "
+    tail = ", as a background process" if tool == "start_process" else ""
+    return f"a keep allows {head}{commands}{tail}"
+
+
 def remember_action_for_session(
     store: RunStore,
     *,
@@ -5006,82 +5188,69 @@ def remember_action_for_session(
     args: dict[str, Any],
     actor: str,
     tier: str = "session",
-) -> dict[str, str] | None:
-    """v90-F3: a confirmed card grants its exact subject for this serve session.
+    chat_id: str | None = None,
+) -> dict[str, Any] | None:
+    """v90-F3 / ADR 0059 D4: a confirmed card's keep stores a scoped grant.
 
-    Approving a card used to grant nothing standing — the identical URL or
-    command carded again next turn, and only a separate ``allow_fetch_domain``
-    (or a hand-written operator rule) made it stop. A plain approve now writes a
-    session-provenance learned rule, so the SAME decision functions
-    (``fetch_grant_decision``, ``queen_shell_decision``) auto-resolve the
-    repeat. Returns the grant for the receipt, or None when nothing was granted.
-
-    v112-F1: ``tier`` is the operator's keep choice riding the confirm —
-    "session" (the v90-F3 default, dropped at serve startup) or "always"
-    (the same durable ``allow-always:`` provenance ``allow_fetch_domain``
-    writes, visible and revocable on the Policies page). The guards below
-    apply identically to both tiers; only the provenance prefix differs.
-
-    Deliberately narrow:
-    - only the verbs whose repeats the operator actually sees (fetch, shell);
-    - EXACT subject only — a grant on ``example.com`` never covers
-      ``docs.example.com`` (the ``domain_allowed`` matcher's rule, fail closed);
-    - never for a guarded class. ``learn_policy_rule`` vets against every deny,
-      and the shell prefixes that can never be granted (remote git, dangerous,
-      outbound content — ADR 0044) are filtered here before that.
+    ``session`` (the default) is bound to the CHAT that confirmed it (B39)
+    and dropped at serve startup; ``always`` is durable and unbound. A
+    read_url keep covers its URL's directory on that scheme and host, with no
+    query or the card's own (``url_prefix``, B74); a run_shell keep the exact
+    argv of each segment (``exact_argv``, B04/B61); a start_process keep the
+    ``run_background`` action its lane decides on (B21). A keep on a subject
+    already granted upgrades it or reports what already holds (B59). Returns
+    the receipt — what was stored, its lifetime, what it matches, what it is
+    bound to — or None for ``once``. A keep that cannot be honoured raises
+    ValueError naming why (B32): callers check ``keep_refusal`` first.
     """
-    import urllib.parse
+    from ..policy_schema import LearnedRule, lifetime_of, matcher_of
 
-    from ..shell_prefixes import (
-        dangerous_prefix_reason,
-        is_outbound_content_prefix,
-        is_remote_git_command,
-        normalize_remembered_command,
-    )
-
-    if tier not in ("session", "always"):
-        raise ValueError(f"grant tier must be 'session' or 'always', got {tier!r}")
-    provenance = f"session:{actor}" if tier == "session" else f"allow-always:{actor}"
-    if tool == "read_url":
-        host = urllib.parse.urlparse(str(args.get("url") or "")).hostname or ""
-        if not host:
-            return None
-        rule_id = learn_policy_rule(
-            store,
-            rule_id=f"network:fetch:{host}",
-            action="fetch",
-            pattern=host,
-            scope="network",
-            provenance=provenance,
-        )
-        return None if rule_id is None else {"scope": "network", "pattern": host, "tier": tier}
-    if tool in ("run_shell", "start_process"):
-        raw = str(args.get("command") or "").strip()
-        if not raw:
-            return None
-        try:
-            argv = normalize_remembered_command(shlex.split(raw))
-        except ValueError:
-            return None
-        # The never-grantable classes stay approve-once, exactly as ADR 0046
-        # holds them for the worker tier.
-        if not argv or is_remote_git_command(argv) or is_outbound_content_prefix(argv):
-            return None
-        if dangerous_prefix_reason(argv) is not None:
-            return None
-        pattern = shlex.join(argv)
-        rule_id = learn_policy_rule(
-            store,
-            rule_id=f"shell:run:{pattern}",
-            action="run",
+    if tier == "once":
+        return None
+    refusal = keep_refusal(tool, args, tier)
+    if refusal is None and tier == "session" and not chat_id:
+        refusal = "a session keep is bound to its chat, and this approval has none"
+    if refusal is not None:
+        raise ValueError(refusal)
+    subjects = _grant_subjects(tool, args)
+    assert not isinstance(subjects, str)  # keep_refusal said it is grantable
+    session = tier == "session"
+    bound = {"chat_id": str(chat_id)} if session else {}
+    provenance = f"session:{actor}" if session else f"allow-always:{actor}"
+    stored: list[tuple[LearnedRule, str]] = []
+    for scope, action, pattern, matcher in subjects:
+        rule = LearnedRule(
+            rule_id=f"{scope}:{action}:{pattern}" + (f"@chat:{chat_id}" if session else ""),
+            action=action,
             pattern=pattern,
-            scope="shell",
+            scope=scope,  # type: ignore[arg-type]
             provenance=provenance,
+            lifetime="session" if session else "global",
+            matcher=matcher,  # type: ignore[arg-type]
+            bound=bound,  # type: ignore[arg-type]
         )
-        if rule_id is None:
-            return None
-        return {"scope": "shell", "pattern": pattern, "tier": tier}
-    return None
+        stored.append(store_grant(store, rule, context={"chat_id": chat_id} if chat_id else {}))
+    rules = [rule for rule, _status in stored]
+    statuses = {status for _rule, status in stored}
+    session_only = all(lifetime_of(rule) == "session" for rule in rules)
+    return {
+        "scope": rules[0].scope,
+        "action": rules[0].action,
+        "pattern": " && ".join(rule.pattern for rule in rules),
+        "patterns": [rule.pattern for rule in rules],
+        "matcher": matcher_of(rules[0]),
+        "tier": "session" if session_only else "always",
+        "lifetime": "session" if session_only else "global",
+        "bound": "this chat" if all(rule.bound for rule in rules) else "everywhere",
+        "status": statuses.pop() if len(statuses) == 1 else "mixed",
+    }
+
+
+def grant_binding(rule: LearnedRule) -> str:
+    """Where a grant applies, in words: ``everywhere`` or ``chat <id>`` /
+    ``repo <path>`` / ``project <id>`` (P3-4)."""
+    names = {"chat_id": "chat", "project_id": "project", "repo": "repo"}
+    return ", ".join(f"{names[key]} {value}" for key, value in rule.bound.items()) or "everywhere"
 
 
 def list_policy_rules(store: RunStore) -> dict[str, Any]:
@@ -5098,7 +5267,10 @@ def list_policy_rules(store: RunStore) -> dict[str, Any]:
         POLICY_DOCUMENT_SETTINGS_KEY,
         PolicyDocument,
         document_from_settings,
+        is_legacy_host,
         is_session_rule,
+        lifetime_of,
+        matcher_of,
         operator_document_from_settings,
     )
 
@@ -5118,6 +5290,10 @@ def list_policy_rules(store: RunStore) -> dict[str, Any]:
                 "provenance": rule.provenance,
                 "tier": "session" if is_session_rule(rule) else "always",
                 "created_at": rule.created_at,
+                # P3-4 (ADR 0059 D4): how long it lives, what it matches, where.
+                "lifetime": lifetime_of(rule),
+                "matcher": "legacy-host" if is_legacy_host(rule) else matcher_of(rule),
+                "bound": grant_binding(rule),
             }
             for rule in document.learned
         ],

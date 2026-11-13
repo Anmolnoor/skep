@@ -412,12 +412,20 @@ def test_allow_command_refuses_to_remember_remote_git(repo: Path, config: Superv
 def testpersist_remembered_command_falls_back_to_global(
     repo: Path, config: SupervisorConfig
 ) -> None:
-    """v19-F4: with no bound project, the command lands in the global setting."""
+    """v19-F4 → P3-4 (ADR 0059 D4): with no bound project the command is a
+    grant bound to that repo — never the global knob every repo reads — and a
+    floor command is refused, never stored."""
+    from skep.supervisor.serve.actions import granted_commands
+
     store = RunStore(config.db_path)
     try:
         holder = ConfigHolder(config, store)
-        persist_remembered_command(store, holder, repo, ["git", "commit", "-m", "hi"])
-        assert store.get_setting("allowed_shell_commands") == [["git", "commit", "-m", "hi"]]
+        where = persist_remembered_command(store, holder, repo, ["pytest", "-q"])
+        assert where == f"repo:{repo.resolve()}"
+        assert store.get_setting("allowed_shell_commands") is None
+        assert granted_commands(store, holder, repo) == [["pytest", "-q"]]
+        with pytest.raises(ValueError, match="git add/commit"):
+            persist_remembered_command(store, holder, repo, ["git", "commit", "-m", "hi"])
     finally:
         store.close()
 
@@ -425,7 +433,10 @@ def testpersist_remembered_command_falls_back_to_global(
 def testpersist_remembered_command_prefers_bound_project(
     repo: Path, config: SupervisorConfig
 ) -> None:
-    """v19-F4: a repo bound to a project scopes the remember there, not globally."""
+    """v19-F4: a repo bound to a project scopes the remember there, not
+    globally — P3-4 (B18): as a project grant, not the enforced knob."""
+    from skep.supervisor.serve.actions import granted_commands
+
     store = RunStore(config.db_path)
     try:
         store.add_project_policy(
@@ -439,12 +450,13 @@ def testpersist_remembered_command_prefers_bound_project(
             project_id="p1", binding_kind="repo_path", binding_value=str(repo)
         )
         holder = ConfigHolder(config, store)
-        persist_remembered_command(store, holder, repo, ["pytest", "-q"])
-        # Global setting untouched; the command lands in the project policy.
+        assert persist_remembered_command(store, holder, repo, ["pytest", "-q"]) == "project:p1"
+        # Neither knob is touched; the grant is bound to the project.
         assert store.get_setting("allowed_shell_commands") is None
         project = store.get_project_policy("p1")
         assert project is not None
-        assert project.policy["allowed_shell_commands"] == [["pytest", "-q"]]
+        assert "allowed_shell_commands" not in project.policy
+        assert granted_commands(store, holder, repo) == [["pytest", "-q"]]
     finally:
         store.close()
 
@@ -572,10 +584,10 @@ def test_allow_command_approval_persists_shell_command_and_resumes(
             # v19-F1: the batch-approval command list is carried on the verdict.
             "commands": [write_argv],
         }
-        assert client.get("/api/policy").json()["allowed_shell_commands"] == [
-            verify_argv,
-            write_argv,
-        ]
+        # P3-4 (B18): a grant bound to the repo (it has no project), never the
+        # global knob; the receipt says where.
+        assert payload["remembered"] == f"repo:{repo.resolve()}"
+        assert client.get("/api/policy").json()["allowed_shell_commands"] == [verify_argv]
         # The just-persisted allowlist reaches the immediate resume too, not
         # only future runs.
         assert task["permissions"]["shell_allowlist"] == [verify_argv, write_argv]
@@ -1167,8 +1179,12 @@ def test_cli_allow_command_writes_the_project_overlay_like_the_rest_face(
         assert cli_cmds.cmd_review(args) == 0
         project = store.project_for_binding("repo_path", str(repo))
         assert project is not None
-        assert ["uv", "tree"] in project.policy["allowed_shell_commands"]
+        # P3-4 (B18): a project grant, the knob untouched (no shadowing).
+        assert project.policy["allowed_shell_commands"] == [["uv", "run", "pytest"]]
         assert ["uv", "tree"] not in (store.get_setting("allowed_shell_commands") or [])
+        from skep.supervisor.serve.actions import granted_commands
+
+        assert granted_commands(store, ConfigHolder(config, store), repo) == [["uv", "tree"]]
     finally:
         store.close()
 
@@ -1410,6 +1426,10 @@ def test_es_f8_cli_approve_of_a_batch_card_grants_every_command(
             cli_cmds._resume_pending_approval(config, store, record, "tester")
         verdict = seen["approval_verdict"]
         assert [list(c) for c in verdict.commands] == batch  # type: ignore[attr-defined]
-        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) == batch
+        # P3-4 (B39): session grants bound to this repo, not the global tier.
+        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) is None
+        from skep.supervisor.serve.actions import granted_commands
+
+        assert granted_commands(store, ConfigHolder(config, store), repo) == batch
     finally:
         store.close()

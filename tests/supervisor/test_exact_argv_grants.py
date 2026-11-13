@@ -39,12 +39,18 @@ def test_an_approved_command_grants_exactly_itself(
     try:
         holder = ConfigHolder(config, store)
         grant = remember_action_for_session(
-            store, tool="run_shell", args={"command": "curl https://x/y"}, actor="op", tier=tier
-        )
-        assert grant == {"scope": "shell", "pattern": "curl https://x/y", "tier": tier}
+            store, tool="run_shell", args={"command": "curl https://x/y"}, actor="op", tier=tier,
+            chat_id="c1",
+        )  # fmt: skip
+        assert grant is not None
+        assert (grant["pattern"], grant["matcher"], grant["tier"]) == (
+            "curl https://x/y", "exact_argv", tier,
+        )  # fmt: skip
 
         def decide_line(command: str) -> str:
-            decision = queen_shell_decision(store, holder, command=command, cwd=str(tmp_path))
+            decision = queen_shell_decision(
+                store, holder, command=command, cwd=str(tmp_path), chat_id="c1"
+            )
             if decision is None or decision.verdict == "require_approval":
                 return "card"
             return decision.verdict

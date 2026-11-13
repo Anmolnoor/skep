@@ -37,9 +37,13 @@ from .policy_schema import (
     PolicyRule,
     ResolvedScopePolicy,
     ScopePolicy,
+    applies,
     decide,
     document_from_settings,
+    lifetime_of,
+    matcher_of,
     operator_document_from_settings,
+    patterns_intersect,
     resolve,
 )
 from .projects import (
@@ -115,6 +119,9 @@ class ResolvedRunPolicy:
     # P1 (ADR 0053 D6): which scopes answered from policy engine v2, which
     # knobs that routed, and the rule refusals the v2 stack recorded (D5).
     policy_engine: dict[str, Any] = field(default_factory=dict)
+    # P3-4: the worker grants in the shell allowlist — pattern → its layer
+    # label (``grant:session`` / ``grant:project``), for decided_by.
+    shell_grants: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -725,10 +732,18 @@ def resolve_run_policy(
     # artifact of resolved policy, which is why this needs no contract bump
     # and no worker change (they keep reading task.permissions).
     trusted_roots = [str(root) for root in policy.get("trusted_workspace_roots") or []]
+    shell_grants = worker_shell_grants(
+        store,
+        config.home,
+        repo,
+        project_context.project_id if project_context is not None else None,
+    )
     document = compile_policy_document(
         template=(project_context.strategy if project_context is not None else "global"),
         network=chosen_network,
-        shell_allowlist=_shell_allowlist_for(policy, repo, resolved_execution_mode),
+        shell_allowlist=_shell_allowlist_for(
+            policy, repo, resolved_execution_mode, [shlex.split(p) for p in shell_grants]
+        ),
         trusted_roots=trusted_roots,
     )
     resolved_scopes = resolve(document, v2_scopes=tuple(policy_engine.get("v2_scopes") or ()))
@@ -783,6 +798,7 @@ def resolve_run_policy(
         provenance=provenance,
         provenance_chain=provenance_chain,
         policy_engine=policy_engine,
+        shell_grants=shell_grants,
     )
 
 
@@ -811,13 +827,21 @@ def _resolve_execution_mode(policy: dict[str, Any], repo: Path, requested: str |
 
 
 def _shell_allowlist_for(
-    policy: dict[str, Any], repo: Path, execution_mode: str
+    policy: dict[str, Any],
+    repo: Path,
+    execution_mode: str,
+    granted: Sequence[Sequence[str]] = (),
 ) -> list[list[str]]:
     """The shell allowlist a run under this policy is entitled to.
 
     Workspace mode requires the repo under a trusted root; sandbox mode honors
     the allowlist as-is because the seatbelt profile already bounds writes and
     network egress — an allowlisted command cannot escape the sandbox.
+
+    ``granted`` (P3-4, ADR 0059 D4): the worker grants bound to this repo or
+    its project (``worker_shell_grants``) — argv prefixes, as every allowlist
+    entry is. They replace the v86-F1 session tier, which was one list every
+    repo's runs read (B39): that setting is no longer read or written.
     """
     if execution_mode == "workspace":
         trusted_roots = policy.get("trusted_workspace_roots")
@@ -827,23 +851,71 @@ def _shell_allowlist_for(
         return []
     allowed = policy.get("allowed_shell_commands")
     result = [list(command) for command in allowed] if isinstance(allowed, list) else []
-    # v86-F1: the session tier — operator-approved for this serve session
-    # (cleared at serve startup), merged read-side only so the durable
-    # write paths never absorb it.
-    session = policy.get("session_allowed_shell_commands")
-    if isinstance(session, list):
-        for command in session:
-            entry = list(command)
-            if entry not in result:
-                result.append(entry)
+    # Merged read-side only, so the durable knob never absorbs a grant.
+    for command in granted:
+        entry = list(command)
+        if entry not in result:
+            result.append(entry)
     return result
 
 
 def resolved_shell_allowlist(
-    policy: dict[str, Any], repo: Path, execution_mode: str
+    policy: dict[str, Any],
+    repo: Path,
+    execution_mode: str,
+    granted: Sequence[Sequence[str]] = (),
 ) -> list[list[str]]:
     """Public wrapper so resume paths can re-resolve a run's shell allowlist."""
-    return _shell_allowlist_for(policy, repo, execution_mode)
+    return _shell_allowlist_for(policy, repo, execution_mode, granted)
+
+
+def grant_repo(repo: Path | str) -> str:
+    """The one spelling a repo binding is stored and matched under."""
+    return str(Path(repo).expanduser().resolve())
+
+
+def worker_shell_grants(
+    store: RunStore, home: Path, repo: Path, project_id: str | None
+) -> dict[str, str]:
+    """ADR 0059 D4: the worker grants a run in ``repo`` holds — pattern →
+    ``grant:session`` (a plain approve, bound to this repo, B39) or
+    ``grant:project`` (an "Allow & remember", bound to the project, else the
+    repo; B18). From the one learned list. Never one in denied space: a
+    guarded prefix, or one a shell deny of the setup document or the approved
+    baseline intersects, is left out (B23's decide-time half)."""
+    from .policy_layers import template_layer
+    from .shell_prefixes import dangerous_prefix_reason, is_remote_git_command
+
+    document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    if document is None or not document.learned:
+        return {}
+    template = template_layer(home)
+    denies = [
+        rule.pattern
+        for rule in (template.rules if template is not None else ())
+        if (rule.scope, rule.verdict, rule.action) == ("shell", "deny", "run")
+    ] + [
+        rule.pattern
+        for scope in document.scopes
+        if scope.scope == "shell"
+        for rule in scope.deny
+        if rule.action == "run"
+    ]
+    granted: dict[str, str] = {}
+    for rule in document.learned:
+        if (rule.scope, rule.action, matcher_of(rule)) != ("shell", "run", "prefix"):
+            continue
+        if not applies(rule, repo=grant_repo(repo), project_id=project_id):
+            continue
+        argv = shlex.split(rule.pattern)
+        if dangerous_prefix_reason(argv) is not None or is_remote_git_command(argv):
+            continue
+        if any(patterns_intersect("shell", rule.pattern, deny) for deny in denies):
+            continue
+        label = "grant:session" if lifetime_of(rule) == "session" else "grant:project"
+        if granted.get(rule.pattern) != "grant:project":
+            granted[rule.pattern] = label
+    return granted
 
 
 # -- the operator policy: the Queen's standing rules (v52-F2) ------------------

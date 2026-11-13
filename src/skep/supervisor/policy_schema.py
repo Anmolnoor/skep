@@ -28,11 +28,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any, Literal, get_args
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from pydantic import BaseModel, Field, model_validator
 
 from .netproxy import domain_allowed
-from .shell_prefixes import dangerous_prefix_reason
+from .shell_prefixes import dangerous_prefix_reason, sh_command_list
 
 if TYPE_CHECKING:
     from .policy_engine import Layer
@@ -93,7 +94,49 @@ SESSION_PROVENANCE_PREFIX = "session:"
 
 def is_session_rule(rule: LearnedRule) -> bool:
     """True for a learned rule that lasts only this serve session (v90-F3)."""
-    return rule.provenance.startswith(SESSION_PROVENANCE_PREFIX)
+    return lifetime_of(rule) == "session"
+
+
+# ADR 0059 D4 (P3-4): a grant's lifetime, matcher and binding. A row stored
+# before P3-4 has none of the three and loads as it always matched: session
+# by its provenance, else global; a shell row ``exact_argv`` (ES-F4), a
+# network row ``host`` (labelled legacy-host), anything else a glob.
+Lifetime = Literal["session", "project", "global"]
+Matcher = Literal["exact_argv", "prefix", "host", "url_prefix", "glob"]
+LIFETIME_RANK: dict[str, int] = {"session": 0, "project": 1, "global": 2}
+
+
+def lifetime_of(rule: LearnedRule) -> str:
+    if rule.lifetime is not None:
+        return rule.lifetime
+    return "session" if rule.provenance.startswith(SESSION_PROVENANCE_PREFIX) else "global"
+
+
+def matcher_of(rule: LearnedRule) -> str:
+    if rule.matcher is not None:
+        return rule.matcher
+    return {"shell": "exact_argv", "network": "host"}.get(rule.scope, "glob")
+
+
+def is_legacy_host(rule: LearnedRule) -> bool:
+    """A host-wide fetch grant from before P3-4 (B74): it still covers its
+    whole host — narrowing it silently would break operators — and doctor
+    lists it."""
+    return rule.scope == "network" and rule.matcher is None
+
+
+def applies(
+    rule: LearnedRule,
+    *,
+    repo: str | None = None,
+    project_id: str | None = None,
+    chat_id: str | None = None,
+) -> bool:
+    """Does this grant apply where the request is? An unbound grant applies
+    everywhere it did before P3-4; a bound one only in its own repo, project
+    or chat (B39) — so with no context it applies nowhere."""
+    here = {"repo": repo, "project_id": project_id, "chat_id": chat_id}
+    return all(here[key] is not None and here[key] == value for key, value in rule.bound.items())
 
 
 # v52-F1: Queen-only rules live in their OWN document. The global document
@@ -119,6 +162,11 @@ class LearnedRule(PolicyRule):
     # v106-F11 (v90-F3's unkept clause): when the operator granted it. None on
     # rules written before the field existed — the receipt says so honestly.
     created_at: str | None = None
+    # ADR 0059 D4 (P3-4): None on a row from before P3-4 (``lifetime_of`` /
+    # ``matcher_of`` give what it always meant). ``bound`` empty = everywhere.
+    lifetime: Lifetime | None = None
+    matcher: Matcher | None = None
+    bound: dict[Literal["repo", "project_id", "chat_id"], str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _action_fits_scope(self) -> LearnedRule:
@@ -180,6 +228,9 @@ class ResolvedRule:
     # ``decide()`` is labelled by — the approved baseline (``template:<name>``).
     # None keeps the document label, so v1 and v2 answer alike.
     layer: str | None = None
+    # P3-4 (B74): ``url_prefix`` — the rule's pattern is a URL prefix that a
+    # host-only value never matches; None for every other rule.
+    matcher: str | None = None
 
 
 @dataclass(frozen=True)
@@ -237,8 +288,9 @@ def shell_segments(value: str) -> list[str] | None:
         return None
     # Non-POSIX keeps quotes on the tokens, so a worker's literal '&&' argument
     # (shlex.join quotes it) stays a word and only bare operators split.
-    lexer = shlex.shlex(value, posix=False, punctuation_chars=True)
+    lexer = shlex.shlex(sh_command_list(value), posix=False, punctuation_chars=True)
     lexer.whitespace_split = True
+    lexer.commenters = ""  # sh_command_list dropped the comments sh drops
     try:
         tokens = list(lexer)
     except ValueError:
@@ -259,6 +311,18 @@ def shell_segments(value: str) -> list[str] | None:
     return [" ".join(seg) for seg in found] or [value]
 
 
+def backgrounds(value: str) -> bool:
+    """B21: does the line send a command to the background (a lone ``&``)?
+    A ``run`` grant never covers that: a daemon is ``run_background``."""
+    lexer = shlex.shlex(sh_command_list(value), posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        return "&" in list(lexer)
+    except ValueError:
+        return False
+
+
 def pattern_matches(scope: str, pattern: str, value: str, *, exact: bool = False) -> bool:
     """Does ``pattern`` cover ``value`` under this scope's matcher?
     ``exact`` (learned shell grants, ES-F4): the whole argv, not a prefix."""
@@ -276,10 +340,62 @@ def pattern_matches(scope: str, pattern: str, value: str, *, exact: bool = False
     return fnmatch(value, pattern)
 
 
+def rule_matches(rule: ResolvedRule, scope: str, value: str, *, url: str | None = None) -> bool:
+    """Does ``rule`` cover the request? A ``url_prefix`` grant needs the URL
+    itself (B74): a host-only value — a redirect hop, a REST probe — never
+    matches it."""
+    if rule.matcher == "url_prefix":
+        return url is not None and url_prefix_matches(rule.pattern, url)
+    return pattern_matches(scope, rule.pattern, value, exact=rule.exact)
+
+
+def _url_parts(url: str) -> tuple[str, str, str, str] | None:
+    """``(scheme, host[:port], path, query)`` normalized, or None for a URL a
+    grant can never cover: not http(s), userinfo, a bad port, dot segments or a
+    backslash in the path (a server may resolve them out of the prefix)."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    host = (parts.hostname or "").rstrip(".")
+    if parts.scheme not in ("http", "https") or not host or parts.username is not None:
+        return None
+    path = parts.path or "/"
+    if "\\" in path or {".", ".."} & set(unquote(path).split("/")):
+        return None
+    default = {"http": 80, "https": 443}[parts.scheme]
+    netloc = host if port in (None, default) else f"{host}:{port}"
+    return parts.scheme, netloc, path, parts.query
+
+
+def url_prefix_of(url: str) -> str | None:
+    """B74: what a read_url keep stores — scheme + host + the path up to its
+    last ``/`` (a directory boundary), plus the card's query if it had one.
+    None when no grant may be made on ``url``."""
+    found = _url_parts(url)
+    if found is None:
+        return None
+    scheme, netloc, path, query = found
+    return urlunsplit((scheme, netloc, path[: path.rfind("/") + 1], query, ""))
+
+
+def url_prefix_matches(pattern: str, url: str) -> bool:
+    """Same scheme and host[:port], the path under the stored directory, and a
+    query that is empty or identical to the card's: a grant made on
+    ``example.com/docs/page`` never covers ``example.com/collect?data=…``."""
+    want, got = _url_parts(pattern), _url_parts(url)
+    if want is None or got is None:
+        return False
+    return got[:2] == want[:2] and got[2].startswith(want[2]) and got[3] in ("", want[3])
+
+
 def patterns_intersect(scope: str, first: str, second: str) -> bool:
     """Conservative overlap check for write-time learned-rule vetting."""
     if first == "*" or second == "*":
         return True
+    if scope == "network":  # a url_prefix grant (P3-4) overlaps through its host
+        first, second = (urlsplit(p).hostname or p if "://" in p else p for p in (first, second))
     if scope == "shell":
         a = _shell_tokens(first)
         b = _shell_tokens(second)
@@ -342,17 +458,11 @@ def resolve(
     all_learned = tuple(
         rule for document in (base, *overlays) for rule in document.learned
     ) + tuple(learned)
-    for rule in all_learned:
+    # P3-4 (B39): a grant bound to a repo, project or chat has no place in a
+    # composition that knows none of them — only unbound grants compose here.
+    for rule in (rule for rule in all_learned if applies(rule)):
         vet_learned_rule(rule, rules[rule.scope])
-        rules[rule.scope].append(
-            ResolvedRule(
-                verdict="allow",
-                rule_id=rule.rule_id,
-                action=rule.action,
-                pattern=rule.pattern,
-                exact=rule.scope == "shell",
-            )
-        )
+        rules[rule.scope].append(learned_resolved(rule))
     result = {
         scope: ResolvedScopePolicy(scope=scope, rules=tuple(bucket))
         for scope, bucket in rules.items()
@@ -365,6 +475,20 @@ def resolve(
             if scope in result:
                 result[scope] = v2[scope]
     return result
+
+
+def learned_resolved(rule: LearnedRule, layer: str | None = None) -> ResolvedRule:
+    """A learned rule as the allow it resolves to, with its matcher (P3-4)."""
+    matcher = matcher_of(rule)
+    return ResolvedRule(
+        verdict="allow",
+        rule_id=rule.rule_id,
+        action=rule.action,
+        pattern=rule.pattern,
+        exact=matcher == "exact_argv",
+        layer=layer,
+        matcher="url_prefix" if matcher == "url_prefix" else None,
+    )
 
 
 def vet_learned_rule(rule: LearnedRule, existing: list[ResolvedRule]) -> None:
@@ -418,7 +542,7 @@ def decide(
     matches = [
         rule
         for rule in (scope_policy.rules if scope_policy else ())
-        if rule.action == action and pattern_matches(scope, rule.pattern, value, exact=rule.exact)
+        if rule.action == action and rule_matches(rule, scope, value)
     ]
     if not matches:
         return PolicyDecision(

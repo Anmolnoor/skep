@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from skep.supervisor.config import SupervisorConfig
 from skep.supervisor.policy_schema import PolicyDocument
 from skep.supervisor.serve import actions
@@ -30,23 +32,32 @@ def test_confirming_a_url_card_grants_the_host_for_the_session(config: Superviso
     holder = ConfigHolder(config, store)
     try:
         grant = actions.remember_action_for_session(
-            store, tool="read_url", args={"url": "https://docs.example.com/x"}, actor="me"
-        )
-        assert grant == {"scope": "network", "pattern": "docs.example.com", "tier": "session"}
+            store, tool="read_url", args={"url": "https://docs.example.com/x"}, actor="me",
+            chat_id="c1",
+        )  # fmt: skip
+        assert grant is not None
+        assert (grant["pattern"], grant["matcher"], grant["tier"], grant["bound"]) == (
+            "https://docs.example.com/", "url_prefix", "session", "this chat",
+        )  # fmt: skip
         learned = _doc(store).learned
-        assert [r.pattern for r in learned] == ["docs.example.com"]
+        assert [r.pattern for r in learned] == ["https://docs.example.com/"]
         assert learned[0].provenance == "session:me"
 
-        # The same decision function the read_url card consults now allows it.
+        # The same decision function the read_url card consults now allows it
+        # (P3-4: the URL's directory, in the chat that kept it).
         from skep.supervisor.serve.tools import fetch_grant_decision
 
-        decision = fetch_grant_decision(store, holder, "docs.example.com")
+        decision = fetch_grant_decision(
+            store, holder, "docs.example.com", chat_id="c1", url="https://docs.example.com/y"
+        )
         assert (decision.verdict, decision.decided_by) == (
             "allow",
-            "grant:session/network:fetch:docs.example.com",
+            "grant:session/network:fetch:https://docs.example.com/@chat:c1",
         )
         # EXACT host only — a subdomain is its own decision (fail closed).
-        other = fetch_grant_decision(store, holder, "other.example.com")
+        other = fetch_grant_decision(
+            store, holder, "other.example.com", chat_id="c1", url="https://other.example.com/"
+        )
         assert other.verdict == "require_approval"
     finally:
         store.close()
@@ -56,8 +67,9 @@ def test_session_grants_are_dropped_at_serve_startup(config: SupervisorConfig) -
     store = RunStore(config.db_path)
     try:
         actions.remember_action_for_session(
-            store, tool="read_url", args={"url": "https://a.example.com/"}, actor="me"
-        )
+            store, tool="read_url", args={"url": "https://a.example.com/"}, actor="me",
+            chat_id="c1",
+        )  # fmt: skip
         actions.learn_policy_rule(
             store,
             rule_id="network:fetch:durable.example.com",
@@ -82,12 +94,11 @@ def test_never_grantable_shell_classes_stay_approve_once(config: SupervisorConfi
             "sudo systemctl restart nginx",
             "himalaya message send --to a@b",
         ):
-            assert (
+            # P3-4 (B32): refused with the reason, never a silent None.
+            with pytest.raises(ValueError, match=r"never|privilege"):
                 actions.remember_action_for_session(
-                    store, tool="run_shell", args={"command": command}, actor="me"
+                    store, tool="run_shell", args={"command": command}, actor="me", chat_id="c1"
                 )
-                is None
-            ), command
         assert _doc(store).learned == []
     finally:
         store.close()
@@ -97,17 +108,19 @@ def test_a_plain_shell_command_grants_its_exact_argv(config: SupervisorConfig) -
     store = RunStore(config.db_path)
     try:
         grant = actions.remember_action_for_session(
-            store, tool="run_shell", args={"command": "uv  run   pytest -q"}, actor="me"
-        )
+            store, tool="run_shell", args={"command": "uv  run   pytest -q"}, actor="me",
+            chat_id="c1",
+        )  # fmt: skip
         assert grant is not None
         assert grant["pattern"] == "uv run pytest -q"  # normalised, exact
-        # A second identical approve does not stack a duplicate rule.
-        assert (
-            actions.remember_action_for_session(
-                store, tool="run_shell", args={"command": "uv run pytest -q"}, actor="me"
-            )
-            is None
-        )
+        assert grant["matcher"] == "exact_argv"
+        # A second identical approve does not stack a duplicate rule (B59: it
+        # says what already holds).
+        again = actions.remember_action_for_session(
+            store, tool="run_shell", args={"command": "uv run pytest -q"}, actor="me",
+            chat_id="c1",
+        )  # fmt: skip
+        assert again is not None and again["status"] == "kept"
         assert len(_doc(store).learned) == 1
     finally:
         store.close()
@@ -125,8 +138,9 @@ def test_the_receipt_knows_the_grant_tier_and_time(tmp_path: Path) -> None:
     store = RunStore(tmp_path / "s.sqlite3")
     try:
         granted = remember_action_for_session(
-            store, tool="read_url", args={"url": "https://docs.example/x"}, actor="chat-user"
-        )
+            store, tool="read_url", args={"url": "https://docs.example/x"}, actor="chat-user",
+            chat_id="c1",
+        )  # fmt: skip
         assert granted is not None and granted["tier"] == "session"
         from skep.supervisor.policy_schema import (
             POLICY_DOCUMENT_SETTINGS_KEY,
@@ -162,13 +176,16 @@ def test_the_always_tier_writes_a_durable_grant(config: SupervisorConfig) -> Non
             actor="me",
             tier="always",
         )
-        assert grant == {"scope": "network", "pattern": "kept.example.com", "tier": "always"}
+        assert grant is not None
+        assert (grant["pattern"], grant["tier"], grant["lifetime"], grant["bound"]) == (
+            "https://kept.example.com/", "always", "global", "everywhere",
+        )  # fmt: skip
         learned = _doc(store).learned
         assert learned[0].provenance == "allow-always:me"
 
         # The session sweep at serve startup must NOT drop it.
         assert actions.clear_session_policy_rules(store) == 0
-        assert [r.pattern for r in _doc(store).learned] == ["kept.example.com"]
+        assert [r.pattern for r in _doc(store).learned] == ["https://kept.example.com/"]
     finally:
         store.close()
 
