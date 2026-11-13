@@ -17,6 +17,8 @@ operator approves.
 from __future__ import annotations
 
 import concurrent.futures
+import ipaddress
+import re
 import socket
 import urllib.parse
 from collections.abc import Callable
@@ -51,6 +53,16 @@ _READ_HEADERS = {
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+# Every dot-label a decimal, octal or hex number: an IPv4 spelling.
+_NUMERIC_HOST = re.compile(r"(?:0x[0-9a-f]*|[0-9]+)(?:\.(?:0x[0-9a-f]*|[0-9]+))*\.?", re.I)
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
 
 
 class WebSearchError(Exception):
@@ -90,8 +102,16 @@ def fetch_url_text(
     from skep.workers.html_text import html_to_markdown, html_to_text
 
     # W6: no env proxy — a proxy would resolve the name itself, out of sight
-    # of the resolved-address check below.
-    with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0), trust_env=False) as client:
+    # of the resolved-address check below. The operator's CA bundle
+    # (SSL_CERT_FILE / SSL_CERT_DIR) still counts: it hides no lookup. No
+    # keep-alive: a connection verified for one name must not carry a hop
+    # to another name that resolves to the same address.
+    with httpx.Client(
+        timeout=httpx.Timeout(10.0, connect=5.0),
+        trust_env=False,
+        verify=httpx.create_ssl_context(trust_env=True),
+        limits=httpx.Limits(max_keepalive_connections=0),
+    ) as client:
         current = url
         for _hop in range(5):
             response = _pinned_get(client, current, resolve)
@@ -132,6 +152,12 @@ def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
     host = parts.hostname
     if parts.scheme not in ("http", "https") or not host:
         raise ValueError(f"read_url needs an http(s) URL, got {url!r}")
+    if _NUMERIC_HOST.fullmatch(host) and not _is_ip(host):
+        # `0177.0.0.1` is 127.0.0.1 to glibc and 177.0.0.1 to macOS.
+        raise ValueError(
+            f"read_url only reads public internet addresses: {host!r} spells an IP in a "
+            "form platforms read differently — write it as a plain dotted address"
+        )
     addresses, why = resolve_public(host, parts.port or _DEFAULT_PORTS[parts.scheme], resolve)
     if why == UNRESOLVED:
         raise httpx.ConnectError(f"{host!r} does not resolve")
@@ -141,7 +167,8 @@ def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
             "LAN, link-local and metadata addresses (skep's own API among them) are "
             "never read, by card or grant — open that page yourself"
         )
-    userinfo, _, authority = parts.netloc.rpartition("@")
+    userinfo = parts.netloc.rpartition("@")[0]
+    named = httpx.URL(url)  # IDNA: Host and SNI carry the ASCII name
     error: Exception = httpx.ConnectError(f"{host!r} has no address to dial")
     for address in addresses:
         netloc = f"[{address}]" if ":" in address else address
@@ -152,8 +179,8 @@ def _pinned_get(client: Any, url: str, resolve: Resolver) -> Any:
         request = client.build_request(
             "GET",
             urllib.parse.urlunsplit(parts._replace(netloc=netloc)),
-            headers={**_READ_HEADERS, "Host": authority},
-            extensions={"sni_hostname": host},
+            headers={**_READ_HEADERS, "Host": named.netloc.decode("ascii")},
+            extensions={"sni_hostname": named.raw_host.decode("ascii")},
         )
         try:
             return client.send(request)

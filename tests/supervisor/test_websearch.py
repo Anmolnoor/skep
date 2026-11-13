@@ -529,3 +529,119 @@ def test_w6_an_unresolvable_name_fails_the_read_and_a_dead_address_falls_over(
         httpx.ConnectError("refused")))  # fmt: skip
     with pytest.raises(httpx.ConnectError):
         fetch_url_text("http://site.example/", resolve=two)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://[64:ff9b::7f00:1]/",  # NAT64 of 127.0.0.1
+        "http://[64:ff9b::a9fe:a9fe]/",  # NAT64 of the metadata address
+        "http://[::7f00:1]/",  # IPv4-compatible loopback
+        "http://224.0.0.1/",
+        "http://[ff0e::1]/",
+        "http://[fec0::1]/",
+        "http://0177.0.0.1/",  # 127.0.0.1 to glibc, 177.0.0.1 to macOS
+        "http://0x7f.1/",
+    ],
+)
+def test_w6_embedded_v4_multicast_and_ambiguous_spellings_are_refused(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F50 review: `is_global` calls NAT64 (`64:ff9b::/96`), IPv4-compatible
+    `::a.b.c.d`, site-local and multicast addresses global, so they passed; and
+    an octal host resolved to 127.0.0.1 on Linux but a public 177.0.0.1 on
+    macOS. The low 32 bits of those IPv6 forms are judged as IPv4, multicast
+    and site-local never pass, and an IP spelled in a non-dotted form is
+    refused on every platform."""
+    from skep.supervisor.serve.websearch import fetch_url_text
+
+    web = _FakeWeb(monkeypatch, {})
+    with pytest.raises(ValueError, match="only reads public internet addresses"):
+        fetch_url_text(url, resolve=_resolver({}))
+    assert web.sent == []
+
+
+def test_w6_nat64_of_a_public_address_and_an_idn_host_still_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An IPv6-only network's NAT64 answer for a public site still reads, and
+    an IDN host rides Host and SNI in its ASCII form (a raw `ü` in the Host
+    header raised before a byte was sent)."""
+    from skep.supervisor.serve.websearch import fetch_url_text
+
+    web = _FakeWeb(monkeypatch, {"xn--bcher-kva.example/": (200, "<p>buch</p>")})
+    got = fetch_url_text(
+        "http://bücher.example/", resolve=_resolver({"bücher.example": "64:ff9b::5db8:d822"})
+    )
+    assert "buch" in got["text"]
+    assert web.sent == [
+        ("http://[64:ff9b::5db8:d822]/", "xn--bcher-kva.example", "xn--bcher-kva.example")
+    ]
+
+
+def test_w6_each_hop_opens_its_own_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ES-F50 review: the pooled client reused hop 1's connection for a hop to
+    another name at the same address, so on https hop 2 was read over a TLS
+    session verified for hop 1's name only. Every hop gets a fresh connection
+    (and so its own handshake against its own name)."""
+    import http.server
+    import threading
+
+    from skep.supervisor.serve import websearch
+
+    connections: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"  # keep-alive on offer
+
+        def setup(self) -> None:
+            super().setup()
+            connections.append("open")
+
+        def do_GET(self) -> None:
+            body = b"<p>end</p>"
+            if self.path == "/hop":
+                self.send_response(302)
+                port = cast(Any, self.server).server_address[1]
+                self.send_header("Location", f"http://b.example:{port}/end")
+                body = b""
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    # The address guard is not under test here: let the local listener through.
+    monkeypatch.setattr(websearch, "resolve_public", lambda *_a: (["127.0.0.1"], ""))
+    try:
+        got = websearch.fetch_url_text(f"http://a.example:{server.server_address[1]}/hop")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert "end" in got["text"]
+    assert connections == ["open", "open"]
+
+
+def test_w6_the_operators_ca_bundle_still_counts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ES-F50 review: `trust_env=False` dropped SSL_CERT_FILE with the proxy
+    settings, so an operator behind a corporate CA could not read any https
+    page. A CA bundle hides no lookup: it is still the bundle the read uses
+    (a broken one fails the read rather than being silently skipped)."""
+    import ssl
+
+    from skep.supervisor.serve.websearch import fetch_url_text
+
+    bundle = tmp_path / "ca.pem"
+    bundle.write_text("not a certificate\n", encoding="utf-8")
+    monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
+    web = _FakeWeb(monkeypatch, {})
+    with pytest.raises(ssl.SSLError):
+        fetch_url_text("https://site.example/", resolve=_resolver({"site.example": _PUBLIC_IP}))
+    assert web.sent == []

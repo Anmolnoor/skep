@@ -145,12 +145,22 @@ def admit_target(
 UNRESOLVED = "does not resolve"
 
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
 def is_public_address(address: str) -> bool:
     """A global unicast address — not loopback, private, link-local, CGNAT,
-    unique-local, unspecified (``0.0.0.0``), nor an IPv4-mapped one of those."""
+    unique-local, site-local, multicast, unspecified (``0.0.0.0``), nor an
+    IPv6 form that carries one of those in its low 32 bits (IPv4-mapped,
+    IPv4-compatible ``::7f00:1``, NAT64 ``64:ff9b::7f00:1``)."""
     ip = ipaddress.ip_address(address.split("%")[0])
-    mapped = getattr(ip, "ipv4_mapped", None)
-    return ip.is_global and (mapped is None or mapped.is_global)
+    if not ip.is_global or ip.is_multicast or getattr(ip, "is_site_local", False):
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and (
+        ip.ipv4_mapped or ip in _NAT64 or int(ip) >> 32 == 0
+    ):
+        return is_public_address(str(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)))
+    return True
 
 
 def resolve_public(
