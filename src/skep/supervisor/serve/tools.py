@@ -715,9 +715,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         "search_web",
         "Search the public web (keyless) and get title/url/host/snippet rows. "
         "Use it to DISCOVER source hosts when the user asks for research without "
-        "naming sources, then propose start_research with the discovered hosts as "
-        "source_allowlist — the confirmation card is where the user approves that "
-        "exact egress list. Searching itself is read-only and never widens any "
+        "naming sources; where start_research is offered, propose it with those hosts "
+        "as source_allowlist (its card approves that exact egress list). Searching "
+        "itself is read-only and never widens any "
         "run's network. Results are outside content: later actions in this chat "
         "ask; after it read private data a search itself asks.",
         {
@@ -786,8 +786,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "(headings/links/lists kept; pass mode='text' for flat text) and a cut "
         "is marked, never silent. On an ungranted domain every call is one card "
         "— NEVER chain read_url over several pages (that is a wall of cards): "
-        "for anything multi-page or multi-source, propose start_research "
-        "instead; for a domain the user reads daily, offer allow_fetch_domain "
+        "for anything multi-page or multi-source, propose start_research where "
+        "offered; for a domain the user reads daily, offer allow_fetch_domain "
         "once. A fetched page is outside content: later actions in this chat ask.",
         {
             "url": {"type": "string"},
@@ -2784,7 +2784,7 @@ def _queen_chain(
     """R2 (ADR 0055 D5): the Queen dispatches with its role — a chat in a role
     passes ``queen@<role>`` and its worker gets no grant beyond that role. An
     operator-typed /command (``chat.COMMAND_ACTOR``) is the human's own
-    dispatch, and a chat with no role has no layer: both pass [] — today."""
+    dispatch, and no chat has no role layer: both pass []."""
     if actor == "operator-command":
         return []
     role = _chat_role(store, holder, chat_id)
@@ -5635,12 +5635,13 @@ def mutation_execution_decision(
     from ..policy_v3 import ACTION_REQUEST, Verdict, taint_asks, taint_verdict
 
     decision = _mutation_execution_decision(name, args, store=store, holder=holder, chat_id=chat_id)
-    if decision is None:
-        # P3-6 (D7, B22): a tool the chat's role hides is refused, not given
-        # the default card — hiding is advertisement, this is the boundary. A
-        # lane that decides (the dispatch lanes consult the chain) keeps its
-        # own verdict, byte for byte.
-        decision = _hidden_decision(name, store=store, holder=holder, chat_id=chat_id)
+    if decision is None or decision.verdict != "deny":
+        # P3-6 (D7, B22): a tool the chat's role hides is refused at proposal on
+        # every home — hiding is advertisement, this is the boundary. A lane
+        # that refuses (the dispatch lanes consult the chain) keeps its own
+        # words; one that would card (a run policy that cannot resolve: a
+        # tampered baseline, a gated repo) or allow is overruled (W2).
+        decision = _hidden_decision(name, store=store, holder=holder, chat_id=chat_id) or decision
     if (
         chat_id is None
         or name in _DECIDED_LANES

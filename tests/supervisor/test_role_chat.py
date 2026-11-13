@@ -17,6 +17,7 @@ from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.roles import SHIPPED_ROLES
 from skep.supervisor.serve.chat import PERSONALITIES, SYSTEM_PROMPT
 
+from .conftest import no_layer_role
 from .fake_ollama import FakeOllama
 from .test_serve_chat_tools import chat_client
 
@@ -123,7 +124,7 @@ def test_cli_role_list_show_use(tmp_path: Path, capsys: pytest.CaptureFixture[st
 
 def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> None:
     """D3: a role is a policy context inside the chat too. With a standing
-    Queen grant `uv sync` runs in-turn for a chat with no role — and, since
+    Queen grant `uv sync` runs in-turn for a chat with no role layer — and, since
     ADR 0059 decision #1 (B56), in an operator chat too: the role's catch-all
     ask is a default the operator's grant answers. A command nobody granted
     cards there (role:operator asks), and the floor still denies."""
@@ -144,7 +145,10 @@ def test_the_chat_role_governs_the_queens_own_lane(config: SupervisorConfig) -> 
         remember_action_for_session(
             store, tool="run_shell", args={"command": "uv sync"}, actor="op", tier="always"
         )
-        plain = store.create_chat(title="plain", model=None).chat_id
+        # no role layer: a NULL role reads as assistant since P3-6
+        plain = store.create_chat(
+            title="plain", model=None, role=no_layer_role(config.home)
+        ).chat_id
         ops = store.create_chat(title="ops", model=None, role="operator").chat_id
         args = {"command": "uv sync"}
 

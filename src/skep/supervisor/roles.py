@@ -18,7 +18,9 @@ decides on its own and the stricter of the two verdicts stands
 passes through, as it does for the baseline (ADR 0056 D2). The floor is above
 all of it (I4): it is already ``deny``, and nothing is stricter.
 
-No role means no role layer — exactly today's behaviour.
+No chat (REST, the CLI, the hook) means no role layer. A chat whose stored
+role is NULL — from before every chat recorded one — is an ``assistant`` chat
+(ADR 0059 decision #4, ``role_for_chat``).
 
 **Delegation is subset-only (R2, ADR 0055 D4).** A bot that dispatches a bot
 passes ``delegation_chain`` — ``actor@role`` hops, outermost first. The
@@ -298,9 +300,12 @@ def tighten(
 def role_for_chat(store: RunStore, home: Path, chat_id: str | None) -> Role | None:
     """The role a chat runs in, for the Queen's own tool lane. A chat whose
     custom role no longer loads raises (I9) — its tools fail closed rather
-    than quietly running with no role layer."""
+    than quietly running with no role layer. A stored NULL — a chat from
+    before every chat recorded one — reads as ``assistant`` (decision #4,
+    B55); the row is not rewritten, so giving it a role undoes it. No chat
+    (REST, the CLI, the hook) is no role."""
     chat = store.get_chat(chat_id) if chat_id else None
-    return resolve_role(chat.role, home) if chat is not None and chat.role else None
+    return None if chat is None else resolve_role(chat.role or ROLE_LESS_CHAT_ROLE, home)
 
 
 EXCEEDS_DELEGATOR = "exceeds_delegator"

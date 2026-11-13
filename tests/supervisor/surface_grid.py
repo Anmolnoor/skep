@@ -9,7 +9,8 @@ search and every MCP server are fakes. Only grant state ``none``: grants have
 their own grid.
 
 A channel, analysis or hermes chat gets the role the code records for one
-(``roles.ROLE_LESS_CHAT_ROLE``; before P3-6 there was none, so NULL).
+(``roles.ROLE_LESS_CHAT_ROLE``; before P3-6 there was none, so NULL). The
+``web:null`` chat keeps its NULL row: since P3-6 it reads as assistant.
 ``tests/fixtures/policy_v3/pre_p3_6_surface_verdicts.json`` is this grid
 answered BEFORE P3-6 (frozen from es-p4-2 @ ba56b63); ``test_tool_surface_v3.py``
 holds the new answers to it. Regenerate only with the pre-P3-6 code, under

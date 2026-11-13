@@ -244,6 +244,13 @@ function formatCompactDecision(decision, namespace) {
 
 // first-run R3 (ADR 0055 D5): who delegated a run — roles.delegation_line's
 // twin: "queen@operator → manager@builder → worker@builder · team <id>".
+// R1: the role picker's options. A chat made before every chat recorded a role
+// has none stored and runs as assistant (ADR 0059 decision #4) — say so.
+function roleChoices(roles, legacyRoleLess) {
+  return [...(legacyRoleLess ? [{ value: "", label: "role: assistant (none stored)" }] : []),
+    ...roles.map(role => ({ value: role.name, label: `role: ${role.name}` }))];
+}
+
 function delegationText(delegation) {
   if (!delegation || typeof delegation !== "object") return "";
   const chain = Array.isArray(delegation.chain) ? delegation.chain.map(String) : [];
@@ -2581,15 +2588,13 @@ async function viewChat(main, chatId) {
   modelSelect.disabled = Boolean(activeChatId);
   // R1: a new chat opens with a role picker defaulting to the onboard choice
   // (or `skep role use`, else assistant: ADR 0059 decision #4); an open chat
-  // switches with /role (a confirm card). Only a chat made before every chat
-  // recorded a role shows "no role".
+  // switches with /role (a confirm card).
   const legacyRoleLess = Boolean(activeChatId) && !activeChat?.role;
   const roleSelect = el("select", {
     class: "composer-model-select",
     "aria-label": "chat role",
     title: activeChatId ? "switch with /role <name>" : "role for the next new chat",
-  }, [...(legacyRoleLess ? [el("option", { value: "" }, "no role")] : []),
-    ...roleList.roles.map(role => el("option", { value: role.name }, `role: ${role.name}`))]);
+  }, roleChoices(roleList.roles, legacyRoleLess).map(c => el("option", { value: c.value }, c.label)));
   roleSelect.value = activeChatId ? (activeChat?.role || "") : (roleList.default || "assistant");
   roleSelect.disabled = Boolean(activeChatId);
   roleSelect.hidden = roleList.roles.length === 0;

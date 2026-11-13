@@ -30,6 +30,7 @@ from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import mutation_execution_decision
 from skep.supervisor.store import ChatTaint
 
+from .conftest import no_layer_role
 from .fake_ollama import FakeOllama
 from .net_lane_grid import build_net_home, fakes
 from .taint_grid import HOMES, rows, set_taint
@@ -56,11 +57,23 @@ GATED = {"private": TEXT_EGRESS, "untrusted": ACTIONS, "both": EGRESS | ACTIONS}
 
 
 def classify(key: str, old: str, new: str) -> str:
-    """``same`` or ``<taint>:<lane>`` for an allow that became the D5 ask;
-    raises on any other change (so a test fails on it)."""
-    _home, lane, probe, _role, _grant, taint = key.split("|")
+    """``same``, ``no-layer:dispatch``, or ``<taint>:<lane>`` for an allow that
+    became the D5 ask; raises on any other change (so a test fails on it)."""
+    _home, lane, probe, role, _grant, taint = key.split("|")
     if old == new:
         return "same"
+    if role == "-" and lane == "dispatch":
+        # P3-6: "-" is now a custom role with no layer (``no_layer_role``: a
+        # NULL chat reads as assistant). Its hop delegates nothing it is
+        # silent on (decision #7), so it may not hand a worker a write: deny.
+        assert new.startswith("deny "), f"only a deny: {key}: {old} -> {new}"
+        return "no-layer:dispatch"
+    if role == "assistant" and lane == "dispatch":
+        # W2 (P3-6): a tool the assistant role hides is refused at proposal on
+        # every home — where the run policy could not resolve, it carded.
+        assert old.startswith("require_approval "), f"only a card: {key}: {old} -> {new}"
+        assert new.startswith("deny role:assistant/"), f"not hidden: {key}: {old} -> {new}"
+        return "hidden:dispatch"
     assert taint != "none", f"taint none changed: {key}: {old} -> {new}"
     assert old.startswith("allow "), f"only an allow may move: {key}: {old} -> {new}"
     assert (lane, probe) in GATED[taint], f"not a D5 cell: {key}: {old} -> {new}"
@@ -73,10 +86,13 @@ def classify(key: str, old: str, new: str) -> str:
 
 # Every flip against the frozen table, per home (the round's report lists
 # them). Identical rows per taint state: shell 8 = the granted run_shell and
-# start_process x 4 roles in two grant states; dispatch 36 = the four auto
-# lanes x 4 roles x 3 grant states (the gated one never allowed); other 12 =
-# remember x 4 roles x 3 grant states.
-_SAME = {"dispatch": 36, "other": 12, "shell": 8}
+# start_process x 4 roles in two grant states; dispatch 24 = the four auto
+# lanes x builder and operator x 3 grant states (the gated one never allowed;
+# assistant never dispatched, "-" is no-layer:dispatch); other 12 = remember
+# x 4 roles x 3 grant states. no-layer:dispatch = the five dispatch probes x
+# 3 grant states x 4 taint states (four probes on the assistant home, whose
+# gated repo already refused; none on the tampered one, which refused all).
+_SAME = {"dispatch": 24, "other": 12, "shell": 8}
 _UNTRUSTED = {f"untrusted:{lane}": n for lane, n in _SAME.items()} | {"untrusted:mcp": 8}
 _BOTH = {f"both:{lane}": n for lane, n in _SAME.items()}
 
@@ -89,14 +105,19 @@ def _flips(fetch: int, both_mcp: int, search: int) -> dict[str, int]:
     return flips
 
 
+_NO_LAYER = {"no-layer:dispatch": 60}
 EXPECTED_FLIPS: dict[str, dict[str, int]] = {
-    "legacy": _flips(fetch=8, both_mcp=29, search=0),
-    "zero": _flips(fetch=8, both_mcp=8, search=0),
-    "builder": _flips(fetch=11, both_mcp=11, search=12),
-    "assistant": _flips(fetch=11, both_mcp=23, search=12),
-    "operator": _flips(fetch=17, both_mcp=11, search=12),
+    "legacy": _flips(fetch=8, both_mcp=29, search=0) | _NO_LAYER,
+    "zero": _flips(fetch=8, both_mcp=8, search=0) | _NO_LAYER,
+    "builder": _flips(fetch=11, both_mcp=11, search=12) | _NO_LAYER,
+    # hidden:dispatch (W2) = the assistant row's dispatch probes that carded
+    # where the run policy cannot resolve, x 3 grant states x 4 taint states:
+    # the gated repo here, all five on the tampered home.
+    "assistant": _flips(fetch=11, both_mcp=23, search=12)
+    | {"no-layer:dispatch": 48, "hidden:dispatch": 12},
+    "operator": _flips(fetch=17, both_mcp=11, search=12) | _NO_LAYER,
     # tampered: nothing allows but remember (an inert proposal, outside decide)
-    "tampered": {"untrusted:other": 12, "both:other": 12},
+    "tampered": {"untrusted:other": 12, "both:other": 12, "hidden:dispatch": 60},
 }
 
 
@@ -301,7 +322,7 @@ def test_each_row_of_the_d5_table(
     live: Callable[[str], Live], bits: str, probe: tuple[str, dict[str, Any]], expected: str
 ) -> None:
     env = live("builder")
-    chat = env.chat()
+    chat = env.chat(no_layer_role(env.holder.current.home))  # the guard alone: no role layer
     actions.remember_action_for_session(
         env.store, tool="run_shell", args={"command": "python3 build.py --fast"}, actor="op",
         tier="always",
@@ -747,7 +768,7 @@ def test_a_dispatch_records_the_chats_taint_and_the_worker_is_unchanged(
 
     try:
         holder = ConfigHolder(config, store)
-        chat = store.create_chat(title="t", model=None).chat_id
+        chat = store.create_chat(title="t", model=None, role="builder").chat_id
         for taint in ("none", "both"):
             set_taint(store, chat, taint)
             args = {"repo": str(repo), "instructions": "x", "execution_mode": "sandbox"}

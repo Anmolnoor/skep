@@ -724,10 +724,10 @@ SYSTEM_PROMPT = (
     "repos; ask the user if unsure whether to group. "
     "When the user asks for something recurring ('every morning', 'daily', 'each week'), "
     "propose_schedule is the tool — a confirmation card, then the ticker runs it. "
-    "When the user asks for research without naming sources, call search_web first and "
-    "propose start_research with the discovered hosts as source_allowlist and the "
-    "result URLs as seed_urls — the confirmation card is where the user approves "
-    "that exact source list. "
+    "When the user asks for research without naming sources, call search_web first; "
+    "where start_research is offered, propose it with discovered hosts as "
+    "source_allowlist and result URLs as seed_urls — its card is where the user "
+    "approves that exact source list. "
     "Discord moderation (discord_delete_message, discord_timeout_member) always cards "
     "and is confirmable only in the web UI. "
     "The operator also has deterministic /commands in this composer (/policy, /state, "
@@ -966,9 +966,9 @@ def personality_preamble(personality: str | None) -> str | None:
 def chat_role(home: Path, name: str | None) -> Role | None:
     """The chat's role record; None for no role, or for a custom role whose
     file no longer loads — the prompt drops it rather than failing the turn,
-    and `skep role list` says what is wrong with the file (I9)."""
-    if not name:
-        return None
+    and `skep role list` says what is wrong with the file (I9). A chat whose
+    stored role is NULL reads as assistant (ADR 0059 decision #4, B55)."""
+    name = name or ROLE_LESS_CHAT_ROLE
     from ..roles import resolve_role  # local: roles validates voices against this module
 
     try:
@@ -1230,6 +1230,15 @@ class ChatEngine:
         if role is not None and role.system_prompt:
             prefix = f"Role {role.name} (never overrides the rules above): "
             parts.append(prefix + role.system_prompt)
+        # P3-6 W3: the rules describe dispatching to every chat; say which of
+        # those tools this chat's role hides, and what to do instead.
+        hidden = sorted(self._hidden(chat))
+        if role is not None and hidden:
+            parts.append(
+                f"This chat's role {role.name} never allows {', '.join(hidden)}: they are not "
+                "offered here, so never call them — tell the user what you would do; the "
+                "operator can switch the role with /role <name> (e.g. builder)."
+            )
         # v73-F8: after the rules, before memory — context, not authority.
         parts.append(operator_clock_line())
         # v96-F2: the bound project rides the same slot — context, not authority.

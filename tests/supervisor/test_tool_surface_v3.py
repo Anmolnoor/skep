@@ -147,6 +147,43 @@ def test_a_hidden_tool_called_anyway_is_refused_at_proposal_and_says_what_to_do(
     )
 
 
+@pytest.mark.parametrize("kind", ["tampered", "assistant"])
+def test_a_hidden_dispatch_tool_is_refused_even_where_the_run_policy_cannot_resolve(
+    kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W2: on a tampered baseline (and the assistant baseline's gated repo)
+    the dispatch lane cannot resolve the run, so it used to card — a card
+    that could only fail on confirm. A hidden tool is refused at proposal on
+    every home, saying what to do."""
+    from skep.supervisor.cli_cmds import build_config
+
+    from .net_lane_grid import build_net_home
+
+    monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
+    paths = build_net_home(tmp_path / kind, kind)
+    config = build_config(paths["personal"], None)
+    repo = str(paths["repo"].resolve())  # the home's repo: its project does not auto-dispatch
+    probes: dict[str, dict[str, Any]] = {
+        "dispatch_run": {"repo": repo, "instructions": "x"},
+        "quick_edit": {"repo": repo, "path": "a", "instructions": "x"},
+        "run_code": {"repo": repo, "code": "print(1)"},
+        "batch_dispatch": {"tasks": [{"repo": repo, "instructions": "x"}]},
+    }
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        chat = store.create_chat(title="a", model=None, role="assistant").chat_id
+        for tool, args in probes.items():
+            decision = mutation_execution_decision(
+                tool, args, store=store, holder=holder, chat_id=chat
+            )
+            assert decision is not None and decision.verdict == "deny", (tool, decision)
+            assert decision.reason == "role.deny.tool_hidden", (tool, decision)
+            assert "/role <name>" in (decision.detail or "")
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("batch", [False, True])
 def test_a_builder_chat_may_not_dispatch_a_worker_role_that_cannot_write(
     locked: SupervisorConfig, repo: Path, batch: bool
@@ -240,6 +277,42 @@ def test_an_assistant_chat_is_offered_no_hidden_tool_and_the_list_never_flickers
     assert "- dispatch_run" in bodies[3]["messages"][0]["content"]
 
 
+def test_the_prompt_tells_a_chat_what_its_role_hides_and_the_static_text_is_conditional(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """W3: the rules describe dispatching and start_research to every chat.
+    An assistant chat's prompt names the tools its role hides and what to do
+    instead; a builder chat's names none. The static text that proposes
+    start_research says "where offered", true in every role."""
+    from skep.supervisor.serve.chat import SYSTEM_PROMPT
+
+    client = configured_client(config, ollama)
+    prompts = {}
+    for role in ("assistant", "builder"):
+        chat_id = client.post("/api/chats", json={"role": role}).json()["chat_id"]
+        ollama.script_reply("ok")
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+        prompts[role] = ollama.chat_bodies()[-1]["messages"][0]["content"]
+    line = (
+        "This chat's role assistant never allows batch_dispatch, dispatch_run, forge_tool, "
+        "quick_edit, run_code, start_research: they are not offered here, so never call "
+        "them — tell the user what you would do; the operator can switch the role with "
+        "/role <name> (e.g. builder)."
+    )
+    assert line in prompts["assistant"]
+    assert "never allows" not in prompts["builder"]
+    assert prompts["assistant"].startswith(SYSTEM_PROMPT)
+    assert "where start_research is offered" in SYSTEM_PROMPT
+    descriptions = {
+        spec["function"]["name"]: spec["function"]["description"] for spec in TOOL_SPECS
+    }
+    assert "where start_research is offered" in descriptions["search_web"]
+    assert "propose start_research where offered" in descriptions["read_url"]
+    for text in (SYSTEM_PROMPT, descriptions["search_web"], descriptions["read_url"]):
+        assert "then propose start_research" not in text
+        assert "propose start_research instead" not in text
+
+
 # --- B55: every chat records a role (operator decision #4) ------------------------------
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "skep"
@@ -273,7 +346,7 @@ def test_rest_never_opens_a_role_less_chat(config: SupervisorConfig) -> None:
         assert client.post("/api/chats", json={"role": "builder"}).json()["role"] == "builder"
 
 
-def test_doctor_names_the_chats_left_with_no_role(tmp_path: Path) -> None:
+def test_doctor_says_a_chat_with_no_stored_role_runs_as_assistant(tmp_path: Path) -> None:
     from skep.status import build_status
     from skep.supervisor.cli_cmds import build_config
 
@@ -281,11 +354,141 @@ def test_doctor_names_the_chats_left_with_no_role(tmp_path: Path) -> None:
 
     config = build_config(tmp_path, None)
     RunStore(config.db_path).close()
-    assert not [a for a in build_status(tmp_path)["advisories"] if "have no role" in a]
+    assert not [a for a in build_status(tmp_path)["advisories"] if "no stored role" in a]
     known_chat(config.db_path, "old-chat")  # a row from before every chat recorded a role
-    (line,) = [a for a in build_status(tmp_path)["advisories"] if "have no role" in a]
-    assert line.startswith("1 chat(s) have no role")
-    assert "skep role use assistant --chat old-chat" in line
+    (line,) = [a for a in build_status(tmp_path)["advisories"] if "no stored role" in a]
+    assert line.startswith("1 chat(s) have no stored role")
+    assert "run as assistant" in line and "widest" not in line
+    assert "skep role use builder --chat old-chat" in line and "/role builder" in line
+
+
+@pytest.mark.parametrize("face", ["turn", "btw", "continuation", "unattended", "channel"])
+def test_a_chat_whose_stored_role_is_null_is_an_assistant_chat_on_every_face(
+    config: SupervisorConfig, face: str
+) -> None:
+    """Decision #4 (B55): a chat from before every chat recorded a role —
+    web, channel or analysis — reads as assistant, on every face a turn
+    takes: the same tools offered (no dispatch tools), the assistant prompt,
+    the same answer when the model names a hidden tool anyway, no card."""
+    from skep.supervisor.serve.channels import ChannelIdentity, ChannelMessage
+    from skep.supervisor.serve.channels.runtime import run_channel_turn
+    from skep.supervisor.serve.chat import ChatEngine
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL
+
+    from .conftest import known_chat
+
+    ollama = FakeOllama(api_key=None).start()
+    store = RunStore(config.db_path)
+    try:
+        null = known_chat(config.db_path, "legacy-chat")  # a raw row: role NULL
+        store.set_setting(LLM_BASE_URL, ollama.base_url)
+        store.set_setting(LLM_DEFAULT_MODEL, "qwen3")
+        holder = ConfigHolder(config, store)
+        engine = ChatEngine(
+            store=store, holder=holder, runner=Dispatcher(holder, store), home=config.home
+        )
+        assistant = store.create_chat(title="a", model=None, role="assistant").chat_id
+        seen = []
+        for chat_id in (null, assistant):
+            ollama.script_tool_call(
+                "start_research", {"question": "q", "source_allowlist": ["example.com"]}
+            )
+            ollama.script_reply("ok")
+            before = len(ollama.chat_bodies())
+            if face == "channel":
+                key = f"telegram:{chat_id}"
+                store.bind_channel_session(
+                    session_key=key, channel="telegram", identity_id=chat_id, chat_id=chat_id
+                )
+                identity = ChannelIdentity(channel="telegram", identity_id=chat_id)
+                message = ChannelMessage("telegram", identity, "fix it", session_key=key)
+                _reply, cards = run_channel_turn(engine, message, web_ui_url="http://x")
+            else:
+                store.add_chat_message(chat_id, role="user", content="fix it")
+                base_url, api_key, model, protocol = engine.resolved_llm(store.get_chat(chat_id))
+                events = list(engine.turn_events(
+                    chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+                    read_only=face in ("btw", "unattended"),
+                    unattended=face in ("continuation", "unattended"),
+                ))  # fmt: skip
+                cards = [data for event, data in events if event == "action"]
+            first, second = ollama.chat_bodies()[before:]
+            seen.append(
+                (
+                    [t["function"]["name"] for t in first["tools"]],
+                    "Role assistant" in first["messages"][0]["content"],
+                    second["messages"][-1]["content"],
+                    cards,
+                )
+            )
+    finally:
+        store.close()
+        ollama.stop()
+    assert seen[0] == seen[1]
+    offered, prompted, _answer, cards = seen[0]
+    assert prompted and cards == []
+    assert not ASSISTANT_HIDDEN & set(offered)
+    reopened = RunStore(config.db_path)  # the stored row is not rewritten
+    try:
+        assert reopened.get_chat(null).role is None  # type: ignore[union-attr]
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("face", ["cli", "deck"])
+def test_giving_a_null_role_chat_a_role_gives_its_tools_back(tmp_path: Path, face: str) -> None:
+    """Reversible: nothing rewrote the row, so `skep role use builder --chat`
+    and /role builder (the deck's set_role card) put the dispatch tools back."""
+    from skep.cli import main
+    from skep.supervisor.cli_cmds import build_config
+
+    from .conftest import known_chat, serve_client
+
+    config = build_config(tmp_path, None)
+    RunStore(config.db_path).close()
+    null = known_chat(config.db_path, "legacy-chat")
+
+    def hidden() -> set[str]:
+        store = RunStore(config.db_path)
+        try:
+            return set(hidden_tools(engine_role(config, store, null)))
+        finally:
+            store.close()
+
+    assert hidden() == ASSISTANT_HIDDEN
+    if face == "cli":
+        assert main(["--home", str(tmp_path), "role", "use", "builder", "--chat", null]) == 0
+    else:
+        with serve_client(config) as client:
+            card = client.post(
+                f"/api/chats/{null}/commands",
+                json={"tool": "set_role", "args": {"name": "builder"}},
+            ).json()
+            confirmed = client.post(f"/api/chats/{null}/commands/{card['action_id']}/confirm")
+            assert confirmed.status_code == 200, confirmed.text
+    assert hidden() == set()
+
+
+def engine_role(config: SupervisorConfig, store: RunStore, chat_id: str | None) -> Any:
+    from skep.supervisor.roles import role_for_chat
+
+    return role_for_chat(store, config.home, chat_id)
+
+
+def test_no_chat_is_no_role_and_a_null_chat_is_assistant(config: SupervisorConfig) -> None:
+    """REST, the CLI and the hook have no chat: no role layer. A chat row with
+    a NULL role is assistant (B55)."""
+    from .conftest import known_chat
+
+    store = RunStore(config.db_path)
+    null = known_chat(config.db_path, "legacy-chat")
+    try:
+        assert engine_role(config, store, None) is None
+        assert engine_role(config, store, null) == SHIPPED_ROLES["assistant"]
+        assert engine_role(config, store, "no-such-chat") is None
+    finally:
+        store.close()
 
 
 def _learned(store: RunStore) -> list[Any]:
@@ -510,11 +713,13 @@ SURFACE_FROZEN: dict[str, str] = json.loads(
     (Path(__file__).parents[1] / "fixtures/policy_v3/pre_p3_6_surface_verdicts.json").read_text()
 )
 _RANK = {"allow": 0, "card": 1, "require_approval": 1, "deny": 2}
-ROLE_LESS_KINDS = ("channel", "analysis", "hermes")
-# Hidden in an assistant chat, yet the dispatch lane still cards as it did
-# (byte-identical: the frozen taint table holds it) — a home whose run policy
-# cannot resolve the dispatch: the tampered baseline, and the assistant
-# baseline's gated repo. Such a card can never succeed on confirm.
+# P3-6 (decision #4): a stored NULL role reads as assistant, so web:null is
+# the assistant row too.
+ROLE_LESS_KINDS = ("web:null", "channel", "analysis", "hermes")
+# Hidden in an assistant chat, yet the dispatch lane carded before P3-6 — a
+# home whose run policy cannot resolve the dispatch: the tampered baseline,
+# and the assistant baseline's gated repo. Such a card could never succeed on
+# confirm; it is refused at proposal now (W2: ``w2:card->deny``).
 HIDDEN_YET_CARDS = {
     "tampered": {"batch_dispatch", "dispatch_run", "dispatch_run@gated",
                  "dispatch_run@role-assistant", "quick_edit", "run_code"},
@@ -524,7 +729,6 @@ SURFACE_FLIPS = {
     "web:assistant": {"hidden": 6, "b22:card->deny": 2},
     "web:builder": {"b22:role=": 1},
     "web:operator": {"b22:role=": 1},
-    "web:null": {"b22:role=": 1},
 }
 
 
@@ -544,6 +748,9 @@ def _surface_flip(home: str, key: str, old: str, new: str) -> str:
             ), (key, call, SURFACE_FROZEN[call])
         return "hidden"
     assert new.startswith("deny") and not old.startswith("deny"), (key, old, new)
+    if kind == "web:assistant" and probe in HIDDEN_YET_CARDS.get(home, ()):
+        assert new.startswith("deny role:assistant/"), (key, old, new)
+        return "w2:card->deny"  # carded, then failed on confirm
     if probe == "dispatch_run@role-assistant":
         return "b22:role="  # carded or ran, then 403'd at the dispatch
     assert kind == "web:assistant" and tool in ("start_research", "forge_tool"), key
@@ -556,9 +763,10 @@ def test_hiding_and_role_defaults_only_tighten_against_the_frozen_surface(
 ) -> None:
     """Six homes x seven kinds of chat x every tool, held to es-p4-2's answers.
     A chat that had a role decides every call as before but for the B22
-    refusals; its list shrinks only by tools its role denies. A channel,
-    analysis or hermes-import chat — role-less before — is now the assistant
-    row, cell for cell, and nothing in it loosened."""
+    refusals; its list shrinks only by tools its role denies. A web chat
+    whose stored role is NULL, a channel, analysis or hermes-import chat —
+    role-less before — is now the assistant row, cell for cell, and nothing
+    in it loosened."""
     monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
     monkeypatch.chdir(tmp_path)
     new = dict(surface_rows(tmp_path / home, home))
@@ -578,4 +786,7 @@ def test_hiding_and_role_defaults_only_tighten_against_the_frozen_surface(
     expected = (
         {"web:assistant": SURFACE_FLIPS["web:assistant"]} if home == "tampered" else SURFACE_FLIPS
     )
+    if home in HIDDEN_YET_CARDS:
+        w2 = {"w2:card->deny": len(HIDDEN_YET_CARDS[home])}
+        expected = {**expected, "web:assistant": {**expected["web:assistant"], **w2}}
     assert {kind: dict(found) for kind, found in flips.items()} == expected

@@ -389,7 +389,9 @@ def test_discord_button_confirms_a_low_risk_dispatch(
         _enable_discord(config, ollama, can_confirm=True)
         store = RunStore(config.db_path)
         try:
-            chat = store.create_chat(title="discord 42", model=None)
+            chat = store.create_chat(
+                title="discord 42", model=None, role="builder"
+            )  # may dispatch (P3-6)
             action_id = store.add_chat_action(
                 chat.chat_id,
                 tool="dispatch_run",
@@ -446,7 +448,9 @@ def test_discord_button_from_a_session_bound_thread_confirms_its_own_card(
         _enable_discord(config, ollama, can_confirm=True)  # allowlist is ["42"]
         store = RunStore(config.db_path)
         try:
-            chat = store.create_chat(title="discord t-900", model=None)
+            chat = store.create_chat(
+                title="discord t-900", model=None, role="builder"
+            )  # may dispatch (P3-6)
             store.bind_channel_session(
                 session_key="discord:t-900",
                 channel="discord",
@@ -562,7 +566,9 @@ def test_discord_reaction_confirms_the_waiting_card(
         _enable_discord(config, ollama, can_confirm=True)
         store = RunStore(config.db_path)
         try:
-            chat = store.create_chat(title="discord 42", model=None)
+            chat = store.create_chat(
+                title="discord 42", model=None, role="builder"
+            )  # may dispatch (P3-6)
             store.bind_channel_session(
                 session_key="discord:42", channel="discord", identity_id="42", chat_id=chat.chat_id
             )
@@ -1013,7 +1019,9 @@ def test_discord_slash_approve_confirms_the_bound_chats_card(
         _enable_discord(config, ollama, can_confirm=True)
         store = RunStore(config.db_path)
         try:
-            chat = store.create_chat(title="discord 42", model=None)
+            chat = store.create_chat(
+                title="discord 42", model=None, role="builder"
+            )  # may dispatch (P3-6)
             store.bind_channel_session(
                 session_key="discord:42",
                 channel="discord",
