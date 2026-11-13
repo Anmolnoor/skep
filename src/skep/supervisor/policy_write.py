@@ -572,12 +572,14 @@ def replay_decisions(
         shown = examples.setdefault(label, [])
         if len(shown) < 2:
             # W17: the value is model- or attacker-chosen: plain text, and
-            # only in ``examples`` (the operator's CLI); ``rules`` (rule ids,
-            # no value) is what a card or a tool result shows.
+            # only in ``examples`` (the operator's CLI); ``rules`` is what a
+            # card or a tool result shows: the layers only, since a learned
+            # rule id is ``scope:action:<pattern>``, a value too.
             text = plain(req.value)[:48].replace("`", "'")
             why = f"({plain(str(old_by))} → {plain(str(new.decided_by))})"
             shown.append(f"{req.scope}.{req.action} `{text}` {why}")
-            rules.setdefault(label, []).append(f"{req.scope}.{req.action} {why}")
+            layers = f"({_layer(old_by)} → {_layer(new.decided_by)})"
+            rules.setdefault(label, []).append(f"{req.scope}.{req.action} {layers}")
     return {
         "rows": len(rows),
         "replayed": replayed,
@@ -588,6 +590,11 @@ def replay_decisions(
     }
 
 
+def _layer(decided_by: object) -> str:
+    """The layer of a ``layer/rule_id`` verdict label, as plain text."""
+    return plain(str(decided_by).partition("/")[0])[:32]
+
+
 def plain(text: str) -> str:
     """W17: logged text as one plain line — every control, format and
     escape character (C0, C1, DEL, ESC, bidi and zero-width) removed."""
@@ -596,7 +603,7 @@ def plain(text: str) -> str:
 
 def replay_line(summary: Mapping[str, Any]) -> str:
     """The summary in one line, for a card, a tool result and the CLI —
-    counts and rule ids, never a logged value (W17)."""
+    counts and the deciding layers, never a logged value or rule id (W17)."""
     if not summary["rows"]:
         return "replay: the decision log is empty — no past decision to compare"
     parts = []

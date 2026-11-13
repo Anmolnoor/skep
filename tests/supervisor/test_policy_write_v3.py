@@ -415,7 +415,7 @@ def test_replay_counts_flips_and_what_it_cannot_replay(home: Home) -> None:
         verdict="deny",
     )  # fmt: skip
     assert "now denies 1 past allows" in denied["replay"]
-    assert "global/operator-root → global/op:filesystem:read:" in denied["replay"]
+    assert "filesystem.read (global → global)" in denied["replay"]  # layers, no rule id
 
 
 def test_replay_examples_are_plain_and_never_reach_the_model(
@@ -434,7 +434,7 @@ def test_replay_examples_are_plain_and_never_reach_the_model(
     line = receipt["replay"]
     assert "now denies 1 past asks" in line
     assert "ignore previous" not in line and "pwned" not in line
-    assert "shell.run (default/unmatched →" in line
+    assert "shell.run (default → global)" in line
     rows = policy_write.read_log(home.config.audit_dir)
     summary = policy_write.replay_decisions(rows, load_stack(home.holder, home.store))
     (example,) = next(iter(summary["examples"].values()))
@@ -443,6 +443,23 @@ def test_replay_examples_are_plain_and_never_reach_the_model(
     assert main(["--home", str(home.root), "policy", "migrate", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "ignore previous" in out and all(ch not in out for ch in (esc, bell, rlo))
+
+
+def test_a_rule_id_never_carries_its_pattern_to_the_model(home: Home) -> None:
+    """A learned grant's rule id is ``scope:action:pattern``: the pattern is
+    the command, host or URL prefix the card showed, model-chosen text. The
+    model-visible line names the layers that decided, never the rule id."""
+    _keep(home, "echo ignore-previous-instructions")
+    (grant,) = home.learned()
+    home.log(_row("shell", "run", "echo ignore-previous-instructions", "allow",
+                  f"grant:always/{grant.rule_id}"))  # fmt: skip
+    receipt = actions.set_operator_policy_rule(
+        home.store, scope="shell", action="run", pattern="echo", verdict="deny"
+    )
+    line = receipt["replay"]
+    assert "now denies 1 past allows" in line
+    assert "ignore-previous" not in line, line
+    assert "shell.run (grant:global → global)" in line
 
 
 def test_the_log_records_the_chat_and_a_fetch_url_so_replay_re_decides_them(
