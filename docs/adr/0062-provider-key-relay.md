@@ -99,9 +99,13 @@ today's path. Each run's `dispatched` line records which path it used.
 (one per relayed protocol: ollama, openai-compat, anthropic,
 openai-responses) direct with the key and through the relay with the token,
 against the repo's fake providers, and requires the recorded requests to be
-identical apart from the auth header: method, path, query, every other
-header (Host included) and the body byte for byte, and the parsed replies
-identical. The default may only flip to ON with this gate and the full suite
+identical apart from the auth header: path, query, every other header (Host,
+Connection and Content-Length included) and the JSON body, and the parsed
+replies identical. The credential header itself must match too: the worker
+sent the token, the provider must get the key in the same header and form.
+The gate's first run caught one difference (the relay dropped the worker's
+`Connection: keep-alive`); the relay now passes a plain keep-alive/close
+through. The default may only flip to ON with this gate and the full suite
 green.
 
 ### 5. Which providers and engines

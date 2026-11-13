@@ -573,7 +573,12 @@ class _ProxyHandler(StreamRequestHandler):
                 # Same name and place as the worker sent it: only the value moves.
                 forwarded.append((raw_name.strip().decode("latin-1"), relay.auth(relay.key)[1]))
                 continue
-            if name in _CREDENTIAL_HEADERS or name in _HOP_BY_HOP or name == b"host":
+            # Parity (ADR 0062 section 4): the worker's plain keep-alive/close
+            # rides along as sent; any other hop-by-hop header stops here.
+            plain_connection = name == b"connection" and value.lower() in ("keep-alive", "close")
+            if name in _CREDENTIAL_HEADERS or name == b"host":
+                continue
+            if name in _HOP_BY_HOP and not plain_connection:
                 continue
             if name == b"content-length":
                 try:

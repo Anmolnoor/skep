@@ -12,6 +12,7 @@ import hmac
 import os
 import secrets
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # Matches ``*-secret`` (secret_floor.SKEP_SECRET_NAMES): masked from every
 # sandboxed worker and refused to every Queen read tool, with no new rule.
@@ -40,3 +41,11 @@ def relay_token(supervisor_home: Path, task_id: str) -> str:
     recomputes the token the worker already holds."""
     secret = _relay_secret(supervisor_home)
     return hmac.new(secret, task_id.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def relay_base_url(port: int, upstream: str) -> str:
+    """The provider URL a relayed worker dials: the proxy's port plus the
+    upstream's own path, so every path rule a client applies to a base URL
+    (openai_style_prefix's bare-host /v1, ollama's /api strip) lands on the
+    same upstream path through the relay as direct."""
+    return f"http://127.0.0.1:{port}{urlsplit(upstream).path.rstrip('/')}"
