@@ -22,7 +22,9 @@ The sandbox mounts the root filesystem read-only and binds only the intended
 writable roots back as writable:
 
 - the worker workspace (its private `TMPDIR` lives inside it)
-- the results/audit output directory
+- the run's own result directory (`results/<task_id>/`, where `--out` points);
+  no run can write another run's result, and the supervisor rejects (and
+  records on the run) an envelope whose `task_id` is not the run's
 - the worktree's own git metadata and the repo's `objects/` — enough for
   `git add`/`git commit`; the repo's `hooks/`, `config` and `refs/` stay
   read-only, and skep's own host-side git runs with hooks and fsmonitor off.

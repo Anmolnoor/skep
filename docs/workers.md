@@ -193,7 +193,10 @@ first-party workers and the claude adapter widened their supported range to
 
 `--worker-cmd` is not a raw prompt wrapper. The command must speak Skep's worker
 contract: read the task JSON path passed by the supervisor, write a result JSON
-file, and emit artifacts/events that Skep can audit.
+file, and emit artifacts/events that Skep can audit. The `--out` path sits in a
+directory of the run's own (`results/<task_id>/result.json`), the only result
+directory a sandboxed run may write; an envelope whose `task_id` is not the
+run's is rejected and the rejection recorded on the run.
 
 Use this shape for an internal adapter:
 

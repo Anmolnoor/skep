@@ -19,6 +19,10 @@ task instructions:
 - badresult: emits a completed terminal event but writes malformed result JSON
 - unclaimed: happy, but the result's changed_files says [] — the shape of a
             file changed by a shell command the worker never counted (v115-F15)
+- forge:    tries to overwrite another run's result (``victim``) beside its own
+            result directory, records what the sandbox let it do next to
+            --out, then happy-min (W26)
+- wrongid:  happy, but its result envelope names another task id (W26)
 - liar:     claims completed+passed, but the patch contradicts the recorded
             verification command (G10 re-verification must catch the lie)
 - vacuous:  patches like liar, but nominates ``true`` as its own verification
@@ -201,6 +205,19 @@ def main() -> int:
             probe["errno"] = exc.errno
         (args.out.parent / f"netprobe-{task_id}.json").write_text(json.dumps(probe))
 
+    if mode == "forge":
+        attempts: dict[str, object] = {}
+        for target in (
+            args.out.parent.parent / "victim" / "result.json",
+            args.out.parent.parent / "victim.json",
+        ):
+            try:
+                target.write_text('{"forged": true}')
+                attempts[target.name] = "written"
+            except OSError as exc:
+                attempts[target.name] = exc.errno
+        (args.out.parent / f"forge-{task_id}.json").write_text(json.dumps(attempts))
+
     approval_verdict = task.get("approval_verdict")
     resumed_with_approval = isinstance(approval_verdict, dict) and approval_verdict.get("approved")
 
@@ -341,6 +358,8 @@ def main() -> int:
             },
         ],
     )
+    if mode == "wrongid":
+        result["task_id"] = "someone-elses-task"
     args.out.write_text(json.dumps(result))
     return 0
 

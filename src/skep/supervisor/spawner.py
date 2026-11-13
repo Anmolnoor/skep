@@ -183,7 +183,7 @@ def spawn_worker(
 
     When enabled (Q1), the worker argv is wrapped in the host sandbox backend:
     Seatbelt on macOS, Bubblewrap on Linux. Writes are physically confined to
-    the workspace, result-file dir, and temp. Network follows
+    the workspace, the run's own result dir (W26), and temp. Network follows
     ``permissions.network`` (D1): an empty list denies all, ``["*"]`` allows all,
     and concrete domain lists use the loopback filtering proxy only on backends
     that can physically pin egress to it. The generated profile/evidence is kept

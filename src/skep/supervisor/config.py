@@ -70,6 +70,11 @@ class SupervisorConfig:
     def results_dir(self) -> Path:
         return self.home / "results"
 
+    def result_path(self, task_id: str) -> Path:
+        """W26: a run's result envelope, in a directory of its own — the only
+        result directory its sandbox may write (no run reaches another's)."""
+        return self.results_dir / task_id / "result.json"
+
     @property
     def audit_dir(self) -> Path:
         return self.home / "audit"

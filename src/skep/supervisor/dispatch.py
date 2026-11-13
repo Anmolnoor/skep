@@ -44,6 +44,7 @@ from skep.worker_contract import (
     ApprovalVerdict,
     AutonomyDecisionPayload,
     Budget,
+    CodingWorkerResult,
     CodingWorkerTask,
     EventType,
     Permissions,
@@ -650,7 +651,7 @@ def run_task(
         task_path = write_task_file(task, workspace / ".events" / "task.json")
         audit_task_dir = config.audit_dir / task.task_id
         write_task_file(task, audit_task_dir / "task.json")
-        result_path = config.results_dir / f"{task.task_id}.json"
+        result_path = config.result_path(task.task_id)
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
         def finish_before_worker(*, reason: str, summary: str) -> IngestOutcome:
@@ -783,12 +784,7 @@ def run_task(
             startup_seconds=config.startup_seconds,
         )
 
-        result = None
-        if result_path.is_file():
-            try:
-                result = read_result(result_path)
-            except ValidationError:
-                result = None  # treated as crash-grade: evidence wins over claims
+        result = _run_result(run_store, task.task_id, result_path)
 
         outcome = ingest_run(
             store=run_store,
@@ -994,6 +990,27 @@ def _live_worker_pid(run_store: RunStore, task_id: str) -> int | None:
 _INTERRUPTED_STATES = ("created", "dispatched", "running")
 
 
+def _run_result(store: RunStore, task_id: str, path: Path) -> CodingWorkerResult | None:
+    """The run's own result envelope, or None: absent, malformed (crash-grade,
+    evidence wins over claims), or naming another task — W26: a deposit for
+    someone else is rejected and the rejection recorded on this run."""
+    if not path.is_file():
+        return None
+    try:
+        result = read_result(path)
+    except ValidationError:
+        return None
+    if result.task_id != task_id:
+        record = store.get_run(task_id)
+        store.transition(
+            task_id,
+            record.state if record is not None else "running",
+            f"result rejected: {path} names task {result.task_id!r}, not this run",
+        )
+        return None
+    return result
+
+
 def recover_interrupted_runs(
     run_store: RunStore,
     config: SupervisorConfig,
@@ -1044,13 +1061,13 @@ def recover_interrupted_runs(
             if on_run_finished is not None:
                 on_run_finished(task_id)
             continue
-        result = None
-        result_path = config.results_dir / f"{task_id}.json"
-        if result_path.is_file():
-            try:
-                result = read_result(result_path)
-            except ValidationError:
-                result = None  # crash-grade: evidence wins over claims
+        result_path = config.result_path(task_id)
+        legacy_path = config.results_dir / f"{task_id}.json"
+        if not result_path.is_file() and legacy_path.is_file():
+            # A run dispatched before W26 deposited here; no sandboxed run can
+            # write this directory any more (only its own subdirectory).
+            result_path = legacy_path
+        result = _run_result(run_store, task_id, result_path)
         events = read_event_log(workspace / ".events" / f"{task_id}.ndjson")
         worker_reported = bool(events) and events[-1].type is EventType.TASK_TERMINAL
         if result is not None and worker_reported:
