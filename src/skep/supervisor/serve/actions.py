@@ -4785,9 +4785,12 @@ _MANIFEST_EXACT = ("repo", "engine", "execution_mode", "verify_command", "auto_a
 def manifest_widening(shown: dict[str, Any], fresh: dict[str, Any]) -> str | None:
     """Which field of ``fresh`` gives the run more than ``shown`` did, as
     words — or None. A key the shown card did not carry (a card from before
-    W13) is not compared; an uncompilable manifest compares nothing."""
-    if "error" in shown or "error" in fresh:
+    W13) is not compared. A fresh manifest that cannot compile fails the
+    dispatch the same way; a card that showed none never runs one."""
+    if "error" in fresh:
         return None
+    if "error" in shown:
+        return "the card showed no envelope (it could not be compiled) and it compiles now"
 
     def items(value: Any) -> set[str]:  # a shell prefix is a list: compare it as one line
         return {shlex.join(v) if isinstance(v, list) else str(v) for v in value or []}

@@ -321,4 +321,7 @@ def test_manifest_widening_per_field() -> None:
     assert "allowed_tools" in (manifest_widening(shown, {**shown, "allowed_tools": None}) or "")
     assert "engine" in (manifest_widening(shown, {**shown, "engine": "codex"}) or "")
     assert manifest_widening({"network": ["a"]}, {"network": ["a"], "read": ["/"]}) is None
-    assert manifest_widening({"error": "x"}, shown) is None
+    # a card that showed no envelope runs nothing it compiles to later
+    assert "no envelope" in (manifest_widening({"error": "x"}, shown) or "")
+    assert manifest_widening({"error": "x"}, {"error": "y"}) is None  # fails the same way
+    assert manifest_widening(shown, {"error": "y"}) is None
