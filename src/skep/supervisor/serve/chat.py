@@ -2082,9 +2082,8 @@ class ChatEngine:
                     # P4-2: a dispatch's manifest — what its run will get.
                     manifest = (
                         dispatch_manifest_for(self.store, self.holder, args, chat_id)
-                        if name == "dispatch_run"
-                        and decision is not None
-                        and decision.verdict != "deny"
+                        if name in ("dispatch_run", "start_research")
+                        and (decision is None or decision.verdict != "deny")
                         else None
                     )
                     # quick_edit and batch members compile the same envelope

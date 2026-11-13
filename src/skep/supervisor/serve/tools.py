@@ -2821,7 +2821,16 @@ def dispatch_manifest_for(
     store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
 ) -> dict[str, Any]:
     """P4-2 (ADR 0059 D6): the manifest of a ``dispatch_run`` this chat
-    proposes — compiled exactly as the confirm will compile it."""
+    proposes — compiled exactly as the confirm will compile it. A
+    ``start_research`` call (its ``source_allowlist``) compiles as the
+    sandboxed researcher run its confirm submits (L23)."""
+    if "source_allowlist" in args:
+        args = {
+            "repo": args.get("repo"),
+            "caste": "researcher",
+            "execution_mode": "sandbox",
+            "network": args["source_allowlist"],
+        }
     try:
         return actions.dispatch_manifest(
             holder,
@@ -5327,7 +5336,11 @@ def _execute_mutation(
             network=source_allowlist,
             dispatch_decision=decision,
             delegation_chain=_queen_chain(store, holder, chat_id, actor),
+            # L23: the role's asks on the source hosts ride as deferred asks;
+            # the card's manifest listed them, and the desk confirm answers them.
+            deferred_asks=_human_answers(store, chat_id),
             chat_taint=chat_taint_bits(store, chat_id),
+            preanswered=preanswered,
         )
         return {"task_id": task_id, "state": "research_dispatched"}
     if name == "propose_schedule":
