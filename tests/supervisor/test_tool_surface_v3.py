@@ -863,17 +863,17 @@ def test_a_dispatch_with_no_repo_is_answered_as_a_model_error(
     assert "repo" in (decision.detail or "")
 
 
-def test_a_role_with_no_layer_is_offered_no_dispatcher_and_none_cards_to_fail(
+def test_a_role_with_no_template_is_offered_no_dispatcher_and_none_cards_to_fail(
     locked: SupervisorConfig, repo: Path
 ) -> None:
-    """A custom role that binds no template delegates no workspace write
-    (decision #7): every dispatcher is refused on confirm. So it is hidden —
-    start_research and forge_tool used to card and then 403."""
+    """A custom role that binds no template acts as assistant (D14): it hides
+    what assistant hides, every dispatcher among them — start_research and
+    forge_tool are refused at proposal, never carded and then 403."""
     from skep.supervisor.roles import resolve_role
 
-    from .conftest import no_layer_role
+    from .conftest import no_template_role
 
-    role = resolve_role(no_layer_role(locked.home), locked.home)
+    role = resolve_role(no_template_role(locked.home), locked.home)
     assert set(hidden_tools(role)) == ASSISTANT_HIDDEN
     store = RunStore(locked.db_path)
     try:

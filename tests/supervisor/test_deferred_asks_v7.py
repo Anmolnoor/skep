@@ -301,20 +301,23 @@ def test_a_headless_dispatch_drops_the_ask_as_before(tmp_path: Path, repo: Path)
 
 
 def test_a_host_the_delegator_denies_stays_dropped(locked: SupervisorConfig, repo: Path) -> None:
-    """A delegator whose role holds nothing there is deny (decision #7) —
-    and a deny never becomes an ask."""
+    """A deny never becomes an ask: an askable prefix the secret floor denies
+    stays dropped under the chain. D14: a delegator in a role naming no
+    template acts as assistant, so what assistant only asks about becomes an
+    ask (before, such a role held nothing — decision #7 — and dropped it all;
+    no shipped template leaves network or shell unset any more)."""
     roles = locked.home.parent / "roles"
     roles.mkdir(exist_ok=True)
     (roles / "bare.json").write_text(json.dumps({"name": "bare"}))
     narrowed, note = _narrow(
         locked,
         repo,
-        _perms(network=["example.com", "pypi.org"], shell_allowlist=[["uv", "sync"]]),
+        _perms(network=["pypi.org"], shell_allowlist=[["uv", "sync"], ["cat", ".env"]]),
         chain=["queen@bare"],
     )
-    assert narrowed.network == [] and narrowed.network_ask == []
-    assert narrowed.shell_allowlist == [] and narrowed.shell_ask == []
-    assert "dropped: " in note and "asks a human" not in note
+    assert narrowed.network == [] and narrowed.network_ask == ["pypi.org"]
+    assert narrowed.shell_allowlist == [] and narrowed.shell_ask == [["uv", "sync"]]
+    assert note.endswith("; beyond the delegator, dropped: shell.run cat .env")
 
 
 def test_a_guarded_class_is_never_offered_as_an_ask(locked: SupervisorConfig, repo: Path) -> None:

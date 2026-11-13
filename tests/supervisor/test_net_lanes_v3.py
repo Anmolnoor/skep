@@ -34,7 +34,7 @@ from skep.supervisor.serve.tools import (
     mutation_execution_decision,
 )
 
-from .conftest import no_layer_role
+from .conftest import no_template_role
 from .net_lane_grid import (
     FETCH_PROBES,
     HOMES,
@@ -290,8 +290,9 @@ def test_b78_search_web_follows_the_chats_role(
 ) -> None:
     """B78: search_web decides with the chat's role — a role layer that denies
     search refuses it there (since P3-6 by hiding it), and in a chat whose
-    stored role is NULL (an assistant chat), while a chat with no role layer
-    still searches."""
+    stored role is NULL (an assistant chat), while a chat in a role naming no
+    template still searches: it acts as the assistant template (D14), which
+    the patch here leaves alone."""
     from skep.supervisor.policy_engine import Layer, LayerRule
     from skep.supervisor.roles import Role
 
@@ -312,7 +313,7 @@ def test_b78_search_web_follows_the_chats_role(
     )
     _paths, store, holder, _fetched = net("assistant")
     plain = store.create_chat(
-        title="p", model=None, role=no_layer_role(holder.current.home)
+        title="p", model=None, role=no_template_role(holder.current.home)
     ).chat_id
     role = store.create_chat(title="a", model=None, role="assistant").chat_id
     null = store.create_chat(title="n", model=None).chat_id
@@ -448,9 +449,11 @@ def test_an_operator_overlay_fetch_allow_does_not_let_read_url_run(
 def test_b56_a_stored_grant_matches_exactly_what_it_matched_before(
     kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No role in the way, a stored fetch or MCP grant decides no probe it did
-    not decide before P3-3 — and since P3-4 (B74) a read_url keep covers its
-    URL's directory with no other query, so the query probe asks."""
+    """A stored fetch or MCP grant decides no probe it did not decide before
+    P3-3 with no role in the way (the frozen "-" row; D14 now gives that chat
+    the assistant layer, whose catch-all asks a grant answers, decision #1) —
+    and since P3-4 (B74) a read_url keep covers its URL's directory with no
+    other query, so the query probe asks."""
     monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
     monkeypatch.chdir(tmp_path)
     for key, shown in rows(tmp_path, kind):

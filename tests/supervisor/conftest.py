@@ -46,20 +46,20 @@ def known_chat(db_path: Path, chat_id: str) -> str:
     return chat_id
 
 
-# ADR 0059 P3-6 (decision #4): a chat whose stored role is NULL reads as
-# assistant. A test about a lane on its own — no role layer, what a NULL chat
-# was before P3-6 — uses a chat in this custom role, which binds no template:
-# the one chat that still has no role layer.
-NO_LAYER_ROLE = "nolayer"
+# ADR 0059 D14: a custom role that names no template acts as assistant, and
+# a chat whose stored role is NULL reads as assistant (decision #4): every
+# chat has a role layer. The grids' "-" row is a chat in this role — its
+# answers are the assistant row's, labelled ``role:notemplate``.
+NO_TEMPLATE_ROLE = "notemplate"
 
 
-def no_layer_role(skep_home: Path) -> str:
-    """Write the custom role ``nolayer`` (no ``policy_layer``) beside the
+def no_template_role(skep_home: Path) -> str:
+    """Write the custom role ``notemplate`` (no ``policy_layer``) beside the
     home's persona and return its name, for ``create_chat(role=...)``."""
     directory = skep_home.parent / "roles"
     directory.mkdir(exist_ok=True)
-    (directory / f"{NO_LAYER_ROLE}.json").write_text(f'{{"name": "{NO_LAYER_ROLE}"}}')
-    return NO_LAYER_ROLE
+    (directory / f"{NO_TEMPLATE_ROLE}.json").write_text(f'{{"name": "{NO_TEMPLATE_ROLE}"}}')
+    return NO_TEMPLATE_ROLE
 
 
 def serve_client(config: SupervisorConfig, **app_kwargs: Any) -> TestClient:

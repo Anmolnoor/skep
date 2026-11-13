@@ -13,7 +13,9 @@ turn calls (``mutation_execution_decision``) and what a run compiles
 ``tests/fixtures/policy_v3/pre_p3_4_grant_verdicts.json`` is this grid answered
 BEFORE P3-4; ``test_grants_v3.py`` holds the new answers to it. Regenerate only
 with the pre-P3-4 code: ``python -m tests.supervisor.grant_grid >
-tests/fixtures/policy_v3/pre_p3_4_grant_verdicts.json``.
+tests/fixtures/policy_v3/pre_p3_4_grant_verdicts.json``. D14 then set every
+chat ``-`` cell to the assistant cell, ``role:assistant/`` read
+``role:notemplate/``: a role naming no template acts as assistant.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from skep.supervisor.serve import actions
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import mutation_execution_decision
 
-from .conftest import no_layer_role
+from .conftest import no_template_role
 from .queen_lane_grid import build_home
 
 HOMES = ("legacy", "zero", "builder", "assistant", "tampered")
@@ -183,7 +185,7 @@ def rows(root: Path, kind: str) -> Iterator[tuple[str, str]]:
         store.add_project_binding(
             project_id="other", binding_kind="repo_path", binding_value=str(other.resolve())
         )
-        stored = {role: role or no_layer_role(config.home) for role in ROLES}  # "-": no layer
+        stored = {role: role or no_template_role(config.home) for role in ROLES}  # "-": no template
         chats = {
             (role, which): store.create_chat(
                 title=f"{role}-{which}", model=None, role=stored[role]
