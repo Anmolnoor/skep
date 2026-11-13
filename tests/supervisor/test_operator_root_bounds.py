@@ -162,3 +162,15 @@ def test_d17_a_sub_folder_still_binds(home: Home, tmp_path: Path) -> None:
     for path in (Path("/opt/myproject"), Path("/var/folders/xy/project"), tmp_path / "app",
                  Path("/Volumes/Disk/code/app"), Path("/usr/local/src/app")):  # fmt: skip
         assert too_broad_root(path, store_root) is None, path
+
+
+def test_d17_the_macos_data_volume_root_and_its_parent_are_never_bound(home: Home) -> None:
+    """ES-F84 review: `/System/Volumes/Data` is every home on the disk, but
+    the alias key kept it as itself (only paths *below* it lost the prefix)
+    and APFS does not report it as a mount point, so it bound; `/System/
+    Volumes` holds it. Both are refused on every OS (harmless on Linux)."""
+    from skep.supervisor.serve.registry import too_broad_root
+
+    store_root = home.config.home.parent
+    for spelling in ("/System/Volumes/Data", "/system/volumes/data/", "/System/Volumes"):
+        assert too_broad_root(Path(spelling), store_root) is not None, spelling

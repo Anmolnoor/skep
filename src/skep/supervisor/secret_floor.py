@@ -106,7 +106,7 @@ def alias_key(path: Path) -> Path:
     macOS data-volume prefix dropped (over-matching on Linux is harmless)."""
     folded = _fold(path)
     parts, volume = folded.parts, _DATA_VOLUME.parts
-    if len(parts) > len(volume) and parts[: len(volume)] == volume:
+    if parts[: len(volume)] == volume:  # the volume root itself is `/` too
         return Path("/", *parts[len(volume) :])
     return folded
 

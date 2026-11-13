@@ -556,7 +556,8 @@ def too_broad_root(path: Path, store_root: Path) -> str | None:
 _SYSTEM_FOLDERS = (
     "/etc", "/var", "/usr", "/opt", "/tmp", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/dev",
     "/proc", "/sys", "/run", "/srv", "/mnt", "/media", "/private", "/private/etc",
-    "/private/var", "/private/tmp", "/System", "/Library", "/Applications", "/Volumes",
+    "/private/var", "/private/tmp", "/System", "/System/Volumes", "/Library", "/Applications",
+    "/Volumes",
 )  # fmt: skip
 
 
