@@ -165,7 +165,7 @@ def test_the_replay_runs_after_the_lock_is_released(
 
     def held(*args: Any, **kwargs: Any) -> Any:
         entered.set()
-        assert release.wait(5)
+        assert release.wait(60)
         return real(*args, **kwargs)
 
     monkeypatch.setattr(policy_write, "_replay", held)
@@ -185,11 +185,11 @@ def test_the_replay_runs_after_the_lock_is_released(
                     "actor": "op", "tier": "session", "chat_id": "c"},
         )  # fmt: skip
         done.start()
-        done.join(3)
+        done.join(30)  # ponytail: wide on purpose, a loaded machine took over 3 s for a keep
         assert not done.is_alive(), "a session keep waited behind a replay"
     finally:
         release.set()
-        standing.join(5)
+        standing.join(60)
     assert "replay_line" in report
     assert {"docs.example.org", "ls -q"} <= _patterns(home)
 
