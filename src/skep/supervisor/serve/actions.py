@@ -1027,7 +1027,7 @@ def set_policy_group(
     The fork validates EVERYTHING before the first write (source exists, name
     fresh, merged policy vets, project attached to the source), so a refusal
     leaves both groups and the project untouched — never create-then-fail."""
-    from ..policy_write import vet_write
+    from ..policy_write import policy_write, vet_write
     from ..projects import (
         POLICY_GROUPS_SETTING,
         projects_attached_to_group,
@@ -1036,17 +1036,18 @@ def set_policy_group(
         validate_policy_group,
     )
 
-    groups = stored_policy_groups(store)
     if fork_from is None:
         if repoint_project is not None:
             raise ValueError("repoint_project only makes sense with fork_from")
-        existed = name in groups
-        group_name, validated = validate_policy_group(name, policy)
-        # P3-5 (V11): the one write-time check, before the group is written.
-        report = vet_write(
-            store, settings={POLICY_GROUPS_SETTING: {**groups, group_name: validated}}
-        )
-        saved = save_policy_group(store, name, policy)
+        with policy_write():  # W14: read -> check -> write as one step
+            groups = stored_policy_groups(store)
+            existed = name in groups
+            group_name, validated = validate_policy_group(name, policy)
+            # P3-5 (V11): the one write-time check, before the group is written.
+            report = vet_write(
+                store, settings={POLICY_GROUPS_SETTING: {**groups, group_name: validated}}
+            )
+            saved = save_policy_group(store, name, policy)
         return {
             "name": name,
             "policy": saved,
@@ -1055,6 +1056,26 @@ def set_policy_group(
             "attached_projects": projects_attached_to_group(store, name),
             **_write_report(report),
         }
+    with policy_write():  # W14
+        return _fork_policy_group(store, name, policy, fork_from, repoint_project)
+
+
+def _fork_policy_group(
+    store: RunStore,
+    name: str,
+    policy: dict[str, Any],
+    fork_from: str,
+    repoint_project: str | None,
+) -> dict[str, Any]:
+    from ..policy_write import vet_write
+    from ..projects import (
+        POLICY_GROUPS_SETTING,
+        save_policy_group,
+        stored_policy_groups,
+        validate_policy_group,
+    )
+
+    groups = stored_policy_groups(store)
     if fork_from not in groups:
         raise ValueError(f"no policy group {fork_from!r} to fork; known: {sorted(groups)}")
     if name in groups:
@@ -1090,44 +1111,47 @@ def set_policy_group(
 
 
 def delete_policy_group(store: RunStore, *, name: str) -> dict[str, Any]:
+    from ..policy_write import policy_write
     from ..projects import delete_policy_group_record
 
-    delete_policy_group_record(store, name)
+    with policy_write():  # W14
+        delete_policy_group_record(store, name)
     return {"deleted": name}
 
 
 def attach_policy_group(store: RunStore, *, project_id: str, name: str) -> dict[str, Any]:
+    from ..policy_write import policy_write, vet_write
     from ..projects import stored_policy_groups
 
-    groups = stored_policy_groups(store)
-    if name not in groups:
-        raise ValueError(f"no policy group {name!r}; known: {sorted(groups)}")
-    record = store.get_project_policy(project_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"no project {project_id!r}")
-    current = [str(n) for n in record.policy.get("policy_groups") or []]
-    if name in current:
-        return {"project_id": project_id, "policy_groups": current, "already_attached": True}
-    from ..policy_write import vet_write
-
-    # P3-5 (V11): the one write-time check, before the attach is written.
-    report = vet_write(store)
-    return {
-        **_update_project_group_list(store, project_id, [*current, name]),
-        **_write_report(report),
-    }
+    with policy_write():  # W14: read -> check -> write as one step
+        groups = stored_policy_groups(store)
+        if name not in groups:
+            raise ValueError(f"no policy group {name!r}; known: {sorted(groups)}")
+        record = store.get_project_policy(project_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"no project {project_id!r}")
+        current = [str(n) for n in record.policy.get("policy_groups") or []]
+        if name in current:
+            return {"project_id": project_id, "policy_groups": current, "already_attached": True}
+        # P3-5 (V11): the one write-time check, before the attach is written.
+        report = vet_write(store)
+        attached = _update_project_group_list(store, project_id, [*current, name])
+    return {**attached, **_write_report(report)}
 
 
 def detach_policy_group(store: RunStore, *, project_id: str, name: str) -> dict[str, Any]:
-    record = store.get_project_policy(project_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"no project {project_id!r}")
-    current = [str(n) for n in record.policy.get("policy_groups") or []]
-    if name not in current:
-        raise ValueError(
-            f"project {project_id!r} does not attach {name!r}; attached: {current or '(none)'}"
-        )
-    return _update_project_group_list(store, project_id, [n for n in current if n != name])
+    from ..policy_write import policy_write
+
+    with policy_write():  # W14
+        record = store.get_project_policy(project_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"no project {project_id!r}")
+        current = [str(n) for n in record.policy.get("policy_groups") or []]
+        if name not in current:
+            raise ValueError(
+                f"project {project_id!r} does not attach {name!r}; attached: {current or '(none)'}"
+            )
+        return _update_project_group_list(store, project_id, [n for n in current if n != name])
 
 
 def list_policy_groups(store: RunStore) -> dict[str, Any]:
@@ -2115,7 +2139,7 @@ def approve_policy_baseline(
     already held does not, so a re-approval always goes through. The answer
     carries the replay and the grants the new layer's denies shadow.
     ``store`` is the home's (opened here when the caller holds none)."""
-    from ..policy_write import vet_write
+    from ..policy_write import policy_write, vet_write
 
     layer_override = layer
     layer, view = baseline_preview(
@@ -2123,13 +2147,6 @@ def approve_policy_baseline(
     )
     if expect_sha256 is not None and view["sha256"] != expect_sha256:
         raise ValueError("the baseline changed since it was shown — run approve again")
-    owned = store is None
-    store = store or RunStore(home / "supervisor.sqlite3")
-    try:
-        report = vet_write(store, holder=holder, baseline=layer)
-    finally:
-        if owned:
-            store.close()
     if layer_override is not None:
         source = f"onboard:{layer.template}"
     elif template:
@@ -2138,9 +2155,17 @@ def approve_policy_baseline(
         source = f"file:{Path(file).expanduser().resolve()}"
     else:
         source = "baseline.json (in place)"
-    row = write_baseline_lock(
-        home, layer, approved_by=approved_by, source=source, changes=view["diff"]
-    )
+    owned = store is None
+    store = store or RunStore(home / "supervisor.sqlite3")
+    with policy_write():  # W14: checked and locked as one step
+        try:
+            report = vet_write(store, holder=holder, baseline=layer)
+        finally:
+            if owned:
+                store.close()
+        row = write_baseline_lock(
+            home, layer, approved_by=approved_by, source=source, changes=view["diff"]
+        )
     return {"approved": row, "diff": view["diff"], "table": view["table"], **_write_report(report)}
 
 
@@ -4119,7 +4144,7 @@ def set_operator_policy_rule(
         ScopePolicy,
         operator_document_from_settings,
     )
-    from ..policy_write import Allow, PolicyWriteRejected, vet_write
+    from ..policy_write import UNCHANGED, Allow, PolicyWriteRejected, vet_write, write_setting
 
     if scope not in OPERATOR_POLICY_SCOPES:
         raise HTTPException(
@@ -4139,27 +4164,31 @@ def set_operator_policy_rule(
         raise HTTPException(status_code=400, detail="pattern must be non-empty")
     if scope == "shell" and verdict == "allow":
         return _queen_shell_allow(store, action, pattern, holder=holder, dry_run=dry_run)
-    document = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
-    bucket = next((s for s in document.scopes if s.scope == scope), None)
-    if bucket is None:
-        bucket = ScopePolicy(scope=scope)  # type: ignore[arg-type]
-        document.scopes.append(bucket)
-    rules = bucket.allow if verdict == "allow" else bucket.deny
     rule_id = f"op:{scope}:{action}:{pattern}"
-    report: dict[str, Any] = {}
-    if not any(r.action == action and r.pattern == pattern for r in rules):
+
+    def plan() -> tuple[Any, tuple[ScopePolicy, dict[str, Any]]]:
+        document = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
+        bucket = next((s for s in document.scopes if s.scope == scope), None)
+        if bucket is None:
+            bucket = ScopePolicy(scope=scope)  # type: ignore[arg-type]
+            document.scopes.append(bucket)
+        rules = bucket.allow if verdict == "allow" else bucket.deny
+        if any(r.action == action and r.pattern == pattern for r in rules):
+            return UNCHANGED, (bucket, {})
         rules.append(PolicyRule(rule_id=rule_id, action=action, pattern=pattern))
-        try:
-            report = vet_write(
-                store,
-                holder=holder,
-                settings={OPERATOR_POLICY_SETTINGS_KEY: document.model_dump_json()},
-                new=[Allow(scope, action, pattern, rule_id)] if verdict == "allow" else [],
-            )
-        except PolicyWriteRejected as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not dry_run:
-            store.set_setting(OPERATOR_POLICY_SETTINGS_KEY, document.model_dump_json())
+        report = vet_write(
+            store,
+            holder=holder,
+            settings={OPERATOR_POLICY_SETTINGS_KEY: document.model_dump_json()},
+            new=[Allow(scope, action, pattern, rule_id)] if verdict == "allow" else [],
+        )
+        return (UNCHANGED if dry_run else document.model_dump_json()), (bucket, report)
+
+    try:
+        # W14: read -> check -> write as one step (a racing grant is seen)
+        bucket, report = write_setting(store, OPERATOR_POLICY_SETTINGS_KEY, plan)
+    except PolicyWriteRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "scope": scope,
         "verdict": verdict,
@@ -5381,15 +5410,20 @@ def store_grant(
     write asks for it — the explicit policy verbs and an ``always`` keep —
     never a session keep or a worker approval, which run on every card."""
     from ..policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
+    from ..policy_write import UNCHANGED, write_setting
 
-    rule, status, updated = _grant_plan(store, rule, context)
-    if updated is None:
-        return rule, status
-    found = _vet_grant(store, rule, updated, replay=replay)
+    def plan() -> tuple[Any, tuple[LearnedRule, str, dict[str, Any]]]:
+        planned, status, updated = _grant_plan(store, rule, context)
+        if updated is None:
+            return UNCHANGED, (planned, status, {})
+        found = _vet_grant(store, planned, updated, replay=replay)
+        return updated.model_dump_json(), (planned, status, found)
+
+    # W14: read -> check -> write as one step (two keeps never lose one)
+    kept, status, found = write_setting(store, POLICY_DOCUMENT_SETTINGS_KEY, plan)
     if report is not None:
         report.update(found)
-    store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
-    return rule, status
+    return kept, status
 
 
 def _vet_grant(
@@ -5838,19 +5872,24 @@ def revoke_policy_rule(store: RunStore, *, rule_id: str) -> dict[str, Any]:
         document_from_settings,
         is_session_rule,
     )
+    from ..policy_write import write_setting
 
-    document = (
-        document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)) or PolicyDocument()
-    )
-    revoked = next((rule for rule in document.learned if rule.rule_id == rule_id), None)
-    if revoked is None:
-        known = ", ".join(rule.rule_id for rule in document.learned) or "(none)"
-        raise HTTPException(
-            status_code=404, detail=f"no learned rule {rule_id!r}; known rules: {known}"
+    def plan() -> tuple[Any, tuple[LearnedRule, list[LearnedRule]]]:
+        document = (
+            document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+            or PolicyDocument()
         )
-    kept = [rule for rule in document.learned if rule.rule_id != rule_id]
-    updated = document.model_copy(update={"learned": kept})
-    store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
+        found = next((rule for rule in document.learned if rule.rule_id == rule_id), None)
+        if found is None:
+            known = ", ".join(rule.rule_id for rule in document.learned) or "(none)"
+            raise HTTPException(
+                status_code=404, detail=f"no learned rule {rule_id!r}; known rules: {known}"
+            )
+        left = [rule for rule in document.learned if rule.rule_id != rule_id]
+        return document.model_copy(update={"learned": left}).model_dump_json(), (found, left)
+
+    # W14: a keep racing this revoke can no longer write the grant back
+    revoked, kept = write_setting(store, POLICY_DOCUMENT_SETTINGS_KEY, plan)
     return {
         "revoked": {
             "rule_id": revoked.rule_id,
@@ -5876,15 +5915,18 @@ def clear_session_policy_rules(store: RunStore) -> int:
         document_from_settings,
         is_session_rule,
     )
+    from ..policy_write import UNCHANGED, write_setting
 
-    raw = store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)
-    document = document_from_settings(raw) or PolicyDocument()
-    kept = [rule for rule in document.learned if not is_session_rule(rule)]
-    dropped = len(document.learned) - len(kept)
-    if dropped:
-        updated = document.model_copy(update={"learned": kept})
-        store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, updated.model_dump_json())
-    return dropped
+    def plan() -> tuple[Any, int]:
+        raw = store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY)
+        document = document_from_settings(raw) or PolicyDocument()
+        kept = [rule for rule in document.learned if not is_session_rule(rule)]
+        dropped = len(document.learned) - len(kept)
+        if not dropped:
+            return UNCHANGED, 0
+        return document.model_copy(update={"learned": kept}).model_dump_json(), dropped
+
+    return write_setting(store, POLICY_DOCUMENT_SETTINGS_KEY, plan)  # W14
 
 
 def _append_policy_ledger(audit_dir: Path, name: str, payload: dict[str, Any]) -> None:
@@ -6021,23 +6063,24 @@ def update_policy(
     for field in _NONNEGATIVE_POLICY_FIELDS:
         if updates.get(field) is not None:
             updates[field] = _require_int(updates[field], field=field, minimum=0)
-    from ..policy_write import PolicyWriteRejected, vet_write
+    from ..policy_write import PolicyWriteRejected, policy_write, vet_write
 
     pending = {
         key: updates[field]
         for field, key in POLICY_FIELDS.items()
         if updates.get(field) is not None
     }
-    try:
-        # P3-5 (V11): the one write-time check, before any knob is written.
-        report = vet_write(store, holder=holder, settings=pending)
-    except PolicyWriteRejected as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with policy_write():  # W14: checked and written as one step
+        try:
+            # P3-5 (V11): the one write-time check, before any knob is written.
+            report = vet_write(store, holder=holder, settings=pending)
+        except PolicyWriteRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        flips_before = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
+        for key, value in [] if dry_run else pending.items():
+            store.set_setting(key, value)
     if dry_run:
         return _write_report(report)
-    flips_before = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
-    for key, value in pending.items():
-        store.set_setting(key, value)
     flips_after = engine_v2_scopes_from(store.get_setting(POLICY_ENGINE_V2_SCOPES))
     if flips_before != flips_after:
         _record_engine_flip(holder.current.audit_dir, flips_before, flips_after)

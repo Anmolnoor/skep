@@ -33,8 +33,10 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from collections import Counter, deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -88,6 +90,61 @@ _HINTS = {
 
 class PolicyWriteRejected(ValueError):
     """A policy write would create a §5.4 forbidden combination."""
+
+
+# -- W14: one writer at a time -------------------------------------------------
+
+# ponytail: one in-process lock for every policy writer — serve is one
+# process per home. Another process (the CLI) is caught by the
+# compare-and-set in ``write_setting``, on the policy document and the
+# overlay only: a group, project or baseline write from the CLI racing
+# serve is not (a lease row in the store would cover those).
+_WRITE_LOCK = threading.RLock()
+_LOCAL = threading.local()
+CAS_ATTEMPTS = 5
+UNCHANGED: Any = object()  # ``write_setting``'s plan: nothing to write
+
+
+@contextmanager
+def policy_write() -> Iterator[None]:
+    """W14: hold the policy write lock across a writer's read -> check ->
+    write. A ``vet_write`` replay asked for inside runs after the outermost
+    one releases the lock (it re-decides up to 200 rows: seconds), filling
+    the report it returned; a nested write runs its replays before it
+    returns, still under the outer lock."""
+    later: list[Callable[[], None]] = []
+    with _WRITE_LOCK:
+        outer = getattr(_LOCAL, "later", None)
+        _LOCAL.later = later
+        try:
+            yield
+        finally:
+            _LOCAL.later = outer
+        if outer is not None:
+            for replay in later:
+                replay()
+            return
+    for replay in later:
+        replay()
+
+
+def write_setting[T](store: RunStore, key: str, plan: Callable[[], tuple[Any, T]]) -> T:
+    """W14: one policy setting's read -> check -> write. ``plan`` reads the
+    store, checks (raising refuses) and returns the value to store (or
+    ``UNCHANGED``) and its answer. Under the lock, and compare-and-set: if
+    another process changed ``key`` meanwhile, nothing is written and the
+    plan runs again on the new value, at most ``CAS_ATTEMPTS`` times."""
+    for _ in range(CAS_ATTEMPTS):
+        with policy_write():
+            seen = store.get_setting(key)
+            value, answer = plan()
+            if value is UNCHANGED or store.compare_and_set_setting(key, seen, value):
+                return answer
+            _LOCAL.later.clear()  # this attempt's replays describe a write that did not land
+    raise PolicyWriteRejected(
+        f"policy write refused, nothing was stored: another skep process changed {key!r} "
+        f"{CAS_ATTEMPTS} times while this write was being checked. Try again"
+    )
 
 
 class Allow(NamedTuple):
@@ -320,10 +377,21 @@ def vet_write(
         for entry in after.ignored
         if entry not in before.ignored
     ]
+    report: dict[str, Any] = {"warnings": warnings}
     if not replay:
-        return {"warnings": warnings}
-    summary, line = _replay(holder.current.audit_dir, after, before=before)
-    return {"warnings": warnings, "replay": summary, "replay_line": line}
+        return report
+    audit_dir = holder.current.audit_dir
+
+    def replay_now() -> None:
+        summary, line = _replay(audit_dir, after, before=before)
+        report.update(replay=summary, replay_line=line)
+
+    later = getattr(_LOCAL, "later", None)
+    if later is None:
+        replay_now()
+    else:
+        later.append(replay_now)  # W14: once the policy write lock is released
+    return report
 
 
 # -- replay ------------------------------------------------------------------

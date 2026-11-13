@@ -2518,6 +2518,27 @@ class RunStore:
         self._conn.commit()
 
     @_locked
+    def compare_and_set_setting(self, key: str, expected: Any | None, value: Any) -> bool:
+        """W14: write ``value`` only if ``key`` still holds ``expected``
+        (None: no row). One conditional statement, so a second connection on
+        the same file (the CLI racing serve) loses the same way; False when
+        the value changed since it was read."""
+        encoded = json.dumps(value, ensure_ascii=True)
+        if expected is None:
+            cursor = self._conn.execute(
+                "INSERT OR IGNORE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
+                (key, encoded, _now()),
+            )
+        else:
+            cursor = self._conn.execute(
+                "UPDATE settings SET value_json = ?, updated_at = ?"
+                " WHERE key = ? AND value_json = ?",
+                (encoded, _now(), key, json.dumps(expected, ensure_ascii=True)),
+            )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    @_locked
     def all_settings(self) -> dict[str, Any]:
         rows = self._conn.execute("SELECT key, value_json FROM settings").fetchall()
         return {str(key): json.loads(value) for key, value in rows}
