@@ -160,7 +160,8 @@ def _parser() -> argparse.ArgumentParser:
     chat.add_argument(
         "--url",
         default=None,
-        help="serve base URL (default: $SKEP_SERVE_URL or http://127.0.0.1:8765)",
+        help="serve base URL (default: $SKEP_SERVE_URL, else the port this home's serve "
+        "recorded, else http://127.0.0.1:8765)",
     )
     chat.add_argument("--chat", dest="chat_id", default=None, help="resume this chat id")
     chat.add_argument(
@@ -552,10 +553,10 @@ def _onboard_chat(supervisor_home: Path, role: str) -> int:
 
     import httpx
 
-    from .cli_chat import DEFAULT_URL, TOKEN_HEADER, run_chat
+    from .cli_chat import TOKEN_HEADER, run_chat, serve_url
     from .supervisor.serve.auth import TOKEN_FILE
 
-    url = os.environ.get("SKEP_SERVE_URL") or DEFAULT_URL
+    url = serve_url(supervisor_home)
 
     def up() -> bool:
         token = supervisor_home / TOKEN_FILE
