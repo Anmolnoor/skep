@@ -176,9 +176,9 @@ OUTBOUND_CONTENT_PREFIXES: tuple[tuple[str, ...], ...] = (
 # guard's shell-egress row (``reaches_network``) and P3-6's refusal of a
 # standing Queen shell allow (serve/actions.py) both read it.
 # ES-F51 review: plus the programs whose only job is sending (mail, file
-# sync, raw sockets). Left out on purpose — each also does local work, and a
-# standing allow on it is the operator's call: gh, docker, kubectl, aws,
-# gcloud, az, openssl, open/xdg-open. Remote git is the floor's (I4).
+# sync, raw sockets). Left out on purpose — each also does local work: gh,
+# docker, kubectl, aws, gcloud, az, openssl, open/xdg-open (P3-6's standing
+# allow refuses them by its own list). Remote git is the floor's (I4).
 # ponytail: named programs only; a script an interpreter runs (`python3 x.py`)
 # can reach the network too and is not seen — inline code is (``reaches_network``).
 NETWORK_PROGRAMS: frozenset[str] = frozenset(
@@ -197,8 +197,9 @@ PACKAGE_MANAGERS: frozenset[str] = frozenset(
     {"pip", "pip3", "pipx", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
      "gem", "go", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk"}
 )  # fmt: skip
+# installs, and the verbs that fetch a package and run it (`pnpm dlx`, `npm exec`)
 INSTALL_VERBS: frozenset[str] = frozenset(
-    {"install", "i", "add", "sync", "update", "upgrade", "get"}
+    {"install", "i", "add", "sync", "update", "upgrade", "get", "ci", "dlx", "exec", "x", "tool"}
 )
 
 

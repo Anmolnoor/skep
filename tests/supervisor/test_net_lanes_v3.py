@@ -8,6 +8,7 @@ decision, P3-3)."""
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import urllib.parse
@@ -23,6 +24,7 @@ from skep.supervisor import RunStore
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.policy_schema import _VERDICT_RANK, POLICY_DOCUMENT_SETTINGS_KEY
 from skep.supervisor.roles import SHIPPED_ROLES
+from skep.supervisor.serve import tools
 from skep.supervisor.serve.actions import policy_decide, remember_action_for_session
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import (
@@ -287,8 +289,9 @@ def test_b78_search_web_follows_the_chats_role(
     net: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """B78: search_web decides with the chat's role — a role layer that denies
-    search refuses it there, and in a chat whose stored role is NULL (an
-    assistant chat since P3-6), while a chat with no role layer still searches."""
+    search refuses it there (since P3-6 by hiding it), and in a chat whose
+    stored role is NULL (an assistant chat), while a chat with no role layer
+    still searches."""
     from skep.supervisor.policy_engine import Layer, LayerRule
     from skep.supervisor.roles import Role
 
@@ -302,6 +305,11 @@ def test_b78_search_web_follows_the_chats_role(
         return Layer(base.name, base.label, rules=(deny, *base.rules))
 
     monkeypatch.setattr(Role, "layer", layer)
+    # hidden_tools caches per role: a fresh cache, so the patched layer never
+    # leaks into (or reads from) another test's — the order dependence
+    monkeypatch.setattr(
+        tools, "_hidden_tools", functools.lru_cache(tools._hidden_tools.__wrapped__)
+    )
     _paths, store, holder, _fetched = net("assistant")
     plain = store.create_chat(
         title="p", model=None, role=no_layer_role(holder.current.home)
@@ -314,7 +322,10 @@ def test_b78_search_web_follows_the_chats_role(
         refused = execute_read_tool(
             "search_web", {"query": "q"}, store=store, holder=holder, chat_id=chat_id
         )
-        assert refused["results"] == [] and refused["decided_by"] == "role:assistant/no-search"
+        # search_web's value never varies (ddgs), so a role that denies it denies
+        # every call: the tool is hidden (P3-6) and the refusal names the rule
+        assert refused["ok"] is False and "role:assistant/no-search" in refused["error"]
+        assert refused["error"].startswith("search_web is not available in this chat")
 
 
 def test_b56_a_session_fetch_grant_in_a_role_chat_runs_the_url_with_no_second_card(

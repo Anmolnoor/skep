@@ -665,13 +665,15 @@ def test_the_line_is_rendered_from_decide_for_the_role_and_the_home(
         "refused.",
         "start_process": "In this chat: a daemon no rule names: ask first.",
         "read_url": "In this chat: a page no rule names: ask first.",
-        "search_web": "In this chat: searches run.",
+        "search_web": "In this chat: searches run until this chat reads private data, then "
+        "ask first.",
         "call_mcp_tool": "In this chat: a tool no rule names: ask first if it acts, ask first if "
         "read-only.",
     }
     assistant = _lines(locked, "assistant")
     assert assistant["search_web"] == (
-        "In this chat: searches run; start_research is not available here."
+        "In this chat: searches run until this chat reads private data, then ask first; "
+        "start_research is not available here."
     )
     # a home with no baseline yet: every read asks — what the static text gets wrong
     fresh = build_config(tmp_path / "fresh", None)
@@ -790,3 +792,164 @@ def test_hiding_and_role_defaults_only_tighten_against_the_frozen_surface(
         w2 = {"w2:card->deny": len(HIDDEN_YET_CARDS[home])}
         expected = {**expected, "web:assistant": {**expected["web:assistant"], **w2}}
     assert {kind: dict(found) for kind, found in flips.items()} == expected
+
+
+# --- review follow-ups ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("role", ["builder", "assistant"])
+def test_a_dispatch_with_no_repo_is_answered_as_a_model_error(
+    locked: SupervisorConfig, role: str
+) -> None:
+    """A missing argument is the model's mistake: it hears what to send, the
+    turn does not die on a KeyError."""
+    store = RunStore(locked.db_path)
+    try:
+        chat = store.create_chat(title="x", model=None, role=role).chat_id
+        decision = mutation_execution_decision(
+            "dispatch_run", {"instructions": "fix"}, store=store,
+            holder=ConfigHolder(locked, store), chat_id=chat,
+        )  # fmt: skip
+    finally:
+        store.close()
+    assert decision is not None and decision.verdict == "deny"
+    assert "repo" in (decision.detail or "")
+
+
+def test_a_role_with_no_layer_is_offered_no_dispatcher_and_none_cards_to_fail(
+    locked: SupervisorConfig, repo: Path
+) -> None:
+    """A custom role that binds no template delegates no workspace write
+    (decision #7): every dispatcher is refused on confirm. So it is hidden —
+    start_research and forge_tool used to card and then 403."""
+    from skep.supervisor.roles import resolve_role
+
+    from .conftest import no_layer_role
+
+    role = resolve_role(no_layer_role(locked.home), locked.home)
+    assert set(hidden_tools(role)) == ASSISTANT_HIDDEN
+    store = RunStore(locked.db_path)
+    try:
+        chat = store.create_chat(title="n", model=None, role=role.name).chat_id
+        for tool, args in (
+            ("start_research", {"repo": str(repo), "question": "q", "source_allowlist": ["a.b"]}),
+            ("forge_tool", {"repo": str(repo), "name": "t", "purpose": "p"}),
+        ):
+            decision = mutation_execution_decision(
+                tool, args, store=store, holder=ConfigHolder(locked, store), chat_id=chat
+            )
+            assert decision is not None and decision.verdict == "deny", tool
+            assert decision.reason == "role.deny.tool_hidden", tool
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "nice curl https://example.com",  # a launcher runs what follows it
+        "timeout 5 python3 x.py",
+        "nohup bash x.sh",
+        "command wget https://example.com",
+        "X=1 ls",  # a standing allow never sets the environment (PATH=., LD_PRELOAD=…)
+        "PATH=. ls",
+        "python3.12 x.py",  # a versioned interpreter is the interpreter
+        "node18 x.js",
+        "busybox wget https://example.com",
+        "busybox sh",
+        ". ./x.sh",  # sh's source builtin
+        "su -c ls",
+        "pkexec ls",
+        "doas ls",
+        "gh pr create",
+        "gh api repos/a/b -X DELETE",
+        "docker run alpine",
+        "podman run alpine",
+        "kubectl delete pod x",
+        "aws s3 rm s3://b --recursive",
+        "find . -delete",
+        "find . -exec rm {} ;",
+        "open https://example.com",
+        "xdg-open https://example.com",
+        "uvx ruff",
+        "pipx run cowsay",
+        "pnpm dlx cowsay",
+        "yarn dlx cowsay",
+        "npm exec cowsay",
+        "npm ci",
+        "yarn",
+        "git -c core.pager=sh log",
+        "git config --global alias.x '!sh'",
+    ],
+)
+def test_b20_a_shell_allow_never_names_a_wrapped_aliased_or_launched_program(
+    locked: SupervisorConfig, pattern: str
+) -> None:
+    with pytest.raises(HTTPException) as refused:
+        _operator_shell(locked, "allow", pattern)
+    assert str(refused.value.detail).startswith("shell allow refused: ")
+    store = RunStore(locked.db_path)
+    try:
+        assert not [r for r in _learned(store) if r.scope == "shell"]
+    finally:
+        store.close()
+
+
+def test_b20_a_harmless_exact_line_still_stores_and_matches_only_itself(
+    locked: SupervisorConfig, tmp_path: Path
+) -> None:
+    for pattern in ("ls -la", "git log", "git status", "uv run pytest", "df -h"):
+        assert _operator_shell(locked, "allow", pattern)["matcher"] == "exact_argv", pattern
+    out = str(tmp_path)
+    assert _shell(locked, "ls -la", cwd=out).startswith("allow grant:global/")
+    for longer in ("ls -la\ngit push", "ls -la; curl https://x", "ls -la && rm -rf ~",
+                   "ls -la | sh", "ls -la $(id)", "ls -la /"):  # fmt: skip
+        assert not _shell(locked, longer, cwd=out).startswith("allow"), longer
+
+
+def test_the_search_line_says_taint_can_make_a_search_ask(locked: SupervisorConfig) -> None:
+    """Rendered with no chat, the line cannot see taint — a real-model run
+    told the operator search_web was "immediate, no card" in a chat whose
+    private bit made it ask. The line says when it does."""
+    line = _lines(locked, "builder")["search_web"]
+    assert line.startswith("In this chat: searches run")
+    assert "private data" in line
+
+
+def test_a_builder_chat_floor_is_pinned_too(config: SupervisorConfig, ollama: FakeOllama) -> None:
+    """The fresh-chat pin (test_tool_index, 25.1K) measured a role-less chat —
+    the whole surface — until P3-6 made a fresh chat an assistant chat, which
+    hides six tools (~20.8K). The widest shipped surface is pinned here at
+    what it measured when that changed (25,470 at es-p3-6 ES-F48, 25,473 at
+    es-p4-2 — it was never under the fresh-chat pin): move it only on purpose."""
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
+    ollama.script_reply("hello")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+    body = ollama.chat_bodies()[0]
+    floor = len(body["messages"][0]["content"]) + len(json.dumps(body["tools"]))
+    assert floor <= 25_470
+
+
+def test_the_repo_pen_never_points_an_assistant_chat_at_a_hidden_tool(
+    locked: SupervisorConfig, repo: Path
+) -> None:
+    store = RunStore(locked.db_path)
+    try:
+        holder = ConfigHolder(locked, store)
+        said = {}
+        for role in ("assistant", "builder"):
+            for background in (False, True):
+                decision = queen_shell_decision(
+                    store, holder, command="ls", cwd=str(repo), background=background,
+                    role=SHIPPED_ROLES[role],
+                )  # fmt: skip
+                assert decision is not None and decision.verdict == "deny"
+                said[role, background] = decision.detail or ""
+    finally:
+        store.close()
+    for background in (False, True):
+        assert "dispatch_run" not in said["assistant", background]
+        assert "quick_edit" not in said["assistant", background]
+        assert "/role" in said["assistant", background]
+        assert "dispatch_run" in said["builder", background]
