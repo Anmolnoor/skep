@@ -4798,10 +4798,12 @@ def _within_delegation(
     ordinary not-allowlisted gate. A grant is kept only where its row,
     held to the chain, still says ``allow`` (§5.4 check 5: no allow the
     delegator lacks). That also covers an explicit ``network`` host the run
-    policy has no rule for, which the worker used to keep. B147 is NOT closed
-    here: on a zero-state home every row reads ``ask baseline/no_baseline``,
-    the delegator's too, and the worker keeps those grants as it always has
-    (see ``kept``).
+    policy has no rule for, which the worker used to keep. B147: on a home
+    with no approved baseline every row reads ``ask baseline/no_baseline``,
+    so every grant there is a deferred ask (or dropped, headless); the
+    dispatch card lists them and approving it answers them for that run
+    (``_preanswer``), which is what lets a sandboxed install reach its
+    registry through the proxy.
 
     R3 (ADR 0055 D5): the worker's own ``role`` decides beside the chain —
     a grant its role layer made stricter is narrowed the same way, recorded
@@ -4826,11 +4828,7 @@ def _within_delegation(
     def kept(scope: str, action: str, value: str, *, askable: bool) -> bool | None:
         """True: kept as a grant. None: a deferred ask. False: dropped."""
         row = row_for(scope, action, value)
-        if row["verdict"] == "allow" or row["rule_id"] == NO_BASELINE_REASON:
-            # B147 stays open: on a zero-state home every row, the delegator's
-            # too, is the same baseline placeholder, so nothing is stricter and
-            # the grant is kept as before. Asking here strands a sandboxed
-            # `uv sync`: the proxy cannot card a subprocess for a registry host.
+        if row["verdict"] == "allow":
             return True
         ask = deferred_asks and askable and row["verdict"] == "require_approval"
         row = {**row, "delegated": "ask" if ask else "dropped"}
