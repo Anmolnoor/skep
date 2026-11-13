@@ -144,7 +144,13 @@ def _mirror_gate_card(store: RunStore, task_id: str, chat_id: str) -> None:
     args: dict[str, Any] = {"review_id": gate.review_id}
     if gate.reason:
         args["reason"] = gate.reason
-    store.add_chat_action(chat_id, tool="approve_review", args=args, source="gate")
+    # L6: the gate's own decision rides the card, so its why-line names what
+    # the worker asked (in words, as the gate recorded it)
+    decision = {"verdict": "require_approval", "reason": gate.reason or gate.action}
+    store.add_chat_action(
+        chat_id, tool="approve_review", args=args, source="gate",
+        decided_by=gate.decided_by, card={"decision": decision},
+    )  # fmt: skip
 
 
 def run_terminal_text(
