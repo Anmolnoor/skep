@@ -3726,6 +3726,17 @@ def _persist_remembered_network_host(
     the repo's bound project policy (``default_network``) so remembering does
     not silently widen every repo's egress; falls back to the global setting
     when the repo is unbound."""
+    from ..policy_write import policy_write
+
+    with policy_write():  # W14: update_policy writes the same knob
+        _union_network_host(store, holder, repo, host)
+    # v109-F8: every historical approval of this host now has a standing
+    # grant — its ledger rows say so, whichever door persisted it (I13).
+    for network_action in ("network.fetch", "network.read"):
+        store.mark_ledger_remembered(action=network_action, resource=host, repo_path=str(repo))
+
+
+def _union_network_host(store: RunStore, holder: ConfigHolder, repo: Path, host: str) -> None:
     project = store.project_for_binding("repo_path", str(repo))
     if project is not None:
         existing = [str(entry) for entry in (project.policy.get("default_network") or [])]
@@ -3750,10 +3761,6 @@ def _persist_remembered_network_host(
             existing.append(host)
             store.set_setting(DEFAULT_NETWORK, existing)
             holder.rebuild()
-    # v109-F8: every historical approval of this host now has a standing
-    # grant — its ledger rows say so, whichever door persisted it (I13).
-    for network_action in ("network.fetch", "network.read"):
-        store.mark_ledger_remembered(action=network_action, resource=host, repo_path=str(repo))
 
 
 def allow_network_host_and_resume(
@@ -4084,17 +4091,20 @@ def _union_shell_allowlist(
     store: RunStore, holder: ConfigHolder, commands: Iterable[Sequence[str]]
 ) -> list[list[str]]:
     """Union vetted command prefixes into the persistent shell allowlist."""
-    policy = policy_view(store, holder.current)
-    existing = [list(entry) for entry in (policy.get("allowed_shell_commands") or [])]
-    for command in commands:
-        entry = list(command)
-        reason = _dangerous_shell_prefix_reason(entry)
-        if reason is not None:
-            raise HTTPException(status_code=400, detail=reason)
-        if entry not in existing:
-            existing.append(entry)
-    store.set_setting(ALLOWED_SHELL_COMMANDS, existing)
-    holder.rebuild()
+    from ..policy_write import policy_write
+
+    with policy_write():  # W14: update_policy writes the same knob
+        policy = policy_view(store, holder.current)
+        existing = [list(entry) for entry in (policy.get("allowed_shell_commands") or [])]
+        for command in commands:
+            entry = list(command)
+            reason = _dangerous_shell_prefix_reason(entry)
+            if reason is not None:
+                raise HTTPException(status_code=400, detail=reason)
+            if entry not in existing:
+                existing.append(entry)
+        store.set_setting(ALLOWED_SHELL_COMMANDS, existing)
+        holder.rebuild()
     return existing
 
 

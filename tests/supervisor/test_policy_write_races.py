@@ -192,3 +192,35 @@ def test_the_replay_runs_after_the_lock_is_released(
         standing.join(5)
     assert "replay_line" in report
     assert {"docs.example.org", "ls -q"} <= _patterns(home)
+
+
+@pytest.mark.usefixtures("slow_check")
+def test_a_knob_union_racing_update_policy_never_brings_back_a_removed_entry(
+    home: Home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``update_policy`` writes ``allowed_shell_commands`` and
+    ``default_network`` under the lock; the "allow this command" union and
+    the remembered-host write read-modify-write the same knobs. Outside the
+    lock, a union that read the list before the removal wrote it back."""
+    real_view = actions.policy_view
+
+    def slow_view(*args: Any, **kwargs: Any) -> Any:
+        view = real_view(*args, **kwargs)
+        time.sleep(0.6)  # the union's read, held open past the removal
+        return view
+
+    monkeypatch.setattr(actions, "policy_view", slow_view)
+    actions.update_policy(home.store, home.holder, {"allowed_shell_commands": [["make"]]})
+    actions.update_policy(home.store, home.holder, {"default_network": ["old.example.org"]})
+    repo = home.root / "unbound"
+    outcomes = race(
+        lambda: actions.update_policy(home.store, home.holder, {"allowed_shell_commands": []}),
+        lambda: actions.allow_shell_command(home.store, home.holder, "pytest"),
+        lambda: actions.update_policy(home.store, home.holder, {"default_network": []}),
+        lambda: actions._persist_remembered_network_host(
+            home.store, home.holder, repo, "new.example.org"
+        ),
+    )
+    assert not [o for o in outcomes if isinstance(o, Exception)], outcomes
+    assert ["make"] not in (home.store.get_setting("allowed_shell_commands") or [])
+    assert "old.example.org" not in (home.store.get_setting("default_network") or [])
