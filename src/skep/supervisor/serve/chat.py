@@ -1161,12 +1161,15 @@ def _link_moved(action: ChatActionRecord, args: dict[str, Any]) -> dict[str, Any
     }
 
 
-def _rounds_in_order(records: list[Any], *, side: bool) -> list[Any]:
+def _rounds_in_order(records: list[Any]) -> list[Any]:
     """W23 (B62): a tool round replays as one piece. A card's result is
     written when it is confirmed, after any /btw rows that ran beside it; it
     moves back to its call, so strict providers never see a call split from
-    its result. A side turn (``side``) leaves out a round that is still open
-    — the pending card stays pending for the main turn."""
+    its result. A round still waiting on a result is left out of every
+    turn: a /btw or a run-finished continuation beside a pending card (the
+    card stays pending; its confirm replays the round whole), or a round a
+    client disconnect left unanswered (B25) — a strict provider refuses a
+    call with no result, and every later turn with it."""
     # Each result joins the newest round still waiting on its call id, or,
     # for rows without ids, the newest round still waiting on any call.
     results: dict[int, list[Any]] = {}
@@ -1191,7 +1194,7 @@ def _rounds_in_order(records: list[Any], *, side: bool) -> list[Any]:
             continue
         if record.id not in results:
             ordered.append(record)
-        elif not (side and waiting[record.id]):  # a side turn skips the open round
+        elif not waiting[record.id]:  # a round still waiting is left out
             ordered += [record, *results[record.id]]
     return ordered
 
@@ -1394,7 +1397,7 @@ class ChatEngine:
         return self._history_budget(len(self._system_prompt(chat_id)) + len(summary), chat)
 
     def _turn_messages(
-        self, chat_id: str, *, budget_cap: int | None = None, side: bool = False
+        self, chat_id: str, *, budget_cap: int | None = None
     ) -> list[dict[str, Any]]:
         """System prompt (+ compaction digest) and the budgeted replay.
 
@@ -1408,7 +1411,7 @@ class ChatEngine:
         budget = self._history_budget(len(system) + len(summary), chat)
         if budget_cap is not None:
             budget = min(budget, budget_cap)
-        replay, dropped = self._replay(chat_id, chat, budget=budget, side=side)
+        replay, dropped = self._replay(chat_id, chat, budget=budget)
         if UNTRUSTED_OPEN in summary or any(
             str(m.get("content") or "").startswith(UNTRUSTED_OPEN) for m in replay
         ):
@@ -1422,9 +1425,7 @@ class ChatEngine:
             system = f"{system}\n\n{block}"
         return [{"role": "system", "content": system}, *replay]
 
-    def _replay(
-        self, chat_id: str, chat: Any, *, budget: int, side: bool = False
-    ) -> tuple[list[dict[str, Any]], int]:
+    def _replay(self, chat_id: str, chat: Any, *, budget: int) -> tuple[list[dict[str, Any]], int]:
         """The transcript slice the model sees: newest-first within budget;
         prior-turn tool results capped; count of messages left out."""
         from .llm import LLM_VISION
@@ -1432,8 +1433,7 @@ class ChatEngine:
         vision = self.store.get_setting(LLM_VISION) is True
         compacted_through = (getattr(chat, "compacted_through", 0) or 0) if chat else 0
         records = _rounds_in_order(
-            [r for r in self.store.chat_messages(chat_id) if r.id > compacted_through],
-            side=side,
+            [r for r in self.store.chat_messages(chat_id) if r.id > compacted_through]
         )
         last_user_id = max((r.id for r in records if r.role == "user"), default=0)
         messages: list[dict[str, Any]] = []
@@ -1807,9 +1807,7 @@ class ChatEngine:
             # indistinguishable from a hung daemon (I8).
             yield ("turn_status", {"state": "thinking"})
             while True:  # at most two passes: full, then halved after a 4xx
-                messages = self._turn_messages(
-                    chat_id, budget_cap=shrink_budget, side=read_only and not unattended
-                )
+                messages = self._turn_messages(chat_id, budget_cap=shrink_budget)
                 if nudge is not None:
                     # v70-F1: the stall correction rides as a transient trailing
                     # system instruction (the v62-F2 mechanism — never stored;
@@ -2454,7 +2452,6 @@ class ChatEngine:
                 break
         yield from self._final_no_tool_events(
             chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
-            side=read_only and not unattended,
         )  # fmt: skip
 
     def _final_no_tool_events(
@@ -2465,7 +2462,6 @@ class ChatEngine:
         api_key: str | None,
         model: str,
         protocol: LLMProtocol,
-        side: bool = False,
     ) -> Iterator[ChatEvent]:
         """After the read-tool cap, let the model summarize the last result once.
 
@@ -2484,7 +2480,7 @@ class ChatEngine:
         shrink_budget: int | None = None  # v73-F1: same one-shrink rule as the loop
         while True:
             messages = [
-                *self._turn_messages(chat_id, budget_cap=shrink_budget, side=side),
+                *self._turn_messages(chat_id, budget_cap=shrink_budget),
                 final_nudge,
             ]
             try:
