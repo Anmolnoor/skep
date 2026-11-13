@@ -277,6 +277,15 @@ def headline(tool: str, args: dict[str, Any], *, limit: int | None = 160) -> str
             if len(reason) > 160:
                 reason = f"{reason[:157]}…"
             return f"{tool} — {reason}"
+    if tool == "call_mcp_tool":
+        # L16: which tool, on which server, with what — an amount is the point
+        rendered = f"{args.get('server_id')}:{args.get('tool')}"
+        if args.get("arguments"):
+            rendered += " " + json.dumps(args["arguments"], ensure_ascii=False)
+        rendered = rendered.replace("\n", " ")
+        if limit is not None and len(rendered) > limit:
+            rendered = f"{rendered[: limit - 3]}…"
+        return f"{tool} — {rendered}"
     for key in _SUBJECT_KEYS:
         value = args.get(key)
         if value in (None, "", [], {}):
@@ -396,6 +405,13 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
         return "widens what future runs may do without asking you again"
     if tool in _DESTRUCTIVE_TOOLS:
         return "removes state that cannot be restored from here"
+    if tool == "call_mcp_tool":
+        return (
+            f"runs {args.get('server_id')}:{args.get('tool')} as you with these arguments; "
+            "its reply comes into this conversation"
+        )
+    if tool == "register_mcp_server":
+        return "starts an MCP server whose tools can act as you"
     if tool in _NETWORK_TOOLS:
         host = _host_of(args)
         target = f" from {host}" if host else ""

@@ -156,3 +156,20 @@ def test_a_script_schedule_card_says_it_is_standing_host_shell() -> None:
     )
     # Other castes keep a quiet card.
     assert "risk" not in card_summary("propose_schedule", {**args, "caste": "note"})
+
+
+def test_l16_an_mcp_card_names_the_server_tool_and_arguments() -> None:
+    """L16 (field test): a money-transfer card read only "call_mcp_tool",
+    with the risk line of a web fetch; the amount sat under details."""
+    args = {"server_id": "bank", "tool": "budget_transfer",
+            "arguments": {"from": "checking", "to": "savings", "amount": 250}}  # fmt: skip
+    line = headline("call_mcp_tool", args)
+    assert line.startswith("call_mcp_tool — bank:budget_transfer ")
+    assert '"amount": 250' in line
+    huge = {**args, "arguments": {"memo": "x" * 1000}}
+    assert len(headline("call_mcp_tool", huge)) <= 200
+    assert risk("call_mcp_tool", args) == (
+        "runs bank:budget_transfer as you with these arguments; its reply comes into "
+        "this conversation"
+    )
+    assert "remote content" not in str(risk("register_mcp_server", {"server_id": "bank"}))
