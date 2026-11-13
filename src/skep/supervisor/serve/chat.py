@@ -537,6 +537,17 @@ def chat_turn_lock(chat_id: str) -> threading.Lock:
         return _TURN_LOCKS.setdefault(chat_id, threading.Lock())
 
 
+# D18: a click recorded while another turn runs still executes after any card
+# of this chat that is executing — one card's execution at a time, in click
+# order. Taken inside the turn lock, never around it.
+_VERDICT_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _verdict_lock(chat_id: str) -> threading.Lock:
+    with _TURN_LOCKS_GUARD:
+        return _VERDICT_LOCKS.setdefault(chat_id, threading.Lock())
+
+
 def take_turn(chat_id: str) -> threading.Lock:
     """The chat's turn lock, taken — or 409 while another turn runs."""
     lock = chat_turn_lock(chat_id)
@@ -2816,9 +2827,10 @@ class ChatEngine:
                 raise
             lock = None  # D18: record the click now; the model follows the turn
         if lock is None:
-            payload = self._record_verdict(
-                chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
-            )
+            with _verdict_lock(chat_id):
+                payload = self._record_verdict(
+                    chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
+                )
             queued = not blocking_cards(self.store, chat_id)
             if queued:
                 _queue_follow_up(self, chat_id, action.tool, confirm)
@@ -2828,9 +2840,10 @@ class ChatEngine:
                 ("done", {"state": "queued" if queued else "awaiting_confirmation"}),
             ])  # fmt: skip
         try:
-            payload = self._record_verdict(
-                chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
-            )
+            with _verdict_lock(chat_id):
+                payload = self._record_verdict(
+                    chat_id, action, confirm=confirm, actor=actor, keep=keep, high=high is not None
+                )
             more_pending = bool(blocking_cards(self.store, chat_id))
         except BaseException:
             lock.release()

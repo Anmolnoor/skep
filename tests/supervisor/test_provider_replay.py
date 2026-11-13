@@ -608,3 +608,62 @@ def test_d18_a_card_from_the_round_still_open_cannot_be_answered_yet(
         lock.release()
     finally:
         store.close()
+
+
+def test_d18_a_click_while_a_sibling_card_executes_runs_after_it(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D18 records a click at once, but two cards of one chat never execute
+    side by side: a click landing while a sibling card's confirm is still
+    running (that confirm holds the turn) runs when that execution ends, in
+    click order — not beside it, and not after the sibling's whole follow-up."""
+    import threading
+
+    provider = FAKES["ollama"]().start()
+    provider.protocol = "ollama"
+    _client, chat_id, store, engine = _d18_rig(config, provider)
+    log: list[str] = []
+    release = threading.Event()
+    real = engine._execute_item
+
+    def slow(chat: str, tool: str, args: dict[str, Any], **kw: Any) -> Any:
+        log.append(f"start {args['value']}")
+        if args["value"] == "terse":
+            assert release.wait(10)
+        try:
+            return real(chat, tool, args, **kw)
+        finally:
+            log.append(f"end {args['value']}")
+
+    monkeypatch.setattr(engine, "_execute_item", slow)
+    try:
+        first, second = _two_call_round(store, chat_id, fold=False)
+        chat = store.get_chat(chat_id)
+        provider.script_reply("both set")
+        done: list[Any] = []
+        one = threading.Thread(
+            target=lambda: done.append(
+                list(engine.verdict_events(chat_id, chat, first, confirm=True, actor="t"))
+            )
+        )
+        one.start()
+        while not log:
+            threading.Event().wait(0.01)
+        two = threading.Thread(
+            target=lambda: done.append(
+                list(engine.verdict_events(chat_id, chat, second, confirm=True, actor="t"))
+            )
+        )
+        two.start()
+        two.join(0.5)
+        assert log == ["start terse"]  # the sibling waits for the running execution
+        release.set()
+        one.join(10)
+        two.join(10)
+        assert log[:2] == ["start terse", "end terse"]
+        assert sorted(log[2:]) == ["end warm", "start warm"]
+        _wait_follow_ups()
+    finally:
+        release.set()
+        store.close()
+        provider.stop()
