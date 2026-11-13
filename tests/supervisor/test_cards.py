@@ -7,6 +7,9 @@ the three lines a human actually reads.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from skep.supervisor import RunStore
 from skep.supervisor.serve.cards import card_summary, headline, purpose, risk
 
 
@@ -199,3 +202,27 @@ def test_l9_l12_review_and_policy_risk_lines_match_what_the_verb_does() -> None:
         risk("set_operator_policy", allow)
         == "widens what future runs may do without asking you again"
     )
+
+
+def test_l9_an_approve_review_card_reads_landing_or_gate_from_the_approval_not_the_call(
+    tmp_path: Path,
+) -> None:
+    """ES-F68 review: the gate-or-landing risk line read the call's own
+    ``reason`` — an argument the model may write — so a model call
+    ``approve_review(review_id=<a landing>, reason="gate")`` showed the
+    milder gate line on a card that lands a patch. A pending card reads the
+    approval the store holds."""
+    store = RunStore(tmp_path / "s.sqlite")
+    try:
+        landing = store.enqueue_approval("t1", action="apply_patch", reason='land "x" → skep/t1')
+        gate = store.enqueue_approval("t2", action="shell.run", reason="shell.run needs: env")
+        spoof = {"review_id": landing, "reason": "shell.run requires approval: ls"}
+        assert card_summary("approve_review", spoof, store=store)["risk"] == (
+            "applies a patch to a real branch — landing IS the commit"
+        )
+        honest = {"review_id": gate, "reason": 'land "x"'}
+        assert card_summary("approve_review", honest, store=store)["risk"] == (
+            "lets the paused run go past this gate and do what it names, once"
+        )
+    finally:
+        store.close()

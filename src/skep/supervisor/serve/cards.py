@@ -553,7 +553,11 @@ def card_summary(
     why = purpose(description)
     if why is not None:
         summary["purpose"] = why
-    danger = risk(tool, safe_args)
+    held = None
+    if tool == "approve_review" and store is not None:
+        # L9: landing or gate is the approval's, never the model's ``reason`` arg
+        held = store.get_approval(str(safe_args.get("review_id") or ""))
+    danger = risk(tool, safe_args if held is None else {**safe_args, "reason": held.reason})
     decision = (recorded or {}).get("decision") or {}
     if decision.get("reason") == "shell.require_approval.unreadable_under_deny":
         danger = str(decision.get("detail"))  # L13: the deny this line may get around
