@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -140,9 +141,22 @@ def test_deny_all_profile_denies_network_text() -> None:
     # v115-F9: loopback is not egress — a test suite's own servers stay reachable.
     assert '(allow network-bind (local ip "localhost:*"))' in text
     assert '(allow network-outbound (remote ip "localhost:*"))' in text
-    # v115-F14: Unix-domain sockets are files on this host, not egress.
+    # v115-F14: a worker binds its own Unix-domain sockets; W34: it connects
+    # only to those under its roots and the system sockets a run needs.
     assert "(allow network-bind (local unix-socket))" in text
-    assert "(allow network-outbound (remote unix-socket))" in text
+    assert "(allow network-outbound (remote unix-socket))" not in text
+    lines = text.splitlines()
+    deny = lines.index("(deny network-outbound (remote unix-socket))")
+    assert lines[deny + 1] == f'(allow network-outbound (subpath "{Path("/tmp/ws").resolve()}"))'
+
+
+def test_a_profile_with_no_roots_opens_no_socket_and_no_egress() -> None:
+    """W34: the availability probe builds a profile with no writable root;
+    an empty connect allow would be an unfiltered (allow network-outbound)."""
+    for network in (sandbox.DENY_ALL_NETWORK, sandbox.NetworkPolicy(allow=("pypi.org",))):
+        text = sandbox.build_profile(writable_roots=[], network=network, proxy_port=40000)
+        assert "(allow network-outbound)" not in text.replace(" )", ")")
+        assert "(deny network-outbound (remote unix-socket))" in text
 
 
 def test_allow_all_profile_omits_network_deny() -> None:
@@ -296,3 +310,104 @@ def test_network_allowlist_enforced_end_to_end(tmp_path: Path, origin_port: int)
         assert deny_proxy.denied_count >= 1
     finally:
         deny_proxy.stop()
+
+
+@pytest.fixture()
+def listeners(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """W34: two throwaway unix-socket listeners standing in for an ssh-agent —
+    one under a fake HOME (bound by a relative path: AF_UNIX caps a path at
+    104 bytes), one under /tmp. Absolute paths are returned for the child."""
+    home = tmp_path / "fakehome"
+    (home / ".ssh").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="skep-w34-", dir="/tmp")).resolve()
+    servers = []
+    paths = []
+    for directory in (home / ".ssh", tmp_dir):
+        with monkeypatch.context() as patch:
+            patch.chdir(directory)
+            srv = socket.socket(socket.AF_UNIX)
+            srv.bind("agent.sock")
+        srv.listen(8)
+        threading.Thread(target=lambda s=srv: [s.accept() for _ in range(8)], daemon=True).start()
+        servers.append(srv)
+        paths.append(str(directory.resolve() / "agent.sock"))
+    try:
+        yield paths
+    finally:
+        for srv in servers:
+            srv.close()
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+_CONNECT = """
+import os, socket, sys
+for path in sys.argv[1:]:
+    c = socket.socket(socket.AF_UNIX)
+    head, name = os.path.split(path)
+    try:
+        os.chdir(head)
+        c.connect(name)
+        print("CONNECTED", path)
+    except OSError as exc:
+        print("REFUSED", path, type(exc).__name__)
+"""
+
+
+@pytest.mark.parametrize(
+    ("network", "proxy_port"),
+    [
+        (sandbox.DENY_ALL_NETWORK, None),
+        (sandbox.ALLOW_ALL_NETWORK, None),
+        (sandbox.NetworkPolicy(allow=("pypi.org",)), 40000),
+    ],
+)
+def test_a_worker_cannot_connect_to_a_unix_socket_outside_its_roots(
+    tmp_path: Path, listeners: list[str], network: sandbox.NetworkPolicy, proxy_port: int | None
+) -> None:
+    """W34: an agent socket (the operator's ssh-agent, Docker, gpg-agent) is
+    refused in every network mode; before, a Seatbelt worker listed the keys
+    of a throwaway ssh-agent from inside the wall."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    profile = tmp_path / "p.sb"
+    profile.write_text(
+        sandbox.build_profile(writable_roots=[workspace], network=network, proxy_port=proxy_port)
+    )
+    argv = sandbox.wrap_command([sys.executable, "-c", _CONNECT, *listeners], profile)
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split("\n")[:2] == [f"REFUSED {p} PermissionError" for p in listeners]
+
+
+@pytest.mark.parametrize(
+    ("network", "dns"),
+    [
+        (sandbox.ALLOW_ALL_NETWORK, "CONNECTED"),
+        (sandbox.DENY_ALL_NETWORK, "REFUSED"),
+        (sandbox.NetworkPolicy(allow=("pypi.org",)), "REFUSED"),
+    ],
+)
+def test_only_an_allow_all_run_reaches_the_name_resolver(
+    tmp_path: Path, network: sandbox.NetworkPolicy, dns: str
+) -> None:
+    """W34: getaddrinfo on macOS asks mDNSResponder over its unix socket, which
+    sends the query on. An allow-all run needs it; a deny-all or proxied run
+    must not have it (the proxy resolves for it); localhost resolves from
+    /etc/hosts either way."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    profile = tmp_path / "p.sb"
+    port = None if network.is_deny_all or network.is_allow_all else 40000
+    profile.write_text(
+        sandbox.build_profile(writable_roots=[workspace], network=network, proxy_port=port)
+    )
+    code = (
+        "import socket\n"
+        "print(socket.getaddrinfo('localhost', 80, type=socket.SOCK_STREAM)[0][4][1])\n" + _CONNECT
+    )
+    argv = sandbox.wrap_command([sys.executable, "-c", code, "/var/run/mDNSResponder"], profile)
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split("\n")[0] == "80"
+    assert proc.stdout.split("\n")[1].startswith(f"{dns} /var/run/mDNSResponder")

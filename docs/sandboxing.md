@@ -64,6 +64,12 @@ On Linux the worker also gets its own PID and IPC namespaces and an empty
 loopback (a worker's own test servers) except serve's port: 8765,
 `$SKEP_SERVE_URL`'s port, and the port `skep serve` records in
 `supervisor/serve-port` under the same home, so a CLI `skep run` denies it too.
+A Seatbelt worker connects only to unix sockets under its own writable roots
+(W34): the operator's ssh-agent, Docker, gpg-agent and other local daemons are
+refused in every network mode. An allow-all run may also reach
+`/var/run/mDNSResponder` (name lookups); a deny-all or proxied run may not, so
+a name cannot carry data out through the system resolver (the proxy resolves
+for it; `localhost` resolves from `/etc/hosts`).
 
 ## Network Modes
 
