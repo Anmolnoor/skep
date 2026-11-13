@@ -267,3 +267,20 @@ def test_the_cli_and_terminal_deck_trust_need_a_person_at_a_terminal(
     repl.run_command("/trust private")
     assert posted == ["/api/chats/c1/trust"]
     assert "cleared: private" in capsys.readouterr().out
+
+
+def test_a_chat_cannot_schedule_skep_trust_either(rig: Rig) -> None:
+    """A script schedule runs on the host as the operator; one a chat
+    proposed with ``skep trust`` in it is refused even when confirmed — the
+    pty trick (``script -q /dev/null skep trust``) included."""
+    from skep.supervisor.serve.tools import execute_mutation
+
+    chat, _hook, _shell = _tainted_chat(rig)
+    for command in (f"skep trust {chat}", f"script -q /dev/null skep trust {chat}"):
+        args = {"name": "t", "caste": "script", "every": "1h", "instructions": command}
+        with pytest.raises(ValueError, match="skep trust"):
+            execute_mutation(
+                "propose_schedule", args, store=rig.store, holder=rig.engine.holder,
+                runner=rig.engine.runner, actor="chat-user", chat_id=chat,
+            )  # fmt: skip
+    assert rig.store.list_schedules() == []

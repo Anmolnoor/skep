@@ -5340,6 +5340,16 @@ def _execute_mutation(
                     f"a {caste} schedule needs instructions "
                     f"(the {'shell command' if caste == 'script' else 'text to run'})"
                 )
+            if caste == "script":
+                from ..shell_prefixes import (
+                    SKEP_TRUST_REFUSAL,
+                    command_line_segments,
+                    is_skep_trust_command,
+                )
+
+                segments = command_line_segments(str(args["instructions"])) or []
+                if any(is_skep_trust_command(segment) for segment in segments):
+                    raise ValueError(SKEP_TRUST_REFUSAL)  # W20 review: nor on a timer
             if caste == "prompt" and chat_id is None:
                 raise ValueError(
                     "a prompt schedule runs its Queen turn in the chat that "
