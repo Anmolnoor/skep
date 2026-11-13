@@ -90,10 +90,15 @@ def test_a_clean_chat_writes_untainted_notes(env: Live) -> None:
     assert env.store.content_taint("note", [note.note_id]) == set()
 
 
-def test_memory_filed_from_a_tainted_chat_taints_chats_that_see_it(env: Live) -> None:
+def test_memory_filed_from_a_tainted_chat_taints_until_the_operator_approves_it(
+    env: Live,
+) -> None:
     """remember from a private chat runs in-turn (an inert proposal); the
-    proposal and the approved item carry ``private``; a chat that lists the
-    proposals, or gets the item in its prompt, takes the bit on."""
+    proposal carries ``private`` and a chat that lists the queue takes it on.
+    Approving it is the operator's own act (always a card, the CLI or the
+    memory page): the approved item is operator-trusted and taints nobody —
+    else every chat on the home would be tainted from its first turn and
+    /trust undone by the next one (W20/W21 review)."""
     chat = env.chat()
     set_taint(env.store, chat, "private")
     env.ollama.script_tool_call("remember", {"content": "the operator likes tea"})
@@ -108,13 +113,21 @@ def test_memory_filed_from_a_tainted_chat_taints_chats_that_see_it(env: Live) ->
     env.turn(lister, "queue?")
     assert env.store.get_chat_taint(lister).private is not None
 
-    item = env.store.approve_memory_proposal(proposal.proposal_id, actor="op")
-    assert env.store.content_taint("memory", [item.memory_id]) == {"private"}
+    env.store.approve_memory_proposal(proposal.proposal_id, actor="op")
     prompted = env.chat()
+    env.ollama.script_tool_call("list_memory", {})
     env.ollama.script_reply("hello")
     env.turn(prompted, "hi")
     assert "likes tea" in json.dumps(env.ollama.chat_bodies()[-1])
-    assert env.store.get_chat_taint(prompted).private is not None
+    assert env.store.get_chat_taint(prompted) == ChatTaint()
+
+    # /trust holds on the next turn of a chat that has that memory in its prompt
+    from skep.supervisor.serve.taint import trust_chat
+
+    trust_chat(env.store, env.holder.current.audit_dir, chat, [], actor="op")
+    env.ollama.script_reply("ok")
+    env.turn(chat, "again")
+    assert env.store.get_chat_taint(chat) == ChatTaint()
 
 
 def test_run_reads_set_untrusted(env: Live) -> None:

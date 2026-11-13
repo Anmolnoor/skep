@@ -39,12 +39,12 @@ _CHAT_READS = frozenset({"search_chats", "get_chat_messages", "get_chat_context"
 # W21: a run read carries the worker's own words (its summary, its errors).
 _RUN_READS = frozenset({"get_run", "await_runs"})
 # W21: rows that carry the bits of the chat that wrote them — result key, id
-# field, ``RunStore.content_taint`` kind.
+# field, ``RunStore.content_taint`` kind. Approved memory is not here: the
+# operator approved it (always a card, the CLI or the memory page), so it is
+# operator-trusted content — only the proposal queue still carries bits.
 _STORE_READS = {
     "list_notes": ("notes", "note_id", "note"),
     "list_tasks": ("tasks", "task_id", "task"),
-    "list_memory": ("items", "memory_id", "memory"),
-    "search_memory": ("items", "memory_id", "memory"),
     "list_memory_proposals": ("proposals", "proposal_id", "proposal"),
 }
 
@@ -66,8 +66,6 @@ _SOURCES = {
     "await_runs": "read a worker's report",
     "list_notes": "read a note a tainted chat wrote",
     "list_tasks": "read a task a tainted chat wrote",
-    "list_memory": "read memory a tainted chat filed",
-    "search_memory": "read memory a tainted chat filed",
     "list_memory_proposals": "read memory a tainted chat filed",
 }
 _AUTHORS = {
@@ -188,28 +186,6 @@ def record_tool_taint(
         chat_id,
         private=message_id if private else None,
         untrusted=message_id if untrusted else None,
-    )
-
-
-def memory_taint(store: RunStore, chat_id: str) -> ChatTaint:
-    """W21: approved memory a tainted chat filed reaches this chat's prompt
-    (``chat.memory_block``'s items), so the chat takes its bits — set at the
-    newest operator message, the turn that will read it."""
-    chat = store.get_chat(chat_id)
-    project = chat.project_id if chat else None
-    ids = [
-        item.memory_id
-        for item in store.list_memory_items()
-        if item.project_id is None or item.project_id == project
-    ]
-    bits = store.content_taint("memory", ids) if ids else set()
-    if not bits:
-        return store.get_chat_taint(chat_id)
-    turn = max((m.id for m in store.chat_messages(chat_id) if m.role == "user"), default=0)
-    return store.add_chat_taint(
-        chat_id,
-        private=turn if "private" in bits else None,
-        untrusted=turn if "untrusted" in bits else None,
     )
 
 

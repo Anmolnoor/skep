@@ -66,7 +66,6 @@ from .settings import ConfigHolder
 from .taint import (
     TrustRefused,
     inherit_taint,
-    memory_taint,
     record_tool_taint,
     taint_line,
     trust_chat,
@@ -1770,7 +1769,6 @@ class ChatEngine:
         read_only: bool = False,
         unattended: bool = False,
     ) -> Iterator[ChatEvent]:
-        memory_taint(self.store, chat_id)  # W21: memory in the prompt brings its bits
         previous_read_tool: str | None = None
         # v59-F7: byte-identical read call returning a byte-identical result is
         # a loop, not diligence (field test 2026-07-18: ~20 list_runs/repo_state

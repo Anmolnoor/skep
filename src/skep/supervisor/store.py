@@ -2840,9 +2840,6 @@ class RunStore:
         "note": "SELECT taint FROM notes WHERE note_id = ?",
         "task": "SELECT taint FROM tasks WHERE task_id = ?",
         "proposal": "SELECT taint FROM memory_proposals WHERE proposal_id = ?",
-        # an approved item carries its proposal's bits
-        "memory": "SELECT p.taint FROM memory_items i JOIN memory_proposals p"
-        " ON p.proposal_id = i.proposal_id WHERE i.memory_id = ?",
     }
 
     @_locked

@@ -8,6 +8,7 @@ channel and an unattended turn cannot reach it; each of those has a test."""
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -260,10 +261,10 @@ def test_the_cli_and_terminal_deck_trust_need_a_person_at_a_terminal(
             return {"cleared": {"private": 1}}
 
     repl = cli_chat.ChatRepl(cast(Any, Client()), {"chat_id": "c1"}, show_thinking=False)
-    monkeypatch.setattr(cli_chat.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     repl.run_command("/trust")
     assert posted == [] and "terminal" in capsys.readouterr().out
-    monkeypatch.setattr(cli_chat.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     repl.run_command("/trust private")
     assert posted == ["/api/chats/c1/trust"]
     assert "cleared: private" in capsys.readouterr().out
