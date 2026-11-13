@@ -45,7 +45,7 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
-from ..policy_v3 import UNATTENDED_CHATS
+from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS
 from ..policy_write import PolicyWriteRejected
 from . import actions
 from .cards import card_summary, fold_subject, headline, high_tier, recorded_card
@@ -1767,6 +1767,7 @@ class ChatEngine:
         protocol: LLMProtocol,
         read_only: bool = False,
         unattended: bool = False,
+        channel: bool = False,
     ) -> Iterator[ChatEvent]:
         """One assistant turn: stream deltas, run read tools, pause on mutations.
 
@@ -1778,16 +1779,18 @@ class ChatEngine:
         ES-F3 (B08): and they never execute a mutation, even one policy would
         auto-allow — it becomes a card (run-finish continuations).
         """
-        if unattended:
-            # W24: nobody is at the desk — the chat's session keeps sit this out
-            UNATTENDED_CHATS.add(chat_id)
+        if unattended or channel:
+            # W24: nobody is at the desk — the chat's session keeps sit this out;
+            # D16: nor are they for a messenger's members
+            marks = UNATTENDED_CHATS if unattended else CHANNEL_CHATS
+            marks.add(chat_id)
             try:
                 yield from self._turn_events(
                     chat_id, base_url=base_url, api_key=api_key, model=model,
-                    protocol=protocol, read_only=read_only, unattended=True,
+                    protocol=protocol, read_only=read_only, unattended=unattended,
                 )  # fmt: skip
             finally:
-                UNATTENDED_CHATS.discard(chat_id)
+                marks.discard(chat_id)
             return
         yield from self._turn_events(
             chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
@@ -2773,10 +2776,11 @@ class ChatEngine:
             chain(
                 verdicts,
                 self.turn_events(
-                    chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
+                    chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+                    channel=actor.startswith("channel:"),
                 ),
             ),
-        )
+        )  # fmt: skip
 
     def _join_fold(
         self, chat_id: str, head: str, name: str, args: dict[str, Any], call_id: str | None

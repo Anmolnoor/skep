@@ -290,3 +290,50 @@ def test_a_script_schedules_output_note_is_untrusted(tmp_path: Path) -> None:
         assert bits == {"script said": {"untrusted"}, "note said": set()}
     finally:
         store.close()
+
+
+def test_a_channel_turn_decides_without_the_chats_session_keeps(env: Live) -> None:
+    """D16 (ES-F102): a keep given at the web UI binds the chat, not whoever
+    can post in its messenger channel. A turn that arrives from the channel —
+    and the follow-up turn after a channel confirm — decides with durable
+    grants only; the next web turn has the keep back."""
+    from skep.supervisor.serve import actions
+    from skep.supervisor.serve.channels import ChannelIdentity, ChannelMessage
+    from skep.supervisor.serve.channels.runtime import run_channel_turn
+
+    chat = env.chat()
+    env.store.bind_channel_session(
+        session_key="discord:t1", channel="discord", identity_id="u1", chat_id=chat
+    )
+    line = {"command": "python3 build.py --fast", "cwd": str(env.paths["outside"])}
+    actions.remember_action_for_session(
+        env.store, tool="run_shell", args={"command": line["command"]}, actor="op",
+        tier="session", chat_id=chat,
+    )  # fmt: skip
+    message = ChannelMessage(
+        channel="discord",
+        identity=ChannelIdentity(channel="discord", identity_id="u1"),
+        text="build it",
+        session_key="discord:t1",
+    )
+    env.ollama.script_tool_call("run_shell", line)
+    _text, events = run_channel_turn(env.engine, message, web_ui_url="http://x")
+    (card,) = events
+    assert card["decision"]["verdict"] == "require_approval", card["decision"]
+    assert "grant" not in str(card["decision"]["decided_by"])
+
+    # a channel confirm's follow-up turn: the keep sits that out too
+    env.ollama.script_tool_call("run_shell", line)
+    follow = list(
+        env.engine.verdict_events(
+            chat, env.store.get_chat(chat), card["action_id"], confirm=False,
+            actor="channel:discord:u1",
+        )
+    )  # fmt: skip
+    (again,) = [d for e, d in follow if e == "action"]
+    assert again["decision"]["verdict"] == "require_approval"
+    env.store.resolve_chat_action(again["action_id"], status="denied", result={"ok": False})
+
+    env.ollama.script_tool_call("run_shell", line)
+    env.ollama.script_reply("built")
+    assert not [d for e, d in env.turn(chat, "build it") if e == "action"]  # web: keep holds

@@ -387,6 +387,10 @@ def run_lane(
 # ponytail: per-process state; serve is one process. Pass ``attended`` down
 # the lanes if decisions ever leave it.
 UNATTENDED_CHATS: set[str] = set()
+# D16: the chats whose turn in flight came from a messenger (a channel message,
+# or the follow-up after a channel confirm) — the keep was given at the web UI
+# for this chat, not for every channel member. Durable grants only, as above.
+CHANNEL_CHATS: set[str] = set()
 
 
 def load_stack(
@@ -401,7 +405,9 @@ def load_stack(
     from .serve.fileio import operator_roots
 
     home = holder.current.home
-    operator, ignored = operator_lane(store, chat=chat, durable_only=chat in UNATTENDED_CHATS)
+    operator, ignored = operator_lane(
+        store, chat=chat, durable_only=chat in UNATTENDED_CHATS | CHANNEL_CHATS
+    )
     stack = Stack(
         home=home,
         cwd=repo,
