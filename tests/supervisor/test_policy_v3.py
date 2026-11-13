@@ -936,8 +936,10 @@ def test_l13_an_unreadable_line_under_a_deny_asks_and_says_so(line: str, tmp_pat
 
 
 @pytest.mark.parametrize(
-    "line", ["sh -c 'ls'", "sh -c 'echo curl'", "bash -c 'grep curl notes.txt'", "echo $(date)"]
-)
+    "line",
+    ["sh -c 'ls'", "sh -c 'echo curl'", "bash -c 'grep curl notes.txt'", "echo $(date)",
+     "python3 -V", "python3 tools/check.py", "node app.js"],
+)  # fmt: skip
 def test_l13_a_readable_line_under_a_deny_carries_no_cannot_read_warning(
     line: str, tmp_path: Path
 ) -> None:
@@ -1011,6 +1013,14 @@ HIDDEN_LINES = [
     "perl -e 'system(\"curl x\")'",
     "ruby -e 'system(\"curl x\")'",
     "sh -c 'python3 -c 1'",
+    # ES-F81 review: what the first reading missed
+    "bash /dev/stdin <<< 'curl x'",
+    "cat cmds | python3",
+    "python3 - < script.py",
+    'node --eval \'require("child_process").execSync("curl x")\'',
+    "python3.12 -c 'import os; os.system(\"curl x\")'",
+    "lua -e 'os.execute(\"curl x\")'",
+    "osascript -e 'do shell script \"curl x\"'",
 ]
 
 

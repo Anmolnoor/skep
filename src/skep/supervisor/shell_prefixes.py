@@ -193,7 +193,19 @@ _INLINE_CODE_FLAGS: dict[str, frozenset[str]] = {
     "python": frozenset({"-c"}), "python3": frozenset({"-c"}), "node": frozenset({"-e", "-p"}),
     "perl": frozenset({"-e", "-E"}), "ruby": frozenset({"-e"}), "php": frozenset({"-r"}),
     "deno": frozenset({"eval"}), "bun": frozenset({"-e", "--eval"}),
+    "lua": frozenset({"-e"}), "osascript": frozenset({"-e"}), "rscript": frozenset({"-e"}),
+    "pwsh": frozenset({"-c"}),
 }  # fmt: skip
+_INLINE_CODE_FLAGS["node"] |= {"--eval", "--print"}
+
+
+def _interpreter(token: str) -> str:
+    """``python3.12`` is python, ``node18`` is node (the table's spelling)."""
+    program = program_name(token)
+    base = program.rstrip("0123456789.") or program
+    return program if program in _INLINE_CODE_FLAGS else base
+
+
 PACKAGE_MANAGERS: frozenset[str] = frozenset(
     {"pip", "pip3", "pipx", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "cargo",
      "gem", "go", "apt", "apt-get", "brew", "dnf", "yum", "pacman", "apk"}
@@ -212,10 +224,10 @@ def is_package_install(argv: Sequence[str]) -> bool:
 
 def _inline_code(argv: Sequence[str]) -> bool:
     """Inline code, its flag alone or in a short cluster (``perl -pe``)."""
-    flags = _INLINE_CODE_FLAGS.get(program_name(argv[0]), frozenset())
+    flags = _INLINE_CODE_FLAGS.get(_interpreter(argv[0]), frozenset())
     letters = {flag[1] for flag in flags if len(flag) == 2 and flag[0] == "-"}
     for token in argv[1:]:
-        if token in flags:
+        if token.partition("=")[0] in flags:
             return True
         if token[:1] != "-":
             return False  # a script path: what follows is the script's
@@ -877,10 +889,16 @@ def _unwrap_argv(
 
 def _stdin_shell(argv: Sequence[str]) -> bool:
     """D12: a wrapper shell reading its commands from stdin — no ``-c`` and no
-    script operand (``… | sh``, ``sh <<< …``, a here-doc, ``sh -``), or ``-s``."""
+    script operand (``… | sh``, ``sh <<< …``, a here-doc, ``sh -``), ``-s``,
+    or ``/dev/stdin`` as the script; an interpreter alone (``… | python3``)
+    or reading ``-`` / ``/dev/stdin``."""
+    if _interpreter(argv[0]) in _INLINE_CODE_FLAGS:
+        return argv[1:2] in ([], ["-"], ["/dev/stdin"])
     if program_name(argv[0]) not in _WRAPPER_SHELLS:
         return False
     for token in argv[1:]:
+        if token == "/dev/stdin":
+            return True
         if not token.startswith("-") or token == "--":
             return False  # `sh script.sh`: a file, not stdin
         short = "" if token.startswith("--") else token[1:]
