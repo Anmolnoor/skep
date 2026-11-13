@@ -524,7 +524,17 @@ def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None)
         ]
         payload = "".join(json.dumps(r) + "\n" for r in requests)
         if not config.server_id.startswith(FORGED_SERVER_PREFIX):
-            lines = _stdio_exchange(list(config.command), payload)
+            cwd = None
+            if config.scope == "browse":
+                # R6 review: Playwright writes a read's optional `filename`
+                # anywhere under its cwd, and a read takes no card — so a
+                # browse server never runs in serve's folder (the repo or the
+                # operator's home), only in one of its own.
+                if skep_home is None:
+                    raise MCPError(f"browse server {config.server_id!r} needs its skep home")
+                cwd = skep_home / "browser"
+                cwd.mkdir(parents=True, exist_ok=True)
+            lines = _stdio_exchange(list(config.command), payload, cwd=cwd)
         else:
             lines = _run_forged_sandboxed(config, payload, skep_home).stdout.splitlines()
         for line in lines:
@@ -542,7 +552,7 @@ def runner_for_config(config: MCPServerConfig, *, skep_home: Path | None = None)
     return run
 
 
-def _stdio_exchange(argv: list[str], payload: str) -> list[str]:
+def _stdio_exchange(argv: list[str], payload: str, *, cwd: Path | None = None) -> list[str]:
     """ES-F162 (R6): send ``payload`` and keep stdin open until the server
     answers request 2, or the deadline passes. A server that stops when its
     stdin closes (Playwright's does, ~0.4 s) never answered a call that takes
@@ -560,6 +570,7 @@ def _stdio_exchange(argv: list[str], payload: str) -> list[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
+        cwd=cwd,
     )
     assert proc.stdin is not None and proc.stdout is not None
     stdout = proc.stdout

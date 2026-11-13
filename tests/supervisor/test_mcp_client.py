@@ -296,3 +296,52 @@ def test_r6_stdio_runner_reports_a_server_that_exits_without_answering() -> None
     call = MCPClient(config, runner=runner_for_config(config)).call_tool("anything", {})
     assert not call.ok
     assert call.error == "no JSON-RPC response for the tool request"
+
+
+# A browse server shaped like Playwright's file output: a relative `filename`
+# argument is written under the server's own cwd.
+_FILE_WRITING_SERVER = r"""
+import json, os, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if request.get("method") == "tools/call":
+        name = request["params"]["arguments"]["filename"]
+        open(name, "w").write("console log")
+        where = os.path.realpath(name)
+        reply = {"jsonrpc": "2.0", "id": request["id"], "result": {"content": where}}
+        print(json.dumps(reply), flush=True)
+"""
+
+
+def test_r6_a_browse_server_writes_files_only_in_its_folder_under_the_skep_home(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6 review: Playwright's page-state reads (browser_snapshot,
+    browser_console_messages, …) take an optional `filename` and write it
+    anywhere under the server's cwd — which was serve's own folder (the repo
+    or the operator's home). A read runs in the turn with no card, so a read
+    could overwrite a file there. The browse server now runs in a folder of
+    its own under the skep home."""
+    import sys
+
+    serve_cwd = tmp_path / "serve-cwd"
+    serve_cwd.mkdir()
+    (serve_cwd / "notes.txt").write_text("mine")
+    monkeypatch.chdir(serve_cwd)
+    home = tmp_path / "home"
+    config = MCPServerConfig(
+        server_id="browser",
+        transport="stdio",
+        command=(sys.executable, "-c", _FILE_WRITING_SERVER),
+        scope="browse",
+    )
+    call = MCPClient(config, runner=runner_for_config(config, skep_home=home)).call_tool(
+        "browser_console_messages", {"filename": "notes.txt"}
+    )
+    assert call.ok, call.error
+    assert (serve_cwd / "notes.txt").read_text() == "mine"
+    assert call.content == str((home / "browser" / "notes.txt").resolve())
+    # No home to put the folder in: the browse server does not start at all.
+    refused = MCPClient(config, runner=runner_for_config(config)).call_tool("x", {"filename": "y"})
+    assert not refused.ok
+    assert "skep home" in str(refused.error)

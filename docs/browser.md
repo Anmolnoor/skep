@@ -52,9 +52,10 @@ Tools on a browse-bound server decide as `browse/read` or `browse/act`
 Each call starts the server, waits for its answer, then stops it (one
 process per call). A page does not carry over from one call to the next:
 `browser_navigate` answers with the snapshot of the page it opened, and a
-later `browser_snapshot` starts on `about:blank`. Playwright writes its
-snapshot and console files to `.playwright-mcp/` in the folder serve runs
-from.
+later `browser_snapshot` starts on `about:blank`. The server runs in
+`~/.skep/browser/`, never in the folder serve runs from: Playwright writes
+its snapshot and console files to `.playwright-mcp/` there, and a read's
+optional `filename` can only land inside that folder.
 
 Teach it your posture with `allow_mcp_tool` (writes a learned
 `browse`-scope rule; a policy deny always wins and refuses without a

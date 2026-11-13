@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -56,13 +57,15 @@ def test_real_playwright_read_spawns_one_server_and_is_not_a_high_card(
     tmp_path: Path, page_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _require_playwright()
-    monkeypatch.chdir(tmp_path)  # Playwright writes .playwright-mcp/ to its cwd
+    serve_cwd = tmp_path / "serve-cwd"
+    serve_cwd.mkdir()
+    monkeypatch.chdir(serve_cwd)
     spawned: list[str] = []
     real_exchange = mc._stdio_exchange
 
-    def counting(argv: list[str], payload: str) -> list[str]:
+    def counting(argv: list[str], payload: str, **kw: Any) -> list[str]:
         spawned.append(payload.splitlines()[-1])
-        return real_exchange(argv, payload)
+        return real_exchange(argv, payload, **kw)
 
     monkeypatch.setattr(mc, "_stdio_exchange", counting)
     config = SupervisorConfig(home=tmp_path / "home" / "supervisor", worker_command=("x",))
@@ -104,5 +107,10 @@ def test_real_playwright_read_spawns_one_server_and_is_not_a_high_card(
             assert call("browser_snapshot", {})["ok"]
         methods = [line.split('"method": "')[1].split('"')[0] for line in spawned]
         assert methods == ["tools/list", "tools/call", "tools/call"]
+
+        # A read's `filename` lands in the server's own folder, never serve's.
+        assert call("browser_console_messages", {"filename": "console.txt"})["ok"]
+        assert (tmp_path / "home" / "browser" / "console.txt").is_file()
+        assert list(serve_cwd.iterdir()) == []
     finally:
         store.close()

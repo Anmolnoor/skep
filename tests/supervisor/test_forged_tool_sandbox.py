@@ -64,7 +64,7 @@ def test_forged_tool_call_is_wrapped_in_the_sandbox_with_a_scrubbed_env(
     assert "SKEP_FAKE_SECRET" not in seen["env"]
 
     # A plain (operator-registered) server is not wrapped — B115 is forged tools.
-    def fake_exchange(argv: list[str], payload: str) -> list[str]:
+    def fake_exchange(argv: list[str], payload: str, **_: object) -> list[str]:
         seen["argv"] = argv
         return ['{"jsonrpc": "2.0", "id": 2, "result": {}}']
 
