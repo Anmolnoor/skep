@@ -1088,6 +1088,8 @@ def recover_interrupted_runs(
         supervisor = run_store.run_supervisor(task_id)
         if supervisor is not None and supervisor != me and owner_alive(supervisor):
             continue  # ADR 0060 §5: a live serve or CLI still supervises it
+        if not run_store.claim_run_supervisor(task_id, expected=supervisor, owner=me):
+            continue  # §5: another serve starting with this one took it first
         # ES-F5 (B10, I1 I12): the detached worker may still be alive — with no
         # babysitter, no budget, and the proxy gone. Kill its whole session
         # BEFORE reading its evidence or touching its worktree: nothing may
@@ -1097,12 +1099,15 @@ def recover_interrupted_runs(
         # (`readopt_workers`) permitting.
         live_pid = _live_worker_pid(run_store, task_id)
         worker = _recorded_worker(run_store, task_id)
-        if live_pid is not None and worker is not None and worker[2] and config.readopt_workers:
-            if not run_store.claim_run_supervisor(task_id, expected=supervisor, owner=me):
-                continue  # §5: another serve adopted it first
-            if _adopt_worker(run_store, config, record, worker, on_run_finished):
-                recovered.append(task_id)
-                continue
+        if (
+            live_pid is not None
+            and worker is not None
+            and worker[2]
+            and config.readopt_workers
+            and _adopt_worker(run_store, config, record, worker, on_run_finished)
+        ):
+            recovered.append(task_id)
+            continue
         if live_pid is not None:
             kill_session(live_pid)
             deadline = time.monotonic() + 5.0

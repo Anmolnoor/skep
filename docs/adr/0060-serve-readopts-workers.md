@@ -122,9 +122,12 @@ killed as before.
 
 There is no cross-process serve lock. Recovery now skips any run whose
 recorded supervisor is still alive — a second serve no longer kills the
-workers of a first one that is still running (it used to). Adoption is a
-compare-and-set on `runs.supervisor_owner` in one SQLite `UPDATE`: of two
-serves starting together, exactly one wins; the loser leaves the run alone.
+workers of a first one that is still running (it used to). Recovery takes
+each run, live worker or dead, with a compare-and-set on
+`runs.supervisor_owner` in one SQLite `UPDATE`: of two serves starting
+together, exactly one wins; the loser leaves the run alone. A run is named
+with its supervisor when its row is created, so a serve starting while a
+dispatch is still setting the run up leaves it alone too.
 
 ### 6. Kill switch
 

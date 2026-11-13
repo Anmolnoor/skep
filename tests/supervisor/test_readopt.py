@@ -493,6 +493,26 @@ def test_restart_leaves_a_worker_another_serve_adopted_first(
         store.close()
 
 
+def test_restart_leaves_a_dead_workers_run_another_serve_claimed_first(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F132 follow-up (ADR 0060 §5): the compare-and-set guards the dead-
+    worker path too — two serves starting together both ingested one dead
+    run (two verdicts, two worktree removals)."""
+    store = RunStore(config.db_path)
+    try:
+        task_id, workspace = _strand(store, config, repo)  # its pid 99999 is gone
+        monkeypatch.setattr(store, "claim_run_supervisor", lambda *a, **k: False)
+
+        assert recover_interrupted_runs(store, config) == []
+
+        record = store.get_run(task_id)
+        assert record is not None and record.state == "running"
+        assert workspace.is_dir()
+    finally:
+        store.close()
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
