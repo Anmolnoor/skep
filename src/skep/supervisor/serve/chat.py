@@ -49,6 +49,7 @@ from ..policy_v3 import UNATTENDED_CHATS
 from ..policy_write import PolicyWriteRejected
 from . import actions
 from .cards import card_summary, fold_subject, headline, high_tier, recorded_card
+from .fileio import resolves_elsewhere
 from .jobs import Dispatcher
 from .llm import (
     _TRANSIENT_STATUSES,
@@ -1127,6 +1128,31 @@ def _replayable_call(call: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         arguments = {}
     return {**call, "function": {**call.get("function", {}), "arguments": arguments}}
+
+
+def _resolution(tool: str, args: dict[str, Any]) -> dict[str, str]:
+    """W38: ``{"resolves_to": …}`` for a file read whose path is a link."""
+    if tool not in ("read_file", "search_files"):
+        return {}
+    real = resolves_elsewhere(str(args.get("path") or ""))
+    return {"resolves_to": real} if real else {}
+
+
+def _link_moved(action: ChatActionRecord, args: dict[str, Any]) -> dict[str, Any] | None:
+    """W38: the refusal for a confirmed file read whose link now leads
+    somewhere other than the card showed — nothing is read."""
+    if action.tool not in ("read_file", "search_files"):
+        return None
+    shown = (action.card or {}).get("resolves_to")
+    now = _resolution(action.tool, args).get("resolves_to")
+    if shown == now:
+        return None
+    where = now or str(args.get("path") or "")
+    return {
+        "ok": False,
+        "error": f"the path now resolves to {where}, not {shown or 'itself'} as the card "
+        "showed — nothing was read; ask again to get a card for where it leads now",
+    }
 
 
 def _rounds_in_order(records: list[Any], *, side: bool) -> list[Any]:
@@ -2272,6 +2298,7 @@ class ChatEngine:
                             **(recorded_card(name, args, high, self.store, manifest) or {}),
                             **({"decision": asdict(decision)} if decision is not None else {}),
                             **({"checked": checked} if checked else {}),
+                            **_resolution(name, args),
                         }
                         or None,
                     )
@@ -2768,7 +2795,8 @@ class ChatEngine:
             try:
                 for item in items:
                     payloads.append(
-                        self._execute_item(
+                        _link_moved(action, item["args"])
+                        or self._execute_item(
                             chat_id,
                             action.tool,
                             item["args"],
@@ -2843,13 +2871,20 @@ class ChatEngine:
         that record alone — it asks nothing live of the policy or a server."""
         taint = self.store.get_chat_taint(chat_id)
         pending = action is None or action.status == "proposed"
-        return card_summary(
+        card = card_summary(
             tool, args, tool_description(tool),
             taint=taint, taint_line=taint_line(self.store, chat_id, taint),
             store=self.store if pending else None,
             recorded=None if action is None else (action.card or {}),
             live_tier=pending,
         )  # fmt: skip
+        # W38: a linked path's card names where the read really goes — as
+        # recorded when it was proposed (the confirm holds it to that)
+        shown = (action.card or {}) if action is not None else _resolution(tool, args)
+        if shown.get("resolves_to"):
+            card["resolves_to"] = shown["resolves_to"]
+            card["headline"] = f"{card['headline']} → resolves to {shown['resolves_to']}"
+        return card
 
 
 # ES B27: a scheduled turn's TOTAL budget. The provider timeout is per read,

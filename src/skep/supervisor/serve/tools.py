@@ -1116,7 +1116,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "Search file CONTENTS (ripgrep regex) or list matching FILE NAMES "
         "under one directory. Same governance as read_file: operator roots "
         "run immediately, other paths card, filesystem deny rules refuse. "
-        "Hits in credential files are left out (the result's note says so).",
+        "Hits in credential files are left out (the result's note says so). "
+        "Symlinks are listed with their targets, never followed.",
         {
             "pattern": {
                 "type": "string",

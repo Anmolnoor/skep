@@ -160,6 +160,8 @@ def card_notes(card: Mapping[str, Any] | None, *, messenger: bool = True) -> tup
             f"HIGH risk: {card.get('high') or 'see the web UI'}. No messenger can confirm "
             "this: open the skep web UI or the CLI."
         )
+    if card.get("resolves_to"):  # W38: where a linked path really reads
+        notes.append(f"the path is a link: it resolves to {card['resolves_to']}")
     if card.get("taint"):
         notes.append(str(card["taint"]))
     manifest = card.get("manifest")
