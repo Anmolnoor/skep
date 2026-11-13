@@ -3058,6 +3058,12 @@ def queen_shell_decision(
             if via_cwd
             else f"the command reaches into registered repo {target!r} (a path, cd, or git -C)"
         )
+        # P3-6: never point a chat at a dispatcher its role hides
+        change = (
+            "this chat's role cannot change a repo (the operator can switch it with /role builder)"
+            if "dispatch_run" in hidden_tools(role)
+            else "quick_edit for one file, dispatch_run for more"
+        )
         if background:
             return AutonomyDecision(
                 verdict="deny",
@@ -3069,7 +3075,7 @@ def queen_shell_decision(
                 detail=(
                     f"{how} — daemons do not run in checkouts (a background process "
                     "there could modify files with no patch card, forever). Run it from "
-                    "a non-repo directory, or use dispatch_run for repo work."
+                    f"a non-repo directory. To change the repo: {change}."
                 ),
                 decided_by="queen-shell-guard",
             )
@@ -3098,7 +3104,7 @@ def queen_shell_decision(
                 f"{how} — a shell command there can modify files with no patch card, "
                 "so it refuses by default. To look: repo_state, search_files, "
                 "read_file, git_log, git_diff run in-turn with no card. To change "
-                "something: quick_edit for one file, dispatch_run for more. Only to "
+                f"something: {change}. Only to "
                 "open repo shells deliberately: set_operator_policy scope='shell' "
                 "action='run_repo' with the exact command line — a standing rule, "
                 "not a one-off."

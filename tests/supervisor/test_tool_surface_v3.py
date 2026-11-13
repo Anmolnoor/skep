@@ -929,3 +929,27 @@ def test_a_builder_chat_floor_is_pinned_too(config: SupervisorConfig, ollama: Fa
     body = ollama.chat_bodies()[0]
     floor = len(body["messages"][0]["content"]) + len(json.dumps(body["tools"]))
     assert floor <= 25_470
+
+
+def test_the_repo_pen_never_points_an_assistant_chat_at_a_hidden_tool(
+    locked: SupervisorConfig, repo: Path
+) -> None:
+    store = RunStore(locked.db_path)
+    try:
+        holder = ConfigHolder(locked, store)
+        said = {}
+        for role in ("assistant", "builder"):
+            for background in (False, True):
+                decision = queen_shell_decision(
+                    store, holder, command="ls", cwd=str(repo), background=background,
+                    role=SHIPPED_ROLES[role],
+                )  # fmt: skip
+                assert decision is not None and decision.verdict == "deny"
+                said[role, background] = decision.detail or ""
+    finally:
+        store.close()
+    for background in (False, True):
+        assert "dispatch_run" not in said["assistant", background]
+        assert "quick_edit" not in said["assistant", background]
+        assert "/role" in said["assistant", background]
+        assert "dispatch_run" in said["builder", background]
