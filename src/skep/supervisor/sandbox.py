@@ -571,7 +571,10 @@ def _network_rules(network: NetworkPolicy, proxy_port: int | None) -> list[str]:
 
 # v28-F3: the bind-mount target inside the sandbox for the host proxy socket.
 # Short (AF_UNIX 108-char limit) and under the tmpfs bwrap already mounts.
-SANDBOX_PROXY_SOCKET = "/tmp/.skep-proxy.sock"
+# ADR 0060: the socket's private DIRECTORY is bound (read-only; connect()
+# still works), not the socket file: a file bind pins the inode of a listener
+# that dies with serve, while a re-adopting serve listens at the same path.
+SANDBOX_PROXY_DIR = "/tmp/.skep-proxy"
 
 
 def _bubblewrap_args(
@@ -634,7 +637,8 @@ def _bubblewrap_args(
         )
     if network.is_domain_list:
         assert unix_socket_path is not None and proxy_port is not None
-        args.extend(["--bind", unix_socket_path, SANDBOX_PROXY_SOCKET])
+        socket_path = Path(unix_socket_path)
+        args.extend(["--ro-bind", str(socket_path.parent), SANDBOX_PROXY_DIR])
         # The shim prefix runs INSIDE the sandbox before the worker; wrap_command
         # appends the trailing "--" that separates it from the worker argv.
         args.extend(
@@ -644,7 +648,7 @@ def _bubblewrap_args(
                 "-m",
                 "skep.netshim",
                 "--unix",
-                SANDBOX_PROXY_SOCKET,
+                f"{SANDBOX_PROXY_DIR}/{socket_path.name}",
                 "--port",
                 str(proxy_port),
             ]

@@ -270,8 +270,8 @@ _MODES = [
     pytest.param(
         "sandbox",
         marks=pytest.mark.skipif(
-            sys.platform != "darwin",
-            reason="bwrap's --die-with-parent kills a sandboxed worker with serve (ADR 0060 §1)",
+            sys.platform != "darwin" and sandbox.availability().backend != "bubblewrap",
+            reason="needs Seatbelt or real bubblewrap",
         ),
     ),
 ]
@@ -297,6 +297,10 @@ def test_restart_readopts_a_live_worker_and_lands_its_work(
         assert f"adopted live worker pid {worker_pid}" in details and "killed" not in details
         probe = config.result_path(task_id).parent / "proxy-probe.txt"
         assert probe.read_text() == "connected"  # its filter is back on its port
+        # ES-F212: on Linux through the socket's dir, which the adopter cleans.
+        bridge = re.search(r" proxy socket (\S+)", details)
+        assert (bridge is not None) is (mode == "sandbox" and sys.platform == "linux")
+        assert bridge is None or not Path(bridge[1]).parent.exists()
     finally:
         store.close()
 

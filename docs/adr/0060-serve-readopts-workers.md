@@ -70,7 +70,8 @@ Linux), which reaps it when it exits.
 ### 2. What serve records, and how it knows the worker is the same one
 
 At spawn the run's `running` transition now reads
-`pid <N> started <lstart> [proxy port <P>]`. `<lstart>` is the process start
+`pid <N> started <lstart> [proxy port <P>] [proxy socket <path>]` (the
+socket only on Linux, section 1). `<lstart>` is the process start
 time from `ps -o lstart=` in the C locale and UTC — the same helper the CLI
 landing claim already uses (W27, `store._process_started`); no second one.
 A pid is only a number and is reused; the pair (pid, start time) is not.

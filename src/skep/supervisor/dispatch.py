@@ -31,6 +31,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -793,6 +794,8 @@ def run_task(
             running_detail += f" started {json.loads(owner)['started']}"
         if proxy is not None:
             running_detail += f" proxy port {proxy.port}"
+        if proxy_unix_path is not None:
+            running_detail += f" proxy socket {proxy_unix_path}"
         run_store.claim_run_supervisor(task.task_id, expected=None, owner=process_owner())
         run_store.transition(task.task_id, "running", running_detail)
 
@@ -987,8 +990,11 @@ def dispatch_parallel(
             run_store.close()
 
 
-# ADR 0060: "pid N[ started <lstart>][ proxy port P]" — the running transition.
-_WORKER_DETAIL = re.compile(r"pid (\d+)(?: started (.+?))?(?: proxy port (\d+))?")
+# ADR 0060: "pid N[ started <lstart>][ proxy port P][ proxy socket S]" — the
+# running transition.
+_WORKER_DETAIL = re.compile(
+    r"pid (\d+)(?: started (.+?))?(?: proxy port (\d+))?(?: proxy socket (.+))?"
+)
 
 
 def _recorded_worker(run_store: RunStore, task_id: str) -> re.Match[str] | None:
@@ -1252,17 +1258,22 @@ def _adopt_worker(
     daemon thread, to the same ingest a never-restarted serve would run.
     False when it cannot be adopted honestly — recovery then kills it."""
     task_id = record.task_id
-    pid, started, port = int(worker[1]), worker[2], worker[3]
+    pid, started, port, unix_path = int(worker[1]), worker[2], worker[3], worker[4]
     task = _task_from_audit(config, task_id)
     if task is None or not record.workspace:
         return False
     proxy: FilteringProxy | None = None
     if port is not None:
         # Its Seatbelt profile and env name this port: rebind it or kill it —
-        # whatever else holds the port is not skep's filter (I12).
+        # whatever else holds the port is not skep's filter (I12). On Linux
+        # the sandbox reaches the proxy through its socket's directory: listen
+        # again at the same path, in place of the dead listener's socket.
         try:
+            if unix_path is not None and Path(unix_path).is_socket():
+                Path(unix_path).unlink()
             proxy = FilteringProxy(
                 effective_network_domains(task),
+                unix_socket_path=unix_path,
                 denied_loopback_ports=control_plane_ports(config.home),
                 asks=task.permissions.network_ask,
                 port=int(port),
@@ -1299,6 +1310,9 @@ def _adopt_worker(
             finally:
                 if proxy is not None:
                     proxy.stop()
+                if unix_path is not None:  # stop() unlinked the socket; its dir
+                    with suppress(OSError):
+                        Path(unix_path).parent.rmdir()
             result_path = config.result_path(task_id)
             result = _run_result(run_store, task_id, result_path)
             _finish_recovered(

@@ -221,10 +221,10 @@ access token on startup.
 On startup, a run whose worker is still alive from a previous serve is
 re-adopted: serve checks it is the same process (pid and start time),
 restores its network proxy on the same port, and supervises it to the end
-with the time it has left. On Linux a sandboxed worker dies with serve and is
-recovered as a crashed run instead. `--no-readopt` (or
+with the time it has left, sandboxed or not. `--no-readopt` (or
 `SKEP_READOPT_WORKERS=0` in the environment or `serve.env`) kills such workers
-instead, as older versions did. See ADR 0060.
+instead, as older versions did; on Linux a sandboxed worker then dies with the
+serve that started it. See ADR 0060.
 
 ## Chat
 
