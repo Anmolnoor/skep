@@ -31,6 +31,15 @@ def clear_sandbox_probe_cache() -> Iterator[None]:
     sandbox.availability.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def no_other_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """W40: the mask list also covers every home directory on the machine;
+    these tests compare exact sets, so they see only the homes they make."""
+    from skep.supervisor import secret_floor
+
+    monkeypatch.setattr(secret_floor, "HOME_DIRS", (f"{tmp_path}/no-homes/*",))
+
+
 @pytest.fixture()
 def fake_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     """A fake HOME with canary credential files, and a skep home with secrets."""
@@ -474,3 +483,25 @@ def test_the_sandbox_masks_the_policy_floor_minus_what_engines_and_installs_read
     assert readable < set(HOME_SECRETS)
     assert masked == {(home / rel).resolve() for rel in HOME_SECRETS if rel not in readable}
     assert (home / ".secrets").resolve() in masked
+
+
+def test_the_mask_list_covers_every_home_but_the_workers_own_logins(
+    fake_homes: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W40: another home's credential files are masked too — all of them,
+    its engine logins included; the serve user's own engine logins stay
+    readable (SANDBOX_READABLE_SECRETS)."""
+    from skep.supervisor import secret_floor
+
+    home, skep_home = fake_homes
+    other = tmp_path / "Users" / "bob"
+    for rel in (".ssh/id_rsa", ".claude/.credentials.json", "code/x.py"):
+        (other / rel).parent.mkdir(parents=True, exist_ok=True)
+        (other / rel).write_text("CANARY\n", encoding="utf-8")
+    (home / ".claude").mkdir(exist_ok=True)
+    (home / ".claude" / ".credentials.json").write_text("CANARY\n", encoding="utf-8")
+    monkeypatch.setattr(secret_floor, "HOME_DIRS", (f"{tmp_path}/Users/*",))
+    masked = set(sandbox.secret_paths(skep_home))
+    assert {other / ".ssh", other / ".claude" / ".credentials.json"} <= masked
+    assert other / "code" / "x.py" not in masked
+    assert home / ".claude" / ".credentials.json" not in masked
