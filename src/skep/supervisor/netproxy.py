@@ -118,19 +118,22 @@ def admit_target(
     *,
     denied_ports: tuple[int, ...],
     resolve: Resolver = socket.getaddrinfo,
+    asks: tuple[str, ...] = (),
 ) -> tuple[int, str, list[tuple[str, int]]]:
     """ES-F6 (B54): (200, "", addresses to dial) or (status, reason, []).
 
     An allowlisted NAME is resolved once here; any non-public answer
     (loopback, private, link-local, ...) is refused and the caller dials the
     vetted IPs, so DNS cannot rebind between the check and the connect. An
-    IP literal the operator allowlisted is taken as stated."""
+    IP literal the operator allowlisted is taken as stated. W30: a refusal
+    names host and port, where else the host is allowed, and whether it is
+    one of the run's deferred asks (``asks``: ``network_ask``)."""
     if _plain_loopback(host):
         if port in denied_ports:
             return 403, "Forbidden: the skep control plane is not reachable from a run", []
         return 200, "", [(host.strip("[]"), port)]
     if not domain_allowed(host, allowlist, port=port):
-        return 403, f"Forbidden: {host!r} is not in the task network allowlist", []
+        return 403, _refusal(host, port, allowlist, asks), []
     try:
         return 200, "", [(str(ipaddress.ip_address(host.strip("[]"))), port)]
     except ValueError:
@@ -144,6 +147,24 @@ def admit_target(
     if local or not addresses:
         return 403, f"Forbidden: {host!r} resolves to a non-public address {local}", []
     return 200, "", [(a, port) for a in addresses]
+
+
+def _refusal(host: str, port: int, allowlist: tuple[str, ...], asks: tuple[str, ...]) -> str:
+    """The 403's reason: ASCII only, it rides the HTTP status line."""
+    target = f"{host}:{port}"
+    if domain_allowed(host, asks):
+        return (
+            f"Forbidden: {target} needs approval for this run (a deferred ask) and a "
+            "subprocess cannot ask; approve it on the dispatch card, or remember the "
+            "host for the project"
+        )
+    ports = sorted(
+        pinned[1]
+        for pinned in map(split_authority, allowlist)
+        if pinned is not None and pinned[0].rstrip(".") == host.strip("[]").lower().rstrip(".")
+    )
+    elsewhere = f" ({host} is allowed on port {', '.join(map(str, ports))} only)" if ports else ""
+    return f"Forbidden: {target} is not in the task network allowlist{elsewhere}"
 
 
 def _dial(addresses: list[tuple[str, int]]) -> socket.socket:
@@ -204,10 +225,16 @@ class _ProxyServer(ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, allowlist: tuple[str, ...], denied_ports: tuple[int, ...] = ()) -> None:
+    def __init__(
+        self,
+        allowlist: tuple[str, ...],
+        denied_ports: tuple[int, ...] = (),
+        asks: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(("127.0.0.1", 0), _ProxyHandler)
         self.allowlist = allowlist
         self.denied_ports = denied_ports
+        self.asks = asks  # W30: named in the 403, never admitted
         self._counts_lock = threading.Lock()
         self.allowed = 0
         self.denied = 0
@@ -241,6 +268,10 @@ class _ProxyUnixServer(ThreadingUnixStreamServer):
     @property
     def denied_ports(self) -> tuple[int, ...]:
         return self._tcp.denied_ports
+
+    @property
+    def asks(self) -> tuple[str, ...]:
+        return self._tcp.asks
 
     def note(self, *, allowed: bool) -> None:
         self._tcp.note(allowed=allowed)
@@ -304,7 +335,11 @@ class _ProxyHandler(StreamRequestHandler):
         serve's port, never a loopback alias, never a name that resolves to a
         local address, and never under a Host header naming someone else."""
         status, reason, self._addresses = admit_target(
-            host, port, self.server.allowlist, denied_ports=self.server.denied_ports
+            host,
+            port,
+            self.server.allowlist,
+            denied_ports=self.server.denied_ports,
+            asks=self.server.asks,
         )
         if status == 200:
             mismatch = _host_header_mismatch(headers, host, port)
@@ -436,8 +471,9 @@ class FilteringProxy:
         *,
         unix_socket_path: str | None = None,
         denied_loopback_ports: tuple[int, ...] = (),
+        asks: tuple[str, ...] | list[str] = (),
     ) -> None:
-        self._server = _ProxyServer(tuple(allowlist), tuple(denied_loopback_ports))
+        self._server = _ProxyServer(tuple(allowlist), tuple(denied_loopback_ports), tuple(asks))
         self._unix_path = unix_socket_path
         self._unix_server = (
             _ProxyUnixServer(unix_socket_path, self._server)

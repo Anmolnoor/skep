@@ -705,6 +705,8 @@ def run_task(
                     domains,
                     unix_socket_path=proxy_unix_path,
                     denied_loopback_ports=control_plane_ports(config.home),
+                    # W30: named in the 403 as needing approval, never admitted.
+                    asks=task.permissions.network_ask,
                 ).start()
             except OSError as exc:
                 return finish_before_worker(

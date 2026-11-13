@@ -248,3 +248,27 @@ def test_an_endpoint_url_with_a_bad_port_is_no_provider_host() -> None:
     assert _url_host("https://[::1]:8443/v1") == "[::1]:8443"
     assert _aux_endpoint("*.example.com") is None
     assert _aux_endpoint("auth.example:8443") == "auth.example:8443"
+
+
+def test_the_403_names_the_host_and_port_and_where_it_is_allowed() -> None:
+    """W30: "'ollama.com' is not in the allowlist" misled when ollama.com is
+    allowed on another port."""
+    status, reason, _ = admit_target(
+        "ollama.com", 8443, ("ollama.com:443",), denied_ports=(), resolve=_resolve_public
+    )
+    assert status == 403
+    assert "ollama.com:8443 is not in the task network allowlist" in reason
+    assert "allowed on port 443 only" in reason
+    status, reason, _ = admit_target("x.example", 443, ("pypi.org",), denied_ports=())
+    assert reason == "Forbidden: x.example:443 is not in the task network allowlist"
+    reason.encode("latin-1")  # it rides the HTTP status line
+
+
+def test_the_403_for_a_deferred_ask_says_it_needs_approval() -> None:
+    status, reason, _ = admit_target(
+        "example.com", 443, ("pypi.org",), denied_ports=(), asks=("example.com",)
+    )
+    assert status == 403
+    assert reason.startswith("Forbidden: example.com:443 needs approval for this run")
+    assert "dispatch card" in reason
+    reason.encode("latin-1")
