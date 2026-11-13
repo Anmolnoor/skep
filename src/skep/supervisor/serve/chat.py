@@ -1531,7 +1531,9 @@ class ChatEngine:
                 )
                 if not open_calls:
                     flush()
-                if record.id > trusted_through:
+                if record.id > trusted_through and not self.store.covered_by_trust(
+                    chat_id, record.provenance
+                ):
                     untrusted_row = untrusted_row or record.id
                 continue
             elif record.role == "user" and record.attachments:

@@ -300,3 +300,101 @@ def test_a_clarification_choice_is_never_a_deck_command(rig: Rig) -> None:
     events = sse_events(rig.client.post(f"/api/chats/{chat}/messages", json={"content": "x"}).text)
     (asked,) = [data for name, data in events if name == "clarification"]
     assert asked["choices"] == ["no"]
+
+
+def _run_in(rig: Rig, chat: str, state: str) -> str:
+    from skep.supervisor.contracts_io import mint_task
+
+    workspace = rig.config.home / "worktrees" / state
+    workspace.mkdir(parents=True, exist_ok=True)
+    task = mint_task(workspace=workspace, instructions="fix it")
+    rig.store.create_run(task, repo=workspace, ref=None, execution_mode="workspace")
+    if state != "created":
+        rig.store.transition(task.task_id, state)
+    action = rig.store.add_chat_action(chat, tool="dispatch_run", args={})
+    rig.store.resolve_chat_action(action, status="confirmed", result={"task_id": task.task_id})
+    return task.task_id
+
+
+def test_trust_covers_the_finish_notice_of_runs_in_flight(rig: Rig) -> None:
+    """D3 (ES-F100): /trust typed while this chat's run is in flight covers
+    that run's finish notice — the notice stays wrapped as the worker's row but
+    sets no bit, in its write or in the follow-up turn's replay. A run that
+    finished before, a run dispatched after and any other outside content
+    still set ``untrusted``."""
+    chat, _hook, _shell = _tainted_chat(rig)
+    flying = _run_in(rig, chat, "running")
+    done = _run_in(rig, chat, "completed")
+    other_chat = rig.client.post("/api/chats", json={}).json()["chat_id"]
+    elsewhere = _run_in(rig, other_chat, "running")
+    body = rig.client.post(f"/api/chats/{chat}/trust", json={"bits": []}).json()
+    assert body["covers_runs"] == [flying]
+    (line,) = [m for m in rig.store.chat_messages(chat) if m.id == body["line_id"]]
+    assert flying in line.content and done not in line.content
+    assert _audit(rig.config)[-1]["runs"] == [flying]
+
+    # the covered run's notice: wrapped, no bit — at write and on replay
+    rig.store.add_chat_message(
+        chat, role="user", content="Worker summary: done", provenance=f"worker:{flying}"
+    )
+    assert rig.store.get_chat_taint(chat).bits() == []
+    rig.ollama.script_reply("ok")
+    sse_events(rig.client.post(f"/api/chats/{chat}/messages", json={"content": "go"}).text)
+    assert f'<untrusted source=\\"worker:{flying}\\">' in json.dumps(rig.ollama.chat_bodies()[-1])
+    assert rig.store.get_chat_taint(chat).bits() == []
+
+    # anything else still sets the bit: the finished run, another chat's run,
+    # a run dispatched after the /trust
+    for task in (done, elsewhere, _run_in(rig, chat, "running")):
+        row = rig.store.add_chat_message(
+            chat, role="user", content="x", provenance=f"worker:{task}"
+        )
+        assert rig.store.get_chat_taint(chat).untrusted == row
+        rig.store.clear_chat_taint(chat, ["untrusted"], through=row)
+
+
+def test_trust_covers_runs_only_when_it_clears_and_names_untrusted(rig: Rig) -> None:
+    """The stricter reading: a no-op /trust, or one naming only ``private``,
+    covers no run (it trusted no outside content)."""
+    chat, _hook, _shell = _tainted_chat(rig)
+    _run_in(rig, chat, "running")
+    only_private = rig.client.post(f"/api/chats/{chat}/trust", json={"bits": ["private"]})
+    assert only_private.json()["covers_runs"] == []
+    rig.client.post(f"/api/chats/{chat}/trust", json={"bits": []})
+    nothing = rig.client.post(f"/api/chats/{chat}/trust", json={"bits": []}).json()
+    assert nothing["cleared"] == {} and "covers_runs" not in nothing
+
+
+def test_the_terminal_and_cli_receipts_name_the_covered_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from typing import Any, cast
+
+    from skep import cli_chat
+    from skep.supervisor import cli_cmds
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.contracts_io import mint_task
+
+    class Client:
+        def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+            return {"cleared": {"untrusted": 1}, "covers_runs": ["run-a"]}
+
+    repl = cli_chat.ChatRepl(cast(Any, Client()), {"chat_id": "c1"}, show_thinking=False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    repl.run_command("/trust")
+    assert "covers the finish notice of run run-a" in capsys.readouterr().out
+
+    monkeypatch.setattr(cli_cmds, "_stdin_is_interactive", lambda: True)
+    config = build_config(tmp_path / "cli-home", None)
+    store = RunStore(config.db_path)
+    try:
+        chat = store.create_chat(title="t", model=None).chat_id
+        store.add_chat_taint(chat, untrusted=1)
+        task = mint_task(workspace=tmp_path, instructions="x")
+        store.create_run(task, repo=tmp_path, ref=None, execution_mode="workspace")
+        action = store.add_chat_action(chat, tool="dispatch_run", args={})
+        store.resolve_chat_action(action, status="confirmed", result={"task_id": task.task_id})
+        assert main(["--home", str(tmp_path / "cli-home"), "trust", chat]) == 0
+        assert f"covers the finish notice of run {task.task_id}" in capsys.readouterr().out
+    finally:
+        store.close()

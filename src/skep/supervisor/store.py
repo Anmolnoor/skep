@@ -4082,7 +4082,7 @@ class RunStore:
         )
         message_id = int(cursor.lastrowid or 0)
         self._conn.execute("UPDATE chats SET updated_at = ? WHERE chat_id = ?", (now, chat_id))
-        if provenance is not None and provenance not in TRUSTED_PROVENANCE:
+        if provenance is not None and not self.covered_by_trust(chat_id, provenance):
             self._add_chat_taint(chat_id, untrusted=message_id)
         self._conn.commit()
         return message_id
@@ -4136,10 +4136,15 @@ class RunStore:
             self._write_taint(chat_id, merged, self.chat_trusted_through(chat_id))
         return merged
 
-    def _write_taint(self, chat_id: str, taint: ChatTaint, through: int) -> None:
-        payload: dict[str, int | None] = {"private": taint.private, "untrusted": taint.untrusted}
+    def _write_taint(
+        self, chat_id: str, taint: ChatTaint, through: int, runs: Sequence[str] = ()
+    ) -> None:
+        payload: dict[str, Any] = {"private": taint.private, "untrusted": taint.untrusted}
         if through:
             payload["trusted_through"] = through
+        runs = sorted({*self.chat_trusted_runs(chat_id), *runs})
+        if runs:
+            payload["trusted_runs"] = runs
         self._conn.execute(
             "UPDATE chats SET taint = ? WHERE chat_id = ?", (json.dumps(payload), chat_id)
         )
@@ -4157,16 +4162,39 @@ class RunStore:
         return through if type(through) is int else 0
 
     @_locked
-    def clear_chat_taint(self, chat_id: str, bits: Sequence[str], *, through: int) -> ChatTaint:
+    def chat_trusted_runs(self, chat_id: str) -> set[str]:
+        """D3: the runs a /trust covered while they were in flight — their
+        finish notice (a ``worker:<task>`` row) sets no bit."""
+        row = self._conn.execute("SELECT taint FROM chats WHERE chat_id = ?", (chat_id,)).fetchone()
+        try:
+            raw = json.loads(str(row[0])) if row and row[0] else {}
+        except ValueError:
+            return set()
+        runs = raw.get("trusted_runs") if isinstance(raw, dict) else None
+        return {r for r in runs if isinstance(r, str)} if isinstance(runs, list) else set()
+
+    def covered_by_trust(self, chat_id: str, provenance: str) -> bool:
+        """Does a row by this author leave the chat's bits alone? The trusted
+        authors, and a run's own notice once /trust covered that run (D3)."""
+        if provenance in TRUSTED_PROVENANCE:
+            return True
+        kind, _, task = provenance.partition(":")
+        return kind == "worker" and task in self.chat_trusted_runs(chat_id)
+
+    @_locked
+    def clear_chat_taint(
+        self, chat_id: str, bits: Sequence[str], *, through: int, runs: Sequence[str] = ()
+    ) -> ChatTaint:
         """W20: the one way a bit is cleared — ``taint.trust_chat``, the
         operator's /trust (never a model tool). ``through`` is the newest row
-        it covers. Returns the chat's taint after."""
+        it covers; ``runs`` the in-flight runs whose finish notice it covers
+        (D3). Returns the chat's taint after."""
         current = self.get_chat_taint(chat_id)
         cleared = ChatTaint(
             private=None if "private" in bits else current.private,
             untrusted=None if "untrusted" in bits else current.untrusted,
         )
-        self._write_taint(chat_id, cleared, through)
+        self._write_taint(chat_id, cleared, through, runs)
         self._conn.commit()
         return cleared
 

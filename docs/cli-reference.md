@@ -265,6 +265,10 @@ commands the model never sees, identical to the web deck:
 | `/trust [private\|untrusted]` | trust this chat again: clear its taint bits (both by default); never a model tool, never from a channel |
 
 `skep trust CHAT_ID [--bit private|untrusted]` is the same verb outside chat.
+A `/trust` that clears `untrusted` also covers the finish notice of the runs
+this chat has in flight at that moment: when one of those runs finishes, its
+notice is still shown as the worker's words but does not set `untrusted` again.
+The receipt names the runs it covers.
 It writes who cleared which bit, when and the message that had set it to
 `audit/policy/taint-cleared.jsonl` and as a line in the chat. Rows already in
 the chat stay wrapped as outside content; new outside content sets the bit
