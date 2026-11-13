@@ -224,3 +224,11 @@ adapter body (`src/skep/workers/cli_adapter.py`) — same contract, same
 sandbox, same gates as Claude Code. The Ollama coding worker is a
 first-party planner that reuses the saved assistant LLM credentials by
 default. Select any of them with `--worker-cmd` or `SKEP_WORKER_CMD`.
+
+An external engine's own sandbox is turned off, because skep's sandbox is
+its wall (ADR 0047) and a sandbox cannot nest inside skep's (Landlock
+refuses a nested bubblewrap; Seatbelt refuses a nested `sandbox-exec`):
+Codex runs `exec --sandbox danger-full-access`, Claude Code gets
+`--settings '{"sandbox": {"enabled": false}}'`. Aider and pi start none.
+External engines always run in sandbox mode (v94-F4), and the codex worker
+refuses to start outside skep's sandbox. See `sandboxing.md`, Landlock.

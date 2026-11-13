@@ -95,6 +95,19 @@ The refresh token never leaves the host.
    it by its realpath): the Queen's `read_file`, `search_files` and host
    shell refuse it, and no card lifts that.
 
+## Codex's own sandbox is off
+
+skep runs `codex exec --sandbox danger-full-access` (ES-F220). Codex's
+default, read-only, refuses every edit (ES-F128), and any Codex sandbox
+starts its own bubblewrap for each shell call, which the kernel refuses
+inside skep's Landlock domain: the first live run's shell calls all failed
+with `bwrap: Failed to make / slave: Operation not permitted` and it made
+no patch. On macOS, Codex's Seatbelt could not nest inside skep's either.
+skep's sandbox (bubblewrap with the Landlock step on Linux, Seatbelt on
+macOS) is the wall: a codex run is always dispatched in sandbox mode
+(v94-F4), and the codex worker refuses to start when the spawner did not
+mark its launch as sandboxed. See `sandboxing.md`, Landlock.
+
 ## Opting in
 
 Off by default. A project-policy key, `codex_chatgpt_login` (bool):

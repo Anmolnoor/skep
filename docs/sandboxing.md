@@ -150,6 +150,21 @@ Landlock only ever narrows. Every bubblewrap and podman mask above stays:
 they also hide what a socket file reveals by being read, and they are the
 wall on a kernel without Landlock.
 
+No sandbox nests inside it. The kernel refuses mount changes to a
+Landlock-restricted process, even in a new user namespace, so a bubblewrap
+started inside the worker fails (`bwrap: Failed to make / slave: Operation
+not permitted`). External engines that would start one get theirs turned
+off (ES-F220, ES-F221): `codex exec --sandbox danger-full-access`, and
+Claude Code `--settings '{"sandbox": {"enabled": false}}'` (its Bash
+sandbox is bubblewrap, and the operator's or the repo's own settings may
+turn it on). skep's sandbox is their wall (ADR 0047): external engines are
+always run in it (v94-F4), and the codex worker refuses to start unless the
+spawner marked its launch as sandboxed (`SKEP_SANDBOX`). On macOS the same
+holds for another reason: `sandbox-exec` inside a Seatbelt-sandboxed
+process fails with `sandbox_apply: Operation not permitted`, so an engine's
+own Seatbelt cannot nest inside skep's. With the engine's sandbox off, it
+never tries. aider and pi start no sandbox of their own.
+
 ### Loopback
 
 Loopback is closed to a sandboxed worker by default. A run reaches a port on
