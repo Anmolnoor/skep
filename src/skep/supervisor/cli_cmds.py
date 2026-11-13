@@ -3636,7 +3636,7 @@ def register_supervisor_commands(
         "--unlocked",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="zero-ask mode for this project (ADR 0060): a sandboxed worker's default "
+        help="zero-ask mode for this project (ADR 0061): a sandboxed worker's default "
         "asks answer themselves, dispatch needs no card and a G10-confirmed patch "
         "lands on skep/*; denies, named asks and the floor still hold. Needs a pinned "
         "verify command, a usable sandbox and an approved baseline; --no-unlocked "

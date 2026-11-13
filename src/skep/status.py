@@ -435,7 +435,7 @@ def _role_less_chat_advisories(home: Path) -> list[str]:
 
 
 def _unlocked_advisories(home: Path) -> list[str]:
-    """ADR 0060 (I8): an unlocked project is a standing mode — "nothing
+    """ADR 0061 (I8): an unlocked project is a standing mode — "nothing
     asked" must read as the mode the operator turned on, with the way out."""
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
@@ -454,7 +454,7 @@ def _unlocked_advisories(home: Path) -> list[str]:
     if not unlocked:
         return []
     return [
-        f"{len(unlocked)} project(s) are unlocked (zero-ask, ADR 0060): {', '.join(unlocked)} — "
+        f"{len(unlocked)} project(s) are unlocked (zero-ask, ADR 0061): {', '.join(unlocked)} — "
         "sandboxed workers there are not asked about commands and hosts no rule names; "
         f"turn it off with `skep project setup <repo> --project-id {unlocked[0]} --no-unlocked`"
     ]

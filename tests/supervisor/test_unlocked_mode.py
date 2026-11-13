@@ -1,4 +1,4 @@
-"""Unlocked mode on policy v3 (ADR 0060): the per-project zero-ask rung.
+"""Unlocked mode on policy v3 (ADR 0061): the per-project zero-ask rung.
 
 The key exists on every operator face, is project-only and never groupable
 (I6), and refuses to save without its preconditions — a pinned

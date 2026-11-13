@@ -63,4 +63,4 @@ touches.
 | [0050](0050-one-verb-three-faces.md) | One verb, three faces: the operator's surface is never the narrow half (v104) |
 | [0051](0051-provider-shelf.md) | The provider shelf: presets, per-profile keys, no borrowed identity (v108) |
 | [0059](0059-policy-v3.md) | Policy v3: one decide(), layer-aware ceilings, scoped grants (edge sweep; P3-1 implemented) |
-| [0060](0060-unlocked-mode.md) | Unlocked mode on policy v3: a zero-ask project as one step inside decide() (es-unlocked-v3, not merged) |
+| [0061](0061-unlocked-mode.md) | Unlocked mode on policy v3: a zero-ask project as one step inside decide() (es-unlocked-v3, not merged) |

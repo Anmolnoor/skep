@@ -1247,7 +1247,7 @@ def create_app(
         continuation degrades to the pre-v105 behaviour rather than losing the
         terminal line.
 
-        ADR 0060: on an unlocked project the gate answers itself BEFORE the
+        ADR 0061: on an unlocked project the gate answers itself BEFORE the
         notice, so the chat never hears an ask that is already answered; any
         failure leaves the gate a human's card.
         """

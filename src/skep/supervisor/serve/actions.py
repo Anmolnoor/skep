@@ -979,7 +979,7 @@ def copy_project_policy(store: RunStore, *, src: str, dst: str) -> dict[str, Any
     target = project_from_store(store, dst)
     if target is None:
         raise HTTPException(status_code=404, detail=f"no project {dst!r}")
-    # ES-F141 (ADR 0060, I6): unlocked is climbed per project, on its own
+    # ES-F141 (ADR 0061, I6): unlocked is climbed per project, on its own
     # HIGH card — a copy never carries it.
     overlay = {
         key: value
@@ -3655,7 +3655,7 @@ def resume_past_gate(
     """Q8: approving a suspended task resumes it past the gate (fresh worker
     run carrying the granted verdict), dispatched on the background pool.
 
-    ``session=False`` (ADR 0060's auto-answer) approves ONCE: an automatic
+    ``session=False`` (ADR 0061's auto-answer) approves ONCE: an automatic
     verdict never writes the session tier a human's plain approve does.
 
     ``shell_allowlist`` overrides the original permissions' allowlist so a
@@ -3780,7 +3780,7 @@ def _gate_requests(store: RunStore, task_id: str, approval: Any) -> list[Request
 def auto_answer_unlocked_gate(
     store: RunStore, holder: ConfigHolder, runner: Dispatcher, task_id: str
 ) -> str | None:
-    """ADR 0060: on an unlocked project a sandboxed run's gate answers itself
+    """ADR 0061: on an unlocked project a sandboxed run's gate answers itself
     when ``decide(…, sandboxed=True)`` allows every request it names, under
     the run's own role and chain — the click path (``resume_past_gate``),
     actor ``auto:unlocked``, once. Each request is a decision-log row (I13).

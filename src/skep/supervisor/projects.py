@@ -51,7 +51,7 @@ PROJECT_POLICY_KEYS = frozenset(
         # Shape-validated here; known-name checks live at attach time and,
         # fail-closed, at resolve time.
         "policy_groups",
-        # ES-F141 (ADR 0060): the top rung of the per-project trust ramp (I6).
+        # ES-F141 (ADR 0061): the top rung of the per-project trust ramp (I6).
         # On an unlocked project decide() answers a sandboxed worker's default
         # asks, dispatch runs in-turn and a G10-confirmed patch lands. Saved on
         # only with a pinned verify_command, a usable sandbox and an approved

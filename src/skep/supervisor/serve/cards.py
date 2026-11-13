@@ -219,7 +219,7 @@ def high_tier(
         safe.get("unlocked") is True
         or (isinstance(overrides, dict) and overrides.get("unlocked") is True)
     ):
-        # ES-F142 (ADR 0060): a whole project's worker asks stop asking
+        # ES-F142 (ADR 0061): a whole project's worker asks stop asking
         return "it turns unlocked mode on: the project's sandboxed workers stop asking"
     if tool == "setup_project" and (overrides or safe.get("groups")):
         # the overlay spells any knob (coding_engine, default_network, …) and

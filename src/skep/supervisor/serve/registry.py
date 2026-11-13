@@ -567,7 +567,7 @@ def _validate_project_binding(*, root: Path, run_store: RunStore, kind: str, val
 
 
 def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | None:
-    """ES-F141 (ADR 0060): why ``unlocked=true`` may not be saved, or None.
+    """ES-F141 (ADR 0061): why ``unlocked=true`` may not be saved, or None.
     The mode stands on three things: G10 re-runs a command the PROJECT
     pinned (I2), its runs are sandboxed (I12), and decide() has a baseline
     to answer under — on a zero-state or tampered home every worker ask is

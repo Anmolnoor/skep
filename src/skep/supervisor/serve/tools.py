@@ -1716,7 +1716,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             },
             "unlocked": {
                 "type": "boolean",
-                "description": "zero-ask mode (ADR 0060): the project's sandboxed "
+                "description": "zero-ask mode (ADR 0061): the project's sandboxed "
                 "workers stop asking about commands and hosts no rule names, and "
                 "verified patches land on skep/*. Set it ONLY when the user asks to "
                 "unlock the project; true is a HIGH card, false turns it off",

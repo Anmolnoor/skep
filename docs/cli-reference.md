@@ -308,7 +308,7 @@ as `GET` / `DELETE /api/policy/rules` and the chat `revoke_policy_rule` card.
 
 `project setup` binds a repo to a policy pack and infers a `verify_command`
 from the repo's own entry point (v91); an explicit `--verify-command` always
-wins. `--unlocked` is the top rung of the trust ramp (ADR 0060): the
+wins. `--unlocked` is the top rung of the trust ramp (ADR 0061): the
 project's sandboxed workers stop asking about commands and hosts no rule
 names, dispatch needs no card and a G10-confirmed patch lands on `skep/*`;
 denies, named asks and the floor still hold. It needs a pinned verify

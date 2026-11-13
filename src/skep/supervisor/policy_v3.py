@@ -166,7 +166,7 @@ class Stack:
     # P4-1 (D5): the asking chat's trifecta bits. None — no chat (REST, the
     # CLI, the hook, ACP) — is no taint: those faces decide as before.
     taint: ChatTaint | None = None
-    # ADR 0060: the project id when the repo's project is unlocked — the run
+    # ADR 0061: the project id when the repo's project is unlocked — the run
     # lane's default asks of a sandboxed worker are answered (``_unlocked``).
     unlocked: str | None = None
 
@@ -589,7 +589,7 @@ def _opaque(
     )
 
 
-# ADR 0060: what the unlocked step answers — the two asks a worker gate
+# ADR 0061: what the unlocked step answers — the two asks a worker gate
 # raises that its auto-answer understands. Nothing else (a write outside the
 # workspace, a Queen lane) is ever the layer's.
 UNLOCKED_REQUESTS = frozenset({("shell", "run"), ("network", "connect")})
@@ -652,7 +652,7 @@ def decide(
     ``network`` value: it decides as its host, with the URL as ``url``, so
     every face can ask what read_url asks (V1).
 
-    ``sandboxed`` (ADR 0060) is a fact about the request: a worker inside
+    ``sandboxed`` (ADR 0061) is a fact about the request: a worker inside
     the sandbox walls raised it (only the worker-gate auto-answer says so).
     On an unlocked project's run lane, the default asks of such a request —
     unmatched, or a catch-all ``*`` ask — are answered ``allow`` labelled

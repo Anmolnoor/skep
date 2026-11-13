@@ -319,7 +319,7 @@ def run_policy_for_repo(
                 chain.pop(registered.name, None)
         engine["routed_keys"] = routed
         engine["rule_refusals"] = [asdict(refusal) for refusal in stack.refusals]
-    # ES-F143 (ADR 0060): unlocked implies the posture keys it stands for —
+    # ES-F143 (ADR 0061): unlocked implies the posture keys it stands for —
     # dispatch without a card, in the sandbox (the wall that justifies it,
     # I12), landing through the unchanged verified-patch lane (G10 with the
     # pinned verify, skep/* only: I1, I2). After every layer, the engine seam
@@ -701,7 +701,7 @@ def resolve_run_policy(
     # may run one on the naked host (field run 019f9e9d did exactly that via
     # the trusted_local_dev workspace default). The coerced mode is the mode
     # every surface shows (I8); dispatch backs this with a hard refusal.
-    # ES-F143 (ADR 0060): the same coercion for an unlocked project — zero-ask
+    # ES-F143 (ADR 0061): the same coercion for an unlocked project — zero-ask
     # is justified by the wall, so no request flag runs one outside it.
     if chosen_engine.external or policy.get("unlocked") is True:
         resolved_execution_mode = "sandbox"
