@@ -226,12 +226,24 @@ def shell_secret_floor_reason(
     (``cat $(printf ~/.s%s/id_rsa sh)``, ``cd ~ && cd .ssh``, a script that
     opens it). The real fix is sandboxing the Queen's shell (deny the floor
     paths like the worker sandbox will, B05) — out of scope here."""
+    for candidate in _command_paths(command, cwd):
+        reason = secret_floor_reason(candidate, skep_home=skep_home, templates_ok=True)
+        if reason is not None:
+            return reason
+    return None
+
+
+def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -> list[Path]:
+    """The cwd and every path a host-shell line's tokens may name (also after
+    ``=`` and a curl-style ``@``), ``$VAR``/``~``-expanded, resolved against
+    the cwd and globbed. ``named_only``: not the cwd itself, and a bare
+    relative word (``df``) only when it exists there."""
     from .shell_prefixes import command_line_segments
 
     base = Path(cwd).expanduser() if cwd else Path.cwd()
     tokens = [token for argv in command_line_segments(command) or [] for token in argv]
     tokens += [token.strip("'\"") for token in command.split()]  # unparseable lines too
-    candidates = [base]
+    candidates = [] if named_only else [base]
     for token in tokens:
         if "://" in token:
             continue  # a URL names no local file
@@ -239,12 +251,26 @@ def shell_secret_floor_reason(
             part = part.removeprefix("@")
             if not part:
                 continue
-            path = base / Path(os.path.expandvars(part)).expanduser()
+            named = Path(os.path.expandvars(part)).expanduser()
+            path = base / named
+            bare = len(named.parts) == 1 and not named.is_absolute()
+            if named_only and bare and not path.exists():
+                continue  # a bare word (`df`, `-h`) names no file here
             candidates.append(path)
             if any(char in part for char in "*?["):
                 candidates += [Path(hit) for hit in islice(iglob(str(path)), 200)]
-    for candidate in candidates:
-        reason = secret_floor_reason(candidate, skep_home=skep_home, templates_ok=True)
-        if reason is not None:
-            return reason
-    return None
+    return candidates
+
+
+def names_path_under(command: str, root: Path, *, cwd: str | None, except_under: Path) -> bool:
+    """D11: does the line (its cwd included) name a path under ``root`` — by
+    either spelling, the requested path or its realpath — that is not under
+    ``except_under``?"""
+    roots = {alias_key(spelling) for spelling in path_spellings(root)}
+    exempt = {alias_key(spelling) for spelling in path_spellings(except_under)}
+    for candidate in _command_paths(command, cwd, named_only=True):
+        for spelling in path_spellings(candidate):
+            folded = alias_key(spelling)
+            if any(_under(folded, r) for r in roots) and not any(_under(folded, e) for e in exempt):
+                return True
+    return False

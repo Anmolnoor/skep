@@ -3074,6 +3074,16 @@ def queen_shell_decision(
             detail=floor["reason"],
             decided_by=floor["decided_by"],
         )
+    from ..shell_prefixes import queen_skep_refusal
+
+    skep_self = queen_skep_refusal(command, home=holder.current.home, cwd=cwd)
+    if skep_self is not None:  # D11: the Queen's lanes only, not the hook's
+        return AutonomyDecision(
+            verdict="deny",
+            reason="shell.deny.skep_self",
+            detail=skep_self,
+            decided_by="floor/floor.never-grantable-prefixes",
+        )
     repo = _cwd_registered_repo(store, holder, cwd)
     reached = None if repo is not None else _command_registered_repo(store, holder, command, cwd)
     target = repo if repo is not None else reached
@@ -5380,15 +5390,9 @@ def _execute_mutation(
                     f"(the {'shell command' if caste == 'script' else 'text to run'})"
                 )
             if caste == "script":
-                from ..shell_prefixes import (
-                    SKEP_TRUST_REFUSAL,
-                    command_line_segments,
-                    is_skep_trust_command,
-                )
-
-                segments = command_line_segments(str(args["instructions"])) or []
-                if any(is_skep_trust_command(segment) for segment in segments):
-                    raise ValueError(SKEP_TRUST_REFUSAL)  # W20 review: nor on a timer
+                skep_self = _schedule_skep_refusal(args, holder)
+                if skep_self is not None:
+                    raise ValueError(skep_self)  # W20 review, D11: nor on a timer
             if caste == "prompt" and chat_id is None:
                 raise ValueError(
                     "a prompt schedule runs its Queen turn in the chat that "
@@ -5718,6 +5722,16 @@ _DECIDED_LANES = frozenset(
 )  # fmt: skip
 
 
+def _schedule_skep_refusal(args: dict[str, Any], holder: ConfigHolder) -> str | None:
+    """D11: a script schedule runs as the operator on this host, so it gets
+    the Queen shell's skep floor (``skep trust`` included, W20 review)."""
+    from ..shell_prefixes import queen_skep_refusal
+
+    if args.get("caste") != "script" or args.get("instructions") is None:
+        return None
+    return queen_skep_refusal(str(args["instructions"]), home=holder.current.home, cwd=None)
+
+
 def mutation_execution_decision(
     name: str,
     args: dict[str, Any],
@@ -5792,6 +5806,9 @@ def _mutation_execution_decision(
     # B22: the Queen's own hop (``_queen_chain``) — a dispatch its role can
     # never delegate refuses here, before a card exists to confirm.
     chain = [f"queen@{role.name}"] if role else []
+    skep_self = _schedule_skep_refusal(args, holder) if name == "propose_schedule" else None
+    if skep_self is not None:  # D11: refused at proposal, no card
+        return AutonomyDecision(verdict="deny", reason="schedule.deny.skep_self", detail=skep_self)
     if name == "run_schedule_now":
         # ES (B122): a disabled/unknown schedule can only fail on confirm —
         # refuse now, without a card, and tell the model why.

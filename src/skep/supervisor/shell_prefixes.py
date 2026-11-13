@@ -11,6 +11,7 @@ import posixpath
 import re
 import shlex
 from collections.abc import Sequence
+from pathlib import Path
 
 # v19-F3: git subcommands the worker denies outright. The supervisor lands
 # changes as a patch after approval, so a worker has no business reaching a
@@ -456,12 +457,11 @@ def references_dead_worktree(argv: Sequence[str]) -> bool:
 _SKEP_RUNNERS = frozenset({"-m", "run", "exec", "uvx", "pipx"})
 
 
-def is_skep_trust_command(argv: Sequence[str]) -> bool:
-    """``skep trust`` or ``skep chat`` (whose deck takes "/trust" from a pipe)
-    in any spelling: ``uv run skep trust``, ``python3 -m skep --home h trust``.
-    Clearing a chat's taint is the operator's act at the desk — from a chat's
-    shell it is the model clearing its own guard (W20 review)."""
+def _skep_subcommands(argv: Sequence[str]) -> list[list[str]]:
+    """What follows each ``skep`` this argv runs, past skep's own options:
+    ``uv run skep trust c1`` → ``[["trust", "c1"]]``; ``[]`` when it runs none."""
     tokens = [str(token) for token in argv]
+    found: list[list[str]] = []
     for index, token in enumerate(tokens):
         runner = index == 0 or program_name(tokens[index - 1]) in _SKEP_RUNNERS
         if program_name(token) != "skep" or not runner:
@@ -469,9 +469,42 @@ def is_skep_trust_command(argv: Sequence[str]) -> bool:
         rest = tokens[index + 1 :]
         while rest and rest[0].startswith("-"):  # skep's own options
             rest = rest[2:] if rest[0] in ("--home", "--url") else rest[1:]
-        if rest[:1] in (["trust"], ["chat"]):
-            return True
-    return False
+        found.append(rest)
+    return found
+
+
+def is_skep_trust_command(argv: Sequence[str]) -> bool:
+    """``skep trust`` or ``skep chat`` (whose deck takes "/trust" from a pipe)
+    in any spelling: ``uv run skep trust``, ``python3 -m skep --home h trust``.
+    Clearing a chat's taint is the operator's act at the desk — from a chat's
+    shell it is the model clearing its own guard (W20 review)."""
+    return any(rest[:1] in (["trust"], ["chat"]) for rest in _skep_subcommands(argv))
+
+
+SKEP_SELF_REFUSAL = (
+    "the chat's shell never runs skep or touches skep's own files (its store, audit, "
+    "tokens, settings) — use get_run for a run, policy_why for a decision, read_file to read"
+)
+
+
+def queen_skep_refusal(command: str, *, home: Path, cwd: str | None) -> str | None:
+    """D11: a line that runs skep in any spelling the floor reads (a path, ``uv
+    run``, ``python3 -m``, a launcher, ``sh -c``, a pipeline), or names a path
+    under the skep home (``home`` is the supervisor home; in the shipped
+    layout ``<SKEP_HOME>/supervisor``, so ``<SKEP_HOME>`` minus its ``repos``
+    clones), relative names judged against ``cwd``. The Queen's lanes only:
+    the hook and REST keep the narrower ``skep trust`` floor."""
+    from .secret_floor import names_path_under
+
+    segments = command_line_segments(command) or []
+    if any(is_skep_trust_command(argv) for argv in segments):
+        return SKEP_TRUST_REFUSAL  # its own words: trusting a chat is the operator's /trust
+    if any(_skep_subcommands(argv) for argv in segments):
+        return SKEP_SELF_REFUSAL
+    root = home.parent if home.name == "supervisor" else home
+    if names_path_under(command, root, cwd=cwd, except_under=root / "repos"):
+        return SKEP_SELF_REFUSAL
+    return None
 
 
 SKEP_TRUST_REFUSAL = (
