@@ -537,9 +537,10 @@ def test_b20_a_shell_allow_is_the_exact_line_a_keep_always_would_store(
     # exact, never a prefix; a role's catch-all ask yields to it, as to a keep (decision #1)
     assert _shell(locked, "df -h /", cwd=out).startswith("require_approval")
     assert _shell(locked, "df -h", cwd=out, role="builder").startswith("allow grant:global/")
-    # a compound line is one exact rule per segment
-    both = _operator_shell(locked, "allow", "uptime && whoami")
-    assert both["patterns"] == ["uptime", "whoami"]
+    # a compound line is one exact rule per segment (D13 moved it off `uptime &&
+    # whoami`: a standing allow now names only the known-safe programs)
+    both = _operator_shell(locked, "allow", "uname -a && pwd")
+    assert both["patterns"] == ["uname -a", "pwd"]
 
 
 @pytest.mark.parametrize(
@@ -630,11 +631,15 @@ def test_b20_a_refused_shell_allow_gets_no_card(locked: SupervisorConfig) -> Non
 def test_b20_a_run_repo_allow_opens_one_exact_line_in_a_repo(
     locked: SupervisorConfig, repo: Path
 ) -> None:
-    """What the repo-pen refusal tells the model to propose, and no more."""
-    assert _shell(locked, "make test", cwd=str(repo)).startswith("deny")
-    _operator_shell(locked, "allow", "make test", action="run_repo")
-    assert _shell(locked, "make test", cwd=str(repo)).startswith("allow grant:global/")
-    assert _shell(locked, "make test-all", cwd=str(repo)).startswith("deny")
+    """What the repo-pen refusal tells the model to propose, and no more.
+    D13 moved it off `make test`: a standing allow now names only the
+    known-safe programs, so `make test` is refused and a test runner opens."""
+    assert _shell(locked, "pytest -q", cwd=str(repo)).startswith("deny")
+    with pytest.raises(HTTPException):
+        _operator_shell(locked, "allow", "make test", action="run_repo")
+    _operator_shell(locked, "allow", "pytest -q", action="run_repo")
+    assert _shell(locked, "pytest -q", cwd=str(repo)).startswith("allow grant:global/")
+    assert _shell(locked, "pytest -q -x", cwd=str(repo)).startswith("deny")
 
 
 # --- D7: the generated "In this chat:" line (the B33 class) -----------------------------

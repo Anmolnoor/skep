@@ -3070,6 +3070,8 @@ def cmd_policy_migrate(args: argparse.Namespace) -> int:
         print(f"already held (decide() still binds it; no write can add one): {line}")
     if report["b31"]:
         print(report["b31"])
+    for pattern in report["standing"]:
+        print(f"standing shell grant a new allow would refuse (D13; still held): {pattern}")
     return 0
 
 

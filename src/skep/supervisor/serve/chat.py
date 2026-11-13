@@ -2724,6 +2724,15 @@ class ChatEngine:
             refused = (
                 "skep cannot read this line and a deny or named ask exists, so it is once only"
             )
+        if refused is None and keep == "always":
+            refused = next(
+                (
+                    why
+                    for item in folded
+                    if (why := actions.standing_keep_refusal(action.tool, item))
+                ),
+                None,
+            )  # D13: the standing allow-list
         if refused is not None and not named:
             # The write-time check narrowed this card to "once" and the client
             # named no keep: a plain Approve runs once, it is not a 400.

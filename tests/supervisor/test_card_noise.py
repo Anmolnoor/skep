@@ -233,9 +233,10 @@ def _transcript(env: Live) -> dict[str, Any]:
     env.ollama.script_reply("not transferring")
     s.deny(c, transfer)
 
-    # t18: a compound line, keep=always, the same line again (B61)
+    # t18: a compound line, keep=always, the same line again (B61). D13 moved it
+    # off `git --version && uname -r`: `git --version` is not a standing allow now.
     c = s.chat()
-    line = ("run_shell", {"command": "git --version && uname -r", "cwd": str(outside)})
+    line = ("run_shell", {"command": "git status && uname -r", "cwd": str(outside)})
     (card,) = s.ask(c, "versions", line, reply=False)
     env.ollama.script_reply("ok")
     s.confirm(c, card, keep="always")

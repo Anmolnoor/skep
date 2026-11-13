@@ -664,7 +664,32 @@ def migration_report(holder: ConfigHolder, store: RunStore) -> dict[str, Any]:
         "replay_line": line,
         "held": [f.message for f in findings(stack) if f.check != 2],  # W16: 2 only warns
         "b31": b31,
+        "standing": unaccepted_standing_shell(store),
     }
+
+
+def unaccepted_standing_shell(store: RunStore) -> list[str]:
+    """D13: the standing ("always", global) shell grants this home holds that
+    a new standing allow would refuse today. Still held and still matching —
+    named so the operator can revoke them; nothing is disabled."""
+    from .policy_schema import (
+        POLICY_DOCUMENT_SETTINGS_KEY,
+        document_from_settings,
+        lifetime_of,
+        matcher_of,
+    )
+    from .serve.actions import queen_shell_allow_refusal
+
+    document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    return [
+        rule.pattern
+        for rule in (document.learned if document else [])
+        if rule.scope == "shell"
+        and rule.action in ("run", "run_background")
+        and lifetime_of(rule) == "global"
+        and matcher_of(rule) == "exact_argv"
+        and isinstance(queen_shell_allow_refusal(rule.pattern, rule.action), str)
+    ]
 
 
 def migration_line(report: Mapping[str, Any]) -> str | None:
@@ -683,6 +708,12 @@ def migration_line(report: Mapping[str, Any]) -> str | None:
         )
     if report["b31"]:
         parts.append(report["b31"])
+    if report.get("standing"):
+        names = ", ".join(f"`{p}`" for p in report["standing"])
+        parts.append(
+            f"{len(report['standing'])} standing shell grant(s) a new one would refuse (D13): "
+            f"{names} — still held; revoke on the Policies page"
+        )
     if not parts:
         return None
     return "policy v3: " + "; ".join(parts) + " — `skep policy migrate --dry-run` lists them"

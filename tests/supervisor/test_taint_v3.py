@@ -956,7 +956,7 @@ def test_w7_a_private_chats_network_line_offers_no_session_keep() -> None:
     private = ChatTaint(private=7)
     for tool in ("run_shell", "start_process"):
         net = actions.keep_options(tool, {"command": "dig x.example"}, private)
-        assert net == ["once", "always"], (tool, net)
+        assert net == ["once"], (tool, net)  # D13 dropped "always": dig is not on the list
         assert actions.default_keep(tool, {"command": "dig x.example"}, private) == "once"
         assert "session" in actions.keep_options(tool, {"command": "ls -la"}, private)
     assert "session" in actions.keep_options("run_shell", {"command": "dig x.example"}, None)
