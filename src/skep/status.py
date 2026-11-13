@@ -735,6 +735,9 @@ def format_doctor_report(status: Mapping[str, Any]) -> str:
         lines.append(f"- engine {name}: {mark} — {engine.get('detail')}{walls}")
         if login:
             lines.extend(_codex_login_lines(login))
+    relay = status.get("provider_key_relay", {})
+    if relay:
+        lines.append(f"- provider key relay: {relay.get('label')}")
 
     approvals = status.get("approvals", {})
     stale = approvals.get("stale", 0)
@@ -881,6 +884,36 @@ def _codex_login_lines(login: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _provider_key_relay_check(home: Path) -> dict[str, Any]:
+    """ADR 0062: does a builtin worker hold the provider key, and which
+    engines the relay does not cover. Names and protocols only, never a key."""
+    from skep.supervisor.engines import CODING_ENGINES
+    from skep.supervisor.provider_relay import relay_plan
+    from skep.supervisor.serve.settings import PROVIDER_KEY_RELAY
+
+    from .supervisor.store import RunStore
+
+    external = [name for name, engine in CODING_ENGINES.items() if engine.external]
+    engines = ", ".join(external[:-1]) + f" and {external[-1]}" if len(external) > 1 else ""
+    not_relayed = f"; {engines} authenticate from their own auth env (not relayed)"
+    db = home / "supervisor" / "supervisor.sqlite3"
+    on = False
+    if db.is_file():
+        store = RunStore(db)
+        try:
+            on = store.get_setting(PROVIDER_KEY_RELAY) is True
+        finally:
+            store.close()
+    if not on:
+        label = "off — builtin workers hold the provider key (set provider_key_relay to relay it)"
+        return {"on": False, "relayed": False, "label": label + not_relayed}
+    plan, why = relay_plan(home)
+    if plan is None:
+        return {"on": True, "relayed": False, "label": f"on, not used — {why}{not_relayed}"}
+    label = f"on — builtin workers reach {plan[1]} through their run's relay and hold no key"
+    return {"on": True, "relayed": True, "label": label + not_relayed}
+
+
 def _memory_status(home: Path, has_profile: bool) -> dict[str, Any]:
     """v13: the single durable memory system is the sqlite store (curated
     memory_items with FTS search), not the inert ``~/.skep/memory`` directory.
@@ -942,6 +975,7 @@ def _status_payload(
         # Reported BEFORE dispatch — the v87-F6 lesson, where a binary that was
         # not on the host burned three runs before anything said so.
         "coding_engines": _coding_engine_checks(home),
+        "provider_key_relay": _provider_key_relay_check(home),
         "approvals": {"status": "ready", "pending": 0},
         "memory": _memory_status(home, profile is not None),
         "sandbox": sandbox or {},

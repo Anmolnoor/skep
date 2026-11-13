@@ -151,6 +151,7 @@ from .settings import (
     DEFAULT_WALL_CLOCK_SECONDS,
     EXECUTION_MODES,
     POLICY_ENGINE_V2_SCOPES,
+    PROVIDER_KEY_RELAY,
     SANDBOX_BACKEND,
     SANDBOX_BACKENDS,
     SANDBOX_REQUIRED_FOR,
@@ -182,6 +183,7 @@ POLICY_FIELDS = {
     "allowed_plugin_risks": ALLOWED_PLUGIN_RISKS,
     "sandbox_backend": SANDBOX_BACKEND,
     "policy_engine_v2_scopes": POLICY_ENGINE_V2_SCOPES,
+    "provider_key_relay": PROVIDER_KEY_RELAY,
 }
 
 _POSITIVE_POLICY_FIELDS = {
@@ -6458,6 +6460,9 @@ def update_policy(
             status_code=400,
             detail="default_execution_mode must be 'ask', 'workspace', or 'sandbox'",
         )
+    relay = updates.get("provider_key_relay")
+    if relay is not None and not isinstance(relay, bool):
+        raise HTTPException(status_code=400, detail="provider_key_relay must be true or false")
     backend = updates.get("sandbox_backend")
     if backend is not None and backend not in SANDBOX_BACKENDS:
         raise HTTPException(

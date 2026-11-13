@@ -126,6 +126,7 @@ def test_every_run_policy_knob_declares_its_scope_or_is_a_daemon_knob_on_purpose
         "ticker_interval_seconds",
         "card_timeout_seconds",
         "policy_engine_v2_scopes",
+        "provider_key_relay",  # ADR 0062: how a key reaches a worker, not a scope's rule
     }
     for key in registry_keys(system="run_policy"):
         if key.scope is None:

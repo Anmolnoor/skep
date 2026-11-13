@@ -14,6 +14,7 @@ from typing import Any, get_args
 
 from skep.profile import ProviderProfile, load_profile, profile_path
 from skep.supervisor.netproxy import domain_allowed
+from skep.supervisor.provider_relay import RELAY_ENV
 from skep.supervisor.serve.llm import (
     DEFAULT_LLM_PROTOCOL,
     LLM_BASE_URL,
@@ -104,10 +105,30 @@ class ProviderUsageTally:
 
 
 def worker_provider_from_env() -> WorkerProvider | None:
+    relayed = _relayed_provider()
+    if relayed is not None:
+        return relayed
     raw_home = os.environ.get("SKEP_HOME", "").strip()
     if not raw_home:
         return None
     return worker_provider_from_home(Path(raw_home))
+
+
+def _relayed_provider() -> WorkerProvider | None:
+    """ADR 0062 (V6b): the supervisor relays this run's model calls. It
+    resolved the provider with ``worker_provider_from_home`` and hands over
+    the relay URL, protocol, model and the run's token — never the key."""
+    raw = os.environ.get(RELAY_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        relay = json.loads(raw)
+        profile = ProviderProfile(
+            name=str(relay["protocol"]), model=str(relay["model"]), endpoint=str(relay["url"])
+        )
+        return WorkerProvider(profile=profile, api_key=str(relay["token"]))
+    except (ValueError, KeyError, TypeError) as exc:
+        raise LlmPlanError(f"{RELAY_ENV} is malformed: {exc}") from exc
 
 
 def worker_provider_from_home(home: Path) -> WorkerProvider | None:
@@ -293,6 +314,9 @@ def _ensure_network_allowed(
     """ADR 0059 D3: the endpoint must be one of the task's ``provider_hosts``
     (``host:port``, filled by the supervisor) or — a task persisted before
     contract 0.3.6 — in its network allowlist."""
+    relayed = _relayed_provider()
+    if relayed is not None and relayed.profile.endpoint == endpoint:
+        return  # ADR 0062: the run's own relay, pinned to its provider by the supervisor
     parsed = urllib.parse.urlparse(endpoint)
     host = parsed.hostname or ""
     port = parsed.port or (443 if parsed.scheme == "https" else 80)

@@ -1312,6 +1312,11 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "default_max_actions": {"type": "integer"},
             "default_max_provider_calls": {"type": "integer"},
             "allowed_plugin_risks": {"type": "array", "items": {"type": "string"}},
+            "provider_key_relay": {
+                "type": "boolean",
+                "description": "true: builtin workers reach their model through a relay "
+                "and never hold the provider key; false (default): the worker holds it",
+            },
         },
     ),
     _tool(
