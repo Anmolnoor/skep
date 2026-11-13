@@ -63,3 +63,28 @@ def test_a_sandboxed_run_cannot_write_another_runs_result(
     )
     assert victim.read_text() == '{"task_id": "victim"}'
     assert not (config.results_dir / "victim.json").exists()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b'{"task_id": "\xff\xfe"}', b"{" + b" " * (17 * 1024 * 1024)],
+    ids=["not-utf8", "oversized"],
+)
+def test_a_result_that_is_not_utf8_or_oversized_is_crash_grade_not_a_crash(
+    config: SupervisorConfig, tmp_path: Path, content: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker owns its result file: bytes that are not UTF-8 raised out of
+    the ingest (and out of the serve-start recovery that reads the same
+    file), and a huge one was read whole into memory. Both are crash-grade."""
+    from skep.supervisor import dispatch
+    from skep.supervisor.dispatch import _run_result
+
+    deposit = tmp_path / "result.json"
+    deposit.write_bytes(content)
+    if len(content) > 1024:
+        monkeypatch.setattr(dispatch, "read_result", lambda path: pytest.fail("read whole"))
+    store = RunStore(config.db_path)
+    try:
+        assert _run_result(store, "t-1", deposit) is None
+    finally:
+        store.close()

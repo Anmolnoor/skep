@@ -998,15 +998,22 @@ def _live_worker_pid(run_store: RunStore, task_id: str) -> int | None:
 _INTERRUPTED_STATES = ("created", "dispatched", "running")
 
 
+_RESULT_MAX_BYTES = 16 * 1024 * 1024  # a result is a few KB of metadata
+
+
 def _run_result(store: RunStore, task_id: str, path: Path) -> CodingWorkerResult | None:
     """The run's own result envelope, or None: absent, malformed (crash-grade,
     evidence wins over claims), or naming another task — W26: a deposit for
-    someone else is rejected and the rejection recorded on this run."""
+    someone else is rejected and the rejection recorded on this run. The
+    worker owns the file: bytes that are not UTF-8, an unreadable path or an
+    envelope past any honest size are crash-grade too, never an exception."""
     if not path.is_file():
         return None
     try:
+        if path.stat().st_size > _RESULT_MAX_BYTES:
+            return None
         result = read_result(path)
-    except ValidationError:
+    except (ValueError, OSError):  # ValidationError and UnicodeDecodeError are ValueErrors
         return None
     if result.task_id != task_id:
         record = store.get_run(task_id)
