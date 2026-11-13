@@ -900,7 +900,10 @@ def memory_block(store: RunStore, project_id: str | None = None) -> str:
         bucket = sorted(by_class.get(memory_class, ()), key=lambda i: i.updated_at, reverse=True)
         cap = _MEMORY_CLASS_RECENT_CAP.get(memory_class)
         for item in bucket if cap is None else bucket[:cap]:
-            line = f"- [{item.memory_class}] {item.content}"
+            content = item.content
+            if item.provenance is not None:  # D15: a worker wrote it — outside content
+                content = wrap_untrusted(item.provenance, content)
+            line = f"- [{item.memory_class}] {content}"
             if len(line) > budget:
                 break
             lines.append(line)
@@ -1432,8 +1435,10 @@ class ChatEngine:
         if budget_cap is not None:
             budget = min(budget, budget_cap)
         replay, dropped = self._replay(chat_id, chat, budget=budget)
-        if UNTRUSTED_OPEN in summary or any(
-            str(m.get("content") or "").startswith(UNTRUSTED_OPEN) for m in replay
+        if (
+            UNTRUSTED_OPEN in system
+            or UNTRUSTED_OPEN in summary
+            or any(str(m.get("content") or "").startswith(UNTRUSTED_OPEN) for m in replay)
         ):
             system = f"{system}\n\n{UNTRUSTED_NOTE}"
         if summary or dropped:

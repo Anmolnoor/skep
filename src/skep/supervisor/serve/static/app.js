@@ -2301,7 +2301,8 @@ async function viewMemory(main) {
       memList.append(el("div", { class: "item-card" },
         el("div", { class: "row" },
           memoryClassChip(item.memory_class),
-          el("span", { class: "note grow" }, item.project_id || "global"),
+          el("span", { class: "note grow" }, item.project_id || "global",
+            item.provenance ? ` · written by ${item.provenance}` : ""),
           forget),
         el("p", {}, item.content)));
     }

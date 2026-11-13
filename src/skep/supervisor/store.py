@@ -1166,6 +1166,11 @@ class RunStore:
         if "taint" not in chat_columns:
             # ADR 0059 D5 (V9): the trifecta guard's two bits; NULL = no taint.
             self._conn.execute("ALTER TABLE chats ADD COLUMN taint TEXT")
+        memory_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(memory_items)")}
+        if "provenance" not in memory_columns:
+            # D15: who wrote a memory item when not the operator (NULL = the
+            # operator: nothing already stored is retroactively marked).
+            self._conn.execute("ALTER TABLE memory_items ADD COLUMN provenance TEXT")
         for table in ("notes", "tasks", "memory_proposals"):
             columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
             if "taint" not in columns:
@@ -3143,10 +3148,12 @@ class RunStore:
             active=bool(row[5]),
             created_at=str(row[6]),
             updated_at=str(row[7]),
+            provenance=None if row[8] is None else str(row[8]),
         )
 
     _MEMORY_ITEM_COLS = (
-        "memory_id, memory_class, content, project_id, proposal_id, active, created_at, updated_at"
+        "memory_id, memory_class, content, project_id, proposal_id, active, created_at, updated_at,"
+        " provenance"
     )
 
     @_locked
@@ -3158,16 +3165,20 @@ class RunStore:
         actor: str,
         project_id: str | None = None,
         proposal_id: str | None = None,
+        provenance: str | None = None,
     ) -> MemoryItem:
         """Insert a durable memory item directly. The governed path is a proposal
-        approval (Step 4); this is the low-level write it and tests build on."""
+        approval (Step 4); this is the low-level write it and tests build on.
+        ``provenance`` names a writer that is not the operator (D15:
+        ``worker:<task>``); None is operator-written."""
         validate_memory_class(memory_class)
         memory_id = str(uuid.uuid4())
         now = _now()
         self._conn.execute(
             "INSERT INTO memory_items (memory_id, memory_class, content, project_id,"
-            " proposal_id, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
-            (memory_id, memory_class, content, project_id, proposal_id, now, now),
+            " proposal_id, active, created_at, updated_at, provenance)"
+            " VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
+            (memory_id, memory_class, content, project_id, proposal_id, now, now, provenance),
         )
         self._conn.execute(
             "INSERT INTO memory_fts (content, memory_id) VALUES (?, ?)",

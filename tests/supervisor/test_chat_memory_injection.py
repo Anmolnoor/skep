@@ -145,3 +145,24 @@ def test_project_bound_chat_sees_its_project_memory(
     system = ollama.chat_bodies()[-1]["messages"][0]
     assert "gates run with TMPDIR outside /tmp" in system["content"]
     assert "an unrelated project's secret habit" not in system["content"]
+
+
+def test_d15_worker_memory_rides_wrapped_with_the_note_and_taints_no_chat(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    from skep.supervisor.serve.chat import UNTRUSTED_NOTE
+
+    client, chat_id = chat_client(config, ollama)
+    store = RunStore(config.db_path)
+    try:
+        store.add_memory_item(
+            memory_class="observation", content="run 1 failed", actor="t", provenance="worker:t1"
+        )
+        ollama.script_reply("ok")
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+        system = ollama.chat_bodies()[-1]["messages"][0]["content"]
+        assert '- [observation] <untrusted source="worker:t1">run 1 failed</untrusted>' in system
+        assert system.endswith(UNTRUSTED_NOTE)
+        assert store.get_chat_taint(chat_id).bits() == []
+    finally:
+        store.close()
