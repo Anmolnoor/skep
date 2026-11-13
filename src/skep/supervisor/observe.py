@@ -134,7 +134,10 @@ def _harvest_run_terminals(store: RunStore) -> list[str]:
             f"observation: run {run.task_id[:8]} on {PurePath(run.repo).name} "
             f"{run.state}: {summary}"
         )[:_OBSERVATION_CONTENT_CAP]
-        store.add_memory_item(memory_class="observation", content=content, actor="run-observer")
+        store.add_memory_item(
+            memory_class="observation", content=content, actor="run-observer",
+            provenance=f"worker:{run.task_id}",  # D15: the worker's words
+        )  # fmt: skip
         created.append(content[:80])
         cursor = max(cursor, run.updated_at)
     if cursor != raw_cursor:

@@ -125,3 +125,5 @@ class MemoryItem:
     project_id: str | None = None
     proposal_id: str | None = None
     active: bool = True
+    # D15: the writer when not the operator (``worker:<task>``); None = operator
+    provenance: str | None = None

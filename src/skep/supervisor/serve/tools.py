@@ -3260,6 +3260,17 @@ def _get_run_guidance(
     return None
 
 
+def _memory_payload(item: Any) -> dict[str, Any]:
+    """D15: a memory item for the Queen — worker-written content wrapped as
+    outside content, as the prompt's memory block shows it."""
+    from .chat import wrap_untrusted
+
+    payload = asdict(item)
+    if item.provenance is not None:
+        payload["content"] = wrap_untrusted(item.provenance, item.content)
+    return payload
+
+
 def execute_read_tool(
     name: str,
     args: dict[str, Any],
@@ -3817,11 +3828,11 @@ def execute_read_tool(
     if name == "list_memory":
         project = None if args.get("project") is None else str(args["project"])
         items = store.list_memory_items(project_id=project)
-        return {"items": [asdict(item) for item in items]}
+        return {"items": [_memory_payload(item) for item in items]}
     if name == "search_memory":
         project = None if args.get("project") is None else str(args["project"])
         hits = store.search_memory(str(args["query"]), project_id=project)
-        return {"items": [asdict(item) for item in hits]}
+        return {"items": [_memory_payload(item) for item in hits]}
     if name == "search_chats":
         limit = min(int(args.get("limit") or 20), 50)
         scope = None if args.get("chat_id") is None else str(args["chat_id"])

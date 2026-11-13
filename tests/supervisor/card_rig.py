@@ -42,9 +42,9 @@ class Live:
         base_url, api_key, model, protocol = self.engine.resolved_llm(self.store.get_chat(chat_id))
         return {"base_url": base_url, "api_key": api_key, "model": model, "protocol": protocol}
 
-    def turn(self, chat_id: str, text: str) -> list[Event]:
+    def turn(self, chat_id: str, text: str, **kw: Any) -> list[Event]:
         self.store.add_chat_message(chat_id, role="user", content=text)
-        return list(self.engine.turn_events(chat_id, **self._llm(chat_id)))
+        return list(self.engine.turn_events(chat_id, **self._llm(chat_id), **kw))
 
     def verdict(self, chat_id: str, action_id: str, *, confirm: bool, **kw: Any) -> list[Event]:
         chat = self.store.get_chat(chat_id)

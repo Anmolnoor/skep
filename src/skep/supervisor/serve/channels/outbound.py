@@ -73,8 +73,10 @@ def push_to_chat_channel(
         logger.info("outbound push to %s skipped: %s", binding.channel, why)
         _note_delivery(store, binding.channel, ok=False, kind=kind, note=why)
         return False
-    if config.notification_level == "none" or (
-        config.notification_level == "approvals" and kind != "action_needed"
+    # a "reply" answers the operator's own click, like an in-turn reply: no filter
+    if kind != "reply" and (
+        config.notification_level == "none"
+        or (config.notification_level == "approvals" and kind != "action_needed")
     ):
         # An intentional filter, not a failure — log only.
         logger.debug(

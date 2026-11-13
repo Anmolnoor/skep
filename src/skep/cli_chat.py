@@ -960,7 +960,10 @@ class ChatRepl:
             # W20: typed by the operator — the decision itself, no card.
             trusted = self.client.post(f"/api/chats/{self.chat_id}/trust", {"bits": args})
             cleared = ", ".join(sorted(trusted.get("cleared") or {})) or "nothing"
+            covers = ", ".join(trusted.get("covers_runs") or [])  # D3
             print(_c(DIM, f"trusted again — cleared: {cleared}"))
+            if covers:
+                print(_c(DIM, f"covers the finish notice of run {covers}"))
             return
         if name == "steer":
             if len(args) < 2:

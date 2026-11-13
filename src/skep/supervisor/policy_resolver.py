@@ -511,7 +511,13 @@ def resolve_injected_memory(
     project-bound run sees its project's memory *plus* global (unscoped) memory;
     an unbound run sees *only* global memory, so project-scoped memory never
     leaks to a different project.
+
+    ES-F181 (D15): a worker-written item (an earlier run's observation) is
+    wrapped as outside content, as the Queen's prompt shows it — the worker
+    prompt and the task envelope carry the wrapped text.
     """
+    from .serve.chat import wrap_untrusted
+
     if project_context is not None:
         items = store.list_memory_items(project_id=project_context.project_id)
     else:
@@ -520,7 +526,9 @@ def resolve_injected_memory(
         MemoryContextEntry(
             memory_id=item.memory_id,
             memory_class=item.memory_class,
-            content=item.content,
+            content=item.content
+            if item.provenance is None
+            else wrap_untrusted(item.provenance, item.content),
             project_id=item.project_id,
         )
         for item in items

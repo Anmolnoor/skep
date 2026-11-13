@@ -2675,6 +2675,8 @@ def cmd_trust(args: argparse.Namespace) -> int:
         store.close()
     cleared = ", ".join(sorted(result["cleared"])) or "nothing — " + result.get("note", "")
     print(f"chat {args.chat_id}: cleared {cleared}")
+    if result.get("covers_runs"):  # D3
+        print(f"covers the finish notice of run {', '.join(result['covers_runs'])}")
     return 0
 
 

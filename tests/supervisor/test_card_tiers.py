@@ -420,7 +420,24 @@ def test_l7_a_confirmed_result_tells_the_model_a_person_approved_it(live: Any) -
     env.ollama.script_reply("ok")
     env.verdict(chat, card["action_id"], confirm=True)
     row = next(r for r in env.store.chat_messages(chat) if r.tool_name == "run_shell")
-    assert json.loads(row.content)["approved"] == chat_module.APPROVED_NOTE
+    assert json.loads(row.content)["approved"] == chat_module.approved_note(high=False)
+
+
+def test_l29_a_confirmed_result_names_the_cards_tier(live: Any) -> None:
+    """L29 (ES-F105): the model told the user "no card was HIGH" after six —
+    the confirmed row now says which tier the card was."""
+    env = live("builder")
+    chat = env.chat()
+    set_taint(env.store, chat, "both")
+    env.ollama.script_tool_call("set_personality", {"value": "terse"})
+    (card,) = cards(env.turn(chat, "be terse"))
+    assert card["card"]["tier"] == "high"
+    env.ollama.script_reply("ok")
+    env.verdict(chat, card["action_id"], confirm=True)
+    row = next(r for r in env.store.chat_messages(chat) if r.tool_name == "set_personality")
+    approved = json.loads(row.content)["approved"]
+    assert approved == chat_module.approved_note(high=True)
+    assert "tier: HIGH" in approved and "tier: normal" in chat_module.approved_note(high=False)
 
 
 def test_l4_a_read_in_skeps_own_home_is_not_called_outside_your_folders(live: Any) -> None:
@@ -438,6 +455,37 @@ def test_l4_a_read_in_skeps_own_home_is_not_called_outside_your_folders(live: An
     env.store.add_chat_taint(chat, private=row)
     line = taint_line(env.store, chat, env.store.get_chat_taint(chat))
     assert line is not None and "it read skep's own records" in line, line
+
+
+def test_l3r_an_unattended_follow_up_reads_inside_its_roots_as_an_attended_turn_does(
+    live: Any,
+) -> None:
+    """L3r (ES-F103): the run-finish follow-up of a doubly tainted chat carded
+    in-root reads HIGH — an unattended turn executed nothing allowed. A read
+    ``decide()`` allows now runs there as in an attended turn; a read outside
+    the roots still cards, and a mutation still never executes unattended."""
+    from skep.supervisor.serve import actions
+
+    env = live("builder")
+    chat = env.chat()
+    set_taint(env.store, chat, "both")
+    actions.remember_action_for_session(
+        env.store, tool="run_shell", args={"command": "python3 build.py"}, actor="op",
+        tier="always",
+    )  # fmt: skip
+    env.ollama.script_tool_calls(
+        ("read_file", {"path": str(env.paths["repo"] / "README.md")}),
+        ("read_file", {"path": str(env.paths["outside"] / "notes.txt")}),
+        ("run_shell", {"command": "python3 build.py", "cwd": str(env.paths["outside"])}),
+    )
+    found = cards(env.turn(chat, "[run finished]", unattended=True))
+    assert [c["tool"] for c in found] == ["read_file"]
+    assert found[0]["args"]["path"].endswith("notes.txt")
+    rows = env.store.chat_messages(chat)
+    readme = next(r for r in rows if r.role == "tool" and "README" in r.content)
+    assert json.loads(readme.content)["ok"] is True
+    shell = [json.loads(r.content) for r in rows if r.tool_name == "run_shell"]
+    assert shell and not any(row.get("ok") for row in shell)  # never ran unattended
 
 
 def test_an_mcp_tool_the_operator_allowed_by_name_is_not_high(live: Any) -> None:

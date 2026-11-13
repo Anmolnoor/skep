@@ -244,8 +244,9 @@ def _channel_turn(
     actions: list[dict[str, object]] = []
     errors: list[str] = []
     for event, data in engine.turn_events(
-        chat.chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol
-    ):
+        chat.chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+        channel=True,  # D16: the chat's session keeps are the web UI's
+    ):  # fmt: skip
         if event is None:
             content = data.get("content")
             if content:

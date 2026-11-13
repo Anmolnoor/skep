@@ -2301,7 +2301,8 @@ async function viewMemory(main) {
       memList.append(el("div", { class: "item-card" },
         el("div", { class: "row" },
           memoryClassChip(item.memory_class),
-          el("span", { class: "note grow" }, item.project_id || "global"),
+          el("span", { class: "note grow" }, item.project_id || "global",
+            item.provenance ? ` · written by ${item.provenance}` : ""),
           forget),
         el("p", {}, item.content)));
     }
@@ -3282,6 +3283,7 @@ async function viewChat(main, chatId) {
     const card = el("div", { class: "confirm-card gate-card", "data-action-id": d.action_id },
       el("p", { class: "card-kicker" }, "A run is waiting on your approval"),
       ...cardBody(d),
+      whyLine(d),
       el("div", { class: "actions" }, approve, refuse));
     const verdict = (verb) => async () => {
       approve.disabled = refuse.disabled = true; // double-click guard

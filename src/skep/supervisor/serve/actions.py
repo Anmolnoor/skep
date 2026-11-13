@@ -2841,6 +2841,7 @@ def ingest_curator_proposals(
                     project_id=(
                         None if entry.get("project_id") is None else str(entry.get("project_id"))
                     ),
+                    provenance=f"worker:{task_id}",  # D15: the curator worker wrote it
                 )
             continue
         sources = tuple(
