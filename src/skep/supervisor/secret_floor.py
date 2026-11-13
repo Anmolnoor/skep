@@ -11,8 +11,8 @@ normalize case, so a case-sensitive compare was a bypass (over-blocking
 
 Policy half only. The sandbox half (tmpfs/deny over these paths, so a
 worker's own ``cat ~/.ssh/id_rsa`` fails too) is ``sandbox.secret_paths``: it
-masks HOME_SECRETS minus ``sandbox.SANDBOX_READABLE_SECRETS`` (engine logins
-and ``~/.npmrc``), which stay on this floor.
+masks HOME_SECRETS minus ``sandbox.SANDBOX_READABLE_SECRETS`` (``~/.npmrc``),
+which stays on this floor.
 """
 
 from __future__ import annotations

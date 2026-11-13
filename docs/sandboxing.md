@@ -50,10 +50,14 @@ worker whose caste calls the LLM (coding, document, reviewer) reads
 `llm-secret` and the active provider profile's `llm-secret-<id>`, its own
 model credential; external engines and every other sandboxed lane see no LLM
 key. `supervisor/supervisor.sqlite3` stays readable (that worker reads its
-provider settings from it). So do `~/.npmrc` (npm install), `~/.claude/.credentials.json`,
-`~/.codex/auth.json` and `~/Library/Keychains` (engine logins): the sandbox
-leaves them readable, while the policy floor still refuses every Queen and
-worker read tool on them (`sandbox.SANDBOX_READABLE_SECRETS`).
+provider settings from it). So does `~/.npmrc` (npm install): the sandbox
+leaves it readable, while the policy floor still refuses every Queen and
+worker read tool on it (`sandbox.SANDBOX_READABLE_SECRETS`). The engine
+logins — `~/Library/Keychains`, `~/.claude/.credentials.json`,
+`~/.codex/auth.json` — are masked like every other credential (W33): an
+external engine's config dir is redirected per run and it authenticates only
+from its auth env (`CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`); a dispatch without one is refused (NO AUTH ENV).
 
 On Linux the worker also gets its own PID and IPC namespaces and an empty
 `/run` (no host D-Bus or systemd sockets). On macOS the profile allows

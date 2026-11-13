@@ -342,11 +342,12 @@ def available() -> bool:
 # into the proxy. The store (supervisor.sqlite3) stays readable: that same
 # worker reads its provider settings from it. Checked when the profile is
 # built, so a secret file created mid-run is not covered.
+# W33: the engine logins (~/Library/Keychains, ~/.claude/.credentials.json,
+# ~/.codex/auth.json) are masked too — each external engine's config dir is
+# redirected per run and a dispatch without its auth env is refused (NO AUTH
+# ENV), so no run authenticates from them.
 SANDBOX_READABLE_SECRETS: dict[str, str] = {
     ".npmrc": "npm install reads registry auth from it",
-    ".claude/.credentials.json": "claude_code's file login (v94-F3)",
-    ".codex/auth.json": "codex's file login",
-    "Library/Keychains": "claude_code authenticates through the macOS keychain (v94-F3)",
 }
 _HOME_SECRET_PATHS = tuple(rel for rel in HOME_SECRETS if rel not in SANDBOX_READABLE_SECRETS)
 

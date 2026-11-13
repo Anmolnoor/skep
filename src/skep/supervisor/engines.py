@@ -60,9 +60,9 @@ class CodingEngine:
     network_host: str | None = None
     # v94-F3: the env vars the engine cannot function without, merged into the
     # run's env allowlist the same way. The worker baseline is PATH+HOME only;
-    # Claude Code's macOS keychain credential lookup additionally needs
-    # USER/LOGNAME — without them every run dies on "Not logged in". Identity
-    # names, never secrets; the registry naming them keeps G2 intact.
+    # claude_code/codex also get USER/LOGNAME (v94-F3 added them for a
+    # keychain login; the keychain is masked since W33 — auth is auth_env).
+    # Identity names, never secrets; the registry naming them keeps G2 intact.
     env_vars: tuple[str, ...] = ()
     # v106-F1: runtime state the engine must be able to WRITE, declared as
     # (env var, subdirectory) pairs resolved under the run's workspace-local
