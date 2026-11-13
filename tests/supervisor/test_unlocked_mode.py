@@ -555,3 +555,22 @@ def test_doctor_names_every_unlocked_project_and_the_way_out(repo: Path, tmp_pat
     assert len(lines) == 1
     assert "unlockable" in lines[0] and "--no-unlocked" in lines[0]
     assert lines[0] in build_status(root, provider_timeout=0.01)["advisories"]
+
+
+def test_the_chat_face_sets_unlocked_through_the_same_write(
+    repo: Path, unlockable: SupervisorConfig
+) -> None:
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import _execute_mutation
+
+    store = RunStore(unlockable.db_path)
+    try:
+        args = {"project_id": "unlockable", "name": "Unlockable", "strategy": "trusted_local_dev",
+                "repo_path": str(repo), "policy_overrides": {"verify_command": "true"},
+                "unlocked": True, "seed_default_schedules": False}  # fmt: skip
+        holder = ConfigHolder(unlockable, store)
+        saved = _execute_mutation("setup_project", args, store=store, holder=holder,
+                                  runner=None, actor="chat-user")  # type: ignore[arg-type]  # fmt: skip
+        assert saved["policy"]["unlocked"] is True
+    finally:
+        store.close()
