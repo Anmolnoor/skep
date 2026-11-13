@@ -35,6 +35,7 @@ DEFAULT_READ_LINES = 200
 MAX_READ_LINES = 1000
 MAX_LINE_CHARS = 500
 MAX_SEARCH_HITS = 100
+MAX_MATCHES_PER_FILE = 10  # a directory search; one file searched lists them all
 SEARCH_TIMEOUT_SECONDS = 30
 
 
@@ -334,7 +335,11 @@ def search_files_result(
         argv.append(str(root))
     else:
         # --null: a NUL after each path, so the floor filter splits it exactly.
-        argv = ["rg", "--null", "--line-number", "--no-heading", "--max-count", "10"]
+        # --with-filename: a single-file search names the file too (the floor
+        # filter reads it). L20: the per-file cap is for a directory only.
+        argv = ["rg", "--null", "--with-filename", "--line-number", "--no-heading"]
+        if root.is_dir():
+            argv += ["--max-count", str(MAX_MATCHES_PER_FILE)]
         if file_glob:
             argv += ["--glob", file_glob]
         argv += ["-e", pattern, str(root)]
@@ -354,6 +359,7 @@ def search_files_result(
         wanted = pattern if any(ch in pattern for ch in "*?[") else f"*{pattern}*"
         hits = [hit for hit in hits if fnmatch(Path(hit).name, wanted)]
     found = len(hits)
+    per_file: dict[str, int] = {}
     if target == "files":
         hits = [hit for hit in hits if secret_floor_reason(hit, skep_home=skep_home) is None]
     else:
@@ -362,16 +368,26 @@ def search_files_result(
             name, sep, rest = hit.partition("\0")
             if sep and secret_floor_reason(name, skep_home=skep_home) is not None:
                 continue
+            per_file[name] = per_file.get(name, 0) + 1
             kept.append(f"{name}:{rest}" if sep else hit)
         hits = kept
     skipped = found - len(hits)
+    capped = (
+        sorted(n for n, c in per_file.items() if c >= MAX_MATCHES_PER_FILE) if root.is_dir() else []
+    )
     result: dict[str, Any] = {
         "path": str(root),
         "target": target,
         "matches": hits[:MAX_SEARCH_HITS],
-        "truncated": len(hits) > MAX_SEARCH_HITS,
+        "truncated": len(hits) > MAX_SEARCH_HITS or bool(capped),
     }
     notes: list[str] = []
+    if capped:
+        notes.append(
+            f"cut: only the first {MAX_MATCHES_PER_FILE} matches per file are shown, and "
+            f"{', '.join(capped[:5])}{' and more' if len(capped) > 5 else ''} may have more — "
+            "to see all of a file's matches, call search_files again with path set to that file"
+        )
     if skipped:
         notes.append(
             f"{skipped} hit(s) in credential files were left out — the secret floor "

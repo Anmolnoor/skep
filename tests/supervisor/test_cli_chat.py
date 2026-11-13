@@ -1384,3 +1384,44 @@ def test_deck_deny_of_a_gate_card_denies_its_review(
     assert ran == [("deny_review", {"review_id": "r-1"})]
     (resolved,) = _chat_actions(client)
     assert resolved["status"] == "denied"
+
+
+def test_skep_chat_talks_to_the_serve_of_its_own_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L25: `skep chat` defaulted to 8765 whatever port the home's serve
+    recorded — with two homes on one machine it talked to the OTHER serve.
+    It now reads the home's ``serve-port`` (what ``skep serve`` writes);
+    ``--url`` and ``$SKEP_SERVE_URL`` still win."""
+    import argparse
+
+    import skep.cli_chat
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.netproxy import record_serve_port
+
+    supervisor = build_config(tmp_path / "home", None).home
+    supervisor.mkdir(parents=True)
+    seen: list[str] = []
+
+    def run_chat(**kw: Any) -> int:
+        seen.append(kw["url"])
+        return 0
+
+    monkeypatch.setattr(skep.cli_chat, "run_chat", run_chat)
+    monkeypatch.delenv("SKEP_SERVE_URL", raising=False)
+    args = argparse.Namespace(
+        home=tmp_path / "home", url=None, chat_id=None, continue_latest=False,
+        thinking=False, oneshot=None, yes=False, role=None,
+    )  # fmt: skip
+    skep.cli_chat.cmd_chat(args)
+    record_serve_port(supervisor, 8766)
+    skep.cli_chat.cmd_chat(args)
+    monkeypatch.setenv("SKEP_SERVE_URL", "http://127.0.0.1:9001")
+    skep.cli_chat.cmd_chat(args)
+    skep.cli_chat.cmd_chat(argparse.Namespace(**{**vars(args), "url": "http://h:1"}))
+    assert seen == [
+        "http://127.0.0.1:8765",
+        "http://127.0.0.1:8766",
+        "http://127.0.0.1:9001",
+        "http://h:1",
+    ]

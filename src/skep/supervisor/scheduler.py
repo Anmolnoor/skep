@@ -572,6 +572,21 @@ def compose_digest(store: RunStore) -> str:
     return "\n".join(lines)
 
 
+def _sources_first(due: list[ScheduleRecord]) -> list[ScheduleRecord]:
+    """L14: a chained schedule due in the same tick as its source runs after
+    it, so it reads this tick's output — not the last one. Stable otherwise
+    (next_run_at order); chains are acyclic and capped (``validate_chain``)."""
+    by_name = {schedule.name: schedule for schedule in due}
+
+    def depth(schedule: ScheduleRecord) -> int:
+        level, current = 0, schedule.chain
+        while current in by_name and level <= MAX_CHAIN_DEPTH:
+            level, current = level + 1, by_name[current].chain
+        return level
+
+    return sorted(due, key=depth)
+
+
 # v83-F5 (ADR 0042): the serve daemon's hook for 'prompt' schedules — one
 # read-only Queen turn in the schedule's bound chat; (reply_text, ok). None
 # (the CLI tick) fails the tick honestly: there is no chat engine here.
@@ -595,7 +610,7 @@ def run_due(
     """
     moment = now or now_ts()
     results: list[TickResult] = []
-    for schedule in store.due_schedules(moment):
+    for schedule in _sources_first(store.due_schedules(moment)):
         task_id: str | None
         try:
             # ES B110: computed BEFORE the side effect, inside the try — a row

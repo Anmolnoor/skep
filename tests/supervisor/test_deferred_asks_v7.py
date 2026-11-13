@@ -948,3 +948,22 @@ def test_the_card_names_a_role_only_dispatch_truthfully(
 ) -> None:
     registry = CapabilityRegistry(tmp_path, emit=lambda _t, _p: None, delegation=delegation)
     assert registry.delegated_ask_text("shell.run", "make").startswith(who)
+
+
+def test_an_llm_worker_never_reaches_a_rememberable_host_ask(tmp_path: Path) -> None:
+    """L11, by design: an LLM worker always has egress (its provider), so an
+    unlisted host is a flat deny — never the empty-allowlist ask that "Allow
+    host & remember" answers (fail closed: ``[]`` means only its own LLM).
+    The one network ask it can meet is the chain's, approve-once by V7."""
+    registry = CapabilityRegistry(
+        tmp_path, emit=lambda _t, _p: None, provider_hosts=("ollama.com:443",)
+    )
+    decision = registry.decision_for("network.fetch", {"url": "https://example.com"})
+    assert (decision.verdict, decision.reason) == (
+        "deny",
+        "capability.deny.network_host_not_allowed",
+    )
+    bare = CapabilityRegistry(tmp_path, emit=lambda _t, _p: None)  # no egress at all
+    assert bare.decision_for("network.fetch", {"url": "https://example.com"}).reason == (
+        "capability.require_approval.network_allowlist_missing"
+    )

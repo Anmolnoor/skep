@@ -1667,13 +1667,22 @@ def workon_preview(
         template_names=[],
         policy_overrides={},
     )
+    # L15: workon seeds the pack's schedules like any project setup — the
+    # card says which ones it adds (an existing one is skipped, not reset).
+    schedules = [
+        f"adds the {'enabled' if seed['enabled'] else 'disabled'} schedule {seed['name']!r} "
+        f"(every {seed['every']}, an unattended worker run; first run one interval "
+        f"from now) — remove it with `skep schedule remove {seed['name']}`"
+        for seed in project_preview.get("seeded_schedules") or []
+        if store.get_schedule(seed["name"]) is None
+    ]
     return {
         "path": str(resolved),
         "project_id": project_id,
         "git": {"is_repo": is_repo, "has_baseline": has_baseline, "dirty": dirty},
         "would_git_init": not is_repo,
         "would_commit_baseline": not has_baseline,
-        "warnings": _workon_warnings(has_baseline=has_baseline, dirty=dirty),
+        "warnings": [*_workon_warnings(has_baseline=has_baseline, dirty=dirty), *schedules],
         "project": project_preview,
     }
 
@@ -4739,6 +4748,8 @@ def dispatch_manifest(
     return {
         "repo": str(compiled.repo),
         "network": list(permissions.network),
+        # L10: an explicit network replaces the project's hosts — say which
+        "network_dropped": list(resolved_policy.network_dropped),
         "provider_hosts": provider_hosts_for(
             store, holder.current.home.parent, caste=caste, engine=resolved_policy.coding_engine
         ),

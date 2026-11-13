@@ -36,6 +36,20 @@ from .supervisor.serve.auth import TOKEN_FILE
 
 DEFAULT_URL = "http://127.0.0.1:8765"
 TOKEN_HEADER = "X-Skep-Token"
+
+
+def serve_url(home: Path) -> str:
+    """L25: the serve of THIS home — ``$SKEP_SERVE_URL``, else the port
+    ``skep serve`` recorded in ``<home>/serve-port``, else the default."""
+    from .supervisor.netproxy import SERVE_PORT_FILE
+
+    if env := os.environ.get("SKEP_SERVE_URL"):
+        return env
+    with contextlib.suppress(OSError, ValueError):
+        return f"http://127.0.0.1:{int((home / SERVE_PORT_FILE).read_text().strip())}"
+    return DEFAULT_URL
+
+
 PROMPT = "you › "  # noqa: RUF001 - the deliberate Hermes-style prompt glyph
 REPLAY_MESSAGES = 20
 DAEMON_HINT = "skep chat needs the daemon — run: skep serve"
@@ -126,8 +140,7 @@ class ServeClient:
     """Thin httpx wrapper for the daemon's /api surface (header-token auth).
 
     Tests inject an ASGI-backed ``httpx.Client`` (the FastAPI ``TestClient``);
-    the real REPL builds one against ``--url`` / ``SKEP_SERVE_URL`` /
-    ``http://127.0.0.1:8765``.
+    the real REPL builds one against ``--url`` / ``serve_url(home)``.
     """
 
     def __init__(self, base_url: str, token: str, *, client: HttpxClientLike | None = None) -> None:
@@ -1419,7 +1432,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     return run_chat(
         home=config.home,
-        url=args.url or os.environ.get("SKEP_SERVE_URL") or DEFAULT_URL,
+        url=args.url or serve_url(config.home),
         chat_id=args.chat_id,
         continue_latest=args.continue_latest,
         show_thinking=args.thinking,

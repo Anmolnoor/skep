@@ -220,3 +220,26 @@ def test_context_view_splits_the_floor_into_named_parts(
     assert context["floor_chars"] == (
         context["tool_surface_chars"] + context["system_prompt_chars"] + context["digest_chars"]
     )
+
+
+def test_the_digest_tells_the_model_it_is_lossy_and_how_to_find_the_rest(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """L19: the digest drops its oldest lines (ADR 0037, by design), and the
+    model was never told — at turn 59 it had "no record" of turn 2. The
+    compacted block now says so and names the tool that reads the rest."""
+    client = configured_client(config, ollama)
+    client.put("/api/llm/config", json={"num_ctx": 1024})
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        _seed_long_chat(store, chat_id, turns=30, chars=400)
+    finally:
+        store.close()
+    ollama.script_reply("ok")
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "what was question 0?"})
+    system = ollama.chat_bodies()[0]["messages"][0]["content"]
+    assert "Earlier in this conversation (compacted):" in system
+    assert f'search_chats with chat_id "{chat_id}"' in system
+    tools = {t["function"]["name"] for t in ollama.chat_bodies()[0]["tools"]}
+    assert "search_chats" in tools
