@@ -138,6 +138,26 @@ def launched_command(argv: Sequence[str]) -> list[str]:
     return launched_command(tokens[index + positionals :])
 
 
+def _launch_index(tokens: Sequence[str]) -> int | None:
+    """Where a launcher argv's command starts, when every option before it is
+    one ``_LAUNCHERS`` knows takes an operand (or ``--x=y``, or ``--``); None
+    when an unknown option might take the next word as its operand."""
+    operand_flags, positionals = _LAUNCHERS[program_name(tokens[0])]
+    index = 1
+    while index < len(tokens) and tokens[index].startswith("-"):
+        if tokens[index] == "--":
+            index += 1
+            break
+        if tokens[index] in operand_flags:
+            index += 2
+        elif tokens[index].startswith("--") and "=" in tokens[index]:
+            index += 1
+        else:
+            return None
+    index += positionals
+    return index if index < len(tokens) and not tokens[index].startswith("-") else None
+
+
 _BROAD_INTERPRETERS: frozenset[str] = frozenset({"bash", "sh", "zsh", "fish", "python", "python3"})
 
 # v84-F4 (ADR 0044): outbound-content prefixes are never-grantable — the git
@@ -592,6 +612,12 @@ def catastrophic_command_line_reason(command: str) -> str | None:
 _SEGMENT_OPERATOR_CHARS = frozenset("|&;()<>")
 _WRAPPER_SHELLS = frozenset({"bash", "sh", "zsh", "fish"})
 _MAX_UNWRAP_DEPTH = 4
+# Reserved words that open or continue a compound command: sh runs the word
+# after them (`{ git push; }`, `! git push`, `if git push; then …`,
+# `function f { git push; }; f`), so the floor reads past them.
+_RESERVED_WORDS = frozenset(
+    {"{", "}", "!", "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "coproc"}
+)
 
 
 def _strip_env_prefix(tokens: list[str]) -> list[str]:
@@ -636,7 +662,9 @@ def _git_exec_lines(core: Sequence[str]) -> list[str]:
     return []
 
 
-def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None:
+def _unwrap_argv(
+    argv: Sequence[str], _depth: int = 0, *, exact: bool = False
+) -> list[list[str]] | None:
     """The argvs one exec-style argv would run: itself, plus the decomposed
     payload of a ``bash -c``-style wrapper (whose operand is a whole shell
     line), every suffix behind a launcher, ``find -exec``'s command and the
@@ -648,11 +676,13 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
     ``GIT_EXTERNAL_DIFF=``) are code, not shell lines: this cannot read them.
     The sandbox is the wall there; the floor is a sign on it."""
     tokens = [str(token) for token in argv]
+    while tokens and (tokens[0] in _RESERVED_WORDS or tokens[0] == "function"):
+        tokens = tokens[2:] if tokens[0] == "function" else tokens[1:]
     if tokens and _ASSIGNMENT_RE.match(tokens[0]):
         # `A=1 git push` runs git: judge what follows the assignments too,
         # keeping the segment itself for callers that read its tokens.
         index = next((i for i, t in enumerate(tokens) if not _ASSIGNMENT_RE.match(t)), len(tokens))
-        nested = _unwrap_argv(tokens[index:], _depth)
+        nested = _unwrap_argv(tokens[index:], _depth, exact=exact)
         return None if nested is None else [tokens, *nested]
     try:
         tokens = _strip_env_prefix(tokens)
@@ -670,14 +700,17 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
         # launcher option this module does not know cannot hide one.
         if _depth >= _MAX_UNWRAP_DEPTH:
             return None
-        for index in range(1, len(tokens)):
+        start = _launch_index(tokens) if exact and program not in _SHELL_LAUNCHERS else None
+        for index in range(1, len(tokens)) if start is None else (start,):
             if not tokens[index].startswith("-"):
-                nested = _unwrap_argv(tokens[index:], _depth + 1)
+                nested = _unwrap_argv(tokens[index:], _depth + 1, exact=exact)
                 if nested is None:
                     return None
                 result.extend(nested)
                 if program in _SHELL_LAUNCHERS:
-                    nested = command_line_segments(" ".join(tokens[index:]), _depth + 1)
+                    nested = command_line_segments(
+                        " ".join(tokens[index:]), _depth + 1, exact=exact
+                    )
                     if nested is None:
                         return None
                     result.extend(nested)
@@ -691,12 +724,12 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
     if core[:3] == ["git", "bisect", "run"]:
         exec_argvs.append(core[3:])  # judged as an argv too, not only space-joined
     for exec_argv in exec_argvs:
-        nested = _unwrap_argv(exec_argv, _depth + 1)
+        nested = _unwrap_argv(exec_argv, _depth + 1, exact=exact)
         if nested is None:
             return None
         result.extend(nested)
     for line in lines:
-        nested = command_line_segments(line, _depth + 1)
+        nested = command_line_segments(line, _depth + 1, exact=exact)
         if nested is None:
             return None
         result.extend(nested)
@@ -716,7 +749,7 @@ def _unwrap_argv(argv: Sequence[str], _depth: int = 0) -> list[list[str]] | None
                 )
                 break
         if payload is not None:
-            nested = command_line_segments(payload, _depth + 1)
+            nested = command_line_segments(payload, _depth + 1, exact=exact)
             if nested is None:
                 return None
             result.extend(nested)
@@ -757,10 +790,19 @@ def sh_command_list(line: str) -> str:
     return "".join(out)
 
 
-def command_line_segments(command: str, _depth: int = 0) -> list[list[str]] | None:
+def command_line_segments(
+    command: str, _depth: int = 0, *, exact: bool = False
+) -> list[list[str]] | None:
     """Split a raw shell line into the argvs it would execute, or None when it
     cannot be judged (unbalanced quotes, backtick substitution, or wrappers
-    nested past ``_MAX_UNWRAP_DEPTH``)."""
+    nested past ``_MAX_UNWRAP_DEPTH``).
+
+    The floor reads every suffix behind a launcher as a command, so an option
+    it does not know cannot hide one (``nice echo curl`` counts as curl).
+    ``exact=True`` reads only the command a launcher runs when every option
+    before it is one ``_LAUNCHERS`` knows — for a rule that binds a named
+    program (W5), where ``timeout 60 grep curl x`` must not count as curl —
+    and falls back to every suffix otherwise."""
     if _depth >= _MAX_UNWRAP_DEPTH:
         return None
     lexer = shlex.shlex(sh_command_list(command), posix=True, punctuation_chars=True)
@@ -786,7 +828,7 @@ def command_line_segments(command: str, _depth: int = 0) -> list[list[str]] | No
         segments.append(current)
     unwrapped: list[list[str]] = []
     for segment in segments:
-        expanded = _unwrap_argv(segment, _depth)
+        expanded = _unwrap_argv(segment, _depth, exact=exact)
         if expanded is None:
             return None
         unwrapped.extend(expanded)

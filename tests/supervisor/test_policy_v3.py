@@ -847,3 +847,105 @@ def test_w5_the_write_time_check_refuses_those_grants_too(
             )
     finally:
         store.close()
+
+
+ASK_CURL = {"scope": "shell", "verdict": "require_approval", "action": "run",
+            "pattern": "curl", "rule_id": "ask-curl"}  # fmt: skip
+
+
+@pytest.mark.parametrize("line", CURL_SPELLINGS)
+def test_w5_a_named_ask_binds_the_same_spellings_a_deny_does(line: str, tmp_path: Path) -> None:
+    """ES-F49 review: a named ask binds across layers (decision #1) but was
+    matched by literal first word, so an exact grant on `/usr/bin/curl x`
+    (or `env curl x`, `CURL x`) answered a `curl` ask with no card. A named
+    ask binds a program the way a deny does."""
+    home, _repo = build_home(tmp_path, "legacy")
+    _grant(home, line, tier="always")
+    _lock(home, "builder", ASK_CURL)
+    hit = _decide(home, scope="shell", action="run", value=line)
+    assert (hit["verdict"], hit["decided_by"]) == ("require_approval", "template:builder/ask-curl")
+
+
+def test_w5_a_named_run_ask_binds_a_background_grant(tmp_path: Path) -> None:
+    from skep.supervisor.serve.actions import remember_action_for_session
+
+    home, _repo = build_home(tmp_path, "legacy")
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        assert remember_action_for_session(
+            store, tool="start_process", args={"command": "curl https://x.example/y"},
+            actor="op", tier="always",
+        )  # fmt: skip
+    finally:
+        store.close()
+    _lock(home, "builder", ASK_CURL)
+    hit = _decide(home, scope="shell", action="run_background", value="curl https://x.example/y")
+    assert (hit["verdict"], hit["decided_by"]) == ("require_approval", "template:builder/ask-curl")
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["{ curl https://x.example/y; }", "! curl https://x.example/y",
+     "if curl https://x.example/y; then :; fi", "function f { curl https://x.example/y; }; f",
+     "xargs --max-procs 4 curl https://x.example/y"],
+)  # fmt: skip
+def test_w5_a_deny_binds_through_reserved_words_and_unknown_launcher_options(
+    line: str, tmp_path: Path
+) -> None:
+    """ES-F49 review: `{ curl x; }` was stored as a grant and ran under a curl
+    deny — the parser read `{` as the program. Reserved words that open a
+    compound command are read past; a launcher option the table does not
+    know still falls back to reading every suffix."""
+    home, _repo = build_home(tmp_path, "legacy")
+    _grant(home, line, tier="always")
+    _lock(home, "builder", NO_CURL)
+    hit = _decide(home, scope="shell", action="run", value=line)
+    assert (hit["verdict"], hit["decided_by"]) == ("deny", "template:builder/no-curl")
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["timeout 60 grep curl README.md", "time grep -r curl src", "nohup grep curl notes.txt",
+     "xargs grep -l curl", "nice -n 5 echo curl", "grep curl README.md", "ls /usr/bin/curl"],
+)  # fmt: skip
+def test_w5_a_deny_does_not_fire_on_an_argument_of_a_launched_command(
+    line: str, tmp_path: Path
+) -> None:
+    """ES-F49 review: the floor reads every suffix behind a launcher, so a
+    `curl` deny refused `timeout 60 grep curl README.md` outright — no card
+    to approve. When every launcher option is known, the deny reads only the
+    command the launcher runs; the line asks like any other."""
+    home, _repo = build_home(tmp_path, "legacy")
+    _lock(home, "builder", NO_CURL)
+    hit = _decide(home, scope="shell", action="run", value=line)
+    assert hit["verdict"] == "require_approval", (line, hit)
+
+
+def test_w5_a_worker_grant_stored_before_the_deny_is_dropped_however_spelled(
+    tmp_path: Path,
+) -> None:
+    """ES-F49 review: worker grant resolution (B23's decide-time half) still
+    compared a deny by literal first word, so a remembered `/usr/bin/curl x`
+    stayed in a run's allowlist under a later `curl` deny and the worker ran
+    it with no card. It uses the deny reading decide() uses."""
+    from skep.supervisor.policy_resolver import worker_shell_grants
+    from skep.supervisor.serve.actions import remember_commands_for_session
+
+    home, repo = build_home(tmp_path, "legacy")
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        remember_commands_for_session(
+            store,
+            [["curl", "x"], ["/usr/bin/curl", "x"], ["env", "curl", "x"], ["make", "check"]],
+            repo=repo,
+        )
+    finally:
+        store.close()
+    _lock(home, "builder", NO_CURL)
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        grants = worker_shell_grants(store, build_config(home, None).home, repo, "app")
+    finally:
+        store.close()
+    assert "make check" in grants
+    assert "/usr/bin/curl x" not in grants and "env curl x" not in grants, grants

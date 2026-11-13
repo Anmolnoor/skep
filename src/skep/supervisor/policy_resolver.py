@@ -39,11 +39,11 @@ from .policy_schema import (
     ScopePolicy,
     applies,
     decide,
+    deny_reaches,
     document_from_settings,
     lifetime_of,
     matcher_of,
     operator_document_from_settings,
-    patterns_intersect,
     resolve,
 )
 from .projects import (
@@ -910,7 +910,7 @@ def worker_shell_grants(
         argv = shlex.split(rule.pattern)
         if dangerous_prefix_reason(argv) is not None or is_remote_git_command(argv):
             continue
-        if any(patterns_intersect("shell", rule.pattern, deny) for deny in denies):
+        if any(deny_reaches("shell", "run", deny, "run", rule.pattern) for deny in denies):
             continue
         label = "grant:session" if lifetime_of(rule) == "session" else "grant:project"
         if granted.get(rule.pattern) != "grant:project":
