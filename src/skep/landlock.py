@@ -53,7 +53,8 @@ def _libc() -> ctypes.CDLL:
 def abi() -> int:
     """The Landlock ABI the running kernel reports; 0 without Landlock (no
     syscall, or disabled at boot) and off Linux."""
-    if not sys.platform.startswith("linux"):
+    # the running kernel, not sys.platform (tests fake that on macOS)
+    if os.uname().sysname != "Linux":
         return 0
     got = _libc().syscall(
         _CREATE, None, ctypes.c_size_t(0), ctypes.c_uint32(_CREATE_RULESET_VERSION)

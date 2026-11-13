@@ -33,11 +33,17 @@ class FakeLibc:
         return self.results.get(-1, 0)
 
 
+class _Uname:
+    def __init__(self, sysname: str) -> None:
+        self.sysname = sysname
+
+
 @pytest.fixture()
 def libc(monkeypatch: pytest.MonkeyPatch) -> FakeLibc:
     fake = FakeLibc()
     monkeypatch.setattr(landlock, "_libc", lambda: fake)
     monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "uname", lambda: _Uname("Linux"))
     return fake
 
 
@@ -60,7 +66,9 @@ def test_no_landlock_or_landlock_off_is_abi_zero(libc: FakeLibc) -> None:
 def test_abi_is_zero_off_linux_without_calling_anything(
     libc: FakeLibc, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(sys, "platform", "darwin")
+    # The kernel decides, not sys.platform: the bwrap argv tests fake
+    # sys.platform == "linux" on macOS, where syscall 444 is not Landlock.
+    monkeypatch.setattr(os, "uname", lambda: _Uname("Darwin"))
     assert landlock.abi() == 0
     assert libc.calls == []
 
