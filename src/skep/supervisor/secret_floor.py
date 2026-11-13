@@ -77,6 +77,20 @@ def _fold(path: Path) -> Path:
     return Path(str(path).casefold())
 
 
+# macOS firmlinks the data volume's /Users, /home, ... onto /, and resolve()
+# does not follow a firmlink: /System/Volumes/Data/Users/me/.ssh IS ~/.ssh.
+_DATA_VOLUME = Path("/system/volumes/data")
+
+
+def alias_key(path: Path) -> Path:
+    """One spelling for every name APFS opens as ``path``: case folded, the
+    macOS data-volume prefix dropped (over-matching on Linux is harmless)."""
+    folded = _fold(path)
+    if _DATA_VOLUME in folded.parents:
+        return Path("/") / folded.relative_to(_DATA_VOLUME)
+    return folded
+
+
 def is_dotenv(name: str) -> bool:
     name = name.casefold()
     return name == ".env" or name.startswith(".env.")
@@ -87,16 +101,16 @@ def _under(path: Path, root: Path) -> bool:
 
 
 def _reason(path: Path, user_homes: tuple[Path, ...], skep_homes: tuple[Path, ...]) -> str | None:
-    folded = _fold(path)
+    folded = alias_key(path)
     if is_dotenv(folded.name):
         return f"{path} is a .env file"
     for home in user_homes:
         for rel in HOME_SECRETS:
-            if _under(folded, _fold(home / rel)):
+            if _under(folded, alias_key(home / rel)):
                 return f"{path} is under ~/{rel}"
     for home in skep_homes:
-        if folded == _fold(home.parent / SERVE_ENV) or (
-            _under(folded, _fold(home))
+        if folded == alias_key(home.parent / SERVE_ENV) or (
+            _under(folded, alias_key(home))
             and any(fnmatch(folded.name, pat) for pat in SKEP_SECRET_NAMES)
         ):
             return f"{path} is one of skep's own secrets"

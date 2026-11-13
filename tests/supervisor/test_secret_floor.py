@@ -117,6 +117,15 @@ def test_a_symlink_to_a_secret_is_caught_by_its_realpath(fake_home: Path, tmp_pa
     assert secret_floor_reason(link) is not None
 
 
+def test_the_macos_data_volume_spelling_of_a_secret_is_caught(fake_home: Path) -> None:
+    """macOS firmlinks /System/Volumes/Data/Users (and /home) to /: the same
+    file under another name, and resolve() does not follow a firmlink."""
+    for prefix in ("/System/Volumes/Data", "/system/volumes/DATA"):
+        aliased = Path(prefix + str(fake_home)) / ".ssh" / "id_rsa"
+        assert secret_floor_reason(aliased) is not None, aliased
+    assert secret_floor_reason(Path("/System/Volumes/Data/srv/notes.txt")) is None
+
+
 def test_queen_reads_of_secrets_deny_whatever_the_policy_says(
     config: SupervisorConfig, store: RunStore, holder: ConfigHolder, fake_home: Path
 ) -> None:
