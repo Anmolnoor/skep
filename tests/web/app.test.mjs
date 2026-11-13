@@ -375,3 +375,12 @@ test("manifestNode: the dispatch card lists what the run gets and the asks it ap
     network_dropped: ["pypi.org"] } }).textContent;
   assert.ok(lost.includes("loses the project's own hosts for this run") && lost.includes("pypi.org"));
 });
+
+test("offersRemember: a delegated ask is approve-once, so no remember button is offered", () => {
+  const app = loadApp();
+  // L11: the server refuses allow-host / allow-command on a delegated ask (409)
+  assert.equal(app.offersRemember({ decision: { reason: "capability.require_approval.delegated_ask" } }), false);
+  assert.equal(app.offersRemember({ decision: { reason: "capability.require_approval.network_allowlist_missing" } }), true);
+  assert.equal(app.offersRemember({}), true);
+  assert.equal(app.offersRemember(undefined), true);
+});

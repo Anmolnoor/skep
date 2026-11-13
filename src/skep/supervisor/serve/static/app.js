@@ -315,6 +315,13 @@ function foldItems(card) {
     el("ul", {}, ...card.items.map((item) => el("li", { class: "mono" }, String(item)))));
 }
 
+// L11 (ADR 0059 D3, V7): a delegated ask is approve-once for that run — the
+// server refuses to remember it (409), so no "& remember" button offers it.
+function offersRemember(approval) {
+  return !(approval && approval.decision
+    && approval.decision.reason === "capability.require_approval.delegated_ask");
+}
+
 // P4-2 (ADR 0059 D6): the dispatch manifest — what the run will get, as the
 // server compiled it when the card was shown. Approving the card approves the
 // listed asks for that run only; anything else the run asks for cards then.
@@ -4265,7 +4272,7 @@ async function viewRunDetail(main, taskId) {
         await api("POST", `/api/approvals/${await ensureReview()}/deny`, { note: "denied from UI" });
         flash("ok", "denied");
       }));
-    if (pending[0]?.action === "shell.run") {
+    if (pending[0]?.action === "shell.run" && offersRemember(pending[0])) {
       actions.append(act(isBatch ? "Allow all & remember" : "Allow command", "ghost", async () => {
         const result = await api("POST", `/api/approvals/${await ensureReview()}/allow-command`, {});
         if (result.resumed_as) location.hash = `#/runs/${result.resumed_as}`;
@@ -4539,13 +4546,14 @@ async function viewApprovals(main) {
     actions.append(
       verdict(isBatch ? `Approve all ${batchCommands.length}` : "Approve", "primary", "approve", {}),
       verdict("Deny", "danger", "deny", { note: "denied from UI" }));
-    if (approval.action === "shell.run") {
+    if (approval.action === "shell.run" && offersRemember(approval)) {
       actions.append(
         verdict(isBatch ? "Allow all & remember" : "Allow command", "ghost", "allow-command", {}),
         verdict("Skip", "ghost", "deny", { note: "skipped from UI" }),
       );
     }
-    if (approval.action === "network.fetch" || approval.action === "network.read") {
+    if ((approval.action === "network.fetch" || approval.action === "network.read")
+        && offersRemember(approval)) {
       // v109-F7: the network twin of "Allow command" — remember the blocked
       // host for this repo's project and resume.
       actions.append(
