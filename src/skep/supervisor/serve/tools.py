@@ -5793,6 +5793,11 @@ def _mutation_execution_decision(
                     else f"schedule {schedule.name!r} is disabled — set_schedule_enabled first"
                 ),
             )
+    if name == "resume_run":
+        # L17: a resume that can only fail on confirm is answered now, no card
+        why = actions.resume_refusal(store, holder.current, str(args.get("task_id") or ""))
+        if why is not None:
+            return AutonomyDecision(verdict="deny", reason="resume.deny.not_resumable", detail=why)
     if name == "call_mcp_tool":
         # v40-F10: the resolved mcp scope decides — allow runs inside the
         # turn, require_approval cards, deny refuses without a card.
