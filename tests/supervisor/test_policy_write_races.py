@@ -202,7 +202,7 @@ def test_a_knob_union_racing_update_policy_never_brings_back_a_removed_entry(
     ``default_network`` under the lock; the "allow this command" union and
     the remembered-host write read-modify-write the same knobs. Outside the
     lock, a union that read the list before the removal wrote it back."""
-    real_view = actions.policy_view
+    from skep.supervisor.serve.settings import policy_view as real_view
 
     def slow_view(*args: Any, **kwargs: Any) -> Any:
         view = real_view(*args, **kwargs)
