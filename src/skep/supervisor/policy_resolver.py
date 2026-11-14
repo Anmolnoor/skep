@@ -711,12 +711,15 @@ def resolve_run_policy(
     # v90-F1 (I2): a CLI engine verifies with `git diff --check` — whitespace.
     # Re-verifying that proves nothing, so the project must say what
     # verification means before an external agent may run at all.
-    if chosen_engine.external and not verify_command:
+    # ES-F280 (D41): the generic shell worker is no registered engine but
+    # wraps any local CLI agent the same way, so ``wrapped`` binds it too.
+    if (chosen_engine.external or wrapped is not None) and not verify_command:
         raise PolicyResolutionError(
-            f"coding_engine {chosen_engine.name!r} is an external agent whose built-in "
-            "verification is `git diff --check` (whitespace only), so G10 would "
-            "re-run a check that cannot fail. Set verify_command in the project "
-            "policy to the command that actually proves the work."
+            f"coding_engine {wrapped or chosen_engine.name!r} is an external agent whose "
+            "built-in verification is `git diff --check` (whitespace only), so G10 would "
+            "re-run a check that cannot fail. Pin the command that actually proves the "
+            'work: `skep project setup <repo> --verify-command "<command>"` (chat: '
+            "setup_project verify_command=...)."
         )
     # v94-F4: an external agent bypasses the capability layer by design — the
     # sandbox IS its confinement (ADR 0047). No policy default or request flag

@@ -374,6 +374,30 @@ def test_a_worker_cmd_running_an_external_agent_meets_the_engines_requirements(
     assert "OPENAI_API_KEY" in resolved.permissions.env_allowlist
 
 
+def test_a_worker_cmd_running_the_shell_worker_needs_a_pinned_verify_command(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F280 (D41, I2, ADR 0047): the generic shell worker wraps any local
+    CLI agent, so its commands skip the capability layer and its built-in
+    verify is `git diff --check`. A --worker-cmd running it needs the pinned
+    verify_command like any external engine, and the refusal teaches (I9)."""
+    import dataclasses
+
+    wrapped = dataclasses.replace(
+        config, worker_command=("python3", "-m", "skep.workers.shell_worker")
+    )
+    _bind(config, repo, {})
+    with pytest.raises(PolicyResolutionError) as excinfo:
+        _resolve(wrapped, repo)
+    message = str(excinfo.value)
+    assert "'shell_worker'" in message and "git diff --check" in message
+    assert "skep project setup" in message and "--verify-command" in message
+    _bind(config, repo, {"verify_command": "pytest -q"})
+    resolved = _resolve(wrapped, repo)
+    assert resolved.verify_command == "pytest -q"
+    assert resolved.execution_mode == "sandbox"
+
+
 def test_dispatch_refuses_a_worker_cmd_external_agent_with_no_auth_env(
     repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:

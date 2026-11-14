@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import re
 import shlex
 from collections.abc import Callable, Mapping, Sequence
@@ -983,6 +984,10 @@ _SECRET_SHAPES = (
     re.compile(r"(?i)([?&](?:token|key|api_key|access_token|password|secret|sig|signature)=)"
                r"([^&\s'\"]+)"),
     re.compile(r"()\b((?:sk-|ghp_|gho_|ghs_|ghu_|github_pat_|xox[abpr]-|AKIA)[-_A-Za-z0-9]{12,})"),
+    # ES-F281: a credential in a URL PATH — Telegram's /bot<id>:<token>/ and
+    # Discord's /interactions|webhooks/<id>/<token> (an httpx error quotes it).
+    re.compile(r"(/bot\d+:)([-_A-Za-z0-9]+)"),
+    re.compile(r"(/(?:interactions|webhooks)/\d+/)([^/\s?#'\"]+)"),
 )  # fmt: skip
 
 
@@ -992,6 +997,48 @@ def redact(value: str) -> str:
     for shape in _SECRET_SHAPES:
         value = shape.sub(lambda m: m.group(1) + _MASK, value)
     return value
+
+
+# ES-F281: every logger skep creates. test_log_redaction scans the source, so
+# a new getLogger("skep.*") that is not listed here fails the suite.
+SKEP_LOGGERS = (
+    "skep.dispatch",
+    "skep.ingest",
+    "skep.scheduler",
+    "skep.serve",
+    "skep.spawner",
+    "skep.voice",
+)
+
+
+class RedactFilter(logging.Filter):
+    """Pass a record's message and traceback through ``redact`` before any
+    handler sees it: a failed Telegram poll logs the httpx error, whose text
+    quotes the request URL — and the bot token sits in that URL (ES-F281)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # bad %-args: logging would report it, never raise from a log call
+            message = f"{record.msg} {record.args!r}"
+        record.msg, record.args = redact(message), None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = redact(record.exc_text)
+        if record.stack_info:
+            record.stack_info = redact(record.stack_info)
+        return True
+
+
+def install_log_redaction() -> None:
+    """Attach one ``RedactFilter`` to each of skep's loggers (idempotent). A
+    logger's filter sees only its own records, never a child's, so each name
+    gets one."""
+    for name in SKEP_LOGGERS:
+        logger = logging.getLogger(name)
+        if not any(isinstance(f, RedactFilter) for f in logger.filters):
+            logger.addFilter(RedactFilter())
 
 
 def log_decision(audit_dir: Path, row: dict[str, Any]) -> None:

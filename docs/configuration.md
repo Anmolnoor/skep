@@ -95,7 +95,9 @@ skep run --worker-cmd "python -m skep.workers.claude_code" /path/to/repo "fix th
 An external agent's commands skip skep's capability layer, so the sandbox is
 its only wall: a worker command that runs one (an engine's worker module, or
 the generic shell worker) is forced into sandbox mode whatever
-`--execution-mode` says, and the run's record notes the change.
+`--execution-mode` says, and the run's record notes the change. Its built-in
+verify is only `git diff --check`, so it also requires the project's pinned
+`verify_command` (`skep project setup <repo> --verify-command "<command>"`).
 
 For the current shell:
 

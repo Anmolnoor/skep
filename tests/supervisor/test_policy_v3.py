@@ -1055,3 +1055,28 @@ def test_d12_with_no_shell_deny_or_named_ask_nothing_changes(line: str, tmp_path
     home, _repo = build_home(tmp_path, "zero")
     hit = _decide(home, scope="shell", action="run", value=line)
     assert "cannot read" not in (hit.get("note") or ""), (line, hit)
+
+
+# Built at runtime: a joined literal would fold into one .pyc constant that
+# CI's gitleaks pass over tests/ scans (the ES-F271 lesson).
+_TG_TOKEN = "".join(["123456789", ":", "AAfake", "_not_a_real_bot_token", "0" * 12])
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"Client error '404' for url 'https://api.telegram.org/bot{_TG_TOKEN}/getUpdates?offset=0'",
+        f"https://api.telegram.org/file/bot{_TG_TOKEN}/photos/a.jpg",
+        "POST https://discord.com/api/v10/interactions/1234567890/" + "CANARY" + "/callback",
+        "PATCH https://discord.com/api/v10/webhooks/1234567890/" + "CANARY" + "/messages/@original",
+    ],
+)
+def test_redact_masks_a_credential_in_a_url_path(line: str) -> None:
+    """ES-F281: Telegram puts the bot token in the URL path (/bot<id>:<token>/)
+    and Discord an interaction token (/interactions|webhooks/<id>/<token>), so
+    a logged httpx error carried it to the serve log."""
+    from skep.supervisor.policy_v3 import redact
+
+    masked = redact(line)
+    assert _TG_TOKEN.split(":")[1] not in masked and "CANARY" not in masked, masked
+    assert "***" in masked

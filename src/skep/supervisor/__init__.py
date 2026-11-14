@@ -145,3 +145,9 @@ __all__ = [
     "write_profile",
     "write_task_file",
 ]
+
+# ES-F281: skep's loggers redact credentials before any handler writes them.
+# Here because every module that creates one lives in this package.
+from .policy_v3 import install_log_redaction
+
+install_log_redaction()
