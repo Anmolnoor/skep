@@ -378,6 +378,20 @@ def create_app(
         except Exception:
             logging.getLogger("skep.serve").exception("interrupted-run recovery failed")
         try:
+            # ES-F290 (L1): a run that completed just before serve stopped
+            # was never re-verified (G10) — re-verify it now, before anyone
+            # can land it.
+            from ..dispatch import reverify_unverified_runs
+
+            reverified = reverify_unverified_runs(run_store, holder.current)
+            if reverified:
+                logging.getLogger("skep.serve").info(
+                    "re-verified %d completed run(s) the previous serve stopped before G10",
+                    len(reverified),
+                )
+        except Exception:
+            logging.getLogger("skep.serve").exception("startup re-verification failed")
+        try:
             # ES-F1/F4: a card or landing claimed by a process that died
             # mid-execute ends honestly — never re-run, never reopened (either
             # could double a mutation whose effect is unknown).

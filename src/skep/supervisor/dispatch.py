@@ -1389,6 +1389,52 @@ def recover_interrupted_runs(
     return recovered
 
 
+def reverify_unverified_runs(run_store: RunStore, config: SupervisorConfig) -> list[str]:
+    """ES-F290 (L1, I2 I8): re-verify every completed, unlanded run that has
+    a patch but no re-verification record.
+
+    ``ingest_run`` commits COMPLETED before G10 runs, so a supervisor that
+    stops in between leaves a completed run nobody re-verified — and
+    ``recover_interrupted_runs`` only looks at in-flight states. Run at serve
+    startup after that recovery; the same restart path (pinned verify, no
+    auto-apply) as a late deposit. A run whose supervisor is still alive (a
+    CLI ``skep run`` mid-re-verify) is its supervisor's to finish. Returns
+    the task ids it re-verified."""
+    me = process_owner()
+    done: list[str] = []
+    for record in run_store.runs_with_states(("completed",)):
+        task_id = record.task_id
+        if run_store.reverification_for(task_id) is not None:
+            continue
+        patches = [Path(p) for kind, p, _ in run_store.artifacts_for(task_id) if kind == "patch"]
+        if not patches or not patches[0].is_file():
+            continue
+        if any(
+            a.action == "apply_patch" and a.status == "approved"
+            for a in run_store.approvals_for(task_id)
+        ):
+            continue  # already landed: re-verifying cannot change that record
+        supervisor = run_store.run_supervisor(task_id)
+        if supervisor is not None and supervisor != me and owner_alive(supervisor):
+            continue
+        task = _task_from_audit(config, task_id)
+        if task is None:
+            continue  # no evidence to re-verify from; landing refuses it (ES-F291)
+        # The stopped re-verify's half-built tree would make create_worktree fail.
+        remove_worktree(Path(record.repo), config.worktrees_root / f"reverify-{patches[0].stem}")
+        result = _run_result(run_store, task_id, config.audit_dir / task_id / "result.json")
+        _reverify_after_restart(
+            run_store,
+            config,
+            record,
+            task,
+            record.verification_outcome,
+            tuple(result.changed_files) if result is not None else None,
+        )
+        done.append(task_id)
+    return done
+
+
 # D35 (ADR 0060 §3): a run that finished across a serve restart — recovered or
 # re-adopted — never auto-applies. Supervision resumed from the record (pid,
 # start time, event log, envelope); nobody watched the gap, so the chain of
@@ -1444,63 +1490,87 @@ def _finish_recovered(
         # G10 unchanged: a late-ingested completed claim is re-verified in
         # a clean worktree before anyone may trust it. Auto-apply rules are
         # deliberately NOT replayed on recovery — landing stays human.
-        # v88-F4: the recovery path has no ResolvedRunPolicy in hand, so it
-        # re-resolves the project's pinned verify_command from the repo. A
-        # crash must not silently downgrade G10 to the worker's own claim.
-        from .policy_resolver import run_policy_for_repo
-
-        # Slug-bound projects keep their pin on recovery too (0bda59d
-        # closed this for the live path; same candidates here).
-        recovery_candidates = (
-            [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+        _reverify_after_restart(
+            run_store,
+            config,
+            record,
+            task,
+            outcome.record.verification_outcome,
+            tuple(result.changed_files) if result is not None else None,
         )
-        recovery_policy = run_policy_for_repo(
-            run_store, config, repo, binding_candidates=recovery_candidates
-        )
-        reverify_run(
-            store=run_store,
-            task_id=task_id,
-            worker_outcome=outcome.record.verification_outcome,
-            repo=repo,
-            ref=record.ref,
-            config=config,
-            changed_files=tuple(result.changed_files) if result is not None else None,
-            verify_command=str(recovery_policy.get("verify_command") or ""),
-            # D6 (I2): the run's loopback ports, as the worker had them —
-            # ES-F252: its local model provider's port included.
-            loopback_ports=run_loopback_ports(
-                recovery_policy.get("loopback_ports") or (),
-                task.permissions.provider_hosts,
-                config.home,
-            ),
-            timeout_seconds=float(task.budget.wall_clock_seconds),  # as the live path
-        )
-        # D35 (ADR 0060 §3): say why a project's auto-apply lane did not fire,
-        # in the vocabulary maybe_auto_approve uses when it declines (I8).
-        raw_auto = recovery_policy.get("auto_apply_verified_patch")
-        rules = auto_apply_decision(
-            config.auto_approval_rules, raw_auto if isinstance(raw_auto, bool) else None
-        ).rules
-        if rules:
-            reason = RESTART_LANDS_BY_APPROVAL.format(task_id=task_id)
-            run_store.transition(
-                task_id,
-                TaskState.COMPLETED.value,
-                json.dumps(
-                    {"auto_apply_blocked": {rule.name: reason for rule in rules}},
-                    ensure_ascii=True,
-                ),
-            )
-        # v107-F1: same post-reverify keep answer as the live path.
-        reverify_record = run_store.reverification_for(task_id)
-        if (
-            reverify_record is None
-            or reverify_record.confirmed
-            or (reverify_record.outcome == "not_applicable")
-        ):
-            remove_worktree(repo, workspace)
     if on_run_finished is not None:
         on_run_finished(task_id)
+
+
+def _reverify_after_restart(
+    run_store: RunStore,
+    config: SupervisorConfig,
+    record: RunRecord,
+    task: CodingWorkerTask,
+    worker_outcome: str | None,
+    changed_files: tuple[str, ...] | None,
+) -> None:
+    """G10 for a completed run whose supervisor did not witness the finish:
+    the pinned verify re-resolved from the repo, the restart's auto-apply
+    note, and the live path's post-reverify worktree keep answer."""
+    task_id = record.task_id
+    repo = Path(record.repo)
+    workspace = Path(record.workspace or task.workspace)
+    # v88-F4: the recovery path has no ResolvedRunPolicy in hand, so it
+    # re-resolves the project's pinned verify_command from the repo. A
+    # crash must not silently downgrade G10 to the worker's own claim.
+    from .policy_resolver import run_policy_for_repo
+
+    # Slug-bound projects keep their pin on recovery too (0bda59d
+    # closed this for the live path; same candidates here).
+    recovery_candidates = (
+        [("repo_slug", repo.name)] if repo.parent == config.home.parent / "repos" else []
+    )
+    recovery_policy = run_policy_for_repo(
+        run_store, config, repo, binding_candidates=recovery_candidates
+    )
+    reverify_run(
+        store=run_store,
+        task_id=task_id,
+        worker_outcome=worker_outcome,
+        repo=repo,
+        ref=record.ref,
+        config=config,
+        changed_files=changed_files,
+        verify_command=str(recovery_policy.get("verify_command") or ""),
+        # D6 (I2): the run's loopback ports, as the worker had them —
+        # ES-F252: its local model provider's port included.
+        loopback_ports=run_loopback_ports(
+            recovery_policy.get("loopback_ports") or (),
+            task.permissions.provider_hosts,
+            config.home,
+        ),
+        timeout_seconds=float(task.budget.wall_clock_seconds),  # as the live path
+    )
+    # D35 (ADR 0060 §3): say why a project's auto-apply lane did not fire,
+    # in the vocabulary maybe_auto_approve uses when it declines (I8).
+    raw_auto = recovery_policy.get("auto_apply_verified_patch")
+    rules = auto_apply_decision(
+        config.auto_approval_rules, raw_auto if isinstance(raw_auto, bool) else None
+    ).rules
+    if rules:
+        reason = RESTART_LANDS_BY_APPROVAL.format(task_id=task_id)
+        run_store.transition(
+            task_id,
+            TaskState.COMPLETED.value,
+            json.dumps(
+                {"auto_apply_blocked": {rule.name: reason for rule in rules}},
+                ensure_ascii=True,
+            ),
+        )
+    # v107-F1: same post-reverify keep answer as the live path.
+    reverify_record = run_store.reverification_for(task_id)
+    if (
+        reverify_record is None
+        or reverify_record.confirmed
+        or (reverify_record.outcome == "not_applicable")
+    ):
+        remove_worktree(repo, workspace)
 
 
 def _adopt_worker(
