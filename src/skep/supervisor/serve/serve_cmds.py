@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from collections.abc import MutableMapping
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 # v70-F2: the log file rides the operator home, size-bounded — a daemon
 # launched from any shell leaves a trail (the 2026-07-20 field test had to be
@@ -18,6 +19,32 @@ SERVE_LOG_MAX_BYTES = 2_000_000
 SERVE_LOG_BACKUPS = 2
 # v111-F1: the operator's env file beside the log, loaded at startup.
 SERVE_ENV_FILE = "serve.env"
+# One serve per home: two supervisors over one store double-resume follow-ups
+# and re-adopt each other's workers.
+SERVE_LOCK_FILE = "serve.lock"
+
+
+def take_serve_lock(home: Path, port: int) -> tuple[IO[str] | None, str | None]:
+    """An exclusive flock on ``<home>/serve.lock`` for the life of this serve:
+    ``(handle, None)`` — keep the handle open — or ``(None, holder)`` naming
+    the serve that holds it. The OS drops the lock when its holder dies, so
+    there is no stale pid to judge; the pid and port written inside are only
+    for the refusal to name."""
+    import fcntl
+
+    home.mkdir(parents=True, exist_ok=True)
+    handle = (home / SERVE_LOCK_FILE).open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.seek(0)
+        holder = handle.read().strip() or "an unknown pid"
+        handle.close()
+        return None, holder
+    handle.truncate(0)
+    handle.write(f"pid {os.getpid()}, port {port}\n")
+    handle.flush()
+    return handle, None
 
 
 def load_serve_env(path: Path, environ: MutableMapping[str, str] = os.environ) -> list[str]:
@@ -91,9 +118,6 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # Lazy imports: registering the parser must not pay the FastAPI import cost
     # for every other CLI invocation.
     from ..cli_cmds import build_config
-    from ..netproxy import record_serve_port
-    from .app import create_app
-    from .auth import ensure_token
 
     # v111-F1: before anything reads the process env — engine auth rides it.
     loaded_env = load_serve_env(args.home.expanduser().resolve() / SERVE_ENV_FILE)
@@ -103,6 +127,27 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # read by build_config).
     if getattr(args, "no_readopt", False):
         config = replace(config, readopt_workers=False)
+    lock, holder = take_serve_lock(config.home, args.port)
+    if lock is None:
+        print(
+            f"error: another skep serve already runs on this home ({holder}; home: "
+            f"{config.home}). Two supervisors over one store resume the same follow-ups "
+            "and re-adopt the same workers twice. Use that serve, stop it first, or start "
+            "this one with a different --home.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        return _serve(args, config, loaded_env)
+    finally:
+        lock.close()  # the OS would release it anyway; a test's next serve needs it now
+
+
+def _serve(args: argparse.Namespace, config: Any, loaded_env: list[str]) -> int:
+    from ..netproxy import record_serve_port
+    from .app import create_app
+    from .auth import ensure_token
+
     # v26-F3: channel confirm-pointers name the UI the operator actually runs.
     app = create_app(config, web_ui_url=f"http://{args.host}:{args.port}/")
     banner = f"skep serve: http://{args.host}:{args.port}  (home: {config.home})"
