@@ -40,9 +40,10 @@ DEFAULT_MAX_ITERATIONS = "default_max_iterations"
 DEFAULT_MAX_ACTIONS = "default_max_actions"
 DEFAULT_MAX_PROVIDER_CALLS = "default_max_provider_calls"
 ALLOWED_SHELL_COMMANDS = "allowed_shell_commands"
-# v86-F1: the session tier — commands a plain approve holds until the serve
-# process restarts. Read-side merged only; the durable write paths (remember,
-# presets, allow_shell_command) never absorb it.
+# v86-F1: the session tier — commands held until the serve process restarts
+# (a plain gate approve no longer writes it: ES-F293, D43). Read-side merged
+# only; the durable write paths (remember, presets, allow_shell_command) never
+# absorb it.
 SESSION_ALLOWED_SHELL_COMMANDS = "session_allowed_shell_commands"
 ALLOWED_PLUGIN_RISKS = "allowed_plugin_risks"
 SANDBOX_BACKEND = "sandbox_backend"  # v44-F7: "auto" (native) | "podman"; O3: | "none"

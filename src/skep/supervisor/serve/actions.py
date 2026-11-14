@@ -537,6 +537,45 @@ def reverification_warning(reverify: Any) -> str | None:
     )
 
 
+def reverify_in_flight(store: RunStore, task_id: str) -> bool:
+    """ES-F291: no G10 record yet, and the supervisor that runs G10 for this
+    run is alive — a completed run in this state is still settling."""
+    if store.reverification_for(task_id) is not None:
+        return False
+    supervisor = store.run_supervisor(task_id)
+    return supervisor is not None and owner_alive(supervisor)
+
+
+def never_reverified_error(store: RunStore, task_id: str) -> str | None:
+    """ES-F291 (L1, I1 I2): why a run with no re-verification record may not
+    land, or None when a record exists. Only landing paths ask, so the run
+    has a patch. Ingest commits COMPLETED before G10 runs, so a missing
+    record means G10 is still running (its supervisor is alive) or the
+    supervisor stopped before it ran — serve's startup sweep re-verifies
+    those, and ``skep review --reverify`` does it on demand."""
+    if store.reverification_for(task_id) is not None:
+        return None
+    if reverify_in_flight(store, task_id):
+        return (
+            "this run's re-verification (G10) is still running — nothing has checked "
+            "the patch yet, so it cannot land. Land it once re-verification finishes "
+            "(get_run shows the result)."
+        )
+    return (
+        "this run was never re-verified (G10): the supervisor stopped between the "
+        "worker finishing and re-verification, so nothing has checked this patch and "
+        f"it cannot land. Re-verify it first — `skep review {task_id} --reverify` "
+        "(restarting `skep serve` also re-verifies it) — then land it again."
+    )
+
+
+def require_reverified(store: RunStore, task_id: str) -> None:
+    """ES-F291: the 409 every serve landing face raises for ``never_reverified_error``."""
+    error = never_reverified_error(store, task_id)
+    if error is not None:
+        raise HTTPException(status_code=409, detail=error)
+
+
 def git_log_view(
     holder: ConfigHolder,
     repo: str,
@@ -1565,6 +1604,8 @@ def land_run(
             detail="run is waiting on a mid-run gate; approve that review first "
             "(approve_review resumes it), then land the completed run",
         )
+    if patch_path(store, task_id) is not None:
+        require_reverified(store, task_id)  # ES-F291: before a review is opened
     # ES-F4 (B17): pending-or-new in one store call — concurrent lands share
     # one review, and apply_patch's claim lets exactly one of them land it.
     review_id = store.pending_or_enqueue_approval(
@@ -2591,7 +2632,9 @@ def approval_view(
         # v106-F3: an unconfirmed re-verification must be visible ON the
         # approval the human is about to grant, not only in the land response
         # after the fact (four field patches landed confirmed=0 quietly).
-        warning = reverification_warning(store.reverification_for(str(approval.task_id)))
+        warning = reverification_warning(
+            store.reverification_for(str(approval.task_id))
+        ) or never_reverified_error(store, str(approval.task_id))
         if warning is not None:
             row["reverification_warning"] = warning
     if project_context is not None:
@@ -3127,6 +3170,12 @@ def open_pr_for_runs(
             f"({', '.join(skipped_no_patch)})",
         )
     runs = landable
+    # ES-F291 follow-up (I2 I8): refuse the group before any of it lands — a
+    # never-re-verified run found mid-loop left the earlier runs landed on a
+    # branch no PR was opened for.
+    for run in runs:
+        if applied_branch_for(store, str(run["task_id"])) is None:
+            require_reverified(store, str(run["task_id"]))
     branch = _grouped_branch(title, str(runs[0]["task_id"]))
     for run in runs:
         task_id = str(run["task_id"])
@@ -3265,6 +3314,7 @@ def apply_patch(
     patch = patch_path(store, task_id)
     if patch is None:
         raise HTTPException(status_code=409, detail="no patch artifact to apply")
+    require_reverified(store, task_id)
     repo = Path(str(run["repo"]))
     if branch is not None and branch.strip():
         target = branch.strip()
@@ -3609,30 +3659,6 @@ def preserved_resumable_hint(
     return None
 
 
-def remember_commands_for_session(
-    store: RunStore, commands: list[list[str]], *, repo: Path | str
-) -> list[list[str]]:
-    """v86-F1 → ADR 0059 D4: a plain approve holds for the serve session, in
-    THIS repo only (B39: the old tier was one list every repo's runs read).
-    Each eligible command becomes a session grant on the one learned list,
-    bound to ``repo`` — an argv prefix, as every worker allowlist entry is —
-    dropped at serve startup. Guarded classes (remote git, dangerous/outbound
-    prefixes) are NEVER session-persisted: they stay approve-once, so denied
-    space gains no standing grant. Returns the commands newly granted."""
-    added: list[list[str]] = []
-    for raw in commands:
-        command = normalize_remembered_command(list(raw))
-        if not command or is_remote_git_command(command):
-            continue
-        if dangerous_prefix_reason(command) is not None:
-            continue
-        grant = _worker_grant(command, "session", {"repo": grant_repo(repo)})
-        _, status = store_grant(store, grant)
-        if status != "kept" and command not in added:
-            added.append(command)
-    return added
-
-
 def _worker_grant(command: Sequence[str], lifetime: str, bound: dict[str, str]) -> LearnedRule:
     """A worker shell grant: an argv prefix (the worker contract's matcher)."""
     from ..policy_schema import LearnedRule
@@ -3727,13 +3753,14 @@ def resume_past_gate(
     *,
     remembered: bool = False,
     granted: Sequence[list[str]] = (),
-    session: bool = True,
 ) -> str:
     """Q8: approving a suspended task resumes it past the gate (fresh worker
     run carrying the granted verdict), dispatched on the background pool.
 
-    ``session=False`` (ADR 0061's auto-answer) approves ONCE: an automatic
-    verdict never writes the session tier a human's plain approve does.
+    ES-F293 (L11, D43): the approve is ONE decision — the verdict carries the
+    gate's commands to the resumed worker and nothing standing is saved. A
+    grant that outlives this run is the explicit remember (``remembered``,
+    written by the caller before this call), never a side effect.
 
     ``shell_allowlist`` overrides the original permissions' allowlist so a
     just-persisted policy change applies to this resume, not only future runs.
@@ -3770,18 +3797,6 @@ def resume_past_gate(
         )
     # v19-F1: a batch approval grants every command it listed, in one verdict.
     approval_commands = store.approval_commands(review_id)
-    # v86-F1: a plain approve also holds for the serve session (the operator's
-    # explicit ask); "remember" already wrote the durable tier before this call.
-    # V7: never a deferred delegated ask — that approval is this run's alone
-    # (the verdict and the resume chain's worker_state carry it) and must not
-    # reach the session tier every repo's runs read (B39).
-    session_kept: list[list[str]] = []
-    if session and not remembered and approval_commands:
-        session_kept = remember_commands_for_session(
-            store,
-            [list(command) for command in approval_commands if not _asked(command, permissions)],
-            repo=str(run["repo"]),
-        )
     verdict = ApprovalVerdict(
         approved=True,
         actor=actor,
@@ -3821,8 +3836,7 @@ def resume_past_gate(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {resumed_id} (dispatched)"
-        + ("; approval held for this serve session, in this repo only" if session_kept else ""),
+        note=f"resumed as {resumed_id} (dispatched)",
         remembered=remembered,
         claimed=True,
     )
@@ -3861,6 +3875,8 @@ def auto_answer_unlocked_gate(
     when ``decide(…, sandboxed=True)`` allows every request it names, under
     the run's own role and chain — the click path (``resume_past_gate``),
     actor ``auto:unlocked``, once. Each request is a decision-log row (I13).
+    A host gate never answers itself (D42: ``decide`` keeps a host's ask), and
+    only the serve's done-callback calls this — a CLI run stops at its gate.
     Returns the resumed task id, or None: the gate stays a human's card."""
     run = store.get_run(task_id)
     if run is None or run.state != "pending_approval":
@@ -3903,7 +3919,6 @@ def auto_answer_unlocked_gate(
         require_run(store, task_id),
         approval.review_id,
         UNLOCKED_ACTOR,
-        session=False,
     )
 
 
@@ -4462,15 +4477,18 @@ def set_operator_policy_rule(
     if scope == "shell" and verdict == "allow":
         return _queen_shell_allow(store, action, pattern, holder=holder, dry_run=dry_run)
     rule_id = f"op:{scope}:{action}:{pattern}"
+    existed = False
 
     def plan() -> tuple[Any, tuple[ScopePolicy, dict[str, Any]]]:
+        nonlocal existed
         document = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
         bucket = next((s for s in document.scopes if s.scope == scope), None)
         if bucket is None:
             bucket = ScopePolicy(scope=scope)  # type: ignore[arg-type]
             document.scopes.append(bucket)
         rules = bucket.allow if verdict == "allow" else bucket.deny
-        if any(r.action == action and r.pattern == pattern for r in rules):
+        existed = any(r.action == action and r.pattern == pattern for r in rules)
+        if existed:
             return UNCHANGED, (bucket, {})
         rules.append(PolicyRule(rule_id=rule_id, action=action, pattern=pattern))
         report = vet_write(
@@ -4493,7 +4511,10 @@ def set_operator_policy_rule(
         "allow": [r.model_dump() for r in bucket.allow],
         "deny": [r.model_dump() for r in bucket.deny],
         **_write_report(report),
-    }
+        # L7: a rule that already exists is no write — said, never carded
+        **({"unchanged": _ALREADY.format(f"{scope} {action} {verdict} {pattern!r}")}
+           if existed else {}),
+    }  # fmt: skip
 
 
 def queen_shell_allow_refusal(pattern: str, action: str) -> str | list[tuple[str, str, str, str]]:
@@ -4565,32 +4586,38 @@ def _queen_shell_allow(
         detail = f"shell allow refused: {found}"
         raise HTTPException(status_code=400, detail=detail) from PolicyWriteRejected(detail)
     report: dict[str, Any] = {}
-    try:
-        if dry_run:
-            report = vet_keep(store, found)
-        for scope, rule_action, line, matcher in [] if dry_run else found:
-            store_grant(
-                store,
-                LearnedRule(
-                    rule_id=f"{scope}:{rule_action}:{line}", action=rule_action, pattern=line,
-                    scope=scope,  # type: ignore[arg-type]
-                    provenance="set_operator_policy", lifetime="global",
-                    matcher=matcher,  # type: ignore[arg-type]
-                ),
-                report=report,
-                replay=True,
-            )  # fmt: skip
-    except PolicyWriteRejected as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    rules = [
+        LearnedRule(
+            rule_id=f"{scope}:{rule_action}:{line}", action=rule_action, pattern=line,
+            scope=scope,  # type: ignore[arg-type]
+            provenance="set_operator_policy", lifetime="global",
+            matcher=matcher,  # type: ignore[arg-type]
+        )
+        for scope, rule_action, line, matcher in found
+    ]  # fmt: skip
     lines = [line for _scope, _action, line, _matcher in found]
-    return {
+    answer = {
         "scope": "shell",
         "verdict": "allow",
         "rule": {"rule_id": f"shell:{action}:{lines[0]}", "action": action, "pattern": pattern},
         "patterns": lines,
         "matcher": "exact_argv",
-        **_write_report(report),
     }
+    if all(_grant_plan(store, rule, None)[1] == "kept" for rule in rules):
+        # L7: every grant it would store already holds — nothing to write
+        return {**answer, "unchanged": _ALREADY.format(f"shell {action} allow {pattern!r}")}
+    try:
+        if dry_run:
+            report = vet_keep(store, found)
+        for rule in [] if dry_run else rules:
+            store_grant(store, rule, report=report, replay=True)
+    except PolicyWriteRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**answer, **_write_report(report)}
+
+
+# L7: the answer to a policy write that would change nothing
+_ALREADY = "{} is already a rule — nothing changes"
 
 
 def _write_report(report: dict[str, Any]) -> dict[str, Any]:

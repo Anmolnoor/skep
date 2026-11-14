@@ -908,8 +908,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         # without a word (dispatch.py takes the engine argv for any external
         # engine) — the field burned three runs on an agent the operator had
         # not asked for. Name both and the two ways out (I9).
+        engine = resolved_policy.coding_engine
+        if resolved_policy.policy.get("coding_engine") != engine:
+            # L8: no pin — the resolver mapped the worker command itself to
+            # the external agent it runs (D36); blaming a pin misleads (I9).
+            return _err(
+                f"--worker-cmd runs {engine}, an external agent: it bypasses the "
+                "capability layer, so it runs only inside the sandbox (an "
+                "--execution-mode workspace becomes sandbox), with the project's pinned "
+                "verify_command and its auth env; pass --engine builtin to run your worker command "
+                f"that way, or --engine {engine} without --worker-cmd",
+                next_command=f'skep run {repo} "<instructions>" --engine builtin --worker-cmd ...',
+            )
         return _err(
-            f"project pins coding_engine {resolved_policy.coding_engine!r}, which replaces "
+            f"project pins coding_engine {engine!r}, which replaces "
             "--worker-cmd; pass --engine builtin to run your worker command under this "
             "project, or drop --worker-cmd to run the pinned engine",
             next_command=f'skep run {repo} "<instructions>" --engine builtin --worker-cmd ...',
@@ -1254,9 +1266,29 @@ def cmd_review(args: argparse.Namespace) -> int:
         approvals = store.approvals_for(record.task_id)
 
         allow_command = bool(getattr(args, "allow_command", False))
-        verdict_flags = [args.approve, args.deny, allow_command]
+        reverify_flag = bool(getattr(args, "reverify", False))
+        verdict_flags = [args.approve, args.deny, allow_command, reverify_flag]
         if sum(bool(flag) for flag in verdict_flags) > 1:
-            return _err("--approve, --deny, and --allow-command are mutually exclusive.")
+            return _err(
+                "--approve, --deny, --allow-command, and --reverify are mutually exclusive."
+            )
+
+        if reverify_flag:
+            # ES-F291 (L1): the operator face of the startup sweep (ES-F290).
+            from .dispatch import reverify_unverified
+
+            why_not = reverify_unverified(store, config, record)
+            if why_not:
+                return _err(
+                    why_not,
+                    state=record.state,
+                    evidence=str(audit_dir),
+                    next_command=f"skep review {record.task_id}  # inspect the evidence",
+                )
+            done = store.reverification_for(record.task_id)
+            print(f"re-verified: task {record.task_id} → {done.outcome if done else '-'}")
+            print(f"  next: skep review {record.task_id}  # read the result, then --approve")
+            return 0
 
         if not args.approve and not args.deny and not allow_command:
             changed_files: list[str] = []
@@ -1415,6 +1447,21 @@ def cmd_review(args: argparse.Namespace) -> int:
                 state=record.state,
                 evidence=str(audit_dir),
                 next_command=f"skep review {record.task_id}  # inspect the evidence",
+            )
+        from .serve.actions import never_reverified_error, reverify_in_flight
+
+        unverified = never_reverified_error(store, record.task_id)
+        if unverified is not None:  # ES-F291 (L1): as serve's apply_patch
+            return _err(
+                unverified,
+                state=record.state,
+                evidence=str(audit_dir),
+                next_command=f"skep review {record.task_id}"
+                + (
+                    "  # once re-verification finishes"
+                    if reverify_in_flight(store, record.task_id)
+                    else " --reverify"
+                ),
             )
         # v20-F5: an operator may name the landing branch (default skep/<task_id>).
         requested_branch = getattr(args, "branch", None)
@@ -1691,23 +1738,9 @@ def _resume_claimed_gate(
     )
     # ES-F8 (B130; ADR 0050 parity with resume_past_gate): a batch card grants
     # EVERY command it listed (v19-F1) — the CLI granted only the first, so a
-    # "for 3 commands" card cost three approvals and three resumes — and a
-    # plain approve holds for the serve session like the REST face (v86-F1).
+    # "for 3 commands" card cost three approvals and three resumes. ES-F293
+    # (D43): in this one verdict only — a plain approve saves no grant.
     approval_commands = store.approval_commands(review_id)
-    session_kept: list[list[str]] = []
-    if not remembered and approval_commands:
-        from .serve.actions import _asked, remember_commands_for_session
-
-        # V7: never a delegated ask — that approval is this run's alone (B39).
-        session_kept = remember_commands_for_session(
-            store,
-            [
-                list(command)
-                for command in approval_commands
-                if not _asked(command, original.permissions)
-            ],
-            repo=record.repo,
-        )
     verdict = ApprovalVerdict(
         approved=True,
         actor=actor,
@@ -1744,8 +1777,7 @@ def _resume_claimed_gate(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})"
-        + ("; approval held for this serve session, in this repo only" if session_kept else ""),
+        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})",
         remembered=remembered,
         claimed=True,
     )
@@ -3463,6 +3495,12 @@ def register_supervisor_commands(
     review.add_argument("--approve", action="store_true")
     review.add_argument("--deny", action="store_true")
     review.add_argument("--allow-command", action="store_true")
+    review.add_argument(
+        "--reverify",
+        action="store_true",
+        help="re-verify (G10) a completed run that was never re-verified — the "
+        "supervisor stopped before it could — with the project's pinned verify",
+    )
     review.add_argument("--actor", default=None, help="who is approving (default: $USER)")
     review.add_argument("--note", default=None)
     review.add_argument(
@@ -3812,7 +3850,8 @@ def register_supervisor_commands(
         action=argparse.BooleanOptionalAction,
         default=None,
         help="zero-ask mode for this project (ADR 0061): a sandboxed worker's default "
-        "asks answer themselves, dispatch needs no card and a G10-confirmed patch "
+        "command asks answer themselves on serve-dispatched runs (never a host no rule "
+        "names), dispatch needs no card and a G10-confirmed patch "
         "lands on skep/*; denies, named asks and the floor still hold. Needs a pinned "
         "verify command, a usable sandbox and an approved baseline; --no-unlocked "
         "turns it off",

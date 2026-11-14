@@ -33,11 +33,16 @@ from typing import Any
 
 from skep.supervisor import RunStore
 from skep.supervisor.cli_cmds import build_config
-from skep.supervisor.policy_resolver import PolicyResolutionError, resolve_run_policy
+from skep.supervisor.policy_resolver import PolicyResolutionError, grant_repo, resolve_run_policy
 from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
 from skep.supervisor.serve import actions
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import mutation_execution_decision
+from skep.supervisor.shell_prefixes import (
+    dangerous_prefix_reason,
+    is_remote_git_command,
+    normalize_remembered_command,
+)
 
 from .conftest import no_template_role
 from .queen_lane_grid import build_home
@@ -83,6 +88,28 @@ FETCH_PROBES: tuple[tuple[str, str], ...] = (
 )
 
 
+def session_worker_grant(
+    store: RunStore, commands: list[list[str]], *, repo: Path | str
+) -> list[list[str]]:
+    """A worker session-tier grant (lifetime ``session``, repo-bound argv
+    prefix), as the plain gate approve wrote it until ES-F293 (D43) and as an
+    older build's serve leaves it on the learned list until a restart clears
+    it. The read side still honours such rows, so the B39 / deny pins keep
+    building them; guarded classes were never stored."""
+    added: list[list[str]] = []
+    for raw in commands:
+        command = normalize_remembered_command(list(raw))
+        if not command or is_remote_git_command(command):
+            continue
+        if dangerous_prefix_reason(command) is not None:
+            continue
+        grant = actions._worker_grant(command, "session", {"repo": grant_repo(repo)})
+        _, status = actions.store_grant(store, grant)
+        if status != "kept" and command not in added:
+            added.append(command)
+    return added
+
+
 def _accepts(func: Any, name: str) -> bool:
     return name in inspect.signature(func).parameters
 
@@ -124,8 +151,7 @@ def grant(store: RunStore, holder: ConfigHolder, kind: str, chat: str, repo: Pat
                              "pattern": "granted.example", "scope": "network",
                              "provenance": "allow-always:op"})  # fmt: skip
     elif kind == "worker-session":
-        extra = {"repo": repo} if _accepts(actions.remember_commands_for_session, "repo") else {}
-        actions.remember_commands_for_session(store, [WORKER], **extra)
+        session_worker_grant(store, [WORKER], repo=repo)
     elif kind == "worker-remember":
         with contextlib.suppress(Exception):  # the grid shows a refused remember
             actions.persist_remembered_command(store, holder, repo, list(WORKER))

@@ -222,7 +222,10 @@ def high_tier(
         or (isinstance(overrides, dict) and overrides.get("unlocked") is True)
     ):
         # ES-F142 (ADR 0061): a whole project's worker asks stop asking
-        return "it turns unlocked mode on: the project's sandboxed workers stop asking"
+        return (
+            "it turns unlocked mode on: the project's sandboxed workers stop asking "
+            "about commands no rule names (hosts no rule names stay refused or asked)"
+        )
     if tool == "setup_project" and (overrides or safe.get("groups")):
         # the overlay spells any knob (coding_engine, default_network, …) and
         # groups= is attach_policy_group: both write the project's policy
@@ -249,6 +252,13 @@ def high_tier(
                 return f"it picks the coding agent itself (engine {task['engine']!r})"
     if tool == "start_research" and _wildcard_network(safe):
         return "the run may reach any host on the internet (network '*')"
+    if tool in ("run_shell", "start_process"):
+        from ..secret_floor import UNRESOLVED_READ, shell_read_target_unresolved
+
+        cwd = safe.get("cwd")
+        command = str(safe.get("command") or "")
+        if command and shell_read_target_unresolved(command, cwd=None if cwd is None else str(cwd)):
+            return UNRESOLVED_READ  # L3 (D44): the floor could not read it
     return None
 
 

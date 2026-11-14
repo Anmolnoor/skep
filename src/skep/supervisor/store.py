@@ -2727,6 +2727,11 @@ class RunStore:
         self._conn.commit()
 
     @_locked
+    def delete_setting(self, key: str) -> None:
+        self._conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        self._conn.commit()
+
+    @_locked
     def compare_and_set_setting(self, key: str, expected: Any | None, value: Any) -> bool:
         """W14: write ``value`` only if ``key`` still holds ``expected``
         (None: no row). One conditional statement, so a second connection on

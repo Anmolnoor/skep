@@ -73,8 +73,14 @@ def serve_client(config: SupervisorConfig, **app_kwargs: Any) -> TestClient:
 def wait_terminal(client: TestClient, task_id: str, timeout: float = 30.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        run = client.get(f"/api/runs/{task_id}").json()["run"]
-        if run["state"] in TERMINAL_STATES:
+        detail = client.get(f"/api/runs/{task_id}").json()
+        run = detail["run"]
+        # ES-F291: ingest commits ``completed`` before G10 runs, and landing
+        # refuses a run until its re-verification record exists — so a
+        # completed run is settled only once G10 has recorded.
+        if run["state"] in TERMINAL_STATES and (
+            run["state"] != "completed" or detail["reverification"] is not None
+        ):
             return dict(run)
         time.sleep(0.05)
     raise AssertionError(f"run {task_id} never reached a terminal state")

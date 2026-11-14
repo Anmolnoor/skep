@@ -277,6 +277,10 @@ def test_review_approve_never_lands_a_review_serve_is_already_applying(
         patch = tmp_path / "task.patch"
         patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
         store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+        store.record_reverification(  # ES-F291: landing needs a G10 record
+            task.task_id, outcome="passed", worker_outcome="passed", confirmed=True,
+            commands=["true"], exit_codes=[0], detail="re-verified",
+        )  # fmt: skip
         review_id = store.enqueue_approval(task.task_id, action="apply_patch", reason="land")
         assert store.claim_approval(review_id)  # serve is mid-landing
     finally:
@@ -311,6 +315,10 @@ def test_review_approve_hands_the_review_back_when_git_blows_up(
         patch = tmp_path / "task.patch"
         patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
         store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+        store.record_reverification(  # ES-F291: landing needs a G10 record
+            task.task_id, outcome="passed", worker_outcome="passed", confirmed=True,
+            commands=["true"], exit_codes=[0], detail="re-verified",
+        )  # fmt: skip
     finally:
         store.close()
 
@@ -2009,6 +2017,32 @@ def test_run_refuses_worker_cmd_under_a_pinned_external_engine(
     assert code == 2, err
     assert "pins coding_engine 'claude_code'" in err
     assert "--engine builtin" in err
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    try:
+        assert store.recent_runs(5) == [], "nothing may be dispatched behind a refusal"
+    finally:
+        store.close()
+
+
+def test_a_worker_cmd_that_runs_an_external_agent_is_named_not_blamed_on_a_pin(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """L8 (overnight 2026-11-14, I9): the project pins no engine; the
+    --worker-cmd itself runs claude_code. The refusal said the project pinned
+    one. It names the real cause and the acceptable path instead."""
+    home = tmp_path / "home"
+    code = _run_cli(home, "project", "setup", str(repo), "--strategy", "trusted_local_dev",
+                    "--project-id", "plain", "--verify-command", "true")  # fmt: skip
+    assert code == 0
+    capsys.readouterr()
+    worker = shlex.join([sys.executable, "-m", "skep.workers.claude_code"])
+    code = _run_cli(home, "run", str(repo), "Fix it.", "--worker-cmd", worker,
+                    "--execution-mode", "workspace")  # fmt: skip
+    err = capsys.readouterr().err
+    assert code == 2, err
+    assert "pins coding_engine" not in err
+    assert "--worker-cmd runs claude_code, an external agent" in err
+    assert "only inside the sandbox" in err and "--engine builtin" in err
     store = RunStore(home / "supervisor" / "supervisor.sqlite3")
     try:
         assert store.recent_runs(5) == [], "nothing may be dispatched behind a refusal"

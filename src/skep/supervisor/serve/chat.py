@@ -99,6 +99,7 @@ from .tools import (
     execute_mutation,
     execute_read_tool,
     hidden_tools,
+    landing_card_error,
     log_denied_dispatch_asks,
     mutation_execution_decision,
     policy_write_preview,
@@ -516,13 +517,17 @@ QUEUED_FOLLOW_UP = (
 )
 
 
-def _queue_follow_up(engine: ChatEngine, action_id: str, actor: str) -> None:
+def _queue_follow_up(
+    engine: ChatEngine, action_id: str, actor: str, *, resumed: bool = False
+) -> None:
     """D18: the model's turn for a verdict recorded while another turn ran —
-    it waits for that turn, the way a run-finish follow-up does, and runs
-    unattended (it fires whether or not anyone is watching). A card still
-    pending by then holds it: that card's verdict resumes the model. The
-    card row holds it until it starts (``store.queue_follow_up``). A click
-    from a messenger hears the reply there, as an in-turn click does."""
+    it waits for that turn, the way a run-finish follow-up does. L6: the
+    operator just clicked, so it is attended, as the in-turn verdict's
+    continuation is (a messenger click: a channel turn). One a serve start
+    ``resumed`` runs with nobody's click behind that moment: unattended.
+    A card still pending by then holds it: that card's verdict resumes the
+    model. The card row holds it until it starts (``store.queue_follow_up``).
+    A click from a messenger hears the reply there, as an in-turn click does."""
 
     def follow() -> None:
         action = engine.store.get_chat_action(action_id)
@@ -544,7 +549,8 @@ def _queue_follow_up(engine: ChatEngine, action_id: str, actor: str) -> None:
                 str(data.get("content") or "")
                 for event, data in engine.turn_events(
                     chat_id, base_url=base_url, api_key=api_key, model=model,
-                    protocol=protocol, unattended=True,  # D16: unattended keeps no session keep
+                    protocol=protocol, unattended=resumed,  # D16: unattended keeps no session keep
+                    channel=not resumed and actor.startswith("channel:"),
                 )
                 if event is None
             ]  # fmt: skip
@@ -566,7 +572,7 @@ def resume_follow_ups(engine: ChatEngine) -> int:
     each runs once (its claim is the once). Returns how many."""
     queued = engine.store.queued_follow_ups()
     for action_id, actor in queued:
-        _queue_follow_up(engine, action_id, actor)
+        _queue_follow_up(engine, action_id, actor, resumed=True)
     # ES-F242: and the run-finish follow-ups a stop cut off, waiting or mid-turn
     from .run_status import CONTINUE_CHAT_SETTING
 
@@ -1304,6 +1310,31 @@ def stream_args(args: dict[str, Any]) -> dict[str, Any]:
     if len(text) <= STREAM_ARGS_MAX_CHARS:
         return shown
     return {"truncated": True, "preview": text[:STREAM_ARGS_MAX_CHARS] + "..."}
+
+
+def shown_strings(value: Any) -> Any:
+    """L5: ``value`` with every string, at any depth, through ``redact`` — a
+    card or decision quotes the args (headline, keep line, detail)."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {k: shown_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [shown_strings(v) for v in value]
+    return value
+
+
+def shown_message(message: Any) -> dict[str, Any]:
+    """L5 follow-up: a stored message for the chat fetch — the model's tool
+    calls carry their args masked (``stream_args``), as the card does; the
+    stored row keeps them raw for the transcript the model replays."""
+    row: dict[str, Any] = asdict(message)
+    row["tool_calls"] = row["tool_calls"] and [
+        {**call, "function": {**(call.get("function") or {}),
+                              "arguments": stream_args(_call_args(call))}}
+        for call in row["tool_calls"]
+    ]  # fmt: skip
+    return row
 
 
 def _call_args(call: dict[str, Any]) -> dict[str, Any]:
@@ -2412,10 +2443,11 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
-                        yield (
+                        yield (  # L5: the deny names what was asked, masked
                             "tool",
-                            {"tool": name, "decision": asdict(decision), "result": payload},
-                        )
+                            {"tool": name, "args": shown_args,
+                             "decision": shown_strings(asdict(decision)), "result": payload},
+                        )  # fmt: skip
                         continue
                     # ES-F3 (B08): an unattended turn never executes — it
                     # fires whether or not anyone is watching, so even a
@@ -2485,7 +2517,7 @@ class ChatEngine:
                         receipt: dict[str, Any] = {
                             "tool": name,
                             "args": shown_args,
-                            "decision": asdict(decision),
+                            "decision": shown_strings(asdict(decision)),
                             "result": payload,
                             "card": self._card(chat_id, name, args),
                         }
@@ -2510,6 +2542,16 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
+                        yield ("tool", {"tool": name, "args": shown_args, "result": payload})
+                        continue
+                    if checked.get("unchanged"):
+                        # L7: a policy write that changes nothing is answered,
+                        # never carded — its confirm would "succeed" at nothing
+                        payload = {"ok": True, "unchanged": True, "detail": checked["unchanged"]}
+                        self.store.add_chat_message(
+                            chat_id, role="tool", tool_name=name, tool_call_id=call_id,
+                            content=json.dumps(payload, ensure_ascii=True),
+                        )  # fmt: skip
                         yield ("tool", {"tool": name, "args": shown_args, "result": payload})
                         continue
                     # v109-F2: a pending twin is not a new question. Identical
@@ -3192,10 +3234,13 @@ class ChatEngine:
         fields: dict[str, Any] = {
             # P3-5: a policy write's replay and narrowed keep, laid over the card
             "card": {**self._card(chat_id, action.tool, action.args, action=action),
-                     **(recorded.get("checked") or {})},
+                     **shown_strings(recorded.get("checked") or {})},
+            # L5: the operator's copy is masked; the stored row keeps the raw
+            # args the confirm executes
+            "args": stream_args(action.args),
         }  # fmt: skip
         if recorded.get("decision") is not None:
-            fields["decision"] = recorded["decision"]
+            fields["decision"] = shown_strings(recorded["decision"])
         return fields
 
     def _card(
@@ -3225,7 +3270,8 @@ class ChatEngine:
         if shown.get("resolves_to"):
             card["resolves_to"] = shown["resolves_to"]
             card["headline"] = f"{card['headline']} → resolves to {shown['resolves_to']}"
-        return card
+        masked: dict[str, Any] = shown_strings(card)  # L5: headline, items, keep quote args
+        return masked
 
 
 # ES B27: a scheduled turn's TOTAL budget. The provider timeout is per read,
@@ -3563,7 +3609,7 @@ def add_chat_routes(
     def _chat_detail(chat_id: str, chat: Any) -> dict[str, Any]:
         return {
             "chat": asdict(chat),
-            "messages": [asdict(m) for m in run_store.chat_messages(chat_id)],
+            "messages": [shown_message(m) for m in run_store.chat_messages(chat_id)],
             # v54-F3: description is derived, not stored — replayed cards get
             # the same human-readable line as live ones.
             "actions": [
@@ -3699,6 +3745,11 @@ def add_chat_routes(
             raise HTTPException(
                 status_code=400, detail=f"unknown command tool {body.tool!r}; known: {known}"
             )
+        # ES-F292 (L9): a /land or /approve card naming a target its confirm
+        # refuses is never shown — the refusal is the answer.
+        landing_error = landing_card_error(run_store, body.tool, body.args)
+        if landing_error is not None:
+            raise HTTPException(status_code=400, detail=landing_error)
         # v109-F2: an operator command that matches a pending card takes it
         # over instead of standing beside it as a twin (the B-pair: a typed
         # /approve while the gate-mirror card is pending). Identical args

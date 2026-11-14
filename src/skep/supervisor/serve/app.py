@@ -54,6 +54,7 @@ from .actions import (
     list_policy_groups,
     list_policy_rules,
     merge_branch,
+    never_reverified_error,
     open_pr_from_branch,
     patch_path,
     pending_approval_or_409,
@@ -377,6 +378,26 @@ def create_app(
             )
         except Exception:
             logging.getLogger("skep.serve").exception("interrupted-run recovery failed")
+
+        # ES-F290 (L1): a run that completed just before serve stopped was
+        # never re-verified (G10) — re-verify it now. In the background: a
+        # pinned suite can take minutes, and landing refuses the run until its
+        # record exists (ES-F291), so serve need not wait to answer.
+        def startup_reverify() -> None:
+            from ..dispatch import reverify_unverified_runs
+
+            try:
+                reverified = reverify_unverified_runs(run_store, holder.current)
+            except Exception:
+                logging.getLogger("skep.serve").exception("startup re-verification failed")
+                return
+            if reverified:
+                logging.getLogger("skep.serve").info(
+                    "re-verified %d completed run(s) the previous serve stopped before G10",
+                    len(reverified),
+                )
+
+        threading.Thread(target=startup_reverify, name="skep-startup-reverify", daemon=True).start()
         try:
             # ES-F1/F4: a card or landing claimed by a process that died
             # mid-execute ends honestly — never re-run, never reopened (either
@@ -797,6 +818,9 @@ def create_app(
 
         try:
             if step == "model":
+                named = (body.provider, body.model, body.endpoint, body.api_key_env)
+                if all(value is None for value in named):
+                    return onboard.onboard_keep_model(holder)  # L2: never a silent switch
                 return onboard.onboard_model(
                     holder,
                     run_store,
@@ -1201,7 +1225,8 @@ def create_app(
                     break
         from ..policy_write import run_unlocked_hosts
 
-        # D34 (ADR 0061): the hosts this run reached that no rule named
+        # D34 (ADR 0061): the hosts this run reached that no rule named —
+        # historical rows only since D42 (unlocked approves no host now)
         reached = run_unlocked_hosts(holder.current.audit_dir, run)
         return {
             **({"unlocked_hosts": reached} if reached else {}),
@@ -1222,6 +1247,16 @@ def create_app(
             "policy_blocks": policy_block_views(events),
             "applied_branch": applied_branch_for(run_store, task_id),
             "reverification": None if reverify is None else asdict(reverify),
+            # ES-F291 follow-up (I8): a landable patch with no G10 record says
+            # so (still running, or never ran) instead of showing nothing.
+            "reverification_missing": (
+                never_reverified_error(run_store, task_id)
+                if run.get("state") == "completed"
+                and reverify is None
+                and patch_path(run_store, task_id) is not None
+                and applied_branch_for(run_store, task_id) is None
+                else None
+            ),
             "usage": None if usage is None else asdict(usage),
         }
 

@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted (v86).
+Accepted (v86). Superseded in part by ES-F293 (decision D43): a plain approve
+on a worker gate is one decision and saves no session grant, because the
+gate card never offered one. The read side and the startup clear remain.
 
 ## Question
 

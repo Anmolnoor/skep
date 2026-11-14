@@ -9,7 +9,7 @@
       "actor": "acp:synthetic-agent", "repo": "$REPO", "scope": "shell", "action": "run", "value": "git push",
       "source": "floor", "verdict": "deny", "rule_id": "floor.worker-git-hard-denies",
       "decided_by": "floor/floor.worker-git-hard-denies", "layer": "floor",
-      "note": "remote git commands never run from chat — skep lands patches after approval; use push_branch/open_pr for the governed remote surface"
+      "note": "remote git commands never run in a coding agent's shell (a skep worker, an ACP or hook-governed agent) — the operator lands the work after approval and pushes it (skep land, push_branch, open_pr)"
     },
     {
       "actor": "acp:synthetic-agent", "repo": "$REPO", "scope": "shell", "action": "run", "value": "git status",
@@ -44,7 +44,7 @@
       "actor": "acp:synthetic-agent", "repo": "$REPO", "scope": "shell", "action": "run", "value": "git push",
       "source": "floor", "verdict": "deny", "rule_id": "floor.worker-git-hard-denies",
       "decided_by": "floor/floor.worker-git-hard-denies", "layer": "floor",
-      "note": "remote git commands never run from chat — skep lands patches after approval; use push_branch/open_pr for the governed remote surface"
+      "note": "remote git commands never run in a coding agent's shell (a skep worker, an ACP or hook-governed agent) — the operator lands the work after approval and pushes it (skep land, push_branch, open_pr)"
     },
     {
       "actor": "acp:synthetic-agent", "repo": "$REPO", "scope": "filesystem", "action": "write", "value": "workspace",

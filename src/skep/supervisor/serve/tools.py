@@ -21,6 +21,7 @@ from typing import Any, get_args
 
 from fastapi import HTTPException
 
+from ..apply import validate_landing_branch
 from ..autonomy import AutonomyDecision
 from ..castes import CASTES, caste_names
 from ..engines import engine_names
@@ -1729,9 +1730,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "unlocked": {
                 "type": "boolean",
                 "description": "zero-ask mode (ADR 0061): the project's sandboxed "
-                "workers stop asking about commands and hosts no rule names, and "
-                "verified patches land on skep/*. Set it ONLY when the user asks to "
-                "unlock the project; true is a HIGH card, false turns it off",
+                "workers stop asking about commands no rule names (hosts no rule "
+                "names stay refused or asked), and verified patches land on skep/*. "
+                "Set it ONLY when the user asks to unlock the project; true is a HIGH "
+                "card, false turns it off",
             },
             "policy_overrides": {"type": "object"},
             "seed_default_schedules": {"type": "boolean"},
@@ -2418,7 +2420,8 @@ def hidden_refusal(tool: str, role: Role, decided_by: str) -> str:
 UNATTENDED_BLOCKED_READ_TOOLS: frozenset[str] = frozenset({"search_web"})
 # ES-F241: {turn} names the turn — "a scheduled turn" (a prompt tick, the one
 # read-only unattended turn) or "an unattended follow-up turn" (a run-finish
-# or card-click follow-up); it said "scheduled" for both.
+# follow-up, or a card-click follow-up a serve restart resumed — L6: one
+# queued behind a live click is attended); it said "scheduled" for both.
 UNATTENDED_READ_REFUSAL = (
     "does not run in {turn} — it fires whether or not anyone is watching, so "
     "it reads the store only (runs, approvals, chats, notes, memory). "
@@ -3374,6 +3377,22 @@ def _get_run_guidance(
             "Do not present the run as verified or passed, and do not suggest landing it "
             "without a human reviewing the patch first."
         )
+    # ES-F291 (L1): a patch nothing re-verified is not "ready to land" — every
+    # landing face refuses it until it is re-verified.
+    if (
+        run.get("state") == "completed"
+        and reverify is None
+        and has_patch
+        and applied_branch is None
+    ):
+        return (
+            "This run completed but has NO re-verification record (G10) yet, so "
+            "nothing has checked the patch and land_run will refuse it. Either "
+            "re-verification is still running (get_run again shortly) or the "
+            "supervisor stopped before it ran and it was never re-verified — then "
+            f"`skep review {run.get('task_id')} --reverify` (or restarting skep serve) "
+            "re-verifies it. Tell the user plainly; do not present it as verified or passed."
+        )
     # v22-F4: a completed, confirmed run with an unlanded patch — the next step
     # is ALWAYS the landing approval, never another run.
     if run.get("state") == "completed" and has_patch and applied_branch is None:
@@ -3544,6 +3563,13 @@ def execute_read_tool(
             }
         from ..cli_cmds import STATE_EXIT_CODES
 
+        def settled(task_id: str, state: str) -> bool:
+            # ES-F291: ingest commits ``completed`` before G10 runs; a run is
+            # settled once its re-verification has recorded (landing needs it).
+            return state in STATE_EXIT_CODES and not (
+                state == "completed" and actions.reverify_in_flight(store, task_id)
+            )
+
         timeout = min(int(args.get("timeout_seconds") or 120), 180)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -3551,7 +3577,7 @@ def execute_read_tool(
                 task_id: str(store.get_run(task_id).state)  # type: ignore[union-attr]
                 for task_id in task_ids
             }
-            if all(state in STATE_EXIT_CODES for state in states.values()):
+            if all(settled(task_id, state) for task_id, state in states.items()):
                 break
             time.sleep(_SCRIPT_RUN_POLL_SECONDS)
         views = []
@@ -3562,7 +3588,7 @@ def execute_read_tool(
             if record is None:  # existed at entry; runs are never deleted
                 continue
             view = _run_view(record, store=store)
-            view["settled"] = str(record.state) in STATE_EXIT_CODES
+            view["settled"] = settled(task_id, str(record.state))
             if not view["settled"]:
                 still_running.append(task_id)
                 views.append(view)
@@ -3667,7 +3693,7 @@ def execute_read_tool(
         from ..policy_write import run_unlocked_hosts
 
         reached = run_unlocked_hosts(holder.current.audit_dir, run)
-        if reached:  # D34 (ADR 0061): hosts no rule named, answered by the mode
+        if reached:  # D34 (ADR 0061): hosts no rule named, answered by the mode before D42
             detail["unlocked_hosts"] = reached
         draft = _draft_excerpt(detail["artifacts"])
         if draft is not None:
@@ -4167,6 +4193,53 @@ def _queen_landing_branch(store: RunStore, run: dict[str, Any], raw: Any) -> str
     return branch
 
 
+def landing_card_error(store: RunStore, name: str, args: dict[str, Any]) -> str | None:
+    """ES-F292 (L9, B22): what a land_run / approve_review (landing) confirm
+    would refuse, asked when the card is proposed, so no card shows a landing
+    it cannot do: the chat branch menu (v81-F4), the branch safety check
+    apply_patch runs (v20-F5), and a missing re-verification (ES-F291).
+    None for every other tool and anything the confirm reports itself (an
+    unknown run or review, a mid-run gate)."""
+    try:
+        if name == "open_pr" and not args.get("branch"):
+            # ES-F292 follow-up: open_pr lands each run first (land_run).
+            ids = args.get("task_ids") or [args.get("task_id")]
+            for task_id in ids if isinstance(ids, list) else []:
+                if (
+                    task_id
+                    and actions.applied_branch_for(store, str(task_id)) is None
+                    and actions.patch_path(store, str(task_id)) is not None
+                    and (error := actions.never_reverified_error(store, str(task_id)))
+                ):
+                    return f"run {task_id}: {error}"
+            return None
+        if name == "land_run":
+            run = actions.require_run(store, str(args["task_id"]))
+        elif name == "approve_review":
+            approval = store.get_approval(str(args["review_id"]))
+            if approval is None or approval.action != "apply_patch":
+                return None
+            run = actions.require_run(store, str(approval.task_id))
+        else:
+            return None
+        if run["state"] == "pending_approval":
+            return None
+        branch = _queen_landing_branch(store, run, args.get("branch"))
+        if branch is not None:
+            error = validate_landing_branch(Path(str(run["repo"])), branch)
+            if error is not None:
+                return error
+        if actions.patch_path(store, str(run["task_id"])) is None:
+            return None
+        return actions.never_reverified_error(store, str(run["task_id"]))
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return None
+        return str(exc.detail)
+    except KeyError:
+        return None
+
+
 def _learned_grant(store: RunStore, name: str, args: dict[str, Any]) -> dict[str, Any]:
     """The learned rule an allow_fetch_domain / allow_mcp_tool confirm stores."""
     if name == "allow_fetch_domain":
@@ -4218,6 +4291,9 @@ def policy_write_preview(
     from ..policy_write import PolicyWriteRejected, vet_write
 
     def check() -> dict[str, Any]:
+        landing_error = landing_card_error(store, name, args)
+        if landing_error is not None:  # ES-F292: a landing card, B22's lesson too
+            raise PolicyWriteRejected(landing_error)
         if name in actions.REMEMBERABLE_TOOLS:
             if len(actions.keep_options(name, args)) < 2:
                 return {}
@@ -4234,8 +4310,8 @@ def policy_write_preview(
         if name in ("allow_fetch_domain", "allow_mcp_tool"):
             rule = LearnedRule(**_learned_grant(store, name, args), provenance="card")
             rule, _status, updated = actions._grant_plan(store, rule, None)
-            if updated is None:
-                return {"replay": f"already granted by {rule.rule_id!r} — nothing changes"}
+            if updated is None:  # L7: no write, so no card
+                return {"unchanged": f"already granted by {rule.rule_id!r} — nothing changes"}
             return actions._write_report(actions._vet_grant(store, rule, updated))
         if name == "approve_policy_baseline":
             layer, _view = actions.baseline_preview(
@@ -4264,7 +4340,7 @@ def policy_write_preview(
         return {}
     fields = {
         key: found[key]
-        for key in ("replay", "keep", "keep_refused", "keep_replay")
+        for key in ("replay", "keep", "keep_refused", "keep_replay", "unchanged")
         if found.get(key)
     }
     if found.get("warnings"):

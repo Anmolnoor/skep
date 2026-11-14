@@ -622,7 +622,9 @@ def test_a_workers_session_tier_never_answers_a_roles_catch_all_ask(
     (dropped headless, a deferred ask where a human answers). P3-4 (B39):
     and it holds only in the repo it was approved in."""
     from skep.supervisor.policy_resolver import resolve_run_policy
-    from skep.supervisor.serve.actions import delegate_permissions, remember_commands_for_session
+    from skep.supervisor.serve.actions import delegate_permissions
+
+    from .grant_grid import session_worker_grant
 
     home, repo_a = build_home(tmp_path, kind)
     repo_b = tmp_path / "repo-b"
@@ -634,7 +636,7 @@ def test_a_workers_session_tier_never_answers_a_roles_catch_all_ask(
                                  phase="build", policy={})  # fmt: skip
         store.add_project_binding(project_id="b", binding_kind="repo_path",
                                   binding_value=str(repo_b.resolve()))  # fmt: skip
-        remember_commands_for_session(store, [["npm", "run", "x"]], repo=repo_a)
+        session_worker_grant(store, [["npm", "run", "x"]], repo=repo_a)
         holder = ConfigHolder(config, store)
 
         def allowlist(repo: Path) -> list[list[str]]:
@@ -980,12 +982,13 @@ def test_w5_a_worker_grant_stored_before_the_deny_is_dropped_however_spelled(
     stayed in a run's allowlist under a later `curl` deny and the worker ran
     it with no card. It uses the deny reading decide() uses."""
     from skep.supervisor.policy_resolver import worker_shell_grants
-    from skep.supervisor.serve.actions import remember_commands_for_session
+
+    from .grant_grid import session_worker_grant
 
     home, repo = build_home(tmp_path, "legacy")
     store = RunStore(build_config(home, None).db_path)
     try:
-        remember_commands_for_session(
+        session_worker_grant(
             store,
             [["curl", "x"], ["/usr/bin/curl", "x"], ["env", "curl", "x"], ["make", "check"]],
             repo=repo,
@@ -1080,3 +1083,59 @@ def test_redact_masks_a_credential_in_a_url_path(line: str) -> None:
     masked = redact(line)
     assert _TG_TOKEN.split(":")[1] not in masked and "CANARY" not in masked, masked
     assert "***" in masked
+
+
+@pytest.mark.parametrize(
+    ("command", "words"),
+    [
+        ("sudo ls", "without sudo/doas/su"),
+        ("git push origin main", "the operator lands the work"),
+        ("git commit -m x", "landing the work is the commit"),
+        ("git checkout main", "a run picks its ref at dispatch"),
+        ("git rebase main", "the operator combines branches with merge_branch"),
+    ],
+)
+def test_l10_the_floor_on_the_run_lane_speaks_to_the_agents_there(
+    tmp_path: Path, command: str, words: str
+) -> None:
+    """L10 (ES-F304): the run lane's floor detail names the agents it binds
+    and the acceptable path — never "never runs from chat"; the Queen's lane
+    keeps its own words."""
+    home, repo = build_home(tmp_path, "builder")
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    try:
+        run = load_stack(ConfigHolder(config, store), store, repo=str(repo))
+        queen = load_stack(ConfigHolder(config, store), store)
+    finally:
+        store.close()
+    assert run.run is not None and queen.run is None
+    on_run = decide(Request("shell", "run", command), stack=run)
+    assert on_run.verdict == "deny" and on_run.layer == "floor"
+    assert "from chat" not in str(on_run.note) and words in str(on_run.note)
+    assert "coding agent's shell" in str(on_run.note)
+    on_queen = decide(Request("shell", "run", command), stack=queen)
+    assert on_queen.verdict == "deny" and "from chat" in str(on_queen.note)
+
+
+def test_l10_every_run_lane_floor_kind_names_the_agents_shell() -> None:
+    from skep.supervisor.shell_prefixes import run_lane_floor_reason
+
+    for command, words in (
+        ("git branch -D main", "create_branch/delete_branch"),
+        ("skep trust abc", "/trust at the desk"),
+        ("git -c alias.p=push p", "spell out the builtin git command"),
+    ):
+        reason = run_lane_floor_reason(command)
+        assert reason is not None and words in reason and "coding agent's shell" in reason
+    assert run_lane_floor_reason("rm -rf /") is None  # its own reason names no lane
+    assert run_lane_floor_reason("ls -la") is None
+
+
+def test_l10_a_line_level_catastrophe_keeps_its_own_reason_on_the_run_lane() -> None:
+    """Review follow-up: the floor checks a raw-device redirect before any
+    segment, so the run lane must not explain that deny as sudo or git push."""
+    from skep.supervisor.shell_prefixes import run_lane_floor_reason
+
+    for command in ("sudo ls > /dev/sda", "git push > /dev/sda"):
+        assert run_lane_floor_reason(command) is None, command

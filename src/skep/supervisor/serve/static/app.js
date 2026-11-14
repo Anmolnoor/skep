@@ -4258,6 +4258,10 @@ async function viewRunDetail(main, taskId) {
     if ((rv.commands || []).length) {
       kv("re-verify ran", el("span", { class: "mono" }, rv.commands.join(" && ")));
     }
+  } else if (detail.reverification_missing) {
+    // ES-F291 follow-up (I8): a patch with no G10 record is "not re-verified",
+    // never a blank row — landing refuses it until the record exists.
+    kv("re-verify (G10)", `not re-verified — ${detail.reverification_missing}`);
   }
   if (detail.usage) {
     const u = detail.usage;

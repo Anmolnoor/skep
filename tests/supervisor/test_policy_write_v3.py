@@ -611,6 +611,51 @@ def test_the_chat_card_shows_the_replay_and_refuses_at_proposal(
     assert refusal["ok"] is False and "§5.4 check 1" in refusal["error"]
 
 
+def test_l7_a_policy_write_that_changes_nothing_answers_without_a_card(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """L7 (ES-F303): a rule that already exists — a deny, a Queen shell
+    allow, a fetch grant — is "already set, nothing changes", not a HIGH
+    card whose confirm would report success for a write that did nothing."""
+    from skep.supervisor.policy_schema import LearnedRule
+
+    client, chat_id = chat_client(config, ollama)
+    deny: dict[str, Any] = {"scope": "shell", "action": "run", "pattern": "du", "verdict": "deny"}
+    shell_allow: dict[str, Any] = {
+        "scope": "shell",
+        "action": "run",
+        "pattern": "ls -la",
+        "verdict": "allow",
+    }
+    store = RunStore(config.db_path)
+    try:
+        actions.set_operator_policy_rule(store, **deny)
+        actions.set_operator_policy_rule(store, **shell_allow)
+        actions.store_grant(
+            store,
+            LearnedRule(rule_id="network:fetch:docs.example.org", action="fetch",
+                        pattern="docs.example.org", scope="network", provenance="t",
+                        lifetime="global"),
+        )  # fmt: skip
+    finally:
+        store.close()
+    calls = [
+        ("set_operator_policy", deny),
+        ("set_operator_policy", shell_allow),
+        ("allow_fetch_domain", {"domain": "docs.example.org"}),
+    ]
+    for tool, args in calls:
+        ollama.script_tool_call(tool, args)
+        ollama.script_reply("ok")
+        events = sse_events(
+            client.post(f"/api/chats/{chat_id}/messages", json={"content": tool}).text
+        )
+        assert [d for name, d in events if name == "action"] == [], (tool, events)
+        (result,) = [d["result"] for name, d in events if name == "tool"]
+        assert result["ok"] is True and result["unchanged"] is True, (tool, result)
+        assert "nothing changes" in result["detail"], result
+
+
 # -- B38: `skep setup --template` keeps the grants --
 
 

@@ -93,6 +93,7 @@ from .shell_prefixes import (
     is_worker_commit_command,
     queen_command_line_refusal,
     reaches_network,
+    run_lane_floor_reason,
 )
 from .store import ChatTaint, RunStore
 
@@ -618,10 +619,12 @@ def _opaque(
     )
 
 
-# ADR 0061: what the unlocked step answers — the two asks a worker gate
-# raises that its auto-answer understands. Nothing else (a write outside the
-# workspace, a Queen lane) is ever the layer's.
-UNLOCKED_REQUESTS = frozenset({("shell", "run"), ("network", "connect")})
+# ADR 0061: what the unlocked step answers — a worker gate's shell ask.
+# Nothing else (a write outside the workspace, a Queen lane) is ever the
+# layer's. D42 (L4): never ``network.connect`` either — a model reaching a
+# host no rule names is the main exfiltration path, so unlocked never widens
+# the network on any path; such a host stays refused or a human's ask.
+UNLOCKED_REQUESTS = frozenset({("shell", "run")})
 UNLOCKED_RULE = "zero-ask"
 
 
@@ -638,9 +641,7 @@ def _unlocked(stack: Stack, req: Request, verdict: Verdict) -> bool:
     scope, action, value = req
     if verdict.verdict != "require_approval" or (scope, action) not in UNLOCKED_REQUESTS:
         return False
-    parts: Sequence[str] | None = [value]
-    if scope == "shell":
-        parts = None if backgrounds(value) else shell_segments(value)
+    parts = None if backgrounds(value) else shell_segments(value)
     if not parts:
         return False
     for part in parts:
@@ -648,7 +649,7 @@ def _unlocked(stack: Stack, req: Request, verdict: Verdict) -> bool:
             hit = _hit(scopes, scope, action, part)
             if hit is not None and _binding(hit.verdict, hit.pattern):
                 return False
-            if scope == "shell" and _widens(scopes, action, part):
+            if _widens(scopes, action, part):
                 return False
     return True
 
@@ -706,8 +707,9 @@ def decide(
 
     ``sandboxed`` (ADR 0061) is a fact about the request: a worker inside
     the sandbox walls raised it (only the worker-gate auto-answer says so).
-    On an unlocked project's run lane, the default asks of such a request —
-    unmatched, or a catch-all ``*`` ask — are answered ``allow`` labelled
+    On an unlocked project's run lane, the default asks of such a shell
+    request — unmatched, or a catch-all ``*`` ask — are answered ``allow``
+    (never a network host, D42) labelled
     ``unlocked:<project>/zero-ask``, after the floor and the baseline guard
     and before the role, the delegation cap and taint, which all still
     apply. REST, the CLI, the hook and ACP never pass it."""
@@ -718,8 +720,11 @@ def decide(
     read_only = read_only and (scope, action) in READ_ONLY_REQUESTS
     floor = floor_verdict(scope, value, action=action, home=stack.home, cwd=stack.cwd)
     if floor is not None:
+        note = floor["reason"]
+        if scope == "shell" and stack.run is not None and (scope, action) not in OPERATOR_LANES:
+            note = run_lane_floor_reason(value) or note  # L10: the run lane's words (I9)
         return Verdict(
-            "deny", "floor", floor["rule_id"], floor["decided_by"], "floor", floor["reason"],
+            "deny", "floor", floor["rule_id"], floor["decided_by"], "floor", note,
             tuple(hop.entry for hop in chain),
         )  # fmt: skip
     reason = stack.guard.get(scope)

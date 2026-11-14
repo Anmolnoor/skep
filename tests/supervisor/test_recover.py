@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,7 @@ from skep.supervisor import RunStore, SupervisorConfig, mint_task
 from skep.supervisor.contracts_io import write_task_file
 from skep.supervisor.dispatch import recover_interrupted_runs
 from skep.supervisor.monitor import append_event, synthesize_terminal
+from skep.supervisor.store import process_owner
 from skep.supervisor.worktree import create_worktree
 from skep.worker_contract import TaskState
 
@@ -425,3 +428,73 @@ def test_recovery_sweeps_proxy_socket_dirs_no_live_run_holds(
         listening.close()
     assert not dirs["empty"].exists() and not dirs["dead"].exists()
     assert dirs["held"].exists() and dirs["answers"].exists() and dirs["fresh"].exists()
+
+
+class _ServeStopped(BaseException):
+    """A SIGTERM landing between ingest's COMPLETED commit and G10."""
+
+
+def test_startup_reverifies_a_run_completed_just_before_serve_stopped(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F290 (L1): run 01a1da85 completed 1 s before a serve stop, so G10
+    never ran (orphan reverify-<id> tree) and nothing at startup looked at
+    completed runs. The startup sweep re-verifies it, once."""
+    from skep.supervisor import dispatch
+
+    store = RunStore(config.db_path)
+    try:
+        task_id, workspace = _strand_run(store, config, repo)
+        _deposit_completed_result(store, config, task_id, workspace, legacy=False)
+        # The envelope carries a real patch, as a coding worker's does.
+        envelope_path = config.result_path(task_id)
+        envelope = json.loads(envelope_path.read_text())
+        patch = workspace / ".artifacts" / f"{task_id}.patch"
+        patch.parent.mkdir()
+        patch.write_text(
+            "diff --git a/docs/a.md b/docs/a.md\nnew file mode 100644\n"
+            "--- /dev/null\n+++ b/docs/a.md\n@@ -0,0 +1 @@\n+hello\n"
+        )
+        envelope["artifacts"].append(
+            {
+                "kind": "patch",
+                "path": f".artifacts/{task_id}.patch",
+                "sha256": hashlib.sha256(patch.read_bytes()).hexdigest(),
+            }
+        )
+        envelope_path.write_text(json.dumps(envelope))
+
+        def stop(**_: object) -> None:
+            create_worktree(repo, config.worktrees_root, f"reverify-{task_id}")
+            raise _ServeStopped
+
+        monkeypatch.setattr(dispatch, "reverify_run", stop)
+        with pytest.raises(_ServeStopped):
+            recover_interrupted_runs(store, config)
+        monkeypatch.undo()
+        record = store.get_run(task_id)
+        assert record is not None and record.state == "completed"
+        assert store.reverification_for(task_id) is None  # the L1 state
+        # The stopped serve was another process: its owner is gone now.
+        me = process_owner()
+        dead = json.dumps({"pid": os.getpid(), "started": "before the restart"})
+        assert store.claim_run_supervisor(task_id, expected=me, owner=dead)
+    finally:
+        store.close()
+
+    from .conftest import serve_client
+
+    with serve_client(config):  # entering the lifespan IS the restart
+        # The sweep runs in the background (serve answers meanwhile).
+        for thread in threading.enumerate():
+            if thread.name == "skep-startup-reverify":
+                thread.join(timeout=60)
+
+    store = RunStore(config.db_path)
+    try:
+        reverify = store.reverification_for(task_id)
+        assert reverify is not None  # G10 ran, despite the orphan tree
+        assert not (config.worktrees_root / f"reverify-{task_id}").exists()
+        assert dispatch.reverify_unverified_runs(store, config) == []
+    finally:
+        store.close()

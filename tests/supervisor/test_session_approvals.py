@@ -1,49 +1,56 @@
-"""v86-F1: the session approval tier — a plain approve holds until the serve
-process restarts. The pins: guarded classes never session-persist; the merge
-is read-side only (the durable union write path never absorbs session
-entries); the view shows the tier separately."""
+"""v86-F1: the session approval tier. ES-F293 (D43) ended its write from a
+plain gate approve — that approve is one decision. The pins: a plain approve
+saves no grant; the merge is read-side only (the durable union write path
+never absorbs session entries); the view shows the tier separately; a serve
+restart clears what an older build left there."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
+from skep.supervisor import SupervisorConfig, mint_task
+from skep.supervisor.contracts_io import write_task_file
 from skep.supervisor.policy_resolver import resolved_shell_allowlist
-from skep.supervisor.serve.actions import remember_commands_for_session
-from skep.supervisor.serve.settings import SESSION_ALLOWED_SHELL_COMMANDS
+from skep.supervisor.serve.actions import granted_commands, require_run, resume_past_gate
+from skep.supervisor.serve.settings import SESSION_ALLOWED_SHELL_COMMANDS, ConfigHolder
 from skep.supervisor.store import RunStore
 
 
-def test_plain_approve_session_persists_eligible_commands(tmp_path: Path) -> None:
-    """P3-4 (ADR 0059 D4, B39): a session grant on the one learned list,
-    bound to the repo it was approved in — no longer the global tier."""
-    from skep.supervisor.policy_schema import (
-        POLICY_DOCUMENT_SETTINGS_KEY,
-        document_from_settings,
-    )
-
-    store = RunStore(tmp_path / "s.sqlite3")
-    repo = tmp_path / "repo"
+def test_a_plain_gate_approve_saves_no_grant(repo: Path, config: SupervisorConfig) -> None:
+    """ES-F293 (L11, D43): a plain approve on a worker gate wrote a repo
+    session grant the card never mentioned (T15: the next run's manifest came
+    pre-answered with the previous gate's command). The approve is now the one
+    decision: the resumed worker's verdict carries the commands, and nothing
+    standing is saved. A standing grant is the explicit remember
+    (`--allow-command` / allow-command), which the operator picks."""
+    store = RunStore(config.db_path)
     try:
-        added = remember_commands_for_session(
-            store,
-            [
-                ["uv", "run", "pytest"],
-                ["git", "push", "origin", "main"],  # remote git: never
-                ["sudo", "rm", "-rf", "/"],  # dangerous prefix: never
-            ],
-            repo=repo,
+        task = mint_task(workspace=repo, instructions="test it")
+        store.create_run(task, repo=repo, ref=None, execution_mode="workspace")
+        store.transition(task.task_id, "pending_approval")
+        write_task_file(task, config.audit_dir / task.task_id / "task.json")
+        review_id = store.enqueue_approval(
+            task.task_id,
+            action="shell.run",
+            reason="shell.run requires approval: uv run pytest",
+            commands=[["uv", "run", "pytest"]],
         )
-        assert added == [["uv", "run", "pytest"]]
-        assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) is None  # never written
-        document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
-        assert document is not None
-        [rule] = document.learned
-        assert (rule.pattern, rule.lifetime, rule.matcher, rule.bound) == (
-            "uv run pytest", "session", "prefix", {"repo": str(repo.resolve())},
-        )  # fmt: skip
+        submitted: dict[str, Any] = {}
 
-        # Idempotent: approving the same command again adds nothing.
-        assert remember_commands_for_session(store, [["uv", "run", "pytest"]], repo=repo) == []
+        def submit(*_: object, **kwargs: object) -> str:
+            submitted.update(kwargs)
+            return "successor"
+
+        runner: Any = SimpleNamespace(submit=submit)
+        run = require_run(store, task.task_id)
+        assert resume_past_gate(store, config, runner, run, review_id, "tester") == "successor"
+        verdict = submitted["approval_verdict"]
+        assert [list(c) for c in verdict.commands] == [["uv", "run", "pytest"]]
+        assert granted_commands(store, ConfigHolder(config, store), repo) == []
+        approval = store.get_approval(review_id)
+        assert approval is not None and "session" not in (approval.resolution_note or "")
     finally:
         store.close()
 
