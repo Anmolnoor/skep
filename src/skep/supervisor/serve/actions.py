@@ -4462,15 +4462,18 @@ def set_operator_policy_rule(
     if scope == "shell" and verdict == "allow":
         return _queen_shell_allow(store, action, pattern, holder=holder, dry_run=dry_run)
     rule_id = f"op:{scope}:{action}:{pattern}"
+    existed = False
 
     def plan() -> tuple[Any, tuple[ScopePolicy, dict[str, Any]]]:
+        nonlocal existed
         document = operator_document_from_settings(store.get_setting(OPERATOR_POLICY_SETTINGS_KEY))
         bucket = next((s for s in document.scopes if s.scope == scope), None)
         if bucket is None:
             bucket = ScopePolicy(scope=scope)  # type: ignore[arg-type]
             document.scopes.append(bucket)
         rules = bucket.allow if verdict == "allow" else bucket.deny
-        if any(r.action == action and r.pattern == pattern for r in rules):
+        existed = any(r.action == action and r.pattern == pattern for r in rules)
+        if existed:
             return UNCHANGED, (bucket, {})
         rules.append(PolicyRule(rule_id=rule_id, action=action, pattern=pattern))
         report = vet_write(
@@ -4493,7 +4496,10 @@ def set_operator_policy_rule(
         "allow": [r.model_dump() for r in bucket.allow],
         "deny": [r.model_dump() for r in bucket.deny],
         **_write_report(report),
-    }
+        # L7: a rule that already exists is no write — said, never carded
+        **({"unchanged": _ALREADY.format(f"{scope} {action} {verdict} {pattern!r}")}
+           if existed else {}),
+    }  # fmt: skip
 
 
 def queen_shell_allow_refusal(pattern: str, action: str) -> str | list[tuple[str, str, str, str]]:
@@ -4565,32 +4571,38 @@ def _queen_shell_allow(
         detail = f"shell allow refused: {found}"
         raise HTTPException(status_code=400, detail=detail) from PolicyWriteRejected(detail)
     report: dict[str, Any] = {}
-    try:
-        if dry_run:
-            report = vet_keep(store, found)
-        for scope, rule_action, line, matcher in [] if dry_run else found:
-            store_grant(
-                store,
-                LearnedRule(
-                    rule_id=f"{scope}:{rule_action}:{line}", action=rule_action, pattern=line,
-                    scope=scope,  # type: ignore[arg-type]
-                    provenance="set_operator_policy", lifetime="global",
-                    matcher=matcher,  # type: ignore[arg-type]
-                ),
-                report=report,
-                replay=True,
-            )  # fmt: skip
-    except PolicyWriteRejected as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    rules = [
+        LearnedRule(
+            rule_id=f"{scope}:{rule_action}:{line}", action=rule_action, pattern=line,
+            scope=scope,  # type: ignore[arg-type]
+            provenance="set_operator_policy", lifetime="global",
+            matcher=matcher,  # type: ignore[arg-type]
+        )
+        for scope, rule_action, line, matcher in found
+    ]  # fmt: skip
     lines = [line for _scope, _action, line, _matcher in found]
-    return {
+    answer = {
         "scope": "shell",
         "verdict": "allow",
         "rule": {"rule_id": f"shell:{action}:{lines[0]}", "action": action, "pattern": pattern},
         "patterns": lines,
         "matcher": "exact_argv",
-        **_write_report(report),
     }
+    if all(_grant_plan(store, rule, None)[1] == "kept" for rule in rules):
+        # L7: every grant it would store already holds — nothing to write
+        return {**answer, "unchanged": _ALREADY.format(f"shell {action} allow {pattern!r}")}
+    try:
+        if dry_run:
+            report = vet_keep(store, found)
+        for rule in [] if dry_run else rules:
+            store_grant(store, rule, report=report, replay=True)
+    except PolicyWriteRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {**answer, **_write_report(report)}
+
+
+# L7: the answer to a policy write that would change nothing
+_ALREADY = "{} is already a rule — nothing changes"
 
 
 def _write_report(report: dict[str, Any]) -> dict[str, Any]:

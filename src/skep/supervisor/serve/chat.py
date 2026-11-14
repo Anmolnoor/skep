@@ -2530,6 +2530,16 @@ class ChatEngine:
                         )
                         yield ("tool", {"tool": name, "args": shown_args, "result": payload})
                         continue
+                    if checked.get("unchanged"):
+                        # L7: a policy write that changes nothing is answered,
+                        # never carded — its confirm would "succeed" at nothing
+                        payload = {"ok": True, "unchanged": True, "detail": checked["unchanged"]}
+                        self.store.add_chat_message(
+                            chat_id, role="tool", tool_name=name, tool_call_id=call_id,
+                            content=json.dumps(payload, ensure_ascii=True),
+                        )  # fmt: skip
+                        yield ("tool", {"tool": name, "args": shown_args, "result": payload})
+                        continue
                     # v109-F2: a pending twin is not a new question. Identical
                     # args → the model gets the pending card back and the turn
                     # continues; changed args, same subject → the stale card is
