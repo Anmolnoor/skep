@@ -213,6 +213,7 @@ def test_turning_unlocked_on_from_chat_is_a_high_card_and_off_is_not() -> None:
     for args in ({"unlocked": True}, {"policy_overrides": {"unlocked": True}}):
         why = high_tier("setup_project", {"project_id": "p", **args})
         assert why is not None and "unlocked" in why, args
+        assert "hosts no rule names stay refused or asked" in why  # D42 (I8)
     assert high_tier("setup_project", {"project_id": "p", "unlocked": False}) is None
 
 
