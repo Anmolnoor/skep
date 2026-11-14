@@ -602,11 +602,11 @@ def test_subcommands_are_not_folded() -> None:
 # reach a remote, walked past the git floor. No stock allowlist holds them,
 # but the floor holds regardless of what an operator allowlists or approves.
 EXEC_THROUGH_PUSHES = [
-    "find . -exec git push \;",
+    r"find . -exec git push \;",
     "find . -execdir git push {} +",
-    "find . -ok git push \;",
-    "find . -okdir git push \;",
-    "find . -name x -exec sh -c 'git push' \;",
+    r"find . -ok git push \;",
+    r"find . -okdir git push \;",
+    r"find . -name x -exec sh -c 'git push' \;",
     "git submodule foreach 'git push'",
     "git submodule foreach --recursive git push origin",
     "git -C sub submodule --quiet foreach 'cd x && git push'",
