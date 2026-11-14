@@ -58,14 +58,17 @@ uv sync --frozen
 ## 3. Pick a worker
 
 The default worker is the in-repo deterministic coding worker. To run Claude
-Code through skep, use the adapter:
+Code through skep, pin it as the project's engine. Claude Code's commands skip
+skep's capability layer, so the sandbox is its only wall: it always runs in
+sandbox mode, and the project must pin the command that proves its work:
 
 ```sh
-uv run skep run \
-  --execution-mode workspace \
-  --worker-cmd "python -m skep.workers.claude_code" \
-  /path/to/your-repo \
-  "fix the failing test"
+uv run skep project setup /path/to/your-repo \
+  --engine claude_code \
+  --verify-command "uv run pytest"
+# the sandbox masks the keychain: authenticate from the env instead
+export CLAUDE_CODE_OAUTH_TOKEN="<token from claude setup-token>"
+uv run skep run /path/to/your-repo "fix the failing test" --execution-mode sandbox
 ```
 
 The adapter expects `claude` on `PATH`. If needed:
@@ -73,18 +76,16 @@ The adapter expects `claude` on `PATH`. If needed:
 ```sh
 SKEP_CLAUDE_CODE_CMD="/path/to/claude" \
 uv run skep run \
-  --execution-mode workspace \
-  --worker-cmd "python -m skep.workers.claude_code" \
+  --execution-mode sandbox \
   --env-allow SKEP_CLAUDE_CODE_CMD \
   /path/to/your-repo \
   "add input validation"
 ```
 
-You can also set `SKEP_WORKER_CMD` once:
-
-```sh
-export SKEP_WORKER_CMD="python -m skep.workers.claude_code"
-```
+A one-off run can pick the engine with `--engine claude_code` instead. A
+`--worker-cmd` or `SKEP_WORKER_CMD` that runs an external agent's module
+(`python -m skep.workers.claude_code`) runs in the sandbox too, whatever
+`--execution-mode` says.
 
 ## 4. Run a task
 

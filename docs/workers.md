@@ -23,12 +23,15 @@ The Claude Code adapter runs the local `claude` CLI in the task worktree, then
 captures the resulting patch as normal Skep evidence.
 
 ```sh
-uv run skep run \
-  --execution-mode workspace \
-  --worker-cmd "python -m skep.workers.claude_code" \
-  /path/to/repo \
-  "Fix the failing test"
+uv run skep project setup /path/to/repo --engine claude_code --verify-command "uv run pytest"
+uv run skep run /path/to/repo "Fix the failing test" --execution-mode sandbox
 ```
+
+Claude Code runs only inside skep's sandbox (operator decision D36): its
+commands skip the capability layer, so the sandbox is its only wall. The
+adapter refuses to start outside it, and a `--worker-cmd` naming it is forced
+into sandbox mode. The sandbox masks the keychain, so it authenticates from
+`CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) or `ANTHROPIC_API_KEY`.
 
 The adapter expects `claude` to be on `PATH`. If your executable is elsewhere,
 set `SKEP_CLAUDE_CODE_CMD` and explicitly allow that variable through Skep's
@@ -37,8 +40,7 @@ worker environment boundary:
 ```sh
 SKEP_CLAUDE_CODE_CMD="/path/to/claude" \
 uv run skep run \
-  --execution-mode workspace \
-  --worker-cmd "python -m skep.workers.claude_code" \
+  --execution-mode sandbox \
   --env-allow SKEP_CLAUDE_CODE_CMD \
   /path/to/repo \
   "Add input validation"
@@ -69,7 +71,7 @@ should receive the task instructions as its final argv item:
 ```sh
 SKEP_SHELL_WORKER_CMD="my-agent --prompt" \
 uv run skep run \
-  --execution-mode workspace \
+  --execution-mode sandbox \
   --worker-cmd "python -m skep.workers.shell_worker" \
   --env-allow SKEP_SHELL_WORKER_CMD \
   /path/to/repo \
