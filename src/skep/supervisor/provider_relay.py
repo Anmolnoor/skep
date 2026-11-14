@@ -136,20 +136,25 @@ def _relay_for(config: SupervisorConfig, task_id: str) -> tuple[ProviderRelay | 
 
     renew = None
     if provider_host(endpoint) == COPILOT_HOST:
-        renew = functools.partial(_renewed_copilot_key, config.home.parent)
+        renew = functools.partial(_renewed_copilot_key, config.home.parent, endpoint)
     relay = ProviderRelay(upstream=endpoint, token=token, key=key, protocol=protocol, renew=renew)
     return relay, model, "on"
 
 
-def _renewed_copilot_key(personal_home: Path, refused: str) -> str:
+def _renewed_copilot_key(personal_home: Path, endpoint: str, refused: str) -> str:
     """ES-F263: a fresh Copilot bearer for a relay whose bearer the provider
-    refused — the cached one dropped, then resolved exactly as at dispatch."""
+    refused — the cached one dropped, then resolved exactly as at dispatch.
+    Only for the endpoint the relay is bound to: an operator who switched
+    profiles mid-run must not have the new profile's key sent to this one's
+    host (ADR 0062: the key goes to its own upstream, never another)."""
     from .serve.llm_copilot import forget_copilot_bearer
 
     forget_copilot_bearer(refused)
     plan, why = relay_plan(personal_home)
     if plan is None or not plan[2]:
         raise ValueError(f"the provider key could not be renewed: {why}")
+    if plan[0] != endpoint:
+        raise ValueError("the provider key could not be renewed: the worker provider changed")
     return plan[2]
 
 

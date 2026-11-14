@@ -964,3 +964,24 @@ def test_a_re_encoded_echo_of_the_key_is_masked(encode: Callable[[bytes], bytes]
         assert encode(key)[4:-4] not in out
         assert b"*" * 24 in out
         assert out.startswith(b'{"debug": "') and out.endswith(b'"}')
+
+
+def test_a_copilot_renewal_never_sends_another_profiles_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F263 follow-up: renewal re-resolves the CURRENT worker provider. An
+    operator who switched profiles mid-run would have had the new profile's
+    key sent to the Copilot host the relay is bound to (ADR 0062: a key goes
+    to its own upstream only). A changed provider fails the renewal, and the
+    worker gets the provider's own 401."""
+    from skep.supervisor import provider_relay
+    from skep.supervisor.serve import llm_copilot
+
+    monkeypatch.setattr(llm_copilot, "_cache", {})
+    monkeypatch.setattr(
+        provider_relay,
+        "relay_plan",
+        lambda home: (("https://api.openai.com/v1", "openai-compat", "CANARY-other", "m"), "on"),
+    )
+    with pytest.raises(ValueError, match="worker provider changed"):
+        provider_relay._renewed_copilot_key(tmp_path, "https://api.githubcopilot.com", "stale")
