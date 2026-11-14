@@ -1127,3 +1127,12 @@ def test_l10_every_run_lane_floor_kind_names_the_agents_shell() -> None:
         assert reason is not None and words in reason and "coding agent's shell" in reason
     assert run_lane_floor_reason("rm -rf /") is None  # its own reason names no lane
     assert run_lane_floor_reason("ls -la") is None
+
+
+def test_l10_a_line_level_catastrophe_keeps_its_own_reason_on_the_run_lane() -> None:
+    """Review follow-up: the floor checks a raw-device redirect before any
+    segment, so the run lane must not explain that deny as sudo or git push."""
+    from skep.supervisor.shell_prefixes import run_lane_floor_reason
+
+    for command in ("sudo ls > /dev/sda", "git push > /dev/sda"):
+        assert run_lane_floor_reason(command) is None, command

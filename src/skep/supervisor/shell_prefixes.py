@@ -1214,6 +1214,8 @@ def run_lane_floor_reason(command: str) -> str | None:
     What happens (denied, whatever rule or grant) and the acceptable path,
     per kind, in ``queen_shell_refusal``'s order; None for a kind whose
     reason names no lane (a catastrophic command)."""
+    if catastrophic_command_line_reason(command) is not None:
+        return None  # the floor's first check: its reason names no lane
     for argv in command_line_segments(command) or []:
         if escalates(argv):
             return (
