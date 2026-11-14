@@ -3125,11 +3125,14 @@ def queen_shell_decision(
     grant never covers it (review item 3); repo cwds refuse flat (daemons do
     not belong in checkouts). ``chat_id``: the chat asking — its own session
     grants apply, no other chat's (P3-4, B39)."""
-    from ..policy_v3 import UNREADABLE_NOTE, Request, floor_verdict, queen_decide
+    from ..policy_v3 import UNREADABLE_NOTE, Request, queen_decide, queen_floor
 
     if not command.strip():
         return None
-    floor = floor_verdict("shell", command, home=holder.current.home, cwd=cwd)
+    action = "run_background" if background else "run"
+    floor = queen_floor(
+        holder, Request("shell", action, command), role=role, cwd=cwd, chat_id=chat_id
+    )
     if floor is not None:
         secret = floor["rule_id"] == "floor.secret-reads"
         return AutonomyDecision(
@@ -3220,7 +3223,6 @@ def queen_shell_decision(
             ),
             decided_by=verdict.decided_by,
         )
-    action = "run_background" if background else "run"
     verdict = queen_decide(
         holder, store, Request("shell", action, command), role=role, cwd=cwd, chat_id=chat_id
     )

@@ -405,6 +405,32 @@ def test_the_floor_answers_the_queen_when_the_policy_document_will_not_load(
         queen_filesystem_decision(store, holder, action="read", path=f"{fmt['repo']}/README.md")
 
 
+def test_a_floor_refusal_on_a_queen_lane_is_a_decision_log_row(grid: Callable[..., Any]) -> None:
+    """I13: the floor refuses before any document loads (I4), and that
+    refusal is still one ``decisions.jsonl`` row naming the floor's rule and
+    reason — even when the policy document will not load. The refusal the
+    lane returns is unchanged."""
+    from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
+
+    _paths, fmt, store, holder = grid("builder")
+    store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, "{not json")
+    push = queen_shell_decision(store, holder, command="git push", cwd=fmt["outside"], chat_id="c1")
+    key = queen_filesystem_decision(store, holder, action="read", path=f"{fmt['home']}/.netrc")
+    assert push is not None and push.verdict == "deny" and key.verdict == "deny"
+    log = holder.current.audit_dir / "policy" / "decisions.jsonl"
+    shell, read = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (shell["actor"], shell["scope"], shell["action"], shell["value"], shell["chat"]) == (
+        "queen", "shell", "run", "git push", "c1"
+    )  # fmt: skip
+    assert (shell["verdict"], shell["source"], shell["layer"]) == ("deny", "floor", "floor")
+    assert shell["rule_id"] == "floor.worker-git-hard-denies"
+    assert (shell["decided_by"], shell["note"]) == (push.decided_by, push.detail)
+    assert (read["scope"], read["action"], read["rule_id"]) == (
+        "filesystem", "read", "floor.secret-reads"
+    )  # fmt: skip
+    assert (read["decided_by"], read["note"]) == (key.decided_by, key.detail)
+
+
 def test_the_grid_never_writes_its_canaries_into_the_real_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

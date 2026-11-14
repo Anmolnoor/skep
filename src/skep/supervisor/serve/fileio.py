@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ..autonomy import AutonomyDecision
-from ..policy_v3 import OPERATOR_ROOT, Request, floor_verdict, queen_decide
+from ..policy_v3 import OPERATOR_ROOT, Request, queen_decide, queen_floor
 from ..roles import Role
 from ..secret_floor import secret_floor_reason
 from ..store import RunStore
@@ -78,7 +78,7 @@ def queen_filesystem_decision(
         return AutonomyDecision(
             verdict="deny", reason="filesystem.deny.unresolvable_path", detail=f"{path}: {exc}"
         )
-    floor = floor_verdict("filesystem", path, action=action, home=holder.current.home)
+    floor = queen_floor(holder, Request("filesystem", action, path), role=role)
     if floor is not None:
         return AutonomyDecision(
             verdict="deny",

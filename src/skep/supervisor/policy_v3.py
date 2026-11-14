@@ -914,6 +914,34 @@ def queen_decide(
     return verdict
 
 
+def queen_floor(
+    holder: ConfigHolder,
+    req: Request,
+    *,
+    role: Role | None = None,
+    cwd: str | None = None,
+    chat_id: str | None = None,
+) -> dict[str, Any] | None:
+    """The floor alone, for a Queen lane that consults it before any document
+    loads (I4): ``floor_verdict`` — and, when it refuses, the row
+    ``queen_decide`` would log for the same refusal (I13)."""
+    from .serve.actions import _decision_row
+
+    home = holder.current.home
+    floor = floor_verdict(req.scope, req.value, action=req.action, home=home, cwd=cwd)
+    if floor is not None:
+        verdict = Verdict(
+            "deny", "floor", floor["rule_id"], floor["decided_by"], "floor", floor["reason"]
+        )
+        stack = Stack(home=home, cwd=cwd, guard={}, baseline="", operator={}, chat=chat_id)
+        row = _decision_row(
+            verdict, stack, actor="queen", repo=None, req=(req.scope, req.action, req.value),
+            role=role,
+        )  # fmt: skip
+        log_decision(holder.current.audit_dir, row)
+    return floor
+
+
 # D1: the decision log. Every decide() a wired face makes is one line here;
 # V11's replay reads it back. Rotated at 10 MB to one ``.1`` generation.
 DECISION_LOG_MAX_BYTES = 10 * 1024 * 1024
