@@ -488,11 +488,29 @@ def _unlocked_advisories(home: Path) -> list[str]:
         store.close()
     if not unlocked:
         return []
-    return [
+    lines = [
         f"{len(unlocked)} project(s) are unlocked (zero-ask, ADR 0061): {', '.join(unlocked)} — "
         "sandboxed workers there are not asked about commands and hosts no rule names; "
         f"turn it off with `skep project setup <repo> --project-id {unlocked[0]} --no-unlocked`"
     ]
+    # D34: what the mode actually let through — the hosts it auto-approved
+    from .supervisor.policy_write import unlocked_hosts
+
+    since = (datetime.now(UTC) - timedelta(days=_UNLOCKED_HOST_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    reached = unlocked_hosts(home / "supervisor" / "audit", since=since)
+    for project in unlocked:
+        hosts = reached.get(project)
+        if hosts:
+            listed = ", ".join(f"{host} ({count})" for host, count in hosts.items())
+            lines.append(
+                f"unlocked project {project} auto-approved {len(hosts)} host(s) no rule names "
+                f"in the last {_UNLOCKED_HOST_DAYS} days: {listed} — each is a decision-log "
+                "row (`skep policy decisions --actor auto:unlocked`)"
+            )
+    return lines
+
+
+_UNLOCKED_HOST_DAYS = 7
 
 
 def _policy_migration_advisories(home: Path) -> list[str]:

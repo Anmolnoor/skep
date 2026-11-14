@@ -3646,6 +3646,11 @@ def execute_read_tool(
             # pointer so the chain is followable from either end.
             "resumed_as": store.resumed_as_for(task_id),
         }
+        from ..policy_write import run_unlocked_hosts
+
+        reached = run_unlocked_hosts(holder.current.audit_dir, run)
+        if reached:  # D34 (ADR 0061): hosts no rule named, answered by the mode
+            detail["unlocked_hosts"] = reached
         draft = _draft_excerpt(detail["artifacts"])
         if draft is not None:
             detail["draft"] = draft

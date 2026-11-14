@@ -543,6 +543,12 @@ def test_a_gate_on_an_unlocked_project_answers_itself_once(
         store.close()
     rows = _decisions(config)
     assert [r["decided_by"] for r in rows] == ["unlocked:unlockable/zero-ask"]
+    assert rows[0]["task_id"] == first  # D34: the row names the run it answered
+    # D34: the run's receipt lists the hosts it reached under unlocked —
+    # the gated run and its resumed successor alike
+    hosts = [{"host": gate, "count": 1}] if mode == "hostgate" else []
+    for task_id in (first, run["task_id"]):
+        assert client.get(f"/api/runs/{task_id}").json().get("unlocked_hosts", []) == hosts
 
 
 @_SANDBOX
@@ -614,6 +620,28 @@ def test_doctor_names_every_unlocked_project_and_the_way_out(repo: Path, tmp_pat
     assert len(lines) == 1
     assert "unlockable" in lines[0] and "--no-unlocked" in lines[0]
     assert lines[0] in build_status(root, provider_timeout=0.01)["advisories"]
+    # D34: the hosts the mode auto-approved in the window, with counts
+    from datetime import UTC, datetime, timedelta
+
+    from skep.supervisor.policy_v3 import log_decision
+
+    def row(host: str, at: datetime, layer: str = "unlocked:unlockable") -> dict[str, Any]:
+        return {"at": at.strftime("%Y-%m-%dT%H:%M:%SZ"), "actor": "auto:unlocked",
+                "scope": "network", "action": "connect", "value": host, "verdict": "allow",
+                "layer": layer, "decided_by": f"{layer}/zero-ask", "task_id": "t1"}  # fmt: skip
+
+    now = datetime.now(UTC)
+    for each in (row("files.example", now), row("files.example", now), row("pypi.org", now),
+                 row("old.example", now - timedelta(days=30)),
+                 row("named.example", now, layer="run")):  # fmt: skip
+        log_decision(config.audit_dir, each)
+    lines = _unlocked_advisories(root)
+    assert len(lines) == 2
+    assert lines[1] == (
+        "unlocked project unlockable auto-approved 2 host(s) no rule names in the last "
+        "7 days: files.example (2), pypi.org (1) — each is a decision-log row "
+        "(`skep policy decisions --actor auto:unlocked`)"
+    )
 
 
 def test_the_chat_face_sets_unlocked_through_the_same_write(

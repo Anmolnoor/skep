@@ -3892,6 +3892,7 @@ def auto_answer_unlocked_gate(
             req=(req.scope, req.action, req.value),
             role=role,
         )
+        row["task_id"] = task_id  # D34: the run's receipt lists what it reached
         log_decision(holder.current.audit_dir, row)
         if verdict.verdict != "allow":
             return None
