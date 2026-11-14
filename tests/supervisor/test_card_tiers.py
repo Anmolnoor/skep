@@ -627,6 +627,15 @@ _UNRESOLVED = (
     "ls /etc/*.conf",
     "cat ~/.{n,}etrc",
     "cat ~/$'\\x2e'netrc",
+    # review follow-up: a directory holding the home reads every file under it
+    "tar c ~",
+    "rsync -a ~/ /tmp/h",
+    "cp -r ~ /tmp/h",
+    "grep -r password ~",
+    "tar --directory=~ -c .",
+    # ... and the line's own cd counts, as the floor's does
+    "cd ~ && find . -exec cat {} +",
+    "cd ~ && tar c .",
 )
 _RESOLVED = (
     "uname -a",
@@ -635,6 +644,10 @@ _RESOLVED = (
     "grep -r 'a*b' src",
     "find . -name '*.py'",
     "echo '$5 for a coffee'",
+    "uv run pytest",
+    "git status",
+    "npm test",
+    "cd ~ && git status",
 )
 
 
@@ -659,3 +672,35 @@ def test_find_exec_from_a_home_cwd_is_unresolved(tmp_path: Any) -> None:
     command = "find . -type f -exec cat {} +"
     assert high_tier("run_shell", {"command": command, "cwd": str(Path.home())}) is not None
     assert high_tier("run_shell", {"command": command, "cwd": str(tmp_path)}) is None
+
+
+def test_the_review_bypass_spellings_are_floored_or_high(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.secret_floor import shell_secret_floor_reason
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".netrc").write_text("x")
+    work = tmp_path / "work"
+    work.mkdir()
+    for command in (
+        "cat ~/.n''etrc",
+        "cat ~/.ne\\trc",
+        "cat $HOME/.netrc",
+        "cat ~/.[n]etrc",
+        "cat <~/.netrc",
+        "awk 1 ~/.netrc",
+        "cp ~/.netrc /tmp/x",
+        "tar c ~",
+        "rsync ~ /tmp",
+    ):
+        floored = shell_secret_floor_reason(command, cwd=str(work)) is not None
+        high = high_tier("run_shell", {"command": command, "cwd": str(work)})
+        assert floored or (high is not None and "credential files" in high), command
+
+
+def test_an_unknown_tilde_user_does_not_crash_the_floor() -> None:
+    from skep.supervisor.secret_floor import shell_secret_floor_reason
+
+    assert shell_secret_floor_reason("cat ~nosuchuser0/x; cd ~nosuchuser0", cwd="/tmp") is None
+    assert high_tier("run_shell", {"command": "ls ~nosuchuser0", "cwd": "/tmp"}) is None
