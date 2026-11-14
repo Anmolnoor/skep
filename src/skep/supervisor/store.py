@@ -971,10 +971,12 @@ def owner_alive(owner: str | None) -> bool:
 class RunStore:
     """Single-writer SQLite store for runs, events, artifacts, and approvals."""
 
-    def __init__(self, db_path: Path) -> None:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: Path, *, readonly: bool = False) -> None:
         # O2: the reader finds the home's policy baseline beside the database.
         self.db_path = db_path
+        if readonly and self._open_readonly(db_path):
+            return
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         # G4: SQLite-WAL, single writer. The connection is shared across dispatch
         # threads (check_same_thread=False) and serialized by self._lock; WAL keeps
         # readers (a concurrent `skep status`, in another process) non-blocking, and
@@ -992,18 +994,53 @@ class RunStore:
         self._conn.executescript(_SCHEMA)
         self._migrate(rebuild_chat_fts=chat_fts_is_new)
         if fresh:
-            # ADR 0056 D2 (O5): a home that never existed starts with every scope on
-            # engine v2, and remembers it was born here, so later code can tell it
-            # from a home that existed before this skep (an upgrade).
-            now = _now()
-            self._conn.executemany(
-                "INSERT OR IGNORE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
-                [
-                    ("policy_engine_v2_scopes", json.dumps(list(SCOPES)), now),
-                    ("fresh_home_seeded_at", json.dumps(now), now),
-                ],
-            )
+            self._seed_fresh()
         self._conn.commit()
+
+    def _seed_fresh(self) -> None:
+        # ADR 0056 D2 (O5): a home that never existed starts with every scope on
+        # engine v2, and remembers it was born here, so later code can tell it
+        # from a home that existed before this skep (an upgrade).
+        now = _now()
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO settings (key, value_json, updated_at) VALUES (?, ?, ?)",
+            [
+                ("policy_engine_v2_scopes", json.dumps(list(SCOPES)), now),
+                ("fresh_home_seeded_at", json.dumps(now), now),
+            ],
+        )
+
+    def _open_readonly(self, db_path: Path) -> bool:
+        """W41: a read-only command (status, doctor, a list) must not write the
+        store. A rw connection does even when nothing changes: the last one to
+        close checkpoints a leftover WAL into the database file, and a missing
+        file is created. So open ``mode=ro`` (a read-only connection never
+        checkpoints), and a home with no store reads an empty in-memory one —
+        no file, no directory. The schema statements are no-ops on a current
+        store; one that needs a migration raises here, and the caller falls
+        back to the rw open: that write is an actual change, made once.
+        Returns False for that fallback."""
+        self._lock = threading.RLock()
+        if not db_path.exists():
+            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+            self._conn.executescript(_SCHEMA)
+            self._migrate()
+            self._seed_fresh()  # reads see what a fresh home would hold
+            return True
+        try:
+            self._conn = sqlite3.connect(
+                f"{db_path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False
+            )
+        except sqlite3.OperationalError:
+            return False
+        try:
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.executescript(_SCHEMA)
+            self._migrate()
+        except sqlite3.OperationalError:
+            self._conn.close()
+            return False
+        return True
 
     def _migrate(self, *, rebuild_chat_fts: bool = False) -> None:
         """Add columns introduced after a table first shipped (CREATE IF NOT EXISTS

@@ -28,7 +28,7 @@ def cmd_channel_status(args: argparse.Namespace) -> int:
     if not config.db_path.is_file():
         print(f"no supervisor store at {config.db_path} — run `skep serve` once first")
         return 1
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         configs = {c.channel: c for c in store.list_channel_configs()}
         for channel in sorted(CHANNELS):

@@ -390,7 +390,7 @@ def cmd_skill_list(args: argparse.Namespace) -> int:
     if not config.db_path.is_file():
         print("no skill candidates yet")
         return 0
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         candidates = store.list_candidates()
     finally:
@@ -414,7 +414,7 @@ def cmd_skill_show(args: argparse.Namespace) -> int:
     from .cli_cmds import _err, build_config
 
     config = build_config(args.home, None)
-    store = RunStore(config.db_path) if config.db_path.is_file() else None
+    store = RunStore(config.db_path, readonly=True) if config.db_path.is_file() else None
     candidate = store.get_candidate(args.name) if store is not None else None
     if store is not None:
         store.close()

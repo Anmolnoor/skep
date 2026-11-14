@@ -28,17 +28,17 @@ from .store import RunStore
 CLI_ACTOR = "cli-user"
 
 
-def _open_store_or_empty(home: Path) -> RunStore | None:
+def _open_store_or_empty(home: Path, *, readonly: bool = False) -> RunStore | None:
     from .cli_cmds import build_config
 
     config = build_config(home, None)
     if not config.db_path.is_file():
         return None
-    return RunStore(config.db_path)
+    return RunStore(config.db_path, readonly=readonly)
 
 
 def cmd_memory_list(args: argparse.Namespace) -> int:
-    store = _open_store_or_empty(args.home)
+    store = _open_store_or_empty(args.home, readonly=True)
     if store is None:
         print("no memory yet")
         return 0
@@ -57,7 +57,7 @@ def cmd_memory_list(args: argparse.Namespace) -> int:
 
 
 def cmd_memory_search(args: argparse.Namespace) -> int:
-    store = _open_store_or_empty(args.home)
+    store = _open_store_or_empty(args.home, readonly=True)
     if store is None:
         print("no matches")
         return 0
@@ -77,7 +77,7 @@ def cmd_memory_search(args: argparse.Namespace) -> int:
 def cmd_memory_show(args: argparse.Namespace) -> int:
     from .cli_cmds import _err
 
-    store = _open_store_or_empty(args.home)
+    store = _open_store_or_empty(args.home, readonly=True)
     if store is None:
         return _err(f"no memory item {args.memory_id!r}.")
     try:
@@ -116,7 +116,7 @@ def cmd_memory_forget(args: argparse.Namespace) -> int:
 
 
 def cmd_memory_proposals(args: argparse.Namespace) -> int:
-    store = _open_store_or_empty(args.home)
+    store = _open_store_or_empty(args.home, readonly=True)
     if store is None:
         print("no proposals")
         return 0

@@ -178,7 +178,7 @@ def _pending_approvals(
     cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         since = {
             run.task_id: run.updated_at for run in store.runs_with_states(["pending_approval"])
@@ -213,7 +213,7 @@ def _store_provider_base_url(home: Path) -> str | None:
     from .supervisor.serve.llm import LLM_BASE_URL
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         base_url = store.get_setting(LLM_BASE_URL)
     finally:
@@ -236,7 +236,7 @@ def _auto_approve_advisories(home: Path) -> list[str]:
         return []
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         enabled = store.get_setting("auto_approve") is True
     finally:
@@ -252,7 +252,7 @@ def _channel_user_advisories(home: Path) -> list[str]:
         return []
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         configs = store.list_channel_configs()
     finally:
@@ -292,7 +292,7 @@ def _model_truth_advisories(home: Path) -> list[str]:
     from .supervisor.serve.llm import LLM_DEFAULT_MODEL
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         setting = store.get_setting(LLM_DEFAULT_MODEL)
         active = store.active_provider_profile()
@@ -348,7 +348,7 @@ def _baseline_advisories(home: Path) -> list[str]:
     from .supervisor.policy_layers import zero_state_home
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         return [] if zero_state_home(store) else [NO_BASELINE_WARNING]
     finally:
@@ -380,7 +380,7 @@ def _policy_v3_advisories(home: Path) -> list[str]:
     from .supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY, document_from_settings
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
     finally:
@@ -411,7 +411,7 @@ def _legacy_host_advisories(home: Path) -> list[str]:
     )
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
     finally:
@@ -435,7 +435,7 @@ def _role_less_chat_advisories(home: Path) -> list[str]:
         return []
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         role_less = [chat for chat in store.list_chats() if not chat.role]
     finally:
@@ -477,7 +477,7 @@ def _unlocked_advisories(home: Path) -> list[str]:
         return []
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         unlocked = sorted(
             record.project_id
@@ -505,7 +505,7 @@ def _policy_migration_advisories(home: Path) -> list[str]:
     from .supervisor.policy_write import holder_for, migration_line, migration_report
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         line = migration_line(migration_report(holder_for(store), store))
     finally:
@@ -524,7 +524,7 @@ def _browse_advisories(home: Path) -> list[str]:
     from .supervisor.mcp_client import load_mcp_servers
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         servers = load_mcp_servers(store)
     finally:
@@ -564,7 +564,7 @@ def _verify_pin_advisories(home: Path) -> list[str]:
     from .supervisor.projects import list_projects
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         unpinned: list[str] = []
         unrunnable: list[str] = []
@@ -622,7 +622,7 @@ def _repo_registry_advisories(home: Path) -> list[str]:
     from .supervisor.projects import list_projects
     from .supervisor.store import RunStore
 
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         bound: dict[str, str] = {}
         dead: list[str] = []
@@ -836,7 +836,7 @@ def _codex_login_check(home: Path, *, key_set: bool) -> dict[str, Any]:
     if db_path.is_file():
         from skep.supervisor.store import RunStore
 
-        store = RunStore(db_path)
+        store = RunStore(db_path, readonly=True)
         try:
             opted_in = sorted(
                 p.project_id for p in store.list_project_policies() if p.policy.get(POLICY_KEY)
@@ -901,7 +901,7 @@ def _provider_key_relay_check(home: Path) -> dict[str, Any]:
     db = home / "supervisor" / "supervisor.sqlite3"
     on = False
     if db.is_file():
-        store = RunStore(db)
+        store = RunStore(db, readonly=True)
         try:
             on = store.get_setting(PROVIDER_KEY_RELAY) is True
         finally:
@@ -935,7 +935,7 @@ def _memory_status(home: Path, has_profile: bool) -> dict[str, Any]:
         }
     from .supervisor.store import RunStore
 
-    store = RunStore(db)
+    store = RunStore(db, readonly=True)
     try:
         items = store.count_memory_items()
     finally:
