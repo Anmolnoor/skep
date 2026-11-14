@@ -145,12 +145,14 @@ def test_a_provider_failure_is_reported_not_swallowed(tmp_path: Path) -> None:
     workspace = _repo(tmp_path)
 
     def generate(task: CodingWorkerTask, messages: list[dict[str, Any]]) -> str:
-        raise LlmPlanError("peer closed connection")
+        # ES-F260 follow-up: a provider error that echoes a credential is masked.
+        raise LlmPlanError("peer closed connection Authorization: Bearer CANARY-" + "r" * 20)
 
     code, result = _run(workspace, tmp_path, generate)
     assert code == 3
     assert result.status is TaskState.FAILED
     assert "peer closed connection" in result.summary
+    assert "CANARY" not in result.summary + result.verification.details
     assert result.verification.outcome is VerificationOutcome.NOT_ATTEMPTED
 
 
