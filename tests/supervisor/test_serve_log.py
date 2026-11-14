@@ -104,3 +104,29 @@ def test_serve_env_missing_file_is_a_noop(tmp_path: Path) -> None:
     environ: dict[str, str] = {}
     assert load_serve_env(tmp_path / "serve.env", environ) == []
     assert environ == {}
+
+
+def test_skeps_own_loggers_reach_the_serve_log_redacted(tmp_path: Path) -> None:
+    """L12 (overnight live re-test): `skep.*` INFO was dropped and ERROR went
+    only to stderr — which the real serve discards — so a failed startup
+    re-verify sweep or recovery left no trace in serve.log (I8)."""
+    import skep.supervisor  # noqa: F401  (installs the ES-F281 redaction filters)
+
+    log_path = tmp_path / "serve.log"
+    logging.config.dictConfig(serve_log_config(log_path))
+    token = "".join(["/bot", "123456", ":", "AAfake", "TOKENfake", "value"])
+    try:
+        logging.getLogger("skep.serve").info("re-verified %d completed run(s)", 1)
+        logging.getLogger("skep.dispatch").error("poll failed at https://api.example%s/x", token)
+    finally:
+        _detach_serve_handlers()
+        skep_logger = logging.getLogger("skep")
+        for handler in list(skep_logger.handlers):
+            handler.close()
+            skep_logger.removeHandler(handler)
+        skep_logger.setLevel(logging.NOTSET)  # no level leak into other tests' caplog
+
+    text = log_path.read_text(encoding="utf-8")
+    assert "re-verified 1 completed run(s)" in text
+    assert "poll failed" in text
+    assert "AAfakeTOKENfakevalue" not in text
