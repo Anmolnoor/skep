@@ -83,6 +83,7 @@ from .providers import ProviderProfile
 from .reverify import reverify_run
 from .sandbox import PODMAN, NetworkPolicy, SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
+from .secret_floor import CODEX_RUN_LOGIN
 from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
 from .store import RunRecord, RunStore, owner_alive, process_owner
 from .worker_state import (
@@ -434,9 +435,26 @@ def run_task(
     # v90-F1 (ADR 0047): the coding engine for this run. Castes with their own
     # workers (audit, researcher, …) are unaffected — an engine replaces the
     # CODING implementation only.
-    from .engines import engine_available, resolve_engine
+    from .engines import (
+        CODING_ENGINES,
+        engine_available,
+        external_agent_for_command,
+        resolve_engine,
+    )
 
     engine = resolve_engine(coding_engine or None)
+    # D36 (ES-F255): what actually runs decides — a --worker-cmd /
+    # SKEP_WORKER_CMD naming an external agent's worker module is that agent.
+    wrapped = (
+        None if engine.external else external_agent_for_command(config.command_for(worker_kind))
+    )
+    if worker_kind == "coding" and wrapped in CODING_ENGINES:
+        # ES-F255 follow-up (ADR 0047, I2 I12): it IS that engine — the same
+        # module, the same binary + auth-env refusal below, its own API host
+        # and toolchain dirs, and the record names it — not a builtin run that
+        # merely got the sandbox. The resolver applies the same mapping, so
+        # the pinned-verify requirement binds it too.
+        engine = CODING_ENGINES[wrapped]
     # ADR 0059 D3 (V6a): the one place a worker's provider_hosts is set. Every
     # face (chat, REST, CLI, scheduler, resume, batch, templates) reaches it,
     # and a caller's value is never trusted: it is recomputed from the
@@ -460,6 +478,17 @@ def run_task(
     worker_argv = engine.argv if (worker_kind == "coding" and engine.external) else None
     codex_auth: str | None = None  # ES-F122: set only when the plan login is used
     run_login: Path | None = None
+    coerced_mode: str | None = None
+    if wrapped is not None and execution_mode != "sandbox":
+        # D36 (ES-F255): v94-F4 keys on the engine id; a --worker-cmd /
+        # SKEP_WORKER_CMD that runs an external agent's worker module is that
+        # agent all the same, and the sandbox is its only wall (ADR 0047).
+        # Coerced like the resolver coerces an engine, and the record says so.
+        coerced_mode = (
+            f"the worker command runs the external agent {wrapped!r}, which only "
+            f"the sandbox confines (ADR 0047): run in 'sandbox', not {execution_mode!r}"
+        )
+        execution_mode = "sandbox"
     if execution_mode == "sandbox" and config.sandbox:
         # ES-F1 (B47, I12): every sandbox-mode run, not only external engines
         # (v94-F4) — the builtin worker and run_code's script caste took the
@@ -832,6 +861,8 @@ def run_task(
             }
         if relay_note != "off":  # off: the record reads as it did before ADR 0062
             dispatched_fields["provider_key_relay"] = relay_note
+        if coerced_mode is not None:
+            dispatched_fields["execution_mode_coerced"] = coerced_mode
         dispatched_detail = (
             json.dumps(dispatched_fields, ensure_ascii=True) if dispatched_fields else None
         )
@@ -856,7 +887,6 @@ def run_task(
             # however the run ends. The record names the source, never a
             # value (I8).
             from .codex_login import write_run_login
-            from .secret_floor import CODEX_RUN_LOGIN
 
             try:
                 run_login = write_run_login(
@@ -931,6 +961,7 @@ def run_task(
             heartbeat_seconds=config.heartbeat_seconds,
             poll_seconds=config.poll_seconds,
             startup_seconds=config.startup_seconds,
+            log_path=log_path,
         )
 
         result = _run_result(run_store, task.task_id, result_path)
@@ -984,8 +1015,13 @@ def run_task(
                 # v88-F4 (I2): when the project pinned what verification means,
                 # G10 re-runs THAT — not the command the worker nominated.
                 verify_command=verify_command,
-                # D6 (I2): the project's loopback ports, as the worker had them.
-                loopback_ports=tuple(task.permissions.loopback_ports),
+                # D6 (I2): the run's loopback ports, as the worker had them —
+                # ES-F252: its local model provider's port included.
+                loopback_ports=run_loopback_ports(
+                    task.permissions.loopback_ports,
+                    task.permissions.provider_hosts,
+                    config.home,
+                ),
                 # The re-run is afforded the run's own wall-clock budget —
                 # the flat 300s cap timed out a healthy 10-minute pinned
                 # suite (dogfood 019fc72c, exit -1).
@@ -1186,6 +1222,21 @@ def _run_result(store: RunStore, task_id: str, path: Path) -> CodingWorkerResult
     return result
 
 
+def _socket_answers(path: Path) -> bool:
+    """ES-F257 follow-up: True when a live proxy still serves ``path``."""
+    import socket
+
+    if not path.is_socket():
+        return False
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1.0)
+        try:
+            probe.connect(str(path))
+        except OSError:
+            return False
+    return True
+
+
 def recover_interrupted_runs(
     run_store: RunStore,
     config: SupervisorConfig,
@@ -1208,13 +1259,16 @@ def recover_interrupted_runs(
     still alive is left alone. Returns the task ids it touched.
     """
     recovered: list[str] = []
+    live: set[str] = set()  # ES-F253: runs whose worker still holds its login copy
     me = process_owner()
     for record in run_store.runs_with_states(_INTERRUPTED_STATES):
         task_id = record.task_id
         supervisor = run_store.run_supervisor(task_id)
         if supervisor is not None and supervisor != me and owner_alive(supervisor):
+            live.add(task_id)
             continue  # ADR 0060 §5: a live serve or CLI still supervises it
         if not run_store.claim_run_supervisor(task_id, expected=supervisor, owner=me):
+            live.add(task_id)
             continue  # §5: another serve starting with this one took it first
         # ES-F5 (B10, I1 I12): the detached worker may still be alive — with no
         # babysitter, no budget, and the proxy gone. Kill its whole session
@@ -1235,6 +1289,7 @@ def recover_interrupted_runs(
             )
         ):
             recovered.append(task_id)
+            live.add(task_id)
             continue
         if live_pid is not None:
             kill_session(live_pid)
@@ -1306,6 +1361,31 @@ def recover_interrupted_runs(
             on_run_finished,
         )
         recovered.append(task_id)
+    # ES-F253: a run's ``finally`` unlinks its codex login copy; a SIGKILLed
+    # serve never got there, and a credential left on disk is a leak. Only a
+    # worker still alive under a supervisor (above) holds one legitimately.
+    for login in config.audit_dir.glob(f"*/{CODEX_RUN_LOGIN}"):
+        if login.parent.name not in live:
+            login.unlink(missing_ok=True)
+    # ES-F257 follow-up: a SIGKILLed serve (mid-dispatch, mid-re-verify,
+    # mid-re-adoption) never reaches the finally that removes its skep-nx-*
+    # proxy dir. Stale = no live run's record names its socket. The root is
+    # shared with every other skep home, so a socket that still answers is
+    # someone's live proxy, and the hour spares a dispatch between mkdtemp
+    # and its ``running`` record.
+    held: set[Path] = set()
+    for task_id in live:
+        worker = _recorded_worker(run_store, task_id)
+        if worker is not None and worker[4]:
+            held.add(Path(worker[4]).parent)
+    for stale in Path(_proxy_socket_root()).glob("skep-nx-*"):
+        with suppress(OSError):
+            if (
+                stale not in held
+                and stale.stat().st_mtime < time.time() - 3600
+                and not _socket_answers(stale / "p.sock")
+            ):
+                shutil.rmtree(stale)
     return recovered
 
 
@@ -1375,8 +1455,13 @@ def _finish_recovered(
             config=config,
             changed_files=tuple(result.changed_files) if result is not None else None,
             verify_command=str(recovery_policy.get("verify_command") or ""),
-            # D6 (I2): the project's loopback ports, as the worker had them.
-            loopback_ports=tuple(recovery_policy.get("loopback_ports") or ()),
+            # D6 (I2): the run's loopback ports, as the worker had them —
+            # ES-F252: its local model provider's port included.
+            loopback_ports=run_loopback_ports(
+                recovery_policy.get("loopback_ports") or (),
+                task.permissions.provider_hosts,
+                config.home,
+            ),
             timeout_seconds=float(task.budget.wall_clock_seconds),  # as the live path
         )
         # v107-F1: same post-reverify keep answer as the live path.
@@ -1457,8 +1542,11 @@ def _adopt_worker(
                     poll_seconds=max(config.poll_seconds, 0.5),
                     startup_seconds=config.startup_seconds,
                     elapsed_seconds=elapsed,
+                    log_path=config.audit_dir / task_id / "worker.log",
                 )
             finally:
+                # ES-F253: as the live path's finally — the worker is gone.
+                (config.audit_dir / task_id / CODEX_RUN_LOGIN).unlink(missing_ok=True)
                 if proxy is not None:
                     proxy.stop()
                 if unix_path is not None:  # stop() unlinked the socket; its dir

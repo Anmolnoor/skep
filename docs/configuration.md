@@ -80,13 +80,22 @@ environment variable name. It does not store the credential value.
 
 ## Worker Command
 
-The worker command decides which coding agent Skep supervises.
+The worker command decides which coding agent Skep supervises. For an
+external agent (Claude Code, Codex, Aider, pi), prefer the project's
+`coding_engine` (`skep project setup --engine claude_code`). A worker command
+that runs an engine's module is that engine all the same: it needs the
+agent's auth env and a pinned `verify_command`, exactly as `--engine` does.
 
 Per run:
 
 ```sh
-skep run --worker-cmd "python -m skep.workers.claude_code" /path/to/repo "fix the bug" --execution-mode workspace
+skep run --worker-cmd "python -m skep.workers.claude_code" /path/to/repo "fix the bug" --execution-mode sandbox
 ```
+
+An external agent's commands skip skep's capability layer, so the sandbox is
+its only wall: a worker command that runs one (an engine's worker module, or
+the generic shell worker) is forced into sandbox mode whatever
+`--execution-mode` says, and the run's record notes the change.
 
 For the current shell:
 
@@ -111,7 +120,7 @@ skep run \
   --env-allow SKEP_CLAUDE_CODE_CMD \
   /path/to/repo \
   "fix the bug" \
-  --execution-mode workspace
+  --execution-mode sandbox
 ```
 
 ## Execution Mode
@@ -120,7 +129,8 @@ Runs can execute in either mode:
 
 - `sandbox`: run the worker through the host sandbox backend.
 - `workspace`: run without the host sandbox, still in Skep's disposable
-  worktree and approval/re-verification pipeline.
+  worktree and approval/re-verification pipeline. Skep's own worker only: an
+  external agent always runs in `sandbox`.
 
 Choose per run:
 

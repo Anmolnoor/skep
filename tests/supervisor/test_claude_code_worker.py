@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from skep.supervisor import SupervisorConfig
+from skep.supervisor import SupervisorConfig, engines, sandbox
 from skep.supervisor.contracts_io import DEFAULT_BUDGET, DEFAULT_PERMISSIONS, mint_task, read_result
 from skep.supervisor.dispatch import run_task
 from skep.worker_contract import Permissions, TaskState, VerificationOutcome
@@ -23,9 +23,15 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+# ES-F255 (D36): the claude_code worker runs only inside skep's sandbox, so a
+# supervisor-driven run needs a usable one; a direct drive says it is inside.
+needs_sandbox = pytest.mark.skipif(not sandbox.available(), reason="needs a usable sandbox")
+
+
 def test_claude_code_adapter_runs_claude_and_writes_contract_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("SKEP_SANDBOX", "test")
     workspace = tmp_path / "repo"
     workspace.mkdir()
     (workspace / "README.md").write_text("# target\n", encoding="utf-8")
@@ -79,6 +85,7 @@ def test_claude_code_adapter_runs_claude_and_writes_contract_result(
     assert 'print("from claude")' in patch_text
 
 
+@needs_sandbox
 def test_supervisor_can_spawn_claude_code_adapter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -103,12 +110,14 @@ def test_supervisor_can_spawn_claude_code_adapter(
     fake_claude.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).parents[2] / "src"))
+    # ES-F255 follow-up: a worker command running claude_code IS that engine,
+    # so its NO AUTH ENV refusal binds it as it binds --engine claude_code.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-not-a-key")
 
     config = SupervisorConfig(
         home=tmp_path / "home",
         worker_command=(sys.executable, "-m", "skep.workers.claude_code"),
         env_baseline=("PATH", "HOME", "PYTHONPATH"),
-        sandbox=False,
     )
 
     outcome = run_task(workspace, "Create a Python file through Claude Code.", config=config)
@@ -119,6 +128,7 @@ def test_supervisor_can_spawn_claude_code_adapter(
     assert not (workspace / "spawned_by_supervisor.py").exists()
 
 
+@needs_sandbox
 def test_supervisor_passes_claude_code_command_env_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -143,12 +153,15 @@ def test_supervisor_passes_claude_code_command_env_override(
     custom_claude.chmod(0o755)
     monkeypatch.setenv("SKEP_CLAUDE_CODE_CMD", str(custom_claude))
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).parents[2] / "src"))
+    # ES-F255 follow-up: the engine's binary + NO AUTH ENV checks bind a
+    # worker command running claude_code; the custom binary stands in.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-not-a-key")
+    monkeypatch.setattr(engines, "engine_available", lambda e: (True, str(custom_claude)))
 
     config = SupervisorConfig(
         home=tmp_path / "home",
         worker_command=(sys.executable, "-m", "skep.workers.claude_code"),
         env_baseline=("PATH", "HOME", "PYTHONPATH"),
-        sandbox=False,
     )
     permissions = Permissions(
         read=["workspace"],
@@ -162,8 +175,11 @@ def test_supervisor_passes_claude_code_command_env_override(
         "Create a Python file through a custom Claude Code executable.",
         config=config,
         permissions=permissions,
+        # ES-F255 (D36): asked for workspace, coerced into the sandbox.
         execution_mode="workspace",
     )
+
+    assert outcome.record.execution_mode == "sandbox"
 
     assert outcome.record.state == "completed"
     assert outcome.record.worker_version == "claude-code-adapter-0.1.0"

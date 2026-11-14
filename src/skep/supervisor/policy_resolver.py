@@ -682,7 +682,12 @@ def resolve_run_policy(
     verify_command = raw_verify_command.strip()
     # v90-F1: same validation point, same fail-closed shape — an unknown engine
     # must never fall back silently to the coding worker (the v42 lesson).
-    from .engines import BUILTIN_ENGINE, resolve_engine
+    from .engines import (
+        BUILTIN_ENGINE,
+        CODING_ENGINES,
+        external_agent_for_command,
+        resolve_engine,
+    )
 
     raw_engine = engine or policy.get("coding_engine") or BUILTIN_ENGINE
     try:
@@ -695,6 +700,14 @@ def resolve_run_policy(
             "or setup_project with policy_overrides)"
         )
         raise PolicyResolutionError(f"{exc} — {hint}") from exc
+    # ES-F255 follow-up (D36, I2): a builtin engine whose worker command is an
+    # external agent's module (--worker-cmd / SKEP_WORKER_CMD) IS that engine
+    # — pinned verify, sandbox, API host and auth env below, as dispatch maps it.
+    wrapped = (
+        None if chosen_engine.external else external_agent_for_command(config.command_for(caste))
+    )
+    if caste == "coding" and wrapped in CODING_ENGINES:
+        chosen_engine = CODING_ENGINES[wrapped]
     # v90-F1 (I2): a CLI engine verifies with `git diff --check` — whitespace.
     # Re-verifying that proves nothing, so the project must say what
     # verification means before an external agent may run at all.
@@ -712,7 +725,10 @@ def resolve_run_policy(
     # every surface shows (I8); dispatch backs this with a hard refusal.
     # ES-F143 (ADR 0061): the same coercion for an unlocked project — zero-ask
     # is justified by the wall, so no request flag runs one outside it.
-    if chosen_engine.external or policy.get("unlocked") is True:
+    # D36 (ES-F255): keyed on what actually runs — a worker command that is
+    # an external agent's module (--worker-cmd / SKEP_WORKER_CMD) is coerced
+    # as its engine id would be.
+    if chosen_engine.external or policy.get("unlocked") is True or wrapped is not None:
         resolved_execution_mode = "sandbox"
     # L10: what the run gets with no explicit network — the project's default,
     # its registries and remembered hosts. D5 (operator decision 2026-11-13):

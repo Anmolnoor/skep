@@ -75,9 +75,13 @@ def test_recovery_leaves_a_run_whose_supervisor_is_still_alive(
         store.transition(task_id, "running", f"pid {worker.pid}")
         live_supervisor = process_owner(worker.pid)  # any live process will do
         assert store.claim_run_supervisor(task_id, expected=None, owner=live_supervisor)
+        login = config.audit_dir / task_id / "codex-login.json"  # ES-F253: its copy too
+        login.parent.mkdir(parents=True, exist_ok=True)
+        login.write_text("CANARY-live-run-login")
 
         assert recover_interrupted_runs(store, config) == []
 
+        assert login.read_text() == "CANARY-live-run-login"
         assert worker.poll() is None
         record = store.get_run(task_id)
         assert record is not None and record.state == "running"
