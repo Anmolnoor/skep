@@ -54,6 +54,7 @@ from .actions import (
     list_policy_groups,
     list_policy_rules,
     merge_branch,
+    never_reverified_error,
     open_pr_from_branch,
     patch_path,
     pending_approval_or_409,
@@ -1242,6 +1243,16 @@ def create_app(
             "policy_blocks": policy_block_views(events),
             "applied_branch": applied_branch_for(run_store, task_id),
             "reverification": None if reverify is None else asdict(reverify),
+            # ES-F291 follow-up (I8): a landable patch with no G10 record says
+            # so (still running, or never ran) instead of showing nothing.
+            "reverification_missing": (
+                never_reverified_error(run_store, task_id)
+                if run.get("state") == "completed"
+                and reverify is None
+                and patch_path(run_store, task_id) is not None
+                and applied_branch_for(run_store, task_id) is None
+                else None
+            ),
             "usage": None if usage is None else asdict(usage),
         }
 

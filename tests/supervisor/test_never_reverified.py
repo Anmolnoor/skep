@@ -35,6 +35,18 @@ def _unverified_run(store: RunStore, repo: Path, audit_dir: Path, tmp_path: Path
     return task.task_id
 
 
+def _record(store: RunStore, task_id: str) -> None:
+    store.record_reverification(
+        task_id,
+        outcome="passed",
+        worker_outcome="passed",
+        confirmed=True,
+        commands=["true"],
+        exit_codes=[0],
+        detail="re-verified",
+    )
+
+
 def test_land_run_and_approve_refuse_a_run_never_reverified(
     repo: Path, config: SupervisorConfig, tmp_path: Path
 ) -> None:
@@ -194,3 +206,47 @@ def test_one_reverify_per_run_across_serve_and_cli(
         assert "never re-verified" in str(actions.never_reverified_error(store, task_id))
     finally:
         store.close()
+
+
+def test_grouped_pr_refuses_before_any_run_lands(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """ES-F291 follow-up: one never-re-verified run in a group refuses the
+    whole group up front — the verified run before it is not left landed on a
+    branch no PR was opened for."""
+    store = RunStore(config.db_path)
+    try:
+        verified = _unverified_run(store, repo, config.audit_dir, tmp_path)
+        _record(store, verified)
+        unverified = _unverified_run(store, repo, config.audit_dir, tmp_path)
+        runs = [actions.require_run(store, t) for t in (verified, unverified)]
+        with pytest.raises(HTTPException) as refused:
+            actions.open_pr_for_runs(store, config.audit_dir, runs, "tester", title="pair")
+        assert "never re-verified" in str(refused.value.detail)
+        assert store.approvals_for(verified) == []  # nothing landed, nothing claimed
+        assert git(repo, "branch", "--list", "skep/*").stdout == ""
+    finally:
+        store.close()
+
+
+def test_run_page_says_not_reverified(repo: Path, config: SupervisorConfig, tmp_path: Path) -> None:
+    """ES-F291 follow-up (I8): the run detail names the missing G10 record
+    instead of leaving the re-verify row blank."""
+    from .conftest import serve_client
+
+    store = RunStore(config.db_path)
+    try:
+        task_id = _unverified_run(store, repo, config.audit_dir, tmp_path)
+        (config.audit_dir / task_id / "task.json").unlink()  # the sweep cannot fix it
+    finally:
+        store.close()
+    with serve_client(config) as client:
+        detail = client.get(f"/api/runs/{task_id}").json()
+        assert detail["reverification"] is None
+        assert "never re-verified" in detail["reverification_missing"]
+        store = RunStore(config.db_path)
+        try:
+            _record(store, task_id)
+        finally:
+            store.close()
+        assert client.get(f"/api/runs/{task_id}").json()["reverification_missing"] is None

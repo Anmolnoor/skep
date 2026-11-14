@@ -1436,7 +1436,7 @@ def cmd_review(args: argparse.Namespace) -> int:
                 evidence=str(audit_dir),
                 next_command=f"skep review {record.task_id}  # inspect the evidence",
             )
-        from .serve.actions import never_reverified_error
+        from .serve.actions import never_reverified_error, reverify_in_flight
 
         unverified = never_reverified_error(store, record.task_id)
         if unverified is not None:  # ES-F291 (L1): as serve's apply_patch
@@ -1444,7 +1444,12 @@ def cmd_review(args: argparse.Namespace) -> int:
                 unverified,
                 state=record.state,
                 evidence=str(audit_dir),
-                next_command=f"skep review {record.task_id} --reverify",
+                next_command=f"skep review {record.task_id}"
+                + (
+                    "  # once re-verification finishes"
+                    if reverify_in_flight(store, record.task_id)
+                    else " --reverify"
+                ),
             )
         # v20-F5: an operator may name the landing branch (default skep/<task_id>).
         requested_branch = getattr(args, "branch", None)

@@ -3170,6 +3170,12 @@ def open_pr_for_runs(
             f"({', '.join(skipped_no_patch)})",
         )
     runs = landable
+    # ES-F291 follow-up (I2 I8): refuse the group before any of it lands — a
+    # never-re-verified run found mid-loop left the earlier runs landed on a
+    # branch no PR was opened for.
+    for run in runs:
+        if applied_branch_for(store, str(run["task_id"])) is None:
+            require_reverified(store, str(run["task_id"]))
     branch = _grouped_branch(title, str(runs[0]["task_id"]))
     for run in runs:
         task_id = str(run["task_id"])
