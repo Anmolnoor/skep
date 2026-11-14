@@ -1254,9 +1254,29 @@ def cmd_review(args: argparse.Namespace) -> int:
         approvals = store.approvals_for(record.task_id)
 
         allow_command = bool(getattr(args, "allow_command", False))
-        verdict_flags = [args.approve, args.deny, allow_command]
+        reverify_flag = bool(getattr(args, "reverify", False))
+        verdict_flags = [args.approve, args.deny, allow_command, reverify_flag]
         if sum(bool(flag) for flag in verdict_flags) > 1:
-            return _err("--approve, --deny, and --allow-command are mutually exclusive.")
+            return _err(
+                "--approve, --deny, --allow-command, and --reverify are mutually exclusive."
+            )
+
+        if reverify_flag:
+            # ES-F291 (L1): the operator face of the startup sweep (ES-F290).
+            from .dispatch import reverify_unverified
+
+            why_not = reverify_unverified(store, config, record)
+            if why_not:
+                return _err(
+                    why_not,
+                    state=record.state,
+                    evidence=str(audit_dir),
+                    next_command=f"skep review {record.task_id}  # inspect the evidence",
+                )
+            done = store.reverification_for(record.task_id)
+            print(f"re-verified: task {record.task_id} → {done.outcome if done else '-'}")
+            print(f"  next: skep review {record.task_id}  # read the result, then --approve")
+            return 0
 
         if not args.approve and not args.deny and not allow_command:
             changed_files: list[str] = []
@@ -1415,6 +1435,16 @@ def cmd_review(args: argparse.Namespace) -> int:
                 state=record.state,
                 evidence=str(audit_dir),
                 next_command=f"skep review {record.task_id}  # inspect the evidence",
+            )
+        from .serve.actions import never_reverified_error
+
+        unverified = never_reverified_error(store, record.task_id)
+        if unverified is not None:  # ES-F291 (L1): as serve's apply_patch
+            return _err(
+                unverified,
+                state=record.state,
+                evidence=str(audit_dir),
+                next_command=f"skep review {record.task_id} --reverify",
             )
         # v20-F5: an operator may name the landing branch (default skep/<task_id>).
         requested_branch = getattr(args, "branch", None)
@@ -3463,6 +3493,12 @@ def register_supervisor_commands(
     review.add_argument("--approve", action="store_true")
     review.add_argument("--deny", action="store_true")
     review.add_argument("--allow-command", action="store_true")
+    review.add_argument(
+        "--reverify",
+        action="store_true",
+        help="re-verify (G10) a completed run that was never re-verified — the "
+        "supervisor stopped before it could — with the project's pinned verify",
+    )
     review.add_argument("--actor", default=None, help="who is approving (default: $USER)")
     review.add_argument("--note", default=None)
     review.add_argument(

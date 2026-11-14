@@ -277,6 +277,10 @@ def test_review_approve_never_lands_a_review_serve_is_already_applying(
         patch = tmp_path / "task.patch"
         patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
         store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+        store.record_reverification(  # ES-F291: landing needs a G10 record
+            task.task_id, outcome="passed", worker_outcome="passed", confirmed=True,
+            commands=["true"], exit_codes=[0], detail="re-verified",
+        )  # fmt: skip
         review_id = store.enqueue_approval(task.task_id, action="apply_patch", reason="land")
         assert store.claim_approval(review_id)  # serve is mid-landing
     finally:
@@ -311,6 +315,10 @@ def test_review_approve_hands_the_review_back_when_git_blows_up(
         patch = tmp_path / "task.patch"
         patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
         store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+        store.record_reverification(  # ES-F291: landing needs a G10 record
+            task.task_id, outcome="passed", worker_outcome="passed", confirmed=True,
+            commands=["true"], exit_codes=[0], detail="re-verified",
+        )  # fmt: skip
     finally:
         store.close()
 

@@ -588,6 +588,10 @@ def _landable_run(store: RunStore, repo: Any, tmp_path: Any) -> dict[str, Any]:
     patch = tmp_path / "task.patch"
     patch.write_text("diff --git a/x b/x\n", encoding="utf-8")
     store.add_artifact(task.task_id, kind="patch", audit_path=patch, sha256="0" * 64)
+    store.record_reverification(  # ES-F291: landing needs a G10 record
+        task.task_id, outcome="passed", worker_outcome="passed", confirmed=True,
+        commands=["true"], exit_codes=[0], detail="re-verified",
+    )  # fmt: skip
     return require_run(store, str(task.task_id))
 
 

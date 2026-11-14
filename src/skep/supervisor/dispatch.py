@@ -1389,49 +1389,64 @@ def recover_interrupted_runs(
     return recovered
 
 
-def reverify_unverified_runs(run_store: RunStore, config: SupervisorConfig) -> list[str]:
-    """ES-F290 (L1, I2 I8): re-verify every completed, unlanded run that has
-    a patch but no re-verification record.
-
-    ``ingest_run`` commits COMPLETED before G10 runs, so a supervisor that
-    stops in between leaves a completed run nobody re-verified — and
-    ``recover_interrupted_runs`` only looks at in-flight states. Run at serve
-    startup after that recovery; the same restart path (pinned verify, no
-    auto-apply) as a late deposit. A run whose supervisor is still alive (a
-    CLI ``skep run`` mid-re-verify) is its supervisor's to finish. Returns
-    the task ids it re-verified."""
-    me = process_owner()
-    done: list[str] = []
-    for record in run_store.runs_with_states(("completed",)):
-        task_id = record.task_id
-        if run_store.reverification_for(task_id) is not None:
-            continue
-        patches = [Path(p) for kind, p, _ in run_store.artifacts_for(task_id) if kind == "patch"]
-        if not patches or not patches[0].is_file():
-            continue
-        if any(
-            a.action == "apply_patch" and a.status == "approved"
-            for a in run_store.approvals_for(task_id)
-        ):
-            continue  # already landed: re-verifying cannot change that record
-        supervisor = run_store.run_supervisor(task_id)
-        if supervisor is not None and supervisor != me and owner_alive(supervisor):
-            continue
-        task = _task_from_audit(config, task_id)
-        if task is None:
-            continue  # no evidence to re-verify from; landing refuses it (ES-F291)
-        # The stopped re-verify's half-built tree would make create_worktree fail.
-        remove_worktree(Path(record.repo), config.worktrees_root / f"reverify-{patches[0].stem}")
-        result = _run_result(run_store, task_id, config.audit_dir / task_id / "result.json")
-        _reverify_after_restart(
-            run_store,
-            config,
-            record,
-            task,
-            record.verification_outcome,
-            tuple(result.changed_files) if result is not None else None,
+def reverify_unverified(run_store: RunStore, config: SupervisorConfig, record: RunRecord) -> str:
+    """ES-F290/F291 (L1, I2 I8): re-verify one completed run that has a patch
+    but no re-verification record — the supervisor stopped between ingest
+    committing COMPLETED and G10. The same restart path (pinned verify, no
+    auto-apply) a late deposit takes. Returns "" when it re-verified, else
+    why it did not (a teaching line for ``skep review --reverify``)."""
+    task_id = record.task_id
+    if record.state != TaskState.COMPLETED.value:
+        return f"run is {record.state}, not completed — only a completed run is re-verified"
+    existing = run_store.reverification_for(task_id)
+    if existing is not None:
+        return (
+            f"already re-verified (G10): {existing.outcome} — one record per run; "
+            f"`skep review {task_id}` shows it"
         )
-        done.append(task_id)
+    patches = [Path(p) for kind, p, _ in run_store.artifacts_for(task_id) if kind == "patch"]
+    if not patches or not patches[0].is_file():
+        return "no patch on disk — nothing to re-verify or land"
+    supervisor = run_store.run_supervisor(task_id)
+    if supervisor is not None and supervisor != process_owner() and owner_alive(supervisor):
+        return (
+            "its supervisor is still running and re-verifies it itself — check back "
+            "shortly; if it never finishes, restart `skep serve` (startup re-verifies it)"
+        )
+    task = _task_from_audit(config, task_id)
+    if task is None:
+        return (
+            f"no task evidence at {config.audit_dir / task_id / 'task.json'} to re-verify "
+            "from — dispatch the task again"
+        )
+    # The stopped re-verify's half-built tree would make create_worktree fail.
+    remove_worktree(Path(record.repo), config.worktrees_root / f"reverify-{patches[0].stem}")
+    result = _run_result(run_store, task_id, config.audit_dir / task_id / "result.json")
+    _reverify_after_restart(
+        run_store,
+        config,
+        record,
+        task,
+        record.verification_outcome,
+        tuple(result.changed_files) if result is not None else None,
+    )
+    return ""
+
+
+def reverify_unverified_runs(run_store: RunStore, config: SupervisorConfig) -> list[str]:
+    """ES-F290 (L1): at serve startup, after ``recover_interrupted_runs``
+    (which only looks at in-flight states), re-verify every completed,
+    unlanded run with a patch and no re-verification record. Returns the
+    task ids it re-verified."""
+    done: list[str] = []
+    for record in run_store.runs_with_states((TaskState.COMPLETED.value,)):
+        if run_store.reverification_for(record.task_id) is not None or any(
+            a.action == "apply_patch" and a.status == "approved"
+            for a in run_store.approvals_for(record.task_id)
+        ):
+            continue  # recorded, or already landed: re-verifying changes neither
+        if not reverify_unverified(run_store, config, record):
+            done.append(record.task_id)
     return done
 
 

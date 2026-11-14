@@ -3374,6 +3374,22 @@ def _get_run_guidance(
             "Do not present the run as verified or passed, and do not suggest landing it "
             "without a human reviewing the patch first."
         )
+    # ES-F291 (L1): a patch nothing re-verified is not "ready to land" — every
+    # landing face refuses it until it is re-verified.
+    if (
+        run.get("state") == "completed"
+        and reverify is None
+        and has_patch
+        and applied_branch is None
+    ):
+        return (
+            "This run completed but has NO re-verification record (G10) yet, so "
+            "nothing has checked the patch and land_run will refuse it. Either "
+            "re-verification is still running (get_run again shortly) or the "
+            "supervisor stopped before it ran and it was never re-verified — then "
+            f"`skep review {run.get('task_id')} --reverify` (or restarting skep serve) "
+            "re-verifies it. Tell the user plainly; do not present it as verified or passed."
+        )
     # v22-F4: a completed, confirmed run with an unlanded patch — the next step
     # is ALWAYS the landing approval, never another run.
     if run.get("state") == "completed" and has_patch and applied_branch is None:
@@ -3544,6 +3560,13 @@ def execute_read_tool(
             }
         from ..cli_cmds import STATE_EXIT_CODES
 
+        def settled(task_id: str, state: str) -> bool:
+            # ES-F291: ingest commits ``completed`` before G10 runs; a run is
+            # settled once its re-verification has recorded (landing needs it).
+            return state in STATE_EXIT_CODES and not (
+                state == "completed" and actions.reverify_in_flight(store, task_id)
+            )
+
         timeout = min(int(args.get("timeout_seconds") or 120), 180)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -3551,7 +3574,7 @@ def execute_read_tool(
                 task_id: str(store.get_run(task_id).state)  # type: ignore[union-attr]
                 for task_id in task_ids
             }
-            if all(state in STATE_EXIT_CODES for state in states.values()):
+            if all(settled(task_id, state) for task_id, state in states.items()):
                 break
             time.sleep(_SCRIPT_RUN_POLL_SECONDS)
         views = []
@@ -3562,7 +3585,7 @@ def execute_read_tool(
             if record is None:  # existed at entry; runs are never deleted
                 continue
             view = _run_view(record, store=store)
-            view["settled"] = str(record.state) in STATE_EXIT_CODES
+            view["settled"] = settled(task_id, str(record.state))
             if not view["settled"]:
                 still_running.append(task_id)
                 views.append(view)

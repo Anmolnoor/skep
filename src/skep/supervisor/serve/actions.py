@@ -537,6 +537,45 @@ def reverification_warning(reverify: Any) -> str | None:
     )
 
 
+def reverify_in_flight(store: RunStore, task_id: str) -> bool:
+    """ES-F291: no G10 record yet, and the supervisor that runs G10 for this
+    run is alive — a completed run in this state is still settling."""
+    if store.reverification_for(task_id) is not None:
+        return False
+    supervisor = store.run_supervisor(task_id)
+    return supervisor is not None and owner_alive(supervisor)
+
+
+def never_reverified_error(store: RunStore, task_id: str) -> str | None:
+    """ES-F291 (L1, I1 I2): why a run with no re-verification record may not
+    land, or None when a record exists. Only landing paths ask, so the run
+    has a patch. Ingest commits COMPLETED before G10 runs, so a missing
+    record means G10 is still running (its supervisor is alive) or the
+    supervisor stopped before it ran — serve's startup sweep re-verifies
+    those, and ``skep review --reverify`` does it on demand."""
+    if store.reverification_for(task_id) is not None:
+        return None
+    if reverify_in_flight(store, task_id):
+        return (
+            "this run's re-verification (G10) is still running — nothing has checked "
+            "the patch yet, so it cannot land. Land it once re-verification finishes "
+            "(get_run shows the result)."
+        )
+    return (
+        "this run was never re-verified (G10): the supervisor stopped between the "
+        "worker finishing and re-verification, so nothing has checked this patch and "
+        f"it cannot land. Re-verify it first — `skep review {task_id} --reverify` "
+        "(restarting `skep serve` also re-verifies it) — then land it again."
+    )
+
+
+def require_reverified(store: RunStore, task_id: str) -> None:
+    """ES-F291: the 409 every serve landing face raises for ``never_reverified_error``."""
+    error = never_reverified_error(store, task_id)
+    if error is not None:
+        raise HTTPException(status_code=409, detail=error)
+
+
 def git_log_view(
     holder: ConfigHolder,
     repo: str,
@@ -1565,6 +1604,8 @@ def land_run(
             detail="run is waiting on a mid-run gate; approve that review first "
             "(approve_review resumes it), then land the completed run",
         )
+    if patch_path(store, task_id) is not None:
+        require_reverified(store, task_id)  # ES-F291: before a review is opened
     # ES-F4 (B17): pending-or-new in one store call — concurrent lands share
     # one review, and apply_patch's claim lets exactly one of them land it.
     review_id = store.pending_or_enqueue_approval(
@@ -2591,7 +2632,9 @@ def approval_view(
         # v106-F3: an unconfirmed re-verification must be visible ON the
         # approval the human is about to grant, not only in the land response
         # after the fact (four field patches landed confirmed=0 quietly).
-        warning = reverification_warning(store.reverification_for(str(approval.task_id)))
+        warning = reverification_warning(
+            store.reverification_for(str(approval.task_id))
+        ) or never_reverified_error(store, str(approval.task_id))
         if warning is not None:
             row["reverification_warning"] = warning
     if project_context is not None:
@@ -3265,6 +3308,7 @@ def apply_patch(
     patch = patch_path(store, task_id)
     if patch is None:
         raise HTTPException(status_code=409, detail="no patch artifact to apply")
+    require_reverified(store, task_id)
     repo = Path(str(run["repo"]))
     if branch is not None and branch.strip():
         target = branch.strip()
