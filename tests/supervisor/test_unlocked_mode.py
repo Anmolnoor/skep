@@ -549,6 +549,18 @@ def test_a_gate_on_an_unlocked_project_answers_itself_once(
     hosts = [{"host": gate, "count": 1}] if mode == "hostgate" else []
     for task_id in (first, run["task_id"]):
         assert client.get(f"/api/runs/{task_id}").json().get("unlocked_hosts", []) == hosts
+    # and the chat's get_run says the same (the Queen's face of the receipt)
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.tools import execute_read_tool
+
+    store = RunStore(config.db_path)
+    try:
+        detail = execute_read_tool(
+            "get_run", {"task_id": first}, store=store, holder=ConfigHolder(config, store)
+        )
+    finally:
+        store.close()
+    assert detail.get("unlocked_hosts", []) == hosts
 
 
 @_SANDBOX

@@ -1001,3 +1001,38 @@ def test_a_codex_card_on_the_chatgpt_login_says_so_and_a_change_is_stale(
     assert "engine_auth" in (manifest_widening(same_hosts, plan) or "")
     monkeypatch.setenv("OPENAI_API_KEY", "test-value")
     assert manifest(codex_chatgpt_login=True)["engine_auth"] is None  # a key still wins
+
+
+def test_a_denied_batch_card_compares_each_member_with_what_it_showed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch card's manifest is one per run: as_shown holds only when every
+    member still asks what the card showed; a card that stored no manifest
+    is never as shown."""
+    from types import SimpleNamespace
+
+    from skep.supervisor.serve import tools
+
+    member = {"network_ask": ["example.com"], "shell_ask": []}
+    marks: list[dict[str, Any]] = []
+
+    def fake(store: Any, holder: Any, args: Any, chat_id: Any, tool: Any, **kw: Any) -> Any:
+        if kw.get("resolution") is not None:
+            marks.append(kw["resolution"])
+        return {"members": [member, member]}
+
+    monkeypatch.setattr(tools, "dispatch_manifest_for", fake)
+
+    def card(manifest: Any) -> Any:
+        return SimpleNamespace(
+            tool="batch_dispatch",
+            chat_id="c",
+            action_id="a1",
+            card=None if manifest is None else {"manifest": manifest},
+            fold_items=lambda: [{"args": {}}],
+        )
+
+    tools.log_denied_dispatch_asks(None, None, card({"members": [member, member]}))  # type: ignore[arg-type]
+    tools.log_denied_dispatch_asks(None, None, card({"members": [member, {}]}))  # type: ignore[arg-type]
+    tools.log_denied_dispatch_asks(None, None, card(None))  # type: ignore[arg-type]
+    assert [m["as_shown"] for m in marks] == [True, False, False]

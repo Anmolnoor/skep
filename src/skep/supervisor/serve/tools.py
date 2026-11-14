@@ -2849,9 +2849,7 @@ def log_denied_dispatch_asks(store: RunStore, holder: ConfigHolder, action: Any)
     if action.tool not in MANIFEST_TOOLS:
         return
 
-    def asks(manifest: Any) -> Any:
-        if not isinstance(manifest, dict):
-            return None
+    def asks(manifest: dict[str, Any]) -> Any:
         if "members" in manifest:
             return [asks(member) for member in manifest["members"]]
         return manifest.get("network_ask"), manifest.get("shell_ask")
