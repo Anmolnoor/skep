@@ -134,7 +134,12 @@ killed as before.
 
 ### 5. Two serves on one home
 
-There is no cross-process serve lock. Recovery now skips any run whose
+Since ES-F274 a second `skep serve` on the same home refuses to start: serve
+holds an exclusive lock on `<home>/serve.lock` for its life (the OS drops it
+when serve dies, so no stale pid is judged) and the refusal names the
+holder's pid and port. What follows still guards everything else that
+recovers runs (`skep run`, `skep team`, two serves started on different
+homes over one copied store). Recovery skips any run whose
 recorded supervisor is still alive — a second serve no longer kills the
 workers of a first one that is still running (it used to). Recovery takes
 each run, live worker or dead, with a compare-and-set on
