@@ -153,3 +153,38 @@ def test_resolver_hook_exchanges_only_for_copilot_endpoints(
     finally:
         fake.stop()
     assert len(fake.requests) == 1
+
+
+def test_a_worker_profile_with_api_key_env_gets_the_exchanged_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Copilot worker profile naming ``api_key_env`` returned the raw GitHub
+    token (``llm_plan._api_key``): every call 401'd and the GitHub token
+    itself reached the worker (and a relay). It is exchanged like the
+    key-file path; a failed exchange is the worker's own error type."""
+    from skep.profile import ProviderProfile as WorkerProfile
+    from skep.workers.llm_plan import LlmPlanError, WorkerProvider, provider_probe_target
+
+    monkeypatch.setattr(llm_copilot, "_cache", {})
+    monkeypatch.setenv("SKEP_TEST_GH", "CANARY-gh-token")
+    seen: list[str] = []
+
+    def exchange(token: str, *, timeout: float = 10.0) -> tuple[str, float]:
+        seen.append(token)
+        return "copilot-bearer", time.time() + 1800
+
+    monkeypatch.setattr(llm_copilot, "exchange_copilot_token", exchange)
+    profile = WorkerProfile(
+        name="openai-compat", model="gpt-4o", endpoint="https://api.githubcopilot.com",
+        api_key_env="SKEP_TEST_GH",
+    )  # fmt: skip
+    assert provider_probe_target(WorkerProvider(profile=profile))[2] == "copilot-bearer"
+    assert seen == ["CANARY-gh-token"]
+
+    def refused(token: str, *, timeout: float = 10.0) -> tuple[str, float]:
+        raise OllamaError("copilot token exchange failed: 401 from api.github.com")
+
+    monkeypatch.setattr(llm_copilot, "_cache", {})
+    monkeypatch.setattr(llm_copilot, "exchange_copilot_token", refused)
+    with pytest.raises(LlmPlanError, match="exchange failed"):
+        provider_probe_target(WorkerProvider(profile=profile))
