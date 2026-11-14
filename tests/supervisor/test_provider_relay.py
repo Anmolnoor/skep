@@ -701,12 +701,25 @@ def _https_upstream(tmp_path: Path) -> tuple[Path, int, object]:
     def run(*argv: str) -> None:
         subprocess.run(["openssl", *argv], cwd=tmp_path, check=True, capture_output=True)
 
+    # ES-F267: Python 3.13+ verifies with VERIFY_X509_STRICT by default (both
+    # the direct client and the relay: one context), which wants a CA with
+    # key usage and a leaf with an Authority Key Identifier. OpenSSL 3's CLI
+    # adds those by itself; LibreSSL's (macOS) does not, so they are named.
+    (tmp_path / "caext").write_text(
+        "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n"
+        "subjectKeyIdentifier=hash\n"
+    )
+    (tmp_path / "ext").write_text(
+        "subjectAltName=IP:127.0.0.1\nauthorityKeyIdentifier=keyid\nbasicConstraints=CA:FALSE\n"
+        "keyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n"
+    )
     try:
-        run("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=t-ca",
-            "-keyout", "ca.key", "-out", "ca.pem")  # fmt: skip
+        run("req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=t-ca",
+            "-keyout", "ca.key", "-out", "ca.csr")  # fmt: skip
+        run("x509", "-req", "-in", "ca.csr", "-signkey", "ca.key", "-days", "1",
+            "-extfile", "caext", "-out", "ca.pem")  # fmt: skip
         run("req", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=127.0.0.1",
             "-keyout", "srv.key", "-out", "srv.csr")  # fmt: skip
-        (tmp_path / "ext").write_text("subjectAltName=IP:127.0.0.1\n")
         run("x509", "-req", "-in", "srv.csr", "-CA", "ca.pem", "-CAkey", "ca.key",
             "-CAcreateserial", "-days", "1", "-extfile", "ext", "-out", "srv.pem")  # fmt: skip
     except subprocess.CalledProcessError as exc:
