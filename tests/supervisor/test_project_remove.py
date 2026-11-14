@@ -87,3 +87,31 @@ def test_rest_delete_and_the_deck_card_route_through_the_one_verb(
     _seed(config.db_path, repo)
     assert client.delete("/api/projects/gone").json()["removed"] is True
     assert _projects(config.db_path) == []
+
+
+def test_removal_waits_for_a_run_in_flight_on_the_project(
+    config: SupervisorConfig, repo: Path, tmp_path: Path
+) -> None:
+    """A run in flight resolved its policy from this project. Unbinding it
+    under the run meant a supervisor restart re-resolved with no project, so
+    recovery's G10 re-verify fell back to the worker's own verify command
+    (I2, v88-F4). Refused like repo removal (v57-F8) until the run ends."""
+    from skep.supervisor.contracts_io import mint_task
+
+    client = serve_client(config)
+    _seed(config.db_path, repo)
+    store = RunStore(config.db_path)
+    try:
+        task = mint_task(workspace=tmp_path / "ws", instructions="x")
+        store.create_run(task, repo=repo, ref=None, execution_mode="sandbox")
+        store.transition(task.task_id, "running", "pid 1")
+
+        busy = client.delete("/api/projects/gone")
+        assert busy.status_code == 409
+        assert task.task_id[:13] in busy.json()["detail"]
+        assert _projects(config.db_path) == ["gone"]
+
+        store.transition(task.task_id, "completed", "done")
+    finally:
+        store.close()
+    assert client.delete("/api/projects/gone").json()["removed"] is True
