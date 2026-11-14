@@ -855,3 +855,27 @@ def test_rest_model_step_with_no_provider_keeps_a_working_one(
     finally:
         working.stop()
     assert kept.status_code == 200 and kept.json()["kept"] is True
+
+
+def test_a_failed_first_switch_leaves_no_setting_rows(tmp_path: Path) -> None:
+    """ES-F310 follow-up: on a home with no provider, a switch whose test
+    fails deletes the llm settings it wrote — absent before, absent after,
+    not a JSON null row — and leaves no profile row or profile.json."""
+    from skep.supervisor.serve.llm import LLM_PROTOCOL
+
+    home = tmp_path / "home"
+    broken = FakeOllama(models=["m"]).start()
+    try:
+        with _holder(home) as (holder, store):
+            with pytest.raises(ValueError, match="no provider was active before"):
+                onboard_model(holder, store, provider="ollama", model="m", endpoint=broken.base_url)
+            keys = (LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL)
+            rows = store._conn.execute(
+                f"SELECT key FROM settings WHERE key IN ({', '.join('?' * len(keys))})", keys
+            ).fetchall()
+            assert rows == []
+            assert store.active_provider_profile() is None
+            assert store.get_provider_profile("ollama") is None
+        assert not (home / "profile.json").exists()
+    finally:
+        broken.stop()

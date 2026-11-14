@@ -223,7 +223,10 @@ def onboard_model(
         if previous is not None:
             store.set_active_provider(previous.provider_id)
         for key, value in saved_settings.items():
-            store.set_setting(key, value)
+            if value is None:  # absent before: delete, not a JSON null row
+                store.delete_setting(key)
+            else:
+                store.set_setting(key, value)
         if saved_profile is None:
             profile_file.unlink(missing_ok=True)
         else:
