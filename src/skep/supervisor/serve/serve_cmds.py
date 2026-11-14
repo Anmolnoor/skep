@@ -100,6 +100,13 @@ def serve_log_config(log_path: Path) -> dict[str, Any]:
     }
     for name in ("uvicorn", "uvicorn.access"):
         config["loggers"][name]["handlers"].append("serve_file")
+    # L12 (I8): skep's own loggers (startup re-verify sweep, recovery, channels)
+    # had no handler — INFO was dropped, ERROR went only to stderr, which a
+    # detached serve discards. Each skep.* logger already redacts at the source
+    # (ES-F281 RedactFilter), so its records reach these handlers masked.
+    # Propagation stays on: the root has no handler under serve, and pytest's
+    # caplog listens there.
+    config["loggers"]["skep"] = {"handlers": ["default", "serve_file"], "level": "INFO"}
     return config
 
 
