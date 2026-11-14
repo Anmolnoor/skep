@@ -22,6 +22,7 @@ env allowlist.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -343,7 +344,8 @@ def available() -> bool:
 # (ADR 0062, ``provider_key_relay``): then the proxy holds the credential.
 # The store (supervisor.sqlite3) stays readable: that same worker reads its
 # provider settings from it. Checked when the profile is
-# built, so a secret file created mid-run is not covered.
+# built, so a secret file created mid-run is not covered (relay-secret is
+# made before the list, ES-F264).
 # W33: the engine logins (~/Library/Keychains, ~/.claude/.credentials.json,
 # ~/.codex/auth.json) are masked too — each external engine's config dir is
 # redirected per run and a dispatch without its auth env is refused (NO AUTH
@@ -960,6 +962,15 @@ def write_profile(
     unmasked = [Path(own).resolve() for own in unmasked]
     probe = require_usable(backend)
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
+    # ES-F264: the mask list holds only files that exist now. relay-secret
+    # used to appear on the first relayed dispatch, readable by every run
+    # already going; made here first, it is on every run's list.
+    # A home this process cannot write is one it cannot make the secret in
+    # mid-run either: nothing to mask.
+    from .provider_relay import relay_secret
+
+    with contextlib.suppress(OSError):
+        relay_secret(skep_home / "supervisor")
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
     if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
         extra_readable = list(extra_readable)

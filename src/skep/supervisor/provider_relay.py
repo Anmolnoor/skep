@@ -34,7 +34,7 @@ RELAY_SECRET_FILE = "relay-secret"
 _SECRET_BYTES = 32
 
 
-def _relay_secret(supervisor_home: Path) -> bytes:
+def relay_secret(supervisor_home: Path) -> bytes:
     """The supervisor's relay secret, made once. Written whole to a private
     temp file and moved into place, so no reader ever sees it half-written;
     a short one (a crash before this rule) is replaced, never used."""
@@ -65,7 +65,7 @@ def relay_token(supervisor_home: Path, task_id: str) -> str:
     """The run's relay token: HMAC(relay-secret, task_id). Derived, not
     stored, so a restarted supervisor that re-adopts the run (ADR 0060)
     recomputes the token the worker already holds."""
-    secret = _relay_secret(supervisor_home)
+    secret = relay_secret(supervisor_home)
     return hmac.new(secret, task_id.encode("utf-8"), hashlib.sha256).hexdigest()
 
 

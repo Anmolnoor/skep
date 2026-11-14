@@ -14,6 +14,7 @@ LLM with them until V6 moves the credential into the proxy.
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -779,3 +780,32 @@ def test_a_relayed_worker_holds_no_provider_key_in_its_env_or_files(
             "llm-secret": "read: True",
             "llm-secret-p1": "read: True",
         }
+
+
+def test_the_relay_secret_exists_before_any_mask_list_is_built(
+    fake_homes: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F264: the mask list holds only the secret files that exist when a
+    run's profile is written. relay-secret was made on the first relayed
+    dispatch, so a relay-OFF run already going when the switch flipped could
+    read it — and with it derive every run's relay token. Every profile now
+    makes it first, so it is always on the list."""
+    _home, skep_home = fake_homes
+    secret = skep_home / "supervisor" / "relay-secret"
+    assert not secret.exists()
+    seen: list[set[Path]] = []
+
+    def spy(home: Path, *, worker_llm_key: bool = False) -> list[Path]:
+        masked = real(home, worker_llm_key=worker_llm_key)
+        seen.append(set(masked))
+        raise RuntimeError("stop after the mask list")
+
+    real = sandbox.secret_paths
+    monkeypatch.setattr(sandbox, "secret_paths", spy)
+    monkeypatch.setattr(sandbox, "require_usable", lambda backend=None: None)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    with pytest.raises(RuntimeError, match="stop after"):
+        sandbox.write_profile(tmp_path / "p.sb", workspace=workspace, skep_home=skep_home)
+    assert secret.resolve() in seen[0]
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600
