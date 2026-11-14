@@ -2418,7 +2418,8 @@ def hidden_refusal(tool: str, role: Role, decided_by: str) -> str:
 UNATTENDED_BLOCKED_READ_TOOLS: frozenset[str] = frozenset({"search_web"})
 # ES-F241: {turn} names the turn — "a scheduled turn" (a prompt tick, the one
 # read-only unattended turn) or "an unattended follow-up turn" (a run-finish
-# or card-click follow-up); it said "scheduled" for both.
+# follow-up, or a card-click follow-up a serve restart resumed — L6: one
+# queued behind a live click is attended); it said "scheduled" for both.
 UNATTENDED_READ_REFUSAL = (
     "does not run in {turn} — it fires whether or not anyone is watching, so "
     "it reads the store only (runs, approvals, chats, notes, memory). "

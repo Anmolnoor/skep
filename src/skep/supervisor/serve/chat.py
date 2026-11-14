@@ -516,13 +516,17 @@ QUEUED_FOLLOW_UP = (
 )
 
 
-def _queue_follow_up(engine: ChatEngine, action_id: str, actor: str) -> None:
+def _queue_follow_up(
+    engine: ChatEngine, action_id: str, actor: str, *, resumed: bool = False
+) -> None:
     """D18: the model's turn for a verdict recorded while another turn ran —
-    it waits for that turn, the way a run-finish follow-up does, and runs
-    unattended (it fires whether or not anyone is watching). A card still
-    pending by then holds it: that card's verdict resumes the model. The
-    card row holds it until it starts (``store.queue_follow_up``). A click
-    from a messenger hears the reply there, as an in-turn click does."""
+    it waits for that turn, the way a run-finish follow-up does. L6: the
+    operator just clicked, so it is attended, as the in-turn verdict's
+    continuation is (a messenger click: a channel turn). One a serve start
+    ``resumed`` runs with nobody's click behind that moment: unattended.
+    A card still pending by then holds it: that card's verdict resumes the
+    model. The card row holds it until it starts (``store.queue_follow_up``).
+    A click from a messenger hears the reply there, as an in-turn click does."""
 
     def follow() -> None:
         action = engine.store.get_chat_action(action_id)
@@ -544,7 +548,8 @@ def _queue_follow_up(engine: ChatEngine, action_id: str, actor: str) -> None:
                 str(data.get("content") or "")
                 for event, data in engine.turn_events(
                     chat_id, base_url=base_url, api_key=api_key, model=model,
-                    protocol=protocol, unattended=True,  # D16: unattended keeps no session keep
+                    protocol=protocol, unattended=resumed,  # D16: unattended keeps no session keep
+                    channel=not resumed and actor.startswith("channel:"),
                 )
                 if event is None
             ]  # fmt: skip
@@ -566,7 +571,7 @@ def resume_follow_ups(engine: ChatEngine) -> int:
     each runs once (its claim is the once). Returns how many."""
     queued = engine.store.queued_follow_ups()
     for action_id, actor in queued:
-        _queue_follow_up(engine, action_id, actor)
+        _queue_follow_up(engine, action_id, actor, resumed=True)
     # ES-F242: and the run-finish follow-ups a stop cut off, waiting or mid-turn
     from .run_status import CONTINUE_CHAT_SETTING
 
