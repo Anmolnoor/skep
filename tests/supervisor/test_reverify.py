@@ -43,6 +43,28 @@ def test_completed_run_is_reverified_and_confirmed(repo: Path, config: Superviso
     _no_leftovers(repo, config)
 
 
+def test_reverify_gets_the_runs_local_provider_port_too(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F252 (D6, I2): the worker reached its local model provider's port
+    (provider_hosts) beside the project's loopback_ports; G10 got only the
+    latter, so a test needing the local provider failed in re-verify only."""
+    from skep.supervisor import dispatch
+    from skep.supervisor.reverify import reverify_run as real
+
+    seen: dict[str, object] = {}
+
+    def spy(**kwargs: object) -> ReverifyOutcome:
+        seen.update(kwargs)
+        return real(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(dispatch, "reverify_run", spy)
+    monkeypatch.setattr(dispatch, "provider_hosts_for", lambda *_a, **_k: ["localhost:11434"])
+    outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
+    assert outcome.record.state == "completed"
+    assert seen["loopback_ports"] == (11434,)
+
+
 def test_lying_worker_is_caught_by_reverification(repo: Path, config: SupervisorConfig) -> None:
     """The worker claims completed+passed, but its patch fails the recorded command."""
     outcome = run_task(repo, "Pretend to fix it. MODE:liar", config=config)

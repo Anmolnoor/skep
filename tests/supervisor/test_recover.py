@@ -338,3 +338,27 @@ def test_a_recovered_runs_reverify_gets_the_projects_loopback_ports(
     finally:
         store.close()
     assert seen["loopback_ports"] == (5432,)
+
+
+def test_a_recovered_runs_reverify_gets_its_local_provider_port_too(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F252 (D6, I2): as the live path — the run reached its local model
+    provider's port, so its late re-verify does too."""
+    from skep.supervisor import dispatch
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(dispatch, "reverify_run", lambda **kwargs: seen.update(kwargs))
+    store = RunStore(config.db_path)
+    try:
+        task_id, workspace = _strand_run(store, config, repo)
+        task_path = config.audit_dir / task_id / "task.json"
+        task = dispatch._task_from_audit(config, task_id)
+        assert task is not None
+        permissions = task.permissions.model_copy(update={"provider_hosts": ["localhost:11434"]})
+        write_task_file(task.model_copy(update={"permissions": permissions}), task_path)
+        _deposit_completed_result(store, config, task_id, workspace)
+        assert recover_interrupted_runs(store, config) == [task_id]
+    finally:
+        store.close()
+    assert seen["loopback_ports"] == (11434,)

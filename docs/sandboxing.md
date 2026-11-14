@@ -193,7 +193,8 @@ would not start, so setup refuses it. A local model provider on a port below
 `sandbox_unavailable` before any worker starts, saying to move the provider to
 1024 or above. HTTP to a closed port answers `403` naming the port and that
 command; a raw connection on macOS fails with "Operation not permitted".
-Re-verification gets the same project ports. `skep doctor` and
+Re-verification gets the same ports the run had: the project's and its local
+provider's. `skep doctor` and
 `skep policy migrate --dry-run` name the projects that open none.
 
 How each backend enforces it:

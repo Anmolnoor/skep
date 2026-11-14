@@ -173,8 +173,9 @@ def reverify(
     uses; when set, priming resolves into it instead of a worktree-local
     throwaway, so the work survives across runs. None keeps the throwaway.
 
-    ``loopback_ports`` (D6, I2): the project's loopback ports, so a verify
-    that talks to a local service it lists runs as the worker's did.
+    ``loopback_ports`` (D6, I2): the run's loopback ports (the project's and
+    its local model provider's, ES-F252), so a verify that talks to a local
+    service runs as the worker's did.
     """
     if patch_path is None or not patch_path.is_file():
         # v65-F1: 58 of the first 94 reverifications were patch-less runs

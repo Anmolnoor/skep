@@ -985,8 +985,13 @@ def run_task(
                 # v88-F4 (I2): when the project pinned what verification means,
                 # G10 re-runs THAT — not the command the worker nominated.
                 verify_command=verify_command,
-                # D6 (I2): the project's loopback ports, as the worker had them.
-                loopback_ports=tuple(task.permissions.loopback_ports),
+                # D6 (I2): the run's loopback ports, as the worker had them —
+                # ES-F252: its local model provider's port included.
+                loopback_ports=run_loopback_ports(
+                    task.permissions.loopback_ports,
+                    task.permissions.provider_hosts,
+                    config.home,
+                ),
                 # The re-run is afforded the run's own wall-clock budget —
                 # the flat 300s cap timed out a healthy 10-minute pinned
                 # suite (dogfood 019fc72c, exit -1).
@@ -1376,8 +1381,13 @@ def _finish_recovered(
             config=config,
             changed_files=tuple(result.changed_files) if result is not None else None,
             verify_command=str(recovery_policy.get("verify_command") or ""),
-            # D6 (I2): the project's loopback ports, as the worker had them.
-            loopback_ports=tuple(recovery_policy.get("loopback_ports") or ()),
+            # D6 (I2): the run's loopback ports, as the worker had them —
+            # ES-F252: its local model provider's port included.
+            loopback_ports=run_loopback_ports(
+                recovery_policy.get("loopback_ports") or (),
+                task.permissions.provider_hosts,
+                config.home,
+            ),
             timeout_seconds=float(task.budget.wall_clock_seconds),  # as the live path
         )
         # v107-F1: same post-reverify keep answer as the live path.
