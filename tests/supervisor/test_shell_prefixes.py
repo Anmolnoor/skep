@@ -725,3 +725,44 @@ def test_su_is_privilege_escalation_on_the_floor(command: str) -> None:
     assert "privilege escalation" in (queen_shell_refusal(argv) or "")
     assert "privilege escalation" in (queen_command_line_refusal(command) or "")
     assert "launder" in (risk("run_shell", {"argv": argv}) or "")
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["env", "sudo", "rm", "-rf", "cache"],
+        ["env", "FOO=1", "sudo", "rm", "x"],
+        ["env", "-i", "sudo", "ls"],
+        ["env", "-u", "HOME", "doas", "ls"],
+        ["/usr/bin/env", "-S", "su -c ls"],
+        ["FOO=1", "sudo", "ls"],
+        ["nice", "-n", "5", "sudo", "ls"],
+        ["timeout", "5", "sudo", "ls"],
+        ["command", "sudo", "ls"],
+        ["exec", "sudo", "ls"],
+        ["nohup", "sudo", "ls"],
+        ["xargs", "sudo", "ls"],
+        ["sudo", "-k", "ls"],  # was a closed flag-variant lane (v93-F1); now a deny
+    ],
+)
+def test_escalation_is_seen_through_env_and_launchers(argv: list[str]) -> None:
+    """ES-F262: `env sudo …` put sudo at argv[1]. The Queen's argv check and
+    the card read argv[0] only, and the worker gate had no escalation check
+    at all — an approved or allowlisted `env FOO=1` prefix covered
+    `env FOO=1 sudo rm -rf x`. Every floor reads the argvs a line runs."""
+    from skep.supervisor.serve.cards import risk
+    from skep.workers.runtime_plugins import SHELL_EXEC_PLUGIN
+
+    assert "privilege escalation" in (queen_shell_refusal(argv) or "")
+    assert "launder" in (risk("run_shell", {"argv": argv}) or "")
+    assert dangerous_prefix_reason(argv) is not None
+    decision = SHELL_EXEC_PLUGIN.decision(
+        purpose="run",
+        argv=argv,
+        command=" ".join(argv),
+        approved_shell_commands=[argv[:2], ["env", "FOO=1"]],
+        shell_allowlist=[argv[:2]],
+    )
+    assert decision.verdict == "deny"
+    assert decision.reason == "capability.deny.privilege_escalation"
+    assert "without sudo" in (decision.detail or "")

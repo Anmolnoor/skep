@@ -1078,6 +1078,16 @@ def hard_denied_segment_reason(entry: Sequence[str]) -> str | None:
     return None
 
 
+def escalates(argv: Sequence[str]) -> bool:
+    """I4: does any argv this one runs escalate? ES-F262: read through env
+    (its options and assignments), launchers and wrappers the same way the
+    git floor is (``argv_segments``), so `env FOO=1 sudo …` is sudo."""
+    return any(
+        segment and program_name(segment[0]) in PRIVILEGE_ESCALATION
+        for segment in argv_segments(argv) or [list(argv)]
+    )
+
+
 def _launcher_only_reason(prefix: Sequence[str]) -> str | None:
     """ES-F1 (B124): a launcher with no command (``timeout``, ``env``,
     ``nice -n 5``) allowlists everything behind it — ``["timeout"]`` covered
@@ -1104,7 +1114,7 @@ def worker_allowlist_reason(prefix: list[str]) -> str | None:
 def dangerous_prefix_reason(prefix: list[str]) -> str | None:
     """Why ``prefix`` must not be persisted as an allowlist entry, else None."""
     canon = [program_name(prefix[0]), *prefix[1:]] if prefix else []
-    if canon and canon[0] in PRIVILEGE_ESCALATION:
+    if escalates(prefix):
         # v49-F2: privilege escalation would also launder every deny below
         # (they all key on argv[0] — 'sudo git push' must not slip through).
         return "privilege escalation cannot be allowlisted"
@@ -1157,7 +1167,7 @@ def queen_shell_refusal(argv: Sequence[str]) -> str | None:
     own hands (I4's spirit: no chat lane may become the git-writing path
     the workers are denied), plus privilege escalation. This list may only
     ever grow."""
-    if argv and program_name(argv[0]) in PRIVILEGE_ESCALATION:
+    if escalates(argv):
         return "privilege escalation never runs from chat (it would also launder every guard below)"
     # v109-F10: catastrophic commands (single argv here; compound decomposition
     # is a separate fix) never run from chat either, operator or not.

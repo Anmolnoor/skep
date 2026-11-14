@@ -28,6 +28,7 @@ from skep.supervisor.shell_prefixes import (
     is_remote_git_command,
     is_unknown_git_subcommand,
     is_worker_commit_command,
+    program_name,
 )
 from skep.worker_contract import (
     RESUME_CHECKPOINT_ARTIFACT_NAME,
@@ -582,6 +583,19 @@ class ShellExecPlugin:
         # the wall; this is the sign on it, and the detail teaches the
         # acceptable shape (I9).
         for segment in segments:
+            # ES-F262 (I4): escalation first, in every segment — an approved
+            # `env FOO=1` prefix must not cover `env FOO=1 sudo rm -rf x`, and
+            # every deny below keys on the segment's own command word.
+            if segment and program_name(segment[0]) in PRIVILEGE_ESCALATION:
+                return RuntimePolicyDecision(
+                    verdict="deny",
+                    reason="capability.deny.privilege_escalation",
+                    detail=(
+                        f"'{segment[0]}' runs a command as another user, which never runs "
+                        "in a worker: the sandbox is unprivileged and every guard keys on "
+                        "the command word. Run the command itself, without sudo/doas/su"
+                    ),
+                )
             denied = _git_floor_decision(segment)
             if denied is not None:
                 return denied

@@ -29,11 +29,10 @@ import urllib.parse
 from typing import Any
 
 from ..shell_prefixes import (
-    PRIVILEGE_ESCALATION,
+    escalates,
     is_ops_mutating_command,
     is_outbound_content_prefix,
     queen_command_line_refusal,
-    program_name,
     queen_shell_refusal,
 )
 from ..store import ChatTaint, RunStore
@@ -368,7 +367,7 @@ def risk(tool: str, args: dict[str, Any]) -> str | None:
                 "sends content outward — public and permanent, and never grantable, "
                 "so this cards every time (ADR 0044)"
             )
-        if program_name(argv[0]) in PRIVILEGE_ESCALATION:
+        if escalates(argv):
             return "privilege escalation — it would launder every command guard beneath it"
         if is_ops_mutating_command(argv):
             return "changes machine state (service, files, or backups) — approve-once only"
