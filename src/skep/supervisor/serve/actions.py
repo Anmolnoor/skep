@@ -3653,30 +3653,6 @@ def preserved_resumable_hint(
     return None
 
 
-def remember_commands_for_session(
-    store: RunStore, commands: list[list[str]], *, repo: Path | str
-) -> list[list[str]]:
-    """v86-F1 → ADR 0059 D4: a plain approve holds for the serve session, in
-    THIS repo only (B39: the old tier was one list every repo's runs read).
-    Each eligible command becomes a session grant on the one learned list,
-    bound to ``repo`` — an argv prefix, as every worker allowlist entry is —
-    dropped at serve startup. Guarded classes (remote git, dangerous/outbound
-    prefixes) are NEVER session-persisted: they stay approve-once, so denied
-    space gains no standing grant. Returns the commands newly granted."""
-    added: list[list[str]] = []
-    for raw in commands:
-        command = normalize_remembered_command(list(raw))
-        if not command or is_remote_git_command(command):
-            continue
-        if dangerous_prefix_reason(command) is not None:
-            continue
-        grant = _worker_grant(command, "session", {"repo": grant_repo(repo)})
-        _, status = store_grant(store, grant)
-        if status != "kept" and command not in added:
-            added.append(command)
-    return added
-
-
 def _worker_grant(command: Sequence[str], lifetime: str, bound: dict[str, str]) -> LearnedRule:
     """A worker shell grant: an argv prefix (the worker contract's matcher)."""
     from ..policy_schema import LearnedRule
@@ -3771,13 +3747,14 @@ def resume_past_gate(
     *,
     remembered: bool = False,
     granted: Sequence[list[str]] = (),
-    session: bool = True,
 ) -> str:
     """Q8: approving a suspended task resumes it past the gate (fresh worker
     run carrying the granted verdict), dispatched on the background pool.
 
-    ``session=False`` (ADR 0061's auto-answer) approves ONCE: an automatic
-    verdict never writes the session tier a human's plain approve does.
+    ES-F293 (L11, D43): the approve is ONE decision — the verdict carries the
+    gate's commands to the resumed worker and nothing standing is saved. A
+    grant that outlives this run is the explicit remember (``remembered``,
+    written by the caller before this call), never a side effect.
 
     ``shell_allowlist`` overrides the original permissions' allowlist so a
     just-persisted policy change applies to this resume, not only future runs.
@@ -3814,18 +3791,6 @@ def resume_past_gate(
         )
     # v19-F1: a batch approval grants every command it listed, in one verdict.
     approval_commands = store.approval_commands(review_id)
-    # v86-F1: a plain approve also holds for the serve session (the operator's
-    # explicit ask); "remember" already wrote the durable tier before this call.
-    # V7: never a deferred delegated ask — that approval is this run's alone
-    # (the verdict and the resume chain's worker_state carry it) and must not
-    # reach the session tier every repo's runs read (B39).
-    session_kept: list[list[str]] = []
-    if session and not remembered and approval_commands:
-        session_kept = remember_commands_for_session(
-            store,
-            [list(command) for command in approval_commands if not _asked(command, permissions)],
-            repo=str(run["repo"]),
-        )
     verdict = ApprovalVerdict(
         approved=True,
         actor=actor,
@@ -3865,8 +3830,7 @@ def resume_past_gate(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {resumed_id} (dispatched)"
-        + ("; approval held for this serve session, in this repo only" if session_kept else ""),
+        note=f"resumed as {resumed_id} (dispatched)",
         remembered=remembered,
         claimed=True,
     )
@@ -3947,7 +3911,6 @@ def auto_answer_unlocked_gate(
         require_run(store, task_id),
         approval.review_id,
         UNLOCKED_ACTOR,
-        session=False,
     )
 
 

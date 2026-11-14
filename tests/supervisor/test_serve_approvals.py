@@ -1390,7 +1390,8 @@ def test_es_f8_cli_approve_of_a_batch_card_grants_every_command(
 ) -> None:
     """ES-F8 (B130, I5; ADR 0050 parity): `skep review --approve` of a card
     "for 3 commands" granted only the first — three approvals, three resumes
-    (lane M2-19) — and skipped the v86-F1 session tier REST writes."""
+    (lane M2-19). ES-F293 (D43): the plain approve saves no grant on either
+    face — the verdict carries every command, once."""
     from skep.supervisor import cli_cmds, mint_task
     from skep.supervisor.contracts_io import write_task_file
     from skep.supervisor.serve.settings import SESSION_ALLOWED_SHELL_COMMANDS
@@ -1426,10 +1427,9 @@ def test_es_f8_cli_approve_of_a_batch_card_grants_every_command(
             cli_cmds._resume_pending_approval(config, store, record, "tester")
         verdict = seen["approval_verdict"]
         assert [list(c) for c in verdict.commands] == batch  # type: ignore[attr-defined]
-        # P3-4 (B39): session grants bound to this repo, not the global tier.
         assert store.get_setting(SESSION_ALLOWED_SHELL_COMMANDS) is None
         from skep.supervisor.serve.actions import granted_commands
 
-        assert granted_commands(store, ConfigHolder(config, store), repo) == batch
+        assert granted_commands(store, ConfigHolder(config, store), repo) == []
     finally:
         store.close()

@@ -40,7 +40,6 @@ from skep.supervisor.serve.actions import (
     persist_remembered_command,
     policy_decide,
     remember_action_for_session,
-    remember_commands_for_session,
 )
 from skep.supervisor.serve.cards import card_summary
 from skep.supervisor.serve.chat import ChatEngine
@@ -52,7 +51,7 @@ from skep.supervisor.serve.tools import (
 )
 
 from .conftest import no_template_role
-from .grant_grid import GRANTED, HOMES, rows
+from .grant_grid import GRANTED, HOMES, rows, session_worker_grant
 from .queen_lane_grid import build_home
 
 FROZEN: dict[str, str] = json.loads(
@@ -272,7 +271,7 @@ def test_b39_a_worker_approve_holds_in_its_own_repo_only(home: Any) -> None:
     h = home("legacy")
     other = h.paths["repo"].parent / "repo-b"
     other.mkdir()
-    added = remember_commands_for_session(h.store, [["make", "check"]], repo=h.paths["repo"])
+    added = session_worker_grant(h.store, [["make", "check"]], repo=h.paths["repo"])
     assert added == [["make", "check"]]
     assert ["make", "check"] in h.allowlist(h.paths["repo"])
     assert ["make", "check"] not in h.allowlist(other)

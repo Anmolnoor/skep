@@ -947,7 +947,8 @@ def worker_shell_grants(
     store: RunStore, home: Path, repo: Path, project_id: str | None
 ) -> dict[str, str]:
     """ADR 0059 D4: the worker grants a run in ``repo`` holds — pattern →
-    ``grant:session`` (a plain approve, bound to this repo, B39) or
+    ``grant:session`` (bound to this repo, B39; written by a plain approve
+    before ES-F293, dropped at serve startup) or
     ``grant:project`` (an "Allow & remember", bound to the project, else the
     repo; B18). From the one learned list. Never one in denied space: a
     guarded prefix, or one a shell deny of the setup document or the approved

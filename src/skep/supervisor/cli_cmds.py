@@ -1721,23 +1721,9 @@ def _resume_claimed_gate(
     )
     # ES-F8 (B130; ADR 0050 parity with resume_past_gate): a batch card grants
     # EVERY command it listed (v19-F1) — the CLI granted only the first, so a
-    # "for 3 commands" card cost three approvals and three resumes — and a
-    # plain approve holds for the serve session like the REST face (v86-F1).
+    # "for 3 commands" card cost three approvals and three resumes. ES-F293
+    # (D43): in this one verdict only — a plain approve saves no grant.
     approval_commands = store.approval_commands(review_id)
-    session_kept: list[list[str]] = []
-    if not remembered and approval_commands:
-        from .serve.actions import _asked, remember_commands_for_session
-
-        # V7: never a delegated ask — that approval is this run's alone (B39).
-        session_kept = remember_commands_for_session(
-            store,
-            [
-                list(command)
-                for command in approval_commands
-                if not _asked(command, original.permissions)
-            ],
-            repo=record.repo,
-        )
     verdict = ApprovalVerdict(
         approved=True,
         actor=actor,
@@ -1774,8 +1760,7 @@ def _resume_claimed_gate(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})"
-        + ("; approval held for this serve session, in this repo only" if session_kept else ""),
+        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})",
         remembered=remembered,
         claimed=True,
     )

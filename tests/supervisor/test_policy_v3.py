@@ -622,7 +622,9 @@ def test_a_workers_session_tier_never_answers_a_roles_catch_all_ask(
     (dropped headless, a deferred ask where a human answers). P3-4 (B39):
     and it holds only in the repo it was approved in."""
     from skep.supervisor.policy_resolver import resolve_run_policy
-    from skep.supervisor.serve.actions import delegate_permissions, remember_commands_for_session
+    from skep.supervisor.serve.actions import delegate_permissions
+
+    from .grant_grid import session_worker_grant
 
     home, repo_a = build_home(tmp_path, kind)
     repo_b = tmp_path / "repo-b"
@@ -634,7 +636,7 @@ def test_a_workers_session_tier_never_answers_a_roles_catch_all_ask(
                                  phase="build", policy={})  # fmt: skip
         store.add_project_binding(project_id="b", binding_kind="repo_path",
                                   binding_value=str(repo_b.resolve()))  # fmt: skip
-        remember_commands_for_session(store, [["npm", "run", "x"]], repo=repo_a)
+        session_worker_grant(store, [["npm", "run", "x"]], repo=repo_a)
         holder = ConfigHolder(config, store)
 
         def allowlist(repo: Path) -> list[list[str]]:
@@ -980,12 +982,13 @@ def test_w5_a_worker_grant_stored_before_the_deny_is_dropped_however_spelled(
     stayed in a run's allowlist under a later `curl` deny and the worker ran
     it with no card. It uses the deny reading decide() uses."""
     from skep.supervisor.policy_resolver import worker_shell_grants
-    from skep.supervisor.serve.actions import remember_commands_for_session
+
+    from .grant_grid import session_worker_grant
 
     home, repo = build_home(tmp_path, "legacy")
     store = RunStore(build_config(home, None).db_path)
     try:
-        remember_commands_for_session(
+        session_worker_grant(
             store,
             [["curl", "x"], ["/usr/bin/curl", "x"], ["env", "curl", "x"], ["make", "check"]],
             repo=repo,
