@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -165,22 +166,37 @@ def test_crash_synthesizes_worker_crashed(repo: Path, config: SupervisorConfig) 
 
 
 @pytest.mark.parametrize(
-    ("mode", "summary"),
+    ("mode", "wrapped", "summary"),
     [
-        ("crash", "Worker crashed: it exited with code 9 before reporting a result."),
-        ("killed", "Worker was killed by signal SIGKILL before reporting a result."),
+        ("crash", False, r"Worker crashed: it exited with code 9 before reporting a result\."),
+        # run_task's default is the sandbox: on Linux that is bwrap, which
+        # reports a signal death as 128+N, so the direct kill reads "(exit
+        # 137)" there and not on macOS. The shell wrapper forces that form here.
+        (
+            "killed",
+            False,
+            r"Worker was killed by signal SIGKILL( \(exit 137\))? before reporting a result\.",
+        ),
+        (
+            "killed",
+            True,
+            r"Worker was killed by signal SIGKILL \(exit 137\) before reporting a result\.",
+        ),
     ],
 )
 def test_a_dead_workers_run_summary_says_how_it_died(
-    repo: Path, config: SupervisorConfig, mode: str, summary: str
+    repo: Path, config: SupervisorConfig, mode: str, wrapped: bool, summary: str
 ) -> None:
     """ES-F238: a killed or crashed run's stored summary was blank. It now
     says in one line that the worker died and by what, from the exit status
     the monitor already recorded."""
+    if wrapped:
+        command = ("/bin/sh", "-c", '"$0" "$@"; exit $?', *config.worker_command)
+        config = replace(config, worker_command=command)
     outcome = run_task(repo, f"Do work. MODE:{mode}", config=config)
 
     assert outcome.record.state == "worker_crashed"
-    assert outcome.record.summary == summary
+    assert re.fullmatch(summary, outcome.record.summary or ""), outcome.record.summary
 
 
 @pytest.mark.parametrize(
