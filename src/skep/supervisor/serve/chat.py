@@ -3338,6 +3338,11 @@ def run_completion_turn(
     if not seeded:
         store.queue_run_follow_up(task_id, "queued")
     with chat_turn_lock(chat_id):
+        tail = store.chat_messages(chat_id)[-1:] if seeded else []
+        if tail and tail[0].role == "assistant" and not tail[0].tool_calls:
+            # the stop landed after its reply, before the clear: it is done
+            store.clear_run_follow_up(task_id)
+            return ("already continued", False)
         if summary and not seeded:
             # P4-1 (B37, D5): the worker's words are its own row — wrapped on
             # replay, and they set ``untrusted``; skep's prompt follows as skep's.

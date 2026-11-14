@@ -439,6 +439,45 @@ def test_a_resumed_run_finish_follow_up_honours_the_opt_out(
         store.close()
 
 
+def test_a_run_finish_follow_up_that_already_replied_is_not_rerun(
+    repo: Path, config: SupervisorConfig, ollama: FakeOllama, monkeypatch: Any
+) -> None:
+    """ES-F242 follow-up: serve stopped after the turn's reply was written but
+    before its marker cleared — the next start clears it; no second reply."""
+    import threading
+
+    from skep.supervisor.serve import chat as chat_module
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.store import RunStore
+
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        task_id = _bound_run(store, chat_id, repo)
+        chat_module._CONTINUED.discard(task_id)
+        ollama.script_reply("first answer")
+        holder = ConfigHolder(config, store)
+        with monkeypatch.context() as died:  # the stop lands before the clear
+            died.setattr(store, "clear_run_follow_up", lambda _task_id: None)
+            chat_module.run_completion_turn(
+                store, holder, Dispatcher(store=store, holder=holder), config.home, task_id
+            )
+        assert store.queued_run_follow_ups() == [(task_id, "seeded")]
+        chat_module._CONTINUED.discard(task_id)
+        ollama.script_reply("second answer")
+        with _client(config, start_ticker=False):
+            for thread in threading.enumerate():
+                if thread.name.startswith("skep-continue-"):
+                    thread.join(10)
+        contents = [m.content for m in store.chat_messages(chat_id)]
+        assert "first answer" in contents and "second answer" not in contents
+        assert store.queued_run_follow_ups() == []
+    finally:
+        store.close()
+
+
 def test_an_old_database_gains_the_run_follow_up_column(repo: Path, tmp_path: Path) -> None:
     """ES-F242: the run row's follow-up marker arrives by migration too."""
     import sqlite3
