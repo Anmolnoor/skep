@@ -243,6 +243,9 @@ def test_death_summary_names_a_landlock_refusal_from_the_worker_log(tmp_path: Pa
         "or the command is not executable); see worker.log."
     )
     assert death_summary(126, tmp_path / "absent.log").startswith("Worker never started")
+    # ES-F250 follow-up: a huge log is read from its tail, the quote bounded.
+    log.write_text("x" * 200_000 + "\nlandlock: " + "y" * 5000 + "\n")
+    assert len(death_summary(126, log)) < 700
 
 
 @pytest.mark.parametrize("mode", ["noresult", "badresult"])

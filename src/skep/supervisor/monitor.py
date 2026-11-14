@@ -151,15 +151,18 @@ def death_summary(exit_code: int | None, log_path: Path | None = None) -> str:
     if exit_code == 126:
         lines: list[str] = []
         if log_path is not None:
-            with contextlib.suppress(OSError):
-                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            # ES-F250 follow-up: the log is the worker's output — read its tail
+            # only, and quote a bounded line into the record, never the file.
+            with contextlib.suppress(OSError), log_path.open("rb") as log:
+                log.seek(max(0, log.seek(0, 2) - 65536))
+                lines = log.read().decode("utf-8", errors="replace").splitlines()
         refusal = next(
             (line for line in reversed(lines) if line.startswith(LANDLOCK_REFUSAL_PREFIX)), None
         )
         if refusal is not None:
             return (
                 "Worker never started: the sandbox's Landlock step refused it "
-                f"(exit 126): {refusal}"
+                f"(exit 126): {refusal[:500]}"
             )
         return (
             "Worker never started: it exited with code 126 (a pre-start step refused it "
