@@ -1080,3 +1080,50 @@ def test_redact_masks_a_credential_in_a_url_path(line: str) -> None:
     masked = redact(line)
     assert _TG_TOKEN.split(":")[1] not in masked and "CANARY" not in masked, masked
     assert "***" in masked
+
+
+@pytest.mark.parametrize(
+    ("command", "words"),
+    [
+        ("sudo ls", "without sudo/doas/su"),
+        ("git push origin main", "the operator lands the work"),
+        ("git commit -m x", "landing the work is the commit"),
+        ("git checkout main", "a run picks its ref at dispatch"),
+        ("git rebase main", "the operator combines branches with merge_branch"),
+    ],
+)
+def test_l10_the_floor_on_the_run_lane_speaks_to_the_agents_there(
+    tmp_path: Path, command: str, words: str
+) -> None:
+    """L10 (ES-F304): the run lane's floor detail names the agents it binds
+    and the acceptable path — never "never runs from chat"; the Queen's lane
+    keeps its own words."""
+    home, repo = build_home(tmp_path, "builder")
+    config = build_config(home, None)
+    store = RunStore(config.db_path)
+    try:
+        run = load_stack(ConfigHolder(config, store), store, repo=str(repo))
+        queen = load_stack(ConfigHolder(config, store), store)
+    finally:
+        store.close()
+    assert run.run is not None and queen.run is None
+    on_run = decide(Request("shell", "run", command), stack=run)
+    assert on_run.verdict == "deny" and on_run.layer == "floor"
+    assert "from chat" not in str(on_run.note) and words in str(on_run.note)
+    assert "coding agent's shell" in str(on_run.note)
+    on_queen = decide(Request("shell", "run", command), stack=queen)
+    assert on_queen.verdict == "deny" and "from chat" in str(on_queen.note)
+
+
+def test_l10_every_run_lane_floor_kind_names_the_agents_shell() -> None:
+    from skep.supervisor.shell_prefixes import run_lane_floor_reason
+
+    for command, words in (
+        ("git branch -D main", "create_branch/delete_branch"),
+        ("skep trust abc", "/trust at the desk"),
+        ("git -c alias.p=push p", "spell out the builtin git command"),
+    ):
+        reason = run_lane_floor_reason(command)
+        assert reason is not None and words in reason and "coding agent's shell" in reason
+    assert run_lane_floor_reason("rm -rf /") is None  # its own reason names no lane
+    assert run_lane_floor_reason("ls -la") is None

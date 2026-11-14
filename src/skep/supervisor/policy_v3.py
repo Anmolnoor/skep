@@ -93,6 +93,7 @@ from .shell_prefixes import (
     is_worker_commit_command,
     queen_command_line_refusal,
     reaches_network,
+    run_lane_floor_reason,
 )
 from .store import ChatTaint, RunStore
 
@@ -718,8 +719,11 @@ def decide(
     read_only = read_only and (scope, action) in READ_ONLY_REQUESTS
     floor = floor_verdict(scope, value, action=action, home=stack.home, cwd=stack.cwd)
     if floor is not None:
+        note = floor["reason"]
+        if scope == "shell" and stack.run is not None and (scope, action) not in OPERATOR_LANES:
+            note = run_lane_floor_reason(value) or note  # L10: the run lane's words (I9)
         return Verdict(
-            "deny", "floor", floor["rule_id"], floor["decided_by"], "floor", floor["reason"],
+            "deny", "floor", floor["rule_id"], floor["decided_by"], "floor", note,
             tuple(hop.entry for hop in chain),
         )  # fmt: skip
     reason = stack.guard.get(scope)

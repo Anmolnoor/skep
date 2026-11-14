@@ -1205,6 +1205,60 @@ def queen_shell_refusal(argv: Sequence[str]) -> str | None:
     return None
 
 
+_AGENT = "in a coding agent's shell (a skep worker, an ACP or hook-governed agent)"
+
+
+def run_lane_floor_reason(command: str) -> str | None:
+    """L10: the floor's words on the run lane — the agents working in a
+    repo, not the Queen's chat ("never runs from chat" was wrong there).
+    What happens (denied, whatever rule or grant) and the acceptable path,
+    per kind, in ``queen_shell_refusal``'s order; None for a kind whose
+    reason names no lane (a catastrophic command)."""
+    for argv in command_line_segments(command) or []:
+        if escalates(argv):
+            return (
+                f"privilege escalation never runs {_AGENT} — every guard keys on the "
+                "command word; run the command itself, without sudo/doas/su"
+            )
+        if catastrophic_command_reason(argv) is not None:
+            return None
+        if is_remote_git_command(argv):
+            return (
+                f"remote git commands never run {_AGENT} — the operator lands the work "
+                "after approval and pushes it (skep land, push_branch, open_pr)"
+            )
+        if is_worker_commit_command(argv):
+            return (
+                f"git add/commit never runs as raw shell {_AGENT} — edit files in place; "
+                "landing the work is the commit (a skep worker may be granted "
+                "git.stage/git.commit)"
+            )
+        if is_branch_switch_command(argv):
+            return (
+                f"branch switching never runs {_AGENT} — a run picks its ref at dispatch; "
+                "read a branch without switching: git show <branch>:<path>"
+            )
+        if is_history_rewrite_command(argv):
+            return (
+                f"merge/rebase/cherry-pick/revert/reset --hard never run {_AGENT} — they "
+                "would land other commits under this task's approval; edit files in "
+                "place, and the operator combines branches with merge_branch"
+            )
+        if is_ref_rewrite_command(argv):
+            return (
+                f"moving or deleting refs never runs {_AGENT} — the operator does it "
+                "with create_branch/delete_branch"
+            )
+        if is_skep_trust_command(argv):
+            return (
+                f"skep trust / skep chat never run {_AGENT} — trusting a chat again is "
+                "the operator's own /trust at the desk"
+            )
+        if is_unknown_git_subcommand(argv):
+            return f"git aliases never run {_AGENT} — spell out the builtin git command"
+    return None
+
+
 def queen_command_line_refusal(command: str) -> str | None:
     """``queen_shell_refusal`` over every segment of a raw command line.
 
