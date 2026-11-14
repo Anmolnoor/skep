@@ -942,15 +942,16 @@ def log_queen_floor(
     cwd: str | None = None,
     chat_id: str | None = None,
     queen_only: bool = False,
+    layer: str = "floor",
 ) -> None:
     """One ``decisions.jsonl`` row for a floor refusal a Queen lane made with
     no document loaded (I4, I13). ``queen_only``: a lane guard ``decide()``
-    does not hold (D11), so replay skips the row."""
+    does not hold (D11), so replay skips the row. ``layer``: ``"guard"`` for
+    a Queen-lane guard that is not the floor (a daemon in a checkout), so
+    the row does not claim the floor refused it (I8)."""
     from .serve.actions import _decision_row
 
-    verdict = Verdict(
-        "deny", "floor", floor["rule_id"], floor["decided_by"], "floor", floor["reason"]
-    )
+    verdict = Verdict("deny", layer, floor["rule_id"], floor["decided_by"], layer, floor["reason"])
     stack = Stack(
         home=holder.current.home, cwd=cwd, guard={}, baseline="", operator={}, chat=chat_id
     )

@@ -107,6 +107,8 @@ class Ticker(threading.Thread):
         a timeout is the human not pulling it, and the safe default is to not
         execute. ``card_timeout_seconds = 0`` disables the sweep.
         """
+        from .tools import log_denied_dispatch_asks
+
         timeout = _stored_int(
             self._store.get_setting(CARD_TIMEOUT_SECONDS), DEFAULT_CARD_TIMEOUT, minimum=0
         )
@@ -146,6 +148,7 @@ class Ticker(threading.Thread):
                 self._store.resolve_chat_action(card.action_id, status="denied", result=payload)
             except (KeyError, ValueError):
                 continue  # resolved concurrently — that verdict stands
+            log_denied_dispatch_asks(self._store, self._holder, card)  # I6: a timeout denies
             # Same transcript shape as a manual deny: the model sees the denial
             # in history and responds on the user's next message (no SSE here —
             # the ticker has no ChatEngine, and an unasked continuation would

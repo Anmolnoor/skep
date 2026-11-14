@@ -475,6 +475,28 @@ def test_the_queen_running_skep_is_a_decision_log_row_replay_skips(
     assert sum(replay["not_replayable"].values()) == 1
 
 
+def test_a_background_process_refused_in_a_repo_is_a_decision_log_row(
+    grid: Callable[..., Any],
+) -> None:
+    """I8, I13: the Queen-lane refusal of a daemon in a checkout returned
+    before any row was written; it is one row now, skipped by replay (a
+    Queen-lane guard decide() does not hold)."""
+    _paths, fmt, store, holder = grid("builder")
+    line = "python3 -m http.server"
+    refused = queen_shell_decision(
+        store, holder, command=line, cwd=fmt["repo"], chat_id="c1", background=True
+    )
+    assert refused is not None and refused.reason == "shell.deny.repo_cwd_background"
+    log = holder.current.audit_dir / "policy" / "decisions.jsonl"
+    (row,) = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (row["actor"], row["action"], row["value"], row["verdict"]) == (
+        "queen", "run_background", line, "deny"
+    )  # fmt: skip
+    assert (row["decided_by"], row["note"], row["queen_only"]) == (
+        "queen-shell-guard", refused.detail, True
+    )  # fmt: skip
+
+
 def test_the_grid_never_writes_its_canaries_into_the_real_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

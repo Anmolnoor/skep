@@ -2834,6 +2834,25 @@ def _human_answers(store: RunStore, chat_id: str | None) -> bool:
     return channel is None or channel.channel_can_confirm
 
 
+# P4-2 (ADR 0059 D6) + D23: the calls whose card shows the run manifest.
+MANIFEST_TOOLS = frozenset(
+    {"dispatch_run", "start_research", "quick_edit", "batch_dispatch", "forge_tool"}
+)
+
+
+def log_denied_dispatch_asks(store: RunStore, holder: ConfigHolder, action: Any) -> None:
+    """I8, I13: only the compile a run gets records a dispatch's asks
+    (ES-F231), and a denied or timed-out card gets no run — so the denial
+    records them, once per item, each row marked ``resolution: denied``.
+    Call it after the denial is stored, so a raced card logs nothing."""
+    if action.tool not in MANIFEST_TOOLS:
+        return
+    for item in action.fold_items():
+        dispatch_manifest_for(
+            store, holder, item["args"], action.chat_id, action.tool, resolution="denied"
+        )
+
+
 def dispatch_manifest_for(
     store: RunStore,
     holder: ConfigHolder,
@@ -2841,6 +2860,7 @@ def dispatch_manifest_for(
     chat_id: str | None,
     tool: str = "dispatch_run",
     hop: str | None = None,
+    resolution: str | None = None,
 ) -> dict[str, Any]:
     """P4-2 (ADR 0059 D6): the manifest of a ``dispatch_run`` this chat
     proposes — compiled exactly as the confirm will compile it. A
@@ -2868,6 +2888,7 @@ def dispatch_manifest_for(
                 },
                 chat_id,
                 hop=None if manager is None else f"manager@{manager}",
+                resolution=resolution,
             )
             for task in tasks
         ]
@@ -2917,6 +2938,7 @@ def dispatch_manifest_for(
             role=None if args.get("role") is None else str(args["role"]),
             deferred_asks=_human_answers(store, chat_id),
             chat_taint=chat_taint_bits(store, chat_id),
+            resolution=resolution,
         )
     except (ValueError, TypeError) as exc:  # malformed args: the confirm says so too
         return {"error": f"bad arguments: {exc}"}
@@ -3179,6 +3201,17 @@ def queen_shell_decision(
             else "quick_edit for one file, dispatch_run for more"
         )
         if background:
+            detail = (
+                f"{how} — daemons do not run in checkouts (a background process "
+                "there could modify files with no patch card, forever). Run it from "
+                f"a non-repo directory. To change the repo: {change}."
+            )
+            # I13: a refusal is a row, like the floor's (decide() does not hold it)
+            guard = {"rule_id": "queen-shell-guard", "decided_by": "queen-shell-guard"}
+            log_queen_floor(
+                holder, Request("shell", action, command), {**guard, "reason": detail},
+                role=role, cwd=cwd, chat_id=chat_id, queen_only=True, layer="guard",
+            )  # fmt: skip
             return AutonomyDecision(
                 verdict="deny",
                 reason=(
@@ -3186,11 +3219,7 @@ def queen_shell_decision(
                     if via_cwd
                     else "shell.deny.repo_target_background"
                 ),
-                detail=(
-                    f"{how} — daemons do not run in checkouts (a background process "
-                    "there could modify files with no patch card, forever). Run it from "
-                    f"a non-repo directory. To change the repo: {change}."
-                ),
+                detail=detail,
                 decided_by="queen-shell-guard",
             )
         verdict = queen_decide(

@@ -81,6 +81,7 @@ from .tools import (
     CLARIFY_TOOL_NAME,
     COMMAND_TOOL_NAMES,
     DESCRIBE_TOOL_NAME,
+    MANIFEST_TOOLS,
     MUTATING_TOOL_NAMES,
     POLICY_LINE_TOOLS,
     READ_TOOL_NAMES,
@@ -98,6 +99,7 @@ from .tools import (
     execute_mutation,
     execute_read_tool,
     hidden_tools,
+    log_denied_dispatch_asks,
     mutation_execution_decision,
     policy_write_preview,
     search_web_verdict,
@@ -433,10 +435,7 @@ def high_tier_decision(high: str, allowed: Any) -> Any:
     )
 
 
-# P4-2 (ADR 0059 D6) + D23: the calls whose card shows the run manifest.
-_MANIFEST_TOOLS = frozenset(
-    {"dispatch_run", "start_research", "quick_edit", "batch_dispatch", "forge_tool"}
-)
+_MANIFEST_TOOLS = MANIFEST_TOOLS
 
 
 def manifest_ask_decision(allowed: Any) -> Any:
@@ -3133,6 +3132,7 @@ class ChatEngine:
                 self.store.resolve_chat_action(action_id, status="denied", result=payload)
             except ValueError:
                 raise card_taken(self.store, action_id) from None
+            log_denied_dispatch_asks(self.store, self.holder, action)
             payloads = [payload] * len(items)
         for item, item_payload in zip(items, payloads, strict=True):
             row_id = self.store.add_chat_message(
@@ -3766,6 +3766,7 @@ def add_chat_routes(
                 run_store.resolve_chat_action(action_id, status="denied", result=payload)
             except ValueError:
                 raise card_taken(run_store, action_id) from None
+            log_denied_dispatch_asks(run_store, holder, action)
         return {"action_id": action_id, "tool": action.tool, **payload}
 
     @app.post("/api/chats/{chat_id}/commands/{action_id}/confirm")

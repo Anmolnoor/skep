@@ -191,6 +191,30 @@ def test_a_carded_dispatch_logs_each_ask_once(desk: Desk) -> None:
     assert len([r for r in rows if r.get("source") == "delegated"]) == 1  # the hop, once
 
 
+def test_a_denied_dispatch_card_logs_each_ask_once(desk: Desk) -> None:
+    """I8, I13: a dispatch's asks are recorded by the compile its run gets —
+    a denied card gets no run, so the denial writes them, once, marked
+    denied. Before: an asked-then-denied dispatch left no ask row at all."""
+    chat, card = desk.propose()
+    desk.ollama.script_reply("ok")
+    list(
+        desk.engine.verdict_events(
+            chat, desk.store.get_chat(chat), card["action_id"], confirm=False, actor="chat-user"
+        )
+    )
+    manifest = card["card"]["manifest"]
+    asked = [f"network.connect {h}" for h in manifest["network_ask"]] + [
+        f"shell.run {' '.join(p)}" for p in manifest["shell_ask"]
+    ]
+    assert asked
+    log = desk.config.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    ask_rows = [r for r in rows if r.get("delegated") == "ask"]
+    assert sorted(f"{r['scope']}.{r['action']} {r['value']}" for r in ask_rows) == sorted(asked)
+    assert {r.get("resolution") for r in ask_rows} == {"denied"}
+    assert desk.runner.submitted == []  # no run: the denial is the only record
+
+
 def test_an_ask_the_card_did_not_list_still_gates(desk: Desk) -> None:
     chat, card = desk.propose()
     (pending,) = desk.store.pending_chat_actions(chat)

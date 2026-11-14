@@ -4971,6 +4971,7 @@ def dispatch_manifest(
     role: str | None = None,
     deferred_asks: bool = False,
     chat_taint: Sequence[str] = (),
+    resolution: str | None = None,
 ) -> dict[str, Any]:
     """ADR 0059 D6 (P4-2): what a dispatch's run will get, compiled the way
     ``submit_run`` compiles it but with no side effect (no git init, no run):
@@ -5001,6 +5002,7 @@ def dispatch_manifest(
             delegation_chain=delegation_chain,
             deferred_asks=deferred_asks,
             init_baseline=False,
+            resolution=resolution,
         )
     except PolicyResolutionError as exc:
         # The policy itself refuses this dispatch (an execution_mode it
@@ -5101,12 +5103,15 @@ def compile_run(
     team: str | None = None,
     deferred_asks: bool = False,
     init_baseline: bool,
+    resolution: str | None = None,
 ) -> CompiledRun:
     """W13: what a dispatch's run gets — ``submit_run`` and
     ``dispatch_manifest`` both compile here, so the card cannot drift from
     the run. ``init_baseline`` (submit only) git-inits the repo; the
-    manifest has no side effect. Raises ``PolicyResolutionError`` when the
-    policy refuses, ``HTTPException`` for a bad chain or repo."""
+    manifest has no side effect — except ``resolution`` (a denied card: no
+    run will compile, so this compile records its asks, marked). Raises
+    ``PolicyResolutionError`` when the policy refuses, ``HTTPException`` for
+    a bad chain or repo."""
     delegation_inputs(holder, delegation_chain, role, team=team)  # refuse before the repo resolves
     resolved = resolve_repo_arg(repo, repos_root(holder), store)
     if init_baseline:
@@ -5138,7 +5143,10 @@ def compile_run(
         delegation_chain=delegation_chain,
         team=team,
         deferred_asks=deferred_asks,
-        record=init_baseline,  # the manifest has no side effect: only the run's compile records
+        # the manifest has no side effect: only the run's compile records —
+        # or a denied card's, the only compile its asks will ever get (I13)
+        record=init_baseline or resolution is not None,
+        resolution=resolution,
     )
     raw = resolved_policy.policy.get("auto_apply_verified_patch")
     # v30: a project's maintain-phase integration branch (skep/maintain) —
@@ -5234,6 +5242,7 @@ def delegate_permissions(
     team: str | None = None,
     deferred_asks: bool = False,
     record: bool = True,
+    resolution: str | None = None,
 ) -> tuple[Permissions, dict[str, Any] | None, str | None]:
     """The worker's permissions held to its role and its chain, with the
     delegation record for the dispatch decision and the dispatch note — or
@@ -5246,7 +5255,7 @@ def delegate_permissions(
         return permissions, None, None
     return _within_delegation(
         holder, store, repo, chain, permissions, worker_role, team,
-        deferred_asks=deferred_asks, record=record,
+        deferred_asks=deferred_asks, record=record, resolution=resolution,
     )  # fmt: skip
 
 
@@ -5330,6 +5339,7 @@ def _within_delegation(
     *,
     deferred_asks: bool = False,
     record: bool = True,
+    resolution: str | None = None,
 ) -> tuple[Permissions, dict[str, Any], str]:
     """R2 (ADR 0055 D4): a worker a bot dispatched gets no grant beyond its
     delegator. Every shell prefix and egress host the run policy granted is
@@ -5381,6 +5391,8 @@ def _within_delegation(
             return True
         ask = deferred_asks and askable and row["verdict"] == "require_approval"
         row = {**row, "delegated": "ask" if ask else "dropped"}
+        if resolution is not None:  # a denied card: asked, then answered no
+            row["resolution"] = resolution
         if record:
             log_decision(holder.current.audit_dir, row)
         (asks if ask else rows).append(row)
