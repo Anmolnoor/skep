@@ -2,6 +2,9 @@
 # Manual release gate: exercise the real Claude Code adapter against a
 # disposable repository. This invokes the logged-in `claude` CLI and may consume
 # provider quota, so it is intentionally not part of the default test suite.
+# ES-F256 (D36): it runs Claude Code the way skep always does — as the
+# claude_code engine, inside the sandbox (never --execution-mode workspace),
+# authenticated from its env because the sandbox masks the keychain (W33).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -67,22 +70,19 @@ if [[ "$CLAUDE_PRINT_PROBE_STATUS" -ne 0 ]]; then
   exit 2
 fi
 
+if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -z "${ANTHROPIC_API_KEY:-}" ]]; then
+  echo "NO AUTH ENV: the sandbox masks the keychain and file logins, so the claude_code" >&2
+  echo "engine authenticates only from CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY." >&2
+  echo "Run \`claude setup-token\` and export CLAUDE_CODE_OAUTH_TOKEN, then retry." >&2
+  exit 2
+fi
+
 if [[ -x "$ROOT/.venv/bin/skep" && -x "$ROOT/.venv/bin/python" ]]; then
   SKEP_CMD=("$ROOT/.venv/bin/skep")
   PYTHON_CMD=("$ROOT/.venv/bin/python")
 else
   SKEP_CMD=(env UV_CACHE_DIR="$UV_CACHE_DIR" uv run skep)
   PYTHON_CMD=(env UV_CACHE_DIR="$UV_CACHE_DIR" uv run python)
-fi
-
-shell_quote() {
-  printf "%q" "$1"
-}
-
-if [[ -x "$ROOT/.venv/bin/python" ]]; then
-  CLAUDE_WORKER_CMD="$(shell_quote "$ROOT/.venv/bin/python") -m skep.workers.claude_code"
-else
-  CLAUDE_WORKER_CMD="env UV_CACHE_DIR=$(shell_quote "$UV_CACHE_DIR") uv --project $(shell_quote "$ROOT") run python -m skep.workers.claude_code"
 fi
 
 mkdir -p "$REPO_DIR" "$HOME_DIR"
@@ -101,11 +101,17 @@ git -C "$REPO_DIR" commit -qm seed
 echo "smoke workspace: $WORK_DIR"
 echo "claude command: $CLAUDE_CMD"
 
+# An external engine needs a pinned verify_command (v90-F1) and is forced into
+# the sandbox (v94-F4); the project setup pins both.
+"${SKEP_CMD[@]}" --home "$HOME_DIR" project setup "$REPO_DIR" \
+  --engine claude_code \
+  --verify-command "grep -qx 'claude adapter smoke ok' claude_smoke.txt" \
+  --no-seed-schedules
+
 env SKEP_CLAUDE_CODE_CMD="$CLAUDE_CMD" \
   "${SKEP_CMD[@]}" --home "$HOME_DIR" run "$REPO_DIR" \
   "Create a new file named claude_smoke.txt containing exactly one line: claude adapter smoke ok" \
-  --execution-mode workspace \
-  --worker-cmd "$CLAUDE_WORKER_CMD" \
+  --engine claude_code \
   --env-allow SKEP_CLAUDE_CODE_CMD \
   --quiet
 
@@ -124,6 +130,7 @@ finally:
     store.close()
 
 assert run.state == "completed", f"expected completed, got {run.state}"
+assert run.execution_mode == "sandbox", run.execution_mode  # D36: never unwalled
 assert run.verification_outcome == "passed", run.verification_outcome
 assert run.worker_version == "claude-code-adapter-0.1.0", run.worker_version
 print(run.task_id)
