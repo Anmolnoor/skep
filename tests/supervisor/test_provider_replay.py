@@ -474,6 +474,61 @@ def test_d18_a_verdict_landing_mid_turn_is_recorded_at_once_and_replays(
         store.close()
 
 
+def test_l6_a_follow_up_queued_by_a_click_is_attended(
+    config: SupervisorConfig, provider: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L6 (ES-F301): the operator just clicked, so the queued follow-up is an
+    attended turn — search_web is not refused as unattended."""
+    from skep.supervisor.serve import chat as chat_module
+
+    client, chat_id, store, engine = _d18_rig(config, provider)
+    try:
+        refused = "an unattended follow-up turn"
+        action_id = _card(client, provider, chat_id, ("set_policy", {"auto_approve": True}))
+        lock = chat_module.chat_turn_lock(chat_id)
+        lock.acquire()
+        provider.script_reply("the run finished")
+        turn = _other_turn(engine, store, chat_id)
+        answer = sse_events(client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm").text)
+        assert answer[-1] == ("done", {"state": "queued"}), answer
+        provider.script_tool_call("search_web", {"query": "skep"})
+        provider.script_reply("searched")
+        list(turn)
+        lock.release()
+        _wait_follow_ups()
+        tools = [m.content for m in store.chat_messages(chat_id) if m.tool_name == "search_web"]
+        assert tools and not any(refused in t for t in tools), tools
+
+    finally:
+        store.close()
+
+
+def test_l6_a_follow_up_a_restart_resumes_stays_unattended(
+    config: SupervisorConfig, provider: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L6 (ES-F301): a queued follow-up a serve restart resumes runs later,
+    with nobody's click behind that moment — it stays unattended."""
+    from skep.supervisor.serve import chat as chat_module
+
+    client, chat_id, store, _engine = _d18_rig(config, provider)
+    try:
+        action_id = _card(client, provider, chat_id, ("set_policy", {"auto_approve": True}))
+        lock = chat_module.chat_turn_lock(chat_id)
+        lock.acquire()
+        with monkeypatch.context() as died:  # serve stops before the follow-up runs
+            died.setattr(chat_module, "_queue_follow_up", lambda *a, **k: None)
+            client.post(f"/api/chats/{chat_id}/actions/{action_id}/confirm")
+        lock.release()
+        provider.script_tool_call("search_web", {"query": "skep"})
+        provider.script_reply("resumed")
+        with serve_client(config, start_ticker=False):
+            _wait_follow_ups()
+        tools = [m.content for m in store.chat_messages(chat_id) if m.tool_name == "search_web"]
+        assert tools and "an unattended follow-up turn" in tools[0], tools
+    finally:
+        store.close()
+
+
 def test_d18_two_verdicts_mid_turn_queue_one_follow_up(
     config: SupervisorConfig, provider: Any
 ) -> None:

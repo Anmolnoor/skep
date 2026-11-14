@@ -252,6 +252,13 @@ def high_tier(
                 return f"it picks the coding agent itself (engine {task['engine']!r})"
     if tool == "start_research" and _wildcard_network(safe):
         return "the run may reach any host on the internet (network '*')"
+    if tool in ("run_shell", "start_process"):
+        from ..secret_floor import UNRESOLVED_READ, shell_read_target_unresolved
+
+        cwd = safe.get("cwd")
+        command = str(safe.get("command") or "")
+        if command and shell_read_target_unresolved(command, cwd=None if cwd is None else str(cwd)):
+            return UNRESOLVED_READ  # L3 (D44): the floor could not read it
     return None
 
 

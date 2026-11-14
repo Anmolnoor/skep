@@ -2420,7 +2420,8 @@ def hidden_refusal(tool: str, role: Role, decided_by: str) -> str:
 UNATTENDED_BLOCKED_READ_TOOLS: frozenset[str] = frozenset({"search_web"})
 # ES-F241: {turn} names the turn — "a scheduled turn" (a prompt tick, the one
 # read-only unattended turn) or "an unattended follow-up turn" (a run-finish
-# or card-click follow-up); it said "scheduled" for both.
+# follow-up, or a card-click follow-up a serve restart resumed — L6: one
+# queued behind a live click is attended); it said "scheduled" for both.
 UNATTENDED_READ_REFUSAL = (
     "does not run in {turn} — it fires whether or not anyone is watching, so "
     "it reads the store only (runs, approvals, chats, notes, memory). "
@@ -4309,8 +4310,8 @@ def policy_write_preview(
         if name in ("allow_fetch_domain", "allow_mcp_tool"):
             rule = LearnedRule(**_learned_grant(store, name, args), provenance="card")
             rule, _status, updated = actions._grant_plan(store, rule, None)
-            if updated is None:
-                return {"replay": f"already granted by {rule.rule_id!r} — nothing changes"}
+            if updated is None:  # L7: no write, so no card
+                return {"unchanged": f"already granted by {rule.rule_id!r} — nothing changes"}
             return actions._write_report(actions._vet_grant(store, rule, updated))
         if name == "approve_policy_baseline":
             layer, _view = actions.baseline_preview(
@@ -4339,7 +4340,7 @@ def policy_write_preview(
         return {}
     fields = {
         key: found[key]
-        for key in ("replay", "keep", "keep_refused", "keep_replay")
+        for key in ("replay", "keep", "keep_refused", "keep_replay", "unchanged")
         if found.get(key)
     }
     if found.get("warnings"):

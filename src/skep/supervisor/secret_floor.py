@@ -278,6 +278,99 @@ def shell_secret_floor_reason(
     return None
 
 
+# L3 (D44): what a HIGH card says when skep cannot tell what a line reads.
+UNRESOLVED_READ = (
+    "this command's target can't be determined (built at run time by an "
+    "expansion, a glob, find -exec/xargs over ~ or /, or a directory that holds "
+    "your home); it may read credential files"
+)
+# a `$` that expands: a name, a brace, a substitution, a positional or special
+_EXPANSION = re.compile(r"\$[A-Za-z_{(0-9@*#?!$'\"-]")  # also $'\x2e' (ANSI-C)
+
+
+def _expands(line: str) -> bool:
+    """Does ``line`` hold a ``$`` expansion sh performs — any outside single
+    quotes (``awk '{print $1}'`` is awk's text, not the shell's)."""
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote == "'":
+            quote = "" if ch == "'" else quote
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == "'" and not quote:
+            quote = ch
+        elif ch == '"':
+            quote = "" if quote else ch
+        elif _EXPANSION.match(line, i):
+            return True
+        i += 1
+    return False
+
+
+def shell_read_target_unresolved(command: str, *, cwd: str | None) -> bool:
+    """L3 (D44): can skep NOT tell statically what this host-shell line
+    reads? True for a ``$`` expansion (also inside a ``sh -c``/``eval``
+    payload) or a substitution, a glob rooted at ``~`` or ``/``, and
+    ``find -exec`` or ``xargs`` with a target under ``~`` or ``/`` (or run
+    from the home directory or above it). The floor resolves static tokens
+    only (``shell_secret_floor_reason``); a line it cannot read is not
+    denied — the operator may want it — but its card says so, HIGH."""
+    from .shell_prefixes import (
+        _FIND_EXEC_ACTIONS,
+        _WRAPPER_SHELLS,
+        command_line_segments,
+        program_name,
+    )
+
+    argvs = command_line_segments(command)
+    if argvs is None or _expands(command):
+        return True  # backticks / an unparseable line: nothing was read
+    homes = {alias_key(s) for s in path_spellings(Path.home())}
+
+    def holds_home(path: Path) -> bool:
+        return any(_under(h, alias_key(s)) for s in path_spellings(path) for h in homes)
+
+    base = Path(cwd).expanduser() if cwd else Path.cwd()
+    wide_cwd = holds_home(base)
+    for argv in argvs:
+        program = program_name(argv[0]) if argv else ""
+        if program in ("cd", "pushd"):
+            # follow the line's own cd, as the floor does (`cd ~ && tar c .`)
+            if len(argv) > 1:
+                base = base / _tilde(argv[1])
+                wide_cwd = wide_cwd or holds_home(base)
+            continue
+        if (program in _WRAPPER_SHELLS or program == "eval") and any(
+            _expands(token) for token in argv[1:]
+        ):
+            return True  # the payload is a shell line of its own
+        rooted = [t for t in argv[1:] if t.startswith(("~", "/"))]
+        if any(set(t) & set("*?[{") for t in rooted):
+            return True  # a glob or brace list the floor did not expand as sh will
+        if (rooted or holds_home(base)) and program == "find" and set(argv) & _FIND_EXEC_ACTIONS:
+            return True
+        named = {part for t in argv[1:] for part in (t, t.partition("=")[2]) if part}
+        if any(holds_home(base / _tilde(part)) for part in named):
+            # `tar c ~`, `rsync -a / x`, `grep -r k .` from ~: every file under
+            # the home, credential files too — no floor path is named
+            return True
+    if any(argv and program_name(argv[0]) == "xargs" for argv in argvs):
+        # xargs reads its paths from the pipe: rooted anywhere in the line counts
+        return wide_cwd or any(t.startswith(("~", "/")) for argv in argvs for t in argv[1:])
+    return False
+
+
+def _tilde(token: str) -> Path:
+    """``token`` ``~``-expanded; an unknown ``~user`` stays as written."""
+    try:
+        return Path(token).expanduser()
+    except RuntimeError:
+        return Path(token)
+
+
 def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -> list[Path]:
     """The cwd and every path a host-shell line's tokens may name (also after
     ``=`` and a curl-style ``@``), ``$VAR``/``~``-expanded, resolved against
@@ -292,7 +385,7 @@ def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -
     bases = [base]
     for argv in argvs:
         if len(argv) > 1 and program_name(argv[0]) in ("cd", "pushd"):
-            bases.append(bases[-1] / Path(os.path.expandvars(argv[1])).expanduser())
+            bases.append(bases[-1] / _tilde(os.path.expandvars(argv[1])))
     tokens = [token for argv in argvs for token in argv]
     tokens += [token.strip("'\"") for token in command.split()]  # unparseable lines too
     tokens += _QUOTED_PATH.findall(command)
@@ -304,7 +397,7 @@ def _command_paths(command: str, cwd: str | None, *, named_only: bool = False) -
             part = part.removeprefix("@")
             if not part:
                 continue
-            named = Path(os.path.expandvars(part)).expanduser()
+            named = _tilde(os.path.expandvars(part))
             bare = len(named.parts) == 1 and not named.is_absolute()
             for path in dict.fromkeys(b / named for b in bases):
                 if named_only and bare and not path.exists():
