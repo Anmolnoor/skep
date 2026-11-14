@@ -463,7 +463,8 @@ def remove_registered_repo(store: RunStore, root: Path, name: str) -> dict[str, 
             status_code=404,
             detail=f"no registered clone named {name!r}; clones: {clones or 'none'}. "
             "A workon-bound directory is removed by deleting its project "
-            "(DELETE /api/projects/<id>), not by repo removal.",
+            "(`skep project remove <id>`, or the deck's `/unregister <id>`), "
+            "not by repo removal.",
         )
     from ..cli_cmds import STATE_EXIT_CODES
 
