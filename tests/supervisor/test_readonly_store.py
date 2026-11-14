@@ -81,6 +81,26 @@ def test_a_read_of_a_home_with_no_store_creates_nothing(
     assert not (home / "supervisor").exists()
 
 
+def test_a_dead_writers_wal_survives_a_read_and_the_next_writer_merges_it(
+    tmp_path: Path,
+) -> None:
+    """A read-only open neither checkpoints nor discards the WAL a dead serve
+    left: it reads the pending write, and the next rw open still merges it."""
+    db = tmp_path / "s.db"
+    RunStore(db).close()
+    _leave_a_wal(db)
+    store = RunStore(db, readonly=True)
+    try:
+        assert store.get_setting("w41") == "CANARY-w41"
+    finally:
+        store.close()
+    assert Path(f"{db}-wal").stat().st_size > 0  # still pending, not dropped
+    RunStore(db).close()  # the next writer's close checkpoints it
+    with sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True) as conn:
+        row = conn.execute("SELECT value_json FROM settings WHERE key = 'w41'").fetchone()
+    assert row == ('"CANARY-w41"',)
+
+
 def test_a_readonly_store_refuses_a_write(tmp_path: Path) -> None:
     db = tmp_path / "s.db"
     RunStore(db).close()
