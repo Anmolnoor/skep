@@ -405,6 +405,76 @@ def test_the_floor_answers_the_queen_when_the_policy_document_will_not_load(
         queen_filesystem_decision(store, holder, action="read", path=f"{fmt['repo']}/README.md")
 
 
+def test_a_floor_refusal_on_a_queen_lane_is_a_decision_log_row(grid: Callable[..., Any]) -> None:
+    """I13: the floor refuses before any document loads (I4), and that
+    refusal is still one ``decisions.jsonl`` row naming the floor's rule and
+    reason — even when the policy document will not load. The refusal the
+    lane returns is unchanged."""
+    from skep.supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY
+
+    _paths, fmt, store, holder = grid("builder")
+    store.set_setting(POLICY_DOCUMENT_SETTINGS_KEY, "{not json")
+    push = queen_shell_decision(store, holder, command="git push", cwd=fmt["outside"], chat_id="c1")
+    key = queen_filesystem_decision(store, holder, action="read", path=f"{fmt['home']}/.netrc")
+    assert push is not None and push.verdict == "deny" and key.verdict == "deny"
+    log = holder.current.audit_dir / "policy" / "decisions.jsonl"
+    shell, read = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (shell["actor"], shell["scope"], shell["action"], shell["value"], shell["chat"]) == (
+        "queen", "shell", "run", "git push", "c1"
+    )  # fmt: skip
+    assert (shell["verdict"], shell["source"], shell["layer"]) == ("deny", "floor", "floor")
+    assert shell["rule_id"] == "floor.worker-git-hard-denies"
+    assert (shell["decided_by"], shell["note"]) == (push.decided_by, push.detail)
+    assert (read["scope"], read["action"], read["rule_id"]) == (
+        "filesystem", "read", "floor.secret-reads"
+    )  # fmt: skip
+    assert (read["decided_by"], read["note"]) == (key.decided_by, key.detail)
+
+
+def test_a_cwd_relative_floor_refusal_replays_as_refused(
+    grid: Callable[..., Any], tmp_path: Path
+) -> None:
+    """W18: a Queen shell row records the cwd its line ran in, and replay
+    re-decides it there — `ls` in ~/.ssh is the secret floor, not "now asks
+    1 past denies" judged from wherever serve happens to run."""
+    from skep.supervisor.policy_write import migration_report
+
+    _paths, _fmt, store, holder = grid("builder")
+    ssh = tmp_path / "fakehome" / ".ssh"
+    ssh.mkdir(parents=True, exist_ok=True)  # the grid seeds a canary there
+    ls = queen_shell_decision(store, holder, command="ls", cwd=str(ssh), chat_id="c1")
+    assert ls is not None and ls.decided_by == "floor/floor.secret-reads"
+    log = holder.current.audit_dir / "policy" / "decisions.jsonl"
+    (row,) = [json.loads(line) for line in log.read_text().splitlines()]
+    assert row["cwd"] == str(ssh)
+    replay = migration_report(holder, store)["replay"]
+    assert (replay["replayed"], replay["flips"]) == (1, {})
+
+
+def test_the_queen_running_skep_is_a_decision_log_row_replay_skips(
+    grid: Callable[..., Any],
+) -> None:
+    """I13: D11's refusal (the Queen running skep — `skep policy approve`
+    re-approving its own baseline) carries a floor label, so it is a row like the floor's. decide()
+    does not hold D11 (the Queen's lanes only), so replay skips that row
+    instead of reading it as "now asks 1 past denies"."""
+    from skep.supervisor.policy_write import migration_report
+
+    _paths, fmt, store, holder = grid("builder")
+    line = "skep policy approve"
+    skep = queen_shell_decision(store, holder, command=line, cwd=fmt["outside"], chat_id="c1")
+    assert skep is not None and skep.reason == "shell.deny.skep_self"
+    log = holder.current.audit_dir / "policy" / "decisions.jsonl"
+    (row,) = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (row["actor"], row["value"], row["verdict"], row["source"]) == (
+        "queen", line, "deny", "floor"
+    )  # fmt: skip
+    assert (row["decided_by"], row["note"]) == (skep.decided_by, skep.detail)
+    replay = migration_report(holder, store)["replay"]
+    assert (replay["replayed"], replay["flips"]) == (0, {})
+    assert sum(replay["not_replayable"].values()) == 1
+
+
 def test_the_grid_never_writes_its_canaries_into_the_real_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

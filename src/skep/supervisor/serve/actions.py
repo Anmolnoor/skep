@@ -2010,9 +2010,10 @@ def _decision_row(
 ) -> dict[str, Any]:
     """One ``decisions.jsonl`` row for a v3 verdict. A row decided under a
     role carries ``role``; one without had no role layer. W18: a chat's row
-    carries ``chat``, and a fetch the ``url`` a url_prefix grant matches on
+    carries ``chat``, a Queen shell row its ``cwd`` (the floor judges its
+    paths there), and a fetch the ``url`` a url_prefix grant matches on
     (``logged_url``: no query, no userinfo; redacted like the value), so the
-    write-time replay can re-decide both."""
+    write-time replay can re-decide them."""
     scope, action, value = req
     record: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2025,6 +2026,8 @@ def _decision_row(
     }
     if stack.chat is not None:
         record["chat"] = stack.chat
+    if repo is None and stack.cwd is not None:
+        record["cwd"] = stack.cwd
     kept = None if url is None or (scope, action) != ("network", "fetch") else logged_url(url)
     if kept is not None:
         record["url"] = redact(kept[0])
@@ -5104,6 +5107,7 @@ def compile_run(
         delegation_chain=delegation_chain,
         team=team,
         deferred_asks=deferred_asks,
+        record=init_baseline,  # the manifest has no side effect: only the run's compile records
     )
     raw = resolved_policy.policy.get("auto_apply_verified_patch")
     # v30: a project's maintain-phase integration branch (skep/maintain) —
@@ -5198,17 +5202,21 @@ def delegate_permissions(
     delegation_chain: Sequence[str],
     team: str | None = None,
     deferred_asks: bool = False,
+    record: bool = True,
 ) -> tuple[Permissions, dict[str, Any] | None, str | None]:
     """The worker's permissions held to its role and its chain, with the
     delegation record for the dispatch decision and the dispatch note — or
     the permissions untouched (and two Nones) when neither is given: today.
-    ``submit_run`` and ``skep run`` both narrow here (ADR 0050: one verb)."""
+    ``submit_run`` and ``skep run`` both narrow here (ADR 0050: one verb).
+    ``record=False`` (a manifest's compile) logs no rows: a dispatch's asks
+    are recorded once, by the compile its run gets (I13)."""
     chain, worker_role = delegation_inputs(holder, delegation_chain, role, team=team)
     if not chain and worker_role is None:
         return permissions, None, None
     return _within_delegation(
-        holder, store, repo, chain, permissions, worker_role, team, deferred_asks=deferred_asks
-    )
+        holder, store, repo, chain, permissions, worker_role, team,
+        deferred_asks=deferred_asks, record=record,
+    )  # fmt: skip
 
 
 def delegated_decision(
@@ -5290,6 +5298,7 @@ def _within_delegation(
     team: str | None = None,
     *,
     deferred_asks: bool = False,
+    record: bool = True,
 ) -> tuple[Permissions, dict[str, Any], str]:
     """R2 (ADR 0055 D4): a worker a bot dispatched gets no grant beyond its
     delegator. Every shell prefix and egress host the run policy granted is
@@ -5341,14 +5350,16 @@ def _within_delegation(
             return True
         ask = deferred_asks and askable and row["verdict"] == "require_approval"
         row = {**row, "delegated": "ask" if ask else "dropped"}
-        log_decision(holder.current.audit_dir, row)
+        if record:
+            log_decision(holder.current.audit_dir, row)
         (asks if ask else rows).append(row)
         return None if ask else False
 
     who = _delegation_who(chain, role)
     refusal = _delegated_write_refusal(
-        holder, store, repo, chain, permissions.write, role=role, team=team, stack=stack
-    )
+        holder, store, repo, chain, permissions.write, role=role, team=team, stack=stack,
+        record=record,
+    )  # fmt: skip
     if refusal is not None:
         raise HTTPException(status_code=403, detail=refusal)
     shell = {
@@ -5434,6 +5445,7 @@ def _delegated_write_refusal(
     role: Role | None = None,
     team: str | None = None,
     stack: Stack | None = None,
+    record: bool = True,
 ) -> str | None:
     """Why a worker this chain (or role) dispatches may not write — the
     workspace write its delegator is denied — recorded; None when it may.
@@ -5456,7 +5468,8 @@ def _delegated_write_refusal(
             role=role,
         )
         if _narrowed_by(row, stack, role) and row["verdict"] == "deny":
-            log_decision(holder.current.audit_dir, {**row, "team": team} if team else row)
+            if record:  # a manifest's compile records nothing (``delegate_permissions``)
+                log_decision(holder.current.audit_dir, {**row, "team": team} if team else row)
             beyond = "the delegator" if row["rule_id"] == EXCEEDS_DELEGATOR else "the role"
             return (
                 f"{_delegation_who(chain, role)}: filesystem.write {path} exceeds {beyond} "
