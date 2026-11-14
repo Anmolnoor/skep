@@ -221,7 +221,10 @@ access token on startup.
 On startup, a run whose worker is still alive from a previous serve is
 re-adopted: serve checks it is the same process (pid and start time),
 restores its network proxy on the same port, and supervises it to the end
-with the time it has left, sandboxed or not. `--no-readopt` (or
+with the time it has left, sandboxed or not. A re-adopted (or recovered)
+run lands only by a human approval, never by a project's auto-apply lane:
+after a restart its chain of trust is reconstructed from the record, not
+witnessed, so `skep review <task> --approve` lands it. `--no-readopt` (or
 `SKEP_READOPT_WORKERS=0` in the environment or `serve.env`) kills such workers
 instead, as older versions did; on Linux a sandboxed worker then dies with the
 serve that started it. The variable also reaches runs that `skep run` and

@@ -1309,6 +1309,17 @@ def recover_interrupted_runs(
     return recovered
 
 
+# D35 (ADR 0060 §3): a run that finished across a serve restart — recovered or
+# re-adopted — never auto-applies. Supervision resumed from the record (pid,
+# start time, event log, envelope); nobody watched the gap, so the chain of
+# trust is reconstructed, not witnessed, and a human verdict lands it (I1, I13).
+RESTART_LANDS_BY_APPROVAL = (
+    "this run finished across a serve restart: its chain of trust is reconstructed, "
+    "not witnessed (supervision resumed from the record), so it lands by a human "
+    "approval, never auto-apply (ADR 0060) — `skep review {task_id} --approve`"
+)
+
+
 def _finish_recovered(
     run_store: RunStore,
     config: SupervisorConfig,
@@ -1379,6 +1390,22 @@ def _finish_recovered(
             loopback_ports=tuple(recovery_policy.get("loopback_ports") or ()),
             timeout_seconds=float(task.budget.wall_clock_seconds),  # as the live path
         )
+        # D35 (ADR 0060 §3): say why a project's auto-apply lane did not fire,
+        # in the vocabulary maybe_auto_approve uses when it declines (I8).
+        raw_auto = recovery_policy.get("auto_apply_verified_patch")
+        rules = auto_apply_decision(
+            config.auto_approval_rules, raw_auto if isinstance(raw_auto, bool) else None
+        ).rules
+        if rules:
+            reason = RESTART_LANDS_BY_APPROVAL.format(task_id=task_id)
+            run_store.transition(
+                task_id,
+                TaskState.COMPLETED.value,
+                json.dumps(
+                    {"auto_apply_blocked": {rule.name: reason for rule in rules}},
+                    ensure_ascii=True,
+                ),
+            )
         # v107-F1: same post-reverify keep answer as the live path.
         reverify_record = run_store.reverification_for(task_id)
         if (
