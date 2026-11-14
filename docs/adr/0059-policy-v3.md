@@ -200,7 +200,7 @@ so this adds no new store.
 | Lifetime | Lives | Bound to | Offered by default |
 |---|---|---|---|
 | once | the card itself, no row | — | always |
-| session | until serve restarts | **chat** (Queen) / **repo** (worker): B39 | yes (default) |
+| session | until serve restarts | **chat** (Queen) / **repo** (worker, read only since ES-F293): B39 | yes (default, Queen cards) |
 | project | durable | project_id | worker cards, Queen in a repo context |
 | global | durable | — | only untainted, only after V11 passes |
 
@@ -564,9 +564,10 @@ Queen card keep (`remember_action_for_session`) — read_url a `url_prefix`
 segments, userinfo and backslashes never match: B74), run_shell `exact_argv`
 per segment of a compound line, offered only if every segment is grantable
 (B61), start_process `run_background` (B21); `session` is bound to the chat
-(B39), `always` is global and unbound. A worker plain approve is a `session`
+(B39), `always` is global and unbound. A worker plain approve was a `session`
 grant bound to the repo (B39: the global `session_allowed_shell_commands`
-tier is no longer read or written); "Allow & remember", `--allow-command`,
+tier is no longer read or written) until ES-F293 (D43): it is now one
+decision and writes no grant, since the gate card offers none; "Allow & remember", `--allow-command`,
 the ledger remember and `allow_shell_command repo=` write a `project` grant
 bound to the project, or the repo when it has none (B18: not the knob a
 locked baseline enforces) — both argv prefixes in the compiled allowlist

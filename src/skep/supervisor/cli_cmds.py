@@ -1254,9 +1254,29 @@ def cmd_review(args: argparse.Namespace) -> int:
         approvals = store.approvals_for(record.task_id)
 
         allow_command = bool(getattr(args, "allow_command", False))
-        verdict_flags = [args.approve, args.deny, allow_command]
+        reverify_flag = bool(getattr(args, "reverify", False))
+        verdict_flags = [args.approve, args.deny, allow_command, reverify_flag]
         if sum(bool(flag) for flag in verdict_flags) > 1:
-            return _err("--approve, --deny, and --allow-command are mutually exclusive.")
+            return _err(
+                "--approve, --deny, --allow-command, and --reverify are mutually exclusive."
+            )
+
+        if reverify_flag:
+            # ES-F291 (L1): the operator face of the startup sweep (ES-F290).
+            from .dispatch import reverify_unverified
+
+            why_not = reverify_unverified(store, config, record)
+            if why_not:
+                return _err(
+                    why_not,
+                    state=record.state,
+                    evidence=str(audit_dir),
+                    next_command=f"skep review {record.task_id}  # inspect the evidence",
+                )
+            done = store.reverification_for(record.task_id)
+            print(f"re-verified: task {record.task_id} → {done.outcome if done else '-'}")
+            print(f"  next: skep review {record.task_id}  # read the result, then --approve")
+            return 0
 
         if not args.approve and not args.deny and not allow_command:
             changed_files: list[str] = []
@@ -1415,6 +1435,21 @@ def cmd_review(args: argparse.Namespace) -> int:
                 state=record.state,
                 evidence=str(audit_dir),
                 next_command=f"skep review {record.task_id}  # inspect the evidence",
+            )
+        from .serve.actions import never_reverified_error, reverify_in_flight
+
+        unverified = never_reverified_error(store, record.task_id)
+        if unverified is not None:  # ES-F291 (L1): as serve's apply_patch
+            return _err(
+                unverified,
+                state=record.state,
+                evidence=str(audit_dir),
+                next_command=f"skep review {record.task_id}"
+                + (
+                    "  # once re-verification finishes"
+                    if reverify_in_flight(store, record.task_id)
+                    else " --reverify"
+                ),
             )
         # v20-F5: an operator may name the landing branch (default skep/<task_id>).
         requested_branch = getattr(args, "branch", None)
@@ -1691,23 +1726,9 @@ def _resume_claimed_gate(
     )
     # ES-F8 (B130; ADR 0050 parity with resume_past_gate): a batch card grants
     # EVERY command it listed (v19-F1) — the CLI granted only the first, so a
-    # "for 3 commands" card cost three approvals and three resumes — and a
-    # plain approve holds for the serve session like the REST face (v86-F1).
+    # "for 3 commands" card cost three approvals and three resumes. ES-F293
+    # (D43): in this one verdict only — a plain approve saves no grant.
     approval_commands = store.approval_commands(review_id)
-    session_kept: list[list[str]] = []
-    if not remembered and approval_commands:
-        from .serve.actions import _asked, remember_commands_for_session
-
-        # V7: never a delegated ask — that approval is this run's alone (B39).
-        session_kept = remember_commands_for_session(
-            store,
-            [
-                list(command)
-                for command in approval_commands
-                if not _asked(command, original.permissions)
-            ],
-            repo=record.repo,
-        )
     verdict = ApprovalVerdict(
         approved=True,
         actor=actor,
@@ -1744,8 +1765,7 @@ def _resume_claimed_gate(
         review_id,
         approved=True,
         actor=actor,
-        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})"
-        + ("; approval held for this serve session, in this repo only" if session_kept else ""),
+        note=f"resumed as {outcome.record.task_id} ({outcome.record.state})",
         remembered=remembered,
         claimed=True,
     )
@@ -3463,6 +3483,12 @@ def register_supervisor_commands(
     review.add_argument("--approve", action="store_true")
     review.add_argument("--deny", action="store_true")
     review.add_argument("--allow-command", action="store_true")
+    review.add_argument(
+        "--reverify",
+        action="store_true",
+        help="re-verify (G10) a completed run that was never re-verified — the "
+        "supervisor stopped before it could — with the project's pinned verify",
+    )
     review.add_argument("--actor", default=None, help="who is approving (default: $USER)")
     review.add_argument("--note", default=None)
     review.add_argument(

@@ -408,3 +408,26 @@ test("offersRemember: a delegated ask is approve-once, so no remember button is 
   assert.equal(app.offersRemember({}), true);
   assert.equal(app.offersRemember(undefined), true);
 });
+
+// ---------- ES-F291 follow-up (I8): the run page never hides a missing G10 ----------
+
+test("run detail: a patch with no re-verification record says 'not re-verified'", async () => {
+  const app = loadApp();
+  const detail = reverification_missing => ({
+    run: { task_id: "t1", instructions: "land me", state: "completed", repo: "/r" },
+    transitions: [], artifacts: [{ kind: "patch" }], commands: [], approvals: [],
+    policy_blocks: [], reverification: null, reverification_missing,
+  });
+  const rows = async body => {
+    app.api = async (method, path) => (path === "/api/runs/t1" ? body : { events: [] });
+    const main = app.document.createElement("main");
+    await app.viewRunDetail(main, "t1");
+    const dts = main.querySelectorAll("dt").map(n => n.textContent);
+    const dds = main.querySelectorAll("dd").map(n => n.textContent);
+    return dts.map((k, i) => [k, dds[i]]).filter(([k]) => k === "re-verify (G10)");
+  };
+  const missing = await rows(detail("this run was never re-verified (G10): …"));
+  assert.equal(missing.length, 1);
+  assert.ok(missing[0][1].startsWith("not re-verified — this run was never re-verified"));
+  assert.deepEqual(await rows(detail(null)), []);  // nothing to land: no row
+});
