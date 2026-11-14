@@ -115,6 +115,26 @@ def test_bubblewrap_gets_the_runs_loopback_ports_on_the_shim() -> None:
     assert "--loopback-port" not in closed
 
 
+def test_bubblewrap_refuses_a_privileged_loopback_port_before_the_worker_starts() -> None:
+    """ES-F251: netshim binds each loopback port inside the worker's own
+    netns, where an unprivileged process cannot bind below 1024 — a local
+    provider on :80 killed the worker with netshim's exit 3. The profile now
+    refuses it up front (dispatch records it as sandbox_unavailable) and says
+    how to fix it."""
+    with pytest.raises(sandbox.SandboxUnavailableError) as refused:
+        sandbox._bubblewrap_args(
+            writable_roots=[Path("/w")],
+            network=sandbox.NetworkPolicy(allow=("pypi.org",)),
+            proxy_port=40000,
+            unix_socket_path="/tmp/p.sock",
+            loopback_ports=[8000, 80],
+        )
+    message = str(refused.value)
+    assert "loopback port 80" in message and "1024" in message
+    assert "8000" not in message  # names only the port at fault
+    assert "never runs" in message  # not started unconfined either
+
+
 def _project(tmp_path: Path, ports: list[int] | None) -> tuple[object, RunStore, Path]:
     from skep.supervisor import SupervisorConfig
     from skep.supervisor.serve.registry import setup_project_record

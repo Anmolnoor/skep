@@ -284,17 +284,28 @@ def reverify(
             ).start()
             network = sandbox.NetworkPolicy(allow=("localhost",))
         if profile_path is not None:
-            sandbox.write_profile(
-                profile_path,
-                workspace=worktree,
-                extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
-                extra_readable=git_metadata_readable_roots(worktree),
-                network=network,
-                proxy_port=proxy.port if proxy is not None else None,
-                unix_socket_path=proxy.unix_socket_path if proxy is not None else None,
-                skep_home=config.home.parent,
-                loopback_ports=ports,
-            )
+            try:
+                sandbox.write_profile(
+                    profile_path,
+                    workspace=worktree,
+                    extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
+                    extra_readable=git_metadata_readable_roots(worktree),
+                    network=network,
+                    proxy_port=proxy.port if proxy is not None else None,
+                    unix_socket_path=proxy.unix_socket_path if proxy is not None else None,
+                    skep_home=config.home.parent,
+                    loopback_ports=ports,
+                )
+            except sandbox.SandboxUnavailableError as exc:
+                # ES-F251 (ES-F1, I12): no wall, no re-run — honestly
+                # unavailable with the backend's reason, never patch guilt.
+                return ReverifyOutcome(
+                    "unavailable",
+                    commands,
+                    [],
+                    f"the re-verify sandbox could not be built, so the verification "
+                    f"command was not run: {exc}",
+                )
         applied = subprocess.run(
             ["git", "-C", str(worktree), "apply", str(patch_path)],
             capture_output=True,

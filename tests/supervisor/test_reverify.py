@@ -291,6 +291,32 @@ def test_non_uv_pin_never_primes(repo: Path, config: SupervisorConfig, tmp_path:
     assert not log.exists()
 
 
+def test_a_wall_that_cannot_be_built_is_unavailable_not_a_crash(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F251: a profile the backend refuses (a privileged loopback port on
+    bubblewrap) makes re-verification honestly unavailable, with the reason —
+    never an exception out of G10 and never an unconfined re-run."""
+    from skep.supervisor import sandbox
+
+    def refuse(*_args: object, **_kwargs: object) -> Path:
+        raise sandbox.SandboxUnavailableError("loopback port 80 is below 1024")
+
+    monkeypatch.setattr(sandbox, "write_profile", refuse)
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["true"],
+        config=config,
+        profile_path=tmp_path / "reverify.profile.sb",
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert outcome.outcome == "unavailable"
+    assert outcome.exit_codes == []
+    assert "loopback port 80 is below 1024" in outcome.detail
+
+
 def test_failed_prime_is_unavailable_not_patch_guilt(
     repo: Path, config: SupervisorConfig, tmp_path: Path
 ) -> None:

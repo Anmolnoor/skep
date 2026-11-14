@@ -712,6 +712,21 @@ def _bubblewrap_args(
         args.extend(["--ro-bind", str(own), str(own)])
     if network.is_domain_list:
         assert unix_socket_path is not None and proxy_port is not None
+        # ES-F251: netshim binds each port inside the worker's own netns,
+        # whose unprivileged-port floor is 1024 and which the worker holds no
+        # capability to lower: a port below it killed the worker (netshim
+        # exit 3). Refuse before anything starts, and say what to change.
+        if privileged := sorted({port for port in loopback_ports if port < 1024}):
+            shown = ", ".join(str(port) for port in privileged)
+            raise SandboxUnavailableError(
+                f"loopback port {shown} is below 1024: on Linux the sandbox presents each "
+                "loopback port inside the worker's own network namespace, where an "
+                "unprivileged process cannot bind a port below 1024, so the worker "
+                "could not start there. Serve the local model provider or service on "
+                "port 1024 or above (ollama's default is 11434) and update the "
+                "provider URL or the project's loopback_ports to match; skep never "
+                "runs a sandbox run unconfined."
+            )
         socket_path = Path(unix_socket_path)
         args.extend(["--ro-bind", str(socket_path.parent), SANDBOX_PROXY_DIR])
         # The shim prefix runs INSIDE the sandbox before the worker; wrap_command
