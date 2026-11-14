@@ -8,6 +8,7 @@ for it: whether a run is relayed, the per-run token, and the worker's env.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import hmac
 import json
@@ -130,8 +131,26 @@ def _relay_for(config: SupervisorConfig, task_id: str) -> tuple[ProviderRelay | 
         return None, "", f"not used: {why}"
     endpoint, protocol, key, model = plan
     token = relay_token(config.home, task_id)
-    relay = ProviderRelay(upstream=endpoint, token=token, key=key, protocol=protocol)
+    from .providers import provider_host
+    from .serve.llm_copilot import COPILOT_HOST
+
+    renew = None
+    if provider_host(endpoint) == COPILOT_HOST:
+        renew = functools.partial(_renewed_copilot_key, config.home.parent)
+    relay = ProviderRelay(upstream=endpoint, token=token, key=key, protocol=protocol, renew=renew)
     return relay, model, "on"
+
+
+def _renewed_copilot_key(personal_home: Path, refused: str) -> str:
+    """ES-F263: a fresh Copilot bearer for a relay whose bearer the provider
+    refused — the cached one dropped, then resolved exactly as at dispatch."""
+    from .serve.llm_copilot import forget_copilot_bearer
+
+    forget_copilot_bearer(refused)
+    plan, why = relay_plan(personal_home)
+    if plan is None or not plan[2]:
+        raise ValueError(f"the provider key could not be renewed: {why}")
+    return plan[2]
 
 
 def readopted_relay(

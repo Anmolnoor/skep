@@ -330,19 +330,25 @@ def _masked(chunks: Iterable[bytes], secret: bytes) -> Iterator[bytes]:
         yield tail
 
 
-@dataclass(frozen=True)
+@dataclass
 class ProviderRelay:
     """ADR 0062 (V6b): one run's relay to one provider.
 
     The worker sends ``token`` where its client sends a key (``Authorization:
     Bearer`` or, for anthropic, ``x-api-key``); the relay checks it and sends
     ``key`` in its place to ``upstream`` (the provider base URL), never to
-    any other origin or path."""
+    any other origin or path.
+
+    ``renew`` (ES-F263): for a provider whose key is a short-lived exchanged
+    token (GitHub Copilot), called with the key the provider refused (401) to
+    get a fresh one; the relay then retries the request once with it. A long
+    run outlives the token, and the worker cannot renew what it never held."""
 
     upstream: str
     token: str = field(repr=False)
     key: str = field(repr=False)
     protocol: str
+    renew: Callable[[str], str] | None = field(default=None, repr=False, compare=False)
 
     def auth(self, secret: str) -> tuple[bytes, str]:
         """The protocol's credential header name and its value for ``secret``."""
@@ -620,6 +626,7 @@ class _ProxyHandler(StreamRequestHandler):
         auth_name, token_value = relay.auth(relay.token)
         forwarded: list[tuple[str, str]] = [("Host", upstream.netloc.rpartition("@")[2])]
         token_ok = False
+        auth_slot = 0
         content_length: int | None = None
         for header in headers:
             raw_name, _, raw_value = header.partition(b":")
@@ -631,8 +638,10 @@ class _ProxyHandler(StreamRequestHandler):
                 return
             if name == auth_name and hmac.compare_digest(value.encode(), token_value.encode()):
                 token_ok = True
-                # Same name and place as the worker sent it: only the value moves.
-                forwarded.append((raw_name.strip().decode("latin-1"), relay.auth(relay.key)[1]))
+                # Same name and place as the worker sent it: only the value moves
+                # (filled in per attempt below, so a renewed key takes the slot).
+                auth_slot = len(forwarded)
+                forwarded.append((raw_name.strip().decode("latin-1"), ""))
                 continue
             # Parity (ADR 0062 section 4): the worker's plain keep-alive/close
             # rides along as sent; any other hop-by-hop header stops here.
@@ -658,34 +667,52 @@ class _ProxyHandler(StreamRequestHandler):
         import httpx  # the worker's own HTTP library: same trust, same decoders
 
         host, port = upstream.hostname or "", upstream.port
-        conn: http.client.HTTPConnection
-        if upstream.scheme == "https":
-            # The direct client's own trust (httpx: certifi, or SSL_CERT_FILE /
-            # SSL_CERT_DIR), so a relayed call verifies exactly as a direct one.
-            conn = http.client.HTTPSConnection(
-                host, port, timeout=_CONNECT_TIMEOUT, context=httpx.create_ssl_context()
-            )
-        else:
-            conn = http.client.HTTPConnection(host, port, timeout=_CONNECT_TIMEOUT)
-        try:
-            conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
-            for name_s, value in forwarded:
-                conn.putheader(name_s, value)
-            conn.endheaders(body)
-            if conn.sock is not None:
-                conn.sock.settimeout(_RELAY_READ_TIMEOUT)
-            response = conn.getresponse()
-        except (OSError, http.client.HTTPException, ValueError):  # ValueError: a bad header
+        key = relay.key
+        renewed = False
+        while True:
+            conn: http.client.HTTPConnection
+            if upstream.scheme == "https":
+                # The direct client's own trust (httpx: certifi, or SSL_CERT_FILE /
+                # SSL_CERT_DIR), so a relayed call verifies exactly as a direct one.
+                conn = http.client.HTTPSConnection(
+                    host, port, timeout=_CONNECT_TIMEOUT, context=httpx.create_ssl_context()
+                )
+            else:
+                conn = http.client.HTTPConnection(host, port, timeout=_CONNECT_TIMEOUT)
+            forwarded[auth_slot] = (forwarded[auth_slot][0], relay.auth(key)[1])
+            try:
+                conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+                for name_s, value in forwarded:
+                    conn.putheader(name_s, value)
+                conn.endheaders(body)
+                if conn.sock is not None:
+                    conn.sock.settimeout(_RELAY_READ_TIMEOUT)
+                response = conn.getresponse()
+            except (OSError, http.client.HTTPException, ValueError):  # ValueError: a bad header
+                conn.close()
+                self.server.note_relay(relayed=False)
+                self._reply(502, "Bad Gateway: the provider relay could not reach the provider")
+                return
+            if response.status != 401 or relay.renew is None or renewed:
+                break
+            # ES-F263: the short-lived key expired (or was revoked) mid-run.
+            # Renew once and retry; when renewal fails or yields the same key,
+            # the provider's own 401 goes back to the worker as it came.
+            renewed = True
+            try:
+                fresh = relay.renew(key)
+            except Exception:  # an exchange error must not kill the proxy thread
+                break
+            if not fresh or fresh == key:
+                break
             conn.close()
-            self.server.note_relay(relayed=False)
-            self._reply(502, "Bad Gateway: the provider relay could not reach the provider")
-            return
+            relay.key = key = fresh
         self.server.note_relay(relayed=True)
         # A provider that reflects the auth header must not hand the worker
         # the key: the reply is decoded with the worker's own HTTP library (so
         # any encoding the worker can ask for, the relay can read) and the key
         # is masked, byte for byte, in the status line, headers and body.
-        secret = relay.key.encode()
+        secret = key.encode()
         coding = response.getheader("Content-Encoding") or "identity"
         decoded = httpx.Response(
             response.status,

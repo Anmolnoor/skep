@@ -819,3 +819,106 @@ def test_an_allow_all_relayed_run_opens_its_relay_port_in_the_loopback_wall(
         relay=relay if relayed else None,
     )
     assert (43210 in tuple(seen["loopback_ports"])) is opened  # type: ignore[arg-type]
+
+
+def test_a_refused_short_lived_key_is_renewed_once_and_the_request_retried(
+    upstream: tuple[FakeOpenAI, str],
+) -> None:
+    """ES-F263: a Copilot bearer lives minutes; a long relayed run outlives
+    it and every later call 401s. The relay renews on a 401 and retries the
+    same request once, and the worker never learns either key."""
+    fake, fresh = upstream
+    stale = _fake_key()
+    token = secrets.token_hex(16)
+    refused: list[str] = []
+
+    def renew(key: str) -> str:
+        refused.append(key)
+        return fresh
+
+    relay = ProviderRelay(
+        upstream=fake.base_url + "/v1",
+        token=token,
+        key=stale,
+        protocol="openai-compat",
+        renew=renew,
+    )
+    fake.script_reply("after renewal")
+    fake.script_reply("second call")
+    with FilteringProxy((), relay=relay) as proxy:
+        assert _text(f"http://127.0.0.1:{proxy.port}/v1", token) == "after renewal"
+        assert _text(f"http://127.0.0.1:{proxy.port}/v1", token) == "second call"
+    assert refused == [stale]  # renewed once; the next call used the fresh key
+    auths = [
+        {k.lower(): v for k, v in r["headers"].items()}["authorization"]
+        for r in fake.requests
+        if r["path"] == "/v1/chat/completions"
+    ]
+    assert auths == [f"Bearer {stale}", f"Bearer {fresh}", f"Bearer {fresh}"]
+
+
+def test_a_renewal_that_fails_hands_the_worker_the_providers_own_401(
+    upstream: tuple[FakeOpenAI, str],
+) -> None:
+    fake, _fresh = upstream
+    token = secrets.token_hex(16)
+
+    def renew(key: str) -> str:
+        raise ValueError("exchange down")
+
+    relay = ProviderRelay(
+        upstream=fake.base_url + "/v1", token=token, key=_fake_key(), protocol="openai-compat",
+        renew=renew,
+    )  # fmt: skip
+    with FilteringProxy((), relay=relay) as proxy:
+        reply = _raw(
+            proxy.port,
+            b"GET /v1/models HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer "
+            + token.encode()
+            + b"\r\n\r\n",
+        )
+    assert reply.startswith(b"HTTP/1.1 401 ")
+
+
+def test_a_copilot_relay_renews_by_re_exchanging_the_github_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F263: only a Copilot endpoint gets a renew; it drops the refused
+    bearer from the cache and exchanges again (the exchange is stubbed)."""
+    from skep.supervisor import provider_relay
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.serve import llm_copilot
+
+    github_token = "CANARY-gh-" + secrets.token_hex(8)
+    bearers = iter(["CANARY-bearer-1", "CANARY-bearer-2"])
+    exchanged: list[str] = []
+
+    def fake_exchange(token: str, *, timeout: float = 10.0) -> tuple[str, float]:
+        exchanged.append(token)
+        return next(bearers), 4_000_000_000.0  # far future: only a 401 renews
+
+    monkeypatch.setattr(llm_copilot, "exchange_copilot_token", fake_exchange)
+    monkeypatch.setattr(llm_copilot, "_cache", {})
+    monkeypatch.setattr(
+        provider_relay,
+        "relay_plan",
+        lambda home: (
+            ("https://api.githubcopilot.com", "openai-compat",
+             llm_copilot.resolve_copilot_bearer(github_token), "gpt-4o"),
+            "on",
+        ),
+    )  # fmt: skip
+    config = build_config(tmp_path / "home", None)
+    relay, _model, note = provider_relay._relay_for(config, "task-1")
+    assert note == "on" and relay is not None and relay.renew is not None
+    assert relay.key == "CANARY-bearer-1"
+    assert relay.renew(relay.key) == "CANARY-bearer-2"
+    assert exchanged == [github_token, github_token]
+
+    monkeypatch.setattr(
+        provider_relay,
+        "relay_plan",
+        lambda home: (("https://api.openai.com/v1", "openai-compat", "k", "m"), "on"),
+    )
+    other, _model, _note = provider_relay._relay_for(config, "task-2")
+    assert other is not None and other.renew is None
