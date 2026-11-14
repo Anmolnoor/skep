@@ -5659,3 +5659,46 @@ def test_a_failed_runs_cause_masks_a_login_and_the_home() -> None:
     cause = coding_worker._failure_cause(exc)
     assert cause.startswith("RuntimeError: provider failed at https://u:***@llm.invalid/v1")
     assert "p" * 30 not in cause and str(Path.home()) not in cause and "~/cfg" in cause
+
+
+def test_a_failure_notice_masks_a_credential_in_the_exception_text(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F260: ~10 failure paths passed ``details=str(exc)`` (and the plan
+    failure its summary) straight into the verify.result event and the result
+    envelope — the run record, the chat notice and the audit trail. A provider
+    error that echoes a URL token or an Authorization header leaked it there.
+    The failure builders mask once, so every caller is covered."""
+    task = mint_task(
+        workspace=repo,
+        instructions="Write generated.py.",
+        permissions=Permissions(
+            read=["workspace"], write=["workspace"], network=["*"], env_allowlist=[]
+        ),
+        budget=DEFAULT_BUDGET,
+    )
+    stream = _EventStream(
+        repo / ".events" / f"{task.task_id}.ndjson", task_id=task.task_id, trace_id=task.trace_id
+    )
+    out_path = tmp_path / f"{task.task_id}.json"
+    canary = "CANARY-" + "q" * 24
+
+    def fake_request(*args: object, **kwargs: object) -> object:
+        exc = LlmPlanError(
+            f"401 from https://llm.invalid/v1?api_key={canary} Authorization: Bearer {canary}"
+        )
+        exc.raw_content = "not json"
+        raise exc
+
+    monkeypatch.setattr(coding_worker, "worker_provider_from_env", lambda: object())
+    monkeypatch.setattr(coding_worker, "request_edit_plan", fake_request)
+    monkeypatch.setattr(coding_worker, "_PLAN_REPAIR_ROUNDS", 0)
+
+    code = coding_worker._execute(task, repo, stream, out_path)
+    result = read_result(out_path)
+
+    assert code != EXIT_COMPLETED
+    assert "api_key=***" in result.verification.details
+    events = stream.path.read_text(encoding="utf-8")
+    for text in (result.summary, result.verification.details, events):
+        assert canary not in text
