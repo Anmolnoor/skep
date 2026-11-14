@@ -7,6 +7,7 @@ task instructions:
 - happy:    full event stream, real patch artifact, completed result, exit 0
 - pending:  approval.requested → terminal pending_approval, result, exit 4
 - crash:    task.start then dies without terminal event or result, exit 9
+- killed:   task.start then SIGKILLs itself — the shape of an operator's kill -9
 - crashgate: dies like crash but leaves a v2 resume checkpoint; its resume
             gates on the shell command ``make check`` (pending, exit 4)
 - shellgate: pending, gating on the shell command ``GATE:<argv>`` (``_`` for
@@ -52,6 +53,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import sys
 import time
 import uuid
@@ -201,6 +203,9 @@ def main() -> int:
     if mode == "crash":
         stream.emit("plan.created", {"steps": ["about to die"]})
         return 9
+
+    if mode == "killed":
+        os.kill(os.getpid(), signal.SIGKILL)
 
     if mode == "hang":
         stream.emit("heartbeat", {"phase": "executing"})

@@ -1324,6 +1324,16 @@ class RunStore:
         self._conn.commit()
 
     @_locked
+    def set_run_summary(self, task_id: str, summary: str) -> None:
+        """ES-F238: a run that ends with no result envelope (killed, crashed,
+        timed out) still gets its one-line summary."""
+        self._conn.execute(
+            "UPDATE runs SET summary = ?, updated_at = ? WHERE task_id = ?",
+            (summary, _now(), task_id),
+        )
+        self._conn.commit()
+
+    @_locked
     def set_worker_identity(self, task_id: str, *, version: str, fingerprint: str) -> None:
         """G7: every run record carries worker version + manifest fingerprint."""
         self._conn.execute(

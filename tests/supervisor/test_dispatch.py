@@ -164,6 +164,42 @@ def test_crash_synthesizes_worker_crashed(repo: Path, config: SupervisorConfig) 
     _no_leftovers(repo, config)
 
 
+@pytest.mark.parametrize(
+    ("mode", "summary"),
+    [
+        ("crash", "Worker crashed: it exited with code 9 before reporting a result."),
+        ("killed", "Worker was killed by signal SIGKILL before reporting a result."),
+    ],
+)
+def test_a_dead_workers_run_summary_says_how_it_died(
+    repo: Path, config: SupervisorConfig, mode: str, summary: str
+) -> None:
+    """ES-F238: a killed or crashed run's stored summary was blank. It now
+    says in one line that the worker died and by what, from the exit status
+    the monitor already recorded."""
+    outcome = run_task(repo, f"Do work. MODE:{mode}", config=config)
+
+    assert outcome.record.state == "worker_crashed"
+    assert outcome.record.summary == summary
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "summary"),
+    [
+        (-15, "Worker was killed by signal SIGTERM before reporting a result."),
+        (137, "Worker was killed by signal SIGKILL (exit 137) before reporting a result."),
+        (-77, "Worker was killed by signal 77 before reporting a result."),
+        (0, "Worker process exited without a terminal event."),
+        (None, "Worker process exited without a terminal event."),
+    ],
+)
+def test_death_summary_reads_the_exit_status(exit_code: int | None, summary: str) -> None:
+    """ES-F238: a negative code is the killing signal; bwrap reports one as 128+N."""
+    from skep.supervisor.monitor import death_summary
+
+    assert death_summary(exit_code) == summary
+
+
 @pytest.mark.parametrize("mode", ["noresult", "badresult"])
 def test_completed_terminal_without_valid_result_fails_evidence_chain(
     repo: Path, config: SupervisorConfig, mode: str

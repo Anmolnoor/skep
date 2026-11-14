@@ -135,6 +135,25 @@ def synthesize_terminal(
     )
 
 
+def death_summary(exit_code: int | None) -> str:
+    """ES-F238: one line on how a worker that never reported died, read off
+    its exit status — a negative code is the signal that killed it (an
+    operator's kill, the OOM killer); bwrap reports that as 128+N."""
+    signum = -exit_code if exit_code is not None and exit_code < 0 else None
+    shown = ""
+    if exit_code is not None and 128 < exit_code <= 128 + 64:
+        signum, shown = exit_code - 128, f" (exit {exit_code})"
+    if signum is not None:
+        try:
+            name = signal.Signals(signum).name
+        except ValueError:
+            name = str(signum)
+        return f"Worker was killed by signal {name}{shown} before reporting a result."
+    if exit_code:
+        return f"Worker crashed: it exited with code {exit_code} before reporting a result."
+    return "Worker process exited without a terminal event."
+
+
 def append_event(path: Path, event: Event) -> None:
     """Append a (synthesized) event to an NDJSON log copy."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,7 +259,7 @@ def watch_worker(
             trace_id=trace_id,
             seq=next_seq,
             status=TaskState.WORKER_CRASHED,
-            summary="Worker process exited without a terminal event.",
+            summary=death_summary(exit_code),
             reason="process_exit_without_terminal",
             exit_code=exit_code,
         )
