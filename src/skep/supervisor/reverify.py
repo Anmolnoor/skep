@@ -211,6 +211,7 @@ def reverify(
     with TREE_LOCK:
         worktree = create_worktree(repo, config.worktrees_root, f"reverify-{patch_path.stem}", ref)
     proxy: FilteringProxy | None = None
+    proxy_socket_dir: str | None = None
     try:
         env = dict(env)
         # v107-F3: TMPDIR inside the wall — unset, tools fall back to /tmp,
@@ -275,11 +276,12 @@ def reverify(
             # that admits those ports alone (empty allowlist: still offline).
             from .dispatch import _proxy_socket_root  # runtime: dispatch imports us
 
+            # ES-F257: kept apart from the proxy, so the finally removes it
+            # even when the proxy never started (its sockets bind in __init__).
+            proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
             proxy = FilteringProxy(
                 (),
-                unix_socket_path=str(
-                    Path(tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())) / "p.sock"
-                ),
+                unix_socket_path=str(Path(proxy_socket_dir) / "p.sock"),
                 denied_loopback_ports=control_plane_ports(config.home),
                 loopback_ports=ports,
             ).start()
@@ -392,10 +394,13 @@ def reverify(
             f"--- re-run output (tail) ---\n{failed_tail or '(no output)'}",
         )
     finally:
-        if proxy is not None:
-            proxy.stop()
-            shutil.rmtree(Path(str(proxy.unix_socket_path)).parent, ignore_errors=True)
-        remove_worktree(repo, worktree)
+        try:
+            if proxy is not None:
+                proxy.stop()
+        finally:
+            if proxy_socket_dir is not None:
+                shutil.rmtree(proxy_socket_dir, ignore_errors=True)
+            remove_worktree(repo, worktree)
 
 
 def reverify_run(
