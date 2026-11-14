@@ -242,7 +242,8 @@ _RUN_POLICY_KNOBS: tuple[PolicyKey, ...] = (
         default=False,
         layers=("project",),
         invariant="I6",
-        doc="zero-ask project (ADR 0061): decide() answers a sandboxed worker's default asks; "
+        doc="zero-ask project (ADR 0061): decide() answers a sandboxed worker's default "
+        "command asks (never a host no rule names, D42); "
         "dispatch and verified landing need no card",
         enforced_at="project",
     ),

@@ -818,6 +818,9 @@ def create_app(
 
         try:
             if step == "model":
+                named = (body.provider, body.model, body.endpoint, body.api_key_env)
+                if all(value is None for value in named):
+                    return onboard.onboard_keep_model(holder)  # L2: never a silent switch
                 return onboard.onboard_model(
                     holder,
                     run_store,
@@ -1222,7 +1225,8 @@ def create_app(
                     break
         from ..policy_write import run_unlocked_hosts
 
-        # D34 (ADR 0061): the hosts this run reached that no rule named
+        # D34 (ADR 0061): the hosts this run reached that no rule named —
+        # historical rows only since D42 (unlocked approves no host now)
         reached = run_unlocked_hosts(holder.current.audit_dir, run)
         return {
             **({"unlocked_hosts": reached} if reached else {}),

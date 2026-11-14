@@ -908,8 +908,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         # without a word (dispatch.py takes the engine argv for any external
         # engine) — the field burned three runs on an agent the operator had
         # not asked for. Name both and the two ways out (I9).
+        engine = resolved_policy.coding_engine
+        if resolved_policy.policy.get("coding_engine") != engine:
+            # L8: no pin — the resolver mapped the worker command itself to
+            # the external agent it runs (D36); blaming a pin misleads (I9).
+            return _err(
+                f"--worker-cmd runs {engine}, an external agent: it bypasses the "
+                "capability layer, so it runs only inside the sandbox (an "
+                "--execution-mode workspace becomes sandbox), with the project's pinned "
+                "verify_command and its auth env; pass --engine builtin to run your worker command "
+                f"that way, or --engine {engine} without --worker-cmd",
+                next_command=f'skep run {repo} "<instructions>" --engine builtin --worker-cmd ...',
+            )
         return _err(
-            f"project pins coding_engine {resolved_policy.coding_engine!r}, which replaces "
+            f"project pins coding_engine {engine!r}, which replaces "
             "--worker-cmd; pass --engine builtin to run your worker command under this "
             "project, or drop --worker-cmd to run the pinned engine",
             next_command=f'skep run {repo} "<instructions>" --engine builtin --worker-cmd ...',
@@ -3838,7 +3850,8 @@ def register_supervisor_commands(
         action=argparse.BooleanOptionalAction,
         default=None,
         help="zero-ask mode for this project (ADR 0061): a sandboxed worker's default "
-        "asks answer themselves, dispatch needs no card and a G10-confirmed patch "
+        "command asks answer themselves on serve-dispatched runs (never a host no rule "
+        "names), dispatch needs no card and a G10-confirmed patch "
         "lands on skep/*; denies, named asks and the floor still hold. Needs a pinned "
         "verify command, a usable sandbox and an approved baseline; --no-unlocked "
         "turns it off",

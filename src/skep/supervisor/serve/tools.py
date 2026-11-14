@@ -1730,9 +1730,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "unlocked": {
                 "type": "boolean",
                 "description": "zero-ask mode (ADR 0061): the project's sandboxed "
-                "workers stop asking about commands and hosts no rule names, and "
-                "verified patches land on skep/*. Set it ONLY when the user asks to "
-                "unlock the project; true is a HIGH card, false turns it off",
+                "workers stop asking about commands no rule names (hosts no rule "
+                "names stay refused or asked), and verified patches land on skep/*. "
+                "Set it ONLY when the user asks to unlock the project; true is a HIGH "
+                "card, false turns it off",
             },
             "policy_overrides": {"type": "object"},
             "seed_default_schedules": {"type": "boolean"},
@@ -3691,7 +3692,7 @@ def execute_read_tool(
         from ..policy_write import run_unlocked_hosts
 
         reached = run_unlocked_hosts(holder.current.audit_dir, run)
-        if reached:  # D34 (ADR 0061): hosts no rule named, answered by the mode
+        if reached:  # D34 (ADR 0061): hosts no rule named, answered by the mode before D42
             detail["unlocked_hosts"] = reached
         draft = _draft_excerpt(detail["artifacts"])
         if draft is not None:

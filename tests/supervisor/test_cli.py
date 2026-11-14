@@ -2024,6 +2024,32 @@ def test_run_refuses_worker_cmd_under_a_pinned_external_engine(
         store.close()
 
 
+def test_a_worker_cmd_that_runs_an_external_agent_is_named_not_blamed_on_a_pin(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """L8 (overnight 2026-11-14, I9): the project pins no engine; the
+    --worker-cmd itself runs claude_code. The refusal said the project pinned
+    one. It names the real cause and the acceptable path instead."""
+    home = tmp_path / "home"
+    code = _run_cli(home, "project", "setup", str(repo), "--strategy", "trusted_local_dev",
+                    "--project-id", "plain", "--verify-command", "true")  # fmt: skip
+    assert code == 0
+    capsys.readouterr()
+    worker = shlex.join([sys.executable, "-m", "skep.workers.claude_code"])
+    code = _run_cli(home, "run", str(repo), "Fix it.", "--worker-cmd", worker,
+                    "--execution-mode", "workspace")  # fmt: skip
+    err = capsys.readouterr().err
+    assert code == 2, err
+    assert "pins coding_engine" not in err
+    assert "--worker-cmd runs claude_code, an external agent" in err
+    assert "only inside the sandbox" in err and "--engine builtin" in err
+    store = RunStore(home / "supervisor" / "supervisor.sqlite3")
+    try:
+        assert store.recent_runs(5) == [], "nothing may be dispatched behind a refusal"
+    finally:
+        store.close()
+
+
 def test_run_engine_flag_overrides_the_pin_and_is_recorded_as_an_override(
     repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

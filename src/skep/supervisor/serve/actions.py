@@ -3875,6 +3875,8 @@ def auto_answer_unlocked_gate(
     when ``decide(…, sandboxed=True)`` allows every request it names, under
     the run's own role and chain — the click path (``resume_past_gate``),
     actor ``auto:unlocked``, once. Each request is a decision-log row (I13).
+    A host gate never answers itself (D42: ``decide`` keeps a host's ask), and
+    only the serve's done-callback calls this — a CLI run stops at its gate.
     Returns the resumed task id, or None: the gate stays a human's card."""
     run = store.get_run(task_id)
     if run is None or run.state != "pending_approval":

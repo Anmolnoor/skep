@@ -1,6 +1,7 @@
 # ADR 0061 — unlocked mode on policy v3
 
-**Status:** accepted (ES-F140–ES-F147).
+**Status:** accepted (ES-F140–ES-F147); amended by D42 (ES-F311): unlocked
+never answers a network host — see "Amendment: D42" at the end.
 **Replaces:** the August `unlocked` branch's ADR (numbered 0052 there; the
 design archive keeps it as accepted ADR 9999). **Builds on:** ADR 0059
 (policy v3), ADR 0048 (policy groups), ADR 0047 (engines), ADR 0044
@@ -75,9 +76,9 @@ After the run lane answers and before the role, the chain and taint:
 
 - it applies only on the run lane (`stack.run`), for a project whose
   effective policy has `unlocked: true` (`Stack.unlocked`), to a sandboxed
-  `shell.run` or `network.connect` request — the two asks the worker-gate
-  auto-answer understands (`UNLOCKED_REQUESTS`); nothing else is ever the
-  layer's (a write outside the workspace keeps its verdict);
+  `shell.run` request (`UNLOCKED_REQUESTS`; `network.connect` was the
+  second until D42 removed it); nothing else is ever the layer's (a write
+  outside the workspace, a network host keep their verdict);
 - it turns an **ask that is only a default** into `allow`, labelled
   `unlocked:<project>/zero-ask`: `default/unmatched`, or a catch-all `*` ask
   (ADR 0059 D2: "a `*` ask is a default, not a ceiling");
@@ -122,9 +123,11 @@ every request the gate names is allowed by `decide(…, sandboxed=True)` with
 the run's own role and chain: the gate resolves through `resume_past_gate`,
 actor `auto:unlocked`, **once** (no session grant written, B39). Each request
 is a line in the decision log (I13) with actor `auto:unlocked`. The gates it
-understands: `shell.run` (each listed command) and `network.fetch` /
-`network.read` (the host, decided as `network.connect`). Anything else — a
-git capability, a gate with no command — stays a human card.
+understands: `shell.run` (each listed command). A `network.fetch` /
+`network.read` gate is decided as `network.connect` and, since D42, always
+stays a human card, as does anything else — a git capability, a gate with no
+command. Only the serve's done callback runs the auto-answer: a CLI
+`skep run` on an unlocked project stops at every gate.
 
 ### Switching it on and off
 
@@ -170,6 +173,24 @@ worker gate's resolution reads `auto:unlocked`; every auto verdict is a
    gate on a run dispatched from a builder chat still cards when the builder
    role would itself ask; runs dispatched from the CLI, REST, a `/command` or
    a schedule (no chain) are fully zero-ask.
-2. The network-host trade from August stands: a worker can reach any host no
-   rule names, each a logged verdict, with credentials stripped by the env
-   allowlist (G2) and nothing landing outside G10 + `skep/*`.
+2. ~~The network-host trade from August stands: a worker can reach any host
+   no rule names.~~ Decided by D42 (below): it does not.
+
+## Amendment: D42 — unlocked never widens the network (ES-F311)
+
+The 2026-11-14 field test (L4) found the host half three ways at once: the
+worker refused an unnamed host flatly whenever the run had egress
+(`capability.deny.network_host_not_allowed`), a run with no egress raised a
+host gate that the serve's auto-answer approved, and doctor said hosts no
+rule names were not asked about. Operator decision D42, security first: a
+model reaching hosts no rule names is the main exfiltration path, so
+unlocked mode never widens the network to them, on any path.
+
+- `network.connect` leaves `UNLOCKED_REQUESTS`: `decide(…, sandboxed=True)`
+  keeps a host's ask, so a host gate stays a human card on serve exactly as
+  it does on a CLI run. A host no rule names is refused (a run with egress)
+  or asked (a run without), never auto-approved.
+- Unlocked still answers default command asks, on serve-dispatched runs only.
+- The D34 listing of hosts the mode auto-approved (doctor, a run's
+  `unlocked_hosts`) can only find rows written before D42, and doctor says
+  they are historical.
