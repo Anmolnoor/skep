@@ -343,6 +343,11 @@ class PersonalModeTests(unittest.TestCase):
             self.assertIn("shell.deny.repo_cwd", report)
             self.assertIn("dead-proj", report)
             self.assertNotIn("clean-proj (", report)
+            # ES-F236: the advice names a command that exists (there never
+            # was a `skep repo remove`), one per project to unregister.
+            self.assertNotIn("skep repo remove", report)
+            self.assertIn("`skep project remove developers`", report)
+            self.assertIn("`skep project remove dead-proj`", report)
 
     def test_doctor_reports_sandbox_even_when_profile_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

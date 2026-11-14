@@ -7,7 +7,7 @@ import shutil
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -635,6 +635,7 @@ def _repo_registry_advisories(home: Path) -> list[str]:
     try:
         bound: dict[str, str] = {}
         dead: list[str] = []
+        dead_ids: set[str] = set()
         for project in list_projects(store):
             for binding in project.bindings:
                 if binding.kind != "repo_path":
@@ -644,7 +645,9 @@ def _repo_registry_advisories(home: Path) -> list[str]:
                     bound[str(path.resolve())] = project.project_id
                 else:
                     dead.append(f"{project.project_id} ({binding.value})")
+                    dead_ids.add(project.project_id)
         umbrellas = []
+        umbrella_ids = []
         for bound_path, project_id in sorted(bound.items()):
             shadowed = sorted(
                 other_id
@@ -653,6 +656,7 @@ def _repo_registry_advisories(home: Path) -> list[str]:
             )
             if shadowed:
                 umbrellas.append(f"{project_id} ({bound_path}) contains: {', '.join(shadowed)}")
+                umbrella_ids.append(project_id)
         disabled = [
             f"{health.name} ({health.disabled_reason})"
             for health in store.list_schedule_health()
@@ -666,14 +670,15 @@ def _repo_registry_advisories(home: Path) -> list[str]:
             f"{len(umbrellas)} umbrella project(s) are bound to a directory that contains "
             f"other registered repos, so the Queen's shell is denied EVERYWHERE under that "
             f"tree (shell.deny.repo_cwd), including inside the repos it shadows: "
-            f"{'; '.join(umbrellas)}. Unregister the umbrella (`skep repo remove <name>`) "
+            f"{'; '.join(umbrellas)}. Unregister the umbrella ({_remove_commands(umbrella_ids)}) "
             "or re-bind it to the specific directory you meant."
         )
     if dead:
         advisories.append(
             f"{len(dead)} project binding(s) point at a directory that no longer exists — "
             f"dispatch fails and their schedules auto-disable one failure at a time: "
-            f"{', '.join(sorted(dead))}. Unregister them or restore the directory."
+            f"{', '.join(sorted(dead))}. Unregister them ({_remove_commands(dead_ids)}) "
+            "or restore the directory."
         )
     if disabled:
         advisories.append(
@@ -681,6 +686,12 @@ def _repo_registry_advisories(home: Path) -> list[str]:
             f"{', '.join(sorted(disabled))}. Fix the cause and re-enable, or delete them."
         )
     return advisories
+
+
+def _remove_commands(project_ids: Iterable[str]) -> str:
+    """ES-F236: the real unregister command (ES-F235), one per project — the
+    advice named `skep repo remove`, which never existed."""
+    return ", ".join(f"`skep project remove {pid}`" for pid in sorted(set(project_ids)))
 
 
 def _provider_advisories(home: Path, *, provider_ready: bool) -> list[str]:
