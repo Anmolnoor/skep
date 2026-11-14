@@ -568,7 +568,17 @@ def resume_follow_ups(engine: ChatEngine) -> int:
     queued = engine.store.queued_follow_ups()
     for action_id, actor in queued:
         _queue_follow_up(engine, action_id, actor)
-    return len(queued)
+    # ES-F242: and the run-finish follow-ups a stop cut off, waiting or mid-turn
+    owed = engine.store.queued_run_follow_ups()
+    for task_id, stage in owed:
+        threading.Thread(
+            target=run_completion_turn,
+            args=(engine.store, engine.holder, engine.runner, engine.home, task_id),
+            kwargs={"seeded": stage == "seeded"},
+            name=f"skep-continue-{task_id[:8]}",
+            daemon=True,
+        ).start()
+    return len(queued) + len(owed)
 
 
 def chat_turn_lock(chat_id: str) -> threading.Lock:
@@ -3259,8 +3269,16 @@ def run_completion_turn(
     runner: Dispatcher,
     home: Path,
     task_id: str,
+    *,
+    seeded: bool = False,
 ) -> tuple[str, bool]:
-    """One Queen turn after a run reaches a terminal state. (reply, ok)."""
+    """One Queen turn after a run reaches a terminal state. (reply, ok).
+
+    ES-F242 (D18): it is owed on the run row until its turn ends, so a serve
+    stopped before then runs it at the next start (``resume_follow_ups``) —
+    ``seeded`` when its rows were already written. Unlike a card's follow-up
+    it is cleared AFTER its turn, not claimed before: the turn only reads and
+    proposes (``unattended``), so rerunning a cut-off one doubles nothing."""
     with _CONTINUE_LOCK:
         # notify_run_terminal is wired from two call sites and a done-callback
         # can be re-entered on resume; one continuation per run, ever.
@@ -3272,6 +3290,7 @@ def run_completion_turn(
     if not chat_id or store.get_chat(chat_id) is None:
         # A CLI or scheduled run with no bound chat has no conversation to
         # continue. The one-line notice already covered it.
+        store.clear_run_follow_up(task_id)  # a resumed one whose chat is gone
         return ("run has no bound chat", False)
     run = store.get_run(task_id)
     if run is None:
@@ -3281,6 +3300,7 @@ def run_completion_turn(
     try:
         base_url, api_key, model, protocol = engine.resolved_llm(store.get_chat(chat_id))
     except HTTPException as exc:
+        store.clear_run_follow_up(task_id)
         return (f"continuation could not run: {exc.detail}", False)
 
     # The facts go in the seed rather than making the model call get_run first:
@@ -3309,15 +3329,19 @@ def run_completion_turn(
     # ES-F2 (B13): queue behind the turn in flight — this runs on its own
     # thread (app._on_run_finished), so waiting blocks nothing, and the run's
     # result still reaches the chat instead of being dropped as "busy".
+    if not seeded:
+        store.queue_run_follow_up(task_id, "queued")
     with chat_turn_lock(chat_id):
-        if summary:
+        if summary and not seeded:
             # P4-1 (B37, D5): the worker's words are its own row — wrapped on
             # replay, and they set ``untrusted``; skep's prompt follows as skep's.
             store.add_chat_message(
                 chat_id, role="user", content=f"{finished}Worker summary: {summary}",
                 provenance=f"worker:{task_id}",
             )  # fmt: skip
-        store.add_chat_message(chat_id, role="user", content=seed, provenance="queen")
+        if not seeded:
+            store.add_chat_message(chat_id, role="user", content=seed, provenance="queen")
+            store.queue_run_follow_up(task_id, "seeded")
         try:
             for event, data in engine.turn_events(
                 chat_id,
@@ -3331,7 +3355,9 @@ def run_completion_turn(
                 if event is None and isinstance(data.get("content"), str):
                     parts.append(str(data["content"]))
         except Exception as exc:  # a broken turn must never poison the run pool
+            store.clear_run_follow_up(task_id)
             return (f"continuation failed mid-turn: {exc}", False)
+    store.clear_run_follow_up(task_id)
     reply = "".join(parts).strip()
     return (reply, bool(reply))
 
