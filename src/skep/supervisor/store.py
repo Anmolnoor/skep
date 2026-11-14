@@ -107,9 +107,11 @@ CREATE TABLE IF NOT EXISTS runs (
     worker_kind TEXT,
     coding_engine TEXT,
     supervisor_owner TEXT,
-    -- ES-F242 (D18): the run-finish follow-up turn still owed to its chat —
-    -- 'queued', then 'seeded' once its rows are written; cleared when the
-    -- turn ends (a restart resumes it).
+    -- ES-F242 (D18): the run-finish follow-up turn still owed to its chat:
+    -- 'queued' and then 'seeded' once its rows are written; cleared when
+    -- the turn ends (a restart resumes it). No commas in this comment:
+    -- SQLite 3.47 DROP COLUMN misreads a comma in a comment before the
+    -- last column (the migration test drops it to fake an old database).
     follow_up TEXT
 );
 CREATE TABLE IF NOT EXISTS run_transitions (
