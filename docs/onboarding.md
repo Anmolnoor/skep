@@ -15,7 +15,7 @@ and `skep doctor` says how to approve one.
 
 | Step | What it asks | What it writes |
 |---|---|---|
-| ① model | provider, model, endpoint, and the **name** of the env var that holds the API key (never the key itself). It looks for a local Ollama first, makes one test call, and prints where prompts go (`LOCAL … nothing leaves this machine` or `CLOUD … leaves this machine for <host>`) | the provider registry, the assistant settings, `profile.json` |
+| ① model | provider, model, endpoint, and the **name** of the env var that holds the API key (never the key itself). With no provider named it first tests the provider already configured and keeps it when it works; only then does it look for a local Ollama. A switch makes one test call and rolls back to the previous provider if that call fails, and prints where prompts go (`LOCAL … nothing leaves this machine` or `CLOUD … leaves this machine for <host>`) | the provider registry, the assistant settings, `profile.json` |
 | ② work directory | a path (default `~/workspace`), created if missing | a project, with the `verify_command` inferred from the repo |
 | ③ sandbox | `auto` (the native backend: Seatbelt on macOS, bubblewrap on Linux), `podman`, or `none`. Docker is detected but not offered, because skep has no docker backend | the `sandbox_backend` setting |
 | ④ template | `builder`, `operator` or `assistant` (the default), shown as their `skep policy explain` tables | the locked baseline, after you type `yes` |

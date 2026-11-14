@@ -751,3 +751,107 @@ def test_previewing_the_already_locked_template_says_so(tmp_path: Path) -> None:
         view = template_preview(holder, template="builder")
         assert view["locked"] is True and view["template"] == "builder"
         assert template_preview(holder, template="operator")["locked"] is False
+
+
+def _working_provider(home: Path, fake: FakeOllama, replies: int) -> None:
+    """A home whose provider works (doctor ready) but whose onboard.json has
+    no model record — the real home in L2 (overnight 2026-11-14)."""
+    for _ in range(replies):
+        fake.script_reply("pong")
+    with _holder(home) as (holder, store):
+        onboard_model(holder, store, provider="ollama", model="llama3.2", endpoint=fake.base_url)
+    state = json.loads((home / "onboard.json").read_text())
+    del state["model"]
+    (home / "onboard.json").write_text(json.dumps(state))
+
+
+def test_onboard_yes_keeps_a_provider_that_already_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """L2: `--yes` with no provider flags tests the CURRENT provider first and
+    keeps it; it never switches to a local Ollama it happens to find."""
+    from skep.supervisor import onboard
+
+    home = tmp_path / "home"
+    working, local = FakeOllama(models=["llama3.2"]).start(), FakeOllama(models=["qwen3"]).start()
+    try:
+        _working_provider(home, working, replies=2)  # setup + the keep check
+        before = (home / "profile.json").read_bytes()
+        monkeypatch.setattr(onboard, "detect_ollama", lambda *a, **k: ["qwen3"])
+        monkeypatch.setattr(onboard, "OLLAMA_LOCAL", local.base_url)
+        argv = ["--home", str(home), "onboard", "--yes", "--no-chat"]
+        assert main([*argv, "--workdir", str(tmp_path / "work"), "--sandbox", "none"]) == 0
+    finally:
+        working.stop()
+        local.stop()
+    out = capsys.readouterr().out
+    assert "kept the provider that already works" in out
+    assert (home / "profile.json").read_bytes() == before
+    with _holder(home) as (_, store):
+        assert store.get_setting(LLM_BASE_URL) == working.base_url
+    record = onboard_status(home / "supervisor")["steps"]["model"]
+    assert (record["model"], record["endpoint"], record["kept"]) == (
+        "llama3.2",
+        working.base_url,
+        True,
+    )
+
+
+def test_a_new_provider_that_fails_its_test_leaves_the_old_one_active(tmp_path: Path) -> None:
+    """L2: a switch whose test call fails rolls back — the previous profile
+    stays active, profile.json byte-identical, the llm settings unchanged,
+    and a profile row the attempt created is gone."""
+    from skep.supervisor.serve.llm import LLM_PROTOCOL
+
+    home = tmp_path / "home"
+    working, broken = FakeOllama(models=["llama3.2"]).start(), FakeOllama(models=["m"]).start()
+    try:
+        _working_provider(home, working, replies=1)
+        before = (home / "profile.json").read_bytes()
+        keys = (LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL)
+        with _holder(home) as (holder, store):
+            active = store.active_provider_profile()
+            settings = [store.get_setting(key) for key in keys]
+            for provider in ("ollama", "openai-compatible"):  # same row id; a new row
+                with pytest.raises(ValueError, match=r"test call failed.*still active"):
+                    onboard_model(
+                        holder, store, provider=provider, model="m", endpoint=broken.base_url
+                    )
+                assert store.active_provider_profile() == active
+                assert [store.get_setting(key) for key in keys] == settings
+                assert (home / "profile.json").read_bytes() == before
+            assert store.get_provider_profile("openai-compatible") is None
+            # an interrupt during the test call rolls back too, and stays an interrupt
+            import skep.status
+
+            def interrupted(*_a: Any) -> dict[str, Any]:
+                raise KeyboardInterrupt
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(skep.status, "_worker_provider_check", interrupted)
+                with pytest.raises(KeyboardInterrupt):
+                    onboard_model(
+                        holder, store, provider="ollama", model="m", endpoint=broken.base_url
+                    )
+            assert store.active_provider_profile() == active
+            assert (home / "profile.json").read_bytes() == before
+    finally:
+        working.stop()
+        broken.stop()
+
+
+def test_rest_model_step_with_no_provider_keeps_a_working_one(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """L2 on the REST face (ADR 0050): no provider in the body keeps the
+    current one when it works, and says so; nothing working → names the gap."""
+    client = serve_client(config)
+    refused = client.post("/api/onboard/model", json={})
+    assert refused.status_code == 400 and "no working provider to keep" in refused.json()["detail"]
+    working = FakeOllama(models=["llama3.2"]).start()
+    try:
+        _working_provider(config.home.parent, working, replies=2)
+        kept = client.post("/api/onboard/model", json={})
+    finally:
+        working.stop()
+    assert kept.status_code == 200 and kept.json()["kept"] is True

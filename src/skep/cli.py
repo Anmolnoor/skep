@@ -417,7 +417,17 @@ def _onboard_steps(args: argparse.Namespace, holder: Any, store: Any) -> int:
         print(f"① model: done — {record['provider']} {record['model']}")
     else:
         print("① model")
+        kept = None
         if not given:
+            try:
+                kept = onboard.onboard_keep_model(holder)
+            except ValueError as exc:
+                print(f"  {exc}")
+        if kept is not None:
+            print(f"  kept the provider that already works: {kept['provider']} {kept['model']}")
+            print(f"  test: {kept['test']}")
+            print(f"  egress: {kept['egress']}")
+        elif not given:
             found = onboard.detect_ollama()
             if found is not None:
                 print(
@@ -433,16 +443,17 @@ def _onboard_steps(args: argparse.Namespace, holder: Any, store: Any) -> int:
                 given = {key: value for key, value in vars(answers).items() if value}
                 if not given.get("model") and found:
                     given["model"] = found[0]
-        record = onboard.onboard_model(
-            holder,
-            store,
-            provider=given.get("provider", "ollama"),
-            model=given.get("model", ""),
-            endpoint=given.get("endpoint"),
-            api_key_env=given.get("api_key_env"),
-        )
-        print(f"  test: {record['test']}")
-        print(f"  egress: {record['egress']}")
+        if kept is None:
+            record = onboard.onboard_model(
+                holder,
+                store,
+                provider=given.get("provider", "ollama"),
+                model=given.get("model", ""),
+                endpoint=given.get("endpoint"),
+                api_key_env=given.get("api_key_env"),
+            )
+            print(f"  test: {record['test']}")
+            print(f"  egress: {record['egress']}")
 
     # ② work directory
     record = records["workdir"]

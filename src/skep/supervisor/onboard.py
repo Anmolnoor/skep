@@ -171,6 +171,7 @@ def onboard_model(
         )
     from .provider_presets import preset_egress_note
     from .serve.actions import add_provider, use_provider
+    from .serve.llm import LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL
 
     preset = _preset_for(provider, endpoint, model, api_key_env)
     base_url = (endpoint or preset.base_url or "").strip()
@@ -178,30 +179,63 @@ def onboard_model(
     if not model:
         raise ValueError("name a --model")
     key_env = api_key_env or preset.api_key_env
-    if preset.preset_id in ("ollama", "openai-compatible"):
-        add_provider(
-            store,
-            provider_id=preset.preset_id,
-            protocol=preset.protocol,
-            base_url=base_url,
-            model=model,
-            api_key_env=key_env,
-            cost_class=preset.cost_class,
-            source="onboard",
+
+    # L2: the test call needs the switch written (it probes exactly what a
+    # worker would resolve), so snapshot what the switch touches first and put
+    # it all back if anything fails — a failed switch changes nothing (I8).
+    profile_file = home / "profile.json"
+    saved_profile = profile_file.read_bytes() if profile_file.exists() else None
+    saved_row = store.get_provider_profile(preset.preset_id)
+    previous = store.active_provider_profile()
+    saved_settings = {
+        key: store.get_setting(key) for key in (LLM_BASE_URL, LLM_DEFAULT_MODEL, LLM_PROTOCOL)
+    }
+    try:
+        if preset.preset_id in ("ollama", "openai-compatible"):
+            add_provider(
+                store,
+                provider_id=preset.preset_id,
+                protocol=preset.protocol,
+                base_url=base_url,
+                model=model,
+                api_key_env=key_env,
+                cost_class=preset.cost_class,
+                source="onboard",
+            )
+        else:
+            add_provider(
+                store, preset=preset.preset_id, base_url=base_url, model=model, api_key_env=key_env
+            )
+        used = use_provider(store, holder.current.home, provider_id=preset.preset_id)
+        # use_provider writes profile.json through with no key env (v19-F9); put
+        # the operator's NAME back so doctor and workers read the same truth.
+        run_personal_setup(
+            home, provider=used["protocol"], model=model, endpoint=base_url, api_key_env=key_env
         )
-    else:
-        add_provider(
-            store, preset=preset.preset_id, base_url=base_url, model=model, api_key_env=key_env
+        check = _worker_provider_check(home, 5.0)
+        if check.get("status") != "ready":
+            raise ValueError(f"test call failed: {check.get('label')}")
+    except BaseException as exc:  # an interrupt mid-probe rolls back too
+        if saved_row is None:
+            store.delete_provider_profile(preset.preset_id)
+        else:
+            store.upsert_provider_profile(saved_row)
+        if previous is not None:
+            store.set_active_provider(previous.provider_id)
+        for key, value in saved_settings.items():
+            store.set_setting(key, value)
+        if saved_profile is None:
+            profile_file.unlink(missing_ok=True)
+        else:
+            profile_file.write_bytes(saved_profile)
+        if not isinstance(exc, Exception):
+            raise
+        kept = (
+            f"the previous provider {previous.provider_id!r} is still active"
+            if previous is not None
+            else "no provider was active before and none is now"
         )
-    used = use_provider(store, holder.current.home, provider_id=preset.preset_id)
-    # use_provider writes profile.json through with no key env (v19-F9); put
-    # the operator's NAME back so doctor and workers read the same truth.
-    run_personal_setup(
-        home, provider=used["protocol"], model=model, endpoint=base_url, api_key_env=key_env
-    )
-    check = _worker_provider_check(home, 5.0)
-    if check.get("status") != "ready":
-        raise ValueError(f"test call failed: {check.get('label')}")
+        raise ValueError(f"{exc} — nothing changed: {kept}") from exc
     return _record(
         home,
         "model",
@@ -212,6 +246,42 @@ def onboard_model(
             "api_key_env": key_env,
             "test": str(check.get("label")),
             "egress": preset_egress_note(preset, base_url),
+        },
+    )
+
+
+def onboard_keep_model(holder: ConfigHolder) -> dict[str, Any]:
+    """① with no provider named (L2): test the provider already configured
+    and, when it works, record it as the model step — onboard never replaces
+    a working provider with one it merely detected. Raises ``ValueError``
+    when there is nothing working to keep."""
+    from ..status import _worker_provider_check
+    from ..workers.llm_plan import worker_provider_from_home
+    from .providers import provider_host
+
+    home = _personal_home(holder)
+    check = _worker_provider_check(home, 5.0)
+    provider = worker_provider_from_home(home) if check.get("status") == "ready" else None
+    if provider is None:
+        raise ValueError(f"no working provider to keep ({check.get('label')})")
+    profile = provider.profile
+    host = provider_host(profile.endpoint or "") or "?"
+    egress = (
+        f"LOCAL ({host}) — nothing leaves this machine"
+        if host in _LOOPBACK
+        else f"CLOUD — every assistant/worker prompt leaves this machine for {host}"
+    )
+    return _record(
+        home,
+        "model",
+        {
+            "provider": profile.name,
+            "model": profile.model,
+            "endpoint": profile.endpoint,
+            "api_key_env": profile.api_key_env,
+            "test": str(check.get("label")),
+            "egress": egress,
+            "kept": True,
         },
     )
 

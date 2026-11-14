@@ -797,6 +797,9 @@ def create_app(
 
         try:
             if step == "model":
+                named = (body.provider, body.model, body.endpoint, body.api_key_env)
+                if all(value is None for value in named):
+                    return onboard.onboard_keep_model(holder)  # L2: never a silent switch
                 return onboard.onboard_model(
                     holder,
                     run_store,
