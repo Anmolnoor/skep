@@ -1204,7 +1204,8 @@ def create_app(
                     break
         from ..policy_write import run_unlocked_hosts
 
-        # D34 (ADR 0061): the hosts this run reached that no rule named
+        # D34 (ADR 0061): the hosts this run reached that no rule named —
+        # historical rows only since D42 (unlocked approves no host now)
         reached = run_unlocked_hosts(holder.current.audit_dir, run)
         return {
             **({"unlocked_hosts": reached} if reached else {}),

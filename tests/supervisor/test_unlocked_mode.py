@@ -346,7 +346,9 @@ UNLOCKED_CELLS = [
     # (scope, action, value, verdict, decided_by) for a sandboxed request
     ("shell", "run", "rm -rf build", "allow", "unlocked:app/zero-ask"),
     ("shell", "run", "pytest -q && rm -rf build", "allow", "unlocked:app/zero-ask"),
-    ("network", "connect", "files.example", "allow", "unlocked:app/zero-ask"),
+    # D42: unlocked never widens the network — an unnamed host still asks
+    ("network", "connect", "files.example", "require_approval", "default/unmatched"),
+    ("network", "connect", "*", "require_approval", "default/unmatched"),
     ("shell", "run", "pytest -q", "allow", "template:builder/shell:pytest"),
     ("shell", "run", "git push origin main", "deny", "floor/floor.worker-git-hard-denies"),
     ("shell", "run", "git checkout other", "deny", "floor/floor.worker-git-hard-denies"),
@@ -519,8 +521,7 @@ def _final(client: TestClient, config: SupervisorConfig, task_id: str) -> dict[s
 
 
 @_SANDBOX
-@pytest.mark.parametrize(("mode", "gate"), [("shellgate", "make_lint"),
-                                             ("hostgate", "files.example")])  # fmt: skip
+@pytest.mark.parametrize(("mode", "gate"), [("shellgate", "make_lint")])
 def test_a_gate_on_an_unlocked_project_answers_itself_once(
     repo: Path, config: SupervisorConfig, mode: str, gate: str
 ) -> None:
@@ -564,14 +565,44 @@ def test_a_gate_on_an_unlocked_project_answers_itself_once(
 
 
 @_SANDBOX
-@pytest.mark.parametrize("gate", ["git_push_origin_main", "echo_$(cat_x)"])
-def test_a_floor_or_unreadable_gate_stays_a_human_card(
-    repo: Path, config: SupervisorConfig, gate: str
+@pytest.mark.parametrize(("mode", "gate"), [("shellgate", "git_push_origin_main"),
+                                             ("shellgate", "echo_$(cat_x)"),
+                                             # D42: an unnamed host is never auto-approved
+                                             ("hostgate", "files.example")])  # fmt: skip
+def test_a_floor_unreadable_or_host_gate_stays_a_human_card(
+    repo: Path, config: SupervisorConfig, mode: str, gate: str
 ) -> None:
-    client, first = _gated_run(config, repo, gate)
+    client, first = _gated_run(config, repo, gate, mode=mode)
     _settled(config, first)
-    assert client.get(f"/api/runs/{first}").json()["run"]["state"] == "pending_approval"
+    detail = client.get(f"/api/runs/{first}").json()
+    assert detail["run"]["state"] == "pending_approval"
+    assert "unlocked_hosts" not in detail
     assert [r["verdict"] for r in _decisions(config)] in (["deny"], ["require_approval"])
+
+
+@_SANDBOX
+def test_a_cli_run_on_an_unlocked_project_stops_at_an_unnamed_host_gate(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D42: the CLI path agrees with serve — an unnamed host gate is a stop
+    for a human, never an auto-answer."""
+    import shlex
+    import sys
+
+    from skep.supervisor.cli_cmds import build_config
+
+    from .conftest import FAKE_WORKER
+
+    root = tmp_path / "cli-home"
+    config = build_config(root, None)
+    config.home.mkdir(parents=True)
+    lock_baseline(config.home)
+    _bound(config, repo, UNLOCKED).close()
+    argv = ["--home", str(root), "run", str(repo), "Fix it. MODE:hostgate GATE:files.example"]
+    argv += ["--worker-cmd", shlex.join([sys.executable, str(FAKE_WORKER)]), "--quiet"]
+    main(argv)
+    assert "state:        pending_approval" in capsys.readouterr().out
+    assert _decisions(config) == []
 
 
 def _callback_ran(monkeypatch: pytest.MonkeyPatch) -> Any:
@@ -631,6 +662,9 @@ def test_doctor_names_every_unlocked_project_and_the_way_out(repo: Path, tmp_pat
     lines = _unlocked_advisories(root)
     assert len(lines) == 1
     assert "unlockable" in lines[0] and "--no-unlocked" in lines[0]
+    # D42 / L4: doctor tells the truth about hosts and the CLI path
+    assert "a host no rule names is still refused or asked, never auto-approved" in lines[0]
+    assert "a CLI `skep run` still stops at every gate" in lines[0]
     assert lines[0] in build_status(root, provider_timeout=0.01)["advisories"]
     # D34: the hosts the mode auto-approved in the window, with counts
     from datetime import UTC, datetime, timedelta
@@ -651,7 +685,8 @@ def test_doctor_names_every_unlocked_project_and_the_way_out(repo: Path, tmp_pat
     assert len(lines) == 2
     assert lines[1] == (
         "unlocked project unlockable auto-approved 2 host(s) no rule names in the last "
-        "7 days: files.example (2), pypi.org (1) — each is a decision-log row "
+        "7 days: files.example (2), pypi.org (1) — historical: unlocked no longer "
+        "approves any host (D42); each is a decision-log row "
         "(`skep policy decisions --actor auto:unlocked`)"
     )
 

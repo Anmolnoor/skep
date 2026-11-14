@@ -3812,7 +3812,8 @@ def register_supervisor_commands(
         action=argparse.BooleanOptionalAction,
         default=None,
         help="zero-ask mode for this project (ADR 0061): a sandboxed worker's default "
-        "asks answer themselves, dispatch needs no card and a G10-confirmed patch "
+        "command asks answer themselves on serve-dispatched runs (never a host no rule "
+        "names), dispatch needs no card and a G10-confirmed patch "
         "lands on skep/*; denies, named asks and the floor still hold. Needs a pinned "
         "verify command, a usable sandbox and an approved baseline; --no-unlocked "
         "turns it off",

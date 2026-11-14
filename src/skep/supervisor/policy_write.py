@@ -468,7 +468,8 @@ def unlocked_hosts(
     audit_dir: Path, *, task_ids: Collection[str] | None = None, since: str | None = None
 ) -> dict[str, dict[str, int]]:
     """D34 (ADR 0061): the hosts unlocked mode auto-approved — the decision
-    log's ``network`` allow rows whose layer is ``unlocked:<project>`` —
+    log's ``network`` allow rows whose layer is ``unlocked:<project>``. Since
+    D42 the mode approves no host, so every row found is historical —
     as project → host → count, oldest host first. ``task_ids``: only the
     rows of those runs; ``since``: only rows at or after that UTC stamp."""
     # ponytail: a full scan of both log generations (≤ 20 MB) per call — fine
