@@ -319,6 +319,37 @@ def test_a_finished_run_continues_the_conversation(
         store.close()
 
 
+def test_a_run_finish_follow_up_refuses_web_reads_as_a_follow_up(
+    repo: Path, config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F241: the run-finish continuation refused search_web saying it
+    "does not run in a scheduled turn" — no schedule was involved. The
+    refusal stays (store reads only, unattended); its words name the turn."""
+    from skep.supervisor.serve.chat import _CONTINUED, run_completion_turn
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.store import RunStore
+
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        task_id = _bound_run(store, chat_id, repo)
+        _CONTINUED.discard(task_id)
+        ollama.script_tool_call("search_web", {"query": "why did it fail"})
+        ollama.script_reply("no web here")
+        holder = ConfigHolder(config, store)
+        run_completion_turn(
+            store, holder, Dispatcher(store=store, holder=holder), config.home, task_id
+        )
+        tool_rows = [m.content for m in store.chat_messages(chat_id) if m.role == "tool"]
+        refusal = json.loads(tool_rows[-1])["error"]
+        assert "unattended follow-up turn" in refusal
+        assert "schedul" not in refusal
+    finally:
+        store.close()
+
+
 def test_the_continuation_may_propose_but_never_execute(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:

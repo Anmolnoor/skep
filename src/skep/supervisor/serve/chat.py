@@ -2506,7 +2506,8 @@ class ChatEngine:
                     call_key = (name, json.dumps(args, sort_keys=True, ensure_ascii=True))
                     if unattended and name in UNATTENDED_BLOCKED_READ_TOOLS:
                         # v83-F5 (ADR 0042): store reads only, unattended.
-                        result = {"error": f"{name} {UNATTENDED_READ_REFUSAL}"}
+                        turn = "a scheduled turn" if read_only else "an unattended follow-up turn"
+                        result = {"error": f"{name} {UNATTENDED_READ_REFUSAL.format(turn=turn)}"}
                         previous_read_tool = name
                     elif unattended and name in UNATTENDED_BLOCKED_STORE_WRITES:
                         # ES B121: ...and no store writes either.

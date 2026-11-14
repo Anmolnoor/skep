@@ -2416,9 +2416,12 @@ def hidden_refusal(tool: str, role: Role, decided_by: str) -> str:
 # morning is a real surface, and mutations refusing (read_only) already
 # closes the acting half; this closes the fetching half.
 UNATTENDED_BLOCKED_READ_TOOLS: frozenset[str] = frozenset({"search_web"})
+# ES-F241: {turn} names the turn — "a scheduled turn" (a prompt tick, the one
+# read-only unattended turn) or "an unattended follow-up turn" (a run-finish
+# or card-click follow-up); it said "scheduled" for both.
 UNATTENDED_READ_REFUSAL = (
-    "does not run in a scheduled turn — nobody is watching, so scheduled "
-    "turns read the store only (runs, approvals, chats, notes, memory). "
+    "does not run in {turn} — it fires whether or not anyone is watching, so "
+    "it reads the store only (runs, approvals, chats, notes, memory). "
     "Do web reads in a live chat instead."
 )
 # ES B121: the store writes that ride READ_TOOL_SPECS (they never card), so
