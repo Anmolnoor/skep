@@ -607,3 +607,29 @@ def test_a_secret_named_after_a_cd_or_inside_quoted_code_is_on_the_floor(
     ):
         assert shell_secret_floor_reason(command, cwd=str(tmp_path / "out")), command
     assert shell_secret_floor_reason("cd ~ && ls src", cwd=str(tmp_path / "out")) is None
+
+
+def test_a_codex_login_moved_by_codex_home_is_on_the_floor(
+    fake_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F254: the floor named ~/.codex/auth.json only; an operator with
+    CODEX_HOME=/elsewhere keeps the real ChatGPT login at
+    /elsewhere/auth.json, which the Queen could read (the worker sandbox
+    already masked it, sandbox.secret_paths). Every reader of the floor —
+    path reads, a link to it, the Queen's shell line — now refuses it; the
+    rest of that directory stays ordinary."""
+    from skep.supervisor.secret_floor import shell_secret_floor_reason
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "auth.json").write_text("CANARY-codex-login\n")
+    (elsewhere / "config.toml").write_text("model = 'x'\n")
+    link = tmp_path / "innocent.json"
+    link.symlink_to(elsewhere / "auth.json")
+    monkeypatch.setenv("CODEX_HOME", str(elsewhere))
+
+    reason = secret_floor_reason(elsewhere / "auth.json")
+    assert reason is not None and "Codex login" in reason and "CODEX_HOME" in reason
+    assert secret_floor_reason(link) is not None
+    assert shell_secret_floor_reason("cat $CODEX_HOME/auth.json", cwd=str(tmp_path))
+    assert secret_floor_reason(elsewhere / "config.toml") is None

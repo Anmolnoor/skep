@@ -26,6 +26,8 @@ from glob import iglob
 from itertools import islice
 from pathlib import Path
 
+from .codex_login import auth_file as codex_auth_file
+
 # Relative to the user's home: a file, or a directory and everything under it.
 HOME_SECRETS: tuple[str, ...] = (
     ".ssh",
@@ -206,6 +208,11 @@ def _reason(
         for root, rel in _secret_roots(home, HOME_SECRETS):
             if _under(folded, root):
                 return f"{path} is under ~/{rel}"
+    # ES-F254: the operator's real Codex login where CODEX_HOME moved it —
+    # HOME_SECRETS holds only the default ~/.codex/auth.json; the worker
+    # sandbox masks this same file (sandbox.secret_paths).
+    if folded in {alias_key(spelling) for spelling in path_spellings(codex_auth_file())}:
+        return f"{path} is the Codex login ($CODEX_HOME/auth.json)"
     for home in skep_homes:
         if folded == alias_key(home.parent / SERVE_ENV) or (
             _under(folded, alias_key(home))
