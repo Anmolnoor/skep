@@ -1254,7 +1254,12 @@ def recover_interrupted_runs(
                 "supervisor restarted while the run was in flight; "
                 "no recoverable task evidence on disk"
             )
-            run_store.set_run_summary(task_id, f"Worker died: {detail}.")  # ES-F238
+            killed = " and killed its unsupervised worker" if live_pid is not None else ""
+            run_store.set_run_summary(  # ES-F238: and by what
+                task_id,
+                f"Worker died: supervisor restarted while the run was in flight{killed}; "
+                "no recoverable task evidence on disk.",
+            )
             run_store.transition(task_id, TaskState.WORKER_CRASHED.value, detail)
             recovered.append(task_id)
             if on_run_finished is not None:
