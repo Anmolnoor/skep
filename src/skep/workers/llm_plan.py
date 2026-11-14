@@ -161,7 +161,7 @@ def _active_profile_key(personal_home: Path, endpoint: str) -> str | None:
     db_path = supervisor_home / "supervisor.sqlite3"
     if not db_path.is_file():
         return None
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         active = store.active_provider_profile()
     finally:
@@ -178,7 +178,7 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
     db_path = supervisor_home / "supervisor.sqlite3"
     if not db_path.is_file():
         return None
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         base_url = store.get_setting(LLM_BASE_URL)
         model = store.get_setting(LLM_DEFAULT_MODEL)
@@ -305,6 +305,20 @@ def _api_key(provider: WorkerProvider) -> str | None:
     value = os.environ.get(provider.profile.api_key_env, "").strip()
     if not value:
         raise LlmPlanError(f"provider credential env var {provider.profile.api_key_env} is not set")
+    from skep.supervisor.providers import provider_host
+    from skep.supervisor.serve.llm_copilot import COPILOT_HOST
+
+    if provider_host(provider.profile.endpoint or "") == COPILOT_HOST:
+        # Exchanged like the key-file path (v108-F7, resolve_provider_api_key):
+        # Copilot refuses the GitHub token itself, so a relay or a direct call
+        # holding it 401'd every time and the raw token reached the worker.
+        from skep.supervisor.serve.llm import OllamaError
+        from skep.supervisor.serve.llm_copilot import resolve_copilot_bearer
+
+        try:
+            return resolve_copilot_bearer(value)
+        except OllamaError as exc:
+            raise LlmPlanError(str(exc)) from exc
     return value
 
 

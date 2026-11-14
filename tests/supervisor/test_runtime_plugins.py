@@ -283,7 +283,7 @@ def test_shell_exec_allowlist_covers_bare_flag_variant() -> None:
         # Flags-are-the-payload binaries never match the variant lane.
         (["git", "clean", "-fdx"], ("git", "clean", "-n")),
         (["find", ".", "-delete"], ("find", ".", "-type")),
-        (["sudo", "-k", "ls"], ("sudo", "ls")),
+        # (sudo is denied outright since ES-F262: test_shell_prefixes.)
     ],
 )
 def test_shell_exec_flag_variant_lane_stays_closed(

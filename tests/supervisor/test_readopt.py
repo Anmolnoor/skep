@@ -75,9 +75,13 @@ def test_recovery_leaves_a_run_whose_supervisor_is_still_alive(
         store.transition(task_id, "running", f"pid {worker.pid}")
         live_supervisor = process_owner(worker.pid)  # any live process will do
         assert store.claim_run_supervisor(task_id, expected=None, owner=live_supervisor)
+        login = config.audit_dir / task_id / "codex-login.json"  # ES-F253: its copy too
+        login.parent.mkdir(parents=True, exist_ok=True)
+        login.write_text("CANARY-live-run-login")
 
         assert recover_interrupted_runs(store, config) == []
 
+        assert login.read_text() == "CANARY-live-run-login"
         assert worker.poll() is None
         record = store.get_run(task_id)
         assert record is not None and record.state == "running"
@@ -453,6 +457,53 @@ def test_an_adopted_run_lands_exactly_as_an_uninterrupted_one(
         assert expected["approvals" if "pending" in instructions else "patches"]  # compared
         assert len(proxies) == 2 and proxies[0] == proxies[1]
         assert 5432 in proxies[1]["loopback_ports"]  # type: ignore[operator]
+    finally:
+        store.close()
+
+
+def test_an_adopted_run_lands_by_approval_never_by_auto_apply(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """D35 (ADR 0060 §3): a project that auto-applies verified patches does
+    not auto-apply a re-adopted run — the chain of trust after a restart is
+    reconstructed, not witnessed, so a human verdict lands it (I1, I13). The
+    run says so on its audit trail."""
+    store = RunStore(config.db_path)
+    store.add_project_policy(
+        project_id="auto", name="Auto", strategy="trusted_local_dev", phase="maintain",
+        policy={"auto_apply_verified_patch": True, "verify_command": "true"},
+    )  # fmt: skip
+    store.add_project_binding(
+        project_id="auto", binding_kind="repo_path", binding_value=str(repo.resolve())
+    )
+    store.close()
+    task_id, _pid = _kill_serve_mid_run(config, repo, "Fix it. MODE:happy GATE", "workspace")
+    store, _ = _adopt_and_finish(config, task_id)
+    try:
+        record = store.get_run(task_id)
+        assert record is not None and record.state == "completed"
+        reverify = store.reverification_for(task_id)
+        assert reverify is not None and reverify.confirmed  # it WOULD have auto-applied
+        assert not [
+            a for a in store.approvals_for(task_id) if (a.resolved_by or "").startswith("auto:")
+        ]
+        assert (
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "rev-parse",
+                    "--verify",
+                    "-q",
+                    f"refs/heads/skep/{task_id}",
+                ],
+                capture_output=True,
+            ).returncode
+            != 0
+        )  # nothing landed
+        details = " ".join(d or "" for _, d, _ in store.transitions_for(task_id))
+        assert "auto_apply_blocked" in details and "reconstructed, not witnessed" in details
     finally:
         store.close()
 

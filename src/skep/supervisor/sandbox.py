@@ -22,6 +22,7 @@ env allowlist.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -343,7 +344,8 @@ def available() -> bool:
 # (ADR 0062, ``provider_key_relay``): then the proxy holds the credential.
 # The store (supervisor.sqlite3) stays readable: that same worker reads its
 # provider settings from it. Checked when the profile is
-# built, so a secret file created mid-run is not covered.
+# built, so a secret file created mid-run is not covered (relay-secret is
+# made before the list, ES-F264).
 # W33: the engine logins (~/Library/Keychains, ~/.claude/.credentials.json,
 # ~/.codex/auth.json) are masked too — each external engine's config dir is
 # redirected per run and a dispatch without its auth env is refused (NO AUTH
@@ -712,6 +714,21 @@ def _bubblewrap_args(
         args.extend(["--ro-bind", str(own), str(own)])
     if network.is_domain_list:
         assert unix_socket_path is not None and proxy_port is not None
+        # ES-F251: netshim binds each port inside the worker's own netns,
+        # whose unprivileged-port floor is 1024 and which the worker holds no
+        # capability to lower: a port below it killed the worker (netshim
+        # exit 3). Refuse before anything starts, and say what to change.
+        if privileged := sorted({port for port in loopback_ports if port < 1024}):
+            shown = ", ".join(str(port) for port in privileged)
+            raise SandboxUnavailableError(
+                f"loopback port {shown} is below 1024: on Linux the sandbox presents each "
+                "loopback port inside the worker's own network namespace, where an "
+                "unprivileged process cannot bind a port below 1024, so the worker "
+                "could not start there. Serve the local model provider or service on "
+                "port 1024 or above (ollama's default is 11434) and update the "
+                "provider URL or the project's loopback_ports to match; skep never "
+                "runs a sandbox run unconfined."
+            )
         socket_path = Path(unix_socket_path)
         args.extend(["--ro-bind", str(socket_path.parent), SANDBOX_PROXY_DIR])
         # The shim prefix runs INSIDE the sandbox before the worker; wrap_command
@@ -960,6 +977,15 @@ def write_profile(
     unmasked = [Path(own).resolve() for own in unmasked]
     probe = require_usable(backend)
     _refuse_home_inside(skep_home, [workspace, *extra_writable])
+    # ES-F264: the mask list holds only files that exist now. relay-secret
+    # used to appear on the first relayed dispatch, readable by every run
+    # already going; made here first, it is on every run's list.
+    # A home this process cannot write is one it cannot make the secret in
+    # mid-run either: nothing to mask.
+    from .provider_relay import relay_secret
+
+    with contextlib.suppress(OSError):
+        relay_secret(skep_home / "supervisor")
     read_denied = secret_paths(skep_home, worker_llm_key=worker_llm_key)
     if probe.backend in (PODMAN, "bubblewrap"):  # Seatbelt binds no readable root
         extra_readable = list(extra_readable)

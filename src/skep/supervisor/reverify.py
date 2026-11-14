@@ -173,8 +173,9 @@ def reverify(
     uses; when set, priming resolves into it instead of a worktree-local
     throwaway, so the work survives across runs. None keeps the throwaway.
 
-    ``loopback_ports`` (D6, I2): the project's loopback ports, so a verify
-    that talks to a local service it lists runs as the worker's did.
+    ``loopback_ports`` (D6, I2): the run's loopback ports (the project's and
+    its local model provider's, ES-F252), so a verify that talks to a local
+    service runs as the worker's did.
     """
     if patch_path is None or not patch_path.is_file():
         # v65-F1: 58 of the first 94 reverifications were patch-less runs
@@ -210,6 +211,7 @@ def reverify(
     with TREE_LOCK:
         worktree = create_worktree(repo, config.worktrees_root, f"reverify-{patch_path.stem}", ref)
     proxy: FilteringProxy | None = None
+    proxy_socket_dir: str | None = None
     try:
         env = dict(env)
         # v107-F3: TMPDIR inside the wall — unset, tools fall back to /tmp,
@@ -274,27 +276,39 @@ def reverify(
             # that admits those ports alone (empty allowlist: still offline).
             from .dispatch import _proxy_socket_root  # runtime: dispatch imports us
 
+            # ES-F257: kept apart from the proxy, so the finally removes it
+            # even when the proxy never started (its sockets bind in __init__).
+            proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
             proxy = FilteringProxy(
                 (),
-                unix_socket_path=str(
-                    Path(tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())) / "p.sock"
-                ),
+                unix_socket_path=str(Path(proxy_socket_dir) / "p.sock"),
                 denied_loopback_ports=control_plane_ports(config.home),
                 loopback_ports=ports,
             ).start()
             network = sandbox.NetworkPolicy(allow=("localhost",))
         if profile_path is not None:
-            sandbox.write_profile(
-                profile_path,
-                workspace=worktree,
-                extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
-                extra_readable=git_metadata_readable_roots(worktree),
-                network=network,
-                proxy_port=proxy.port if proxy is not None else None,
-                unix_socket_path=proxy.unix_socket_path if proxy is not None else None,
-                skep_home=config.home.parent,
-                loopback_ports=ports,
-            )
+            try:
+                sandbox.write_profile(
+                    profile_path,
+                    workspace=worktree,
+                    extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
+                    extra_readable=git_metadata_readable_roots(worktree),
+                    network=network,
+                    proxy_port=proxy.port if proxy is not None else None,
+                    unix_socket_path=proxy.unix_socket_path if proxy is not None else None,
+                    skep_home=config.home.parent,
+                    loopback_ports=ports,
+                )
+            except sandbox.SandboxUnavailableError as exc:
+                # ES-F251 (ES-F1, I12): no wall, no re-run — honestly
+                # unavailable with the backend's reason, never patch guilt.
+                return ReverifyOutcome(
+                    "unavailable",
+                    commands,
+                    [],
+                    f"the re-verify sandbox could not be built, so the verification "
+                    f"command was not run: {exc}",
+                )
         applied = subprocess.run(
             ["git", "-C", str(worktree), "apply", str(patch_path)],
             capture_output=True,
@@ -380,10 +394,13 @@ def reverify(
             f"--- re-run output (tail) ---\n{failed_tail or '(no output)'}",
         )
     finally:
-        if proxy is not None:
-            proxy.stop()
-            shutil.rmtree(Path(str(proxy.unix_socket_path)).parent, ignore_errors=True)
-        remove_worktree(repo, worktree)
+        try:
+            if proxy is not None:
+                proxy.stop()
+        finally:
+            if proxy_socket_dir is not None:
+                shutil.rmtree(proxy_socket_dir, ignore_errors=True)
+            remove_worktree(repo, worktree)
 
 
 def reverify_run(

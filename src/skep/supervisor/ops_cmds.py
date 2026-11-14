@@ -46,7 +46,9 @@ def cmd_node_add(args: argparse.Namespace) -> int:
 
 
 def cmd_node_list(args: argparse.Namespace) -> int:
-    store = RunStore(_store_path(args.home))
+    from .cli_cmds import build_config
+
+    store = RunStore(build_config(args.home, None).db_path, readonly=True)
     try:
         nodes = store.list_nodes()
     finally:

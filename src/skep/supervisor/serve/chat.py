@@ -45,7 +45,7 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
-from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS
+from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS, redact
 from ..policy_write import PolicyWriteRejected
 from . import actions
 from .cards import (
@@ -81,6 +81,7 @@ from .tools import (
     CLARIFY_TOOL_NAME,
     COMMAND_TOOL_NAMES,
     DESCRIBE_TOOL_NAME,
+    MANIFEST_TOOLS,
     MUTATING_TOOL_NAMES,
     POLICY_LINE_TOOLS,
     READ_TOOL_NAMES,
@@ -98,6 +99,7 @@ from .tools import (
     execute_mutation,
     execute_read_tool,
     hidden_tools,
+    log_denied_dispatch_asks,
     mutation_execution_decision,
     policy_write_preview,
     search_web_verdict,
@@ -433,10 +435,7 @@ def high_tier_decision(high: str, allowed: Any) -> Any:
     )
 
 
-# P4-2 (ADR 0059 D6) + D23: the calls whose card shows the run manifest.
-_MANIFEST_TOOLS = frozenset(
-    {"dispatch_run", "start_research", "quick_edit", "batch_dispatch", "forge_tool"}
-)
+_MANIFEST_TOOLS = MANIFEST_TOOLS
 
 
 def manifest_ask_decision(allowed: Any) -> Any:
@@ -711,6 +710,28 @@ def _trim_longest_text(data: dict[str, Any], cap: int) -> None:
             f"{original[:keep]}… [{len(original) - keep} chars cut; the rest is in the transcript]"
         )
         over = len(json.dumps(data, ensure_ascii=True)) - cap
+
+
+def _redacted(content: str) -> str:
+    """ES-F260: ``content`` with every inline credential masked (``redact``).
+    A JSON result is masked leaf by leaf and stays valid JSON (v73-F7: a
+    broken one reads as a broken tool and the model loops)."""
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return redact(content)
+
+    def walk(value: Any) -> Any:
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, list):
+            return [walk(item) for item in value]
+        if isinstance(value, dict):
+            return {key: walk(item) for key, item in value.items()}
+        return value
+
+    masked = walk(data)
+    return content if masked == data else json.dumps(masked, ensure_ascii=True)
 
 
 def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
@@ -1249,6 +1270,42 @@ def _strip_inline_think(content: str) -> tuple[str, str]:
     return "".join(visible).strip(), leaked
 
 
+# W42a: the live tool event shows what the model asked for, capped (the
+# transcript keeps the full call).
+STREAM_ARGS_MAX_CHARS = 2000
+# A bare ``key`` is not on the list: set_policy/set_setting name settings with it.
+# ponytail: a [name, value] pair inside a list is not matched by key; the
+# value still goes through redact (prefixed tokens, Bearer/Basic headers).
+_SECRET_ARG_KEY = re.compile(
+    r"(?i)token|secret|passw|pwd|(?:api|private|access)[-_]?key|auth|credential|cookie"
+    r"|session|bearer|signature|(?:^|[-_])pat$"
+)
+
+
+def stream_args(args: dict[str, Any]) -> dict[str, Any]:
+    """The arguments as the operator watching the stream sees them: every
+    string through the decision log's secret masker (``redact``), a
+    secret-named key's value hidden whole, and past STREAM_ARGS_MAX_CHARS a
+    masked preview in place of the object."""
+
+    def mask(key: str, value: Any) -> Any:
+        if _SECRET_ARG_KEY.search(key):
+            return "***"
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, dict):
+            return {str(k): mask(str(k), v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [mask(key, v) for v in value]
+        return value
+
+    shown = {str(k): mask(str(k), v) for k, v in args.items()}
+    text = json.dumps(shown, ensure_ascii=True)
+    if len(text) <= STREAM_ARGS_MAX_CHARS:
+        return shown
+    return {"truncated": True, "preview": text[:STREAM_ARGS_MAX_CHARS] + "..."}
+
+
 def _call_args(call: dict[str, Any]) -> dict[str, Any]:
     """Tool-call arguments, tolerating the JSON-string variant some servers send."""
     arguments = call.get("function", {}).get("arguments") or {}
@@ -1632,7 +1689,10 @@ class ChatEngine:
                 # blob must never eat the budget that carries the question.
                 # Older ones are history, not working data — the tighter cap.
                 cap = TOOL_REPLAY_CAP if record.id < last_user_id else CURRENT_TOOL_REPLAY_CAP
-                content = _truncate_tool_result(content, cap, record.tool_name)
+                # ES-F260: a tool or MCP error can echo a credential (an
+                # httpx error's URL, a provider's auth header); the model, a
+                # third party, never sees one. The stored row stays whole.
+                content = _redacted(_truncate_tool_result(content, cap, record.tool_name))
                 message: dict[str, Any] = {
                     "role": "tool",
                     "tool_name": record.tool_name,
@@ -1816,7 +1876,7 @@ class ChatEngine:
         return {"role": "user", "content": f"{record.content}{listed}"}
 
     def _chat_stream_with_retry(
-        self, base_url: str, api_key: str | None, **kwargs: Any
+        self, base_url: str, api_key: str | None, *, chat_id: str, **kwargs: Any
     ) -> Iterator[dict[str, Any]]:
         model = str(kwargs.get("model") or "")
         for chunk in chat_stream_with_retry(base_url, api_key, sleep=self.sleep, **kwargs):
@@ -1828,6 +1888,7 @@ class ChatEngine:
                     model=model,
                     prompt_tokens=int(chunk.get("prompt_eval_count") or 0),
                     completion_tokens=int(chunk.get("eval_count") or 0),
+                    chat_id=chat_id,
                 )
             yield chunk
 
@@ -1984,6 +2045,7 @@ class ChatEngine:
                     for chunk in self._chat_stream_with_retry(
                         base_url,
                         api_key,
+                        chat_id=chat_id,
                         model=model,
                         messages=messages,
                         tools=tools_payload,
@@ -2112,6 +2174,7 @@ class ChatEngine:
             for call in tool_calls:
                 name = str(call.get("function", {}).get("name") or "")
                 args = _call_args(call)
+                shown_args = stream_args(args)
                 # v106-F4 (v101-F15): the model's own call id rides every row
                 # this call produces — position stops being the only link.
                 call_id = str(call.get("id") or "") or None
@@ -2132,7 +2195,7 @@ class ChatEngine:
                         tool_call_id=call_id,
                         content=json.dumps(bad_args, ensure_ascii=True),
                     )
-                    yield ("tool", {"tool": name, "result": bad_args})
+                    yield ("tool", {"tool": name, "args": shown_args, "result": bad_args})
                     continue
                 if name == CLARIFY_TOOL_NAME:
                     # v51-F7: a turn-ENDING prompt — the third interaction
@@ -2180,7 +2243,10 @@ class ChatEngine:
                         content=json.dumps(result, ensure_ascii=True),
                     )
                     # v115-F3: the terminal receipt names the lane (I8).
-                    yield ("tool", {"tool": name, "kind": "read", "result": result})
+                    yield (
+                        "tool",
+                        {"tool": name, "args": shown_args, "kind": "read", "result": result},
+                    )
                     continue
                 # P4-1 (ADR 0059 D5): search_web is a read tool, and read tools
                 # never card — except a taint ask in a turn a human can answer.
@@ -2219,7 +2285,7 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(refusal, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "result": refusal})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": refusal})
                         continue
                     decision = search_ask or mutation_execution_decision(
                         name, args, store=self.store, holder=self.holder, chat_id=chat_id
@@ -2295,7 +2361,7 @@ class ChatEngine:
                     if head is not None:
                         joined = self._join_fold(chat_id, head, name, args, call_id)
                         if joined is not None:
-                            yield ("tool", {"tool": name, "result": joined})
+                            yield ("tool", {"tool": name, "args": shown_args, "result": joined})
                         continue
                     if taint_ask and (unattended or name in taint_carded):
                         # P4-1: an unattended turn refuses a taint ask (nobody is
@@ -2321,7 +2387,7 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(waiting, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "result": waiting})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": waiting})
                         continue
                     if taint_ask:
                         taint_carded.add(name)
@@ -2418,6 +2484,7 @@ class ChatEngine:
                         # auto-dispatched runs) keeps working untouched.
                         receipt: dict[str, Any] = {
                             "tool": name,
+                            "args": shown_args,
                             "decision": asdict(decision),
                             "result": payload,
                             "card": self._card(chat_id, name, args),
@@ -2443,7 +2510,7 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "result": payload})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": payload})
                         continue
                     # v109-F2: a pending twin is not a new question. Identical
                     # args → the model gets the pending card back and the turn
@@ -2464,7 +2531,7 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "result": payload})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": payload})
                         continue
                     if duplicate is not None:
                         self.store.supersede_chat_action(
@@ -2619,7 +2686,7 @@ class ChatEngine:
                 # The live event carries the full result for EVERY tool — the
                 # old notes/tasks whitelist left get_run/list_runs/... rendering
                 # as empty expanders until a page reload (history always had it).
-                yield ("tool", {"tool": name, "result": result})
+                yield ("tool", {"tool": name, "args": shown_args, "result": result})
             for action_event in round_cards:
                 # P4-2: the card as the server recorded it — every folded item.
                 record = self.store.get_chat_action(str(action_event["action_id"]))
@@ -2670,6 +2737,7 @@ class ChatEngine:
                 for chunk in self._chat_stream_with_retry(
                     base_url,
                     api_key,
+                    chat_id=chat_id,
                     model=model,
                     messages=messages,
                     tools=None,
@@ -3095,6 +3163,7 @@ class ChatEngine:
                 self.store.resolve_chat_action(action_id, status="denied", result=payload)
             except ValueError:
                 raise card_taken(self.store, action_id) from None
+            log_denied_dispatch_asks(self.store, self.holder, action)
             payloads = [payload] * len(items)
         for item, item_payload in zip(items, payloads, strict=True):
             row_id = self.store.add_chat_message(
@@ -3728,6 +3797,7 @@ def add_chat_routes(
                 run_store.resolve_chat_action(action_id, status="denied", result=payload)
             except ValueError:
                 raise card_taken(run_store, action_id) from None
+            log_denied_dispatch_asks(run_store, holder, action)
         return {"action_id": action_id, "tool": action.tool, **payload}
 
     @app.post("/api/chats/{chat_id}/commands/{action_id}/confirm")

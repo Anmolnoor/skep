@@ -191,6 +191,59 @@ def test_a_carded_dispatch_logs_each_ask_once(desk: Desk) -> None:
     assert len([r for r in rows if r.get("source") == "delegated"]) == 1  # the hop, once
 
 
+def test_a_denied_dispatch_card_logs_each_ask_once(desk: Desk) -> None:
+    """I8, I13: a dispatch's asks are recorded by the compile its run gets —
+    a denied card gets no run, so the denial writes them, once, marked
+    denied. Before: an asked-then-denied dispatch left no ask row at all."""
+    chat, card = desk.propose()
+    desk.ollama.script_reply("ok")
+    list(
+        desk.engine.verdict_events(
+            chat, desk.store.get_chat(chat), card["action_id"], confirm=False, actor="chat-user"
+        )
+    )
+    manifest = card["card"]["manifest"]
+    asked = [f"network.connect {h}" for h in manifest["network_ask"]] + [
+        f"shell.run {' '.join(p)}" for p in manifest["shell_ask"]
+    ]
+    assert asked
+    log = desk.config.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    ask_rows = [r for r in rows if r.get("delegated") == "ask"]
+    assert sorted(f"{r['scope']}.{r['action']} {r['value']}" for r in ask_rows) == sorted(asked)
+    assert {r.get("resolution") for r in ask_rows} == {"denied"}
+    assert {r.get("action_id") for r in ask_rows} == {card["action_id"]}
+    assert {r.get("as_shown") for r in ask_rows} == {True}
+    assert desk.runner.submitted == []  # no run: the denial is the only record
+
+
+def test_a_denied_card_whose_policy_moved_says_its_rows_are_not_what_was_shown(
+    desk: Desk,
+) -> None:
+    """I8, I13: the denial compiles its rows from the policy as it is at deny
+    time. When that no longer asks what the card showed, the rows say so
+    (``as_shown: false``) instead of passing for the question the human saw."""
+    chat, card = desk.propose()
+    (pending,) = desk.store.pending_chat_actions(chat)
+    shown = {**pending.card["manifest"], "network_ask": []}  # type: ignore[index]
+    desk.store._conn.execute(  # the card as shown asked nothing
+        "UPDATE chat_actions SET card_json = ? WHERE action_id = ?",
+        (json.dumps({"manifest": shown}), pending.action_id),
+    )
+    desk.store._conn.commit()
+    desk.ollama.script_reply("ok")
+    list(
+        desk.engine.verdict_events(
+            chat, desk.store.get_chat(chat), card["action_id"], confirm=False, actor="chat-user"
+        )
+    )
+    log = desk.config.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    ask_rows = [r for r in rows if r.get("delegated") == "ask"]
+    assert ask_rows
+    assert {(r.get("resolution"), r.get("as_shown")) for r in ask_rows} == {("denied", False)}
+
+
 def test_an_ask_the_card_did_not_list_still_gates(desk: Desk) -> None:
     chat, card = desk.propose()
     (pending,) = desk.store.pending_chat_actions(chat)
@@ -948,3 +1001,38 @@ def test_a_codex_card_on_the_chatgpt_login_says_so_and_a_change_is_stale(
     assert "engine_auth" in (manifest_widening(same_hosts, plan) or "")
     monkeypatch.setenv("OPENAI_API_KEY", "test-value")
     assert manifest(codex_chatgpt_login=True)["engine_auth"] is None  # a key still wins
+
+
+def test_a_denied_batch_card_compares_each_member_with_what_it_showed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A batch card's manifest is one per run: as_shown holds only when every
+    member still asks what the card showed; a card that stored no manifest
+    is never as shown."""
+    from types import SimpleNamespace
+
+    from skep.supervisor.serve import tools
+
+    member = {"network_ask": ["example.com"], "shell_ask": []}
+    marks: list[dict[str, Any]] = []
+
+    def fake(store: Any, holder: Any, args: Any, chat_id: Any, tool: Any, **kw: Any) -> Any:
+        if kw.get("resolution") is not None:
+            marks.append(kw["resolution"])
+        return {"members": [member, member]}
+
+    monkeypatch.setattr(tools, "dispatch_manifest_for", fake)
+
+    def card(manifest: Any) -> Any:
+        return SimpleNamespace(
+            tool="batch_dispatch",
+            chat_id="c",
+            action_id="a1",
+            card=None if manifest is None else {"manifest": manifest},
+            fold_items=lambda: [{"args": {}}],
+        )
+
+    tools.log_denied_dispatch_asks(None, None, card({"members": [member, member]}))  # type: ignore[arg-type]
+    tools.log_denied_dispatch_asks(None, None, card({"members": [member, {}]}))  # type: ignore[arg-type]
+    tools.log_denied_dispatch_asks(None, None, card(None))  # type: ignore[arg-type]
+    assert [m["as_shown"] for m in marks] == [True, False, False]

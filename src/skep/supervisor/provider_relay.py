@@ -8,6 +8,7 @@ for it: whether a run is relayed, the per-run token, and the worker's env.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import hmac
 import json
@@ -33,7 +34,7 @@ RELAY_SECRET_FILE = "relay-secret"
 _SECRET_BYTES = 32
 
 
-def _relay_secret(supervisor_home: Path) -> bytes:
+def relay_secret(supervisor_home: Path) -> bytes:
     """The supervisor's relay secret, made once. Written whole to a private
     temp file and moved into place, so no reader ever sees it half-written;
     a short one (a crash before this rule) is replaced, never used."""
@@ -64,7 +65,7 @@ def relay_token(supervisor_home: Path, task_id: str) -> str:
     """The run's relay token: HMAC(relay-secret, task_id). Derived, not
     stored, so a restarted supervisor that re-adopts the run (ADR 0060)
     recomputes the token the worker already holds."""
-    secret = _relay_secret(supervisor_home)
+    secret = relay_secret(supervisor_home)
     return hmac.new(secret, task_id.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
@@ -130,8 +131,31 @@ def _relay_for(config: SupervisorConfig, task_id: str) -> tuple[ProviderRelay | 
         return None, "", f"not used: {why}"
     endpoint, protocol, key, model = plan
     token = relay_token(config.home, task_id)
-    relay = ProviderRelay(upstream=endpoint, token=token, key=key, protocol=protocol)
+    from .providers import provider_host
+    from .serve.llm_copilot import COPILOT_HOST
+
+    renew = None
+    if provider_host(endpoint) == COPILOT_HOST:
+        renew = functools.partial(_renewed_copilot_key, config.home.parent, endpoint)
+    relay = ProviderRelay(upstream=endpoint, token=token, key=key, protocol=protocol, renew=renew)
     return relay, model, "on"
+
+
+def _renewed_copilot_key(personal_home: Path, endpoint: str, refused: str) -> str:
+    """ES-F263: a fresh Copilot bearer for a relay whose bearer the provider
+    refused — the cached one dropped, then resolved exactly as at dispatch.
+    Only for the endpoint the relay is bound to: an operator who switched
+    profiles mid-run must not have the new profile's key sent to this one's
+    host (ADR 0062: the key goes to its own upstream, never another)."""
+    from .serve.llm_copilot import forget_copilot_bearer
+
+    forget_copilot_bearer(refused)
+    plan, why = relay_plan(personal_home)
+    if plan is None or not plan[2]:
+        raise ValueError(f"the provider key could not be renewed: {why}")
+    if plan[0] != endpoint:
+        raise ValueError("the provider key could not be renewed: the worker provider changed")
+    return plan[2]
 
 
 def readopted_relay(

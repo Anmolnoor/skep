@@ -43,6 +43,28 @@ def test_completed_run_is_reverified_and_confirmed(repo: Path, config: Superviso
     _no_leftovers(repo, config)
 
 
+def test_reverify_gets_the_runs_local_provider_port_too(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F252 (D6, I2): the worker reached its local model provider's port
+    (provider_hosts) beside the project's loopback_ports; G10 got only the
+    latter, so a test needing the local provider failed in re-verify only."""
+    from skep.supervisor import dispatch
+    from skep.supervisor.reverify import reverify_run as real
+
+    seen: dict[str, object] = {}
+
+    def spy(**kwargs: object) -> ReverifyOutcome:
+        seen.update(kwargs)
+        return real(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(dispatch, "reverify_run", spy)
+    monkeypatch.setattr(dispatch, "provider_hosts_for", lambda *_a, **_k: ["localhost:11434"])
+    outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
+    assert outcome.record.state == "completed"
+    assert seen["loopback_ports"] == (11434,)
+
+
 def test_lying_worker_is_caught_by_reverification(repo: Path, config: SupervisorConfig) -> None:
     """The worker claims completed+passed, but its patch fails the recorded command."""
     outcome = run_task(repo, "Pretend to fix it. MODE:liar", config=config)
@@ -289,6 +311,85 @@ def test_non_uv_pin_never_primes(repo: Path, config: SupervisorConfig, tmp_path:
     )
     assert outcome.outcome == "passed"
     assert not log.exists()
+
+
+def test_a_wall_that_cannot_be_built_is_unavailable_not_a_crash(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F251: a profile the backend refuses (a privileged loopback port on
+    bubblewrap) makes re-verification honestly unavailable, with the reason —
+    never an exception out of G10 and never an unconfined re-run."""
+    from skep.supervisor import sandbox
+
+    def refuse(*_args: object, **_kwargs: object) -> Path:
+        raise sandbox.SandboxUnavailableError("loopback port 80 is below 1024")
+
+    monkeypatch.setattr(sandbox, "write_profile", refuse)
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["true"],
+        config=config,
+        profile_path=tmp_path / "reverify.profile.sb",
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert outcome.outcome == "unavailable"
+    assert outcome.exit_codes == []
+    assert "loopback port 80 is below 1024" in outcome.detail
+
+
+@pytest.mark.parametrize("fails", ["proxy_start", "proxy_stop"])
+def test_reverify_removes_its_proxy_socket_dir_whatever_the_proxy_did(
+    repo: Path,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fails: str,
+) -> None:
+    """ES-F257: the bubblewrap loopback bridge's socket dir (skep-nx-*) was
+    removed only through a started proxy; a proxy that failed to start (its
+    sockets bind in the constructor) or to stop left the dir behind — Fedora
+    collected 124 under /run/user/1000. The dir now goes in the finally."""
+    import importlib
+
+    from skep.supervisor import dispatch, sandbox
+
+    reverify_module = importlib.import_module("skep.supervisor.reverify")
+    root = tmp_path / "runtime"
+    root.mkdir()
+    monkeypatch.setattr(dispatch, "_proxy_socket_root", lambda: str(root))
+    bwrap = sandbox.SandboxAvailability(True, backend="bubblewrap")
+    monkeypatch.setattr(sandbox, "availability", lambda backend=None: bwrap)
+    monkeypatch.setattr(sandbox, "write_profile", lambda path, **_kw: path)
+
+    class Proxy:
+        port = 40000
+
+        def __init__(self, _allow: object, *, unix_socket_path: str, **_kw: object) -> None:
+            if fails == "proxy_start":
+                raise OSError("cannot bind the bridge socket")
+            self.unix_socket_path = unix_socket_path
+
+        def start(self) -> Proxy:
+            return self
+
+        def stop(self) -> None:
+            raise RuntimeError("stop failed")
+
+    monkeypatch.setattr(reverify_module, "FilteringProxy", Proxy)
+    with pytest.raises((OSError, RuntimeError)):
+        reverify_module.reverify(
+            repo=repo,
+            ref=None,
+            patch_path=_patch_adding_marker(tmp_path),
+            commands=["true"],
+            config=config,
+            profile_path=tmp_path / "reverify.profile.sb",
+            env={"PATH": "/usr/bin:/bin"},
+            loopback_ports=(5432,),
+        )
+    assert list(root.iterdir()) == []
 
 
 def test_failed_prime_is_unavailable_not_patch_guilt(

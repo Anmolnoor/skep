@@ -245,3 +245,46 @@ def test_the_digest_tells_the_model_it_is_lossy_and_how_to_find_the_rest(
     assert "(condensed, and its oldest lines drop once it is full;" in system
     tools = {t["function"]["name"] for t in ollama.chat_bodies()[0]["tools"]}
     assert "search_chats" in tools
+
+
+def test_a_replayed_tool_result_masks_a_credential_and_stays_valid_json(
+    config: SupervisorConfig,
+) -> None:
+    """ES-F260 follow-up: a tool or MCP error carries ``str(exc)`` — an httpx
+    error's URL, a provider's auth header — and the Queen's model (a third
+    party) was resent it every round. The replay masks it leaf by leaf, so a
+    JSON result stays JSON (v73-F7); the stored row stays whole."""
+    import json
+
+    from skep.supervisor.serve.chat import ChatEngine
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    canary = "CANARY-" + "m" * 20
+    error = {"ok": False, "error": f"http MCP transport error: 401\nAuthorization: Bearer {canary}"}
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        engine = ChatEngine(
+            store=store, holder=holder, runner=Dispatcher(holder, store), home=config.home
+        )
+        chat = store.create_chat(title="t", model="fake", source="web")
+        store.add_chat_message(chat.chat_id, role="user", content="call it")
+        store.add_chat_message(chat.chat_id, role="assistant", content="", tool_calls=[{}])
+        store.add_chat_message(
+            chat.chat_id, role="tool", tool_name="mcp_call", content=json.dumps(error)
+        )
+        store.add_chat_message(chat.chat_id, role="assistant", content="", tool_calls=[{}])
+        store.add_chat_message(
+            chat.chat_id, role="tool", tool_name="run_shell", content=f"API_TOKEN={canary} ok"
+        )
+
+        replay, _dropped = engine._replay(chat.chat_id, store.get_chat(chat.chat_id), budget=12_000)
+
+        tool_rows = [str(m["content"]) for m in replay if m["role"] == "tool"]
+        assert len(tool_rows) == 2 and all(canary not in row for row in tool_rows)
+        assert json.loads(tool_rows[0])["error"].endswith("Authorization: Bearer ***")
+        assert tool_rows[1] == "API_TOKEN=*** ok"
+        assert canary in store.chat_messages(chat.chat_id)[2].content
+    finally:
+        store.close()

@@ -338,3 +338,90 @@ def test_a_recovered_runs_reverify_gets_the_projects_loopback_ports(
     finally:
         store.close()
     assert seen["loopback_ports"] == (5432,)
+
+
+def test_a_recovered_runs_reverify_gets_its_local_provider_port_too(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F252 (D6, I2): as the live path — the run reached its local model
+    provider's port, so its late re-verify does too."""
+    from skep.supervisor import dispatch
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(dispatch, "reverify_run", lambda **kwargs: seen.update(kwargs))
+    store = RunStore(config.db_path)
+    try:
+        task_id, workspace = _strand_run(store, config, repo)
+        task_path = config.audit_dir / task_id / "task.json"
+        task = dispatch._task_from_audit(config, task_id)
+        assert task is not None
+        permissions = task.permissions.model_copy(update={"provider_hosts": ["localhost:11434"]})
+        write_task_file(task.model_copy(update={"permissions": permissions}), task_path)
+        _deposit_completed_result(store, config, task_id, workspace)
+        assert recover_interrupted_runs(store, config) == [task_id]
+    finally:
+        store.close()
+    assert seen["loopback_ports"] == (11434,)
+
+
+def test_recovery_sweeps_login_copies_no_live_worker_needs(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F253: a codex run's per-run ChatGPT login copy lives in its audit
+    dir until the run's ``finally`` unlinks it — a SIGKILLed serve never gets
+    there. Serve start's recovery removes every copy whose run no live worker
+    holds: the stranded run's and a finished run's alike."""
+    from skep.supervisor.secret_floor import CODEX_RUN_LOGIN
+
+    store = RunStore(config.db_path)
+    try:
+        task_id, _workspace = _strand_run(store, config, repo)
+        stranded = config.audit_dir / task_id / CODEX_RUN_LOGIN
+        finished = config.audit_dir / "long-finished-run" / CODEX_RUN_LOGIN
+        for copy in (stranded, finished):
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_text("CANARY-codex-access-token")
+        assert recover_interrupted_runs(store, config) == [task_id]
+    finally:
+        store.close()
+    assert not stranded.exists()
+    assert not finished.exists()
+
+
+def test_recovery_sweeps_proxy_socket_dirs_no_live_run_holds(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ES-F257 follow-up: a SIGKILLed serve strands its skep-nx-* dir, dead
+    socket and all. Serve start removes every old one no live run's record
+    names; it keeps the dir a live run's record names (re-adoption rebinds
+    it), one whose socket still answers (another home's live proxy), and a
+    fresh one (a dispatch about to record it)."""
+    import os
+    import socket
+
+    root = Path(os.environ["XDG_RUNTIME_DIR"])
+    dirs = {n: root / f"skep-nx-{n}" for n in ("empty", "dead", "held", "answers", "fresh")}
+    for d in dirs.values():
+        d.mkdir()
+    dead = socket.socket(socket.AF_UNIX)
+    dead.bind(str(dirs["dead"] / "p.sock"))
+    dead.close()  # the socket file a killed proxy leaves behind
+    listening = socket.socket(socket.AF_UNIX)
+    listening.bind(str(dirs["answers"] / "p.sock"))
+    listening.listen()
+    for name, d in dirs.items():
+        if name != "fresh":
+            os.utime(d, (0, 0))
+    store = RunStore(config.db_path)
+    try:
+        task_id, _workspace = _strand_run(store, config, repo)
+        held_sock = dirs["held"] / "p.sock"
+        store.transition(task_id, "running", f"pid 99999 proxy socket {held_sock}")
+        # another live supervisor holds the run
+        monkeypatch.setattr(store, "claim_run_supervisor", lambda *a, **k: False)
+        recover_interrupted_runs(store, config)
+    finally:
+        store.close()
+        listening.close()
+    assert not dirs["empty"].exists() and not dirs["dead"].exists()
+    assert dirs["held"].exists() and dirs["answers"].exists() and dirs["fresh"].exists()

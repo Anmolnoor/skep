@@ -602,11 +602,11 @@ def test_subcommands_are_not_folded() -> None:
 # reach a remote, walked past the git floor. No stock allowlist holds them,
 # but the floor holds regardless of what an operator allowlists or approves.
 EXEC_THROUGH_PUSHES = [
-    "find . -exec git push \;",
+    r"find . -exec git push \;",
     "find . -execdir git push {} +",
-    "find . -ok git push \;",
-    "find . -okdir git push \;",
-    "find . -name x -exec sh -c 'git push' \;",
+    r"find . -ok git push \;",
+    r"find . -okdir git push \;",
+    r"find . -name x -exec sh -c 'git push' \;",
     "git submodule foreach 'git push'",
     "git submodule foreach --recursive git push origin",
     "git -C sub submodule --quiet foreach 'cd x && git push'",
@@ -697,3 +697,72 @@ def test_es_f49_review_reserved_words_do_not_hide_a_command_from_the_floor(line:
     assert queen_command_line_refusal(line) is not None
     for argv in (["{", "git", "push"], ["!", "git", "push"], ["then", "git", "push"]):
         assert hard_denied_segment_reason(argv) is not None, argv
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "su -c 'git push origin main'",
+        "su root -c 'rm -rf cache'",
+        "su - bob -c ls",
+        "su",
+        "/bin/SU -",
+        "pkexec rm x",
+        "run0 ls",
+    ],
+)
+def test_su_is_privilege_escalation_on_the_floor(command: str) -> None:
+    """ES-F261: the floor refused sudo/doas first (every deny below keys on
+    argv[0], I4) but not su, whose -c payload is the same laundering path:
+    `su -c 'git push'` was allowlistable and ran from chat."""
+    import shlex
+
+    from skep.supervisor.serve.cards import risk
+    from skep.supervisor.shell_prefixes import queen_command_line_refusal
+
+    argv = shlex.split(command)
+    assert dangerous_prefix_reason(argv) == "privilege escalation cannot be allowlisted"
+    assert "privilege escalation" in (queen_shell_refusal(argv) or "")
+    assert "privilege escalation" in (queen_command_line_refusal(command) or "")
+    assert "launder" in (risk("run_shell", {"argv": argv}) or "")
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["env", "sudo", "rm", "-rf", "cache"],
+        ["env", "FOO=1", "sudo", "rm", "x"],
+        ["env", "-i", "sudo", "ls"],
+        ["env", "-u", "HOME", "doas", "ls"],
+        ["/usr/bin/env", "-S", "su -c ls"],
+        ["FOO=1", "sudo", "ls"],
+        ["nice", "-n", "5", "sudo", "ls"],
+        ["timeout", "5", "sudo", "ls"],
+        ["command", "sudo", "ls"],
+        ["exec", "sudo", "ls"],
+        ["nohup", "sudo", "ls"],
+        ["xargs", "sudo", "ls"],
+        ["sudo", "-k", "ls"],  # was a closed flag-variant lane (v93-F1); now a deny
+    ],
+)
+def test_escalation_is_seen_through_env_and_launchers(argv: list[str]) -> None:
+    """ES-F262: `env sudo …` put sudo at argv[1]. The Queen's argv check and
+    the card read argv[0] only, and the worker gate had no escalation check
+    at all — an approved or allowlisted `env FOO=1` prefix covered
+    `env FOO=1 sudo rm -rf x`. Every floor reads the argvs a line runs."""
+    from skep.supervisor.serve.cards import risk
+    from skep.workers.runtime_plugins import SHELL_EXEC_PLUGIN
+
+    assert "privilege escalation" in (queen_shell_refusal(argv) or "")
+    assert "launder" in (risk("run_shell", {"argv": argv}) or "")
+    assert dangerous_prefix_reason(argv) is not None
+    decision = SHELL_EXEC_PLUGIN.decision(
+        purpose="run",
+        argv=argv,
+        command=" ".join(argv),
+        approved_shell_commands=[argv[:2], ["env", "FOO=1"]],
+        shell_allowlist=[argv[:2]],
+    )
+    assert decision.verdict == "deny"
+    assert decision.reason == "capability.deny.privilege_escalation"
+    assert "without sudo" in (decision.detail or "")

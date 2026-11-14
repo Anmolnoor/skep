@@ -141,7 +141,10 @@ These require account or hosting access and cannot be proven by local tests:
    The script preflights `claude auth status` and `claude --print` before it
    creates a Skep task. If auth is stale, run `claude auth login`. If the
    default Claude Code model is unavailable, set `SKEP_CLAUDE_CODE_CMD` to a
-   working command such as `claude --model <available-model>`.
+   working command such as `claude --model <available-model>`. The run is the
+   `claude_code` engine inside the sandbox, which masks the keychain, so export
+   `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) or `ANTHROPIC_API_KEY`
+   first; the script stops before dispatch without one.
 
 10. Confirm the GitHub profile is up to date with Skep pinned or linked.
 11. Confirm anmolnoor.com links to skep.anmolnoor.com.

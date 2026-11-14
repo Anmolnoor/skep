@@ -80,7 +80,9 @@ real key in the protocol's header. A request without the token gets 403
 and no upstream connection.
 
 The token is `HMAC-SHA256(relay-secret, task_id)`. `relay-secret` is a 0600
-file the supervisor creates on first use in the supervisor home; its name
+file the supervisor creates in the supervisor home before it writes any
+sandbox profile (ES-F264: the mask list holds only files that exist, so a
+secret made on first use was readable by a run already going); its name
 matches `*-secret`, so the sandbox mask list and the secret floor already
 hide it from every worker and every Queen read tool. One relay serves one
 run: another run's worker holds another token, and a relay is bound to one

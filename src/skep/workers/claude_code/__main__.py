@@ -36,6 +36,9 @@ CLAUDE_SPEC = AdapterSpec(
         instructions,
     ],
     plan_steps=("run claude --print", "capture git diff"),
+    # ES-F255 (D36): an external agent never runs outside skep's sandbox —
+    # the refusal ES-F220 left off claude_code for the workspace-mode docs.
+    requires_sandbox=True,
 )
 
 

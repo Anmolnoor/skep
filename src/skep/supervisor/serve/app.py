@@ -1199,7 +1199,12 @@ def create_app(
                 project_context = project_context_detail_view(detail.get("project_context"))
                 if project_context is not None:
                     break
+        from ..policy_write import run_unlocked_hosts
+
+        # D34 (ADR 0061): the hosts this run reached that no rule named
+        reached = run_unlocked_hosts(holder.current.audit_dir, run)
         return {
+            **({"unlocked_hosts": reached} if reached else {}),
             "run": run,
             # v115-F1: the forward pointer of the resume chain (v79-F2 kept it
             # for chat only; the run page had to rediscover the successor).

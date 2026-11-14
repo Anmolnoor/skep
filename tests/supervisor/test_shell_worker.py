@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from skep.supervisor import SupervisorConfig
+from skep.supervisor import SupervisorConfig, sandbox
 from skep.supervisor.contracts_io import DEFAULT_BUDGET, DEFAULT_PERMISSIONS, mint_task, read_result
 from skep.supervisor.dispatch import run_task
 from skep.worker_contract import Permissions, TaskState, VerificationOutcome
@@ -43,6 +43,7 @@ def test_shell_worker_runs_configured_agent_and_writes_contract_result(
         encoding="utf-8",
     )
     monkeypatch.setenv("SKEP_SHELL_WORKER_CMD", f"{sys.executable} {fake_agent}")
+    monkeypatch.setenv("SKEP_SANDBOX", "test")  # a direct drive says it is inside
 
     task = mint_task(
         workspace=workspace,
@@ -69,6 +70,7 @@ def test_shell_worker_runs_configured_agent_and_writes_contract_result(
     )
 
 
+@pytest.mark.skipif(not sandbox.available(), reason="needs a usable sandbox")
 def test_supervisor_can_spawn_shell_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = tmp_path / "repo"
     workspace.mkdir()
@@ -93,7 +95,6 @@ def test_supervisor_can_spawn_shell_worker(tmp_path: Path, monkeypatch: pytest.M
         home=tmp_path / "home",
         worker_command=(sys.executable, "-m", "skep.workers.shell_worker"),
         env_baseline=("PATH", "HOME", "PYTHONPATH"),
-        sandbox=False,
     )
     permissions = Permissions(
         read=["workspace"],
@@ -107,9 +108,11 @@ def test_supervisor_can_spawn_shell_worker(tmp_path: Path, monkeypatch: pytest.M
         "Create a Python file through a shell prompt wrapper.",
         config=config,
         permissions=permissions,
+        # ES-F255 (D36): asked for workspace, coerced into the sandbox.
         execution_mode="workspace",
     )
 
+    assert outcome.record.execution_mode == "sandbox"
     assert outcome.record.state == "completed"
     assert outcome.record.worker_version == "shell-worker-0.1.0"
     assert outcome.record.verification_outcome == "passed"
@@ -121,3 +124,30 @@ def test_worker_docs_list_shell_worker_as_supported() -> None:
 
     assert "Generic shell worker" in docs
     assert "python -m skep.workers.shell_worker" in docs
+
+
+def test_shell_worker_refuses_to_start_outside_skeps_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F255 follow-up (D36): SKEP_SHELL_WORKER_CMD is any CLI agent whose
+    commands skip the capability layer, so it never runs unwalled."""
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    marker = tmp_path / "ran"
+    monkeypatch.setenv("SKEP_SHELL_WORKER_CMD", f"touch {marker}")
+    monkeypatch.delenv("SKEP_SANDBOX", raising=False)
+    task = mint_task(
+        workspace=workspace,
+        instructions="anything",
+        permissions=DEFAULT_PERMISSIONS,
+        budget=DEFAULT_BUDGET,
+    )
+    task_path = tmp_path / "task.json"
+    task_path.write_text(task.model_dump_json(), encoding="utf-8")
+    out_path = tmp_path / "result.json"
+
+    assert run_shell_worker_task(task_path, out_path) != 0
+    result = read_result(out_path)
+    assert result.status is TaskState.REJECTED
+    assert "SKEP_SANDBOX unset" in result.summary and "'sandbox'" in result.summary
+    assert not marker.exists()

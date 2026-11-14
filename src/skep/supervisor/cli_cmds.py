@@ -14,6 +14,7 @@ import pydoc
 import re
 import shlex
 import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -1115,7 +1116,7 @@ def cmd_status_personal(args: argparse.Namespace) -> int:
         print("no runs yet")
         print('next: skep run <repo> "<instructions>"')
         return 0
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         all_runs = store.recent_runs(20)
         pending = store.pending_approvals()
@@ -1895,7 +1896,7 @@ def cmd_schedule_list(args: argparse.Namespace) -> int:
     if not config.db_path.is_file():
         print("no schedules yet")
         return 0
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         schedules = store.list_schedules()
     finally:
@@ -1939,7 +1940,7 @@ def cmd_schedule_health(args: argparse.Namespace) -> int:
     if not config.db_path.is_file():
         print("no schedules yet")
         return 0
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         health = store.list_schedule_health()
     finally:
@@ -1965,11 +1966,18 @@ def cmd_provider_list(args: argparse.Namespace) -> int:
     if not config.db_path.is_file():
         print("no providers configured")
         return 0
-    store = RunStore(config.db_path)
-    try:
-        from .providers import migrate_legacy_provider
+    from .providers import migrate_legacy_provider
 
-        migrate_legacy_provider(store, config.home)
+    # W41: seeding the registry from legacy config is the one write a listing
+    # may make, and only when it happens — the read-only store refuses it.
+    store = RunStore(config.db_path, readonly=True)
+    try:
+        try:
+            migrate_legacy_provider(store, config.home)
+        except sqlite3.OperationalError:
+            store.close()
+            store = RunStore(config.db_path)
+            migrate_legacy_provider(store, config.home)
         providers = store.list_provider_profiles()
     finally:
         store.close()
@@ -2168,7 +2176,7 @@ def cmd_provider_health(args: argparse.Namespace) -> int:
     if not config.db_path.is_file():
         print("no provider health recorded")
         return 0
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         health = store.list_provider_health()
     finally:
@@ -2265,7 +2273,7 @@ def cmd_template_list(args: argparse.Namespace) -> int:
     if not config.db_path.is_file():
         print("no templates yet")
         return 0
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         templates = store.list_templates()
     finally:
@@ -2287,7 +2295,7 @@ def cmd_template_show(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     if not config.db_path.is_file():
         return _err(f"no template named {args.name!r}.", next_command="skep template list")
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         template = store.get_template(args.name)
     finally:
@@ -2615,7 +2623,7 @@ def cmd_branch_list(args: argparse.Namespace) -> int:
     from .serve.settings import ConfigHolder
 
     config = build_config(args.home, None)
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         state = repo_state_view(ConfigHolder(config, store), args.repo, store=store)
     except HTTPException as exc:
@@ -2771,7 +2779,7 @@ def cmd_repo_list(args: argparse.Namespace) -> int:
     from .serve.settings import ConfigHolder
 
     config = build_config(args.home, None)
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         repos = known_repos(repos_root(ConfigHolder(config, store)), store)
     finally:
@@ -2840,7 +2848,7 @@ def cmd_project_list(args: argparse.Namespace) -> int:
     if not config.db_path.is_file():
         print("no projects yet")
         return 0
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         projects = list_projects(store)
     finally:
@@ -2866,7 +2874,7 @@ def cmd_project_show(args: argparse.Namespace) -> int:
         return _err("project_id (or --effective <repo>) is required.")
     if not config.db_path.is_file():
         return _err(f"no project named {args.project_id!r}.", next_command="skep project list")
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         project = project_from_store(store, args.project_id)
     finally:
@@ -2907,7 +2915,7 @@ def cmd_policy_rsop(args: argparse.Namespace) -> int:
     from .serve.settings import ConfigHolder
 
     config = build_config(args.home, None)
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         view = rsop_view(ConfigHolder(config, store), store, args.repo)
     except HTTPException as exc:
@@ -2967,7 +2975,7 @@ def cmd_policy_grants(args: argparse.Namespace) -> int:
     from .serve.actions import list_policy_rules
 
     config = build_config(args.home, None)
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         rules = list_policy_rules(store)["rules"]
     finally:
@@ -3187,7 +3195,7 @@ def cmd_policy_why(args: argparse.Namespace) -> int:
     from .serve.settings import ConfigHolder
 
     config = build_config(args.home, None)
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         view = policy_why(
             ConfigHolder(config, store),
@@ -3214,7 +3222,7 @@ def _cmd_project_show_effective(config: SupervisorConfig, repo: str) -> int:
     from .serve.actions import effective_policy_view
     from .serve.settings import ConfigHolder
 
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         view = effective_policy_view(ConfigHolder(config, store), store, repo)
     finally:
@@ -3272,7 +3280,7 @@ def cmd_agents(args: argparse.Namespace) -> int:
     from .agent_presence import presence_view
 
     config = build_config(args.home, None)
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         view = presence_view(store, config.audit_dir)
     finally:
