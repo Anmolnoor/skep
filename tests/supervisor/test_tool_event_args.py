@@ -26,8 +26,9 @@ def ollama() -> Iterator[FakeOllama]:
 
 def test_the_tool_event_carries_masked_args(config: SupervisorConfig, ollama: FakeOllama) -> None:
     client, chat_id = chat_client(config, ollama)
-    # split so gitleaks' curl-auth-header rule does not flag the fake token (CI scans tests/)
-    curl = "curl -H 'Author" + "ization: Bearer CANARY-tok123'"
+    # joined at runtime so neither the source nor the .pyc (the compiler folds "a" + "b")
+    # holds a literal gitleaks' curl-auth-header rule flags (CI scans tests/ after the suite)
+    curl = " ".join(["curl", "-H", "'Authorization:", "Bearer", "CANARY-tok123'"])
     ollama.script_tool_calls(
         ("no_such_tool", {"query": curl, "n": 3}),
         ("no_such_tool", {"api_key": "CANARY-key", "nested": {"password": "CANARY-pw"}}),
