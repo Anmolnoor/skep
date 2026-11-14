@@ -978,6 +978,7 @@ _SECRET_SHAPES = (
     re.compile(r"(?i)((?:^|\s)(?:-u\s*|--user[=\s]+)['\"]?[^\s:'\"]+:)([^\s'\"]+)"),
     re.compile(r"(?i)(\b(?:authorization|x-api-key|api-key|private-token|x-auth-token):\s*"
                r"(?:bearer\s+|basic\s+|token\s+)?)([^\s'\"]+)"),
+    re.compile(r"(?i)(\bbearer\s+)([^\s'\"]+)"),  # a bare bearer token, no header name
     re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)([^@\s/]+)(?=@)"),
     re.compile(r"(?i)([?&](?:token|key|api_key|access_token|password|secret|sig|signature)=)"
                r"([^&\s'\"]+)"),

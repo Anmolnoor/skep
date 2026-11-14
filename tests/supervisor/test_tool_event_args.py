@@ -43,3 +43,19 @@ def test_large_args_are_capped() -> None:
     assert len(json.dumps(shown)) <= STREAM_ARGS_MAX_CHARS + 64
     assert shown["truncated"] is True
     assert stream_args({"path": "a.txt"}) == {"path": "a.txt"}
+
+
+def test_header_and_env_shaped_secret_keys_are_hidden() -> None:
+    shown = stream_args(
+        {
+            "headers": {"X-Api-Key": "CANARY-1", "Private-Token": "CANARY-2"},
+            "private_key": "CANARY-3",
+            "env": {"GITHUB_PAT": "CANARY-4", "AWS_ACCESS_KEY_ID": "CANARY-5"},
+            "items": [{"session_id": "CANARY-6"}, "Bearer CANARY-7 at Authorization: x"],
+            "url": "https://u:CANARY-8@host/x",
+            "key": "auto_approve",  # a setting's name stays readable
+            "n": 3,
+        }
+    )
+    assert "CANARY" not in json.dumps(shown)
+    assert shown["key"] == "auto_approve" and shown["n"] == 3

@@ -1251,7 +1251,13 @@ def _strip_inline_think(content: str) -> tuple[str, str]:
 # W42a: the live tool event shows what the model asked for, capped (the
 # transcript keeps the full call).
 STREAM_ARGS_MAX_CHARS = 2000
-_SECRET_ARG_KEY = re.compile(r"(?i)token|secret|passw|api_?key|auth|credential|cookie")
+# A bare ``key`` is not on the list: set_policy/set_setting name settings with it.
+# ponytail: a [name, value] pair inside a list is not matched by key; the
+# value still goes through redact (prefixed tokens, Bearer/Basic headers).
+_SECRET_ARG_KEY = re.compile(
+    r"(?i)token|secret|passw|pwd|(?:api|private|access)[-_]?key|auth|credential|cookie"
+    r"|session|bearer|signature|(?:^|[-_])pat$"
+)
 
 
 def stream_args(args: dict[str, Any]) -> dict[str, Any]:
