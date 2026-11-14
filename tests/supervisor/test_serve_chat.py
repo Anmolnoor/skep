@@ -409,6 +409,36 @@ def test_a_run_finish_follow_up_cut_off_by_a_restart_runs_once_on_startup(
         store.close()
 
 
+def test_a_resumed_run_finish_follow_up_honours_the_opt_out(
+    repo: Path, config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F242 follow-up: continuations switched off before the restart —
+    the owed one is dropped, not run; a later switch-on does not revive it."""
+    import threading
+
+    from skep.supervisor.serve import chat as chat_module
+    from skep.supervisor.serve.run_status import CONTINUE_CHAT_SETTING
+    from skep.supervisor.store import RunStore
+
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        task_id = _bound_run(store, chat_id, repo)
+        chat_module._CONTINUED.discard(task_id)
+        store.queue_run_follow_up(task_id, "queued")
+        store.set_setting(CONTINUE_CHAT_SETTING, False)
+        ollama.script_reply("should not run")
+        with _client(config, start_ticker=False):
+            for thread in threading.enumerate():
+                if thread.name.startswith("skep-continue-"):
+                    thread.join(10)
+        assert [m for m in store.chat_messages(chat_id) if m.provenance == "queen"] == []
+        assert store.queued_run_follow_ups() == []
+    finally:
+        store.close()
+
+
 def test_an_old_database_gains_the_run_follow_up_column(repo: Path, tmp_path: Path) -> None:
     """ES-F242: the run row's follow-up marker arrives by migration too."""
     import sqlite3

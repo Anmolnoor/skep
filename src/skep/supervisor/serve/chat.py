@@ -569,7 +569,13 @@ def resume_follow_ups(engine: ChatEngine) -> int:
     for action_id, actor in queued:
         _queue_follow_up(engine, action_id, actor)
     # ES-F242: and the run-finish follow-ups a stop cut off, waiting or mid-turn
+    from .run_status import CONTINUE_CHAT_SETTING
+
     owed = engine.store.queued_run_follow_ups()
+    if engine.store.get_setting(CONTINUE_CHAT_SETTING) is False:
+        for task_id, _stage in owed:  # switched off since the stop: dropped, not run
+            engine.store.clear_run_follow_up(task_id)
+        owed = []
     for task_id, stage in owed:
         threading.Thread(
             target=run_completion_turn,
