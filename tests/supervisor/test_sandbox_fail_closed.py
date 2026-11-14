@@ -47,7 +47,19 @@ def test_spawn_worker_refuses_instead_of_running_unconfined(
 
     _sandbox_unusable(monkeypatch)
     started: list[object] = []
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: started.append(a))
+    real_popen = subprocess.Popen
+
+    def popen(argv: object, *args: object, **kwargs: object) -> object:
+        # Popen is process-global: a run thread an earlier test left finishing
+        # in this xdist worker (its `git worktree remove`) calls it too and
+        # was recorded as "the worker started". Only the worker's own argv
+        # counts; every other call is the real thing.
+        if isinstance(argv, list | tuple) and "w" in argv:
+            started.append(argv)
+            return None
+        return real_popen(argv, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
     workspace = tmp_path / "ws"
     workspace.mkdir()
     task = mint_task(workspace=workspace, instructions="x", budget=DEFAULT_BUDGET)
