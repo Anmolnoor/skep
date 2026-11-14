@@ -47,3 +47,14 @@ def test_a_logged_error_carrying_a_bot_token_is_masked(
             logger.exception("telegram poll failed")
     assert _SECRET not in caplog.text, caplog.text
     assert "bot123456789:***" in caplog.text
+
+
+def test_a_log_call_with_bad_format_args_never_raises_and_is_still_redacted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    token = "".join(["/bot", "123456", ":", "AAfake", "TOKENfake", "value"])
+    logger = logging.getLogger("skep.serve")
+    with caplog.at_level(logging.WARNING, logger="skep.serve"):
+        logger.warning("delivery failed %s %s", f"https://api.example{token}/getUpdates")
+    assert "AAfakeTOKENfakevalue" not in caplog.text
+    assert "delivery failed" in caplog.text

@@ -1017,7 +1017,11 @@ class RedactFilter(logging.Filter):
     quotes the request URL — and the bot token sits in that URL (ES-F281)."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg, record.args = redact(record.getMessage()), None
+        try:
+            message = record.getMessage()
+        except Exception:  # bad %-args: logging would report it, never raise from a log call
+            message = f"{record.msg} {record.args!r}"
+        record.msg, record.args = redact(message), None
         if record.exc_info and not record.exc_text:
             record.exc_text = logging.Formatter().formatException(record.exc_info)
         if record.exc_text:
