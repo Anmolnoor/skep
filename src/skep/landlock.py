@@ -41,6 +41,10 @@ class _RulesetAttr(ctypes.Structure):
 
 
 class _PathBeneathAttr(ctypes.Structure):
+    # The kernel's struct is __attribute__((packed)): a u64 then an s32, 12
+    # bytes. "ms" with _pack_ 1 is that layout ("gcc-sysv" refuses _pack_);
+    # named because 3.14 deprecates the implicit default (ES-F266).
+    _layout_ = "ms"
     _pack_ = 1
     _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
 

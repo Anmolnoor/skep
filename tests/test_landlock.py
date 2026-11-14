@@ -170,3 +170,22 @@ def test_a_worker_scoped_to_its_roots_still_renames_and_links_across_directories
     )
     assert done.returncode == 0, done.stderr
     assert (tmp_path / "a" / "g").read_text() == "x"
+
+
+def test_the_path_beneath_struct_is_the_kernels_packed_layout_without_a_warning() -> None:
+    """ES-F266: Python 3.14 warns (an error from 3.19) that a ``_pack_``
+    Structure with no ``_layout_`` gets MSVC layout implicitly. The layout
+    is named, and it is the kernel's: struct landlock_path_beneath_attr is
+    packed, a u64 then an s32, 12 bytes."""
+    import ctypes
+    import importlib
+    import warnings
+
+    from skep import landlock
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        importlib.reload(landlock)
+    attr = landlock._PathBeneathAttr
+    assert ctypes.sizeof(attr) == 12
+    assert attr.parent_fd.offset == 8
