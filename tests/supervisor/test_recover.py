@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,7 @@ from skep.supervisor import RunStore, SupervisorConfig, mint_task
 from skep.supervisor.contracts_io import write_task_file
 from skep.supervisor.dispatch import recover_interrupted_runs
 from skep.supervisor.monitor import append_event, synthesize_terminal
+from skep.supervisor.store import process_owner
 from skep.supervisor.worktree import create_worktree
 from skep.worker_contract import TaskState
 
@@ -472,13 +475,20 @@ def test_startup_reverifies_a_run_completed_just_before_serve_stopped(
         record = store.get_run(task_id)
         assert record is not None and record.state == "completed"
         assert store.reverification_for(task_id) is None  # the L1 state
+        # The stopped serve was another process: its owner is gone now.
+        me = process_owner()
+        dead = json.dumps({"pid": os.getpid(), "started": "before the restart"})
+        assert store.claim_run_supervisor(task_id, expected=me, owner=dead)
     finally:
         store.close()
 
     from .conftest import serve_client
 
     with serve_client(config):  # entering the lifespan IS the restart
-        pass
+        # The sweep runs in the background (serve answers meanwhile).
+        for thread in threading.enumerate():
+            if thread.name == "skep-startup-reverify":
+                thread.join(timeout=60)
 
     store = RunStore(config.db_path)
     try:

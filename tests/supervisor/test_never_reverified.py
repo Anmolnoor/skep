@@ -144,3 +144,53 @@ def test_reverify_refuses_with_the_reason(
         assert "not completed" in reverify_unverified(store, config, record)
     finally:
         store.close()
+
+
+def test_one_reverify_per_run_across_serve_and_cli(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F290 follow-up (I2): serve's startup sweep runs in the background,
+    so it and a CLI `--reverify` may reach one run together. Each takes the
+    run in a compare-and-set first; the loser re-verifies nothing. A live
+    owner (this serve, finishing a re-adopted worker) is never doubled, and
+    a re-verify that blows up hands the run back."""
+    import json
+
+    from skep.supervisor import dispatch
+    from skep.supervisor.store import process_owner
+
+    calls: list[str] = []
+    monkeypatch.setattr(dispatch, "_reverify_after_restart", lambda *a, **k: calls.append("g10"))
+    store = RunStore(config.db_path)
+    try:
+        task_id = _unverified_run(store, repo, config.audit_dir, tmp_path)
+        record = store.get_run(task_id)
+        assert record is not None
+        dead = json.dumps({"pid": 1, "started": "long ago"})
+        assert store.claim_run_supervisor(task_id, expected=None, owner=dead)
+
+        # Another process claims it between our read and our claim.
+        real_claim = store.claim_run_supervisor
+        monkeypatch.setattr(store, "claim_run_supervisor", lambda *a, **k: False)
+        assert "still running" in dispatch.reverify_unverified(store, config, record)
+        monkeypatch.setattr(store, "claim_run_supervisor", real_claim)
+        assert calls == []
+
+        # A live owner (this very process) re-verifies it itself.
+        assert store.claim_run_supervisor(task_id, expected=dead, owner=process_owner())
+        assert "still running" in dispatch.reverify_unverified(store, config, record)
+        assert dispatch.reverify_unverified_runs(store, config) == []
+        assert calls == []
+
+        # A failed re-verify hands the run back to its (dead) previous owner.
+        assert store.claim_run_supervisor(task_id, expected=process_owner(), owner=dead)
+
+        def boom(*_: object, **__: object) -> None:
+            raise RuntimeError("verify blew up")
+
+        monkeypatch.setattr(dispatch, "_reverify_after_restart", boom)
+        assert dispatch.reverify_unverified_runs(store, config) == []  # logged, not raised
+        assert store.run_supervisor(task_id) == dead
+        assert "never re-verified" in str(actions.never_reverified_error(store, task_id))
+    finally:
+        store.close()

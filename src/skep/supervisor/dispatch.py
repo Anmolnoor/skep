@@ -1407,37 +1407,60 @@ def reverify_unverified(run_store: RunStore, config: SupervisorConfig, record: R
     patches = [Path(p) for kind, p, _ in run_store.artifacts_for(task_id) if kind == "patch"]
     if not patches or not patches[0].is_file():
         return "no patch on disk — nothing to re-verify or land"
+    me = process_owner()
     supervisor = run_store.run_supervisor(task_id)
-    if supervisor is not None and supervisor != process_owner() and owner_alive(supervisor):
-        return (
-            "its supervisor is still running and re-verifies it itself — check back "
-            "shortly; if it never finishes, restart `skep serve` (startup re-verifies it)"
-        )
+    in_flight = (
+        "its supervisor is still running and re-verifies it itself — check back "
+        "shortly; if it never finishes, restart `skep serve` (startup re-verifies it)"
+    )
+    # A live owner — this very serve included (a re-adopted worker finishing
+    # on its own thread runs its own G10) — re-verifies it itself.
+    if supervisor is not None and owner_alive(supervisor):
+        return in_flight
     task = _task_from_audit(config, task_id)
     if task is None:
         return (
             f"no task evidence at {config.audit_dir / task_id / 'task.json'} to re-verify "
             "from — dispatch the task again"
         )
-    # The stopped re-verify's half-built tree would make create_worktree fail.
-    remove_worktree(Path(record.repo), config.worktrees_root / f"reverify-{patches[0].stem}")
-    result = _run_result(run_store, task_id, config.audit_dir / task_id / "result.json")
-    _reverify_after_restart(
-        run_store,
-        config,
-        record,
-        task,
-        record.verification_outcome,
-        tuple(result.changed_files) if result is not None else None,
-    )
+    # ES-F290 follow-up (I2): take the run in one compare-and-set, so a CLI
+    # `--reverify` and serve's background startup sweep never re-verify one
+    # run twice; while held, landing says "still running" (owner alive).
+    if not run_store.claim_run_supervisor(task_id, expected=supervisor, owner=me):
+        return in_flight
+    if run_store.reverification_for(task_id) is not None:  # one finished meanwhile
+        return f"already re-verified (G10) — `skep review {task_id}` shows it"
+    name = f"reverify-{patches[0].stem}"
+    with TREE_LOCK:  # shield it from a concurrent run's orphan sweep (v89-F1)
+        _ACTIVE.add(name)
+        # The stopped re-verify's half-built tree would make create_worktree fail.
+        remove_worktree(Path(record.repo), config.worktrees_root / name)
+    try:
+        result = _run_result(run_store, task_id, config.audit_dir / task_id / "result.json")
+        _reverify_after_restart(
+            run_store,
+            config,
+            record,
+            task,
+            record.verification_outcome,
+            tuple(result.changed_files) if result is not None else None,
+        )
+    except BaseException:
+        # Hand it back: with no live owner, landing teaches `--reverify` again.
+        run_store.claim_run_supervisor(task_id, expected=me, owner=supervisor)
+        raise
+    finally:
+        _ACTIVE.discard(name)
     return ""
 
 
 def reverify_unverified_runs(run_store: RunStore, config: SupervisorConfig) -> list[str]:
     """ES-F290 (L1): at serve startup, after ``recover_interrupted_runs``
     (which only looks at in-flight states), re-verify every completed,
-    unlanded run with a patch and no re-verification record. Returns the
-    task ids it re-verified."""
+    unlanded run with a patch and no re-verification record. Serve runs it on
+    a background thread (landing refuses those runs until their record
+    exists, ES-F291); ``reverify_unverified`` claims each run first. Returns
+    the task ids it re-verified."""
     done: list[str] = []
     for record in run_store.runs_with_states((TaskState.COMPLETED.value,)):
         if run_store.reverification_for(record.task_id) is not None or any(
@@ -1445,8 +1468,11 @@ def reverify_unverified_runs(run_store: RunStore, config: SupervisorConfig) -> l
             for a in run_store.approvals_for(record.task_id)
         ):
             continue  # recorded, or already landed: re-verifying changes neither
-        if not reverify_unverified(run_store, config, record):
-            done.append(record.task_id)
+        try:
+            if not reverify_unverified(run_store, config, record):
+                done.append(record.task_id)
+        except Exception:  # one run's failure must not strand the rest
+            logger.exception("startup re-verification of %s failed", record.task_id)
     return done
 
 
