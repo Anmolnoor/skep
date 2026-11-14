@@ -2700,8 +2700,9 @@ async function viewChat(main, chatId) {
   // exposes no account usage API, so skep counts its own requests.
   contextMeter.addEventListener("mouseenter", async () => {
     // W42b: and this chat's share of it
-    const forChat = activeChatId ? `?chat_id=${encodeURIComponent(activeChatId)}` : "";
-    try { llmUsage = await api("GET", `/api/llm/usage${forChat}`); updateContextMeter(); }
+    const usagePath = activeChatId
+      ? `/api/llm/usage?chat_id=${encodeURIComponent(activeChatId)}` : "/api/llm/usage";
+    try { llmUsage = await api("GET", usagePath); updateContextMeter(); }
     catch { /* the popover simply omits the usage line */ }
   });
   // v96-F3: the composer strip reads server truth — the chat's bound project

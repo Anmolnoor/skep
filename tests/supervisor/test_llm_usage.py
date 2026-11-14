@@ -109,7 +109,7 @@ def test_the_usage_surfaces_exist_in_the_ui() -> None:
     # v76-F2 re-pin (C4): settings + popover + the topbar Queen tile.
     assert source.count('api("GET", "/api/llm/usage")') == 2
     # W42b: the chat's popover asks for this chat's share too
-    assert "`/api/llm/usage${forChat}`" in source
+    assert "`/api/llm/usage?chat_id=${encodeURIComponent(activeChatId)}`" in source
     assert "this chat" in source
     assert "ollama.com/settings" in source  # the authoritative meter is named
     assert "context-popover-usage" in source
