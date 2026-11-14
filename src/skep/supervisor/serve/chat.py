@@ -45,7 +45,7 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
-from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS
+from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS, redact
 from ..policy_write import PolicyWriteRejected
 from . import actions
 from .cards import (
@@ -1249,6 +1249,36 @@ def _strip_inline_think(content: str) -> tuple[str, str]:
     return "".join(visible).strip(), leaked
 
 
+# W42a: the live tool event shows what the model asked for, capped (the
+# transcript keeps the full call).
+STREAM_ARGS_MAX_CHARS = 2000
+_SECRET_ARG_KEY = re.compile(r"(?i)token|secret|passw|api_?key|auth|credential|cookie")
+
+
+def stream_args(args: dict[str, Any]) -> dict[str, Any]:
+    """The arguments as the operator watching the stream sees them: every
+    string through the decision log's secret masker (``redact``), a
+    secret-named key's value hidden whole, and past STREAM_ARGS_MAX_CHARS a
+    masked preview in place of the object."""
+
+    def mask(key: str, value: Any) -> Any:
+        if _SECRET_ARG_KEY.search(key):
+            return "***"
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, dict):
+            return {str(k): mask(str(k), v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [mask(key, v) for v in value]
+        return value
+
+    shown = {str(k): mask(str(k), v) for k, v in args.items()}
+    text = json.dumps(shown, ensure_ascii=True)
+    if len(text) <= STREAM_ARGS_MAX_CHARS:
+        return shown
+    return {"truncated": True, "preview": text[:STREAM_ARGS_MAX_CHARS] + "..."}
+
+
 def _call_args(call: dict[str, Any]) -> dict[str, Any]:
     """Tool-call arguments, tolerating the JSON-string variant some servers send."""
     arguments = call.get("function", {}).get("arguments") or {}
@@ -2112,6 +2142,7 @@ class ChatEngine:
             for call in tool_calls:
                 name = str(call.get("function", {}).get("name") or "")
                 args = _call_args(call)
+                shown_args = stream_args(args)
                 # v106-F4 (v101-F15): the model's own call id rides every row
                 # this call produces — position stops being the only link.
                 call_id = str(call.get("id") or "") or None
@@ -2132,7 +2163,7 @@ class ChatEngine:
                         tool_call_id=call_id,
                         content=json.dumps(bad_args, ensure_ascii=True),
                     )
-                    yield ("tool", {"tool": name, "result": bad_args})
+                    yield ("tool", {"tool": name, "args": shown_args, "result": bad_args})
                     continue
                 if name == CLARIFY_TOOL_NAME:
                     # v51-F7: a turn-ENDING prompt — the third interaction
@@ -2180,7 +2211,10 @@ class ChatEngine:
                         content=json.dumps(result, ensure_ascii=True),
                     )
                     # v115-F3: the terminal receipt names the lane (I8).
-                    yield ("tool", {"tool": name, "kind": "read", "result": result})
+                    yield (
+                        "tool",
+                        {"tool": name, "args": shown_args, "kind": "read", "result": result},
+                    )
                     continue
                 # P4-1 (ADR 0059 D5): search_web is a read tool, and read tools
                 # never card — except a taint ask in a turn a human can answer.
@@ -2219,7 +2253,7 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(refusal, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "result": refusal})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": refusal})
                         continue
                     decision = search_ask or mutation_execution_decision(
                         name, args, store=self.store, holder=self.holder, chat_id=chat_id
@@ -2295,7 +2329,7 @@ class ChatEngine:
                     if head is not None:
                         joined = self._join_fold(chat_id, head, name, args, call_id)
                         if joined is not None:
-                            yield ("tool", {"tool": name, "result": joined})
+                            yield ("tool", {"tool": name, "args": shown_args, "result": joined})
                         continue
                     if taint_ask and (unattended or name in taint_carded):
                         # P4-1: an unattended turn refuses a taint ask (nobody is
@@ -2321,7 +2355,7 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(waiting, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "result": waiting})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": waiting})
                         continue
                     if taint_ask:
                         taint_carded.add(name)
@@ -2418,6 +2452,7 @@ class ChatEngine:
                         # auto-dispatched runs) keeps working untouched.
                         receipt: dict[str, Any] = {
                             "tool": name,
+                            "args": shown_args,
                             "decision": asdict(decision),
                             "result": payload,
                             "card": self._card(chat_id, name, args),
@@ -2443,7 +2478,7 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "result": payload})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": payload})
                         continue
                     # v109-F2: a pending twin is not a new question. Identical
                     # args → the model gets the pending card back and the turn
@@ -2464,7 +2499,7 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "result": payload})
+                        yield ("tool", {"tool": name, "args": shown_args, "result": payload})
                         continue
                     if duplicate is not None:
                         self.store.supersede_chat_action(
@@ -2619,7 +2654,7 @@ class ChatEngine:
                 # The live event carries the full result for EVERY tool — the
                 # old notes/tasks whitelist left get_run/list_runs/... rendering
                 # as empty expanders until a page reload (history always had it).
-                yield ("tool", {"tool": name, "result": result})
+                yield ("tool", {"tool": name, "args": shown_args, "result": result})
             for action_event in round_cards:
                 # P4-2: the card as the server recorded it — every folded item.
                 record = self.store.get_chat_action(str(action_event["action_id"]))
