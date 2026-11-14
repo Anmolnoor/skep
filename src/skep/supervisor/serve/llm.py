@@ -1118,7 +1118,7 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
         return {"ok": True, "models": len(models)}
 
     @app.get("/api/llm/usage")
-    def get_llm_usage() -> dict[str, Any]:
+    def get_llm_usage(chat_id: str | None = None) -> dict[str, Any]:
         """v74-F6: skep's own token tally over rolling windows shaped like
         ollama.com's session (5h) and weekly limits. Honest surface (I8):
         measured locally from this daemon's requests — the account meter at
@@ -1132,6 +1132,18 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
             ),
             "last_5h": run_store.llm_usage_totals(hours=5),
             "last_7d": run_store.llm_usage_totals(hours=24 * 7),
+            # W42b: one chat's share of the same windows
+            **(
+                {
+                    "chat": {
+                        "chat_id": chat_id,
+                        "last_5h": run_store.llm_usage_totals(hours=5, chat_id=chat_id),
+                        "last_7d": run_store.llm_usage_totals(hours=24 * 7, chat_id=chat_id),
+                    }
+                }
+                if chat_id
+                else {}
+            ),
         }
 
     @app.get("/api/llm/models")

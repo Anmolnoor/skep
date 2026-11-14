@@ -107,6 +107,56 @@ def test_the_usage_surfaces_exist_in_the_ui() -> None:
 
     source = (STATIC_DIR / "app.js").read_text()
     # v76-F2 re-pin (C4): settings + popover + the topbar Queen tile.
-    assert source.count('api("GET", "/api/llm/usage")') == 3
+    assert source.count('api("GET", "/api/llm/usage")') == 2
+    # W42b: the chat's popover asks for this chat's share too
+    assert "`/api/llm/usage${forChat}`" in source
+    assert "this chat" in source
     assert "ollama.com/settings" in source  # the authoritative meter is named
     assert "context-popover-usage" in source
+
+
+def test_usage_is_counted_per_chat(config: SupervisorConfig, ollama: FakeOllama) -> None:
+    """W42b: the tally knows which chat spent it; the route serves that
+    chat's share beside the global windows."""
+    client = configured_client(config, ollama)
+    first = client.post("/api/chats", json={}).json()["chat_id"]
+    second = client.post("/api/chats", json={}).json()["chat_id"]
+    for chat_id, tokens in ((first, 100), (second, 7)):
+        ollama.chat_scripts.append(
+            [
+                {
+                    "model": "fake",
+                    "message": {"role": "assistant", "content": "ok"},
+                    "done": True,
+                    "prompt_eval_count": tokens,
+                    "eval_count": 1,
+                }
+            ]
+        )
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+    usage = client.get("/api/llm/usage", params={"chat_id": first}).json()
+    assert usage["last_5h"]["total_tokens"] == 109
+    assert usage["chat"]["last_5h"] == {
+        "requests": 1,
+        "prompt_tokens": 100,
+        "completion_tokens": 1,
+        "total_tokens": 101,
+    }
+    assert usage["chat"]["last_7d"]["total_tokens"] == 101
+    assert "chat" not in client.get("/api/llm/usage").json()
+
+
+def test_an_older_store_gains_the_chat_column(tmp_path: object) -> None:
+    from pathlib import Path
+
+    db = Path(str(tmp_path)) / "s.db"
+    RunStore(db).close()
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE llm_usage DROP COLUMN chat_id")
+    store = RunStore(db)
+    try:
+        store.record_llm_usage(model="m", prompt_tokens=1, completion_tokens=1, chat_id="c1")
+        assert store.llm_usage_totals(hours=5, chat_id="c1")["requests"] == 1
+        assert store.llm_usage_totals(hours=5, chat_id="c2")["requests"] == 0
+    finally:
+        store.close()

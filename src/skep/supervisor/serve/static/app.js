@@ -2692,12 +2692,16 @@ async function viewChat(main, chatId) {
       ...(llmUsage ? [el("div", { class: "context-popover-line context-popover-usage" },
         `skep usage — 5h: ${llmUsage.last_5h.total_tokens.toLocaleString()} tok`
         + ` · 7d: ${llmUsage.last_7d.total_tokens.toLocaleString()} tok`
+        + (llmUsage.chat ? ` · this chat 5h: ${llmUsage.chat.last_5h.total_tokens.toLocaleString()}`
+          + ` tok · 7d: ${llmUsage.chat.last_7d.total_tokens.toLocaleString()} tok` : "")
         + " (local count; account meter: ollama.com/settings)")] : []));
   };
   // v74-F6: refresh the local usage tally when the popover opens — ollama.com
   // exposes no account usage API, so skep counts its own requests.
   contextMeter.addEventListener("mouseenter", async () => {
-    try { llmUsage = await api("GET", "/api/llm/usage"); updateContextMeter(); }
+    // W42b: and this chat's share of it
+    const forChat = activeChatId ? `?chat_id=${encodeURIComponent(activeChatId)}` : "";
+    try { llmUsage = await api("GET", `/api/llm/usage${forChat}`); updateContextMeter(); }
     catch { /* the popover simply omits the usage line */ }
   });
   // v96-F3: the composer strip reads server truth — the chat's bound project

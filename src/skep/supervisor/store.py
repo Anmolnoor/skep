@@ -531,7 +531,8 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     created_at TEXT NOT NULL,
     model TEXT NOT NULL,
     prompt_tokens INTEGER NOT NULL,
-    completion_tokens INTEGER NOT NULL
+    completion_tokens INTEGER NOT NULL,
+    chat_id TEXT  -- W42b: which chat spent it (NULL: before the column)
 );
 -- v83-F8: operator-started background processes (start_process). The row is
 -- the record; liveness is reconciled against the real pid on every read so
@@ -1248,6 +1249,10 @@ class RunStore:
                 "UPDATE chats SET source = 'terminal'"
                 " WHERE source = 'web' AND title LIKE 'terminal 20__-__-__ __:__'"
             )
+        usage_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(llm_usage)")}
+        if "chat_id" not in usage_columns:
+            # W42b: the tally per chat, not only global.
+            self._conn.execute("ALTER TABLE llm_usage ADD COLUMN chat_id TEXT")
         provider_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(provider_profiles)")
         }
@@ -2754,26 +2759,29 @@ class RunStore:
     _USAGE_RETENTION_DAYS = 8
 
     @_locked
-    def record_llm_usage(self, *, model: str, prompt_tokens: int, completion_tokens: int) -> None:
+    def record_llm_usage(
+        self, *, model: str, prompt_tokens: int, completion_tokens: int, chat_id: str | None = None
+    ) -> None:
         cutoff = (datetime.now(UTC) - timedelta(days=self._USAGE_RETENTION_DAYS)).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
         self._conn.execute("DELETE FROM llm_usage WHERE created_at < ?", (cutoff,))
         self._conn.execute(
-            "INSERT INTO llm_usage (created_at, model, prompt_tokens, completion_tokens)"
-            " VALUES (?, ?, ?, ?)",
-            (_now(), model, prompt_tokens, completion_tokens),
+            "INSERT INTO llm_usage (created_at, model, prompt_tokens, completion_tokens, chat_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (_now(), model, prompt_tokens, completion_tokens, chat_id),
         )
         self._conn.commit()
 
     @_locked
-    def llm_usage_totals(self, *, hours: float) -> dict[str, int]:
+    def llm_usage_totals(self, *, hours: float, chat_id: str | None = None) -> dict[str, int]:
+        """The tally over the last ``hours``; with ``chat_id``, that chat's share."""
         cutoff = (datetime.now(UTC) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
         row = self._conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0),"
             " COALESCE(SUM(completion_tokens), 0)"
-            " FROM llm_usage WHERE created_at >= ?",
-            (cutoff,),
+            " FROM llm_usage WHERE created_at >= ? AND (? IS NULL OR chat_id = ?)",
+            (cutoff, chat_id, chat_id),
         ).fetchone()
         return {
             "requests": int(row[0]),

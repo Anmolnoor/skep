@@ -1846,7 +1846,7 @@ class ChatEngine:
         return {"role": "user", "content": f"{record.content}{listed}"}
 
     def _chat_stream_with_retry(
-        self, base_url: str, api_key: str | None, **kwargs: Any
+        self, base_url: str, api_key: str | None, *, chat_id: str, **kwargs: Any
     ) -> Iterator[dict[str, Any]]:
         model = str(kwargs.get("model") or "")
         for chunk in chat_stream_with_retry(base_url, api_key, sleep=self.sleep, **kwargs):
@@ -1858,6 +1858,7 @@ class ChatEngine:
                     model=model,
                     prompt_tokens=int(chunk.get("prompt_eval_count") or 0),
                     completion_tokens=int(chunk.get("eval_count") or 0),
+                    chat_id=chat_id,
                 )
             yield chunk
 
@@ -2014,6 +2015,7 @@ class ChatEngine:
                     for chunk in self._chat_stream_with_retry(
                         base_url,
                         api_key,
+                        chat_id=chat_id,
                         model=model,
                         messages=messages,
                         tools=tools_payload,
@@ -2705,6 +2707,7 @@ class ChatEngine:
                 for chunk in self._chat_stream_with_retry(
                     base_url,
                     api_key,
+                    chat_id=chat_id,
                     model=model,
                     messages=messages,
                     tools=None,
