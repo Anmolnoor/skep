@@ -396,11 +396,12 @@ def create_app(
         except Exception:
             logging.getLogger("skep.serve").exception("interrupted-card sweep failed")
         try:
-            # D18: a card's follow-up turn queued when serve stopped runs now, once.
+            # D18: a card's follow-up turn queued when serve stopped runs now,
+            # once — and (ES-F242) a run-finish follow-up the stop cut off.
             from .chat import resume_follow_ups
 
             if chat_engine is not None and resume_follow_ups(chat_engine):
-                logging.getLogger("skep.serve").info("resumed queued card follow-up turn(s)")
+                logging.getLogger("skep.serve").info("resumed queued follow-up turn(s)")
         except Exception:
             logging.getLogger("skep.serve").exception("card follow-up resume failed")
         try:

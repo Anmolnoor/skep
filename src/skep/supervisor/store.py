@@ -106,7 +106,11 @@ CREATE TABLE IF NOT EXISTS runs (
     base_commit TEXT,
     worker_kind TEXT,
     coding_engine TEXT,
-    supervisor_owner TEXT
+    supervisor_owner TEXT,
+    -- ES-F242 (D18): the run-finish follow-up turn still owed to its chat —
+    -- 'queued', then 'seeded' once its rows are written; cleared when the
+    -- turn ends (a restart resumes it).
+    follow_up TEXT
 );
 CREATE TABLE IF NOT EXISTS run_transitions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1098,6 +1102,9 @@ class RunStore:
         if "supervisor_owner" not in run_columns:
             # ADR 0060: the W27 owner ({"pid", "started"}) supervising the run.
             self._conn.execute("ALTER TABLE runs ADD COLUMN supervisor_owner TEXT")
+        if "follow_up" not in run_columns:
+            # ES-F242 (D18): a run-finish follow-up survives a serve restart.
+            self._conn.execute("ALTER TABLE runs ADD COLUMN follow_up TEXT")
         chat_message_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(chat_messages)")
         }
@@ -4569,6 +4576,28 @@ class RunStore:
         rows = self._conn.execute(
             "SELECT action_id, follow_up FROM chat_actions"
             " WHERE follow_up IS NOT NULL ORDER BY resolved_at, action_id"
+        ).fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
+
+    @_locked
+    def queue_run_follow_up(self, task_id: str, stage: str) -> None:
+        """ES-F242 (D18): the run-finish follow-up is owed ('queued'), or its
+        rows are written and only its turn is ('seeded')."""
+        self._conn.execute("UPDATE runs SET follow_up = ? WHERE task_id = ?", (stage, task_id))
+        self._conn.commit()
+
+    @_locked
+    def clear_run_follow_up(self, task_id: str) -> None:
+        """ES-F242: the run-finish follow-up's turn ended — no restart reruns it."""
+        self._conn.execute("UPDATE runs SET follow_up = NULL WHERE task_id = ?", (task_id,))
+        self._conn.commit()
+
+    @_locked
+    def queued_run_follow_ups(self) -> list[tuple[str, str]]:
+        """ES-F242: (task_id, stage) of every run-finish follow-up a stop cut off."""
+        rows = self._conn.execute(
+            "SELECT task_id, follow_up FROM runs"
+            " WHERE follow_up IS NOT NULL ORDER BY updated_at, task_id"
         ).fetchall()
         return [(str(row[0]), str(row[1])) for row in rows]
 
