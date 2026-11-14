@@ -5357,8 +5357,9 @@ def _within_delegation(
 
     who = _delegation_who(chain, role)
     refusal = _delegated_write_refusal(
-        holder, store, repo, chain, permissions.write, role=role, team=team, stack=stack
-    )
+        holder, store, repo, chain, permissions.write, role=role, team=team, stack=stack,
+        record=record,
+    )  # fmt: skip
     if refusal is not None:
         raise HTTPException(status_code=403, detail=refusal)
     shell = {
@@ -5444,6 +5445,7 @@ def _delegated_write_refusal(
     role: Role | None = None,
     team: str | None = None,
     stack: Stack | None = None,
+    record: bool = True,
 ) -> str | None:
     """Why a worker this chain (or role) dispatches may not write — the
     workspace write its delegator is denied — recorded; None when it may.
@@ -5466,7 +5468,8 @@ def _delegated_write_refusal(
             role=role,
         )
         if _narrowed_by(row, stack, role) and row["verdict"] == "deny":
-            log_decision(holder.current.audit_dir, {**row, "team": team} if team else row)
+            if record:  # a manifest's compile records nothing (``delegate_permissions``)
+                log_decision(holder.current.audit_dir, {**row, "team": team} if team else row)
             beyond = "the delegator" if row["rule_id"] == EXCEEDS_DELEGATOR else "the role"
             return (
                 f"{_delegation_who(chain, role)}: filesystem.write {path} exceeds {beyond} "
