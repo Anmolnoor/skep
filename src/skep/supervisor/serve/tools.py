@@ -21,6 +21,7 @@ from typing import Any, get_args
 
 from fastapi import HTTPException
 
+from ..apply import validate_landing_branch
 from ..autonomy import AutonomyDecision
 from ..castes import CASTES, caste_names
 from ..engines import engine_names
@@ -4190,6 +4191,41 @@ def _queen_landing_branch(store: RunStore, run: dict[str, Any], raw: Any) -> str
     return branch
 
 
+def landing_card_error(store: RunStore, name: str, args: dict[str, Any]) -> str | None:
+    """ES-F292 (L9, B22): what a land_run / approve_review (landing) confirm
+    would refuse, asked when the card is proposed, so no card shows a landing
+    it cannot do: the chat branch menu (v81-F4), the branch safety check
+    apply_patch runs (v20-F5), and a missing re-verification (ES-F291).
+    None for every other tool and anything the confirm reports itself (an
+    unknown run or review, a mid-run gate)."""
+    try:
+        if name == "land_run":
+            run = actions.require_run(store, str(args["task_id"]))
+        elif name == "approve_review":
+            approval = store.get_approval(str(args["review_id"]))
+            if approval is None or approval.action != "apply_patch":
+                return None
+            run = actions.require_run(store, str(approval.task_id))
+        else:
+            return None
+        if run["state"] == "pending_approval":
+            return None
+        branch = _queen_landing_branch(store, run, args.get("branch"))
+        if branch is not None:
+            error = validate_landing_branch(Path(str(run["repo"])), branch)
+            if error is not None:
+                return error
+        if actions.patch_path(store, str(run["task_id"])) is None:
+            return None
+        return actions.never_reverified_error(store, str(run["task_id"]))
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return None
+        return str(exc.detail)
+    except KeyError:
+        return None
+
+
 def _learned_grant(store: RunStore, name: str, args: dict[str, Any]) -> dict[str, Any]:
     """The learned rule an allow_fetch_domain / allow_mcp_tool confirm stores."""
     if name == "allow_fetch_domain":
@@ -4241,6 +4277,9 @@ def policy_write_preview(
     from ..policy_write import PolicyWriteRejected, vet_write
 
     def check() -> dict[str, Any]:
+        landing_error = landing_card_error(store, name, args)
+        if landing_error is not None:  # ES-F292: a landing card, B22's lesson too
+            raise PolicyWriteRejected(landing_error)
         if name in actions.REMEMBERABLE_TOOLS:
             if len(actions.keep_options(name, args)) < 2:
                 return {}

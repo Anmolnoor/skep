@@ -2774,3 +2774,68 @@ def test_turn_status_events_name_the_wait(config: SupervisorConfig, ollama: Fake
     names = [name for name, _ in events]
     assert names.index("turn_status") < names.index("tool")
     assert events[-1] == ("done", {"state": "complete"})
+
+
+def test_land_card_naming_a_branch_confirm_refuses_is_never_shown(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F292 (L9, B22): a land_run / approve_review card naming a branch the
+    chat may not land on was refused only after confirm. The proposal now
+    runs confirm's own checks: no card, the menu in the error instead."""
+    from skep.supervisor.policy_write import PolicyWriteRejected
+    from skep.supervisor.serve.tools import policy_write_preview
+
+    outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
+    task_id = outcome.record.task_id
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        with pytest.raises(PolicyWriteRejected) as land:
+            policy_write_preview(
+                store, holder, "land_run", {"task_id": task_id, "branch": "skep/glm-5.2"}
+            )
+        assert f"skep/{task_id}" in str(land.value)  # the menu
+        review_id = store.enqueue_approval(task_id, action="apply_patch", reason="land")
+        with pytest.raises(PolicyWriteRejected):
+            policy_write_preview(
+                store, holder, "approve_review", {"review_id": review_id, "branch": "main"}
+            )
+        # A target confirm accepts still gets its card.
+        assert (
+            policy_write_preview(
+                store, holder, "land_run", {"task_id": task_id, "branch": f"skep/{task_id}"}
+            )
+            == {}
+        )
+        # A menu branch the safety check refuses (checked out in the clone)
+        # is refused at proposal too; a call missing its id is left to confirm.
+        store.add_project_policy(
+            project_id="menu", name="m", strategy="trusted_local_dev", phase="maintain",
+            policy={"auto_apply_branch": "skep/maintain"},
+        )  # fmt: skip
+        store.add_project_binding(
+            project_id="menu", binding_kind="repo_path", binding_value=str(repo)
+        )
+        git(repo, "checkout", "-q", "-b", "skep/maintain")
+        with pytest.raises(PolicyWriteRejected, match="checked out"):
+            policy_write_preview(
+                store, holder, "land_run", {"task_id": task_id, "branch": "skep/maintain"}
+            )
+        git(repo, "checkout", "-q", "main")
+        assert policy_write_preview(store, holder, "land_run", {}) == {}
+        # An unknown run or review is the confirm's to report, as before.
+        assert policy_write_preview(store, holder, "land_run", {"task_id": "nope"}) == {}
+        assert policy_write_preview(store, holder, "approve_review", {"review_id": "nope"}) == {}
+    finally:
+        store.close()
+
+    # The operator deck: /land with a refused branch gets no card either.
+    client = _client(config)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    proposed = client.post(
+        f"/api/chats/{chat_id}/commands",
+        json={"tool": "land_run", "args": {"task_id": task_id, "branch": "skep/glm-5.2"}},
+    )
+    assert proposed.status_code == 400
+    assert "not a landing target" in proposed.json()["detail"]
+    assert client.get(f"/api/chats/{chat_id}").json()["actions"] == []

@@ -99,6 +99,7 @@ from .tools import (
     execute_mutation,
     execute_read_tool,
     hidden_tools,
+    landing_card_error,
     log_denied_dispatch_asks,
     mutation_execution_decision,
     policy_write_preview,
@@ -3699,6 +3700,11 @@ def add_chat_routes(
             raise HTTPException(
                 status_code=400, detail=f"unknown command tool {body.tool!r}; known: {known}"
             )
+        # ES-F292 (L9): a /land or /approve card naming a target its confirm
+        # refuses is never shown — the refusal is the answer.
+        landing_error = landing_card_error(run_store, body.tool, body.args)
+        if landing_error is not None:
+            raise HTTPException(status_code=400, detail=landing_error)
         # v109-F2: an operator command that matches a pending card takes it
         # over instead of standing beside it as a twin (the B-pair: a typed
         # /approve while the gate-mirror card is pending). Identical args
