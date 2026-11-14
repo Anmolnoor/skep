@@ -568,7 +568,23 @@ def resume_follow_ups(engine: ChatEngine) -> int:
     queued = engine.store.queued_follow_ups()
     for action_id, actor in queued:
         _queue_follow_up(engine, action_id, actor)
-    return len(queued)
+    # ES-F242: and the run-finish follow-ups a stop cut off, waiting or mid-turn
+    from .run_status import CONTINUE_CHAT_SETTING
+
+    owed = engine.store.queued_run_follow_ups()
+    if engine.store.get_setting(CONTINUE_CHAT_SETTING) is False:
+        for task_id, _stage in owed:  # switched off since the stop: dropped, not run
+            engine.store.clear_run_follow_up(task_id)
+        owed = []
+    for task_id, stage in owed:
+        threading.Thread(
+            target=run_completion_turn,
+            args=(engine.store, engine.holder, engine.runner, engine.home, task_id),
+            kwargs={"seeded": stage == "seeded"},
+            name=f"skep-continue-{task_id[:8]}",
+            daemon=True,
+        ).start()
+    return len(queued) + len(owed)
 
 
 def chat_turn_lock(chat_id: str) -> threading.Lock:
@@ -715,6 +731,17 @@ def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
     if not isinstance(data, dict):
         return content[:cap] + _TOOL_TRUNCATION_MARKER
     hint = _NARROW_HINTS.get(tool_name or "", "ask for less at a time")
+    # ES-F240: a card's approval note (L7/L29) is set aside and put back last,
+    # so the trim and drops below cut the payload, never the note. A
+    # multi-item card carries it per item; the top level keeps one copy.
+    approved = data.pop("approved") if isinstance(data.get("approved"), str) else None
+    if approved is None and isinstance(data.get("items"), list):
+        approved = next(
+            (i["approved"] for i in data["items"] if isinstance(i, dict) and "approved" in i),
+            None,
+        )
+    if isinstance(approved, str):
+        cap -= len(json.dumps({"approved": approved}, ensure_ascii=True))
     data["truncated"] = True
     data["note"] = (
         f"result exceeded the replay cap — narrow the query ({hint}); "
@@ -736,6 +763,8 @@ def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
     )
     while weight(data) > cap and droppable:
         del data[droppable.pop()]
+    if isinstance(approved, str):
+        data["approved"] = approved
     return json.dumps(data, ensure_ascii=True)
 
 
@@ -2493,7 +2522,8 @@ class ChatEngine:
                     call_key = (name, json.dumps(args, sort_keys=True, ensure_ascii=True))
                     if unattended and name in UNATTENDED_BLOCKED_READ_TOOLS:
                         # v83-F5 (ADR 0042): store reads only, unattended.
-                        result = {"error": f"{name} {UNATTENDED_READ_REFUSAL}"}
+                        turn = "a scheduled turn" if read_only else "an unattended follow-up turn"
+                        result = {"error": f"{name} {UNATTENDED_READ_REFUSAL.format(turn=turn)}"}
                         previous_read_tool = name
                     elif unattended and name in UNATTENDED_BLOCKED_STORE_WRITES:
                         # ES B121: ...and no store writes either.
@@ -3245,8 +3275,16 @@ def run_completion_turn(
     runner: Dispatcher,
     home: Path,
     task_id: str,
+    *,
+    seeded: bool = False,
 ) -> tuple[str, bool]:
-    """One Queen turn after a run reaches a terminal state. (reply, ok)."""
+    """One Queen turn after a run reaches a terminal state. (reply, ok).
+
+    ES-F242 (D18): it is owed on the run row until its turn ends, so a serve
+    stopped before then runs it at the next start (``resume_follow_ups``) —
+    ``seeded`` when its rows were already written. Unlike a card's follow-up
+    it is cleared AFTER its turn, not claimed before: the turn only reads and
+    proposes (``unattended``), so rerunning a cut-off one doubles nothing."""
     with _CONTINUE_LOCK:
         # notify_run_terminal is wired from two call sites and a done-callback
         # can be re-entered on resume; one continuation per run, ever.
@@ -3258,6 +3296,7 @@ def run_completion_turn(
     if not chat_id or store.get_chat(chat_id) is None:
         # A CLI or scheduled run with no bound chat has no conversation to
         # continue. The one-line notice already covered it.
+        store.clear_run_follow_up(task_id)  # a resumed one whose chat is gone
         return ("run has no bound chat", False)
     run = store.get_run(task_id)
     if run is None:
@@ -3267,6 +3306,7 @@ def run_completion_turn(
     try:
         base_url, api_key, model, protocol = engine.resolved_llm(store.get_chat(chat_id))
     except HTTPException as exc:
+        store.clear_run_follow_up(task_id)
         return (f"continuation could not run: {exc.detail}", False)
 
     # The facts go in the seed rather than making the model call get_run first:
@@ -3295,15 +3335,24 @@ def run_completion_turn(
     # ES-F2 (B13): queue behind the turn in flight — this runs on its own
     # thread (app._on_run_finished), so waiting blocks nothing, and the run's
     # result still reaches the chat instead of being dropped as "busy".
+    if not seeded:
+        store.queue_run_follow_up(task_id, "queued")
     with chat_turn_lock(chat_id):
-        if summary:
+        tail = store.chat_messages(chat_id)[-1:] if seeded else []
+        if tail and tail[0].role == "assistant" and not tail[0].tool_calls:
+            # the stop landed after its reply, before the clear: it is done
+            store.clear_run_follow_up(task_id)
+            return ("already continued", False)
+        if summary and not seeded:
             # P4-1 (B37, D5): the worker's words are its own row — wrapped on
             # replay, and they set ``untrusted``; skep's prompt follows as skep's.
             store.add_chat_message(
                 chat_id, role="user", content=f"{finished}Worker summary: {summary}",
                 provenance=f"worker:{task_id}",
             )  # fmt: skip
-        store.add_chat_message(chat_id, role="user", content=seed, provenance="queen")
+        if not seeded:
+            store.add_chat_message(chat_id, role="user", content=seed, provenance="queen")
+            store.queue_run_follow_up(task_id, "seeded")
         try:
             for event, data in engine.turn_events(
                 chat_id,
@@ -3317,7 +3366,9 @@ def run_completion_turn(
                 if event is None and isinstance(data.get("content"), str):
                     parts.append(str(data["content"]))
         except Exception as exc:  # a broken turn must never poison the run pool
+            store.clear_run_follow_up(task_id)
             return (f"continuation failed mid-turn: {exc}", False)
+    store.clear_run_follow_up(task_id)
     reply = "".join(parts).strip()
     return (reply, bool(reply))
 

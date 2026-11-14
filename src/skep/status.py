@@ -7,7 +7,7 @@ import shutil
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -29,8 +29,7 @@ def build_status(
     env = os.environ if env is None else env
     home = Path(home)
     required: dict[str, dict[str, Any]] = {}
-    stale_pending = _stale_pending_runs(home, now=now)
-    approvals = _pending_approvals(home, now=now)
+    approvals, stale_pending = _pending_approvals(home, now=now)
 
     if not profile_path(home).exists():
         required["profile"] = {
@@ -163,51 +162,43 @@ def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
     return {"status": "ready", "label": f"provider ready ({target})", "detail": target}
 
 
-def _pending_approvals(home: Path, *, now: datetime | None = None) -> dict[str, Any]:
-    """Every approval row the store holds pending, and how many are older
-    than the stale threshold: no auto-deny timeout applies to a gate, and a
-    row whose run moved on still waits (doctor printed a constant 0)."""
+def _pending_approvals(
+    home: Path, *, now: datetime | None = None
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Every task waiting at a gate, and the stale tail of it (no auto-deny
+    timeout applies to a gate). ES-F237: ONE count for the summary line and
+    the stale list — a task counts when the store holds a pending approval
+    row for it (ES-F156: its run may have moved on) or its run sits in
+    ``pending_approval`` (v20-F6: a pre-v19 run may have no row). Each stale
+    task carries the exact ``skep review <id> --deny`` that clears it."""
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
-        return {"status": "ready", "pending": 0, "stale": 0}
-    cutoff = (now or datetime.now(UTC)) - timedelta(days=_STALE_PENDING_DAYS)
-    from .supervisor.store import RunStore
-
-    store = RunStore(db_path)
-    try:
-        pending = store.pending_approvals()
-    finally:
-        store.close()
-    stale = sum(a.requested_at < cutoff.strftime("%Y-%m-%dT%H:%M:%SZ") for a in pending)
-    return {"status": "ready", "pending": len(pending), "stale": stale}
-
-
-def _stale_pending_runs(home: Path, *, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Runs stuck in ``pending_approval`` for more than 7 days (v20-F6).
-
-    Each carries the exact ``skep review <id> --deny`` command to clear it, so a
-    pre-v19 store converges to a clean state without hand-editing sqlite.
-    """
-    db_path = home / "supervisor" / "supervisor.sqlite3"
-    if not db_path.is_file():
-        return []
+        return {"status": "ready", "pending": 0, "stale": 0}, []
     cutoff = (now or datetime.now(UTC)) - timedelta(days=_STALE_PENDING_DAYS)
     cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
     from .supervisor.store import RunStore
 
     store = RunStore(db_path)
     try:
-        runs = store.pending_runs_before(cutoff_iso)
+        since = {
+            run.task_id: run.updated_at for run in store.runs_with_states(["pending_approval"])
+        }
+        for approval in store.pending_approvals():
+            since[approval.task_id] = min(
+                since.get(approval.task_id, approval.requested_at), approval.requested_at
+            )
     finally:
         store.close()
-    return [
+    stale = [
         {
-            "task_id": run.task_id,
-            "pending_since": run.updated_at,
-            "deny_command": f"skep review {run.task_id} --deny",
+            "task_id": task_id,
+            "pending_since": pending_since,
+            "deny_command": f"skep review {task_id} --deny",
         }
-        for run in runs
+        for task_id, pending_since in sorted(since.items(), key=lambda kv: (kv[1], kv[0]))
+        if pending_since < cutoff_iso
     ]
+    return {"status": "ready", "pending": len(since), "stale": len(stale)}, stale
 
 
 def _store_provider_base_url(home: Path) -> str | None:
@@ -635,6 +626,7 @@ def _repo_registry_advisories(home: Path) -> list[str]:
     try:
         bound: dict[str, str] = {}
         dead: list[str] = []
+        dead_ids: set[str] = set()
         for project in list_projects(store):
             for binding in project.bindings:
                 if binding.kind != "repo_path":
@@ -644,7 +636,9 @@ def _repo_registry_advisories(home: Path) -> list[str]:
                     bound[str(path.resolve())] = project.project_id
                 else:
                     dead.append(f"{project.project_id} ({binding.value})")
+                    dead_ids.add(project.project_id)
         umbrellas = []
+        umbrella_ids = []
         for bound_path, project_id in sorted(bound.items()):
             shadowed = sorted(
                 other_id
@@ -653,6 +647,7 @@ def _repo_registry_advisories(home: Path) -> list[str]:
             )
             if shadowed:
                 umbrellas.append(f"{project_id} ({bound_path}) contains: {', '.join(shadowed)}")
+                umbrella_ids.append(project_id)
         disabled = [
             f"{health.name} ({health.disabled_reason})"
             for health in store.list_schedule_health()
@@ -666,14 +661,15 @@ def _repo_registry_advisories(home: Path) -> list[str]:
             f"{len(umbrellas)} umbrella project(s) are bound to a directory that contains "
             f"other registered repos, so the Queen's shell is denied EVERYWHERE under that "
             f"tree (shell.deny.repo_cwd), including inside the repos it shadows: "
-            f"{'; '.join(umbrellas)}. Unregister the umbrella (`skep repo remove <name>`) "
+            f"{'; '.join(umbrellas)}. Unregister the umbrella ({_remove_commands(umbrella_ids)}) "
             "or re-bind it to the specific directory you meant."
         )
     if dead:
         advisories.append(
             f"{len(dead)} project binding(s) point at a directory that no longer exists — "
             f"dispatch fails and their schedules auto-disable one failure at a time: "
-            f"{', '.join(sorted(dead))}. Unregister them or restore the directory."
+            f"{', '.join(sorted(dead))}. Unregister them ({_remove_commands(dead_ids)}) "
+            "or restore the directory."
         )
     if disabled:
         advisories.append(
@@ -681,6 +677,12 @@ def _repo_registry_advisories(home: Path) -> list[str]:
             f"{', '.join(sorted(disabled))}. Fix the cause and re-enable, or delete them."
         )
     return advisories
+
+
+def _remove_commands(project_ids: Iterable[str]) -> str:
+    """ES-F236: the real unregister command (ES-F235), one per project — the
+    advice named `skep repo remove`, which never existed."""
+    return ", ".join(f"`skep project remove {pid}`" for pid in sorted(set(project_ids)))
 
 
 def _provider_advisories(home: Path, *, provider_ready: bool) -> list[str]:

@@ -97,6 +97,7 @@ _DESTRUCTIVE_TOOLS = frozenset(
         "suspend_tool",
         "unregister_mcp_server",
         "unregister_repo",
+        "remove_project",  # ES-F235: the deck's /unregister
     }
 )
 _NETWORK_TOOLS = frozenset({"read_url", "register_mcp_server", "call_mcp_tool", "setup_browser"})

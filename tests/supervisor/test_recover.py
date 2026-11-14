@@ -143,8 +143,32 @@ def test_recovery_without_a_deposit_is_an_honest_crash(
         assert ("worker_crashed", "supervisor_restart") in [
             (state, detail) for state, detail, _ts in transitions
         ]
+        assert record.summary == (  # ES-F238: no longer blank
+            "Supervisor restarted while the run was in flight; no result envelope was deposited."
+        )
         assert not workspace.exists()
         assert notified == [task_id]
+    finally:
+        store.close()
+
+
+def test_recovery_with_no_task_evidence_still_leaves_a_summary(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F238: a stranded run whose task.json is gone crashes with a
+    one-line summary saying why, not a blank one."""
+    store = RunStore(config.db_path)
+    try:
+        task_id, _workspace = _strand_run(store, config, repo)
+        (config.audit_dir / task_id / "task.json").unlink()
+
+        assert recover_interrupted_runs(store, config) == [task_id]
+        record = store.get_run(task_id)
+        assert record is not None and record.state == "worker_crashed"
+        assert record.summary == (
+            "Worker died: supervisor restarted while the run was in flight; "
+            "no recoverable task evidence on disk."
+        )
     finally:
         store.close()
 

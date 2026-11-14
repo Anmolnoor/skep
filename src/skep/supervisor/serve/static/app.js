@@ -2393,6 +2393,10 @@ const COMMANDS = {
     usage: "/phase <project-id> <bootstrap|build|maintain>",
     desc: "move a project's trust phase (confirm card)",
   },
+  unregister: {
+    usage: "/unregister <project-id>",
+    desc: "unregister a project: skep forgets it, its folder stays (confirm card)",
+  },
   land: { usage: "/land <task-id> [branch]", desc: "land a completed run's patch (confirm card)" },
   approve: { usage: "/approve <review-id|card-id> [branch]", desc: "approve a pending review (confirm card), or a pending card by its id" },
   deny: { usage: "/deny <review-id|card-id>", desc: "deny a pending review (confirm card), or a pending card by its id" },
@@ -3421,6 +3425,12 @@ async function viewChat(main, chatId) {
         const [projectId, phase] = args;
         if (!projectId || !phase) { commandHelp(`usage: ${spec.usage}`); return; }
         await proposeCommand("set_project_phase", { project_id: projectId, phase });
+        return;
+      }
+      if (name === "unregister") {
+        const [projectId] = args;
+        if (!projectId) { commandHelp(`usage: ${spec.usage}`); return; }
+        await proposeCommand("remove_project", { project_id: projectId });
         return;
       }
       if (name === "land") {

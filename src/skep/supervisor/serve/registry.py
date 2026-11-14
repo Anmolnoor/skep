@@ -463,7 +463,8 @@ def remove_registered_repo(store: RunStore, root: Path, name: str) -> dict[str, 
             status_code=404,
             detail=f"no registered clone named {name!r}; clones: {clones or 'none'}. "
             "A workon-bound directory is removed by deleting its project "
-            "(DELETE /api/projects/<id>), not by repo removal.",
+            "(`skep project remove <id>`, or the deck's `/unregister <id>`), "
+            "not by repo removal.",
         )
     from ..cli_cmds import STATE_EXIT_CODES
 
@@ -1734,10 +1735,10 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
         return _vetted_persist(run_store, project, project.bindings)
 
     @app.delete("/api/projects/{project_id}")
-    def delete_project(project_id: str) -> dict[str, bool]:
-        if not run_store.remove_project_policy(project_id):
-            raise HTTPException(status_code=404, detail=f"no project named {project_id!r}")
-        return {"removed": True}
+    def delete_project(project_id: str) -> dict[str, Any]:
+        from . import actions
+
+        return actions.remove_project(run_store, project_id)
 
     # -- learned skills (v4 lifecycle: the two gates stay fail-closed) -------
 

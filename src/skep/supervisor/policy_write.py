@@ -494,6 +494,8 @@ def _unreplayable(row: dict[str, Any] | None) -> str | None:
         return "unreadable row"
     if row.get("repo"):
         return "decided in a repo (run lane, not replayed)"
+    if row.get("queen_only"):
+        return "a Queen-lane guard decide() does not hold"
     if row.get("delegation_chain"):
         return "delegated (chain not replayed)"
     if _MASK in value:
@@ -550,6 +552,10 @@ def replay_decisions(
                 why = "chat row on a baseline write (not replayed)"
             else:
                 row_after, row_before = found[0], (found[1] if before is not None else None)
+        cwd = row.get("cwd") if why is None and row is not None else None
+        if isinstance(cwd, str):  # W18: re-decided where its line ran
+            row_after = replace(row_after, cwd=cwd)
+            row_before = None if row_before is None else replace(row_before, cwd=cwd)
         role = None
         if why is None and row is not None and row.get("role"):
             try:

@@ -427,6 +427,9 @@ def test_repo_registry_clone_run_by_slug_and_delete(repo: Path, config: Supervis
     assert gone.status_code == 404
     assert "no registered clone named 'fixture'" in gone.json()["detail"]
     assert "deleting its project" in gone.json()["detail"]
+    # ES-F235: and names the operator faces that do it, not a raw REST route
+    assert "skep project remove <id>" in gone.json()["detail"]
+    assert "/unregister <id>" in gone.json()["detail"]
     # The slug no longer resolves, and 'fixture' is not a host path either.
     assert (
         client.post(

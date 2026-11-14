@@ -187,7 +187,7 @@ def _forge_trial(
 # v25-F1: the command deck's mutating verbs — operator-typed /commands the UI
 # turns into confirm-carded chat actions (source 'operator'). COMMAND_ONLY
 # tools are executable through execute_mutation but never offered to the model.
-COMMAND_ONLY_TOOLS = frozenset({"set_project_phase"})
+COMMAND_ONLY_TOOLS = frozenset({"set_project_phase", "remove_project"})
 
 # v51-F7: a THIRD interaction type — not a read, not a mutation. The chat
 # engine intercepts this call, posts the question as a normal assistant
@@ -2416,9 +2416,12 @@ def hidden_refusal(tool: str, role: Role, decided_by: str) -> str:
 # morning is a real surface, and mutations refusing (read_only) already
 # closes the acting half; this closes the fetching half.
 UNATTENDED_BLOCKED_READ_TOOLS: frozenset[str] = frozenset({"search_web"})
+# ES-F241: {turn} names the turn — "a scheduled turn" (a prompt tick, the one
+# read-only unattended turn) or "an unattended follow-up turn" (a run-finish
+# or card-click follow-up); it said "scheduled" for both.
 UNATTENDED_READ_REFUSAL = (
-    "does not run in a scheduled turn — nobody is watching, so scheduled "
-    "turns read the store only (runs, approvals, chats, notes, memory). "
+    "does not run in {turn} — it fires whether or not anyone is watching, so "
+    "it reads the store only (runs, approvals, chats, notes, memory). "
     "Do web reads in a live chat instead."
 )
 # ES B121: the store writes that ride READ_TOOL_SPECS (they never card), so
@@ -3125,11 +3128,14 @@ def queen_shell_decision(
     grant never covers it (review item 3); repo cwds refuse flat (daemons do
     not belong in checkouts). ``chat_id``: the chat asking — its own session
     grants apply, no other chat's (P3-4, B39)."""
-    from ..policy_v3 import UNREADABLE_NOTE, Request, floor_verdict, queen_decide
+    from ..policy_v3 import UNREADABLE_NOTE, Request, log_queen_floor, queen_decide, queen_floor
 
     if not command.strip():
         return None
-    floor = floor_verdict("shell", command, home=holder.current.home, cwd=cwd)
+    action = "run_background" if background else "run"
+    floor = queen_floor(
+        holder, Request("shell", action, command), role=role, cwd=cwd, chat_id=chat_id
+    )
     if floor is not None:
         secret = floor["rule_id"] == "floor.secret-reads"
         return AutonomyDecision(
@@ -3142,11 +3148,17 @@ def queen_shell_decision(
 
     skep_self = queen_skep_refusal(command, home=holder.current.home, cwd=cwd)
     if skep_self is not None:  # D11: the Queen's lanes only, not the hook's
+        key = "floor.never-grantable-prefixes"
+        floor = {"rule_id": key, "decided_by": f"floor/{key}", "reason": skep_self}
+        log_queen_floor(
+            holder, Request("shell", action, command), floor, role=role, cwd=cwd,
+            chat_id=chat_id, queen_only=True,
+        )  # fmt: skip
         return AutonomyDecision(
             verdict="deny",
             reason="shell.deny.skep_self",
             detail=skep_self,
-            decided_by="floor/floor.never-grantable-prefixes",
+            decided_by=floor["decided_by"],
         )
     repo = _cwd_registered_repo(store, holder, cwd)
     reached = None if repo is not None else _command_registered_repo(store, holder, command, cwd)
@@ -3220,7 +3232,6 @@ def queen_shell_decision(
             ),
             decided_by=verdict.decided_by,
         )
-    action = "run_background" if background else "run"
     verdict = queen_decide(
         holder, store, Request("shell", action, command), role=role, cwd=cwd, chat_id=chat_id
     )
@@ -5321,6 +5332,9 @@ def _execute_mutation(
     if name == "set_project_phase":
         # v25-F1: command-deck only — the model never sees this tool.
         return set_project_phase(store, str(args["project_id"]), str(args["phase"]))
+    if name == "remove_project":
+        # ES-F235: command-deck only, like set_project_phase (/unregister).
+        return actions.remove_project(store, str(args["project_id"]))
     if name == "workon":
         return actions.workon(
             holder,

@@ -639,7 +639,9 @@ def test_an_unattended_turn_runs_no_network_lane_even_where_policy_allows(
         assert fetched == []
         search = [m.content for m in store.chat_messages(chat.chat_id)
                   if m.role == "tool" and m.tool_name == "search_web"]  # fmt: skip
-        assert search and "scheduled turn" in search[0], search
+        # ES-F241: the refusal names the turn it is
+        turn = "a scheduled turn" if read_only else "an unattended follow-up turn"
+        assert search and turn in search[0], search
         actions = {a.tool: a.status for a in store.chat_actions(chat.chat_id)}
         # A continuation may propose (a human pulls the card); a prompt tick never.
         assert actions == (

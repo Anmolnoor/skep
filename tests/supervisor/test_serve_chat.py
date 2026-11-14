@@ -319,6 +319,188 @@ def test_a_finished_run_continues_the_conversation(
         store.close()
 
 
+def test_a_run_finish_follow_up_refuses_web_reads_as_a_follow_up(
+    repo: Path, config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F241: the run-finish continuation refused search_web saying it
+    "does not run in a scheduled turn" — no schedule was involved. The
+    refusal stays (store reads only, unattended); its words name the turn."""
+    from skep.supervisor.serve.chat import _CONTINUED, run_completion_turn
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.store import RunStore
+
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        task_id = _bound_run(store, chat_id, repo)
+        _CONTINUED.discard(task_id)
+        ollama.script_tool_call("search_web", {"query": "why did it fail"})
+        ollama.script_reply("no web here")
+        holder = ConfigHolder(config, store)
+        run_completion_turn(
+            store, holder, Dispatcher(store=store, holder=holder), config.home, task_id
+        )
+        tool_rows = [m.content for m in store.chat_messages(chat_id) if m.role == "tool"]
+        refusal = json.loads(tool_rows[-1])["error"]
+        assert "unattended follow-up turn" in refusal
+        assert "schedul" not in refusal
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("cut", ["mid-turn", "queued"])
+def test_a_run_finish_follow_up_cut_off_by_a_restart_runs_once_on_startup(
+    cut: str, repo: Path, config: SupervisorConfig, ollama: FakeOllama, monkeypatch: Any
+) -> None:
+    """ES-F242: the run-finish continuation joins D18's follow-up queue. A
+    serve stopped mid-turn (or while it waited for the chat) lost it; the next
+    serve start now runs it, once, and a second restart finds nothing left.
+    Its seed rows are written once — a resumed turn picks up after them."""
+    import threading
+
+    from skep.supervisor.serve import chat as chat_module
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.store import RunStore
+
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        task_id = _bound_run(store, chat_id, repo)
+        chat_module._CONTINUED.discard(task_id)
+        if cut == "queued":  # stopped while it waited behind another turn
+            store.queue_run_follow_up(task_id, "queued")
+        else:
+
+            class ServeStopped(BaseException):
+                pass
+
+            def stopped(*_args: Any, **_kwargs: Any) -> Any:
+                raise ServeStopped
+
+            holder = ConfigHolder(config, store)
+            with monkeypatch.context() as died:
+                died.setattr(chat_module.ChatEngine, "turn_events", stopped)
+                with pytest.raises(ServeStopped):
+                    chat_module.run_completion_turn(
+                        store, holder, Dispatcher(store=store, holder=holder), config.home, task_id
+                    )
+        chat_module._CONTINUED.discard(task_id)  # a new process remembers nothing
+
+        def wait_continuations() -> None:
+            for thread in threading.enumerate():
+                if thread.name.startswith("skep-continue-"):
+                    thread.join(10)
+                    assert not thread.is_alive()
+
+        ollama.script_reply("resumed: the patch is ready to land")
+        with _client(config, start_ticker=False):
+            wait_continuations()
+        with _client(config, start_ticker=False):  # and again: nothing left to run
+            wait_continuations()
+        rows = store.chat_messages(chat_id)
+        assert [m.content for m in rows].count("resumed: the patch is ready to land") == 1
+        assert len([m for m in rows if m.role == "user" and m.provenance == "queen"]) == 1
+        assert store.queued_run_follow_ups() == []
+    finally:
+        store.close()
+
+
+def test_a_resumed_run_finish_follow_up_honours_the_opt_out(
+    repo: Path, config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ES-F242 follow-up: continuations switched off before the restart —
+    the owed one is dropped, not run; a later switch-on does not revive it."""
+    import threading
+
+    from skep.supervisor.serve import chat as chat_module
+    from skep.supervisor.serve.run_status import CONTINUE_CHAT_SETTING
+    from skep.supervisor.store import RunStore
+
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        task_id = _bound_run(store, chat_id, repo)
+        chat_module._CONTINUED.discard(task_id)
+        store.queue_run_follow_up(task_id, "queued")
+        store.set_setting(CONTINUE_CHAT_SETTING, False)
+        ollama.script_reply("should not run")
+        with _client(config, start_ticker=False):
+            for thread in threading.enumerate():
+                if thread.name.startswith("skep-continue-"):
+                    thread.join(10)
+        assert [m for m in store.chat_messages(chat_id) if m.provenance == "queen"] == []
+        assert store.queued_run_follow_ups() == []
+    finally:
+        store.close()
+
+
+def test_a_run_finish_follow_up_that_already_replied_is_not_rerun(
+    repo: Path, config: SupervisorConfig, ollama: FakeOllama, monkeypatch: Any
+) -> None:
+    """ES-F242 follow-up: serve stopped after the turn's reply was written but
+    before its marker cleared — the next start clears it; no second reply."""
+    import threading
+
+    from skep.supervisor.serve import chat as chat_module
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.store import RunStore
+
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        task_id = _bound_run(store, chat_id, repo)
+        chat_module._CONTINUED.discard(task_id)
+        ollama.script_reply("first answer")
+        holder = ConfigHolder(config, store)
+        with monkeypatch.context() as died:  # the stop lands before the clear
+            died.setattr(store, "clear_run_follow_up", lambda _task_id: None)
+            chat_module.run_completion_turn(
+                store, holder, Dispatcher(store=store, holder=holder), config.home, task_id
+            )
+        assert store.queued_run_follow_ups() == [(task_id, "seeded")]
+        chat_module._CONTINUED.discard(task_id)
+        ollama.script_reply("second answer")
+        with _client(config, start_ticker=False):
+            for thread in threading.enumerate():
+                if thread.name.startswith("skep-continue-"):
+                    thread.join(10)
+        contents = [m.content for m in store.chat_messages(chat_id)]
+        assert "first answer" in contents and "second answer" not in contents
+        assert store.queued_run_follow_ups() == []
+    finally:
+        store.close()
+
+
+def test_an_old_database_gains_the_run_follow_up_column(repo: Path, tmp_path: Path) -> None:
+    """ES-F242: the run row's follow-up marker arrives by migration too."""
+    import sqlite3
+
+    from skep.supervisor.store import RunStore
+
+    db = tmp_path / "old.sqlite3"
+    store = RunStore(db)
+    task_id = _bound_run(store, store.create_chat(title="t", model=None).chat_id, repo)
+    store.close()
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE runs DROP COLUMN follow_up")
+    reopened = RunStore(db)
+    try:
+        assert reopened.queued_run_follow_ups() == []
+        reopened.queue_run_follow_up(task_id, "seeded")
+        assert reopened.queued_run_follow_ups() == [(task_id, "seeded")]
+        reopened.clear_run_follow_up(task_id)
+        assert reopened.queued_run_follow_ups() == []
+    finally:
+        reopened.close()
+
+
 def test_the_continuation_may_propose_but_never_execute(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:

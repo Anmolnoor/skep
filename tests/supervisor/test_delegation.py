@@ -401,6 +401,28 @@ def test_a_delegator_denied_workspace_writes_cannot_dispatch_a_writer(
     assert "role:assistant/fs-workspace-denied" in str(refused.value.detail)
 
 
+def test_a_refused_write_is_one_row_though_rest_compiles_the_manifest_first(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """I13: POST /api/runs with a chain compiles the manifest, then the run.
+    The write the delegator is denied refuses both; only the run's compile
+    is the decision, so it is one ``decisions.jsonl`` row, not two."""
+    store = RunStore(config.db_path)
+    try:
+        manifest = actions.dispatch_manifest(
+            ConfigHolder(config, store), store, repo=str(repo), delegation_chain=["queen@assistant"]
+        )
+    finally:
+        store.close()
+    assert "exceeds the delegator" in manifest["error"]
+    with pytest.raises(HTTPException):
+        _dispatch(config, repo, ["queen@assistant"])
+    log = config.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    writes = [r for r in rows if (r["scope"], r["action"]) == ("filesystem", "write")]
+    assert [(r["verdict"], r["rule_id"]) for r in writes] == [("deny", "exceeds_delegator")]
+
+
 def test_dispatch_refuses_a_chain_deeper_than_one(config: SupervisorConfig, repo: Path) -> None:
     """ADR 0055 D4: depth 1 outside a team (R3 lifts it to 2 for a team's
     manager hop only — test_queen_delegates.py)."""
