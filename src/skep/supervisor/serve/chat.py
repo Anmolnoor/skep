@@ -45,7 +45,7 @@ from ..store import ChatActionRecord, RunStore
 
 if TYPE_CHECKING:
     from ..roles import Role
-from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS
+from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS, redact
 from ..policy_write import PolicyWriteRejected
 from . import actions
 from .cards import (
@@ -711,6 +711,28 @@ def _trim_longest_text(data: dict[str, Any], cap: int) -> None:
             f"{original[:keep]}… [{len(original) - keep} chars cut; the rest is in the transcript]"
         )
         over = len(json.dumps(data, ensure_ascii=True)) - cap
+
+
+def _redacted(content: str) -> str:
+    """ES-F260: ``content`` with every inline credential masked (``redact``).
+    A JSON result is masked leaf by leaf and stays valid JSON (v73-F7: a
+    broken one reads as a broken tool and the model loops)."""
+    try:
+        data = json.loads(content)
+    except ValueError:
+        return redact(content)
+
+    def walk(value: Any) -> Any:
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, list):
+            return [walk(item) for item in value]
+        if isinstance(value, dict):
+            return {key: walk(item) for key, item in value.items()}
+        return value
+
+    masked = walk(data)
+    return content if masked == data else json.dumps(masked, ensure_ascii=True)
 
 
 def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
@@ -1632,7 +1654,10 @@ class ChatEngine:
                 # blob must never eat the budget that carries the question.
                 # Older ones are history, not working data — the tighter cap.
                 cap = TOOL_REPLAY_CAP if record.id < last_user_id else CURRENT_TOOL_REPLAY_CAP
-                content = _truncate_tool_result(content, cap, record.tool_name)
+                # ES-F260: a tool or MCP error can echo a credential (an
+                # httpx error's URL, a provider's auth header); the model, a
+                # third party, never sees one. The stored row stays whole.
+                content = _redacted(_truncate_tool_result(content, cap, record.tool_name))
                 message: dict[str, Any] = {
                     "role": "tool",
                     "tool_name": record.tool_name,

@@ -415,7 +415,10 @@ def _execute(
             review = generate(task, messages)
         provider_calls = 1
     except LlmPlanError as exc:
-        failure = f"provider request failed: {exc}"
+        from skep.supervisor.policy_v3 import redact
+
+        # ES-F260: a provider error can echo a URL token or an auth header.
+        failure = redact(f"provider request failed: {exc}")
         stream.emit(
             EventType.VERIFY_RESULT,
             {

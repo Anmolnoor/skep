@@ -134,12 +134,14 @@ def test_document_task_fails_honestly_on_provider_error(tmp_path: Path) -> None:
     out = tmp_path / "result.json"
 
     def generate(_task: CodingWorkerTask, _messages: list[dict[str, Any]]) -> str:
-        raise LlmPlanError("provider unreachable")
+        # ES-F260 follow-up: a provider error that echoes a credential is masked.
+        raise LlmPlanError("provider unreachable https://x.invalid/v1?api_key=CANARY-" + "d" * 20)
 
     assert run_document_task(task_file, out, generate=generate) == 3
     result = json.loads(out.read_text())
     assert result["status"] == "failed"
     assert "provider request failed" in result["summary"]
+    assert "CANARY" not in out.read_text() and "api_key=***" in result["summary"]
     assert result["verification"]["outcome"] == "not_attempted"
 
 

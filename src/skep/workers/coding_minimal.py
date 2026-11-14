@@ -447,6 +447,10 @@ def _failure_result(
     details: str,
     usage: Usage,
 ) -> int:
+    from skep.supervisor.policy_v3 import redact
+
+    # ES-F260: callers pass str(exc); a credential in it is masked here, once.
+    summary, details = redact(summary), redact(details)
     stream.emit(EventType.PLAN_CREATED, {"steps": [summary]})
     stream.emit(
         EventType.VERIFY_RESULT,
@@ -505,6 +509,9 @@ def _invalid_plan_result(
     provider_calls: int,
     tokens: ProviderUsageTally | None = None,
 ) -> int:
+    from skep.supervisor.policy_v3 import redact
+
+    details = redact(details)  # ES-F260
     summary = "LLM coding plan is invalid."
     stream.emit(EventType.TASK_TERMINAL, {"status": TaskState.FAILED.value, "summary": summary})
     artifact = Artifact(
@@ -539,6 +546,9 @@ def _tool_not_allowed_result(
     provider_calls: int,
     tokens: ProviderUsageTally | None = None,
 ) -> int:
+    from skep.supervisor.policy_v3 import redact
+
+    details = redact(details)  # ES-F260
     summary = "LLM coding plan requested disallowed tool(s)."
     stream.emit(
         EventType.TASK_REJECTED,

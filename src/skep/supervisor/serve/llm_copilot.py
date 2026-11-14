@@ -69,3 +69,11 @@ def resolve_copilot_bearer(github_token: str) -> str:
     with _lock:
         _cache[github_token] = (bearer, expiry)
     return bearer
+
+
+def forget_copilot_bearer(bearer: str) -> None:
+    """ES-F263: drop a bearer the provider refused, so the next resolve
+    re-exchanges instead of handing back the same dead token until expiry."""
+    with _lock:
+        for github_token in [t for t, (b, _) in _cache.items() if b == bearer]:
+            del _cache[github_token]

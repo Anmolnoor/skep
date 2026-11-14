@@ -68,8 +68,10 @@ fetch, checkout, switch: hard-denied at the capability layer (v19-F3/F5),
 before the verify fast-path and before any allowlist or grant is
 consulted, and never persistable as a stored prefix — the denial is
 absolute. No allowlist entry, grant, verify label, plugin, or approval
-overrides it, and privilege escalation (`sudo`/`doas`) is refused first
-precisely because every deny below keys on `argv[0]`. The same list binds
+overrides it, and privilege escalation (`sudo`/`doas`/`su`/`pkexec`/`run0`,
+read through `env` and launchers, ES-F261/F262) is refused first
+precisely because every deny below keys on `argv[0]` — in a worker even
+when the exact command was approved. The same list binds
 the Queen's own hands (v83-F9): no chat lane may become the git-writing
 path workers are denied. The guard list may only ever grow.
 
