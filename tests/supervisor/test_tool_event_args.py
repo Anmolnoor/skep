@@ -90,6 +90,10 @@ def test_the_card_event_and_the_chat_fetch_carry_masked_args(
     assert "CANARY" not in json.dumps(cards)
     detail = client.get(f"/api/chats/{chat_id}").json()
     assert detail["actions"] and "CANARY" not in json.dumps(detail["actions"])
+    # follow-up: the model's own call, as the fetch replays it, is masked too
+    calls = [c for m in detail["messages"] for c in m["tool_calls"] or []]
+    assert calls and "example.com/p" in json.dumps(calls)
+    assert "CANARY" not in json.dumps(detail)
     from skep.supervisor.store import RunStore
 
     store = RunStore(config.db_path)

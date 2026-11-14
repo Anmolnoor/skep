@@ -1323,6 +1323,19 @@ def shown_strings(value: Any) -> Any:
     return value
 
 
+def shown_message(message: Any) -> dict[str, Any]:
+    """L5 follow-up: a stored message for the chat fetch — the model's tool
+    calls carry their args masked (``stream_args``), as the card does; the
+    stored row keeps them raw for the transcript the model replays."""
+    row: dict[str, Any] = asdict(message)
+    row["tool_calls"] = row["tool_calls"] and [
+        {**call, "function": {**(call.get("function") or {}),
+                              "arguments": stream_args(_call_args(call))}}
+        for call in row["tool_calls"]
+    ]  # fmt: skip
+    return row
+
+
 def _call_args(call: dict[str, Any]) -> dict[str, Any]:
     """Tool-call arguments, tolerating the JSON-string variant some servers send."""
     arguments = call.get("function", {}).get("arguments") or {}
@@ -3595,7 +3608,7 @@ def add_chat_routes(
     def _chat_detail(chat_id: str, chat: Any) -> dict[str, Any]:
         return {
             "chat": asdict(chat),
-            "messages": [asdict(m) for m in run_store.chat_messages(chat_id)],
+            "messages": [shown_message(m) for m in run_store.chat_messages(chat_id)],
             # v54-F3: description is derived, not stored — replayed cards get
             # the same human-readable line as live ones.
             "actions": [
