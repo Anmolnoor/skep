@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from skep.supervisor import SupervisorConfig, sandbox
+from skep.supervisor import SupervisorConfig, engines, sandbox
 from skep.supervisor.contracts_io import DEFAULT_BUDGET, DEFAULT_PERMISSIONS, mint_task, read_result
 from skep.supervisor.dispatch import run_task
 from skep.worker_contract import Permissions, TaskState, VerificationOutcome
@@ -110,6 +110,9 @@ def test_supervisor_can_spawn_claude_code_adapter(
     fake_claude.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).parents[2] / "src"))
+    # ES-F255 follow-up: a worker command running claude_code IS that engine,
+    # so its NO AUTH ENV refusal binds it as it binds --engine claude_code.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-not-a-key")
 
     config = SupervisorConfig(
         home=tmp_path / "home",
@@ -150,6 +153,10 @@ def test_supervisor_passes_claude_code_command_env_override(
     custom_claude.chmod(0o755)
     monkeypatch.setenv("SKEP_CLAUDE_CODE_CMD", str(custom_claude))
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).parents[2] / "src"))
+    # ES-F255 follow-up: the engine's binary + NO AUTH ENV checks bind a
+    # worker command running claude_code; the custom binary stands in.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-not-a-key")
+    monkeypatch.setattr(engines, "engine_available", lambda e: (True, str(custom_claude)))
 
     config = SupervisorConfig(
         home=tmp_path / "home",

@@ -29,8 +29,8 @@ uv run skep run /path/to/repo "Fix the failing test" --execution-mode sandbox
 
 Claude Code runs only inside skep's sandbox (operator decision D36): its
 commands skip the capability layer, so the sandbox is its only wall. The
-adapter refuses to start outside it, and a `--worker-cmd` naming it is forced
-into sandbox mode. The sandbox masks the keychain, so it authenticates from
+adapter refuses to start outside it, and a `--worker-cmd` naming it runs as
+the `claude_code` engine: sandbox mode, auth env and pinned `verify_command`. The sandbox masks the keychain, so it authenticates from
 `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) or `ANTHROPIC_API_KEY`.
 
 The adapter expects `claude` to be on `PATH`. If your executable is elsewhere,
@@ -78,8 +78,10 @@ uv run skep run \
   "Fix the failing test"
 ```
 
-The configured command runs with the task worktree as `cwd`, edits files there,
-and exits. Skep captures the resulting `git diff --binary`, runs
+The configured command's own actions skip skep's capability layer, so the
+shell worker runs only inside skep's sandbox: it refuses to start outside it,
+and a run naming it is forced into sandbox mode. The configured command runs
+with the task worktree as `cwd`, edits files there, and exits. Skep captures the resulting `git diff --binary`, runs
 `git diff --check`, writes the event log/result JSON, and keeps approvals and
 audit evidence in the supervisor layer.
 

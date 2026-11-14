@@ -28,6 +28,7 @@ from skep.workers.cli_adapter import (
     EXIT_FAILED,
     EXIT_INVOCATION_ERROR,
     EXIT_REJECTED,
+    SANDBOX_MARKER_ENV,
     _changed_files,
     _EventStream,
     _run,
@@ -241,6 +242,24 @@ def run_shell_worker_task(task_path: Path, out_path: Path) -> int:
         workspace / ".events" / f"{task_id}.ndjson", task_id=task_id, trace_id=trace_id
     )
 
+    if not os.environ.get(SANDBOX_MARKER_ENV):
+        # ES-F255 follow-up (D36, ADR 0047, I12): SKEP_SHELL_WORKER_CMD is any
+        # local CLI agent, run with a plain subprocess — its commands skip the
+        # capability layer, so skep's sandbox is its only wall, as for the
+        # requires_sandbox adapters (cli_adapter).
+        return _reject(
+            task_id=task_id,
+            trace_id=trace_id,
+            workspace=workspace,
+            stream=stream,
+            out_path=out_path,
+            reason=(
+                "the shell worker runs SKEP_SHELL_WORKER_CMD, whose commands skip skep's "
+                "capability layer, so skep's sandbox is its only wall (ADR 0047), and it "
+                f"was started outside skep's sandbox ({SANDBOX_MARKER_ENV} unset) — "
+                "dispatch it with execution mode 'sandbox'"
+            ),
+        )
     skew = check_supported(str(raw.get("contract_version") or ""), SUPPORTED_CONTRACT_RANGE)
     if skew is not None:
         return _reject(

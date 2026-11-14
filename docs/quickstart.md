@@ -84,8 +84,9 @@ uv run skep run \
 
 A one-off run can pick the engine with `--engine claude_code` instead. A
 `--worker-cmd` or `SKEP_WORKER_CMD` that runs an external agent's module
-(`python -m skep.workers.claude_code`) runs in the sandbox too, whatever
-`--execution-mode` says.
+(`python -m skep.workers.claude_code`) is that engine: it runs in the
+sandbox whatever `--execution-mode` says, and needs the same auth env and
+pinned `verify_command`.
 
 ## 4. Run a task
 

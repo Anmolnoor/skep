@@ -192,8 +192,9 @@ def external_agent_for_command(argv: Sequence[str]) -> str | None:
     The generic shell worker counts: it wraps any local CLI agent.
 
     ponytail: these spellings only — a wrapper script that execs the module
-    is not seen here; the CLI adapters' own SKEP_SANDBOX refusal
-    (cli_adapter ``requires_sandbox``) is the wall behind this one."""
+    is not seen here; the CLI adapters' and the shell worker's own
+    SKEP_SANDBOX refusal (cli_adapter ``requires_sandbox``) is the wall
+    behind this one."""
     modules = {e.argv[-1]: e.name for e in CODING_ENGINES.values() if e.external and e.argv}
     modules["skep.workers.shell_worker"] = "shell_worker"
     for token in argv:

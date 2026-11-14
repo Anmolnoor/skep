@@ -435,9 +435,26 @@ def run_task(
     # v90-F1 (ADR 0047): the coding engine for this run. Castes with their own
     # workers (audit, researcher, …) are unaffected — an engine replaces the
     # CODING implementation only.
-    from .engines import engine_available, external_agent_for_command, resolve_engine
+    from .engines import (
+        CODING_ENGINES,
+        engine_available,
+        external_agent_for_command,
+        resolve_engine,
+    )
 
     engine = resolve_engine(coding_engine or None)
+    # D36 (ES-F255): what actually runs decides — a --worker-cmd /
+    # SKEP_WORKER_CMD naming an external agent's worker module is that agent.
+    wrapped = (
+        None if engine.external else external_agent_for_command(config.command_for(worker_kind))
+    )
+    if worker_kind == "coding" and wrapped in CODING_ENGINES:
+        # ES-F255 follow-up (ADR 0047, I2 I12): it IS that engine — the same
+        # module, the same binary + auth-env refusal below, its own API host
+        # and toolchain dirs, and the record names it — not a builtin run that
+        # merely got the sandbox. The resolver applies the same mapping, so
+        # the pinned-verify requirement binds it too.
+        engine = CODING_ENGINES[wrapped]
     # ADR 0059 D3 (V6a): the one place a worker's provider_hosts is set. Every
     # face (chat, REST, CLI, scheduler, resume, batch, templates) reaches it,
     # and a caller's value is never trusted: it is recomputed from the
@@ -462,18 +479,16 @@ def run_task(
     codex_auth: str | None = None  # ES-F122: set only when the plan login is used
     run_login: Path | None = None
     coerced_mode: str | None = None
-    if worker_argv is None and execution_mode != "sandbox":
+    if wrapped is not None and execution_mode != "sandbox":
         # D36 (ES-F255): v94-F4 keys on the engine id; a --worker-cmd /
         # SKEP_WORKER_CMD that runs an external agent's worker module is that
         # agent all the same, and the sandbox is its only wall (ADR 0047).
         # Coerced like the resolver coerces an engine, and the record says so.
-        wrapped = external_agent_for_command(config.command_for(worker_kind))
-        if wrapped is not None:
-            coerced_mode = (
-                f"the worker command runs the external agent {wrapped!r}, which only "
-                f"the sandbox confines (ADR 0047): run in 'sandbox', not {execution_mode!r}"
-            )
-            execution_mode = "sandbox"
+        coerced_mode = (
+            f"the worker command runs the external agent {wrapped!r}, which only "
+            f"the sandbox confines (ADR 0047): run in 'sandbox', not {execution_mode!r}"
+        )
+        execution_mode = "sandbox"
     if execution_mode == "sandbox" and config.sandbox:
         # ES-F1 (B47, I12): every sandbox-mode run, not only external engines
         # (v94-F4) — the builtin worker and run_code's script caste took the

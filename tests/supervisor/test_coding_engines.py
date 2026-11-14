@@ -329,7 +329,11 @@ def test_a_worker_cmd_running_an_external_agent_is_forced_into_the_sandbox(
         seen.update(kwargs)
         raise OSError("stop here")
 
+    import skep.supervisor.engines as engines_module
+
     monkeypatch.setattr(dispatch_module, "spawn_worker", spawn)
+    monkeypatch.setattr(engines_module, "engine_available", lambda e: (True, "/usr/bin/claude"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-not-a-key")
     outcome = run_task(
         repo,
         "do a thing",
@@ -340,12 +344,61 @@ def test_a_worker_cmd_running_an_external_agent_is_forced_into_the_sandbox(
     )
     assert seen["sandbox_enabled"] is None  # the spawner's sandbox, not False
     assert outcome.record.execution_mode == "sandbox"
+    # ES-F255 follow-up: it ran AS the engine, and the record names it (I8).
+    assert outcome.record.coding_engine == "claude_code"
     store = RunStore(config.db_path)
     try:
         details = " ".join(d or "" for _, d, _ in store.transitions_for(outcome.record.task_id))
     finally:
         store.close()
     assert "claude_code" in details and "'workspace'" in details and "sandbox" in details
+
+
+def test_a_worker_cmd_running_an_external_agent_meets_the_engines_requirements(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F255 follow-up (ADR 0047, I2): a --worker-cmd running codex is the
+    codex engine — it needs the pinned verify_command (its own verify is
+    `git diff --check`) and gets the engine's API host and auth env, exactly
+    as `--engine codex` would. Before, only the sandbox followed."""
+    import dataclasses
+
+    wrapped = dataclasses.replace(config, worker_command=("python3", "-m", "skep.workers.codex"))
+    _bind(config, repo, {})
+    with pytest.raises(PolicyResolutionError) as excinfo:
+        _resolve(wrapped, repo)
+    assert "'codex'" in str(excinfo.value) and "verify_command" in str(excinfo.value)
+    _bind(config, repo, {"verify_command": "pytest -q"})
+    resolved = _resolve(wrapped, repo)
+    assert resolved.coding_engine == "codex"
+    assert "OPENAI_API_KEY" in resolved.permissions.env_allowlist
+
+
+def test_dispatch_refuses_a_worker_cmd_external_agent_with_no_auth_env(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F255 follow-up (v116-F1, I9): the engine's NO AUTH ENV refusal
+    binds a worker command running claude_code before any run record."""
+    import dataclasses
+    import sys
+
+    import skep.supervisor.engines as engines_module
+    from skep.supervisor.dispatch import run_task
+
+    _usable_sandbox(monkeypatch)
+    monkeypatch.setattr(engines_module, "engine_available", lambda e: (True, "/usr/bin/claude"))
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    wrapped = dataclasses.replace(
+        config, worker_command=(sys.executable, "-m", "skep.workers.claude_code")
+    )
+    with pytest.raises(ValueError, match="NO AUTH ENV"):
+        run_task(repo, "do a thing", config=wrapped, verify_command="pytest -q")
+    store = RunStore(config.db_path)
+    try:
+        assert store.recent_runs(5) == []
+    finally:
+        store.close()
 
 
 def test_dispatch_refuses_an_external_engine_without_a_usable_sandbox(

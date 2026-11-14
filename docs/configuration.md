@@ -82,8 +82,9 @@ environment variable name. It does not store the credential value.
 
 The worker command decides which coding agent Skep supervises. For an
 external agent (Claude Code, Codex, Aider, pi), prefer the project's
-`coding_engine` (`skep project setup --engine claude_code`): it also checks
-the agent's auth env and requires a pinned `verify_command`.
+`coding_engine` (`skep project setup --engine claude_code`). A worker command
+that runs an engine's module is that engine all the same: it needs the
+agent's auth env and a pinned `verify_command`, exactly as `--engine` does.
 
 Per run:
 
