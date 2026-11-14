@@ -608,3 +608,54 @@ def test_a_project_wide_network_is_high_for_every_dispatch_verb(
             store.close()
     finally:
         ollama.stop()
+
+
+# L3 (ES-F302, D44): a host-shell line whose read target skep cannot resolve
+# statically is a HIGH card with the warning — not a deny (the operator may
+# want it), never an ordinary card.
+_UNRESOLVED = (
+    "f=.ne; cat ~/${f}trc",
+    'cat "$HOME/$X"',
+    "cat $(printf '%s' ~/.netrc)",
+    "cat `echo ~/.netrc`",
+    "find ~ -name id_rsa -exec cat {} +",
+    r"find / -type f -exec cat {} \;",
+    "find ~ -type f | xargs cat",
+    "cat ~/.ss*/id_*",
+    "sh -c 'cat ~/${f}trc'",
+    "eval 'cat $P'",
+    "ls /etc/*.conf",
+    "cat ~/.{n,}etrc",
+    "cat ~/$'\\x2e'netrc",
+)
+_RESOLVED = (
+    "uname -a",
+    "awk '{print $1}' notes.txt",
+    "ls -la",
+    "grep -r 'a*b' src",
+    "find . -name '*.py'",
+    "echo '$5 for a coffee'",
+)
+
+
+@pytest.mark.parametrize("command", _UNRESOLVED)
+def test_an_unresolvable_shell_read_target_is_a_high_card(command: str) -> None:
+    for tool in ("run_shell", "start_process"):
+        why = high_tier(tool, {"command": command})
+        assert why is not None and "can't be determined" in why, (tool, command, why)
+        assert "credential files" in why
+    card = card_summary("run_shell", {"command": command})
+    assert card["tier"] == "high" and card["keep"] == ["once"]
+
+
+@pytest.mark.parametrize("command", _RESOLVED)
+def test_a_statically_read_shell_line_stays_an_ordinary_card(command: str) -> None:
+    assert high_tier("run_shell", {"command": command, "cwd": "/tmp"}) is None
+
+
+def test_find_exec_from_a_home_cwd_is_unresolved(tmp_path: Any) -> None:
+    from pathlib import Path
+
+    command = "find . -type f -exec cat {} +"
+    assert high_tier("run_shell", {"command": command, "cwd": str(Path.home())}) is not None
+    assert high_tier("run_shell", {"command": command, "cwd": str(tmp_path)}) is None
