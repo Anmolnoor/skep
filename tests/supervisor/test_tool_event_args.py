@@ -62,3 +62,53 @@ def test_header_and_env_shaped_secret_keys_are_hidden() -> None:
     )
     assert "CANARY" not in json.dumps(shown)
     assert shown["key"] == "auto_approve" and shown["n"] == 3
+
+
+def _secret_command(prefix: str = "") -> str:
+    # built at runtime: neither the source nor the .pyc holds a credential-shaped literal
+    userinfo = ":".join(["user", "CANARY-urlpw"]) + "@"
+    query = "=".join(["?token", "CANARY-qtok"])
+    header = " ".join(["'Authorization:", "Bearer", "CANARY-bearer'"])
+    return f"{prefix}curl -H {header} https://{userinfo}example.com/p{query}"
+
+
+def test_the_card_event_and_the_chat_fetch_carry_masked_args(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """L5 (ES-F300): the card the operator sees — live event and reloaded
+    chat — masks URL userinfo, ?token= and bearer headers in args, card and
+    decision, at any depth; the stored action keeps the raw args to execute."""
+    client, chat_id = chat_client(config, ollama)
+    nested = {"cfg": {"env": ["Bearer CANARY-list"], "url": "https://a:CANARY-nest@h/x"}}
+    ollama.script_tool_calls(("run_shell", {"command": _secret_command(), **nested}))
+    ollama.script_reply("ok")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "x"}).text)
+    cards = [d for name, d in events if name == "action"]
+    assert len(cards) == 1, events
+    assert cards[0]["args"]["command"].startswith("curl -H 'Authorization: Bearer ***'")
+    assert "example.com/p" in cards[0]["args"]["command"]  # the target stays readable
+    assert "CANARY" not in json.dumps(cards)
+    detail = client.get(f"/api/chats/{chat_id}").json()
+    assert detail["actions"] and "CANARY" not in json.dumps(detail["actions"])
+    from skep.supervisor.store import RunStore
+
+    store = RunStore(config.db_path)
+    try:
+        (action,) = store.chat_actions(chat_id)
+        assert "CANARY-urlpw" in action.args["command"]  # raw for execution, server-side
+    finally:
+        store.close()
+
+
+def test_a_denied_call_event_carries_masked_args(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """L5 (ES-F300): a policy deny names what the model asked for, masked."""
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_calls(("run_shell", {"command": _secret_command("sudo ")}))
+    ollama.script_reply("ok")
+    events = sse_events(client.post(f"/api/chats/{chat_id}/messages", json={"content": "x"}).text)
+    tools = [d for name, d in events if name == "tool"]
+    assert tools and tools[0]["result"]["ok"] is False, tools
+    assert tools[0]["args"]["command"].startswith("sudo curl")
+    assert "CANARY" not in json.dumps(tools)

@@ -1306,6 +1306,18 @@ def stream_args(args: dict[str, Any]) -> dict[str, Any]:
     return {"truncated": True, "preview": text[:STREAM_ARGS_MAX_CHARS] + "..."}
 
 
+def shown_strings(value: Any) -> Any:
+    """L5: ``value`` with every string, at any depth, through ``redact`` — a
+    card or decision quotes the args (headline, keep line, detail)."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {k: shown_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [shown_strings(v) for v in value]
+    return value
+
+
 def _call_args(call: dict[str, Any]) -> dict[str, Any]:
     """Tool-call arguments, tolerating the JSON-string variant some servers send."""
     arguments = call.get("function", {}).get("arguments") or {}
@@ -2412,10 +2424,11 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(payload, ensure_ascii=True),
                         )
-                        yield (
+                        yield (  # L5: the deny names what was asked, masked
                             "tool",
-                            {"tool": name, "decision": asdict(decision), "result": payload},
-                        )
+                            {"tool": name, "args": shown_args,
+                             "decision": shown_strings(asdict(decision)), "result": payload},
+                        )  # fmt: skip
                         continue
                     # ES-F3 (B08): an unattended turn never executes — it
                     # fires whether or not anyone is watching, so even a
@@ -2485,7 +2498,7 @@ class ChatEngine:
                         receipt: dict[str, Any] = {
                             "tool": name,
                             "args": shown_args,
-                            "decision": asdict(decision),
+                            "decision": shown_strings(asdict(decision)),
                             "result": payload,
                             "card": self._card(chat_id, name, args),
                         }
@@ -3192,10 +3205,13 @@ class ChatEngine:
         fields: dict[str, Any] = {
             # P3-5: a policy write's replay and narrowed keep, laid over the card
             "card": {**self._card(chat_id, action.tool, action.args, action=action),
-                     **(recorded.get("checked") or {})},
+                     **shown_strings(recorded.get("checked") or {})},
+            # L5: the operator's copy is masked; the stored row keeps the raw
+            # args the confirm executes
+            "args": stream_args(action.args),
         }  # fmt: skip
         if recorded.get("decision") is not None:
-            fields["decision"] = recorded["decision"]
+            fields["decision"] = shown_strings(recorded["decision"])
         return fields
 
     def _card(
@@ -3225,7 +3241,8 @@ class ChatEngine:
         if shown.get("resolves_to"):
             card["resolves_to"] = shown["resolves_to"]
             card["headline"] = f"{card['headline']} → resolves to {shown['resolves_to']}"
-        return card
+        masked: dict[str, Any] = shown_strings(card)  # L5: headline, items, keep quote args
+        return masked
 
 
 # ES B27: a scheduled turn's TOTAL budget. The provider timeout is per read,
