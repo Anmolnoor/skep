@@ -386,3 +386,42 @@ def test_recovery_sweeps_login_copies_no_live_worker_needs(
         store.close()
     assert not stranded.exists()
     assert not finished.exists()
+
+
+def test_recovery_sweeps_proxy_socket_dirs_no_live_run_holds(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ES-F257 follow-up: a SIGKILLed serve strands its skep-nx-* dir, dead
+    socket and all. Serve start removes every old one no live run's record
+    names; it keeps the dir a live run's record names (re-adoption rebinds
+    it), one whose socket still answers (another home's live proxy), and a
+    fresh one (a dispatch about to record it)."""
+    import os
+    import socket
+
+    root = Path(os.environ["XDG_RUNTIME_DIR"])
+    dirs = {n: root / f"skep-nx-{n}" for n in ("empty", "dead", "held", "answers", "fresh")}
+    for d in dirs.values():
+        d.mkdir()
+    dead = socket.socket(socket.AF_UNIX)
+    dead.bind(str(dirs["dead"] / "p.sock"))
+    dead.close()  # the socket file a killed proxy leaves behind
+    listening = socket.socket(socket.AF_UNIX)
+    listening.bind(str(dirs["answers"] / "p.sock"))
+    listening.listen()
+    for name, d in dirs.items():
+        if name != "fresh":
+            os.utime(d, (0, 0))
+    store = RunStore(config.db_path)
+    try:
+        task_id, _workspace = _strand_run(store, config, repo)
+        held_sock = dirs["held"] / "p.sock"
+        store.transition(task_id, "running", f"pid 99999 proxy socket {held_sock}")
+        # another live supervisor holds the run
+        monkeypatch.setattr(store, "claim_run_supervisor", lambda *a, **k: False)
+        recover_interrupted_runs(store, config)
+    finally:
+        store.close()
+        listening.close()
+    assert not dirs["empty"].exists() and not dirs["dead"].exists()
+    assert dirs["held"].exists() and dirs["answers"].exists() and dirs["fresh"].exists()

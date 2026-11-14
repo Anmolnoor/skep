@@ -107,7 +107,8 @@ _PROBE = textwrap.dedent(
 def test_a_real_sandboxed_process_cannot_reach_host_sockets_or_pids(tmp_path: Path) -> None:
     # A host unix listener standing in for the systemd user bus: the test can
     # always create one, and on a desktop host the real ones are probed too.
-    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    # the real runtime dir: conftest points XDG_RUNTIME_DIR at a per-test one
+    runtime = Path(f"/run/user/{os.getuid()}")
     host_socket = Path("/run") / "skep-test-never-exists"
     sockets = [str(runtime / "bus"), str(runtime / "systemd" / "private")]
     listener = None

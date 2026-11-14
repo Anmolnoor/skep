@@ -1222,6 +1222,21 @@ def _run_result(store: RunStore, task_id: str, path: Path) -> CodingWorkerResult
     return result
 
 
+def _socket_answers(path: Path) -> bool:
+    """ES-F257 follow-up: True when a live proxy still serves ``path``."""
+    import socket
+
+    if not path.is_socket():
+        return False
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1.0)
+        try:
+            probe.connect(str(path))
+        except OSError:
+            return False
+    return True
+
+
 def recover_interrupted_runs(
     run_store: RunStore,
     config: SupervisorConfig,
@@ -1352,6 +1367,25 @@ def recover_interrupted_runs(
     for login in config.audit_dir.glob(f"*/{CODEX_RUN_LOGIN}"):
         if login.parent.name not in live:
             login.unlink(missing_ok=True)
+    # ES-F257 follow-up: a SIGKILLed serve (mid-dispatch, mid-re-verify,
+    # mid-re-adoption) never reaches the finally that removes its skep-nx-*
+    # proxy dir. Stale = no live run's record names its socket. The root is
+    # shared with every other skep home, so a socket that still answers is
+    # someone's live proxy, and the hour spares a dispatch between mkdtemp
+    # and its ``running`` record.
+    held: set[Path] = set()
+    for task_id in live:
+        worker = _recorded_worker(run_store, task_id)
+        if worker is not None and worker[4]:
+            held.add(Path(worker[4]).parent)
+    for stale in Path(_proxy_socket_root()).glob("skep-nx-*"):
+        with suppress(OSError):
+            if (
+                stale not in held
+                and stale.stat().st_mtime < time.time() - 3600
+                and not _socket_answers(stale / "p.sock")
+            ):
+                shutil.rmtree(stale)
     return recovered
 
 
