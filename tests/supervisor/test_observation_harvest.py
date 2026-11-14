@@ -180,7 +180,9 @@ def test_d15_a_harvested_run_summary_is_marked_wrapped_and_taints_nothing(
     assert "&lt;/untrusted> now</untrusted>" in block
     assert store.get_chat_taint(chat).bits() == []
 
-    monkeypatch.setattr(memory_cmds, "_open_store_or_empty", lambda _home: RunStore(store.db_path))
+    monkeypatch.setattr(
+        memory_cmds, "_open_store_or_empty", lambda _home, **_kw: RunStore(store.db_path)
+    )
     assert memory_cmds.cmd_memory_list(argparse.Namespace(home=None, project=None)) == 0
     out = capsys.readouterr().out
     assert f"from worker:{task.task_id}" in out

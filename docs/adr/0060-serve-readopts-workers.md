@@ -14,7 +14,9 @@ marked the run `worker_crashed`; the worktree survived only when a version-2
 checkpoint existed. React-style runs write one every round; plan-style runs
 only at approval gates, so a plan run lost its worktree and its work (field
 test finding L18). The operator chose (D2): **serve re-adopts the running
-worker** and supervises it to completion as if it had never restarted.
+worker** and supervises it to completion as if it had never restarted —
+with one deliberate exception (D35, section 3): a re-adopted run never
+auto-applies; it lands by a human approval.
 
 ## Decision
 
@@ -97,8 +99,19 @@ Everything else is the existing loop: the event log under
 with the existing `kill_session`. After the worker exits, the run takes the
 same ingest → G10 re-verification → approval path recovery already uses
 (I1, I2), and its finish reaches the dispatching chat as a live run's does:
-the one-line notice and the Queen's continuation turn (v105-F1). Auto-apply rules are not replayed on this path, as for every
-recovered run: an adopted run lands only by a human approval.
+the one-line notice and the Queen's continuation turn (v105-F1).
+
+**Landing is the exception (D35).** Auto-apply rules are not replayed on
+this path, as for every recovered run: an adopted run lands only by a human
+approval, even on a project whose maintain lane or unlocked mode would have
+auto-applied it. The reason: after a restart the chain of trust is
+*reconstructed, not witnessed*. The new serve rebuilt supervision from the
+record — pid and start time, the event log, the result envelope — and nobody
+watched the gap between the old serve's death and the adoption; G10 still
+re-verifies, but the only lane that lands without a human (I1) is the one
+place a reconstructed chain is not enough, so a human verdict lands it
+(I1, I13). The run's audit trail says so: an `auto_apply_blocked` transition
+names the restart and the `skep review <task> --approve` that lands it.
 
 The filtering proxy lived in the old serve. Before watching, the new serve
 starts a proxy with the run's own allowlist and asks (from `task.json` in
@@ -121,7 +134,12 @@ killed as before.
 
 ### 5. Two serves on one home
 
-There is no cross-process serve lock. Recovery now skips any run whose
+Since ES-F274 a second `skep serve` on the same home refuses to start: serve
+holds an exclusive lock on `<home>/serve.lock` for its life (the OS drops it
+when serve dies, so no stale pid is judged) and the refusal names the
+holder's pid and port. What follows still guards everything else that
+recovers runs (`skep run`, `skep team`, two serves started on different
+homes over one copied store). Recovery skips any run whose
 recorded supervisor is still alive — a second serve no longer kills the
 workers of a first one that is still running (it used to). Recovery takes
 each run, live worker or dead, with a compare-and-set on

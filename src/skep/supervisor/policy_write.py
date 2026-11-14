@@ -39,7 +39,7 @@ import re
 import threading
 import unicodedata
 from collections import Counter, deque
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -462,6 +462,43 @@ def read_log(audit_dir: Path, limit: int = REPLAY_ROWS) -> list[dict[str, Any] |
             row = None
         rows.append(row if isinstance(row, dict) else None)
     return rows
+
+
+def unlocked_hosts(
+    audit_dir: Path, *, task_ids: Collection[str] | None = None, since: str | None = None
+) -> dict[str, dict[str, int]]:
+    """D34 (ADR 0061): the hosts unlocked mode auto-approved — the decision
+    log's ``network`` allow rows whose layer is ``unlocked:<project>`` —
+    as project → host → count, oldest host first. ``task_ids``: only the
+    rows of those runs; ``since``: only rows at or after that UTC stamp."""
+    # ponytail: a full scan of both log generations (≤ 20 MB) per call — fine
+    # for doctor and one run's page; index by task if a list view ever wants it.
+    found: dict[str, dict[str, int]] = {}
+    for row in read_log(audit_dir, limit=1_000_000):
+        if row is None or (row.get("scope"), row.get("verdict")) != ("network", "allow"):
+            continue
+        layer = str(row.get("layer") or "")
+        if not layer.startswith("unlocked:"):
+            continue
+        if task_ids is not None and row.get("task_id") not in task_ids:
+            continue
+        if since is not None and str(row.get("at") or "") < since:
+            continue
+        hosts = found.setdefault(layer.removeprefix("unlocked:"), {})
+        hosts[str(row.get("value"))] = hosts.get(str(row.get("value")), 0) + 1
+    return found
+
+
+def run_unlocked_hosts(audit_dir: Path, run: dict[str, Any]) -> list[dict[str, Any]]:
+    """D34: the hosts a run reached under unlocked — its own gate's rows
+    and, for a resumed run, the gate it resumed past (that is where the host
+    was answered; this run is the one that reached it)."""
+    ids = {str(run["task_id"]), *([str(run["resume_of"])] if run.get("resume_of") else [])}
+    counts: dict[str, int] = {}
+    for hosts in unlocked_hosts(audit_dir, task_ids=ids).values():
+        for host, count in hosts.items():
+            counts[host] = counts.get(host, 0) + count
+    return [{"host": host, "count": count} for host, count in counts.items()]
 
 
 StacksFor = Callable[[str], "tuple[Stack, Stack | None] | None"]

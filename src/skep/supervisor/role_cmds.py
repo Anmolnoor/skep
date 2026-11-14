@@ -21,7 +21,7 @@ def cmd_role_list(args: argparse.Namespace) -> int:
     from .store import RunStore
 
     config = build_config(args.home, None)
-    store = RunStore(config.db_path)
+    store = RunStore(config.db_path, readonly=True)
     try:
         view = roles_view(store, config.home)
     except ValueError as exc:

@@ -161,7 +161,7 @@ def _active_profile_key(personal_home: Path, endpoint: str) -> str | None:
     db_path = supervisor_home / "supervisor.sqlite3"
     if not db_path.is_file():
         return None
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         active = store.active_provider_profile()
     finally:
@@ -178,7 +178,7 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
     db_path = supervisor_home / "supervisor.sqlite3"
     if not db_path.is_file():
         return None
-    store = RunStore(db_path)
+    store = RunStore(db_path, readonly=True)
     try:
         base_url = store.get_setting(LLM_BASE_URL)
         model = store.get_setting(LLM_DEFAULT_MODEL)
