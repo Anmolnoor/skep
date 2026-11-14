@@ -715,6 +715,17 @@ def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
     if not isinstance(data, dict):
         return content[:cap] + _TOOL_TRUNCATION_MARKER
     hint = _NARROW_HINTS.get(tool_name or "", "ask for less at a time")
+    # ES-F240: a card's approval note (L7/L29) is set aside and put back last,
+    # so the trim and drops below cut the payload, never the note. A
+    # multi-item card carries it per item; the top level keeps one copy.
+    approved = data.pop("approved") if isinstance(data.get("approved"), str) else None
+    if approved is None and isinstance(data.get("items"), list):
+        approved = next(
+            (i["approved"] for i in data["items"] if isinstance(i, dict) and "approved" in i),
+            None,
+        )
+    if isinstance(approved, str):
+        cap -= len(json.dumps({"approved": approved}, ensure_ascii=True))
     data["truncated"] = True
     data["note"] = (
         f"result exceeded the replay cap — narrow the query ({hint}); "
@@ -736,6 +747,8 @@ def _truncate_tool_result(content: str, cap: int, tool_name: str | None) -> str:
     )
     while weight(data) > cap and droppable:
         del data[droppable.pop()]
+    if isinstance(approved, str):
+        data["approved"] = approved
     return json.dumps(data, ensure_ascii=True)
 
 

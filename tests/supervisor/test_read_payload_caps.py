@@ -158,3 +158,24 @@ def test_non_json_content_keeps_the_plain_chop() -> None:
     chopped = _truncate_tool_result("x" * 5000, TOOL_REPLAY_CAP, None)
     assert chopped.endswith(_TOOL_TRUNCATION_MARKER)
     assert len(chopped) == TOOL_REPLAY_CAP + len(_TOOL_TRUNCATION_MARKER)
+
+
+@pytest.mark.parametrize("items", [False, True])
+def test_the_card_approval_note_survives_replay_trimming(items: bool) -> None:
+    """ES-F240: a card-confirmed result whose bulk is short strings in
+    nested lists had the approval note as its longest string — the trim cut
+    the note, then dropped the payload. The note stays; the payload goes."""
+    from skep.supervisor.serve.chat import approved_note
+
+    note = approved_note(high=True)
+    rows = [{"id": f"r-{i}", "state": "done"} for i in range(400)]
+    one = {"ok": True, "result": {"runs": rows}, "approved": note}
+    payload = json.dumps({"ok": True, "items": [one, dict(one)]} if items else one)
+    assert len(payload) > CURRENT_TOOL_REPLAY_CAP
+
+    for cap in (TOOL_REPLAY_CAP, CURRENT_TOOL_REPLAY_CAP):
+        chopped = _truncate_tool_result(payload, cap, "list_runs")
+        assert len(chopped) <= cap
+        data = json.loads(chopped)
+        assert data["approved"] == note
+        assert data["truncated"] is True
