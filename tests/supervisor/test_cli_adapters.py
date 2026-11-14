@@ -16,6 +16,7 @@ import pytest
 from skep.supervisor.contracts_io import DEFAULT_BUDGET, DEFAULT_PERMISSIONS, mint_task, read_result
 from skep.worker_contract import CodingWorkerResult, Permissions, TaskState, VerificationOutcome
 from skep.workers.aider import run_aider_task
+from skep.workers.claude_code import run_claude_code_task
 from skep.workers.codex import run_codex_task
 from skep.workers.pi import run_pi_task
 
@@ -353,6 +354,8 @@ def test_codex_argv_turns_its_own_sandbox_off() -> None:
         (run_codex_task, "SKEP_CODEX_CMD"),
         (run_aider_task, "SKEP_AIDER_CMD"),
         (run_pi_task, "SKEP_PI_CMD"),
+        # ES-F255 (D36): claude_code too — external agents never run unwalled.
+        (run_claude_code_task, "SKEP_CLAUDE_CODE_CMD"),
     ],
 )
 def test_an_external_agent_refuses_to_start_outside_skeps_sandbox(

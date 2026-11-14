@@ -34,7 +34,9 @@ from __future__ import annotations
 
 import shutil
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 BUILTIN_ENGINE = "builtin"
 
@@ -180,6 +182,28 @@ def resolve_engine(name: str | None) -> CodingEngine:
     if engine is None:
         raise ValueError(f"unknown coding_engine {name!r}; known: {', '.join(engine_names())}")
     return engine
+
+
+def external_agent_for_command(argv: Sequence[str]) -> str | None:
+    """D36 (ES-F255): the external agent a worker command actually runs —
+    ``python -m skep.workers.claude_code`` (``.__main__`` too) or a path to
+    that package or its ``__main__.py`` — else None. A ``--worker-cmd`` /
+    ``SKEP_WORKER_CMD`` that runs one is that agent, whatever the engine id.
+    The generic shell worker counts: it wraps any local CLI agent.
+
+    ponytail: these spellings only — a wrapper script that execs the module
+    is not seen here; the CLI adapters' own SKEP_SANDBOX refusal
+    (cli_adapter ``requires_sandbox``) is the wall behind this one."""
+    modules = {e.argv[-1]: e.name for e in CODING_ENGINES.values() if e.external and e.argv}
+    modules["skep.workers.shell_worker"] = "shell_worker"
+    for token in argv:
+        path = Path(token)
+        if path.name == "__main__.py":
+            path = path.parent
+        for name in (token.removesuffix(".__main__"), ".".join(path.parts[-3:])):
+            if name in modules:
+                return modules[name]
+    return None
 
 
 def engine_available(engine: CodingEngine) -> tuple[bool, str]:

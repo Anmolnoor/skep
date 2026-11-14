@@ -682,7 +682,7 @@ def resolve_run_policy(
     verify_command = raw_verify_command.strip()
     # v90-F1: same validation point, same fail-closed shape — an unknown engine
     # must never fall back silently to the coding worker (the v42 lesson).
-    from .engines import BUILTIN_ENGINE, resolve_engine
+    from .engines import BUILTIN_ENGINE, external_agent_for_command, resolve_engine
 
     raw_engine = engine or policy.get("coding_engine") or BUILTIN_ENGINE
     try:
@@ -712,7 +712,14 @@ def resolve_run_policy(
     # every surface shows (I8); dispatch backs this with a hard refusal.
     # ES-F143 (ADR 0061): the same coercion for an unlocked project — zero-ask
     # is justified by the wall, so no request flag runs one outside it.
-    if chosen_engine.external or policy.get("unlocked") is True:
+    # D36 (ES-F255): keyed on what actually runs — a worker command that is
+    # an external agent's module (--worker-cmd / SKEP_WORKER_CMD) is coerced
+    # as its engine id would be.
+    if (
+        chosen_engine.external
+        or policy.get("unlocked") is True
+        or external_agent_for_command(config.command_for(caste)) is not None
+    ):
         resolved_execution_mode = "sandbox"
     # L10: what the run gets with no explicit network — the project's default,
     # its registries and remembered hosts. D5 (operator decision 2026-11-13):

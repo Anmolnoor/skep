@@ -213,6 +213,20 @@ def test_an_external_engine_always_resolves_to_the_sandbox(
     del resolved
 
 
+def test_a_worker_cmd_running_an_external_agent_resolves_to_the_sandbox(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F255 (D36): the resolver keys on what actually runs, so a builtin
+    engine whose worker command is an external agent's module shows sandbox
+    on every surface too (I8); the plain builtin worker keeps workspace."""
+    import dataclasses
+
+    _bind(config, repo, {"verify_command": "pytest -q"})
+    assert _resolve(config, repo).execution_mode == "workspace"
+    wrapped = dataclasses.replace(config, worker_command=("python3", "-m", "skep.workers.codex"))
+    assert _resolve(wrapped, repo).execution_mode == "sandbox"
+
+
 def test_a_request_engine_overrides_the_project_policy(
     repo: Path, config: SupervisorConfig
 ) -> None:
@@ -271,6 +285,67 @@ def test_dispatch_refuses_an_external_engine_outside_the_sandbox(
         )
     message = str(excinfo.value)
     assert "sandbox" in message
+
+
+@pytest.mark.parametrize(
+    ("command", "engine"),
+    [
+        (("python3", "-m", "skep.workers.claude_code"), "claude_code"),
+        (("/usr/bin/python3", "-m", "skep.workers.codex.__main__", "--x"), "codex"),
+        (("python", "/opt/skep/src/skep/workers/aider/__main__.py"), "aider"),
+        (("python", "/opt/skep/src/skep/workers/pi"), "pi"),
+        (("python", "-m", "skep.workers.shell_worker"), "shell_worker"),
+        (("python3", "-m", "skep.workers.coding"), None),
+        (("python3", "tests/supervisor/fake_worker.py"), None),
+        (("my-claude_code-wrapper",), None),
+    ],
+)
+def test_an_external_agent_is_recognised_in_a_worker_command(
+    command: tuple[str, ...], engine: str | None
+) -> None:
+    """ES-F255 (D36): a --worker-cmd / SKEP_WORKER_CMD that runs an external
+    agent's worker module is that agent, whatever the engine id says."""
+    from skep.supervisor.engines import external_agent_for_command
+
+    assert external_agent_for_command(command) == engine
+
+
+def test_a_worker_cmd_running_an_external_agent_is_forced_into_the_sandbox(
+    repo: Path, config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ES-F255 (D36): v94-F4 keyed on the engine id only, so `skep run
+    --worker-cmd "python -m skep.workers.claude_code" --execution-mode
+    workspace` ran Claude Code with no wall at all. The run is coerced into
+    the sandbox, and its record says so (I8)."""
+    import dataclasses
+    import sys
+
+    import skep.supervisor.dispatch as dispatch_module
+    from skep.supervisor.dispatch import run_task
+
+    seen: dict[str, object] = {}
+
+    def spawn(*_args: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        raise OSError("stop here")
+
+    monkeypatch.setattr(dispatch_module, "spawn_worker", spawn)
+    outcome = run_task(
+        repo,
+        "do a thing",
+        config=dataclasses.replace(
+            config, worker_command=(sys.executable, "-m", "skep.workers.claude_code")
+        ),
+        execution_mode="workspace",
+    )
+    assert seen["sandbox_enabled"] is None  # the spawner's sandbox, not False
+    assert outcome.record.execution_mode == "sandbox"
+    store = RunStore(config.db_path)
+    try:
+        details = " ".join(d or "" for _, d, _ in store.transitions_for(outcome.record.task_id))
+    finally:
+        store.close()
+    assert "claude_code" in details and "'workspace'" in details and "sandbox" in details
 
 
 def test_dispatch_refuses_an_external_engine_without_a_usable_sandbox(

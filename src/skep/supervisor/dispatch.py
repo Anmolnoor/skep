@@ -435,7 +435,7 @@ def run_task(
     # v90-F1 (ADR 0047): the coding engine for this run. Castes with their own
     # workers (audit, researcher, …) are unaffected — an engine replaces the
     # CODING implementation only.
-    from .engines import engine_available, resolve_engine
+    from .engines import engine_available, external_agent_for_command, resolve_engine
 
     engine = resolve_engine(coding_engine or None)
     # ADR 0059 D3 (V6a): the one place a worker's provider_hosts is set. Every
@@ -461,6 +461,19 @@ def run_task(
     worker_argv = engine.argv if (worker_kind == "coding" and engine.external) else None
     codex_auth: str | None = None  # ES-F122: set only when the plan login is used
     run_login: Path | None = None
+    coerced_mode: str | None = None
+    if worker_argv is None and execution_mode != "sandbox":
+        # D36 (ES-F255): v94-F4 keys on the engine id; a --worker-cmd /
+        # SKEP_WORKER_CMD that runs an external agent's worker module is that
+        # agent all the same, and the sandbox is its only wall (ADR 0047).
+        # Coerced like the resolver coerces an engine, and the record says so.
+        wrapped = external_agent_for_command(config.command_for(worker_kind))
+        if wrapped is not None:
+            coerced_mode = (
+                f"the worker command runs the external agent {wrapped!r}, which only "
+                f"the sandbox confines (ADR 0047): run in 'sandbox', not {execution_mode!r}"
+            )
+            execution_mode = "sandbox"
     if execution_mode == "sandbox" and config.sandbox:
         # ES-F1 (B47, I12): every sandbox-mode run, not only external engines
         # (v94-F4) — the builtin worker and run_code's script caste took the
@@ -833,6 +846,8 @@ def run_task(
             }
         if relay_note != "off":  # off: the record reads as it did before ADR 0062
             dispatched_fields["provider_key_relay"] = relay_note
+        if coerced_mode is not None:
+            dispatched_fields["execution_mode_coerced"] = coerced_mode
         dispatched_detail = (
             json.dumps(dispatched_fields, ensure_ascii=True) if dispatched_fields else None
         )
