@@ -8,12 +8,14 @@ tokens are built at runtime (CI runs gitleaks).
 
 from __future__ import annotations
 
+import base64
 import os
 import secrets
 import socket
 import stat
 import threading
-from collections.abc import Iterator
+import urllib.parse
+from collections.abc import Callable, Iterator
 from fnmatch import fnmatch
 from pathlib import Path
 
@@ -922,3 +924,30 @@ def test_a_copilot_relay_renews_by_re_exchanging_the_github_token(
     )
     other, _model, _note = provider_relay._relay_for(config, "task-2")
     assert other is not None and other.renew is None
+
+
+@pytest.mark.parametrize(
+    "encode",
+    [
+        lambda k: base64.b64encode(k + b"\n"),  # `echo $KEY | base64`
+        lambda k: base64.b64encode(b"Bearer " + k),  # mid-stream: another alignment
+        lambda k: base64.urlsafe_b64encode(b"x" + k).rstrip(b"="),
+        lambda k: k.hex().encode(),
+        lambda k: k.hex().upper().encode(),
+        lambda k: urllib.parse.quote(k.decode(), safe="").encode(),
+    ],
+    ids=["base64-echo", "base64-offset", "base64url", "hex", "HEX", "url"],
+)
+def test_a_re_encoded_echo_of_the_key_is_masked(encode: Callable[[bytes], bytes]) -> None:
+    """ES-F265: the relay masked the key's exact bytes only; a provider (or a
+    tool it ran) that printed the key base64-, hex- or URL-encoded handed it
+    to the worker. The common encodings of the key are masked too, chunked
+    or not; arbitrary transforms are out of scope."""
+    from skep.supervisor.netproxy import _mask, _masked
+
+    key = (_fake_key() + "+/=?&").encode()  # characters each encoding changes
+    echo = b'{"debug": "' + encode(key) + b'"}'
+    for out in (_mask(echo, key), b"".join(_masked([echo[:20], echo[20:]], key))):
+        assert encode(key)[4:-4] not in out
+        assert b"*" * 24 in out
+        assert out.startswith(b'{"debug": "') and out.endswith(b'"}')

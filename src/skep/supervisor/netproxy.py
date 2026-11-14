@@ -20,7 +20,9 @@ Filtering is by the CONNECT target host (HTTPS) or the absolute-form request hos
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import functools
 import hmac
 import http.client
 import ipaddress
@@ -32,7 +34,7 @@ from pathlib import Path
 from socketserver import StreamRequestHandler, ThreadingTCPServer, ThreadingUnixStreamServer
 from types import TracebackType
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 _CONNECT_TIMEOUT = 10.0
 # v100-F6: a POLL interval, not a deadline. Both relay loops treat a recv
@@ -308,20 +310,46 @@ _HOP_BY_HOP = frozenset(
 _RELAY_READ_TIMEOUT = 600.0
 
 
+# An encoded form shorter than this is not masked: it would hit ordinary text.
+_MIN_ENCODED_FORM = 16
+_URLSAFE = bytes.maketrans(b"+/", b"-_")
+
+
+@functools.lru_cache(maxsize=16)
+def _secret_forms(secret: bytes) -> tuple[bytes, ...]:
+    """ES-F265: ``secret`` and its common encodings — hex (both cases), URL
+    encoding, and base64/base64url at each of the three alignments it can sit
+    at inside a longer encoded run (``echo $KEY | base64`` encodes the key
+    plus a newline), cut to the characters the key alone decides. Longest
+    first. ponytail: these encodings only; JSON escapes, gzip or any other
+    transform of the key is not caught."""
+    forms = {secret.hex().encode(), secret.hex().upper().encode(), quote(secret, safe="").encode()}
+    for offset in range(3):
+        encoded = base64.b64encode(b"\0" * offset + secret)
+        core = encoded[(4 if offset else 0) : (offset + len(secret)) // 3 * 4]
+        forms |= {core, core.translate(_URLSAFE)}
+    forms = {form for form in forms if len(form) >= _MIN_ENCODED_FORM} | {secret}
+    return tuple(sorted(forms, key=len, reverse=True))
+
+
 def _mask(data: bytes, secret: bytes) -> bytes:
-    return data.replace(secret, b"*" * len(secret))
+    for form in _secret_forms(secret):
+        data = data.replace(form, b"*" * len(form))
+    return data
 
 
 def _masked(chunks: Iterable[bytes], secret: bytes) -> Iterator[bytes]:
-    """``chunks`` with every ``secret`` masked, across chunk boundaries. Holds
-    back only a tail that could start the secret, so a stream still reaches
-    the worker chunk by chunk. ponytail: exact bytes only; a provider that
-    echoes the key re-encoded (JSON-escaped, base64) is not caught."""
+    """``chunks`` with every form of ``secret`` (``_secret_forms``) masked,
+    across chunk boundaries. Holds back only a tail that could start one, so
+    a stream still reaches the worker chunk by chunk."""
+    forms = _secret_forms(secret)
     tail = b""
     for chunk in chunks:
         buf = _mask(tail + chunk, secret)
-        top = min(len(buf), len(secret) - 1)
-        hold = next((n for n in range(top, 0, -1) if secret.startswith(buf[-n:])), 0)
+        hold = max(
+            next((n for n in range(min(len(buf), len(f) - 1), 0, -1) if f.startswith(buf[-n:])), 0)
+            for f in forms
+        )
         cut = len(buf) - hold
         if cut:
             yield buf[:cut]
@@ -711,7 +739,7 @@ class _ProxyHandler(StreamRequestHandler):
         # A provider that reflects the auth header must not hand the worker
         # the key: the reply is decoded with the worker's own HTTP library (so
         # any encoding the worker can ask for, the relay can read) and the key
-        # is masked, byte for byte, in the status line, headers and body.
+        # is masked (and its common encodings) in the status line, headers and body.
         secret = key.encode()
         coding = response.getheader("Content-Encoding") or "identity"
         decoded = httpx.Response(
