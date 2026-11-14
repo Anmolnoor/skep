@@ -2010,9 +2010,10 @@ def _decision_row(
 ) -> dict[str, Any]:
     """One ``decisions.jsonl`` row for a v3 verdict. A row decided under a
     role carries ``role``; one without had no role layer. W18: a chat's row
-    carries ``chat``, and a fetch the ``url`` a url_prefix grant matches on
+    carries ``chat``, a Queen shell row its ``cwd`` (the floor judges its
+    paths there), and a fetch the ``url`` a url_prefix grant matches on
     (``logged_url``: no query, no userinfo; redacted like the value), so the
-    write-time replay can re-decide both."""
+    write-time replay can re-decide them."""
     scope, action, value = req
     record: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -2025,6 +2026,8 @@ def _decision_row(
     }
     if stack.chat is not None:
         record["chat"] = stack.chat
+    if repo is None and stack.cwd is not None:
+        record["cwd"] = stack.cwd
     kept = None if url is None or (scope, action) != ("network", "fetch") else logged_url(url)
     if kept is not None:
         record["url"] = redact(kept[0])

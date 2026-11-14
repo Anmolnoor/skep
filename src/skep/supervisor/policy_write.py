@@ -550,6 +550,10 @@ def replay_decisions(
                 why = "chat row on a baseline write (not replayed)"
             else:
                 row_after, row_before = found[0], (found[1] if before is not None else None)
+        cwd = row.get("cwd") if why is None and row is not None else None
+        if isinstance(cwd, str):  # W18: re-decided where its line ran
+            row_after = replace(row_after, cwd=cwd)
+            row_before = None if row_before is None else replace(row_before, cwd=cwd)
         role = None
         if why is None and row is not None and row.get("role"):
             try:
