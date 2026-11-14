@@ -697,3 +697,31 @@ def test_es_f49_review_reserved_words_do_not_hide_a_command_from_the_floor(line:
     assert queen_command_line_refusal(line) is not None
     for argv in (["{", "git", "push"], ["!", "git", "push"], ["then", "git", "push"]):
         assert hard_denied_segment_reason(argv) is not None, argv
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "su -c 'git push origin main'",
+        "su root -c 'rm -rf cache'",
+        "su - bob -c ls",
+        "su",
+        "/bin/SU -",
+        "pkexec rm x",
+        "run0 ls",
+    ],
+)
+def test_su_is_privilege_escalation_on_the_floor(command: str) -> None:
+    """ES-F261: the floor refused sudo/doas first (every deny below keys on
+    argv[0], I4) but not su, whose -c payload is the same laundering path:
+    `su -c 'git push'` was allowlistable and ran from chat."""
+    import shlex
+
+    from skep.supervisor.serve.cards import risk
+    from skep.supervisor.shell_prefixes import queen_command_line_refusal
+
+    argv = shlex.split(command)
+    assert dangerous_prefix_reason(argv) == "privilege escalation cannot be allowlisted"
+    assert "privilege escalation" in (queen_shell_refusal(argv) or "")
+    assert "privilege escalation" in (queen_command_line_refusal(command) or "")
+    assert "launder" in (risk("run_shell", {"argv": argv}) or "")

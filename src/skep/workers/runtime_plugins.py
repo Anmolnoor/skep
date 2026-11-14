@@ -17,6 +17,7 @@ from typing import Any, Literal
 # not going to be the sixth. (Workers already import from skep.supervisor:
 # netproxy, store, serve.llm.)
 from skep.supervisor.shell_prefixes import (
+    PRIVILEGE_ESCALATION,
     argv_segments,
     catastrophic_command_line_reason,
     catastrophic_command_reason,
@@ -382,9 +383,9 @@ def _argv_matches_prefix(argv: Sequence[str], prefixes: Sequence[Sequence[str]])
 
 # v93-F1: binaries where a bare flag alone flips read into destroy
 # (`git clean -n` → `git clean -fdx`, `find . -delete`) or whose real command
-# starts at argv[1] (`sudo`/`doas`). An approved command for these covers NO
+# starts at argv[1] (`sudo`/`doas`/`su`). An approved command for these covers NO
 # flag variant; exact/prefix matching still applies. May only ever grow.
-_FLAG_SENSITIVE_BINARIES = frozenset({"git", "find", "sudo", "doas"})
+_FLAG_SENSITIVE_BINARIES = frozenset({"git", "find", *PRIVILEGE_ESCALATION})
 
 # A bare flag carries no payload: `-q`, `-xvs`, `--verbose`, `--maxfail`.
 # Anything with a glued value (`--index-url=http://x`, `-o/tmp/x`, `-d@file`)

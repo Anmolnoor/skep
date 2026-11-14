@@ -80,6 +80,11 @@ def program_name(token: str) -> str:
     return posixpath.basename(str(token)).casefold()
 
 
+# I4: programs that run a command as another user. Refused first on every
+# floor, because every deny below keys on argv[0] (v49-F2). ES-F261: su's
+# -c payload is the same laundering path as sudo; pkexec and run0 too.
+PRIVILEGE_ESCALATION: frozenset[str] = frozenset({"sudo", "doas", "su", "pkexec", "run0"})
+
 # `A=1 git push`: the shell runs git with A in its environment.
 _ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -1047,7 +1052,7 @@ def hard_denied_segment_reason(entry: Sequence[str]) -> str | None:
         return "the command wraps a payload that cannot be statically judged"
     for segment in segments:
         stripped = segment
-        while stripped and program_name(stripped[0]) in {"sudo", "doas"}:
+        while stripped and program_name(stripped[0]) in PRIVILEGE_ESCALATION:
             stripped = stripped[1:]
         if len(stripped) < len(segment):
             return "privilege escalation cannot be allowlisted"
@@ -1099,7 +1104,7 @@ def worker_allowlist_reason(prefix: list[str]) -> str | None:
 def dangerous_prefix_reason(prefix: list[str]) -> str | None:
     """Why ``prefix`` must not be persisted as an allowlist entry, else None."""
     canon = [program_name(prefix[0]), *prefix[1:]] if prefix else []
-    if canon and canon[0] in {"sudo", "doas"}:
+    if canon and canon[0] in PRIVILEGE_ESCALATION:
         # v49-F2: privilege escalation would also launder every deny below
         # (they all key on argv[0] — 'sudo git push' must not slip through).
         return "privilege escalation cannot be allowlisted"
@@ -1152,7 +1157,7 @@ def queen_shell_refusal(argv: Sequence[str]) -> str | None:
     own hands (I4's spirit: no chat lane may become the git-writing path
     the workers are denied), plus privilege escalation. This list may only
     ever grow."""
-    if argv and program_name(argv[0]) in {"sudo", "doas"}:
+    if argv and program_name(argv[0]) in PRIVILEGE_ESCALATION:
         return "privilege escalation never runs from chat (it would also launder every guard below)"
     # v109-F10: catastrophic commands (single argv here; compound decomposition
     # is a separate fix) never run from chat either, operator or not.
