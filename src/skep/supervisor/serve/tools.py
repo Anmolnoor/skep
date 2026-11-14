@@ -2843,14 +2843,34 @@ MANIFEST_TOOLS = frozenset(
 def log_denied_dispatch_asks(store: RunStore, holder: ConfigHolder, action: Any) -> None:
     """I8, I13: only the compile a run gets records a dispatch's asks
     (ES-F231), and a denied or timed-out card gets no run — so the denial
-    records them, once per item, each row marked ``resolution: denied``.
+    records them, once per item, each row marked ``resolution: denied`` with
+    the card's ``action_id``.
     Call it after the denial is stored, so a raced card logs nothing."""
     if action.tool not in MANIFEST_TOOLS:
         return
-    for item in action.fold_items():
-        dispatch_manifest_for(
-            store, holder, item["args"], action.chat_id, action.tool, resolution="denied"
+
+    def asks(manifest: Any) -> Any:
+        if not isinstance(manifest, dict):
+            return None
+        if "members" in manifest:
+            return [asks(member) for member in manifest["members"]]
+        return manifest.get("network_ask"), manifest.get("shell_ask")
+
+    # The rows are compiled now, from the policy as it is now. ``as_shown``
+    # says whether that still asks what the card showed (its stored manifest,
+    # which a confirm would have answered); False when the policy moved since,
+    # or for a folded item the card showed no manifest of its own (I8).
+    shown = (action.card or {}).get("manifest")
+    for index, item in enumerate(action.fold_items()):
+        args, chat_id = item["args"], action.chat_id
+        as_shown = (
+            index == 0
+            and shown is not None
+            and asks(dispatch_manifest_for(store, holder, args, chat_id, action.tool))
+            == asks(shown)
         )
+        mark = {"resolution": "denied", "action_id": action.action_id, "as_shown": as_shown}
+        dispatch_manifest_for(store, holder, args, chat_id, action.tool, resolution=mark)
 
 
 def dispatch_manifest_for(
@@ -2860,7 +2880,7 @@ def dispatch_manifest_for(
     chat_id: str | None,
     tool: str = "dispatch_run",
     hop: str | None = None,
-    resolution: str | None = None,
+    resolution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """P4-2 (ADR 0059 D6): the manifest of a ``dispatch_run`` this chat
     proposes — compiled exactly as the confirm will compile it. A

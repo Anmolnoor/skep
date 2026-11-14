@@ -4972,7 +4972,7 @@ def dispatch_manifest(
     role: str | None = None,
     deferred_asks: bool = False,
     chat_taint: Sequence[str] = (),
-    resolution: str | None = None,
+    resolution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """ADR 0059 D6 (P4-2): what a dispatch's run will get, compiled the way
     ``submit_run`` compiles it but with no side effect (no git init, no run):
@@ -5104,7 +5104,7 @@ def compile_run(
     team: str | None = None,
     deferred_asks: bool = False,
     init_baseline: bool,
-    resolution: str | None = None,
+    resolution: dict[str, Any] | None = None,
 ) -> CompiledRun:
     """W13: what a dispatch's run gets — ``submit_run`` and
     ``dispatch_manifest`` both compile here, so the card cannot drift from
@@ -5243,7 +5243,7 @@ def delegate_permissions(
     team: str | None = None,
     deferred_asks: bool = False,
     record: bool = True,
-    resolution: str | None = None,
+    resolution: dict[str, Any] | None = None,
 ) -> tuple[Permissions, dict[str, Any] | None, str | None]:
     """The worker's permissions held to its role and its chain, with the
     delegation record for the dispatch decision and the dispatch note — or
@@ -5340,7 +5340,7 @@ def _within_delegation(
     *,
     deferred_asks: bool = False,
     record: bool = True,
-    resolution: str | None = None,
+    resolution: dict[str, Any] | None = None,
 ) -> tuple[Permissions, dict[str, Any], str]:
     """R2 (ADR 0055 D4): a worker a bot dispatched gets no grant beyond its
     delegator. Every shell prefix and egress host the run policy granted is
@@ -5393,7 +5393,7 @@ def _within_delegation(
         ask = deferred_asks and askable and row["verdict"] == "require_approval"
         row = {**row, "delegated": "ask" if ask else "dropped"}
         if resolution is not None:  # a denied card: asked, then answered no
-            row["resolution"] = resolution
+            row = {**row, **resolution}
         if record:
             log_decision(holder.current.audit_dir, row)
         (asks if ask else rows).append(row)

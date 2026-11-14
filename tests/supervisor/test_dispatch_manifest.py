@@ -212,7 +212,36 @@ def test_a_denied_dispatch_card_logs_each_ask_once(desk: Desk) -> None:
     ask_rows = [r for r in rows if r.get("delegated") == "ask"]
     assert sorted(f"{r['scope']}.{r['action']} {r['value']}" for r in ask_rows) == sorted(asked)
     assert {r.get("resolution") for r in ask_rows} == {"denied"}
+    assert {r.get("action_id") for r in ask_rows} == {card["action_id"]}
+    assert {r.get("as_shown") for r in ask_rows} == {True}
     assert desk.runner.submitted == []  # no run: the denial is the only record
+
+
+def test_a_denied_card_whose_policy_moved_says_its_rows_are_not_what_was_shown(
+    desk: Desk,
+) -> None:
+    """I8, I13: the denial compiles its rows from the policy as it is at deny
+    time. When that no longer asks what the card showed, the rows say so
+    (``as_shown: false``) instead of passing for the question the human saw."""
+    chat, card = desk.propose()
+    (pending,) = desk.store.pending_chat_actions(chat)
+    shown = {**pending.card["manifest"], "network_ask": []}  # type: ignore[index]
+    desk.store._conn.execute(  # the card as shown asked nothing
+        "UPDATE chat_actions SET card_json = ? WHERE action_id = ?",
+        (json.dumps({"manifest": shown}), pending.action_id),
+    )
+    desk.store._conn.commit()
+    desk.ollama.script_reply("ok")
+    list(
+        desk.engine.verdict_events(
+            chat, desk.store.get_chat(chat), card["action_id"], confirm=False, actor="chat-user"
+        )
+    )
+    log = desk.config.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    ask_rows = [r for r in rows if r.get("delegated") == "ask"]
+    assert ask_rows
+    assert {(r.get("resolution"), r.get("as_shown")) for r in ask_rows} == {("denied", False)}
 
 
 def test_an_ask_the_card_did_not_list_still_gates(desk: Desk) -> None:
