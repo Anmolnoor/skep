@@ -1385,26 +1385,6 @@ class RunStore:
         return [RunRecord(*row) for row in rows]
 
     @_locked
-    def pending_runs_before(self, cutoff_iso: str) -> list[RunRecord]:
-        """Runs stuck in ``pending_approval`` whose ``updated_at`` is < cutoff (v20-F6).
-
-        Timestamps are the sortable ``%Y-%m-%dT%H:%M:%SZ`` form, so the string
-        comparison orders correctly. Used by ``skep doctor`` to surface stale
-        gates with a deny command.
-        """
-        rows = self._conn.execute(
-            "SELECT task_id, trace_id, repo, ref, workspace, execution_mode, instructions, state,"
-            " summary,"
-            " verification_outcome, verification_details, worker_version,"
-            " manifest_fingerprint, resume_of, created_at, updated_at, base_commit,"
-            " worker_kind, coding_engine"
-            " FROM runs WHERE state = 'pending_approval' AND updated_at < ?"
-            " ORDER BY updated_at ASC, task_id ASC",
-            (cutoff_iso,),
-        ).fetchall()
-        return [RunRecord(*row) for row in rows]
-
-    @_locked
     def transitions_for(self, task_id: str) -> list[tuple[str, str | None, str]]:
         rows = self._conn.execute(
             "SELECT state, detail, created_at FROM run_transitions WHERE task_id = ? ORDER BY id",

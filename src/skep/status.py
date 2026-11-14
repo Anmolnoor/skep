@@ -29,8 +29,7 @@ def build_status(
     env = os.environ if env is None else env
     home = Path(home)
     required: dict[str, dict[str, Any]] = {}
-    stale_pending = _stale_pending_runs(home, now=now)
-    approvals = _pending_approvals(home, now=now)
+    approvals, stale_pending = _pending_approvals(home, now=now)
 
     if not profile_path(home).exists():
         required["profile"] = {
@@ -163,51 +162,43 @@ def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
     return {"status": "ready", "label": f"provider ready ({target})", "detail": target}
 
 
-def _pending_approvals(home: Path, *, now: datetime | None = None) -> dict[str, Any]:
-    """Every approval row the store holds pending, and how many are older
-    than the stale threshold: no auto-deny timeout applies to a gate, and a
-    row whose run moved on still waits (doctor printed a constant 0)."""
+def _pending_approvals(
+    home: Path, *, now: datetime | None = None
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Every task waiting at a gate, and the stale tail of it (no auto-deny
+    timeout applies to a gate). ES-F237: ONE count for the summary line and
+    the stale list — a task counts when the store holds a pending approval
+    row for it (ES-F156: its run may have moved on) or its run sits in
+    ``pending_approval`` (v20-F6: a pre-v19 run may have no row). Each stale
+    task carries the exact ``skep review <id> --deny`` that clears it."""
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
-        return {"status": "ready", "pending": 0, "stale": 0}
-    cutoff = (now or datetime.now(UTC)) - timedelta(days=_STALE_PENDING_DAYS)
-    from .supervisor.store import RunStore
-
-    store = RunStore(db_path)
-    try:
-        pending = store.pending_approvals()
-    finally:
-        store.close()
-    stale = sum(a.requested_at < cutoff.strftime("%Y-%m-%dT%H:%M:%SZ") for a in pending)
-    return {"status": "ready", "pending": len(pending), "stale": stale}
-
-
-def _stale_pending_runs(home: Path, *, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Runs stuck in ``pending_approval`` for more than 7 days (v20-F6).
-
-    Each carries the exact ``skep review <id> --deny`` command to clear it, so a
-    pre-v19 store converges to a clean state without hand-editing sqlite.
-    """
-    db_path = home / "supervisor" / "supervisor.sqlite3"
-    if not db_path.is_file():
-        return []
+        return {"status": "ready", "pending": 0, "stale": 0}, []
     cutoff = (now or datetime.now(UTC)) - timedelta(days=_STALE_PENDING_DAYS)
     cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
     from .supervisor.store import RunStore
 
     store = RunStore(db_path)
     try:
-        runs = store.pending_runs_before(cutoff_iso)
+        since = {
+            run.task_id: run.updated_at for run in store.runs_with_states(["pending_approval"])
+        }
+        for approval in store.pending_approvals():
+            since[approval.task_id] = min(
+                since.get(approval.task_id, approval.requested_at), approval.requested_at
+            )
     finally:
         store.close()
-    return [
+    stale = [
         {
-            "task_id": run.task_id,
-            "pending_since": run.updated_at,
-            "deny_command": f"skep review {run.task_id} --deny",
+            "task_id": task_id,
+            "pending_since": pending_since,
+            "deny_command": f"skep review {task_id} --deny",
         }
-        for run in runs
+        for task_id, pending_since in sorted(since.items(), key=lambda kv: (kv[1], kv[0]))
+        if pending_since < cutoff_iso
     ]
+    return {"status": "ready", "pending": len(since), "stale": len(stale)}, stale
 
 
 def _store_provider_base_url(home: Path) -> str | None:

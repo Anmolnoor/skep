@@ -443,6 +443,38 @@ def test_doctor_counts_every_pending_approval_row_and_says_which_are_stale(
     )
 
 
+def test_doctor_approval_summary_and_stale_list_read_one_count(tmp_path: Path) -> None:
+    """ES-F237: doctor printed "approvals: 0 pending" right above a stale
+    pending approval — the summary counted approval rows (ES-F156), the stale
+    list counted runs stuck in pending_approval (v20-F6). One count now: every
+    task waiting at a gate, by either record, and the stale list is its tail."""
+    from datetime import UTC, datetime
+
+    from skep.status import build_status, format_doctor_report
+
+    home = tmp_path / "personal"
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    db_path.parent.mkdir(parents=True)
+    store = RunStore(db_path)
+    try:
+        stuck = mint_task(workspace=tmp_path / "stuck", instructions="x")  # run, no row
+        store.create_run(stuck, repo=tmp_path / "repo", ref=None, execution_mode="workspace")
+        store.transition(stuck.task_id, "pending_approval", "waiting")
+        moved = mint_task(workspace=tmp_path / "moved", instructions="x")  # row, run moved on
+        store.create_run(moved, repo=tmp_path / "repo", ref=None, execution_mode="workspace")
+        store.enqueue_approval(moved.task_id, action="shell.run", reason="gate")
+        store.transition(moved.task_id, "failed", "gone")
+    finally:
+        store.close()
+
+    status = build_status(home, now=datetime(2099, 1, 1, tzinfo=UTC))
+    assert status["approvals"]["pending"] == 2 and status["approvals"]["stale"] == 2
+    assert {run["task_id"] for run in status["stale_pending"]} == {stuck.task_id, moved.task_id}
+    report = format_doctor_report(status)
+    assert "- approvals: 2 pending (2 stale" in report
+    assert "approvals: 0 pending" not in report
+
+
 def test_doctor_flags_deprecated_global_auto_approve(tmp_path: Path) -> None:
     """v23-F6 → v81-F14: a store carrying auto_approve=true is told the toggle
     is inert now, and how to clear it."""
