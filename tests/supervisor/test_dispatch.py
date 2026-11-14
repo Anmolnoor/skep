@@ -182,6 +182,14 @@ def test_crash_synthesizes_worker_crashed(repo: Path, config: SupervisorConfig) 
             True,
             r"Worker was killed by signal SIGKILL \(exit 137\) before reporting a result\.",
         ),
+        # ES-F250: the Landlock step's refusal reached only worker.log.
+        (
+            "landlockrefused",
+            False,
+            r"Worker never started: the sandbox's Landlock step refused it \(exit 126\): "
+            r"landlock: cannot scope this worker, not starting it: "
+            r"landlock_restrict_self: \[Errno 1\] Operation not permitted",
+        ),
     ],
 )
 def test_a_dead_workers_run_summary_says_how_it_died(
@@ -214,6 +222,27 @@ def test_death_summary_reads_the_exit_status(exit_code: int | None, summary: str
     from skep.supervisor.monitor import death_summary
 
     assert death_summary(exit_code) == summary
+
+
+def test_death_summary_names_a_landlock_refusal_from_the_worker_log(tmp_path: Path) -> None:
+    """ES-F250: exit 126 with skep.landlock's line in worker.log is a pre-start
+    refusal, and the summary quotes it; 126 without the line still teaches
+    where to look; a missing log never raises."""
+    from skep.supervisor.monitor import death_summary
+
+    log = tmp_path / "worker.log"
+    log.write_text("noise\nlandlock: cannot scope this worker, not starting it: boom\n")
+    assert death_summary(126, log) == (
+        "Worker never started: the sandbox's Landlock step refused it (exit 126): "
+        "landlock: cannot scope this worker, not starting it: boom"
+    )
+    assert "Landlock" not in death_summary(9, log)
+    log.write_text("bash: ./worker: Permission denied\n")
+    assert death_summary(126, log) == (
+        "Worker never started: it exited with code 126 (a pre-start step refused it "
+        "or the command is not executable); see worker.log."
+    )
+    assert death_summary(126, tmp_path / "absent.log").startswith("Worker never started")
 
 
 @pytest.mark.parametrize("mode", ["noresult", "badresult"])

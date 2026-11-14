@@ -13,6 +13,8 @@ task instructions:
 - shellgate: pending, gating on the shell command ``GATE:<argv>`` (``_`` for
             spaces); resumed with an approval it runs happy
 - hostgate: pending, gating on network.fetch of host ``GATE:<host>``
+- landlockrefused: never starts — prints skep.landlock's refusal line to
+            stderr and exits 126, the shape of a pre-start Landlock refusal
 - hang:     task.start + one heartbeat, then sleeps forever (monitor must kill)
 - envdump:  writes its environment to <workspace>/envdump.json, then happy-min
 - childenv: spawns a grandchild through the worker's REAL child-env boundary
@@ -148,6 +150,14 @@ def main() -> int:
             file_name = token.removeprefix("FILE:")
         if token.startswith("GATE:"):
             gated = token.removeprefix("GATE:")
+
+    if mode == "landlockrefused":
+        print(
+            "landlock: cannot scope this worker, not starting it: "
+            "landlock_restrict_self: [Errno 1] Operation not permitted",
+            file=sys.stderr,
+        )
+        return 126
 
     stream = Stream(workspace / ".events" / f"{task_id}.ndjson", task_id, trace_id)
     start_payload: dict[str, object] = {

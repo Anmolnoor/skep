@@ -931,6 +931,7 @@ def run_task(
             heartbeat_seconds=config.heartbeat_seconds,
             poll_seconds=config.poll_seconds,
             startup_seconds=config.startup_seconds,
+            log_path=log_path,
         )
 
         result = _run_result(run_store, task.task_id, result_path)
@@ -1457,6 +1458,7 @@ def _adopt_worker(
                     poll_seconds=max(config.poll_seconds, 0.5),
                     startup_seconds=config.startup_seconds,
                     elapsed_seconds=elapsed,
+                    log_path=config.audit_dir / task_id / "worker.log",
                 )
             finally:
                 if proxy is not None:

@@ -135,10 +135,36 @@ def synthesize_terminal(
     )
 
 
-def death_summary(exit_code: int | None) -> str:
+# ES-F250: skep.landlock prints this and exits 126 when the kernel refuses
+# the scoping it promised (src/skep/landlock.py main()).
+LANDLOCK_REFUSAL_PREFIX = "landlock: "
+
+
+def death_summary(exit_code: int | None, log_path: Path | None = None) -> str:
     """ES-F238: one line on how a worker that never reported died, read off
     its exit status — a negative code is the signal that killed it (an
-    operator's kill, the OOM killer); bwrap reports that as 128+N."""
+    operator's kill, the OOM killer); bwrap reports that as 128+N.
+
+    ES-F250: exit 126 is a pre-start refusal (the Landlock step, or a command
+    that is not executable); the refusal line from worker.log is quoted so
+    the record names the real cause (I8, I9)."""
+    if exit_code == 126:
+        lines: list[str] = []
+        if log_path is not None:
+            with contextlib.suppress(OSError):
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        refusal = next(
+            (line for line in reversed(lines) if line.startswith(LANDLOCK_REFUSAL_PREFIX)), None
+        )
+        if refusal is not None:
+            return (
+                "Worker never started: the sandbox's Landlock step refused it "
+                f"(exit 126): {refusal}"
+            )
+        return (
+            "Worker never started: it exited with code 126 (a pre-start step refused it "
+            "or the command is not executable); see worker.log."
+        )
     signum = -exit_code if exit_code is not None and exit_code < 0 else None
     shown = ""
     if exit_code is not None and 128 < exit_code <= 128 + 64:
@@ -173,6 +199,7 @@ def watch_worker(
     poll_seconds: float = 0.05,
     startup_seconds: float = 120.0,
     elapsed_seconds: float = 0.0,
+    log_path: Path | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> MonitorVerdict:
@@ -259,7 +286,7 @@ def watch_worker(
             trace_id=trace_id,
             seq=next_seq,
             status=TaskState.WORKER_CRASHED,
-            summary=death_summary(exit_code),
+            summary=death_summary(exit_code, log_path),
             reason="process_exit_without_terminal",
             exit_code=exit_code,
         )
