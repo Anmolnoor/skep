@@ -4199,6 +4199,18 @@ def landing_card_error(store: RunStore, name: str, args: dict[str, Any]) -> str 
     None for every other tool and anything the confirm reports itself (an
     unknown run or review, a mid-run gate)."""
     try:
+        if name == "open_pr" and not args.get("branch"):
+            # ES-F292 follow-up: open_pr lands each run first (land_run).
+            ids = args.get("task_ids") or [args.get("task_id")]
+            for task_id in ids if isinstance(ids, list) else []:
+                if (
+                    task_id
+                    and actions.applied_branch_for(store, str(task_id)) is None
+                    and actions.patch_path(store, str(task_id)) is not None
+                    and (error := actions.never_reverified_error(store, str(task_id)))
+                ):
+                    return f"run {task_id}: {error}"
+            return None
         if name == "land_run":
             run = actions.require_run(store, str(args["task_id"]))
         elif name == "approve_review":
