@@ -925,21 +925,42 @@ def queen_floor(
     """The floor alone, for a Queen lane that consults it before any document
     loads (I4): ``floor_verdict`` — and, when it refuses, the row
     ``queen_decide`` would log for the same refusal (I13)."""
+    floor = floor_verdict(
+        req.scope, req.value, action=req.action, home=holder.current.home, cwd=cwd
+    )
+    if floor is not None:
+        log_queen_floor(holder, req, floor, role=role, cwd=cwd, chat_id=chat_id)
+    return floor
+
+
+def log_queen_floor(
+    holder: ConfigHolder,
+    req: Request,
+    floor: Mapping[str, str],
+    *,
+    role: Role | None = None,
+    cwd: str | None = None,
+    chat_id: str | None = None,
+    queen_only: bool = False,
+) -> None:
+    """One ``decisions.jsonl`` row for a floor refusal a Queen lane made with
+    no document loaded (I4, I13). ``queen_only``: a lane guard ``decide()``
+    does not hold (D11), so replay skips the row."""
     from .serve.actions import _decision_row
 
-    home = holder.current.home
-    floor = floor_verdict(req.scope, req.value, action=req.action, home=home, cwd=cwd)
-    if floor is not None:
-        verdict = Verdict(
-            "deny", "floor", floor["rule_id"], floor["decided_by"], "floor", floor["reason"]
-        )
-        stack = Stack(home=home, cwd=cwd, guard={}, baseline="", operator={}, chat=chat_id)
-        row = _decision_row(
-            verdict, stack, actor="queen", repo=None, req=(req.scope, req.action, req.value),
-            role=role,
-        )  # fmt: skip
-        log_decision(holder.current.audit_dir, row)
-    return floor
+    verdict = Verdict(
+        "deny", "floor", floor["rule_id"], floor["decided_by"], "floor", floor["reason"]
+    )
+    stack = Stack(
+        home=holder.current.home, cwd=cwd, guard={}, baseline="", operator={}, chat=chat_id
+    )
+    row = _decision_row(
+        verdict, stack, actor="queen", repo=None, req=(req.scope, req.action, req.value),
+        role=role,
+    )  # fmt: skip
+    if queen_only:
+        row["queen_only"] = True
+    log_decision(holder.current.audit_dir, row)
 
 
 # D1: the decision log. Every decide() a wired face makes is one line here;

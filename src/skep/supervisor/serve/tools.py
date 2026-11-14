@@ -3125,7 +3125,7 @@ def queen_shell_decision(
     grant never covers it (review item 3); repo cwds refuse flat (daemons do
     not belong in checkouts). ``chat_id``: the chat asking — its own session
     grants apply, no other chat's (P3-4, B39)."""
-    from ..policy_v3 import UNREADABLE_NOTE, Request, queen_decide, queen_floor
+    from ..policy_v3 import UNREADABLE_NOTE, Request, log_queen_floor, queen_decide, queen_floor
 
     if not command.strip():
         return None
@@ -3145,11 +3145,17 @@ def queen_shell_decision(
 
     skep_self = queen_skep_refusal(command, home=holder.current.home, cwd=cwd)
     if skep_self is not None:  # D11: the Queen's lanes only, not the hook's
+        key = "floor.never-grantable-prefixes"
+        floor = {"rule_id": key, "decided_by": f"floor/{key}", "reason": skep_self}
+        log_queen_floor(
+            holder, Request("shell", action, command), floor, role=role, cwd=cwd,
+            chat_id=chat_id, queen_only=True,
+        )  # fmt: skip
         return AutonomyDecision(
             verdict="deny",
             reason="shell.deny.skep_self",
             detail=skep_self,
-            decided_by="floor/floor.never-grantable-prefixes",
+            decided_by=floor["decided_by"],
         )
     repo = _cwd_registered_repo(store, holder, cwd)
     reached = None if repo is not None else _command_registered_repo(store, holder, command, cwd)

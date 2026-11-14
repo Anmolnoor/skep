@@ -494,6 +494,8 @@ def _unreplayable(row: dict[str, Any] | None) -> str | None:
         return "unreadable row"
     if row.get("repo"):
         return "decided in a repo (run lane, not replayed)"
+    if row.get("queen_only"):
+        return "a Queen-lane guard decide() does not hold"
     if row.get("delegation_chain"):
         return "delegated (chain not replayed)"
     if _MASK in value:

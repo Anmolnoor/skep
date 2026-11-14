@@ -451,6 +451,30 @@ def test_a_cwd_relative_floor_refusal_replays_as_refused(
     assert (replay["replayed"], replay["flips"]) == (1, {})
 
 
+def test_the_queen_running_skep_is_a_decision_log_row_replay_skips(
+    grid: Callable[..., Any],
+) -> None:
+    """I13: D11's refusal (the Queen running skep — `skep policy approve`
+    re-approving its own baseline) carries a floor label, so it is a row like the floor's. decide()
+    does not hold D11 (the Queen's lanes only), so replay skips that row
+    instead of reading it as "now asks 1 past denies"."""
+    from skep.supervisor.policy_write import migration_report
+
+    _paths, fmt, store, holder = grid("builder")
+    line = "skep policy approve"
+    skep = queen_shell_decision(store, holder, command=line, cwd=fmt["outside"], chat_id="c1")
+    assert skep is not None and skep.reason == "shell.deny.skep_self"
+    log = holder.current.audit_dir / "policy" / "decisions.jsonl"
+    (row,) = [json.loads(line) for line in log.read_text().splitlines()]
+    assert (row["actor"], row["value"], row["verdict"], row["source"]) == (
+        "queen", line, "deny", "floor"
+    )  # fmt: skip
+    assert (row["decided_by"], row["note"]) == (skep.decided_by, skep.detail)
+    replay = migration_report(holder, store)["replay"]
+    assert (replay["replayed"], replay["flips"]) == (0, {})
+    assert sum(replay["not_replayable"].values()) == 1
+
+
 def test_the_grid_never_writes_its_canaries_into_the_real_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
