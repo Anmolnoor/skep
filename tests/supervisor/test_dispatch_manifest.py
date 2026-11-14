@@ -173,6 +173,24 @@ def test_the_pre_answer_holds_for_that_run_only(desk: Desk, tmp_path: Path) -> N
     assert "example.com" not in learned  # no session/project/global grant
 
 
+def test_a_carded_dispatch_logs_each_ask_once(desk: Desk) -> None:
+    """I13: the card, the confirm's fresh compile and the run all compile the
+    same grants; only the run's compile is a decision. A dispatch with N
+    asks is N ask rows in ``decisions.jsonl`` — not one per compile."""
+    chat, card = desk.propose()
+    desk.confirm(chat, card["action_id"])
+    manifest = card["card"]["manifest"]
+    asked = [f"network.connect {h}" for h in manifest["network_ask"]] + [
+        f"shell.run {' '.join(p)}" for p in manifest["shell_ask"]
+    ]
+    assert asked  # the desk's home asks example.com
+    log = desk.config.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    ask_rows = [r for r in rows if r.get("delegated") == "ask"]
+    assert sorted(f"{r['scope']}.{r['action']} {r['value']}" for r in ask_rows) == sorted(asked)
+    assert len([r for r in rows if r.get("source") == "delegated"]) == 1  # the hop, once
+
+
 def test_an_ask_the_card_did_not_list_still_gates(desk: Desk) -> None:
     chat, card = desk.propose()
     (pending,) = desk.store.pending_chat_actions(chat)

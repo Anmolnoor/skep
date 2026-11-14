@@ -5104,6 +5104,7 @@ def compile_run(
         delegation_chain=delegation_chain,
         team=team,
         deferred_asks=deferred_asks,
+        record=init_baseline,  # the manifest has no side effect: only the run's compile records
     )
     raw = resolved_policy.policy.get("auto_apply_verified_patch")
     # v30: a project's maintain-phase integration branch (skep/maintain) —
@@ -5198,17 +5199,21 @@ def delegate_permissions(
     delegation_chain: Sequence[str],
     team: str | None = None,
     deferred_asks: bool = False,
+    record: bool = True,
 ) -> tuple[Permissions, dict[str, Any] | None, str | None]:
     """The worker's permissions held to its role and its chain, with the
     delegation record for the dispatch decision and the dispatch note — or
     the permissions untouched (and two Nones) when neither is given: today.
-    ``submit_run`` and ``skep run`` both narrow here (ADR 0050: one verb)."""
+    ``submit_run`` and ``skep run`` both narrow here (ADR 0050: one verb).
+    ``record=False`` (a manifest's compile) logs no rows: a dispatch's asks
+    are recorded once, by the compile its run gets (I13)."""
     chain, worker_role = delegation_inputs(holder, delegation_chain, role, team=team)
     if not chain and worker_role is None:
         return permissions, None, None
     return _within_delegation(
-        holder, store, repo, chain, permissions, worker_role, team, deferred_asks=deferred_asks
-    )
+        holder, store, repo, chain, permissions, worker_role, team,
+        deferred_asks=deferred_asks, record=record,
+    )  # fmt: skip
 
 
 def delegated_decision(
@@ -5290,6 +5295,7 @@ def _within_delegation(
     team: str | None = None,
     *,
     deferred_asks: bool = False,
+    record: bool = True,
 ) -> tuple[Permissions, dict[str, Any], str]:
     """R2 (ADR 0055 D4): a worker a bot dispatched gets no grant beyond its
     delegator. Every shell prefix and egress host the run policy granted is
@@ -5341,7 +5347,8 @@ def _within_delegation(
             return True
         ask = deferred_asks and askable and row["verdict"] == "require_approval"
         row = {**row, "delegated": "ask" if ask else "dropped"}
-        log_decision(holder.current.audit_dir, row)
+        if record:
+            log_decision(holder.current.audit_dir, row)
         (asks if ask else rows).append(row)
         return None if ask else False
 
