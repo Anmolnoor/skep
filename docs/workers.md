@@ -85,6 +85,12 @@ with the task worktree as `cwd`, edits files there, and exits. Skep captures the
 `git diff --check`, writes the event log/result JSON, and keeps approvals and
 audit evidence in the supervisor layer.
 
+That whitespace check proves nothing about the work, so, like an external
+engine, a run using the shell worker requires the project's pinned
+`verify_command` — the command G10 re-runs before the patch can land. Without
+one the run is refused before it starts; pin it first with
+`skep project setup <repo> --verify-command "<command>"`.
+
 Use a custom contract worker instead when the underlying agent needs richer
 state, structured progress events, or task-specific verification beyond this
 single prompt-call shape.
