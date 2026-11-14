@@ -362,3 +362,27 @@ def test_a_recovered_runs_reverify_gets_its_local_provider_port_too(
     finally:
         store.close()
     assert seen["loopback_ports"] == (11434,)
+
+
+def test_recovery_sweeps_login_copies_no_live_worker_needs(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F253: a codex run's per-run ChatGPT login copy lives in its audit
+    dir until the run's ``finally`` unlinks it — a SIGKILLed serve never gets
+    there. Serve start's recovery removes every copy whose run no live worker
+    holds: the stranded run's and a finished run's alike."""
+    from skep.supervisor.secret_floor import CODEX_RUN_LOGIN
+
+    store = RunStore(config.db_path)
+    try:
+        task_id, _workspace = _strand_run(store, config, repo)
+        stranded = config.audit_dir / task_id / CODEX_RUN_LOGIN
+        finished = config.audit_dir / "long-finished-run" / CODEX_RUN_LOGIN
+        for copy in (stranded, finished):
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_text("CANARY-codex-access-token")
+        assert recover_interrupted_runs(store, config) == [task_id]
+    finally:
+        store.close()
+    assert not stranded.exists()
+    assert not finished.exists()

@@ -83,6 +83,7 @@ from .providers import ProviderProfile
 from .reverify import reverify_run
 from .sandbox import PODMAN, NetworkPolicy, SandboxUnavailableError
 from .sandbox import availability as sandbox_availability
+from .secret_floor import CODEX_RUN_LOGIN
 from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
 from .store import RunRecord, RunStore, owner_alive, process_owner
 from .worker_state import (
@@ -856,7 +857,6 @@ def run_task(
             # however the run ends. The record names the source, never a
             # value (I8).
             from .codex_login import write_run_login
-            from .secret_floor import CODEX_RUN_LOGIN
 
             try:
                 run_login = write_run_login(
@@ -1214,13 +1214,16 @@ def recover_interrupted_runs(
     still alive is left alone. Returns the task ids it touched.
     """
     recovered: list[str] = []
+    live: set[str] = set()  # ES-F253: runs whose worker still holds its login copy
     me = process_owner()
     for record in run_store.runs_with_states(_INTERRUPTED_STATES):
         task_id = record.task_id
         supervisor = run_store.run_supervisor(task_id)
         if supervisor is not None and supervisor != me and owner_alive(supervisor):
+            live.add(task_id)
             continue  # ADR 0060 §5: a live serve or CLI still supervises it
         if not run_store.claim_run_supervisor(task_id, expected=supervisor, owner=me):
+            live.add(task_id)
             continue  # §5: another serve starting with this one took it first
         # ES-F5 (B10, I1 I12): the detached worker may still be alive — with no
         # babysitter, no budget, and the proxy gone. Kill its whole session
@@ -1241,6 +1244,7 @@ def recover_interrupted_runs(
             )
         ):
             recovered.append(task_id)
+            live.add(task_id)
             continue
         if live_pid is not None:
             kill_session(live_pid)
@@ -1312,6 +1316,12 @@ def recover_interrupted_runs(
             on_run_finished,
         )
         recovered.append(task_id)
+    # ES-F253: a run's ``finally`` unlinks its codex login copy; a SIGKILLed
+    # serve never got there, and a credential left on disk is a leak. Only a
+    # worker still alive under a supervisor (above) holds one legitimately.
+    for login in config.audit_dir.glob(f"*/{CODEX_RUN_LOGIN}"):
+        if login.parent.name not in live:
+            login.unlink(missing_ok=True)
     return recovered
 
 
@@ -1471,6 +1481,8 @@ def _adopt_worker(
                     log_path=config.audit_dir / task_id / "worker.log",
                 )
             finally:
+                # ES-F253: as the live path's finally — the worker is gone.
+                (config.audit_dir / task_id / CODEX_RUN_LOGIN).unlink(missing_ok=True)
                 if proxy is not None:
                     proxy.stop()
                 if unix_path is not None:  # stop() unlinked the socket; its dir
