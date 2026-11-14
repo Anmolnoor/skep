@@ -3246,6 +3246,26 @@ def cmd_project_set_phase(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_project_remove(args: argparse.Namespace) -> int:
+    # ES-F235 (ADR 0050): the operator face of the REST DELETE — one verb.
+    from fastapi import HTTPException
+
+    from .serve.actions import remove_project
+
+    config = build_config(args.home, None)
+    if not config.db_path.is_file():
+        return _err(f"no project named {args.project_id!r}", next_command="skep project list")
+    store = RunStore(config.db_path)
+    try:
+        remove_project(store, args.project_id)
+    except HTTPException as exc:
+        return _err(str(exc.detail), next_command="skep project list")
+    finally:
+        store.close()
+    print(f"project unregistered: {args.project_id} (its folder is untouched)")
+    return 0
+
+
 def cmd_agents(args: argparse.Namespace) -> int:
     """first-run L1: coding agents running on this machine and which skep
     governs — the same presence_view the Queen's list_agents reads."""
@@ -3807,6 +3827,12 @@ def register_supervisor_commands(
     project_phase.add_argument("project_id")
     project_phase.add_argument("phase")
     project_phase.set_defaults(func=cmd_project_set_phase)
+
+    project_remove = project_sub.add_parser(
+        "remove", help="unregister a project: skep forgets it, its folder is untouched"
+    )
+    project_remove.add_argument("project_id")
+    project_remove.set_defaults(func=cmd_project_remove)
 
     # v104-F2: the branch surface. These verbs have existed as tested functions
     # in serve/actions.py since v57 and were reachable only from chat, so the

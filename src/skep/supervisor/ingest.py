@@ -297,6 +297,10 @@ def ingest_run(
             if terminal is not None
             else "no terminal event and no result envelope"
         )
+        # ES-F238: the synthesized terminal's one line (killed by what, crashed
+        # with which code, timed out) is the run's summary — it was blank.
+        summary = str(terminal.payload.get("summary") or "") if terminal is not None else ""
+        store.set_run_summary(task.task_id, summary or detail)
         store.transition(task.task_id, status, detail)
 
     record = store.get_run(task.task_id)

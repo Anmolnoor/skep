@@ -1331,6 +1331,16 @@ class RunStore:
         self._conn.commit()
 
     @_locked
+    def set_run_summary(self, task_id: str, summary: str) -> None:
+        """ES-F238: a run that ends with no result envelope (killed, crashed,
+        timed out) still gets its one-line summary."""
+        self._conn.execute(
+            "UPDATE runs SET summary = ?, updated_at = ? WHERE task_id = ?",
+            (summary, _now(), task_id),
+        )
+        self._conn.commit()
+
+    @_locked
     def set_worker_identity(self, task_id: str, *, version: str, fingerprint: str) -> None:
         """G7: every run record carries worker version + manifest fingerprint."""
         self._conn.execute(
@@ -1388,26 +1398,6 @@ class RunStore:
             " worker_kind, coding_engine"
             " FROM runs ORDER BY created_at DESC, task_id DESC LIMIT ?",
             (limit,),
-        ).fetchall()
-        return [RunRecord(*row) for row in rows]
-
-    @_locked
-    def pending_runs_before(self, cutoff_iso: str) -> list[RunRecord]:
-        """Runs stuck in ``pending_approval`` whose ``updated_at`` is < cutoff (v20-F6).
-
-        Timestamps are the sortable ``%Y-%m-%dT%H:%M:%SZ`` form, so the string
-        comparison orders correctly. Used by ``skep doctor`` to surface stale
-        gates with a deny command.
-        """
-        rows = self._conn.execute(
-            "SELECT task_id, trace_id, repo, ref, workspace, execution_mode, instructions, state,"
-            " summary,"
-            " verification_outcome, verification_details, worker_version,"
-            " manifest_fingerprint, resume_of, created_at, updated_at, base_commit,"
-            " worker_kind, coding_engine"
-            " FROM runs WHERE state = 'pending_approval' AND updated_at < ?"
-            " ORDER BY updated_at ASC, task_id ASC",
-            (cutoff_iso,),
         ).fetchall()
         return [RunRecord(*row) for row in rows]
 

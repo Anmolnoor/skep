@@ -1250,12 +1250,17 @@ def recover_interrupted_runs(
         task = _task_from_audit(config, task_id)
         workspace = Path(record.workspace) if record.workspace else None
         if task is None or workspace is None:
-            run_store.transition(
-                task_id,
-                TaskState.WORKER_CRASHED.value,
+            detail = (
                 "supervisor restarted while the run was in flight; "
-                "no recoverable task evidence on disk",
+                "no recoverable task evidence on disk"
             )
+            killed = " and killed its unsupervised worker" if live_pid is not None else ""
+            run_store.set_run_summary(  # ES-F238: and by what
+                task_id,
+                f"Worker died: supervisor restarted while the run was in flight{killed}; "
+                "no recoverable task evidence on disk.",
+            )
+            run_store.transition(task_id, TaskState.WORKER_CRASHED.value, detail)
             recovered.append(task_id)
             if on_run_finished is not None:
                 on_run_finished(task_id)
@@ -1283,8 +1288,10 @@ def recover_interrupted_runs(
                     trace_id=task.trace_id,
                     seq=(events[-1].seq + 1) if events else 1,
                     status=TaskState.WORKER_CRASHED,
-                    summary="Supervisor restarted while the run was in flight; "
-                    "no result envelope was deposited.",
+                    # ES-F238: and by what, when this recovery killed it
+                    summary="Supervisor restarted while the run was in flight"
+                    + (" and killed its unsupervised worker" if live_pid is not None else "")
+                    + "; no result envelope was deposited.",
                     reason="supervisor_restart",
                 ),
             )

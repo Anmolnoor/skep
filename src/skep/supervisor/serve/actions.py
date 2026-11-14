@@ -969,6 +969,37 @@ def repo_state_view(
     }
 
 
+def remove_project(store: RunStore, project_id: str) -> dict[str, Any]:
+    """ES-F235 (ADR 0050): unregister a project — its policy row and bindings,
+    nothing more. The folder, its worktrees and its runs stay where they are
+    (I6: what is on disk is the operator's). One verb for the REST DELETE,
+    `skep project remove` and the command deck's /unregister card.
+
+    Refuses while a run on its repo is in flight, like repo removal (v57-F8):
+    that run resolved its policy from this project, and a restart's recovery
+    re-resolves it — with the project gone, G10 re-verifies with the worker's
+    own command instead of the pinned one (I2, v88-F4)."""
+    bound = {
+        str(Path(b.binding_value).resolve()) if b.binding_kind == "repo_path" else b.binding_value
+        for b in store.project_bindings(project_id)
+    }
+    busy = [
+        run.task_id
+        for run in store.runs_with_states(["created", "dispatched", "running"])
+        if str(Path(run.repo).resolve()) in bound or Path(run.repo).name in bound
+    ]
+    if busy:
+        sample = ", ".join(task_id[:13] for task_id in busy[:3])
+        raise HTTPException(
+            status_code=409,
+            detail=f"project {project_id!r} has runs in flight ({sample}) — wait for them "
+            "to finish, then remove it",
+        )
+    if not store.remove_project_policy(project_id):
+        raise HTTPException(status_code=404, detail=f"no project named {project_id!r}")
+    return {"removed": True}
+
+
 def copy_project_policy(store: RunStore, *, src: str, dst: str) -> dict[str, Any]:
     """Copy project ``src``'s policy overlay onto project ``dst`` (v55-F4, ADR 0036).
 

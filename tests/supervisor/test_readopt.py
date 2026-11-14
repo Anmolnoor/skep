@@ -729,6 +729,36 @@ def test_the_kill_switch_restores_kill_on_restart(repo: Path, config: Supervisor
         assert record is not None and record.state == "worker_crashed"
         details = " ".join(d or "" for _, d, _ in store.transitions_for(task_id))
         assert "killed" in details and "adopted" not in details
+        # ES-F238: the run's summary says what killed it
+        assert record.summary == (
+            "Supervisor restarted while the run was in flight and killed its "
+            "unsupervised worker; no result envelope was deposited."
+        )
+    finally:
+        store.close()
+
+
+def test_a_killed_worker_with_no_task_evidence_says_recovery_killed_it(
+    repo: Path, config: SupervisorConfig
+) -> None:
+    """ES-F238: with task.json gone, the summary said only that the worker
+    died — when this recovery had just killed it. It says by what now."""
+    store = RunStore(config.db_path)
+    try:
+        task_id, pid = _strand_with_live_worker(store, config, repo)
+        (config.audit_dir / task_id / "task.json").unlink()
+
+        recover_interrupted_runs(store, replace(config, readopt_workers=False))
+
+        from .test_recover import _gone
+
+        assert _gone(pid)
+        record = store.get_run(task_id)
+        assert record is not None and record.state == "worker_crashed"
+        assert record.summary == (
+            "Worker died: supervisor restarted while the run was in flight and killed "
+            "its unsupervised worker; no recoverable task evidence on disk."
+        )
     finally:
         store.close()
 

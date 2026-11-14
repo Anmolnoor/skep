@@ -232,6 +232,10 @@ COMMANDS: dict[str, dict[str, str]] = {
         "usage": "/phase <project-id> <bootstrap|build|maintain>",
         "desc": "move a project's trust phase (confirm card)",
     },
+    "unregister": {
+        "usage": "/unregister <project-id>",
+        "desc": "unregister a project: skep forgets it, its folder stays (confirm card)",
+    },
     "land": {
         "usage": "/land <task-id> [branch]",
         "desc": "land a completed run's patch (confirm card)",
@@ -939,6 +943,12 @@ class ChatRepl:
                 print(usage)
                 return
             self._propose_command("set_project_phase", {"project_id": args[0], "phase": args[1]})
+            return
+        if name == "unregister":
+            if not args:
+                print(usage)
+                return
+            self._propose_command("remove_project", {"project_id": args[0]})
             return
         if name == "land":
             if not args:
