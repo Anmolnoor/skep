@@ -969,6 +969,16 @@ def repo_state_view(
     }
 
 
+def remove_project(store: RunStore, project_id: str) -> dict[str, Any]:
+    """ES-F235 (ADR 0050): unregister a project — its policy row and bindings,
+    nothing more. The folder, its worktrees and its runs stay where they are
+    (I6: what is on disk is the operator's). One verb for the REST DELETE,
+    `skep project remove` and the command deck's /unregister card."""
+    if not store.remove_project_policy(project_id):
+        raise HTTPException(status_code=404, detail=f"no project named {project_id!r}")
+    return {"removed": True}
+
+
 def copy_project_policy(store: RunStore, *, src: str, dst: str) -> dict[str, Any]:
     """Copy project ``src``'s policy overlay onto project ``dst`` (v55-F4, ADR 0036).
 

@@ -1734,10 +1734,10 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
         return _vetted_persist(run_store, project, project.bindings)
 
     @app.delete("/api/projects/{project_id}")
-    def delete_project(project_id: str) -> dict[str, bool]:
-        if not run_store.remove_project_policy(project_id):
-            raise HTTPException(status_code=404, detail=f"no project named {project_id!r}")
-        return {"removed": True}
+    def delete_project(project_id: str) -> dict[str, Any]:
+        from . import actions
+
+        return actions.remove_project(run_store, project_id)
 
     # -- learned skills (v4 lifecycle: the two gates stay fail-closed) -------
 

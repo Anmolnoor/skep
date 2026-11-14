@@ -267,6 +267,7 @@ commands the model never sees, identical to the web deck:
 | `/state <repo>` | a repo's git state |
 | `/setup <repo>` | bind a repo to a trusted project (confirm card) |
 | `/phase <project-id> <phase>` | move a project's trust phase (confirm card) |
+| `/unregister <project-id>` | unregister a project: skep forgets it, its folder stays (confirm card) |
 | `/land <task-id> [branch]` | land a completed run's patch (confirm card) |
 | `/approve <review-id> [branch]` | approve a pending review (confirm card) |
 | `/deny <review-id>` | deny a pending review (confirm card) |
@@ -302,6 +303,7 @@ skep project setup   REPO [--engine ENGINE] [--verify-command CMD] [--group NAME
 skep project list
 skep project show    PROJECT_ID
 skep project set-phase PROJECT_ID PHASE
+skep project remove PROJECT_ID     # unregister: skep forgets it, the folder is untouched
 skep policy registry
 skep policy rsop REPO
 skep policy why  REPO SCOPE ACTION VALUE [--role NAME] [--delegated-by ACTOR@ROLE ...]

@@ -482,6 +482,23 @@ def test_deck_deny_cancel_leaves_nothing_executed(
     assert action["status"] == "denied"
 
 
+def test_deck_unregister_cards_remove_project_and_needs_an_id(
+    config: SupervisorConfig,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ES-F235: /unregister proposes the remove_project card; bare, it prints usage."""
+    script_input(monkeypatch, ["/unregister", "/unregister ghost-project", "n"])
+    assert run_chat(home=config.home, url="http://unused", client=client) == 0
+    out = capsys.readouterr().out
+    assert "/unregister <project-id>" in out and "canceled" in out
+    (action,) = _chat_actions(client)
+    assert action["tool"] == "remove_project"
+    assert action["args"] == {"project_id": "ghost-project"}
+    assert action["status"] == "denied"
+
+
 def test_unknown_command_points_at_help(
     config: SupervisorConfig,
     client: TestClient,
