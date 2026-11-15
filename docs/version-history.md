@@ -3026,3 +3026,35 @@ operator sees:
 
 The four pre-1.2.1 template names are still accepted as aliases in 1.3.0
 (ADR 0056 open question 3 proposed retiring them here; not done in R3).
+
+## v1.4.0 — the edge sweep (2026-11-15)
+
+1.3.0 was bumped but never tagged, so this is the first published release
+since 1.2.0 and carries both: the roles-and-delegation work above, and the
+edge sweep, a live-model campaign against the policy engine, the sandbox and
+the landing path (#56–#90). What an operator sees:
+
+- **One decision point.** REST, CLI, hooks, ACP, the Queen's file and shell
+  lanes, `read_url`, `search_web`, MCP and browser calls all decide through
+  one `policy_v3.decide()`. A deny binds every spelling of a command, reaches
+  through `sh -c`, and a policy write is checked before it lands.
+- **Taint asks before acting.** A chat that has read private data or taken in
+  outside content asks before it sends or acts; `/trust` clears a chat's
+  taint. High-risk cards need your desk, repeated asks fold into one card,
+  and a dispatch card lists what the run will get.
+- **A stricter sandbox.** It fails closed; it hides rc files, login stores,
+  unused LLM keys, agent sockets and ssh-agent; a git hook can't escape it,
+  and on Linux Landlock confines the worker. An engine's own sandbox is
+  switched off under skep's (codex/claude_code). An opt-in provider-key
+  relay (`provider_key_relay`, default off, ADR 0062) keeps the provider
+  key out of the worker, and codex can run on a ChatGPT plan login.
+- **No unverified landing.** A shell worker needs a pinned verify command,
+  landing can't half-fail beside worktree cleanup, and approvals claim a card
+  atomically before they act.
+- **Honest output.** Logs and cards mask secrets and channel tokens, `skep
+  doctor` and the decision log report what actually happened, follow-ups
+  survive a restart, and skep's own log lines reach `serve.log`.
+- **Tests.** The web UI's JavaScript runs under `node --test`, and CI fails a
+  PR with changed lines no test runs (diff coverage ≥ 90%).
+
+The four pre-1.2.1 template names are still accepted as aliases.
