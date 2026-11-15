@@ -50,20 +50,20 @@
   <section class="wrap" style="padding-bottom: clamp(32px, 4vw, 48px);">
     <div style="padding: clamp(22px, 3vw, 32px); border: 1px solid rgba(123,224,140,0.3); border-radius: 14px; background: var(--bg-card);">
       <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 14px;">
-        <span class="mono" style="font-size: 22px; font-weight: 600; color: var(--text-bright);">v1.3.0</span>
+        <span class="mono" style="font-size: 22px; font-weight: 600; color: var(--text-bright);">v1.4.0</span>
         <span class="pill" style="background: rgba(123,224,140,0.13); color: var(--green);">Latest</span>
-        <span class="mono" style="font-size: 12.5px; color: var(--text-ghost);">2026-11-09 · PyPI + GitHub release</span>
+        <span class="mono" style="font-size: 12.5px; color: var(--text-ghost);">2026-11-15 · PyPI + GitHub release</span>
       </div>
-      <p style="margin: 0 0 16px; max-width: 74ch; font-size: 15px; line-height: 1.65; color: var(--text-mid);">Roles and delegation. A chat runs in a role — <span class="mono" style="font-size: 13.5px;">builder</span>, <span class="mono" style="font-size: 13.5px;">operator</span> or <span class="mono" style="font-size: 13.5px;">assistant</span> — a policy layer that only tightens the approved baseline. The Queen dispatches under its role and a worker it dispatches holds no more than it does; a worker can take its own role, and a team run sends a manager in a role out to up to three workers as one ledger thread. Every hop is a ledger row with its role, and the run cards show the chain.</p>
+      <p style="margin: 0 0 16px; max-width: 74ch; font-size: 15px; line-height: 1.65; color: var(--text-mid);">The edge sweep. A live-model campaign against the policy engine, the sandbox and the landing path, fixed and landed. Every surface — REST, CLI, hooks, ACP, the Queen, web reads, MCP — decides through one <span class="mono" style="font-size: 13.5px;">decide()</span>; a chat that has read private data or outside content asks before it acts; the sandbox fails closed, hides login stores, agent sockets and unused keys, and adds Landlock on Linux; nothing lands unverified. Also carries the unpublished 1.3.0: roles and subset-only delegation.</p>
       <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-        <span class="pill" style="background: rgba(123,224,140,0.1); color: var(--green);">Roles</span>
-        <span class="pill" style="background: rgba(103,211,232,0.1); color: #67D3E8;">Subset-only delegation</span>
-        <span class="pill" style="background: rgba(255,107,31,0.1); color: var(--orange-soft);">skep team</span>
-        <span class="pill" style="background: rgba(167,139,250,0.12); color: #A78BFA;">Chain on every card</span>
+        <span class="pill" style="background: rgba(123,224,140,0.1); color: var(--green);">One decide()</span>
+        <span class="pill" style="background: rgba(103,211,232,0.1); color: #67D3E8;">Taint asks first</span>
+        <span class="pill" style="background: rgba(255,107,31,0.1); color: var(--orange-soft);">Fail-closed sandbox</span>
+        <span class="pill" style="background: rgba(167,139,250,0.12); color: #A78BFA;">No unverified landing</span>
       </div>
       <div style="display: flex; flex-wrap: wrap; gap: 18px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line-inner); font-size: 13.5px; color: var(--text-dim);">
         <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="package" style="width: 15px; height: 15px; color: var(--green);"></i><span class="mono" style="font-size: 12.5px;">pipx install skep</span></span>
-        <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="file-code-2" style="width: 15px; height: 15px; color: var(--green);"></i>worker contract 0.3.5</span>
+        <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="file-code-2" style="width: 15px; height: 15px; color: var(--green);"></i>worker contract 0.3.8</span>
         <span style="display: flex; align-items: center; gap: 8px;"><i data-lucide="scale" style="width: 15px; height: 15px; color: var(--green);"></i>MIT license</span>
       </div>
     </div>
@@ -76,6 +76,11 @@
       <p style="margin: 0 0 34px; max-width: 62ch; font-size: 15px; line-height: 1.6; color: var(--text-dim);">Milestones from the internal version history — each one field-tested, fixed, and landed with its own evidence before the next began.</p>
 
       <div class="timeline">
+        <div class="t-item major">
+          <div class="when">2026-11-15 · v1.4.0</div>
+          <h3>The edge sweep</h3>
+          <p>A live-model campaign found where policy, sandbox and landing could be talked around, and closed it. One <span class="mono">policy_v3.decide()</span> answers every surface, and a deny binds every spelling of a command. A tainted chat asks before it sends or acts, and <span class="mono">/trust</span> clears it. The sandbox fails closed, masks login stores, agent sockets and unused keys, and confines Linux workers with Landlock; an opt-in key relay keeps the provider key out of the worker. A shell worker needs a pinned verify, and logs and cards mask secrets.</p>
+        </div>
         <div class="t-item major">
           <div class="when">2026-11-09 · v1.3.0</div>
           <h3>First run: roles and delegation</h3>
