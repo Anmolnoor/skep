@@ -433,10 +433,21 @@ def _list_ollama_models(base_url: str, api_key: str | None, *, timeout: float) -
     return [str(name) for name in names if name]
 
 
+# v118-F2: chatgpt.com lists models only for a client version it knows — a
+# compatibility filter on the listing, not an identity header.
+CODEX_CLIENT_VERSION = "0.169.0"
+
+
 def _list_openai_models(base_url: str, api_key: str | None, *, timeout: float) -> list[str]:
+    from ..codex_login import uses_codex_login
+
+    codex = uses_codex_login(base_url)
     try:
         response = httpx.get(
-            f"{openai_style_prefix(base_url)}/models", headers=_headers(api_key), timeout=timeout
+            f"{openai_style_prefix(base_url)}/models",
+            params={"client_version": CODEX_CLIENT_VERSION} if codex else None,
+            headers=_headers(api_key),
+            timeout=timeout,
         )
         response.raise_for_status()
         payload = response.json()
@@ -445,6 +456,8 @@ def _list_openai_models(base_url: str, api_key: str | None, *, timeout: float) -
         raise OllamaError(f"{status} from {base_url}" + _login_refused(base_url, status)) from exc
     except (httpx.HTTPError, json.JSONDecodeError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
+    if codex:  # v118-F2: {"models": [{"slug": ...}]}
+        return [str(e["slug"]) for e in payload.get("models", []) if e.get("slug")]
     names = [entry.get("id") or entry.get("name") for entry in payload.get("data", [])]
     return [str(name) for name in names if name]
 
@@ -556,7 +569,8 @@ def _error_detail(response: httpx.Response) -> str:
     error = payload.get("error")
     if isinstance(error, dict):
         error = error.get("message")
-    return str(error or payload.get("message") or "")[:300]
+    # v118-F2: chatgpt.com answers {"detail": "..."}.
+    return str(error or payload.get("message") or payload.get("detail") or "")[:300]
 
 
 def _open_stream_lines(

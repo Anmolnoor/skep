@@ -13,6 +13,7 @@ import argparse
 import io
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -313,3 +314,87 @@ def test_a_worker_never_resolves_the_login(
         worker_provider_from_home(tmp_path)
     assert "only the Queen uses" in str(raised.value)
     assert "skep provider use" in str(raised.value)
+
+
+# -- F2: the two wire differences ---------------------------------------------
+
+
+def _captured_body(monkeypatch: pytest.MonkeyPatch, base_url: str) -> tuple[str, object]:
+    from skep.supervisor.serve import llm_responses
+
+    seen: dict[str, object] = {}
+
+    def fake_open(url: str, base: str, **kw: object) -> Iterator[str]:
+        seen.update(url=url, body=kw["body"])
+        yield 'data: {"type": "response.completed", "response": {}}'
+
+    monkeypatch.setattr(llm_responses, "_open_stream_lines", fake_open)
+    list(
+        chat_stream(
+            base_url,
+            "k",
+            model="m",
+            messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}],
+            tools=[{"type": "function", "function": {"name": "t", "parameters": {}}}],
+            protocol="openai-responses",
+        )
+    )
+    return str(seen["url"]), seen["body"]
+
+
+def test_store_false_only_for_chatgpt(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skep.supervisor.serve.llm_responses import _responses_payload
+
+    expected = _responses_payload(
+        model="m",
+        messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "t", "parameters": {}}}],
+    )
+    for base in ("https://api.openai.com/v1", "https://api.x.ai/v1"):
+        url, body = _captured_body(monkeypatch, base)
+        assert url == f"{base}/responses"
+        # byte-identical to what these providers got before v118
+        assert json.dumps(body) == json.dumps(expected)
+    url, body = _captured_body(monkeypatch, CODEX_BASE)
+    assert url == f"{CODEX_BASE}/responses"
+    assert body == {**expected, "store": False}
+
+
+def test_chatgpt_model_listing_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    from skep.supervisor.serve import llm
+
+    calls: list[dict[str, object]] = []
+
+    def fake_get(url: str, *, params: object, headers: object, timeout: float) -> httpx.Response:
+        calls.append({"url": url, "params": params})
+        request = httpx.Request("GET", url)
+        if "chatgpt.com" in url:
+            body = {"models": [{"slug": "gpt-6.1-terra"}, {"slug": "gpt-6.1-sol"}, {}]}
+        else:
+            body = {"data": [{"id": "gpt-5-mini"}]}
+        return httpx.Response(200, json=body, request=request)
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    assert llm.list_models(CODEX_BASE, "k", protocol="openai-responses") == [
+        "gpt-6.1-terra",
+        "gpt-6.1-sol",
+    ]
+    assert calls[-1] == {
+        "url": f"{CODEX_BASE}/models",
+        "params": {"client_version": llm.CODEX_CLIENT_VERSION},
+    }
+    assert llm.list_models("https://api.openai.com/v1", "k", protocol="openai-responses") == [
+        "gpt-5-mini"
+    ]
+    assert calls[-1] == {"url": "https://api.openai.com/v1/models", "params": None}
+
+
+def test_a_chatgpt_error_detail_is_shown() -> None:
+    import httpx
+
+    from skep.supervisor.serve.llm import _error_detail
+
+    response = httpx.Response(400, json={"detail": "Store must be set to false"})
+    assert _error_detail(response) == "Store must be set to false"

@@ -189,6 +189,10 @@ def responses_chat_stream(
 ) -> Iterator[dict[str, Any]]:
     """One streamed Responses API call, yielding normalized chunks."""
     body = _responses_payload(model=model, messages=messages, tools=tools)
+    from ..codex_login import uses_codex_login
+
+    if uses_codex_login(base_url):
+        body["store"] = False  # v118-F2: chatgpt.com 400s without it
     # Keyed on output_index: the call's id and name arrive on the item-added
     # event, its arguments as later fragments naming the same index.
     pending_calls: dict[int, dict[str, str]] = {}
