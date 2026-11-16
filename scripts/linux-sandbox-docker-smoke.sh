@@ -12,5 +12,10 @@ if [[ "$BUILD" != "0" ]]; then
   docker build -f "$ROOT/Dockerfile" -t "$IMAGE" "$ROOT"
 fi
 
-docker run --rm --entrypoint bash "$IMAGE" -lc \
+# bwrap needs to create user namespaces, which Docker's default seccomp and
+# AppArmor profiles refuse inside a container. Since ES-F1 skep fails closed
+# on that instead of running the worker unconfined, so the smoke lifts both
+# profiles for this one throwaway container.
+docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  --entrypoint bash "$IMAGE" -lc \
   "cd /opt/skep && scripts/linux-sandbox-smoke.sh"

@@ -3058,3 +3058,13 @@ the landing path (#56–#90). What an operator sees:
   PR with changed lines no test runs (diff coverage ≥ 90%).
 
 The four pre-1.2.1 template names are still accepted as aliases.
+
+## v1.4.1 — the release gate runs a real sandbox (2026-11-15)
+
+The `v1.4.0` tag was pushed, but its release gate failed and nothing was
+published, so 1.4.1 is the published form of 1.4.0, with one fix to the gate.
+`scripts/linux-sandbox-docker-smoke.sh` runs bwrap inside a container, and
+Docker's default seccomp and AppArmor profiles refuse the user namespaces bwrap
+needs. Before ES-F1 skep then ran the worker unconfined and the smoke passed
+without testing a sandbox; since ES-F1 it fails closed, which is what failed the
+1.4.0 gate. The smoke now lifts both profiles for its one throwaway container.

@@ -21,5 +21,11 @@ def test_linux_sandbox_docker_smoke_builds_image_and_runs_linux_smoke() -> None:
     assert "SKEP_DOCKER_IMAGE:-skep:linux-sandbox-smoke" in script
     assert "SKEP_DOCKER_BUILD:-1" in script
     assert 'docker build -f "$ROOT/Dockerfile" -t "$IMAGE" "$ROOT"' in script
-    assert 'docker run --rm --entrypoint bash "$IMAGE"' in script
+    # bwrap can't create namespaces under Docker's default seccomp/AppArmor
+    # profiles, and since ES-F1 skep refuses instead of running unconfined.
+    assert (
+        "docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined"
+        in script
+    )
+    assert '--entrypoint bash "$IMAGE"' in script
     assert "scripts/linux-sandbox-smoke.sh" in script
