@@ -47,7 +47,12 @@ def provider_hosts_for(
         # login's host in place of the API host — never both.
         host = chosen.login_host if chatgpt_login and chosen.login_host else chosen.network_host
         return [f"{host}:443"]
-    return sorted(set(configured_provider_hosts(store, home)))
+    # v118-F4 (ADR 0063): a Queen-only provider on chatgpt.com is no run's
+    # provider; configured_provider_hosts still lists it for the egress truth.
+    from .codex_login import CHATGPT_HOST
+
+    hosts = configured_provider_hosts(store, home)
+    return sorted({h for h in hosts if h.rpartition(":")[0] != CHATGPT_HOST})
 
 
 def configured_provider_hosts(store: RunStore, home: Path) -> list[str]:

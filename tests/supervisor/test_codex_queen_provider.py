@@ -471,3 +471,115 @@ def test_the_card_says_what_the_opt_in_spends(tmp_path: Path) -> None:
         assert other is not None and "chatgpt" not in other
     finally:
         store.close()
+
+
+# -- F4: the Queen only ---------------------------------------------------------
+
+
+def _home_with(tmp_path: Path, *profiles: ProviderProfile) -> tuple[Path, Path]:
+    home = tmp_path / "home"
+    supervisor = home / "supervisor"
+    supervisor.mkdir(parents=True)
+    store = RunStore(supervisor / "supervisor.sqlite3")
+    try:
+        for profile in profiles:
+            store.upsert_provider_profile(profile)
+    finally:
+        store.close()
+    return home, supervisor
+
+
+def _use(supervisor: Path, provider_id: str) -> dict[str, object]:
+    from skep.supervisor.serve.actions import use_provider
+
+    store = RunStore(supervisor / "supervisor.sqlite3")
+    try:
+        return use_provider(store, supervisor, provider_id=provider_id)
+    finally:
+        store.close()
+
+
+def test_workers_keep_their_provider_and_never_get_the_login(
+    tmp_path: Path, codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.profile import load_profile
+    from skep.supervisor import SupervisorConfig
+    from skep.supervisor.provider_hosts import configured_provider_hosts, provider_hosts_for
+    from skep.supervisor.provider_relay import _relay_for, relay_plan, relay_worker_env
+    from skep.supervisor.sandbox import secret_paths
+    from skep.workers.llm_plan import worker_provider_from_home
+
+    write_fake_login(codex_home)
+    token = _access_token(codex_home)
+    monkeypatch.delenv("SKEP_LLM_API_KEY", raising=False)
+    ollama = ProviderProfile("ollama", "ollama", "https://ollama.com", "glm-5.2", cost_class="paid")
+    home, supervisor = _home_with(tmp_path, ollama, _codex_profile())
+    store_api_key(supervisor, "decoy-ollama-key")
+    stale = provider_secret_path(supervisor, "openai-codex")
+    stale.write_text("decoy-stale\n")  # e.g. left from before v118
+    _use(supervisor, "ollama")
+    note = str(_use(supervisor, "openai-codex")["note"])
+    assert "workers never get it and keep the provider they had" in note
+
+    # The Queen is on chatgpt.com; the workers' profile.json is untouched.
+    assert load_profile(home).provider.endpoint == "https://ollama.com"
+    provider = worker_provider_from_home(home)
+    assert provider is not None
+    assert provider.profile.endpoint == "https://ollama.com"
+    assert provider.api_key == "decoy-ollama-key"
+
+    # The relay (ADR 0062) holds the same key, and the worker env only a token.
+    plan, why = relay_plan(home)
+    assert why == "on" and plan is not None
+    assert plan[0] == "https://ollama.com" and plan[2] == "decoy-ollama-key"
+    config = SupervisorConfig(home=supervisor, worker_command=("true",))
+    relay, model, _ = _relay_for(config, "task-1")
+    assert relay is not None and relay.upstream == "https://ollama.com"
+    assert relay.key == "decoy-ollama-key"
+    env = json.dumps(relay_worker_env(relay, model, 9999))
+    assert token not in env and "decoy-ollama-key" not in env
+
+    # Direct path: the sandbox unmasks no key file for the Queen-only profile.
+    masked = {p.name for p in secret_paths(home, worker_llm_key=True)}
+    assert stale.name in masked and "llm-secret" not in masked
+    assert "auth.json" in masked  # W33, unchanged
+
+    store = RunStore(supervisor / "supervisor.sqlite3")
+    try:
+        # Egress truth still names chatgpt.com; no run is pinned to it.
+        assert "chatgpt.com:443" in configured_provider_hosts(store, home)
+        run_hosts = provider_hosts_for(store, home, caste="coding")
+        assert "ollama.com:443" in run_hosts and "chatgpt.com:443" not in run_hosts
+    finally:
+        store.close()
+
+
+def test_routing_never_picks_the_queen_only_profile(tmp_path: Path) -> None:
+    from skep.supervisor.policy_resolver import resolve_routed_provider
+    from skep.supervisor.providers import ProviderHealth
+
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        store.upsert_provider_profile(_codex_profile())
+        store.record_provider_health(
+            ProviderHealth("openai-codex", True, True, 5, None, "2026-11-16T00:00:00Z")
+        )
+        decision = resolve_routed_provider(store, strategy="trusted_local_dev", allow_remote=True)
+    finally:
+        store.close()
+    assert decision.provider_id is None
+
+
+def test_a_codex_only_home_refuses_workers_with_the_way_forward(
+    tmp_path: Path, codex_home: Path
+) -> None:
+    from skep.profile import profile_path
+    from skep.supervisor.provider_relay import relay_plan
+
+    write_fake_login(codex_home)
+    home, supervisor = _home_with(tmp_path, _codex_profile())
+    _use(supervisor, "openai-codex")
+    assert not profile_path(home).exists()  # nothing written for workers
+    plan, why = relay_plan(home)
+    assert plan is None
+    assert "only the Queen uses" in why and "skep provider use" in why

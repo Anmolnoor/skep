@@ -515,7 +515,11 @@ def _active_llm_key_names(supervisor: Path) -> set[str]:
         active = store.active_provider_profile()
     finally:
         store.close()
-    return {provider_secret_path(supervisor, active.provider_id).name} if active else set()
+    from .codex_login import uses_codex_login
+
+    if active is None or uses_codex_login(active.base_url):  # v118-F4: no worker key
+        return set()
+    return {provider_secret_path(supervisor, active.provider_id).name}
 
 
 # ``skep serve`` records its port here (under ``<home>/supervisor``) so every

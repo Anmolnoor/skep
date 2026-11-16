@@ -1111,13 +1111,18 @@ def _write_through_profile(store: RunStore, personal_home: Path) -> None:
         return
     if not (isinstance(model, str) and model.strip()):
         return
-    run_personal_setup(
-        personal_home,
-        provider=_protocol(protocol),
-        model=model.strip(),
-        endpoint=base_url.strip(),
-        api_key_env=None,
-    )
+    from ..codex_login import uses_codex_login
+
+    # v118-F4 (ADR 0063): profile.json is the WORKERS' provider. The ChatGPT
+    # plan login is the Queen's alone, so workers keep the one they had.
+    if not uses_codex_login(base_url):
+        run_personal_setup(
+            personal_home,
+            provider=_protocol(protocol),
+            model=model.strip(),
+            endpoint=base_url.strip(),
+            api_key_env=None,
+        )
     # v115-F5: the registry's ACTIVE profile is the third copy of this truth
     # — routing and `skep provider health` read it. It was seeded once
     # (migrate_legacy_provider) and never followed the settings: the field

@@ -165,7 +165,8 @@ def _refuse_queen_only(endpoint: str) -> None:
         raise LlmPlanError(
             "the assistant's provider is your ChatGPT plan login (Codex), which only the "
             "Queen uses — workers need a provider of their own: make another provider "
-            "active (`skep provider use <id>`)"
+            "active once (`skep provider use <id>`); workers keep it when the Queen "
+            "switches back to the ChatGPT plan"
         )
 
 
