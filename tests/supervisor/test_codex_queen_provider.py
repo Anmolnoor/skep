@@ -147,7 +147,7 @@ def test_config_view_reports_the_login_not_a_key(
         store.set_setting(LLM_DEFAULT_MODEL, "gpt-6.1-terra")
         store.set_setting(LLM_PROTOCOL, "openai-responses")
         view = llm_config_view(store, tmp_path)
-        assert view["api_key_set"] is False
+        assert view["api_key_set"] is True  # the saved key is the workers' (v118-R4)
         login = view["chatgpt_login"]
         assert login["present"] and login["plan"] == "pro" and login["problem"] is None
         assert login["expires_at"]
@@ -629,3 +629,47 @@ def test_a_codex_only_home_refuses_workers_with_the_way_forward(
     plan, why = relay_plan(home)
     assert plan is None
     assert "only the Queen uses" in why and "skep provider use" in why
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://chatgpt.com/backend-api/codex",
+        "https://chatgpt.com./backend-api/codex",
+        "https://www.chatgpt.com/backend-api/codex",
+    ],
+)
+def test_the_token_only_leaves_for_the_exact_https_host(
+    base_url: str, tmp_path: Path, codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v118-R2: a cleartext, trailing-dot or subdomain spelling is still
+    chatgpt.com (no other key may reach it) but never gets the login."""
+    write_fake_login(codex_home)
+    _seed_decoys(tmp_path, monkeypatch)
+    assert codex_login.uses_codex_login(base_url)
+    with pytest.raises(OllamaError, match=r"only sent to https://chatgpt\.com"):
+        resolve_provider_api_key(tmp_path, _codex_profile(base_url=base_url))
+
+
+def test_workers_keep_their_own_profile_key_while_the_queen_is_on_the_plan(
+    tmp_path: Path, codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v118-R1: the worker's key is the one registered for ITS endpoint, never
+    another provider's legacy secret, and the sandbox unmasks that file."""
+    from skep.supervisor.sandbox import secret_paths
+    from skep.workers.llm_plan import worker_provider_from_home
+
+    write_fake_login(codex_home)
+    monkeypatch.delenv("SKEP_LLM_API_KEY", raising=False)
+    xai = ProviderProfile("xai", "openai_compat", "https://api.x.ai/v1", "grok-4.3")
+    home, supervisor = _home_with(tmp_path, xai, _codex_profile())
+    store_api_key(supervisor, "decoy-legacy-ollama")
+    provider_secret_path(supervisor, "xai").write_text("decoy-xai-own\n")
+    _use(supervisor, "xai")
+    _use(supervisor, "openai-codex")
+
+    provider = worker_provider_from_home(home)
+    assert provider is not None and provider.profile.endpoint == "https://api.x.ai/v1"
+    assert provider.api_key == "decoy-xai-own"
+    masked = {p.name for p in secret_paths(home, worker_llm_key=True)}
+    assert "llm-secret-xai" not in masked and "llm-secret-openai-codex" not in masked

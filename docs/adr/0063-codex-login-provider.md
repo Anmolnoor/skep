@@ -78,11 +78,14 @@ value and `models[].slug` shape.
 - The config view, the provider list, `skep doctor` and the Settings key
   field report the login's presence, plan and expiry for this profile,
   never a value and never a misleading "key set" or "no key" (I8).
-- While the Queen is on the plan, workers authenticate with the legacy
-  `llm-secret` against their `profile.json` endpoint (the v19-F9 rule):
-  a key held only in another profile's `llm-secret-<id>` file is not read
-  for them. Saving that key as the assistant API key (Settings →
-  assistant, which writes `llm-secret`) is the fix if it bites.
+- While the Queen is on the plan, workers authenticate with the key of
+  the registry profile whose endpoint matches their `profile.json`
+  endpoint (its `llm-secret-<id>` file, which the sandbox keeps readable),
+  falling back to the legacy `llm-secret` as before (v19-F9). They never
+  borrow another provider's key for that endpoint.
+- The token is sent only to `https://chatgpt.com`. An `http://`,
+  trailing-dot or subdomain spelling of the host is refused with the URL
+  to use, and no other credential is sent there either.
 - The access token lives about ten days. skep does not extend it; the
   Codex CLI does, on its own schedule, the next time the operator uses it.
 - The plan's backend is not a documented public API. If it changes, the

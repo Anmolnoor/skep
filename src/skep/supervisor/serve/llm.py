@@ -142,29 +142,42 @@ def store_provider_api_key(home: Path, provider_id: str, value: str) -> None:
     path.chmod(0o600)
 
 
-def _codex_login_key() -> str:
+def _codex_login_key(base_url: str) -> str:
     """v118-F1 (ADR 0063): the one credential a chatgpt.com profile has — the
     operator's Codex login, read and never refreshed. Never the profile's key
     file, ``llm-secret`` or an env var: an ollama key must never reach
     chatgpt.com. Raises OllamaError naming the fix."""
-    from ..codex_login import QUEEN_REFRESH_HINT, queen_access_token
+    from ..codex_login import (
+        CHATGPT_HOST,
+        QUEEN_LOGIN_NAME,
+        QUEEN_REFRESH_HINT,
+        queen_access_token,
+    )
 
+    # v118-R2: the token leaves only over TLS to the exact host — never
+    # http://, a subdomain or a trailing-dot spelling of it.
+    parsed = urlparse(base_url)
+    if parsed.scheme != "https" or parsed.hostname != CHATGPT_HOST:
+        raise OllamaError(
+            f"your {QUEEN_LOGIN_NAME} is only sent to https://{CHATGPT_HOST} — "
+            f"set the base URL to https://{CHATGPT_HOST}/backend-api/codex"
+        )
     try:
         return queen_access_token()
     except ValueError as exc:
         problem = str(exc)
         if "codex login" not in problem:
             problem += f" — {QUEEN_REFRESH_HINT}"
-        raise OllamaError(f"your ChatGPT plan login (Codex) cannot be used: {problem}") from exc
+        raise OllamaError(f"your {QUEEN_LOGIN_NAME} cannot be used: {problem}") from exc
 
 
 def _login_refused(base_url: str, status: int) -> str:
     """v118-F1: what a 401 from chatgpt.com means and how to fix it (I9)."""
-    from ..codex_login import QUEEN_REFRESH_HINT, uses_codex_login
+    from ..codex_login import QUEEN_LOGIN_NAME, QUEEN_REFRESH_HINT, uses_codex_login
 
     if status != 401 or not uses_codex_login(base_url):
         return ""
-    return f" — your ChatGPT plan login (Codex) was refused: {QUEEN_REFRESH_HINT}"
+    return f" — your {QUEEN_LOGIN_NAME} was refused: {QUEEN_REFRESH_HINT}"
 
 
 def chatgpt_login_view() -> dict[str, Any]:
@@ -185,7 +198,7 @@ def resolve_provider_api_key(home: Path, profile: ProviderProfile) -> str | None
     from ..codex_login import uses_codex_login
 
     if uses_codex_login(profile.base_url):
-        return _codex_login_key()
+        return _codex_login_key(profile.base_url)
     key = _raw_provider_api_key(home, profile)
     if key is None:
         return None
@@ -198,6 +211,29 @@ def resolve_provider_api_key(home: Path, profile: ProviderProfile) -> str | None
 
         return resolve_copilot_bearer(key)
     return key
+
+
+def worker_key_profile(store: RunStore, endpoint: str) -> ProviderProfile | None:
+    """The registry profile whose credential a worker dialing ``endpoint``
+    uses: the active one — or, while the Queen is on the ChatGPT plan (v118-R1),
+    the profile registered for that endpoint, since workers kept it. None when
+    the endpoint matches neither (a diverged config never borrows a key)."""
+    from ..codex_login import uses_codex_login
+
+    want = endpoint.strip().rstrip("/")
+    profile = store.active_provider_profile()
+    if profile is not None and uses_codex_login(profile.base_url):
+        profile = next(
+            (
+                p
+                for p in store.list_provider_profiles()
+                if not uses_codex_login(p.base_url) and p.base_url.rstrip("/") == want
+            ),
+            None,
+        )
+    if profile is None or profile.base_url.rstrip("/") != want:
+        return None
+    return profile
 
 
 def _raw_provider_api_key(home: Path, profile: ProviderProfile) -> str | None:
@@ -224,7 +260,7 @@ def resolve_active_api_key(
     from ..codex_login import uses_codex_login
 
     if base_url is not None and uses_codex_login(base_url):
-        return _codex_login_key()  # v118-F1: whichever profile is active
+        return _codex_login_key(base_url)  # v118-F1: whichever profile is active
     active = store.active_provider_profile()
     if active is None:
         return resolve_api_key(home)
@@ -251,7 +287,7 @@ def llm_config_view(store: RunStore, home: Path) -> dict[str, Any]:
         "base_url": base_url,
         "default_model": store.get_setting(LLM_DEFAULT_MODEL),
         "protocol": _protocol(store.get_setting(LLM_PROTOCOL)),
-        "api_key_set": not codex and resolve_api_key(home) is not None,
+        "api_key_set": resolve_api_key(home) is not None,
         **({"chatgpt_login": chatgpt_login_view()} if codex else {}),
         "vision": store.get_setting(LLM_VISION) is True,
         "num_ctx": num_ctx,
@@ -1193,7 +1229,7 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
 
             # v118-F1: chatgpt.com gets the Codex login, never a pasted or saved key.
             api_key = (
-                _codex_login_key()
+                _codex_login_key(str(base_url))
                 if uses_codex_login(str(base_url))
                 else (body.api_key or "").strip() or resolve_api_key(home)
             )

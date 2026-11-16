@@ -507,17 +507,25 @@ def _active_llm_key_names(supervisor: Path) -> set[str]:
     db_path = supervisor / "supervisor.sqlite3"
     if not db_path.is_file():
         return set()
-    from .serve.llm import provider_secret_path
+    from ..profile import load_profile, profile_path
+    from .codex_login import uses_codex_login
+    from .serve.llm import provider_secret_path, worker_key_profile
     from .store import RunStore
 
     store = RunStore(db_path)
     try:
         active = store.active_provider_profile()
+        if active is not None and uses_codex_login(active.base_url):
+            # v118-F4/R1: never the login — the key of the provider the
+            # workers kept (profile.json), or none.
+            endpoint = ""
+            if profile_path(supervisor.parent).is_file():
+                with contextlib.suppress(OSError, ValueError):
+                    endpoint = load_profile(supervisor.parent).provider.endpoint or ""
+            active = worker_key_profile(store, endpoint)
     finally:
         store.close()
-    from .codex_login import uses_codex_login
-
-    if active is None or uses_codex_login(active.base_url):  # v118-F4: no worker key
+    if active is None:
         return set()
     return {provider_secret_path(supervisor, active.provider_id).name}
 

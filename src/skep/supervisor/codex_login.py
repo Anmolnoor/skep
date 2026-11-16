@@ -49,6 +49,9 @@ _REFRESH_HINT = QUEEN_REFRESH_HINT + ", then dispatch again"
 # v118: a provider profile on this host authenticates with the login and
 # nothing else, and only the Queen uses it (ADR 0063).
 CHATGPT_HOST = "chatgpt.com"
+# What every Queen-side refusal about this login is named (matched by the chat
+# and channel failure lines, so they share the one spelling).
+QUEEN_LOGIN_NAME = "ChatGPT plan login (Codex)"
 # Decision 3: such a profile has no key to set, on every face that sets one.
 NO_KEY_REFUSAL = (
     "uses your ChatGPT plan login (Codex) and takes no key — "
@@ -138,7 +141,11 @@ def uses_codex_login(base_url: str) -> bool:
     Codex login or nothing, and it is the Queen's alone."""
     from .providers import provider_host
 
-    return provider_host(base_url) == CHATGPT_HOST
+    # v118-R2: a trailing dot or a subdomain is still chatgpt.com to DNS —
+    # matched here so no other key reaches it; the token itself goes only to
+    # the exact https URL (serve.llm._codex_login_key).
+    host = (provider_host(base_url) or "").rstrip(".")
+    return host == CHATGPT_HOST or host.endswith("." + CHATGPT_HOST)
 
 
 def queen_access_token() -> str:

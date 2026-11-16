@@ -179,14 +179,14 @@ def _active_profile_key(personal_home: Path, endpoint: str) -> str | None:
     if not db_path.is_file():
         return None
     store = RunStore(db_path, readonly=True)
+    from skep.supervisor.serve.llm import resolve_provider_api_key, worker_key_profile
+
     try:
-        active = store.active_provider_profile()
+        active = worker_key_profile(store, endpoint)
     finally:
         store.close()
-    if active is None or active.base_url.rstrip("/") != endpoint.strip().rstrip("/"):
+    if active is None:
         return None
-    from skep.supervisor.serve.llm import resolve_provider_api_key
-
     return resolve_provider_api_key(supervisor_home, active)
 
 
@@ -200,7 +200,9 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
         base_url = store.get_setting(LLM_BASE_URL)
         model = store.get_setting(LLM_DEFAULT_MODEL)
         protocol = store.get_setting(LLM_PROTOCOL)
-        active = store.active_provider_profile()
+        from skep.supervisor.serve.llm import worker_key_profile
+
+        active = worker_key_profile(store, base_url) if isinstance(base_url, str) else None
     finally:
         store.close()
     if not isinstance(base_url, str) or not base_url.strip():

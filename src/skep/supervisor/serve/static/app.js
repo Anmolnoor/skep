@@ -5908,7 +5908,8 @@ function keyFieldLabel(llm) {
   if (login.problem) return `ChatGPT plan login (Codex): not usable — ${login.problem}`;
   const facts = [login.plan && `plan ${login.plan}`, login.expires_at && `expires ${login.expires_at}`];
   const shown = facts.filter(Boolean).join(", ");
-  return `ChatGPT plan login (Codex)${shown ? ` (${shown})` : ""} — no key needed`;
+  const saved = llm.api_key_set ? " (saved)" : "";
+  return `ChatGPT plan login (Codex)${shown ? ` (${shown})` : ""} — the Queen needs no key; a key here is for workers${saved}`;
 }
 
 // -- assistant (v6): URL + key -> test -> pick a default model --------------

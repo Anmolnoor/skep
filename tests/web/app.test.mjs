@@ -451,7 +451,8 @@ test("keyFieldLabel: a chatgpt.com config shows the login, never a key", () => {
   assert.equal(app.keyFieldLabel({ api_key_set: true }), "API key (stored as a 0600 file; saved)");
   assert.equal(app.keyFieldLabel({ api_key_set: false }), "API key (stored as a 0600 file)");
   const ready = { api_key_set: false, chatgpt_login: { present: true, plan: "plus", expires_at: "2026-11-20T00:00:00+00:00" } };
-  assert.equal(app.keyFieldLabel(ready), "ChatGPT plan login (Codex) (plan plus, expires 2026-11-20T00:00:00+00:00) — no key needed");
+  assert.equal(app.keyFieldLabel(ready), "ChatGPT plan login (Codex) (plan plus, expires 2026-11-20T00:00:00+00:00) — the Queen needs no key; a key here is for workers");
+  assert.match(app.keyFieldLabel({ ...ready, api_key_set: true }), /for workers \(saved\)$/);
   const missing = { api_key_set: false, chatgpt_login: { present: false, problem: "no Codex login on this machine (`codex login`)" } };
   assert.match(app.keyFieldLabel(missing), /not usable — no Codex login.*codex login/);
 });

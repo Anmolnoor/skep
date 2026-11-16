@@ -40,6 +40,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from ..codex_login import QUEEN_LOGIN_NAME
 from ..roles import ROLE_LESS_CHAT_ROLE
 from ..store import ChatActionRecord, RunStore
 
@@ -256,7 +257,7 @@ def _request_too_large(exc: OllamaError) -> bool:
 def _provider_failure_line(exc: OllamaError, *, shrunk: bool) -> str:
     """v62-F1: the honest line a turn ends on when nothing arrived."""
     if getattr(exc, "status", None) in (401, 403):
-        if "ChatGPT plan login" in str(exc):  # v118-F1: the fix is already named
+        if QUEEN_LOGIN_NAME in str(exc):  # v118-F1: the fix is already named
             return f"the provider refused your ChatGPT plan login ({exc})."
         return f"the provider rejected the API key ({exc}) — check the API key in Settings."
     if _provider_rejected_request(exc) and not _request_too_large(exc):
