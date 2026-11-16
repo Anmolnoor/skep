@@ -141,6 +141,7 @@ def worker_provider_from_home(home: Path) -> WorkerProvider | None:
     name = provider.name.strip().lower()
     if name in {"", "mock", "unconfigured"} or not provider.model.strip():
         return _assistant_provider_from_home(home)
+    _refuse_queen_only(provider.endpoint or "")
     # v19-F9: a profile written through from the daemon carries api_key_env=None
     # (the daemon keeps its secret in supervisor/llm-secret, not an env var), so
     # fall back to that secret to authenticate. v108-F4: the active registry
@@ -151,6 +152,21 @@ def worker_provider_from_home(home: Path) -> WorkerProvider | None:
             home / "supervisor"
         )
     return WorkerProvider(profile=provider, api_key=api_key)
+
+
+def _refuse_queen_only(endpoint: str) -> None:
+    """v118 (ADR 0063, decision 4): a provider on chatgpt.com runs on the
+    operator's ChatGPT plan login, and that login is the Queen's alone — a
+    worker never resolves a key for it, nor sends it llm-secret. Raised
+    BEFORE any key is read, so the worker process never holds the token."""
+    from skep.supervisor.codex_login import uses_codex_login
+
+    if uses_codex_login(endpoint):
+        raise LlmPlanError(
+            "the assistant's provider is your ChatGPT plan login (Codex), which only the "
+            "Queen uses — workers need a provider of their own: make another provider "
+            "active (`skep provider use <id>`)"
+        )
 
 
 def _active_profile_key(personal_home: Path, endpoint: str) -> str | None:
@@ -190,6 +206,7 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
         return None
     if not isinstance(model, str) or not model.strip():
         return None
+    _refuse_queen_only(base_url)
     known = get_args(LLMProtocol)
     name = str(protocol) if protocol in known else DEFAULT_LLM_PROTOCOL
     # v108-F4: the active registry profile's own credential — but only while

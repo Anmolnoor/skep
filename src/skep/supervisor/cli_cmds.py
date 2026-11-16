@@ -2137,6 +2137,10 @@ def cmd_provider_set_key(args: argparse.Namespace) -> int:
         store.close()
     if profile is None:
         return _err(f"unknown provider {args.provider_id!r}")
+    from .codex_login import NO_KEY_REFUSAL, uses_codex_login
+
+    if uses_codex_login(profile.base_url):
+        return _err(f"{args.provider_id} {NO_KEY_REFUSAL}")
     if args.clear:
         store_provider_api_key(config.home, args.provider_id, "")
         print(f"cleared key for {args.provider_id}")
@@ -2180,6 +2184,10 @@ def cmd_provider_login(args: argparse.Namespace) -> int:
             f"unknown provider {args.provider_id!r}",
             next_command=f"skep provider add {args.provider_id} --preset <preset>",
         )
+    from .codex_login import NO_KEY_REFUSAL, uses_codex_login
+
+    if uses_codex_login(profile.base_url):
+        return _err(f"{args.provider_id} {NO_KEY_REFUSAL}")
     known = KNOWN_LOGIN_ENDPOINTS.get(args.provider_id)
     device_url = args.device_url or (known.device_url if known else None)
     token_url = args.token_url or (known.token_url if known else None)

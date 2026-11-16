@@ -191,7 +191,9 @@ def run_channel_turn(
         )
     try:
         base_url, api_key, model, protocol = engine.resolved_llm(chat)
-    except HTTPException:
+    except HTTPException as exc:
+        if "ChatGPT plan login" in str(exc.detail):  # v118-F1: say why, and the fix
+            return (f"skep: {exc.detail}", [])
         return (
             f"skep: configure the assistant first in the web UI (Settings): {web_ui_url}",
             [],

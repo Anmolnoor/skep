@@ -256,6 +256,8 @@ def _request_too_large(exc: OllamaError) -> bool:
 def _provider_failure_line(exc: OllamaError, *, shrunk: bool) -> str:
     """v62-F1: the honest line a turn ends on when nothing arrived."""
     if getattr(exc, "status", None) in (401, 403):
+        if "ChatGPT plan login" in str(exc):  # v118-F1: the fix is already named
+            return f"the provider refused your ChatGPT plan login ({exc})."
         return f"the provider rejected the API key ({exc}) — check the API key in Settings."
     if _provider_rejected_request(exc) and not _request_too_large(exc):
         return f"the provider refused the request ({exc})."
@@ -1530,7 +1532,12 @@ class ChatEngine:
             )
         # v108-F4: the active profile's own credential (per-profile secret /
         # named env var), falling back to the legacy llm-secret.
-        api_key = resolve_active_api_key(self.store, self.home, base_url=str(config["base_url"]))
+        try:
+            api_key = resolve_active_api_key(
+                self.store, self.home, base_url=str(config["base_url"])
+            )
+        except OllamaError as exc:  # v118-F1: the Codex login is unusable; say why
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return str(config["base_url"]), api_key, str(model), config["protocol"]
 
     def _system_prompt(self, chat_id: str) -> str:

@@ -5901,6 +5901,16 @@ function buildPresetPicker(protocol, baseUrl) {
   return picker;
 }
 
+// v118-F1: on chatgpt.com the Queen signs in with the Codex login, not a key.
+function keyFieldLabel(llm) {
+  const login = llm.chatgpt_login;
+  if (!login) return `API key (stored as a 0600 file${llm.api_key_set ? "; saved" : ""})`;
+  if (login.problem) return `ChatGPT plan login (Codex): not usable — ${login.problem}`;
+  const facts = [login.plan && `plan ${login.plan}`, login.expires_at && `expires ${login.expires_at}`];
+  const shown = facts.filter(Boolean).join(", ");
+  return `ChatGPT plan login (Codex)${shown ? ` (${shown})` : ""} — no key needed`;
+}
+
 // -- assistant (v6): URL + key -> test -> pick a default model --------------
 async function renderAssistantTab(panel) {
   const llm = await api("GET", "/api/llm/config");
@@ -5937,7 +5947,7 @@ async function renderAssistantTab(panel) {
       el("div", { class: "field" }, el("label", {}, "assistant protocol"), protocol),
       el("div", { class: "field grow" }, el("label", {}, "assistant base URL"), baseUrl),
       el("div", { class: "field grow" },
-        el("label", {}, `API key (stored as a 0600 file${llm.api_key_set ? "; saved" : ""})`), apiKey),
+        el("label", {}, keyFieldLabel(llm)), apiKey),
       probe));
   if (llm.api_key_set) {
     const clearKey = el("button", { class: "ghost" }, "Clear saved key");

@@ -18,8 +18,10 @@ design and its failure modes are in ``docs/codex-chatgpt-login.md``. In short:
 - the access token must outlive the run's budget, or the dispatch refuses and
   says how to refresh it on the host (the Codex CLI does that itself).
 
-Nothing here returns, logs or prints a token: callers see a ``LoginStatus``
-(presence, plan, expiry, a problem sentence) and a path.
+Nothing here logs or prints a token: callers see a ``LoginStatus``
+(presence, plan, expiry, a problem sentence) and a path. The one function
+that returns it, ``queen_access_token`` (v118, ADR 0063), feeds the Queen's
+own requests to a chatgpt.com provider profile and nothing else.
 """
 
 from __future__ import annotations
@@ -38,9 +40,19 @@ CARD_LINE = "uses your ChatGPT plan login (Codex)"
 # ponytail: one fixed margin past the run budget; Codex itself refreshes a
 # managed login 5 minutes before expiry, so the same window is kept here.
 _MARGIN_SECONDS = 300
-_REFRESH_HINT = (
+# v118-F1: the fix the Queen names too (a provider on chatgpt.com, ADR 0063).
+QUEEN_REFRESH_HINT = (
     "use `codex` once on this machine (it refreshes its own login when one is due) "
-    "or sign in again with `codex login`, then dispatch again"
+    "or sign in again with `codex login`"
+)
+_REFRESH_HINT = QUEEN_REFRESH_HINT + ", then dispatch again"
+# v118: a provider profile on this host authenticates with the login and
+# nothing else, and only the Queen uses it (ADR 0063).
+CHATGPT_HOST = "chatgpt.com"
+# Decision 3: such a profile has no key to set, on every face that sets one.
+NO_KEY_REFUSAL = (
+    "uses your ChatGPT plan login (Codex) and takes no key — "
+    "sign in with `codex login` on this machine instead"
 )
 
 
@@ -68,10 +80,10 @@ def _claims(jwt: str) -> dict[str, Any]:
     return claims if isinstance(claims, dict) else {}
 
 
-def _load(min_seconds: float) -> tuple[LoginStatus, str, str]:
+def _load(min_seconds: float, *, queen: bool = False) -> tuple[LoginStatus, str, str]:
     """(status, access token, account id); the two strings are empty unless
     the status has no problem. Private: tokens never leave this module except
-    into the run's file."""
+    into the run's file and the Queen's own request (``queen_access_token``)."""
     path = auth_file()
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
@@ -101,8 +113,11 @@ def _load(min_seconds: float) -> tuple[LoginStatus, str, str]:
     if expires_at is None:
         problem = "the Codex login's access token carries no expiry skep can check"
     elif expires_at <= datetime.now(UTC) + timedelta(seconds=min_seconds + _MARGIN_SECONDS):
+        when = f"{expires_at:%Y-%m-%d %H:%M} UTC"
         problem = (
-            f"the Codex login's access token expires {expires_at:%Y-%m-%d %H:%M} UTC, "
+            f"the Codex login's access token expires {when} — {QUEEN_REFRESH_HINT}, then ask again"
+            if queen
+            else f"the Codex login's access token expires {when}, "
             f"before this run could finish — {_REFRESH_HINT}"
         )
     elif not isinstance(account, str) or not account:
@@ -116,6 +131,24 @@ def login_status(min_seconds: float = 0) -> LoginStatus:
     """The login's presence, plan and expiry, and whether a run that lasts
     ``min_seconds`` could use it."""
     return _load(min_seconds)[0]
+
+
+def uses_codex_login(base_url: str) -> bool:
+    """v118 (ADR 0063): a provider on chatgpt.com — its credential is the
+    Codex login or nothing, and it is the Queen's alone."""
+    from .providers import provider_host
+
+    return provider_host(base_url) == CHATGPT_HOST
+
+
+def queen_access_token() -> str:
+    """v118-F1: the access token, for the Queen's own requests to chatgpt.com
+    (never a worker's). Read, never refreshed: raises ValueError with the
+    problem sentence and the fix. Callers must not log or print it."""
+    status, access, _ = _load(0, queen=True)
+    if status.problem is not None:
+        raise ValueError(status.problem)
+    return access
 
 
 def run_auth_source(engine: str, policy: dict[str, Any], *, min_seconds: float) -> str | None:

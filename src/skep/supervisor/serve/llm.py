@@ -142,7 +142,50 @@ def store_provider_api_key(home: Path, provider_id: str, value: str) -> None:
     path.chmod(0o600)
 
 
+def _codex_login_key() -> str:
+    """v118-F1 (ADR 0063): the one credential a chatgpt.com profile has — the
+    operator's Codex login, read and never refreshed. Never the profile's key
+    file, ``llm-secret`` or an env var: an ollama key must never reach
+    chatgpt.com. Raises OllamaError naming the fix."""
+    from ..codex_login import QUEEN_REFRESH_HINT, queen_access_token
+
+    try:
+        return queen_access_token()
+    except ValueError as exc:
+        problem = str(exc)
+        if "codex login" not in problem:
+            problem += f" — {QUEEN_REFRESH_HINT}"
+        raise OllamaError(f"your ChatGPT plan login (Codex) cannot be used: {problem}") from exc
+
+
+def _login_refused(base_url: str, status: int) -> str:
+    """v118-F1: what a 401 from chatgpt.com means and how to fix it (I9)."""
+    from ..codex_login import QUEEN_REFRESH_HINT, uses_codex_login
+
+    if status != 401 or not uses_codex_login(base_url):
+        return ""
+    return f" — your ChatGPT plan login (Codex) was refused: {QUEEN_REFRESH_HINT}"
+
+
+def chatgpt_login_view() -> dict[str, Any]:
+    """v118-F1: what a key-presence view says for a chatgpt.com profile —
+    the login's presence, plan and expiry, never a value (I8)."""
+    from ..codex_login import login_status
+
+    status = login_status()
+    return {
+        "present": status.present,
+        "plan": status.plan,
+        "expires_at": status.expires_at.isoformat() if status.expires_at else None,
+        "problem": status.problem,
+    }
+
+
 def resolve_provider_api_key(home: Path, profile: ProviderProfile) -> str | None:
+    from ..codex_login import uses_codex_login
+
+    if uses_codex_login(profile.base_url):
+        return _codex_login_key()
     key = _raw_provider_api_key(home, profile)
     if key is None:
         return None
@@ -178,6 +221,10 @@ def resolve_active_api_key(
     saved llm_* settings no longer match the active profile (a manual PUT
     /api/llm/config), the profile's credential must not leak onto a
     different endpoint, so the legacy single secret applies instead."""
+    from ..codex_login import uses_codex_login
+
+    if base_url is not None and uses_codex_login(base_url):
+        return _codex_login_key()  # v118-F1: whichever profile is active
     active = store.active_provider_profile()
     if active is None:
         return resolve_api_key(home)
@@ -195,12 +242,17 @@ def llm_config_view(store: RunStore, home: Path) -> dict[str, Any]:
 
     migrate_legacy_provider(store, home)
     num_ctx, num_ctx_source = resolved_num_ctx(store)
+    from ..codex_login import uses_codex_login
+
+    # v118-F1: on chatgpt.com no API key is in play — the login is (I8).
+    codex = isinstance(base_url, str) and uses_codex_login(base_url)
     return {
         "configured": bool(base_url),
         "base_url": base_url,
         "default_model": store.get_setting(LLM_DEFAULT_MODEL),
         "protocol": _protocol(store.get_setting(LLM_PROTOCOL)),
-        "api_key_set": resolve_api_key(home) is not None,
+        "api_key_set": not codex and resolve_api_key(home) is not None,
+        **({"chatgpt_login": chatgpt_login_view()} if codex else {}),
         "vision": store.get_setting(LLM_VISION) is True,
         "num_ctx": num_ctx,
         # v74-F2: which rule set the window, so the UI and doctor can say (I8).
@@ -308,6 +360,10 @@ def refresh_model_ctx(store: RunStore, home: Path, model: str) -> None:
     protocol = _protocol(store.get_setting(LLM_PROTOCOL))
     if protocol == "ollama" and _is_loopback(base_url):
         return  # v82-F1: local RAM — never probed or auto-matched
+    from ..codex_login import uses_codex_login
+
+    if uses_codex_login(base_url):
+        return  # v118-F1: no context endpoint, and llm-secret never goes there
     detected = detect_model_ctx(
         base_url,
         resolve_api_key(home),
@@ -385,7 +441,8 @@ def _list_openai_models(base_url: str, api_key: str | None, *, timeout: float) -
         response.raise_for_status()
         payload = response.json()
     except httpx.HTTPStatusError as exc:
-        raise OllamaError(f"{exc.response.status_code} from {base_url}") from exc
+        status = exc.response.status_code
+        raise OllamaError(f"{status} from {base_url}" + _login_refused(base_url, status)) from exc
     except (httpx.HTTPError, json.JSONDecodeError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
     names = [entry.get("id") or entry.get("name") for entry in payload.get("data", [])]
@@ -535,7 +592,9 @@ def _open_stream_lines(
                     time.sleep(_RETRY_DELAY_SECONDS * attempt)
                     continue
                 raise OllamaError(
-                    f"{response.status_code} from {base_url}" + (f": {detail}" if detail else ""),
+                    f"{response.status_code} from {base_url}"
+                    + (f": {detail}" if detail else "")
+                    + _login_refused(base_url, response.status_code),
                     status=response.status_code,
                 )
             yield from response.iter_lines()
@@ -1109,9 +1168,16 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
         base_url = (body.base_url or "").strip() or run_store.get_setting(LLM_BASE_URL)
         if not base_url:
             return {"ok": False, "detail": "no base URL configured"}
-        api_key = (body.api_key or "").strip() or resolve_api_key(home)
         protocol = body.protocol or _protocol(run_store.get_setting(LLM_PROTOCOL))
         try:
+            from ..codex_login import uses_codex_login
+
+            # v118-F1: chatgpt.com gets the Codex login, never a pasted or saved key.
+            api_key = (
+                _codex_login_key()
+                if uses_codex_login(str(base_url))
+                else (body.api_key or "").strip() or resolve_api_key(home)
+            )
             models = list_models(str(base_url), api_key, protocol=protocol)
         except OllamaError as exc:
             return {"ok": False, "detail": str(exc)}
@@ -1152,9 +1218,9 @@ def add_llm_routes(app: FastAPI, *, run_store: RunStore, home: Path) -> None:
         if not base_url:
             raise HTTPException(status_code=409, detail="configure the LLM base URL first")
         protocol = _protocol(run_store.get_setting(LLM_PROTOCOL))
-        # v108-F4: the active profile's own credential, when settings match it.
-        api_key = resolve_active_api_key(run_store, home, base_url=str(base_url))
         try:
+            # v108-F4: the active profile's own credential, when settings match it.
+            api_key = resolve_active_api_key(run_store, home, base_url=str(base_url))
             return {"models": list_models(str(base_url), api_key, protocol=protocol)}
         except OllamaError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
