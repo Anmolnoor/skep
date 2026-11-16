@@ -155,6 +155,21 @@ def _changes_provider(args: dict[str, Any], store: RunStore | None) -> bool:
     return store is None or args["protocol"] != store.get_setting(LLM_PROTOCOL)
 
 
+def _to_codex_login(tool: str, args: dict[str, Any], store: RunStore | None) -> bool:
+    """v118: does this provider change point the Queen at chatgpt.com?"""
+    from ..codex_login import uses_codex_login
+    from ..provider_presets import PROVIDER_PRESETS
+
+    url = str(args.get("base_url") or "")
+    preset = PROVIDER_PRESETS.get(str(args.get("preset") or ""))
+    if tool == "add_provider" and not url and preset is not None:
+        url = preset.base_url or ""
+    if tool == "use_provider" and store is not None:
+        profile = store.get_provider_profile(str(args.get("provider_id") or ""))
+        url = profile.base_url if profile is not None else ""
+    return uses_codex_login(url)
+
+
 def _doubly_tainted(taint: ChatTaint | None) -> bool:
     return taint is not None and taint.private is not None and taint.untrusted is not None
 
@@ -205,6 +220,14 @@ def high_tier(
         return "it activates a skill pack's scripts"
     if tool in _HIGH_POLICY_TOOLS:
         return "it changes standing policy"
+    if tool in ("add_provider", "use_provider", "set_assistant_model") and _to_codex_login(
+        tool, safe, store
+    ):
+        # v118 (ADR 0063, I6): say what this opt-in spends and where it goes
+        return (
+            "it uses your ChatGPT plan login (Codex): every Queen prompt leaves "
+            "this machine for chatgpt.com"
+        )
     if tool in ("add_provider", "use_provider") or (
         tool == "set_assistant_model" and _changes_provider(safe, store)
     ):

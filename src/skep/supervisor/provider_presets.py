@@ -267,6 +267,21 @@ _PRESETS: tuple[ProviderPreset, ...] = (
         "grok-4.3",
         "XAI_API_KEY",
     ),
+    # v118 (ADR 0063): the Queen on the operator's ChatGPT plan. No key, no
+    # OAuth client id: the Codex CLI's own login is read, never refreshed.
+    ProviderPreset(
+        "openai-codex",
+        "ChatGPT plan (Codex login)",
+        "openai_responses",
+        "https://chatgpt.com/backend-api/codex",
+        "gpt-6.1-terra",
+        None,
+        auth_note=(
+            "uses your ChatGPT plan login (Codex): skep reads the Codex CLI's "
+            "auth.json and never refreshes or writes it — sign in with `codex "
+            "login`; there is no key to set. The Queen only: workers never get it"
+        ),
+    ),
     ProviderPreset(
         "bedrock",
         "AWS Bedrock",
@@ -291,6 +306,13 @@ def preset_egress_note(preset: ProviderPreset, base_url: str) -> str:
     the voice.py PROVIDER_EGRESS_NOTES pattern (I8)."""
     if preset.cost_class == "local":
         return f"LOCAL ({preset.label}) — nothing leaves this machine"
+    from .codex_login import uses_codex_login
+
+    if uses_codex_login(base_url):
+        return (
+            f"CLOUD ({preset.label}) — uses your ChatGPT plan login (Codex); every "
+            f"Queen prompt leaves this machine for {provider_host(base_url)}"
+        )
     hosts = [h for h in (provider_host(base_url), *preset.extra_hosts) if h]
     if preset.preset_id == "bedrock":
         from .serve.llm_bedrock import control_base_url

@@ -398,3 +398,76 @@ def test_a_chatgpt_error_detail_is_shown() -> None:
 
     response = httpx.Response(400, json={"detail": "Store must be set to false"})
     assert _error_detail(response) == "Store must be set to false"
+
+
+# -- F3: the preset -------------------------------------------------------------
+
+
+def test_the_openai_codex_preset(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from skep.supervisor.cli_cmds import cmd_provider_add, cmd_provider_presets
+    from skep.supervisor.provider_presets import (
+        PROVIDER_PRESETS,
+        preset_view,
+        profile_from_preset,
+    )
+    from skep.supervisor.providers import validate_provider_profile
+
+    preset = PROVIDER_PRESETS["openai-codex"]
+    assert (preset.protocol, preset.base_url, preset.api_key_env, preset.cost_class) == (
+        "openai_responses",
+        CODEX_BASE,
+        None,
+        "paid",
+    )
+    profile = validate_provider_profile(profile_from_preset("openai-codex"))
+    assert profile.base_url == CODEX_BASE and profile.model == "gpt-6.1-terra"
+    view = preset_view(preset)
+    assert "uses your ChatGPT plan login (Codex)" in str(view["auth_note"])
+    assert "uses your ChatGPT plan login (Codex)" in str(view["egress"])
+    assert "every Queen prompt leaves this machine for chatgpt.com" in str(view["egress"])
+    assert "worker" not in str(view["egress"])
+
+    assert cmd_provider_presets(argparse.Namespace()) == 0
+    assert "every Queen prompt leaves this machine for chatgpt.com" in capsys.readouterr().out
+    args = argparse.Namespace(
+        home=tmp_path,
+        provider_id=None,
+        preset="openai-codex",
+        protocol=None,
+        base_url=None,
+        model=None,
+        api_key_env=None,
+        cost_class=None,
+        order=0,
+        host=None,
+        activate=False,
+    )
+    assert cmd_provider_add(args) == 0
+    out = capsys.readouterr().out
+    assert "registered openai-codex" in out
+    assert "every Queen prompt leaves this machine for chatgpt.com" in out
+
+
+def test_the_card_says_what_the_opt_in_spends(tmp_path: Path) -> None:
+    from skep.supervisor.serve.cards import high_tier
+
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        store.upsert_provider_profile(_codex_profile())
+        store.upsert_provider_profile(
+            ProviderProfile("ollama", "ollama", "https://ollama.com", "glm-5.2")
+        )
+        sentence = "every Queen prompt leaves this machine for chatgpt.com"
+        for tool, args in (
+            ("add_provider", {"preset": "openai-codex"}),
+            ("add_provider", {"provider_id": "x", "base_url": CODEX_BASE, "model": "m"}),
+            ("use_provider", {"provider_id": "openai-codex"}),
+            ("set_assistant_model", {"model": "m", "base_url": CODEX_BASE}),
+        ):
+            reason = high_tier(tool, args, store=store)
+            assert reason is not None and sentence in reason, (tool, args)
+            assert "ChatGPT plan login (Codex)" in reason
+        other = high_tier("use_provider", {"provider_id": "ollama"}, store=store)
+        assert other is not None and "chatgpt" not in other
+    finally:
+        store.close()
