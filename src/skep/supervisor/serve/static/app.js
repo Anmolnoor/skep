@@ -251,6 +251,13 @@ function roleChoices(roles, legacyRoleLess) {
     ...roles.map(role => ({ value: role.name, label: `role: ${role.name}` }))];
 }
 
+// A new chat starts in the default workspace project (setup.py's
+// DEFAULT_WORKSPACE_PROJECT_ID) when one is set up; the selector can still
+// pick "no project" or any other project before the first message.
+function newChatProject(projects) {
+  return projects.find(p => p.project_id === "workspace") || null;
+}
+
 function delegationText(delegation) {
   if (!delegation || typeof delegation !== "object") return "";
   const chain = Array.isArray(delegation.chain) ? delegation.chain.map(String) : [];
@@ -2827,6 +2834,14 @@ async function viewChat(main, chatId) {
   const loadStripProjects = async () => {
     try { stripProjects = (await api("GET", "/api/projects")).projects || []; }
     catch { stripProjects = []; }
+    if (!activeChatId && !boundProject) {
+      const fallback = newChatProject(stripProjects);
+      if (fallback) {
+        pendingProjectId = fallback.project_id;  // binds when the first message creates the chat
+        boundProject = localProjectView(fallback);
+        chatBoundRepo = boundProject.repo || null;
+      }
+    }
     projectSelect.replaceChildren(
       el("option", { value: "" }, "no project"),
       ...stripProjects.map(p =>
