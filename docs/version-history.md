@@ -3074,3 +3074,18 @@ container those two capabilities with both profiles lifted.
 Getting that far exposed a real bug: the Docker image had no `ps`, which the
 monitor and run re-adoption call, so a sandboxed run in the published image
 crashed. The image now installs `procps`.
+
+## v118 — the Queen on a ChatGPT plan (2026-11-16)
+
+ADR 0063. An operator with a ChatGPT plan and no OpenAI API key can run the
+Queen on it: the `openai-codex` preset ("ChatGPT plan (Codex login)") talks
+the Responses protocol to `chatgpt.com/backend-api/codex` with the Codex
+CLI's access token, read from `$CODEX_HOME/auth.json` and never refreshed or
+written. F1 makes that login the only credential a `chatgpt.com` profile
+has (never its key file, `llm-secret` or an env var; `set-key` refuses it)
+and names the fix when it is missing, expiring or refused. F2 adds the two
+wire differences: `store: false` on the body and the listing's
+`client_version` query and `slug` shape; other providers' bodies are pinned
+byte-identical. F3 is the preset and its egress line and card. F4 keeps the
+login the Queen's alone: workers, the reviewer caste and the key relay keep
+the provider they had, and no run is routed or pinned to chatgpt.com.

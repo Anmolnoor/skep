@@ -21,7 +21,10 @@ Kimi, MiniMax, Copilot, Bedrock and ~25 more) and `skep provider add
 <id> --preset <preset> --activate` registers + switches in one step.
 Each profile can hold its own key (`skep provider set-key`, a 0600
 `llm-secret-<id>` file); the GitHub Copilot preset exchanges your own
-GitHub token for its short-lived bearer automatically (v108-F7).
+GitHub token for its short-lived bearer automatically (v108-F7). The
+`openai-codex` preset runs the Queen on your ChatGPT plan with the Codex
+CLI's own login (v118, ADR 0063): no key, nothing refreshed, every Queen
+prompt goes to chatgpt.com, and workers never use it.
 
 ## How to switch
 

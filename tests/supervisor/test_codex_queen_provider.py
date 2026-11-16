@@ -260,10 +260,52 @@ def test_the_chat_says_why_when_the_login_is_unusable(
         chat = store.create_chat(title="t", model=None)
         with pytest.raises(HTTPException) as raised:
             engine.resolved_llm(chat)
+        # A messenger hears the same reason, not "configure the assistant".
+        from skep.supervisor.serve.channels import ChannelIdentity, ChannelMessage
+        from skep.supervisor.serve.channels.runtime import run_channel_turn
+
+        message = ChannelMessage(
+            channel="discord",
+            identity=ChannelIdentity(channel="discord", identity_id="u1"),
+            text="hi",
+            session_key="discord:t1",
+        )
+        reply, events = run_channel_turn(engine, message, web_ui_url="http://x")
     finally:
         store.close()
     assert raised.value.status_code == 409
     assert "no Codex login on this machine" in str(raised.value.detail)
+    assert reply.startswith("skep: your ChatGPT plan login (Codex) cannot be used")
+    assert events == []
+
+
+def test_an_unreadable_login_still_names_the_fix(
+    tmp_path: Path, codex_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text("{not json")
+    with pytest.raises(OllamaError) as raised:
+        resolve_provider_api_key(tmp_path, _codex_profile())
+    assert "could not be read" in str(raised.value) and "codex login" in str(raised.value)
+
+
+def test_context_detection_never_dials_chatgpt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.serve import llm
+
+    def _no_dial(*_a: object, **_k: object) -> None:
+        raise AssertionError("detect_model_ctx dialled chatgpt.com")
+
+    monkeypatch.setattr(llm, "detect_model_ctx", _no_dial)
+    store_api_key(tmp_path, "decoy-legacy-secret")
+    store = RunStore(tmp_path / "supervisor.sqlite3")
+    try:
+        store.set_setting(LLM_BASE_URL, CODEX_BASE)
+        store.set_setting(LLM_PROTOCOL, "ollama")  # even a mis-set protocol
+        llm.refresh_model_ctx(store, tmp_path, "gpt-6.1-terra")
+    finally:
+        store.close()
 
 
 def test_doctor_names_the_queen_login(tmp_path: Path, codex_home: Path) -> None:
@@ -283,6 +325,10 @@ def test_doctor_names_the_queen_login(tmp_path: Path, codex_home: Path) -> None:
     (ready,) = _queen_login_check(tmp_path)
     line = _queen_login_line(ready)
     assert "the Queen only" in line and "plan plus" in line and "workers never get it" in line
+    from skep.status import format_doctor_report
+
+    report = format_doctor_report({"overall": "ready", "queen_chatgpt_login": [ready]})
+    assert line in report
     assert _access_token(codex_home) not in line
 
 
