@@ -12,10 +12,13 @@ if [[ "$BUILD" != "0" ]]; then
   docker build -f "$ROOT/Dockerfile" -t "$IMAGE" "$ROOT"
 fi
 
-# bwrap needs to create user namespaces, which Docker's default seccomp and
-# AppArmor profiles refuse inside a container. Since ES-F1 skep fails closed
-# on that instead of running the worker unconfined, so the smoke lifts both
-# profiles for this one throwaway container.
+# The container runs as root, and bwrap run as root creates its namespaces
+# directly instead of through a user namespace: that needs CAP_SYS_ADMIN (and
+# CAP_NET_ADMIN for --unshare-net's loopback), which Docker drops, and Docker's
+# default seccomp/AppArmor profiles refuse the mounts. Since ES-F1 skep fails
+# closed on that instead of running the worker unconfined, so this one
+# throwaway container gets exactly those, short of --privileged.
 docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+  --cap-add SYS_ADMIN --cap-add NET_ADMIN \
   --entrypoint bash "$IMAGE" -lc \
   "cd /opt/skep && scripts/linux-sandbox-smoke.sh"

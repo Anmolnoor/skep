@@ -3063,8 +3063,14 @@ The four pre-1.2.1 template names are still accepted as aliases.
 
 The `v1.4.0` tag was pushed, but its release gate failed and nothing was
 published, so 1.4.1 is the published form of 1.4.0, with one fix to the gate.
-`scripts/linux-sandbox-docker-smoke.sh` runs bwrap inside a container, and
-Docker's default seccomp and AppArmor profiles refuse the user namespaces bwrap
-needs. Before ES-F1 skep then ran the worker unconfined and the smoke passed
-without testing a sandbox; since ES-F1 it fails closed, which is what failed the
-1.4.0 gate. The smoke now lifts both profiles for its one throwaway container.
+`scripts/linux-sandbox-docker-smoke.sh` runs bwrap as root inside a container.
+Root's bwrap creates namespaces directly, which needs `CAP_SYS_ADMIN` and
+`CAP_NET_ADMIN`; Docker drops both and its default seccomp and AppArmor
+profiles refuse the mounts. Before ES-F1 skep then ran the worker unconfined
+and the smoke passed without testing a sandbox; since ES-F1 it fails closed,
+which is what failed the 1.4.0 gate. The smoke now gives its one throwaway
+container those two capabilities with both profiles lifted.
+
+Getting that far exposed a real bug: the Docker image had no `ps`, which the
+monitor and run re-adoption call, so a sandboxed run in the published image
+crashed. The image now installs `procps`.

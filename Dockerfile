@@ -10,9 +10,9 @@
 FROM python:3.12-slim
 
 # git: worktrees + repo clones. bubblewrap: Linux sandbox. gh: the PR action (U1 land).
-# curl: gh's apt repo.
+# curl: gh's apt repo. procps: `ps`, which the monitor and run re-adoption call.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git bubblewrap curl ca-certificates \
+    && apt-get install -y --no-install-recommends git bubblewrap curl ca-certificates procps \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) \
