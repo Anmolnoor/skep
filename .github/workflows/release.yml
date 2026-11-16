@@ -22,6 +22,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap ripgrep
+      - name: Allow user namespaces for the Docker sandbox smoke
+        # Ubuntu 24.04 refuses user namespaces to unconfined programs. The
+        # host's bwrap has its own AppArmor profile, but the bwrap inside the
+        # linux-sandbox-docker-smoke container does not, so without this
+        # skep's fail-closed probe (ES-F1) rejects it and the gate fails.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Sync
         run: uv sync --frozen
       - name: Install gitleaks
