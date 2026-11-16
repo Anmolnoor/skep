@@ -62,6 +62,36 @@ def test_workon_inits_commits_baseline_and_binds_a_plain_dir(
     assert {"name": workdir.name, "path": str(workdir.resolve()), "source": "workon"} in listed
 
 
+def test_workon_creates_a_missing_folder_as_a_new_project(
+    config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """The Queen can start a brand-new project: workon on a path that does
+    not exist yet creates the folder (parents included), then runs the usual
+    on-ramp. The card says so before anything is created."""
+    workdir = tmp_path / "ideas" / "new-app"
+
+    client = serve_client(config)
+    preview = client.post("/api/workon/preview", json={"path": str(workdir)})
+    assert preview.status_code == 200, preview.json()
+    view = preview.json()
+    assert view["would_create_dir"] is True
+    assert view["would_git_init"] is True
+    assert any("does not exist yet" in warning for warning in view["warnings"])
+    assert not workdir.exists()  # previewing created nothing
+
+    done = client.post("/api/workon", json={"path": str(workdir)})
+    assert done.status_code == 201
+    result = done.json()
+    assert result["created_dir"] is True
+    assert result["git_initialized"] is True
+    assert (workdir / ".git").is_dir()
+    assert client.get("/api/projects/new-app").status_code == 200
+
+    # The second call finds the folder: an update, not a re-create.
+    again = client.post("/api/workon", json={"path": str(workdir)}).json()
+    assert again["created_dir"] is False
+
+
 def test_workon_on_an_existing_repo_binds_without_touching_the_tree(
     repo: Path, config: SupervisorConfig
 ) -> None:
@@ -98,8 +128,12 @@ def test_workon_refuses_the_store_missing_paths_and_too_broad_targets(
     repos_root = config.home.parent / "repos"
     (repos_root / "cloned").mkdir(parents=True)
     assert "slug" in refused(str(repos_root / "cloned"))  # managed clones go by slug
-    # v73-F11: a missing path gets the ONE shared story dispatch_run tells.
-    assert "does not exist on this machine" in refused(str(tmp_path / "missing"))
+    (tmp_path / "a-file").write_text("x")
+    assert "not a directory" in refused(str(tmp_path / "a-file"))
+    # A folder that cannot be created (its parent is a file) refuses, not 500s.
+    blocked = client.post("/api/workon", json={"path": str(tmp_path / "a-file" / "child")})
+    assert blocked.status_code == 400
+    assert "cannot create" in blocked.json()["detail"]
     assert "relative" in refused("some/relative/dir")
     assert "too broad" in refused("/")
     assert "too broad" in refused("~")

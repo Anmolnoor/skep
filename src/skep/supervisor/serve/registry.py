@@ -301,7 +301,8 @@ def existing_dir_error(resolved: Path) -> str | None:
         return f"{resolved} is not a directory"
     return (
         f"{resolved} does not exist on this machine — is the repo somewhere "
-        "else? (list_repos shows what skep can reach)"
+        "else? (list_repos shows what skep can reach) To start a NEW project "
+        "there, workon creates the folder."
     )
 
 
@@ -564,14 +565,17 @@ _SYSTEM_FOLDERS = (
 )  # fmt: skip
 
 
-def _validate_project_binding(*, root: Path, run_store: RunStore, kind: str, value: str) -> None:
+def _validate_project_binding(
+    *, root: Path, run_store: RunStore, kind: str, value: str, may_be_missing: bool = False
+) -> None:
     if kind == "repo_slug":
         if not _SLUG_RE.match(value) or not (root / value / ".git").exists():
             raise HTTPException(status_code=400, detail=f"unknown registered repo slug {value!r}")
         return
     if kind == "repo_path":
         repo = Path(value).expanduser().resolve()
-        if not repo.is_dir():
+        # may_be_missing: workon's preview of a folder it will create.
+        if not repo.is_dir() and not (may_be_missing and not repo.exists()):
             raise HTTPException(status_code=400, detail=f"repo path {value!r} does not exist")
         broad = too_broad_root(repo, root.parent)  # root is <store>/repos
         if broad is not None:
@@ -1200,6 +1204,7 @@ def preview_project_setup(
     template_names: list[str],
     policy_overrides: dict[str, Any],
     seed_shell_commands: bool = True,
+    repo_path_may_be_missing: bool = False,
 ) -> dict[str, Any]:
     pack: PolicyPack | None = None
     if pack_name is not None:
@@ -1261,6 +1266,7 @@ def preview_project_setup(
             run_store=run_store,
             kind=binding.kind,
             value=binding.value,
+            may_be_missing=repo_path_may_be_missing,
         )
     return {
         "project": project_to_dict(project),

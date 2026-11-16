@@ -1666,14 +1666,17 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "workon",
         "PROPOSE making a local directory a first-class skep workspace (requires "
-        "user confirmation). If the directory is not a git repo, this runs git init "
+        "user confirmation). If the directory does not exist yet, it is created — "
+        "this is how to start a brand-new project. If it is not a git repo, this "
+        "runs git init "
         "and commits the current tree as the baseline — a git baseline is what makes "
         "skep's changes reviewable and revertible; raw filesystem mutation without one "
         "is out of scope permanently. Then it binds the directory to a trusted project "
         "(default pack trusted_local_dev, phase build, toolchain allowlist seeded) and "
         "returns the effective policy. Use this when the user asks skep to work on a "
-        "plain local folder that is not registered. NOT for remote URLs — a Git URL "
-        "gets register_repo; a repo already registered needs no workon.",
+        "plain local folder that is not registered, or to create a new project. "
+        "NOT for remote URLs — a Git URL gets register_repo; a repo already "
+        "registered needs no workon.",
         {
             "path": {
                 "type": "string",
