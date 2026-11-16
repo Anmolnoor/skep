@@ -4140,10 +4140,16 @@ def _bind_chat_project(
     result: Any,
 ) -> None:
     """Remember the chat's project so its scoped memory rides the prompt
-    (v56-F4). Best-effort — binding must never fail the verb it rides."""
+    (v56-F4). Best-effort — binding must never fail the verb it rides.
+    Fills an EMPTY slot only: the selector strip is the operator's binding, and
+    a dispatch elsewhere must not silently move it (I8 — the prompt calls the
+    binding "operator-selected")."""
     if name not in _PROJECT_BINDING_TOOLS:
         return
     try:
+        chat = store.get_chat(chat_id)
+        if chat is None or chat.project_id:
+            return
         project_id = None
         if isinstance(result, dict):
             project = result.get("project")
