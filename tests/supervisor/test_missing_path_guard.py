@@ -39,14 +39,16 @@ def test_missing_path_is_refused_at_proposal_time_with_one_story(
     assert "does not exist on this machine" in decision.detail
     assert "list_repos" in decision.detail
 
-    # workon speaks the SAME string for the SAME absent path.
+    # The refusal teaches the one verb that starts a project there: workon,
+    # which creates the missing folder (its card says so up front).
+    assert "workon" in decision.detail
     client = serve_client(config)
     preview = client.post(
         "/api/workon/preview",
         json={"path": str(gone), "pack": "trusted_local_dev", "phase": "build"},
     )
-    assert preview.status_code == 400
-    assert preview.json()["detail"] == decision.detail
+    assert preview.status_code == 200
+    assert preview.json()["would_create_dir"] is True
 
 
 def test_existing_non_git_path_keeps_its_card_and_message(

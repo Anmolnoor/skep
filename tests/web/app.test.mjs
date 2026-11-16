@@ -20,6 +20,18 @@ test("roleChoices: a chat with no stored role says it runs as assistant", () => 
   assert.ok(!legacy.some(c => c.label.includes("no role")));
 });
 
+// ---------- new chats start in the workspace project ----------
+
+test("newChatProject: a new chat defaults to the workspace project when it exists", () => {
+  const app = loadApp();
+  const workspace = { project_id: "workspace", name: "Workspace", bindings: [] };
+  const skep = { project_id: "skep", name: "skep", bindings: [] };
+  assert.equal(app.newChatProject([skep, workspace]), workspace);
+  // No workspace project set up: the chat starts unbound, as before.
+  assert.equal(app.newChatProject([skep]), null);
+  assert.equal(app.newChatProject([]), null);
+});
+
 // ---------- R3: delegationText ----------
 
 test("delegationText names the chain, the worker role and the team", () => {

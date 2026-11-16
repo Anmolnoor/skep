@@ -2578,7 +2578,9 @@ def test_memory_proposal_tool_description_lists_the_classes() -> None:
 
 def test_bind_chat_project_remembers_where_the_chat_works(tmp_path: Path) -> None:
     """v56-F4: dispatch/workon/setup verbs stamp the chat's project so its
-    scoped memory can ride the prompt. Best-effort: unknown repos are a no-op."""
+    scoped memory can ride the prompt. Best-effort: unknown repos are a no-op.
+    It only fills an EMPTY slot — the operator's selector pick (or an earlier
+    bind) is never overwritten by a later dispatch elsewhere."""
     from skep.supervisor.serve.tools import _bind_chat_project
     from skep.supervisor.store import RunStore
 
@@ -2600,18 +2602,26 @@ def test_bind_chat_project_remembers_where_the_chat_works(tmp_path: Path) -> Non
         store.add_project_binding(
             project_id="proj-b", binding_kind="repo_slug", binding_value="fixture"
         )
+        fresh = store.create_chat(title="t2", model=None)
         _bind_chat_project(
-            store, None, chat.chat_id, "dispatch_run", {"repo": "fixture"}, {"task_id": "x"}
+            store, None, fresh.chat_id, "dispatch_run", {"repo": "fixture"}, {"task_id": "x"}
         )
-        rebound = store.get_chat(chat.chat_id)
+        rebound = store.get_chat(fresh.chat_id)
         assert rebound is not None and rebound.project_id == "proj-b"
         # (c) non-binding verbs and unknown repos change nothing
-        _bind_chat_project(store, None, chat.chat_id, "set_policy", {}, {})
+        _bind_chat_project(store, None, fresh.chat_id, "set_policy", {}, {})
         _bind_chat_project(
-            store, None, chat.chat_id, "dispatch_run", {"repo": "nope"}, {"task_id": "y"}
+            store, None, fresh.chat_id, "dispatch_run", {"repo": "nope"}, {"task_id": "y"}
         )
-        final = store.get_chat(chat.chat_id)
+        final = store.get_chat(fresh.chat_id)
         assert final is not None and final.project_id == "proj-b"
+        # (d) the operator's pick is never moved: a bound chat stays bound
+        # when the Queen later works in another project.
+        _bind_chat_project(
+            store, None, chat.chat_id, "dispatch_run", {"repo": "fixture"}, {"task_id": "z"}
+        )
+        kept = store.get_chat(chat.chat_id)
+        assert kept is not None and kept.project_id == "proj-a"
     finally:
         store.close()
 

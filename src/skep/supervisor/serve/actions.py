@@ -1649,7 +1649,9 @@ def _workon_path_or_400(config: SupervisorConfig, raw: str) -> Path:
         )
     resolved = candidate.resolve()
     error = existing_dir_error(resolved)  # v73-F11: one story per path
-    if error is not None:
+    if error is not None and resolved.exists():
+        # A file is refused; a MISSING path is fine — workon creates it, and
+        # the preview (the card) says so before anything is made.
         raise HTTPException(status_code=400, detail=error)
     store_root = config.home.parent
     broad = too_broad_root(resolved, store_root)  # W15: the list every binding face shares
@@ -1736,6 +1738,7 @@ def workon_preview(
     resolved = _workon_path_or_400(holder.current, path)
     _workon_phase_or_400(phase)
     project_id = _workon_project_id_or_409(store, resolved)
+    would_create_dir = not resolved.exists()
     is_repo, has_baseline, dirty = _workon_git_state(resolved)
     project_preview = preview_project_setup(
         root=repos_root(holder),
@@ -1749,6 +1752,7 @@ def workon_preview(
         repo_slug=None,
         template_names=[],
         policy_overrides={},
+        repo_path_may_be_missing=would_create_dir,
     )
     # L15: workon seeds the pack's schedules like any project setup — the
     # card says which ones it adds (an existing one is skipped, not reset).
@@ -1763,9 +1767,18 @@ def workon_preview(
         "path": str(resolved),
         "project_id": project_id,
         "git": {"is_repo": is_repo, "has_baseline": has_baseline, "dirty": dirty},
+        "would_create_dir": would_create_dir,
         "would_git_init": not is_repo,
         "would_commit_baseline": not has_baseline,
-        "warnings": [*_workon_warnings(has_baseline=has_baseline, dirty=dirty), *schedules],
+        "warnings": [
+            *(
+                [f"{resolved} does not exist yet: confirming creates it (and any missing parents)"]
+                if would_create_dir
+                else []
+            ),
+            *_workon_warnings(has_baseline=has_baseline, dirty=dirty),
+            *schedules,
+        ],
         "project": project_preview,
     }
 
@@ -1786,6 +1799,12 @@ def workon(
     resolved = _workon_path_or_400(holder.current, path)
     _workon_phase_or_400(phase)
     project_id = _workon_project_id_or_409(store, resolved)
+    created_dir = not resolved.exists()
+    if created_dir:
+        try:
+            resolved.mkdir(parents=True)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"cannot create {resolved}: {exc}") from exc
     is_repo, has_baseline, dirty = _workon_git_state(resolved)
     baseline_committed = False
     if not has_baseline:
@@ -1802,6 +1821,7 @@ def workon(
     )
     return {
         "path": str(resolved),
+        "created_dir": created_dir,
         "git_initialized": not is_repo,
         "baseline_committed": baseline_committed,
         "warnings": _workon_warnings(has_baseline=has_baseline, dirty=dirty),
