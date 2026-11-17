@@ -66,3 +66,4 @@ touches.
 | [0060](0060-serve-readopts-workers.md) | Serve re-adopts a live worker after a restart (edge sweep D2) |
 | [0061](0061-unlocked-mode.md) | Unlocked mode on policy v3: a zero-ask project as one step inside decide() |
 | [0062](0062-provider-key-relay.md) | The provider-key relay: the worker never holds the provider key (V6b; behind a kill switch, default off) |
+| [0063](0063-codex-login-provider.md) | The Queen on a ChatGPT plan: the Codex login as a provider credential, Queen only (v118) |

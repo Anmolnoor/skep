@@ -159,3 +159,25 @@ no key is present.
   of Codex's app-server protocol. If a later Codex stops loading it from
   disk, the run fails with Codex's own "not logged in" error, the
   operator's login is untouched, and the API-key mode still works.
+
+## The Queen on the same login (v118, ADR 0063)
+
+The Queen can run on the plan too, through the provider registry: `skep
+provider add openai-codex --preset openai-codex --activate` (or the chat
+`add_provider` card, a HIGH card). It talks the Responses protocol to
+`https://chatgpt.com/backend-api/codex` with the access token from the same
+`auth.json`, read in place and never refreshed or written: nothing here
+changes the rules above.
+
+- The key for any profile on `chatgpt.com` is this login or nothing — never
+  the profile's key file, `llm-secret` or an env var. `skep provider
+  set-key` and `provider login` refuse such a profile.
+- It is the Queen's alone. Activating it leaves `profile.json` (the
+  workers' provider) as it was, so builtin workers and the key relay keep
+  their own provider; with none configured they refuse and say how to set
+  one. No run is routed to it, pinned to its host or unmasked a key for it.
+- A missing login, an API-key login, a token within 5 minutes of expiry,
+  or a 401 from chatgpt.com ends the Queen's turn with the reason and the
+  fix: use `codex` once on this machine, or `codex login`.
+- The provider list, `/api/llm/config`, Settings and `skep doctor` report
+  the login's presence, plan and expiry, never a value.

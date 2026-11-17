@@ -1379,10 +1379,16 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
     def list_providers() -> dict[str, Any]:
         import os
 
-        from .llm import provider_secret_path
+        from ..codex_login import uses_codex_login
+        from .llm import chatgpt_login_view, provider_secret_path
 
         def _view(profile: Any) -> dict[str, Any]:
             view = asdict(profile)
+            if uses_codex_login(profile.base_url):
+                # v118-F1: no key is in play — the Codex login is (I8).
+                view["api_key_set"] = False
+                view["chatgpt_login"] = chatgpt_login_view()
+                return view
             # v108-F4: presence only, never the value — "does this profile
             # hold ITS OWN credential" (named env var set, or its key file).
             has_env = bool(profile.api_key_env and os.environ.get(profile.api_key_env))
@@ -1464,8 +1470,13 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
         # clears. The value never appears in sqlite or any GET.
         from .llm import provider_secret_path, store_provider_api_key
 
-        if run_store.get_provider_profile(provider_id) is None:
+        profile = run_store.get_provider_profile(provider_id)
+        if profile is None:
             raise HTTPException(status_code=404, detail=f"unknown provider {provider_id!r}")
+        from ..codex_login import NO_KEY_REFUSAL, uses_codex_login
+
+        if uses_codex_login(profile.base_url):
+            raise HTTPException(status_code=400, detail=f"{provider_id} {NO_KEY_REFUSAL}")
         store_provider_api_key(holder.current.home, provider_id, body.api_key.strip())
         return {
             "provider_id": provider_id,

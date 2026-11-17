@@ -535,7 +535,9 @@ key values never ride the command line, and `use` writes the profile through
 to the saved assistant config so the Queen actually speaks it. `login` (v108)
 runs the RFC 8628 device-code flow with the OPERATOR'S own `--client-id` —
 skep ships no OAuth client id for any provider — and stores the access token
-it returns exactly where `set-key` would.
+it returns exactly where `set-key` would. A profile on `chatgpt.com` (the
+`openai-codex` preset, v118) uses your ChatGPT plan login (Codex) and takes
+no key: `set-key` and `login` refuse it and point at `codex login`.
 
 ## Nodes and Ops
 

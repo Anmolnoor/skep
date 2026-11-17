@@ -29,6 +29,7 @@ from typing import Any, Protocol
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
+from ...codex_login import QUEEN_LOGIN_NAME
 from ...roles import ROLE_LESS_CHAT_ROLE
 from ..chat import (
     ATTACHMENT_MAX_BYTES,
@@ -191,7 +192,9 @@ def run_channel_turn(
         )
     try:
         base_url, api_key, model, protocol = engine.resolved_llm(chat)
-    except HTTPException:
+    except HTTPException as exc:
+        if QUEEN_LOGIN_NAME in str(exc.detail):  # v118-F1: say why, and the fix
+            return (f"skep: {exc.detail}", [])
         return (
             f"skep: configure the assistant first in the web UI (Settings): {web_ui_url}",
             [],

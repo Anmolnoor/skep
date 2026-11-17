@@ -443,3 +443,16 @@ test("run detail: a patch with no re-verification record says 'not re-verified'"
   assert.ok(missing[0][1].startsWith("not re-verified — this run was never re-verified"));
   assert.deepEqual(await rows(detail(null)), []);  // nothing to land: no row
 });
+
+// ---------- v118-F1: the Codex login is the Queen's credential on chatgpt.com ----------
+
+test("keyFieldLabel: a chatgpt.com config shows the login, never a key", () => {
+  const app = loadApp();
+  assert.equal(app.keyFieldLabel({ api_key_set: true }), "API key (stored as a 0600 file; saved)");
+  assert.equal(app.keyFieldLabel({ api_key_set: false }), "API key (stored as a 0600 file)");
+  const ready = { api_key_set: false, chatgpt_login: { present: true, plan: "plus", expires_at: "2026-11-20T00:00:00+00:00" } };
+  assert.equal(app.keyFieldLabel(ready), "ChatGPT plan login (Codex) (plan plus, expires 2026-11-20T00:00:00+00:00) — the Queen needs no key; a key here is for workers");
+  assert.match(app.keyFieldLabel({ ...ready, api_key_set: true }), /for workers \(saved\)$/);
+  const missing = { api_key_set: false, chatgpt_login: { present: false, problem: "no Codex login on this machine (`codex login`)" } };
+  assert.match(app.keyFieldLabel(missing), /not usable — no Codex login.*codex login/);
+});

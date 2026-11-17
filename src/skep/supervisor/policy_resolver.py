@@ -493,11 +493,13 @@ def resolve_routed_provider(
     ``route_provider``. The choice is explainable (a reason code) so it can appear
     in run detail. Returns a RoutingDecision.
     """
+    from .codex_login import uses_codex_login
     from .packs import pack_provider_defaults, route_provider
 
     defaults = pack_provider_defaults(strategy)
     preferred = str(defaults.get("preferred_provider") or "local")
-    providers = store.list_provider_profiles()
+    # v118-F4 (ADR 0063): the ChatGPT plan login is the Queen's, never a run's.
+    providers = [p for p in store.list_provider_profiles() if not uses_codex_login(p.base_url)]
     health_rows = store.list_provider_health()
     healthy_ids = {
         health.provider_id for health in health_rows if health.reachable and health.model_found

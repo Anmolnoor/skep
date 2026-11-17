@@ -1386,11 +1386,19 @@ def use_provider(store: RunStore, home: Path, *, provider_id: str) -> dict[str, 
     store.set_setting(LLM_PROTOCOL, serve_protocol)
     refresh_model_ctx(store, home, profile.model)
     _write_through_profile(store, home.parent)
+    from ..codex_login import uses_codex_login
+
+    note = "chats and default workers use this from their next turn"
+    if uses_codex_login(profile.base_url):  # v118-F4: the Queen's alone (ADR 0063)
+        note = (
+            "chats use this from their next turn, on your ChatGPT plan login (Codex); "
+            "workers never get it and keep the provider they had"
+        )
     return {
         "active": provider_id,
         "model": profile.model,
         "protocol": serve_protocol,
-        "note": "chats and default workers use this from their next turn",
+        "note": note,
     }
 
 

@@ -761,6 +761,8 @@ def format_doctor_report(status: Mapping[str, Any]) -> str:
     relay = status.get("provider_key_relay", {})
     if relay:
         lines.append(f"- provider key relay: {relay.get('label')}")
+    for queen in status.get("queen_chatgpt_login", []):
+        lines.append(_queen_login_line(queen))
 
     approvals = status.get("approvals", {})
     stale = approvals.get("stale", 0)
@@ -907,6 +909,39 @@ def _codex_login_lines(login: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _queen_login_check(home: Path) -> list[dict[str, Any]]:
+    """v118-F1 (ADR 0063): each provider profile on chatgpt.com, with the
+    Codex login it authenticates with — presence, plan, expiry, never a value."""
+    from skep.supervisor.codex_login import uses_codex_login
+    from skep.supervisor.serve.llm import chatgpt_login_view
+
+    from .supervisor.store import RunStore
+
+    db = home / "supervisor" / "supervisor.sqlite3"
+    if not db.is_file():
+        return []
+    store = RunStore(db, readonly=True)
+    try:
+        profiles = [p for p in store.list_provider_profiles() if uses_codex_login(p.base_url)]
+    finally:
+        store.close()
+    if not profiles:
+        return []
+    login = chatgpt_login_view()
+    return [{"provider_id": p.provider_id, "active": p.active, **login} for p in profiles]
+
+
+def _queen_login_line(queen: Mapping[str, Any]) -> str:
+    head = f"- provider {queen['provider_id']}{' (active)' if queen.get('active') else ''}: "
+    head += "the Queen only, on your ChatGPT plan login (Codex)"
+    if queen.get("problem"):
+        return f"{head} — not usable now: {queen['problem']}"
+    facts = [f"plan {queen['plan']}" if queen.get("plan") else ""]
+    facts.append(f"access token expires {queen['expires_at']}" if queen.get("expires_at") else "")
+    shown = ", ".join(f for f in facts if f)
+    return f"{head} — ready{f' ({shown})' if shown else ''}; workers never get it"
+
+
 def _provider_key_relay_check(home: Path) -> dict[str, Any]:
     """ADR 0062: does a builtin worker hold the provider key, and which
     engines the relay does not cover. Names and protocols only, never a key."""
@@ -999,6 +1034,7 @@ def _status_payload(
         # not on the host burned three runs before anything said so.
         "coding_engines": _coding_engine_checks(home),
         "provider_key_relay": _provider_key_relay_check(home),
+        "queen_chatgpt_login": _queen_login_check(home),
         "approvals": {"status": "ready", "pending": 0},
         "memory": _memory_status(home, profile is not None),
         "sandbox": sandbox or {},

@@ -141,6 +141,7 @@ def worker_provider_from_home(home: Path) -> WorkerProvider | None:
     name = provider.name.strip().lower()
     if name in {"", "mock", "unconfigured"} or not provider.model.strip():
         return _assistant_provider_from_home(home)
+    _refuse_queen_only(provider.endpoint or "")
     # v19-F9: a profile written through from the daemon carries api_key_env=None
     # (the daemon keeps its secret in supervisor/llm-secret, not an env var), so
     # fall back to that secret to authenticate. v108-F4: the active registry
@@ -153,6 +154,22 @@ def worker_provider_from_home(home: Path) -> WorkerProvider | None:
     return WorkerProvider(profile=provider, api_key=api_key)
 
 
+def _refuse_queen_only(endpoint: str) -> None:
+    """v118 (ADR 0063, decision 4): a provider on chatgpt.com runs on the
+    operator's ChatGPT plan login, and that login is the Queen's alone — a
+    worker never resolves a key for it, nor sends it llm-secret. Raised
+    BEFORE any key is read, so the worker process never holds the token."""
+    from skep.supervisor.codex_login import uses_codex_login
+
+    if uses_codex_login(endpoint):
+        raise LlmPlanError(
+            "the assistant's provider is your ChatGPT plan login (Codex), which only the "
+            "Queen uses — workers need a provider of their own: make another provider "
+            "active once (`skep provider use <id>`); workers keep it when the Queen "
+            "switches back to the ChatGPT plan"
+        )
+
+
 def _active_profile_key(personal_home: Path, endpoint: str) -> str | None:
     """v108-F4: the active registry profile's per-profile credential — only
     while the profile's endpoint matches the one this worker will dial (a
@@ -162,14 +179,14 @@ def _active_profile_key(personal_home: Path, endpoint: str) -> str | None:
     if not db_path.is_file():
         return None
     store = RunStore(db_path, readonly=True)
+    from skep.supervisor.serve.llm import resolve_provider_api_key, worker_key_profile
+
     try:
-        active = store.active_provider_profile()
+        active = worker_key_profile(store, endpoint)
     finally:
         store.close()
-    if active is None or active.base_url.rstrip("/") != endpoint.strip().rstrip("/"):
+    if active is None:
         return None
-    from skep.supervisor.serve.llm import resolve_provider_api_key
-
     return resolve_provider_api_key(supervisor_home, active)
 
 
@@ -183,13 +200,16 @@ def _assistant_provider_from_home(home: Path) -> WorkerProvider | None:
         base_url = store.get_setting(LLM_BASE_URL)
         model = store.get_setting(LLM_DEFAULT_MODEL)
         protocol = store.get_setting(LLM_PROTOCOL)
-        active = store.active_provider_profile()
+        from skep.supervisor.serve.llm import worker_key_profile
+
+        active = worker_key_profile(store, base_url) if isinstance(base_url, str) else None
     finally:
         store.close()
     if not isinstance(base_url, str) or not base_url.strip():
         return None
     if not isinstance(model, str) or not model.strip():
         return None
+    _refuse_queen_only(base_url)
     known = get_args(LLMProtocol)
     name = str(protocol) if protocol in known else DEFAULT_LLM_PROTOCOL
     # v108-F4: the active registry profile's own credential — but only while
