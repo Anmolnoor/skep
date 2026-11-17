@@ -143,6 +143,29 @@ def test_text_tokens_clear_aa_on_every_surface_they_are_painted_on() -> None:
     assert not failures, f"below AA (4.5:1): {failures}"
 
 
+def test_the_palette_is_graphite() -> None:
+    """H1-G1: the operator chose "A · Graphite" (skep-design
+    plans/hive-rooms/design-graphite.html, theme a) after seeing H1 keep the
+    warm brown-black, cream and green. Pinned so a later pass cannot drift the
+    canvas back to a hue: neutral greys, a white primary, and colour that means
+    a status — green ok, amber waiting on you — never decoration."""
+    tokens = _tokens()
+    assert tokens["--bg"] == "#0f1011"
+    assert tokens["--chrome"] == "#0b0c0d"  # the sidebar
+    assert tokens["--panel"] == "#17181a"  # the raised surface
+    assert tokens["--text"] == "#ececed"
+    assert tokens["--muted"] == "#85888e"
+    assert tokens["--ok"] == "#3ecf8e"
+    assert tokens["--warn"] == "#f0b23e"
+    # The primary button is white with canvas-coloured text, and the accent
+    # that used to be the hive green is that white: not a status colour.
+    assert tokens["--accent"] == "#ececed"
+    assert tokens["--on-accent"] == tokens["--bg"]
+    assert tokens["--accent"] not in {tokens["--ok"], tokens["--warn"], tokens["--bad"]}
+    root = _css().split(":root {", 1)[1].split("\n}", 1)[0]
+    assert "--border-soft: rgba(255, 255, 255, .075);" in root  # the hairline
+
+
 def test_muted_2_stays_a_step_below_muted() -> None:
     """Legibility is not the only requirement — tertiary text that reads as
     body text has lost the hierarchy the token exists for."""
