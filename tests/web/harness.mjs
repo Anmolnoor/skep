@@ -53,7 +53,7 @@ class FakeNode {
   set textContent(value) { this._text = String(value); this.children = []; }
   // Fire listeners and wait for any async handler, so a test can assert after.
   async click() {
-    await Promise.all((this.listeners.click || []).map(fn => fn({ target: this, preventDefault() {} })));
+    await Promise.all((this.listeners.click || []).map(fn => fn({ target: this, preventDefault() {}, stopPropagation() {} })));
   }
   // ".cls" or "tag" only — enough to find a card's parts.
   querySelectorAll(selector) {

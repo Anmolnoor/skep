@@ -1,5 +1,6 @@
 /* skep — the face (v5 Stage F). No build step: ES modules + fetch + EventSource. */
 import { renderContextPanel } from "./room.js";
+import { installSidebar, refreshSidebar, renderThreads } from "./sidebar.js";
 
 const TOKEN_KEY = "skep-token";
 
@@ -653,101 +654,6 @@ function setShellActiveRoute(hash) {
     }
     link.classList.toggle("active", active);
   }
-}
-
-// v44-F3: sources whose group the operator opened; survives re-renders.
-// ponytail: in-memory; localStorage if reload-reset annoys
-const openChatGroups = new Set();
-
-// v76-F8: pinned chats are a UI preference (localStorage, I11), not a
-// server fact — the daily-driver conversation stays on top. The search
-// query survives re-renders the same way the open groups do.
-const pinnedChats = new Set(JSON.parse(localStorage.getItem("skep-pinned-chats") || "[]"));
-let chatSearchQuery = "";
-
-function savePinnedChats() {
-  localStorage.setItem("skep-pinned-chats", JSON.stringify([...pinnedChats]));
-}
-
-function renderSidebarChats(list, chats, activeChatId, fallbackModel) {
-  if (!list) return;
-  list.replaceChildren();
-  const applyChatSearch = () => {
-    const q = chatSearchQuery.trim().toLowerCase();
-    for (const node of list.querySelectorAll(".sidebar-chat-item")) {
-      node.classList.toggle("search-hidden",
-        Boolean(q) && !node.textContent.toLowerCase().includes(q));
-    }
-  };
-  const searchInput = el("input", {
-    class: "chat-sidebar-search", type: "search",
-    placeholder: "Search chats…", value: chatSearchQuery,
-    "aria-label": "search chats",
-  });
-  searchInput.addEventListener("input", () => {
-    chatSearchQuery = searchInput.value;
-    applyChatSearch();
-  });
-  list.append(searchInput);
-  const item = (chat) => {
-    const model = modelLabel(chat.model || fallbackModel);
-    const isPinned = pinnedChats.has(chat.chat_id);
-    const pin = iconButton(isPinned ? "unpin chat" : "pin chat", isPinned ? "●" : "○", {
-      class: `chat-pin icon-button ghost${isPinned ? " pinned" : ""}`,
-      onclick: (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (isPinned) pinnedChats.delete(chat.chat_id);
-        else pinnedChats.add(chat.chat_id);
-        savePinnedChats();
-        renderSidebarChats(list, chats, activeChatId, fallbackModel);
-      },
-    });
-    return el("a", {
-      class: `sidebar-chat-item${chat.chat_id === activeChatId ? " active" : ""}`,
-      href: `#/chat/${chat.chat_id}`,
-      title: `${chatTitle(chat)} · ${model}`,
-      "aria-label": `open chat: ${chatTitle(chat)}`,
-    },
-      el("span", { class: "sidebar-chat-label" }, `${chatTitle(chat)} · ${model}`),
-      pin);
-  };
-  // Pinned first — moved, not duplicated, whatever their source group.
-  const pinned = chats.filter(chat => pinnedChats.has(chat.chat_id));
-  if (pinned.length) {
-    list.append(el("div", { class: "sidebar-chat-pinned" },
-      el("div", { class: "sidebar-chat-pinned-label" }, "pinned"),
-      pinned.map(item)));
-  }
-  const groups = new Map(); // insertion order = recency (list arrives updated_at DESC)
-  for (const chat of chats) {
-    if (pinnedChats.has(chat.chat_id)) continue;
-    const source = chat.source || "web";
-    if (source === "web") { list.append(item(chat)); continue; }
-    if (!groups.has(source)) groups.set(source, []);
-    groups.get(source).push(chat);
-  }
-  for (const [source, group] of groups) {
-    const open = openChatGroups.has(source) || group.some((c) => c.chat_id === activeChatId);
-    list.append(el("details", {
-      class: "sidebar-chat-group",
-      open: open ? "" : null,
-      ontoggle: (event) => {
-        if (event.target.open) openChatGroups.add(source);
-        else openChatGroups.delete(source);
-      },
-    },
-      el("summary", {
-        class: "sidebar-chat-group-toggle",
-        title: `toggle ${source} chats`,
-        "aria-label": `toggle ${source} chats`,
-      },
-        source,
-        el("span", { class: "badge" }, String(group.length)),
-        el("span", { class: "chat-thinking-chevron button-icon", "aria-hidden": "true" }, "⌄")),
-      group.map(item)));
-  }
-  applyChatSearch(); // a re-render keeps the live filter applied
 }
 
 function installShellHandlers() {
@@ -2507,8 +2413,7 @@ async function viewChat(main, chatId) {
     api("GET", "/api/roles").catch(() => ({ roles: [], default: null })),
   ]);
   let chats = chatList.chats;
-  const chatSidebar = el("nav", { class: "chat-sidebar", "aria-label": "Chats" });
-  renderSidebarChats(chatSidebar, chats, activeChatId, llm.default_model);
+  renderThreads(chats); // H1: the thread list lives in the sidebar now
 
   header(main, "Chat", "Talk to the hive — the Queen's own model, with the supervisor at hand.");
   if (!llm.configured) {
@@ -2871,12 +2776,13 @@ async function viewChat(main, chatId) {
     refreshStrip();
   });
   loadStripProjects().then(() => refreshStrip());
-  // v88-F2: collapsing the chat list is a UI preference, so it lives in
+  // v88-F2: collapsing a panel is a UI preference, so it lives in
   // localStorage like the v76-F8 pins — operator-owned local state, never
-  // server state (I11).
-  let sidebarHidden = localStorage.getItem("skep-chat-sidebar") === "hidden";
-  const toggleSidebar = iconButton("hide chat list", "☰", {
-    class: "chat-toolbar-action icon-button ghost chat-sidebar-toggle",
+  // server state (I11). H1: the chat list moved to the sidebar; the toggle
+  // folds the context panel instead.
+  let contextHidden = localStorage.getItem("skep-context-panel") === "hidden";
+  const toggleContext = iconButton("hide thread context", "ⓘ", {
+    class: "chat-toolbar-action icon-button ghost chat-context-toggle",
   });
   const newChat = iconButton("new chat", "+", { class: "chat-toolbar-action icon-button ghost" });
   const deleteChat = iconButton("delete current chat", "×", {
@@ -2891,7 +2797,7 @@ async function viewChat(main, chatId) {
     if (!activeChatId) return;
     await api("DELETE", `/api/chats/${activeChatId}`);
     chats = (await api("GET", "/api/chats")).chats;
-    renderSidebarChats(chatSidebar, chats, null, llm.default_model);
+    renderThreads(chats);
     location.hash = "#/chat";
   });
   // v75-F2: the two always-disabled placeholder pills (codeChrome) are gone —
@@ -3039,26 +2945,25 @@ async function viewChat(main, chatId) {
   const pane = el("div", { class: "chat-main" }, log, statusLine, composer);
   // H1 (hive-rooms C10): role and model, cards waiting, runs, spend.
   const contextPanel = el("aside", { class: "chat-context", "aria-label": "thread context" });
-  const layout = el("div", { class: `chat-layout${sidebarHidden ? " sidebar-hidden" : ""}` },
-    chatSidebar,
+  const layout = el("div", { class: `chat-layout${contextHidden ? " context-hidden" : ""}` },
     el("div", { class: "chat-content" },
-      el("div", { class: "chat-toolbar" }, toggleSidebar, newChat, deleteChat),
+      el("div", { class: "chat-toolbar" }, toggleContext, newChat, deleteChat),
       pane),
     contextPanel);
   renderContextPanel(contextPanel, { chat: activeChat, defaultModel: llm.default_model, actions });
-  const applySidebarState = () => {
-    layout.classList.toggle("sidebar-hidden", sidebarHidden);
-    const label = sidebarHidden ? "show chat list" : "hide chat list";
-    toggleSidebar.title = label;
-    toggleSidebar.setAttribute("aria-label", label);
-    toggleSidebar.setAttribute("aria-expanded", String(!sidebarHidden));
+  const applyContextState = () => {
+    layout.classList.toggle("context-hidden", contextHidden);
+    const label = contextHidden ? "show thread context" : "hide thread context";
+    toggleContext.title = label;
+    toggleContext.setAttribute("aria-label", label);
+    toggleContext.setAttribute("aria-expanded", String(!contextHidden));
   };
-  toggleSidebar.addEventListener("click", () => {
-    sidebarHidden = !sidebarHidden;
-    localStorage.setItem("skep-chat-sidebar", sidebarHidden ? "hidden" : "shown");
-    applySidebarState();
+  toggleContext.addEventListener("click", () => {
+    contextHidden = !contextHidden;
+    localStorage.setItem("skep-context-panel", contextHidden ? "hidden" : "shown");
+    applyContextState();
   });
-  applySidebarState();
+  applyContextState();
   main.append(layout);
 
   const scrollBottom = () => { log.scrollTop = log.scrollHeight; };
@@ -3729,7 +3634,7 @@ async function viewChat(main, chatId) {
         renderPendingCards();
       }
       updateContextMeter();
-      renderSidebarChats(chatSidebar, chats, activeChatId, llm.default_model); // titles may have changed
+      renderThreads(chats); // titles may have changed
       renderContextPanel(contextPanel, { chat: activeChat, defaultModel: llm.default_model, actions });
       // v103-F1: the turn is over — send whatever the operator typed during it.
       // After the refresh above, so a card raised by this turn has already
@@ -3793,7 +3698,7 @@ async function viewChat(main, chatId) {
     roleSelect.title = "switch with /role <name>";
     history.replaceState(null, "", `#/chat/${activeChatId}`);
     setShellActiveRoute(location.hash);
-    renderSidebarChats(chatSidebar, chats, activeChatId, llm.default_model);
+    renderThreads(chats);
     deleteChat.disabled = false;
     // v96-F3: a project picked before the first message binds now.
     if (pendingProjectId) {
@@ -6379,6 +6284,8 @@ async function poll() {
     const status = await api("GET", "/api/status");
     document.getElementById("health").textContent =
       `${status.status} · ${status.pending_approvals} pending`;
+    document.getElementById("sidebar-machine").textContent = status.machine; // H1
+    refreshSidebar().catch(() => {}); // H1: dots and counts ride this poll too
     // v76-F2: the Queen tile's liveness rides THIS poll — no new timer. The
     // tile unhides once the model label is filled (an empty tile is a lie).
     const queenTile = document.getElementById("topbar-queen-status");
@@ -6468,6 +6375,7 @@ decorateShell();
 installSearch();
 installPalette();
 installDock();
+installSidebar();
 if (await tryConnect()) { await route(); refreshDockModel(); }
 poll();
 schedulePoll(POLL_MIN_MS);

@@ -416,13 +416,16 @@ def test_memory_chips_and_chat_sidebar_search_pinning() -> None:
     assert "proposed ${relativeTime(p.created_at)}" in memory
     assert "items · ${memKb} KB" in memory
 
-    sidebar = app_js[app_js.index("function renderSidebarChats") :]
-    sidebar = sidebar[: sidebar.index("function installShellHandlers")]
+    # H1: the chat list moved to the sidebar (sidebar.js renderThreads); the
+    # search input is a fixed element there, so a re-render never steals focus.
+    sidebar_js = (STATIC_DIR / "sidebar.js").read_text()
+    sidebar = sidebar_js[sidebar_js.index("export function renderThreads") :]
+    sidebar = sidebar[: sidebar.index("export async function refreshSidebar")]
     assert "api(" not in sidebar  # search + pin are pure client state (I11)
-    assert 'class: "chat-sidebar-search"' in sidebar
+    assert 'class="chat-sidebar-search"' in (STATIC_DIR / "index.html").read_text()
     # Pinning round-trips localStorage; pinned renders before the groups.
-    assert '"skep-pinned-chats"' in app_js
-    assert sidebar.index("sidebar-chat-pinned") < sidebar.index("const groups = new Map()")
+    assert '"skep-pinned-chats"' in sidebar_js
+    assert sidebar.index("sidebar-chat-pinned") < sidebar.index("const projects = new Map()")
     assert "pinnedChats.has(chat.chat_id)) continue;" in sidebar  # moved, not duplicated
 
     for selector in (
@@ -826,26 +829,27 @@ def test_sidebar_chat_rows_are_one_height() -> None:
     assert "flex: none; height: 32px; }" in styles
 
 
-def test_chat_sidebar_collapses_from_the_toolbar() -> None:
+def test_context_panel_collapses_from_the_toolbar() -> None:
     """v88-F2: the toggle is pure client state — a UI preference in
-    localStorage, not server state (I11), like the v76-F8 pins."""
+    localStorage, not server state (I11), like the v76-F8 pins. H1: the chat
+    list it used to fold moved to the sidebar; it folds the context panel."""
     source = (STATIC_DIR / "app.js").read_text()
     styles = (STATIC_DIR / "style.css").read_text()
 
-    assert ".chat-layout.sidebar-hidden .chat-sidebar { display: none; }" in styles
-    assert ".chat-sidebar-toggle { margin-right: auto; }" in styles
+    assert ".chat-layout.context-hidden .chat-context { display: none; }" in styles
+    assert ".chat-context-toggle { margin-right: auto; }" in styles
 
-    assert 'class: "chat-toolbar-action icon-button ghost chat-sidebar-toggle"' in source
-    assert '"skep-chat-sidebar"' in source
+    assert 'class: "chat-toolbar-action icon-button ghost chat-context-toggle"' in source
+    assert '"skep-context-panel"' in source
     # The toggle never talks to the server, and it announces its state.
-    toggle = source[source.index("const applySidebarState") :]
+    toggle = source[source.index("const applyContextState") :]
     toggle = toggle[: toggle.index("main.append(layout)")]
     assert "api(" not in toggle
     assert '"aria-expanded"' in toggle
-    assert '"show chat list"' in toggle and '"hide chat list"' in toggle
-    # The toolbar renders it alongside the existing actions, not in the sidebar
+    assert '"show thread context"' in toggle and '"hide thread context"' in toggle
+    # The toolbar renders it alongside the existing actions, not in the panel
     # itself — a control that hides its own container must outlive it.
-    assert 'el("div", { class: "chat-toolbar" }, toggleSidebar, newChat, deleteChat)' in source
+    assert 'el("div", { class: "chat-toolbar" }, toggleContext, newChat, deleteChat)' in source
 
 
 def test_confirm_cards_render_the_summary_not_the_model_prose() -> None:
@@ -1244,9 +1248,11 @@ def test_v75_foundation_tokens_helpers_and_rail_groups() -> None:
     ):
         assert token_name in css, token_name
 
-    # The rail groups wrap the pinned anchors without touching them.
-    for group in ("daily", "manage", "configure"):
-        assert f'class="rail-group" data-group="{group}"' in index
+    # The groups wrap the pinned anchors without touching them. H1: the daily
+    # pair on top; the old workspaces fold into Runs / Library / Settings.
+    assert 'class="rail-group" data-group="daily"' in index
+    for group in ("runs", "library", "settings"):
+        assert f'<details class="rail-group" data-group="{group}">' in index
     assert ".rail-group" in css
 
     # The shared helpers exist; the tab bar persists panels across switches

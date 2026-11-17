@@ -55,7 +55,7 @@
   --radius-lg: 12px;
   --radius-pill: 26px;
   --control-h: 38px;
-  --rail-w: 60px;
+  --sidebar-w: 248px;
   --topbar-h: 60px;
   --dock-h: 64px;
   --content-max: 1180px;
@@ -137,55 +137,81 @@ code, pre, .mono { font-family: var(--font-mono); }
 .login-card input { width: 100%; margin-bottom: 12px; }
 .error { color: var(--bad); min-height: 1em; }
 
-/* shell: command rail + workspace (top bar / content / chat dock) */
+/* shell: sidebar + workspace (top bar / content / chat dock) */
 .shell { display: flex; min-height: 100vh; }
 
-/* --- command rail (icon nav) --- */
+/* --- H1 (hive-rooms C10): the sidebar — machine, search, threads by project,
+   then the old workspaces folded below. It replaced the 60px icon rail. --- */
 .sidebar {
-  width: var(--rail-w); flex: none; background: var(--chrome);
+  width: var(--sidebar-w); flex: none; background: var(--chrome);
   border-right: 1px solid var(--border-soft);
-  /* v104-F0: gap was 2px — 42px targets stacked two pixels apart read as one
-     column of boxes rather than separate controls. One step on F5's scale. */
-  display: flex; flex-direction: column; align-items: center; gap: var(--space-1);
-  padding: 10px 0; position: sticky; top: 0; height: 100vh; z-index: 5;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 8px; position: sticky; top: 0; height: 100vh; z-index: 5;
 }
+.sidebar-head { display: flex; align-items: center; gap: 8px; padding: 0 4px 8px; flex: none; }
 .sidebar .brand {
-  width: 34px; height: 34px; margin-bottom: 8px; flex: none;
-  display: grid; place-items: center; border-radius: var(--radius-md);
+  width: 26px; height: 26px; flex: none;
+  display: grid; place-items: center; border-radius: var(--radius-sm);
   background: var(--text-strong); color: var(--on-accent); font-size: 0;
 }
 .sidebar .brand::before {
-  content: "S"; font-family: var(--font-sans); font-weight: 700; font-size: 15px;
+  content: "S"; font-family: var(--font-sans); font-weight: 700; font-size: 13px;
 }
 .sidebar .brand:hover { background: #fff; }
-.sidebar a[data-ws] {
-  position: relative; width: 42px; height: 42px; flex: none;
-  display: grid; place-items: center; border-radius: var(--radius-lg);
-  color: var(--muted-2); font-size: 0;
+.sidebar-machine {
+  flex: 1; min-width: 0; color: var(--text-strong); font-weight: 600; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.sidebar a[data-ws] .rail-icon { width: 21px; height: 21px; display: block; }
-.sidebar a[data-ws]:hover { color: var(--text); background: var(--panel); }
+.sidebar-search {
+  display: flex; align-items: center; justify-content: space-between; flex: none;
+  width: 100%; height: 30px; min-height: 0; padding: 0 8px; margin: 0 0 6px;
+  border-radius: var(--radius-sm); border: 1px solid var(--border-soft);
+  background: var(--panel); color: var(--muted-2); font-size: 12px; font-weight: 400;
+}
+.sidebar a[data-ws], .sidebar .rail-group > summary {
+  position: relative; display: flex; align-items: center; gap: 9px; flex: none;
+  height: 30px; padding: 0 8px; border-radius: var(--radius-sm);
+  color: var(--muted); font-size: 13px; white-space: nowrap; cursor: pointer;
+}
+.sidebar .rail-group > summary { list-style: none; }
+.sidebar .rail-group > summary::-webkit-details-marker { display: none; }
+.sidebar details.rail-group > a[data-ws] { padding-left: 33px; }
+.sidebar a[data-ws] .rail-icon, .sidebar summary .rail-icon { width: 16px; height: 16px; flex: none; display: block; }
+.sidebar a[data-ws]:hover, .sidebar .rail-group > summary:hover { color: var(--text); background: var(--panel); }
 .sidebar a[data-ws].active { color: var(--text-strong); background: var(--panel-2); }
 .sidebar a[data-ws].active::after {
-  /* v104-F0: was left: -10px. The rail is 60px and the item 42px and centred,
-     so the item's left edge sits at 9px — at -10px the active bar rendered at
-     x = -1, off the rail entirely and clipped by the viewport edge. -7px puts
-     it 2px inside the rail, which is where it was always meant to be. */
-  content: ""; position: absolute; left: -7px; top: 50%; transform: translateY(-50%);
-  width: 3px; height: 18px; border-radius: 999px; background: var(--accent);
+  /* v104-F0's rule, kept: the bar sits inside the sidebar — items start at the
+     8px padding, so -6px puts it 2px in from the edge, never clipped. */
+  content: ""; position: absolute; left: -6px; top: 50%; transform: translateY(-50%);
+  width: 3px; height: 16px; border-radius: 999px; background: var(--accent);
 }
 .sidebar a[data-ws] .badge {
-  position: absolute; top: 5px; right: 5px; min-width: 8px; width: 8px; height: 8px;
-  padding: 0; margin: 0; font-size: 0; color: transparent;
-  background: var(--warn); border: 2px solid var(--chrome); border-radius: 999px;
+  margin-left: auto; background: var(--warn); color: var(--on-accent);
+  border-radius: 999px; padding: 0 6px; font-size: 11px; font-weight: 700;
 }
-/* Chat-history sidebar lives inside the chat view (not a rail flyout). */
-.chat-sidebar {
-  flex: none; width: 220px; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 2px;
-  padding-right: 10px; border-right: 1px solid var(--border-soft);
+/* A folded group with a count inside still shows that something waits. */
+.sidebar details.rail-group:not([open]):has(.badge:not(.hidden)) > summary::after {
+  content: ""; margin-left: auto; width: 7px; height: 7px; border-radius: 999px;
+  background: var(--warn);
 }
-.chat-sidebar:empty { display: none; }
+.sidebar .chat-sidebar-search { flex: none; margin: 8px 0 4px; }
+.sidebar-threads {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px; padding-bottom: 8px;
+}
+.sidebar-thread-group { display: flex; flex-direction: column; gap: 2px; flex: none; }
+.sidebar-thread-project:hover { color: var(--text); }
+.thread-dot {
+  width: 7px; height: 7px; flex: none; border-radius: 999px;
+  border: 1px solid var(--muted-2);
+}
+.thread-dot.wait { background: var(--warn); border-color: var(--warn); }
+.thread-dot.active { background: var(--accent); border-color: var(--accent); }
+.thread-dot.unread { background: var(--text-strong); border-color: var(--text-strong); }
+.sidebar-nav {
+  flex: none; display: flex; flex-direction: column; gap: 2px;
+  padding-top: 8px; border-top: 1px solid var(--border-soft);
+}
 .sidebar-chat-item {
   color: var(--muted); border-radius: var(--radius-sm); padding: 7px 9px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -201,9 +227,8 @@ code, pre, .mono { font-family: var(--font-mono); }
 }
 .sidebar-chat-group-toggle:hover { color: var(--text); background: var(--panel-2); }
 .sidebar-chat-group:not([open]) .chat-thinking-chevron { transform: rotate(-90deg); }
-.sidebar .spacer { flex: 1; }
 .health {
-  margin-top: 8px; flex: none; width: 10px; height: 10px; border-radius: 999px;
+  flex: none; width: 8px; height: 8px; border-radius: 999px;
   background: var(--ok); font-size: 0; color: transparent;
 }
 .badge {
@@ -429,10 +454,10 @@ pre.log, pre.diff {
 .chat-toolbar-action.icon-button {
   width: 38px; min-width: 38px; min-height: 38px; border-radius: var(--radius-md);
 }
-/* v88-F2: the collapse toggle sits left of the chat actions, next to the
-   column it controls; the same display:none the mobile breakpoint uses. */
-.chat-sidebar-toggle { margin-right: auto; }
-.chat-layout.sidebar-hidden .chat-sidebar { display: none; }
+/* v88-F2 → H1: the collapse toggle sits left of the chat actions; since the
+   chat list moved to the sidebar it folds the context panel instead. */
+.chat-context-toggle { margin-right: auto; }
+.chat-layout.context-hidden .chat-context { display: none; }
 /* H1 (hive-rooms C10): the context panel — read-only facts about the thread. */
 .chat-context {
   flex: none; width: 232px; overflow-y: auto; padding-left: 12px;
@@ -1165,15 +1190,8 @@ pre.log, pre.diff {
 
 /* ---------- v75-F1: shared view furniture ---------- */
 
-/* Rail groups — daily / manage / configure separation on the command rail. */
-.rail-group {
-  display: flex; flex-direction: column; align-items: center; gap: var(--space-1);
-  flex: none;
-}
-.rail-group + .rail-group {
-  margin-top: 8px; padding-top: 10px;
-  border-top: 1px solid var(--border-soft);
-}
+/* Sidebar groups (H1): the daily pair on top, the folded workspaces below. */
+.rail-group { display: flex; flex-direction: column; gap: 2px; flex: none; }
 
 /* Shared tab bar (Settings, Templates & Skills, Run detail). */
 .tab-bar {
@@ -1419,20 +1437,15 @@ pre.log, pre.diff {
     width: 100%; height: auto; position: static; flex-direction: row; align-items: center;
     gap: 4px; overflow-x: auto; padding: 8px; border-right: 0; border-bottom: 1px solid var(--border);
   }
-  .sidebar .brand { flex: none; padding: 0 10px; }
-  .sidebar a {
-    flex: none; padding: 8px 10px; border-left: 0; border-bottom: 0;
-    white-space: nowrap;
-  }
-  .sidebar a.active { border-left-color: transparent; border-bottom-color: transparent; }
-  .chat-sidebar, .chat-context { display: none; }
-  .sidebar .spacer, .health { display: none; }
+  .sidebar-head { padding: 0; }
+  .sidebar a { flex: none; white-space: nowrap; }
+  /* H1: no phone layout this round — the strip keeps the pages and drops the
+     thread list, as the chat view's own list was dropped before. */
+  .sidebar-threads, .sidebar .chat-sidebar-search, .sidebar-search, .sidebar-machine,
+  .chat-context, .health { display: none; }
+  .sidebar-nav { flex-direction: row; padding-top: 0; border-top: 0; }
   /* v75-F1 (C11): rail groups flow along the strip instead of stacking. */
   .rail-group { flex-direction: row; }
-  .rail-group + .rail-group {
-    margin-top: 0; padding-top: 0; border-top: 0;
-    margin-left: 4px; padding-left: 6px; border-left: 1px solid var(--border-soft);
-  }
 
   main { width: 100%; max-width: none; padding: 20px 12px; }
   .chat-layout { height: calc(100vh - 190px); min-height: 420px; }

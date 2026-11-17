@@ -251,21 +251,19 @@ def test_every_id_that_has_a_class_rule_also_carries_the_class() -> None:
     assert not orphans, f"id has a matching .class rule but no class attribute: {orphans}"
 
 
-def test_the_rail_active_indicator_stays_inside_the_rail() -> None:
-    """v104-F0: the rail is --rail-w wide and its items are 42px, centred, so
-    an item's left edge sits at (rail - 42) / 2. The indicator was at
-    `left: -10px`, which put it past the rail's own left edge and the viewport
-    clipped it. Computed from the tokens so a wider rail cannot silently
+def test_the_sidebar_active_indicator_stays_inside_the_sidebar() -> None:
+    """v104-F0: the indicator was at `left: -10px`, past the rail's own left
+    edge, and the viewport clipped it. H1 replaced the rail with a sidebar
+    whose items start at its horizontal padding; the bar must still land at
+    x >= 0. Computed from the stylesheet so a padding change cannot silently
     re-break it."""
     css = _css()
-    rail_match = re.search(r"--rail-w:\s*(\d+)px", css)
-    offset_match = re.search(
+    sidebar = re.search(r"\n\.sidebar \{[^}]*padding:\s*\d+px (\d+)px", css)
+    offset = re.search(
         r"\.sidebar a\[data-ws\]\.active::after\s*\{[^}]*left:\s*(-?\d+)px", css, re.S
     )
-    assert rail_match and offset_match, "rail width / active-bar offset not found"
-    rail = int(rail_match.group(1))
-    offset = int(offset_match.group(1))
-    item_left = (rail - 42) // 2
-    assert item_left + offset >= 0, (
-        f"active bar renders at x={item_left + offset} — outside the {rail}px rail"
+    assert sidebar and offset, "sidebar padding / active-bar offset not found"
+    item_left = int(sidebar.group(1))
+    assert item_left + int(offset.group(1)) >= 0, (
+        f"active bar renders at x={item_left + int(offset.group(1))} — outside the sidebar"
     )
