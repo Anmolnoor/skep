@@ -62,7 +62,6 @@
   --topbar-h: 46px;
   --dock-h: 64px;
   --content-max: 1180px;
-  --ls-label: .06em;      /* letter-spacing for uppercase micro-labels */
   --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --shadow-focus: 0 0 0 1px var(--focus), 0 0 0 4px rgba(139, 142, 148, .18);
@@ -82,7 +81,7 @@
      stays 13.5px in the `font:` shorthand below; these are the steps an
      explicit declaration may use, and test_style_tokens.py fails the gate on a
      thirteenth. */
-  --text-micro: 11px;   /* uppercase micro-labels; absorbed 10px */
+  --text-micro: 11px;   /* micro-labels; absorbed 10px */
   --text-sm: 12px;      /* absorbed 12.5px */
   --text-body: 13px;    /* the commonest explicit size — unchanged */
   --text-md: 15px;      /* absorbed 14px and 16px */
@@ -373,7 +372,7 @@ h3 { color: var(--text-strong); font-size: 15px; font-weight: 650; margin: 0 0 1
 /* widgets */
 table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 12px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border-soft); }
-th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
 tr.click { cursor: pointer; }
 tr.click:hover { background: var(--panel); }
 .command-output { white-space: pre-wrap; max-width: 320px; overflow-wrap: anywhere; }
@@ -477,7 +476,7 @@ pre.log, pre.diff {
 }
 .suggestion-grants p { margin: 0; overflow-wrap: anywhere; }
 .suggestion-grant-key {
-  color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase;
+  color: var(--muted); font-size: 12px; font-weight: 700;
 }
 
 .empty-state {
@@ -554,7 +553,6 @@ main.chat-view { padding: 0; max-width: none; }
 .card-details { margin: 0 0 8px; }
 .card-details > summary {
   cursor: pointer; color: var(--muted-2); font-size: 12px;
-  letter-spacing: var(--ls-label); text-transform: uppercase;
 }
 .card-details[open] > summary { margin-bottom: 6px; }
 /* v90-F3: a receipt is a record, not a decision — quieter than a live card,
@@ -690,7 +688,7 @@ main.chat-view { padding: 0; max-width: none; }
 }
 .agent-thread-header:hover { color: var(--text); filter: none; }
 .agent-thread-tool {
-  color: var(--text); text-transform: uppercase; letter-spacing: 0; font-size: 12px;
+  color: var(--text); font-family: var(--font-mono); font-size: 12px;
 }
 .agent-thread-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-thread-chevron { color: var(--muted); transition: transform .15s; }
@@ -1059,7 +1057,6 @@ main.chat-view { padding: 0; max-width: none; }
 .stat-value.warn { color: var(--warn); }
 .stat-label {
   margin-top: 8px; color: var(--muted); font-size: 11px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: var(--ls-label);
 }
 
 /* v76-F1: the feed column is wider (1.8fr) than the waiting column. */
@@ -1098,12 +1095,11 @@ main.chat-view { padding: 0; max-width: none; }
   background: color-mix(in srgb, var(--chip-color, var(--muted)) 15%, transparent);
   color: var(--chip-color, var(--muted));
 }
-/* The uppercase micro-label idiom — a fixed vocabulary (a phase, a memory
-   class), not free text. `.due-pill` renders "in 3 days", which is why this is
-   a modifier and not part of the primitive. */
-.chip.upper {
-  text-transform: uppercase; font-weight: 600; letter-spacing: var(--ls-label);
-}
+/* A fixed vocabulary (a phase, a memory class), not free text — `.due-pill`
+   renders "in 3 days", which is why this is a modifier. H1-G8: it was
+   uppercase and tracked; labels are sentence case now, so only the weight
+   marks it. The class name stays: app.js and its tests use it. */
+.chip.upper { font-weight: 600; }
 .chip.tone-ok { --chip-color: var(--ok); }
 .chip.tone-bad { --chip-color: var(--bad); }
 .chip.tone-warn { --chip-color: var(--warn); }
@@ -1128,8 +1124,7 @@ main.chat-view { padding: 0; max-width: none; }
 .sidebar-chat-item:hover .chat-pin, .chat-pin.pinned { opacity: 1; }
 .chat-pin.pinned { color: var(--accent); }
 .sidebar-chat-pinned-label {
-  color: var(--muted-2); font-size: 11px; text-transform: uppercase;
-  letter-spacing: var(--ls-label); padding: 4px 9px 2px;
+  color: var(--muted-2); font-size: 11px; padding: 4px 9px 2px;
 }
 
 /* v76-F7: Notes & Tasks — markdown notes, tag pills, due-grouped tasks. */
@@ -1149,7 +1144,6 @@ main.chat-view { padding: 0; max-width: none; }
 .task-group { margin: 0 0 14px; }
 .task-group h4, .task-group summary {
   margin: 0 0 8px; color: var(--muted); font-size: 12px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: var(--ls-label);
 }
 .task-group summary { cursor: pointer; }
 .task-group .item-card { margin: 0 0 6px; }
@@ -1249,8 +1243,7 @@ main.chat-view { padding: 0; max-width: none; }
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .activity-type {
-  color: var(--muted-2); font-size: 11px; text-transform: uppercase;
-  letter-spacing: var(--ls-label); margin-right: 8px;
+  color: var(--muted-2); font-size: 11px; margin-right: 8px;
 }
 .activity-summary { color: var(--text); font-size: 13px; }
 .activity-time { flex: none; color: var(--muted-2); font-size: 12px; }
@@ -1261,7 +1254,6 @@ main.chat-view { padding: 0; max-width: none; }
 }
 .schedule-strip-label {
   flex: none; color: var(--muted-2); font-size: 11px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: var(--ls-label);
 }
 .schedule-strip-item {
   display: flex; align-items: center; gap: 6px; flex: none;
@@ -1290,7 +1282,7 @@ main.chat-view { padding: 0; max-width: none; }
 .waiting-sub { color: var(--muted-2); font-size: 12px; margin-top: 4px; }
 
 .prio {
-  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+  font-size: 11px; font-weight: 600;
   padding: 2px 8px; border-radius: var(--radius-sm);
 }
 .prio-high { background: rgba(239, 107, 107, .16); color: var(--bad); }
@@ -1303,7 +1295,7 @@ main.chat-view { padding: 0; max-width: none; }
 .chat-message-body .md-p:last-child { margin-bottom: 0; }
 .chat-message-body .md-h { margin: 12px 0 6px; color: var(--text-strong); line-height: 1.3; }
 .chat-message-body h3.md-h { font-size: 15px; }
-.chat-message-body h4.md-h { font-size: 13px; text-transform: uppercase; letter-spacing: var(--ls-label); }
+.chat-message-body h4.md-h { font-size: 13px; }
 .chat-message-body h5.md-h, .chat-message-body h6.md-h { font-size: 12px; }
 .chat-message-body .md-list { margin: 0 0 8px; padding-left: 20px; }
 .chat-message-body .md-list li { margin: 2px 0; }
@@ -1437,8 +1429,7 @@ main.chat-view { padding: 0; max-width: none; }
 .skill-step.reached .skill-step-dot { background: var(--accent); border-color: var(--accent); }
 .skill-step.current .skill-step-dot { background: var(--warn); border-color: var(--warn); }
 .skill-step-label {
-  font-size: 11px; color: var(--muted); text-transform: uppercase;
-  letter-spacing: var(--ls-label);
+  font-size: 11px; color: var(--muted);
 }
 .skill-step.reached .skill-step-label { color: var(--text); }
 
@@ -1466,8 +1457,7 @@ main.chat-view { padding: 0; max-width: none; }
 .timeline-node.pending_approval .timeline-dot { background: var(--warn); border-color: var(--warn); }
 .timeline-node.superseded .timeline-dot { background: var(--muted-2); border-color: var(--muted-2); }
 .timeline-label {
-  font-size: 11px; color: var(--muted); text-transform: uppercase;
-  letter-spacing: var(--ls-label); text-align: center; max-width: 110px;
+  font-size: 11px; color: var(--muted); text-align: center; max-width: 110px;
 }
 .timeline-node.reached .timeline-label { color: var(--text); }
 .timeline-time { font-size: 11px; color: var(--muted-2); }
@@ -1528,7 +1518,7 @@ main.chat-view { padding: 0; max-width: none; }
 .run-card-id { font-size: 12px; }
 .run-card-time { margin-left: auto; color: var(--muted-2); font-size: 11px; flex: none; }
 .run-card-verify {
-  font-size: 11px; padding: 1px 7px; border-radius: var(--radius-sm); text-transform: uppercase; flex: none;
+  font-size: 11px; padding: 1px 7px; border-radius: var(--radius-sm); flex: none;
 }
 .run-card-verify.passed { background: rgba(62, 207, 142, .15); color: var(--ok); }
 .run-card-verify.failed, .run-card-verify.error { background: rgba(239, 107, 107, .15); color: var(--bad); }
@@ -1663,4 +1653,16 @@ main.chat-view { padding: 0; max-width: none; }
     transition-duration: .01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* H1-G8: labels are sentence case. The uppercase micro-label idiom is gone;
+   labels whose text is written lower-case at the source (table heads, stat
+   and timeline labels, the sidebar's group labels, a card's "details") get a
+   capital first letter here, so their strings and the tests that pin them
+   stay. A project name is an id and keeps its own case. */
+th::first-letter, .stat-label::first-letter, .timeline-label::first-letter,
+.skill-step-label::first-letter, .card-details > summary::first-letter,
+.task-group h4::first-letter,
+.sidebar-chat-pinned-label:not(.sidebar-thread-project)::first-letter {
+  text-transform: uppercase;
 }
