@@ -433,6 +433,26 @@ pre.log, pre.diff {
    column it controls; the same display:none the mobile breakpoint uses. */
 .chat-sidebar-toggle { margin-right: auto; }
 .chat-layout.sidebar-hidden .chat-sidebar { display: none; }
+/* H1 (hive-rooms C10): the context panel — read-only facts about the thread. */
+.chat-context {
+  flex: none; width: 232px; overflow-y: auto; padding-left: 12px;
+  border-left: 1px solid var(--border-soft);
+}
+.context-section { margin: 0 0 16px; }
+.context-label {
+  color: var(--muted-2); font-size: 11px; text-transform: uppercase;
+  letter-spacing: var(--ls-label); margin: 0 0 6px;
+}
+.context-mini {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; width: 100%;
+  padding: 6px 8px; margin: 0 0 4px; font-size: 12px; text-align: left;
+  color: var(--text); background: var(--panel); border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.context-mini small { flex-basis: 100%; color: var(--muted-2); font-size: 11px; }
+.context-card, .context-run { cursor: pointer; }
+.context-card:hover, .context-run:hover { border-color: var(--border); background: var(--panel-2); }
+.chat-context .note { font-size: 12px; margin: 0; }
 
 /* v90-F2: three lines, ranked. The headline is the thing itself, so it reads
    as code; the risk line is the only coloured thing on a quiet card. */
@@ -1405,7 +1425,7 @@ pre.log, pre.diff {
     white-space: nowrap;
   }
   .sidebar a.active { border-left-color: transparent; border-bottom-color: transparent; }
-  .chat-sidebar { display: none; }
+  .chat-sidebar, .chat-context { display: none; }
   .sidebar .spacer, .health { display: none; }
   /* v75-F1 (C11): rail groups flow along the strip instead of stacking. */
   .rail-group { flex-direction: row; }

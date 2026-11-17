@@ -497,19 +497,20 @@ def test_index_and_assets_are_public(config: SupervisorConfig) -> None:
 
 
 def test_ui_calls_only_routes_that_exist(config: SupervisorConfig) -> None:
-    """Every /api/ path mentioned in app.js resolves to a real route."""
+    """Every /api/ path mentioned in app.js — or a module it imports (H1) —
+    resolves to a real route."""
     import re
 
     app = create_app(config)
     known = {route.path for route in app.routes}
-    source = (STATIC_DIR / "app.js").read_text()
+    source = "\n".join(p.read_text() for p in sorted(STATIC_DIR.glob("*.js")))
     for raw in set(re.findall(r"\"(/api/[^\"?$`]*)", source)) | set(
         re.findall(r"`(/api/[^`?]*)`?", source)
     ):
         path = re.sub(r"\$\{[^}]+\}", "{x}", raw).rstrip("/")
         pattern = "^" + re.sub(r"\{[^}]+\}", "[^/]+", path) + "$"
         assert any(re.match(pattern, re.sub(r"\{[^}]+\}", "x", k)) for k in known), (
-            f"app.js calls {raw} but no such route exists"
+            f"the UI calls {raw} but no such route exists"
         )
 
 
@@ -517,10 +518,11 @@ def test_app_js_parses_as_an_es_module(tmp_path: Path) -> None:
     """No build step means no compile check — parse it with node when available."""
     if shutil.which("node") is None:
         pytest.skip("node not installed; parsing is exercised by the browser instead")
-    target = tmp_path / "app.mjs"  # .mjs makes --check parse it as a module
-    target.write_text((STATIC_DIR / "app.js").read_text())
-    result = subprocess.run(["node", "--check", str(target)], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
+    for source in sorted(STATIC_DIR.glob("*.js")):  # H1: and every module it imports
+        target = tmp_path / f"{source.stem}.mjs"  # .mjs makes --check parse it as a module
+        target.write_text(source.read_text())
+        result = subprocess.run(["node", "--check", str(target)], capture_output=True, text=True)
+        assert result.returncode == 0, f"{source.name}: {result.stderr}"
 
 
 def test_settings_shell_renders_before_model_list_fetch() -> None:

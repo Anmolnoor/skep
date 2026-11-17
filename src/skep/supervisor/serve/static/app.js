@@ -1,4 +1,5 @@
 /* skep — the face (v5 Stage F). No build step: ES modules + fetch + EventSource. */
+import { renderContextPanel } from "./room.js";
 
 const TOKEN_KEY = "skep-token";
 
@@ -3036,11 +3037,15 @@ async function viewChat(main, chatId) {
     };
   };
   const pane = el("div", { class: "chat-main" }, log, statusLine, composer);
+  // H1 (hive-rooms C10): role and model, cards waiting, runs, spend.
+  const contextPanel = el("aside", { class: "chat-context", "aria-label": "thread context" });
   const layout = el("div", { class: `chat-layout${sidebarHidden ? " sidebar-hidden" : ""}` },
     chatSidebar,
     el("div", { class: "chat-content" },
       el("div", { class: "chat-toolbar" }, toggleSidebar, newChat, deleteChat),
-      pane));
+      pane),
+    contextPanel);
+  renderContextPanel(contextPanel, { chat: activeChat, defaultModel: llm.default_model, actions });
   const applySidebarState = () => {
     layout.classList.toggle("sidebar-hidden", sidebarHidden);
     const label = sidebarHidden ? "show chat list" : "hide chat list";
@@ -3725,6 +3730,7 @@ async function viewChat(main, chatId) {
       }
       updateContextMeter();
       renderSidebarChats(chatSidebar, chats, activeChatId, llm.default_model); // titles may have changed
+      renderContextPanel(contextPanel, { chat: activeChat, defaultModel: llm.default_model, actions });
       // v103-F1: the turn is over — send whatever the operator typed during it.
       // After the refresh above, so a card raised by this turn has already
       // locked the composer and the steer waits for the verdict instead of
@@ -6465,3 +6471,7 @@ installDock();
 if (await tryConnect()) { await route(); refreshDockModel(); }
 poll();
 schedulePoll(POLL_MIN_MS);
+
+// H1: the helpers sidebar.js and room.js import back (the cycle is safe: they
+// only declare at top level). After the boot marker, so tests/web never sees it.
+export { api, chatTitle, el, header, iconButton, relativeTime, shortTaskId, stateChip };
