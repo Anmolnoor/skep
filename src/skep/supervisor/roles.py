@@ -37,6 +37,7 @@ chain is no constraint — exactly today.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -227,9 +228,15 @@ def default_role(store: RunStore, home: Path) -> str:
 
 
 def roles_view(store: RunStore, home: Path) -> dict[str, Any]:
-    """`skep role list` and ``GET /api/roles``: every role and the default."""
+    """`skep role list` and ``GET /api/roles``: every role and the default.
+    H2 (the Hive page, C11): each row says whether it ships with skep and how
+    many chats run in it (a NULL stored role counts as assistant, B55)."""
+    usage = Counter(chat.role or ROLE_LESS_CHAT_ROLE for chat in store.list_chats())
     return {
-        "roles": [role.view() for role in all_roles(home).values()],
+        "roles": [
+            {**role.view(), "shipped": role.name in SHIPPED_ROLES, "chats": usage[role.name]}
+            for role in all_roles(home).values()
+        ],
         "default": default_role(store, home),
     }
 

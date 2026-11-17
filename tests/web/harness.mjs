@@ -43,6 +43,7 @@ class FakeNode {
     for (const n of nodes) this.children.push(typeof n === "object" ? n : new FakeText(n));
   }
   appendChild(node) { this.append(node); return node; }
+  replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
   get textContent() { return this._text ?? this.children.map(c => c.textContent).join(""); }
   set textContent(value) { this._text = String(value); this.children = []; }
   // Fire listeners and wait for any async handler, so a test can assert after.
@@ -66,11 +67,9 @@ class FakeText {
   constructor(text) { this.nodeType = 3; this.textContent = String(text); }
 }
 
-export function loadApp() {
-  const source = readFileSync(APP, "utf8");
-  const cut = source.indexOf("// ---------- boot ----------");
-  if (cut < 0) throw new Error("app.js boot marker moved — update tests/web/harness.mjs");
-  const document = {
+// The fake document — also what an ES module (hive.js) gets as globalThis.document.
+export function fakeDocument() {
+  return {
     createElement: tag => new FakeNode(tag),
     createTextNode: text => new FakeText(text),
     getElementById: () => new FakeNode("div"),
@@ -80,6 +79,18 @@ export function loadApp() {
     body: new FakeNode("body"),
     cookie: "",
   };
+}
+
+export function loadApp() {
+  let source = readFileSync(APP, "utf8");
+  // A classic vm script cannot `import`: each imported name (hive.js, H2) is a
+  // stub here; the module runs under its own test file.
+  const imported = [...source.matchAll(/^import \{([^}]*)\} from "[^"]+";$/gm)]
+    .flatMap(m => m[1].split(",").map(name => name.trim()));
+  source = source.replace(/^import .*$/gm, "");
+  const cut = source.indexOf("// ---------- boot ----------");
+  if (cut < 0) throw new Error("app.js boot marker moved — update tests/web/harness.mjs");
+  const document = fakeDocument();
   const store = new Map();
   const context = vm.createContext({
     document,
@@ -92,6 +103,7 @@ export function loadApp() {
     history: { replaceState() {} },
     addEventListener() {},
     console, setTimeout, clearTimeout, URL, URLSearchParams,
+    ...Object.fromEntries(imported.map(name => [name, () => {}])),
   });
   context.window = context;
   vm.runInContext(source.slice(0, cut), context, { filename: "app.js" });

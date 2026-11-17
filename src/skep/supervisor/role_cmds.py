@@ -36,7 +36,8 @@ def cmd_role_list(args: argparse.Namespace) -> int:
         mark = "*" if role["name"] == view["default"] else " "
         layer = role["policy_layer"] or "(none: acts as assistant)"
         castes = ", ".join(role["default_castes"])
-        print(f"{mark} {role['name']:<12} layer: {layer:<10} castes: {castes}")
+        talks = f"{role['provider'] or 'active'}·{role['model'] or 'default'}"
+        print(f"{mark} {role['name']:<12} layer: {layer:<10} talks: {talks:<20} castes: {castes}")
     return 0
 
 

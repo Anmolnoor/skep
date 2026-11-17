@@ -414,8 +414,11 @@ Settings model exactly as before. `role create|edit|delete` are one verb with
 ceiling and names where its chats' content goes). `edit` keeps every field it
 is not given; editing a shipped role writes an override, and `delete` on one
 removes only the override. A custom role in use by a chat, or the new-chat
-default, is refused naming who uses it. The web UI's Hive page (`#/hive`) is
-the same roster and form.
+default, is refused naming who uses it. `role list` shows what each role talks
+to; the web UI's Hive page (`#/hive`) is the same roster — provider, model,
+template and how many chats run in each — with the create/edit form (it names
+the host a provider choice sends content to) and the agents running on this
+machine (`GET /api/agents`).
 
 Delegation is subset-only (first-run R2, ADR 0055 D4): `--delegated-by
 ACTOR@ROLE` (repeat, outermost first — e.g. `--delegated-by queen@operator`)

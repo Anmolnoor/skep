@@ -205,3 +205,30 @@ def test_a_role_naming_a_provider_is_a_high_card_naming_the_host(
         assert plain == "it changes standing policy"
     finally:
         store.close()
+
+
+def test_the_hive_page_is_served_and_the_roster_counts_chats(config: SupervisorConfig) -> None:
+    """C11: one route, one module, one anchor; GET /api/roles says how many
+    chats run in each role (a NULL stored role counts as assistant)."""
+    from skep.supervisor.serve.app import STATIC_DIR
+
+    store = RunStore(config.db_path)
+    try:
+        store.create_chat(title="a", model=None, role="builder")
+        store.create_chat(title="b", model=None, role=None)
+    finally:
+        store.close()
+    with serve_client(config) as client:
+        roles = {r["name"]: r for r in client.get("/api/roles").json()["roles"]}
+        module = client.get("/static/hive.js")
+    assert (roles["builder"]["chats"], roles["assistant"]["chats"], roles["operator"]["chats"]) == (
+        1,
+        1,
+        0,
+    )
+    assert roles["builder"]["shipped"] is True
+    assert module.status_code == 200 and "export async function viewHive" in module.text
+    app_js = (STATIC_DIR / "app.js").read_text()
+    assert 'import { viewHive } from "./hive.js";' in app_js
+    assert "[/^#\\/hive$/, viewHive]" in app_js
+    assert 'href="#/hive" data-ws="hive"' in (STATIC_DIR / "index.html").read_text()

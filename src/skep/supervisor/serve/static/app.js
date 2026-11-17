@@ -1,4 +1,5 @@
 /* skep — the face (v5 Stage F). No build step: ES modules + fetch + EventSource. */
+import { viewHive } from "./hive.js";
 
 const TOKEN_KEY = "skep-token";
 
@@ -789,6 +790,7 @@ const RAIL_ICONS = {
   memory: '<path d="M7 4h10a1 1 0 0 1 1 1v16l-6-4-6 4V5a1 1 0 0 1 1-1z"/>',
   policies: '<path d="M12 3l7 3v6c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/>',
   setup: '<path d="M6 21V4M6 4h11l-2 4 2 4H6"/>',
+  hive: '<path d="M12 3l7 4v10l-7 4-7-4V7z"/>',
   settings:
     '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6' +
     'M5.2 5.2l1.9 1.9M16.9 16.9l1.9 1.9M18.8 5.2l-1.9 1.9M7.1 16.9l-1.9 1.9"/>',
@@ -862,6 +864,7 @@ const PALETTE_ACTIONS = [
   { label: "Notes & Tasks", hash: "#/notes", keywords: "todo capture due" },
   { label: "Memory", hash: "#/memory", keywords: "durable proposals forget" },
   { label: "Policies", hash: "#/policies", keywords: "autonomy scopes gates budget" },
+  { label: "Hive", hash: "#/hive", keywords: "queens roles models providers agents" },
   { label: "Setup", hash: "#/setup", keywords: "onboarding first run wizard" },
   { label: "Settings", hash: "#/settings", keywords: "llm model channels webhooks repos" },
 ];
@@ -1036,6 +1039,7 @@ const routes = [
   [/^#\/projects\/([^/]+)$/, viewProjectDetail],
   [/^#\/schedules$/, viewSchedules],
   [/^#\/policies$/, viewPolicies],
+  [/^#\/hive$/, viewHive],
   [/^#\/settings$/, viewSettings],
 ];
 
