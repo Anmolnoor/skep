@@ -1531,11 +1531,23 @@ class ChatEngine:
         ``model``, then the default. A role naming a ``provider`` talks to that
         profile alone (``_pinned_llm``); one naming neither runs exactly the
         path below, as before."""
-        role = chat_role(self.home, getattr(chat, "role", None))
-        if role is not None and role.provider is not None:
+        from ..roles import load_role  # local: roles validates voices against this module
+
+        name = getattr(chat, "role", None) or ROLE_LESS_CHAT_ROLE
+        try:
+            role = load_role(name, self.home)
+        except ValueError as exc:
+            # condition 2: a role that does not load may have pinned a provider,
+            # so its chat never falls back to the active one
+            raise HTTPException(
+                status_code=409,
+                detail=f"this chat's role {name!r} does not load ({exc}) — fix the file, or "
+                f"switch the chat: `skep role use <role> --chat {chat.chat_id}`",
+            ) from exc
+        if role.provider is not None:
             return self._pinned_llm(chat, role)
         config = llm_config_view(self.store, self.home)
-        model = chat.model or (role.model if role is not None else None) or config["default_model"]
+        model = chat.model or role.model or config["default_model"]
         if not config["configured"] or not model:
             raise HTTPException(
                 status_code=409,
@@ -1584,8 +1596,10 @@ class ChatEngine:
 
         want = base_url.rstrip("/")
         here = [p for p in self.store.list_provider_profiles() if p.base_url.rstrip("/") == want]
-        role = chat_role(self.home, getattr(self.store.get_chat(chat_id), "role", None))
-        pin = None if role is None else role.provider
+        from ..roles import load_role
+
+        name = getattr(self.store.get_chat(chat_id), "role", None) or ROLE_LESS_CHAT_ROLE
+        pin = load_role(name, self.home).provider  # resolved_llm just loaded it
         pick = next((p for p in here if p.provider_id == pin), None) or next(
             (p for p in here if p.active), here[0] if here else None
         )

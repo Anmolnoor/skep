@@ -37,6 +37,8 @@ chain is no constraint — exactly today.
 from __future__ import annotations
 
 import json
+import os
+import re
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
@@ -172,19 +174,42 @@ def all_roles(home: Path) -> dict[str, Role]:
     roles = dict(SHIPPED_ROLES)
     directory = roles_dir(home)
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
-        try:
-            role = Role.model_validate(json.loads(path.read_text(encoding="utf-8")))
-            if role.voice is not None:
-                # local: serve.chat imports the serve stack, which imports this module
-                from .serve.chat import validate_personality
-
-                validate_personality(role.voice)
-        except (OSError, ValueError, ValidationError) as exc:
-            raise ValueError(f"role file {path} does not load: {exc}") from exc
-        if role.name != path.stem:
-            raise ValueError(f"role file {path.name} names itself {role.name!r}")
+        role = _load_role_file(path)
         roles[role.name] = role
     return roles
+
+
+def _load_role_file(path: Path) -> Role:
+    try:
+        role = Role.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        if role.voice is not None:
+            # local: serve.chat imports the serve stack, which imports this module
+            from .serve.chat import validate_personality
+
+            validate_personality(role.voice)
+    except (OSError, ValueError, ValidationError) as exc:
+        raise ValueError(f"role file {path} does not load: {exc}") from exc
+    if role.name != path.stem:
+        raise ValueError(f"role file {path.name} names itself {role.name!r}")
+    return role
+
+
+_ROLE_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
+
+
+def load_role(name: str, home: Path) -> Role:
+    """H2 (ADR 0064 D1 condition 2): ONE role — its home file, else the
+    shipped record — read alone, so a broken sibling file can never change
+    where this role's chats go. Raises naming the file (I9); the caller
+    refuses the turn rather than falling back to the active provider."""
+    if not _ROLE_NAME.match(name):
+        raise ValueError(f"{name!r} is not a role name")
+    path = roles_dir(home) / f"{name}.json"
+    if path.is_file():
+        return _load_role_file(path)
+    if name in SHIPPED_ROLES:
+        return SHIPPED_ROLES[name]
+    raise ValueError(f"no role {name!r} (no file {path})")
 
 
 def resolve_role(name: str, home: Path) -> Role:
@@ -296,7 +321,10 @@ def save_role(
     check_role_provider(role, store)
     path = roles_dir(home) / f"{role.name}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(role.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8")
+    # atomic: a turn reading the file mid-save sees the old record or the new
+    partial = path.with_name(f".{role.name}.json.partial")
+    partial.write_text(json.dumps(role.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8")
+    os.replace(partial, path)
     return {"role": role.view(), "created": create, "path": str(path)}
 
 

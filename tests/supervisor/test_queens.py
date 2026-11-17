@@ -322,3 +322,60 @@ def test_a_store_from_before_the_column_reads_null(tmp_path: Path) -> None:
         assert [m.model for m in store.chat_messages("c")] == [None]
     finally:
         store.close()
+
+
+def test_a_role_that_does_not_load_refuses_and_a_broken_sibling_changes_nothing(
+    hive: SupervisorConfig, fakes: tuple[FakeOllama, FakeOllama, FakeOpenAI]
+) -> None:
+    """Condition 2 (council round 1): a pinned chat never falls back to the
+    active provider. Its own role is read alone, so a broken sibling file
+    leaves it on its own provider; its own file broken or gone refuses the
+    turn naming the fix, and nothing is dialled."""
+    from skep.supervisor.roles import roles_dir
+
+    main_llm, a, _b = fakes
+    a.script_reply("still here")
+    with serve_client(hive) as client:
+        chat_id = client.post("/api/chats", json={"role": "ada"}).json()["chat_id"]
+        (roles_dir(hive.home) / "zzz.json").write_text("{not json")
+        assert (
+            client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"}).status_code == 200
+        )
+        assert [r["headers"].get("Authorization") for r in a.requests] == ["Bearer key-a"]
+        for broken in ("{half", None):
+            ada = roles_dir(hive.home) / "ada.json"
+            if broken is None:
+                ada.unlink()
+            else:
+                ada.write_text(broken)
+            refused = client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+            assert refused.status_code == 409, broken
+            detail = refused.json()["detail"]
+            assert "this chat's role 'ada' does not load" in detail
+            assert f"skep role use <role> --chat {chat_id}" in detail
+    assert len(a.requests) == 1 and main_llm.chat_bodies() == []
+
+
+def test_role_writes_are_atomic(tmp_path: Path) -> None:
+    """A save replaces the file in one rename — no reader sees half a record."""
+    import os as real_os
+
+    from skep.supervisor import roles
+
+    config = build_config(tmp_path, None)
+    store = RunStore(config.db_path)
+    renames: list[tuple[str, str]] = []
+    try:
+        original = real_os.replace
+
+        def spy(src: Any, dst: Any) -> None:
+            renames.append((Path(src).name, Path(dst).name))
+            original(src, dst)
+
+        roles.os.replace = spy  # type: ignore[attr-defined]
+        save_role(store, config.home, "nova", {"model": "m"}, create=True)
+    finally:
+        roles.os.replace = original  # type: ignore[attr-defined]
+        store.close()
+    assert renames == [(".nova.json.partial", "nova.json")]
+    assert sorted(p.name for p in roles.roles_dir(config.home).iterdir()) == ["nova.json"]
