@@ -269,13 +269,15 @@ def resolve_active_api_key(
     return resolve_provider_api_key(home, active)
 
 
-def resolve_pinned_api_key(store: RunStore, home: Path, profile: ProviderProfile) -> str:
+def resolve_pinned_api_key(home: Path, profile: ProviderProfile) -> str | None:
     """hive-rooms H2 (ADR 0064 D1, condition 1): the key for a profile a role
-    pins — that profile's OWN credential: its named env var, then its own key
-    file. The legacy single secret (``llm-secret`` / ``SKEP_LLM_API_KEY``)
-    applies only when the profile's base URL IS the saved ``LLM_BASE_URL`` —
-    the endpoint that secret was saved for; the main provider's key never
-    reaches another host. With none the turn refuses (I9), nothing dialled.
+    pins — that profile's OWN credential and nothing else: its named env var,
+    then its own key file. Never the legacy single secret (``llm-secret`` /
+    ``SKEP_LLM_API_KEY``): ``use_provider`` repoints ``LLM_BASE_URL`` without
+    moving that secret, so no endpoint comparison can say whose it is (council
+    round 1). With no key the turn refuses (I9) and nothing is dialled —
+    except where there is no key to borrow: Bedrock signs from the AWS
+    environment, and a loopback server takes none, so those dial with None.
     A role's chat is a Queen turn, so a chatgpt.com profile uses the Codex
     login exactly as when it is active (v118-F4: the Queen's alone)."""
     from ..codex_login import uses_codex_login
@@ -288,9 +290,8 @@ def resolve_pinned_api_key(store: RunStore, home: Path, profile: ProviderProfile
     path = provider_secret_path(home, profile.provider_id)
     if key is None and path.is_file():
         key = path.read_text(encoding="utf-8").strip() or None
-    saved = str(store.get_setting(LLM_BASE_URL) or "").strip().rstrip("/")
-    if key is None and saved == profile.base_url.rstrip("/"):
-        key = resolve_api_key(home)
+    if key is None and (profile.protocol == "bedrock" or _is_loopback(profile.base_url)):
+        return None
     if key is None:
         ways = f"`skep provider key {profile.provider_id}`" + (f" or set ${env}" if env else "")
         raise OllamaError(

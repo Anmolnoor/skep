@@ -402,9 +402,10 @@ A queen is a role with a model (hive-rooms H2, ADR 0064 D1): a role may pin
 `provider` — a profile already on the shelf (`skep provider list`; any other
 name is refused with the known ones) — and `model`. A chat in that role talks
 to that provider with **that profile's own** key — its named env var or its
-key file (`skep provider key ID`); the main `llm-secret` only when the
-profile's base URL is the Settings one it was saved for. A pinned profile with
-no key refuses the turn and nothing is dialled — and
+key file (`skep provider key ID`), never the main `llm-secret`. A pinned
+profile with no key refuses the turn and nothing is dialled, unless there is
+no key to borrow (Bedrock signs from the AWS environment; a loopback server
+takes none) — and
 to the role's model, else the profile's; an explicit chat model still wins. A
 profile removed since the role named it refuses every turn naming the fix;
 it never falls back to the active one. A role that pins neither uses the

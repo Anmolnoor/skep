@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 
 from skep.cli import main
 from skep.supervisor import RunStore, SupervisorConfig
@@ -132,12 +133,18 @@ def test_a_pinned_profile_with_no_key_of_its_own_refuses_and_dials_nothing(
     fakes: tuple[FakeOllama, FakeOllama, FakeOpenAI],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Condition 1: role on profile B, B has no key, the legacy secret is set
-    (file AND env) → refused, no request reaches B's host."""
-    main_llm, _a, b = fakes
+    """Condition 1: role on profile B (a remote host), B has no key, the
+    legacy secret is set (file AND env) → refused, nothing dialled."""
+    main_llm, a, b = fakes
     from skep.supervisor.serve.llm import provider_secret_path
 
     provider_secret_path(hive.home, "pb").unlink()
+    store = RunStore(hive.db_path)
+    try:
+        remote = ProviderProfile("pb", "openai_compat", "https://b.example/v1", "gpt-b")
+        store.upsert_provider_profile(remote)
+    finally:
+        store.close()
     store_api_key(hive.home, "main-key")
     monkeypatch.setenv("SKEP_LLM_API_KEY", "main-key")
     with serve_client(hive) as client:
@@ -147,14 +154,12 @@ def test_a_pinned_profile_with_no_key_of_its_own_refuses_and_dials_nothing(
     detail = refused.json()["detail"]
     assert "role 'bolt': provider 'pb' has no key of its own" in detail
     assert "`skep provider key pb`" in detail
-    assert b.requests == [] and main_llm.chat_bodies() == []
+    assert a.requests == b.requests == [] and main_llm.chat_bodies() == []
     # The named env var counts as its own key.
     store = RunStore(hive.db_path)
     try:
-        profile = store.get_provider_profile("pb")
-        assert profile is not None
         store.upsert_provider_profile(
-            ProviderProfile("pb", "openai_compat", profile.base_url, "gpt-b", api_key_env="PB_KEY")
+            ProviderProfile("pb", "openai_compat", b.base_url, "gpt-b", api_key_env="PB_KEY")
         )
     finally:
         store.close()
@@ -224,44 +229,79 @@ def test_the_pinned_key_resolver_keeps_the_codex_and_copilot_paths(
     from skep.supervisor.serve import llm, llm_copilot
     from skep.supervisor.serve.llm import OllamaError, resolve_pinned_api_key
 
-    store = RunStore(tmp_path / "s.sqlite3")
-
     monkeypatch.setattr(llm, "_codex_login_key", lambda url: f"login-for:{url}")
     codex = ProviderProfile("cx", "openai_responses", "https://chatgpt.com/backend-api/codex", "m")
-    assert resolve_pinned_api_key(store, tmp_path, codex) == f"login-for:{codex.base_url}"
+    assert resolve_pinned_api_key(tmp_path, codex) == f"login-for:{codex.base_url}"
     monkeypatch.setattr(llm_copilot, "resolve_copilot_bearer", lambda key: f"bearer:{key}")
     copilot = ProviderProfile("gh", "openai_compat", "https://api.githubcopilot.com", "m")
     store_provider_api_key(tmp_path, "gh", "gho-own")
-    assert resolve_pinned_api_key(store, tmp_path, copilot) == "bearer:gho-own"
+    assert resolve_pinned_api_key(tmp_path, copilot) == "bearer:gho-own"
     named = ProviderProfile(
         "ds", "openai_compat", "https://api.deepseek.com", "m", api_key_env="DS"
     )
     monkeypatch.delenv("DS", raising=False)
     with pytest.raises(OllamaError, match=r"`skep provider key ds` or set \$DS"):
-        resolve_pinned_api_key(store, tmp_path, named)
-    store.close()
+        resolve_pinned_api_key(tmp_path, named)
+    # No key to borrow: Bedrock signs from the AWS environment.
+    bedrock = ProviderProfile(
+        "aws", "bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com", "m"
+    )
+    assert resolve_pinned_api_key(tmp_path, bedrock) is None
 
 
-def test_the_legacy_secret_serves_only_its_own_endpoint(
-    hive: SupervisorConfig, fakes: tuple[FakeOllama, FakeOllama, FakeOpenAI]
+def test_the_legacy_secret_never_follows_a_provider_switch(
+    hive: SupervisorConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Condition 1's one exception: a role pinned to the profile whose base
-    URL IS the saved Settings endpoint may use the secret saved for it."""
-    main_llm, _a, _b = fakes
+    """Council round 1: use_provider repoints LLM_BASE_URL and leaves
+    llm-secret where it was, so the legacy secret cannot be said to belong to
+    the saved endpoint. A pinned profile with no key of its own refuses even
+    when it IS the active profile at the saved endpoint."""
+    from skep.supervisor.serve.chat import ChatEngine
+    from skep.supervisor.serve.llm import LLM_BASE_URL
+    from skep.supervisor.serve.settings import ConfigHolder
+
+    store_api_key(hive.home, "main-key")  # saved for the main endpoint
+    monkeypatch.setenv("SKEP_LLM_API_KEY", "main-key")
     store = RunStore(hive.db_path)
     try:
-        store.upsert_provider_profile(ProviderProfile("pm", "ollama", main_llm.base_url, "glm-m"))
-        save_role(store, hive.home, "mia", {"provider": "pm"}, create=True)
+        anth = ProviderProfile("anth", "anthropic", "https://api.anthropic.com", "claude")
+        store.upsert_provider_profile(anth)
+        store.set_active_provider("anth")  # what use_provider writes
+        store.set_setting(LLM_BASE_URL, anth.base_url)
+        save_role(store, hive.home, "nova", {"provider": "anth"}, create=True)
+        chat = store.create_chat(title="t", model=None, role="nova")
+        holder = ConfigHolder(hive, store)
+        engine = ChatEngine(store=store, holder=holder, runner=None, home=hive.home)  # type: ignore[arg-type]
+        with pytest.raises(HTTPException) as refused:
+            engine.resolved_llm(chat)
     finally:
         store.close()
-    main_llm.script_reply("hi")
-    with serve_client(hive) as client:
-        chat_id = client.post("/api/chats", json={"role": "mia"}).json()["chat_id"]
-        assert (
-            client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"}).status_code == 200
-        )
-    assert [r["headers"].get("Authorization") for r in main_llm.requests] == ["Bearer main-key"]
-    assert [body["model"] for body in main_llm.chat_bodies()] == ["glm-m"]
+    assert refused.value.status_code == 409
+    assert "provider 'anth' has no key of its own" in str(refused.value.detail)
+
+
+def test_a_keyless_loopback_profile_can_be_pinned(hive: SupervisorConfig) -> None:
+    """A local server takes no key, so there is none to borrow: the pinned
+    chat dials it with no Authorization header at all."""
+    local = FakeOllama(api_key=None).start()
+    try:
+        store = RunStore(hive.db_path)
+        try:
+            store.upsert_provider_profile(
+                ProviderProfile("local", "ollama", local.base_url, "llama")
+            )
+            save_role(store, hive.home, "priv", {"provider": "local"}, create=True)
+        finally:
+            store.close()
+        local.script_reply("local here")
+        with serve_client(hive) as client:
+            chat_id = client.post("/api/chats", json={"role": "priv"}).json()["chat_id"]
+            sent = client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+        assert sent.status_code == 200
+        assert [r["headers"].get("Authorization") for r in local.requests] == [None]
+        assert [body["model"] for body in local.chat_bodies()] == ["llama"]
+    finally:
+        local.stop()
 
 
 def test_each_assistant_row_records_what_answered_it(

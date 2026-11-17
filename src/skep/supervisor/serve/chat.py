@@ -1581,7 +1581,7 @@ class ChatEngine:
             )
         protocol = REGISTRY_PROTOCOLS[profile.protocol]  # the shelf only holds these
         try:
-            api_key = resolve_pinned_api_key(self.store, self.home, profile)
+            api_key = resolve_pinned_api_key(self.home, profile)
         except OllamaError as exc:
             raise HTTPException(status_code=409, detail=f"role {role.name!r}: {exc}") from exc
         model = chat.model or role.model or profile.model
