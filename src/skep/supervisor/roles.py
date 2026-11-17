@@ -78,6 +78,13 @@ class Role(BaseModel):
     # The v44-F10 style preset a chat in this role speaks in when the chat
     # has no /personality of its own.
     voice: str | None = None
+    # H2 (ADR 0064 D1): a queen is a role with a model. ``provider`` names a
+    # profile on the shelf (ADR 0051) — checked where a role is written
+    # (``check_role_provider``) and again when a chat resolves it, since a
+    # profile can be removed after. Both unset: the active profile and the
+    # default model, exactly as before.
+    provider: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    model: str | None = Field(default=None, min_length=1, max_length=200)
 
     @field_validator("policy_layer")
     @classmethod
@@ -184,6 +191,23 @@ def resolve_role(name: str, home: Path) -> Role:
     if name not in roles:
         raise ValueError(f"no role {name!r}; known: {', '.join(roles)}")
     return roles[name]
+
+
+def unknown_provider(name: str, store: RunStore) -> str:
+    """H2 (I9): what a role naming a profile that is not on the shelf hears."""
+    known = ", ".join(p.provider_id for p in store.list_provider_profiles()) or "none yet"
+    return (
+        f"provider {name!r} is not on the shelf; known: {known} — add it first "
+        "(`skep provider add`) or name a known one"
+    )
+
+
+def check_role_provider(role: Role, store: RunStore) -> None:
+    """H2 (ADR 0064 D1): a role sends its chats' content to its provider's
+    host, so it may only name a profile the operator already put on the
+    shelf. Refuses with the list of known ones."""
+    if role.provider is not None and store.get_provider_profile(role.provider) is None:
+        raise ValueError(unknown_provider(role.provider, store))
 
 
 def default_role(store: RunStore, home: Path) -> str:
