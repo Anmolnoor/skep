@@ -423,6 +423,14 @@ function authorLabel(message, fallback) {
 // hive-rooms H2 (ADR 0064 D1 condition 5): an assistant row names what
 // answered it — the model@profile the server STORED on the row, never one
 // recomputed from the chat or a role file (both editable). Older rows: "skep".
+// hive-rooms H2 (council round 1): a role pinning a provider or model picks
+// the model, and chats.model would beat it — so a new chat in such a role
+// stores none unless the operator moved the select off the default.
+function newChatModel(selected, defaultModel, role) {
+  const pins = role && (role.provider || role.model);
+  return pins && selected === defaultModel ? null : (selected || null);
+}
+
 function messageLabel(message) {
   if (message.role === "user") return authorLabel(message, "You");
   return message.model || "skep";
@@ -3787,7 +3795,9 @@ async function viewChat(main, chatId) {
   const ensureChat = async () => {
     if (activeChatId) return;
     activeChat = await api("POST", "/api/chats",
-      { model: modelSelect.value || null, role: roleSelect.hidden ? null : roleSelect.value });
+      { model: newChatModel(modelSelect.value, llm.default_model,
+          roleList.roles.find(r => r.name === roleSelect.value)),
+        role: roleSelect.hidden ? null : roleSelect.value });
     activeChatId = activeChat.chat_id;
     chats = [activeChat, ...chats.filter(chat => chat.chat_id !== activeChatId)];
     modelSelect.value = activeChat.model || llm.default_model || "";

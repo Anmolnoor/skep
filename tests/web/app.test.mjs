@@ -466,3 +466,16 @@ test("messageLabel: an assistant row shows its stored model@profile, never a rec
   assert.equal(app.messageLabel({ role: "user", provenance: "webhook:ci" }), "from webhook:ci");
   assert.equal(app.messageLabel({ role: "user" }), "You");
 });
+
+test("newChatModel: a pinned role's chat stores no model unless the operator picked one", () => {
+  const app = loadApp();
+  const ada = { name: "ada", provider: "pa", model: "glm-a1" };
+  const vera = { name: "vera", provider: null, model: "glm-vera" };
+  const plain = { name: "assistant", provider: null, model: null };
+  assert.equal(app.newChatModel("glm-main", "glm-main", ada), null);
+  assert.equal(app.newChatModel("glm-main", "glm-main", vera), null);
+  assert.equal(app.newChatModel("big", "glm-main", ada), "big"); // the operator chose it
+  assert.equal(app.newChatModel("glm-main", "glm-main", plain), "glm-main"); // as on main
+  assert.equal(app.newChatModel("glm-main", "glm-main", undefined), "glm-main");
+  assert.equal(app.newChatModel("", "glm-main", plain), null);
+});

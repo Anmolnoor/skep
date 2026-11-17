@@ -231,4 +231,6 @@ def test_the_hive_page_is_served_and_the_roster_counts_chats(config: SupervisorC
     app_js = (STATIC_DIR / "app.js").read_text()
     assert 'import { viewHive } from "./hive.js";' in app_js
     assert "[/^#\\/hive$/, viewHive]" in app_js
+    # council round 1: a new web chat in a pinned role leaves the model to it
+    assert "model: newChatModel(modelSelect.value, llm.default_model," in app_js
     assert 'href="#/hive" data-ws="hive"' in (STATIC_DIR / "index.html").read_text()
