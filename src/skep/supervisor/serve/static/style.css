@@ -515,24 +515,27 @@ main.chat-view { padding: 0; max-width: none; }
 .chat-context-toggle { margin-right: auto; }
 .chat-layout.context-hidden .chat-context { display: none; }
 /* H1 (hive-rooms C10): the context panel — read-only facts about the thread. */
+/* H1-G6: flat sections — a small sentence-case label over plain rows, no
+   boxes. A row is one line: what it is on the left, when on the right. */
 .chat-context {
-  flex: none; width: 232px; overflow-y: auto; padding-left: 12px;
+  flex: none; width: 264px; overflow-y: auto; padding: 14px 16px;
   border-left: 1px solid var(--border-soft);
 }
-.context-section { margin: 0 0 16px; }
-.context-label {
-  color: var(--muted-2); font-size: 11px; text-transform: uppercase;
-  letter-spacing: var(--ls-label); margin: 0 0 6px;
-}
+.context-section { margin: 0 0 18px; }
+.context-label { color: var(--muted); font-size: 11px; font-weight: 500; margin: 0 0 6px; }
 .context-mini {
   display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; width: 100%;
-  padding: 6px 8px; margin: 0 0 4px; font-size: 12px; text-align: left;
-  color: var(--text); background: var(--panel); border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
+  min-height: 0; padding: 3px 0; margin: 0; font-size: 12px; font-weight: 400; text-align: left;
+  color: var(--text); background: transparent; border: 0; border-radius: var(--radius-sm);
 }
-.context-mini small { flex-basis: 100%; color: var(--muted-2); font-size: 11px; }
+.context-mini small { margin-left: auto; color: var(--muted-2); font-size: 11px; }
+.context-card::before {
+  content: ""; width: 7px; height: 7px; flex: none; border-radius: 999px; background: var(--warn);
+}
 .context-card, .context-run { cursor: pointer; }
-.context-card:hover, .context-run:hover { border-color: var(--border); background: var(--panel-2); }
+.context-run { flex-wrap: nowrap; white-space: nowrap; }
+.context-card:hover, .context-run:hover { background: transparent; color: var(--text-strong); }
+.context-card:hover small, .context-run:hover small { color: var(--text); }
 .chat-context .note { font-size: 12px; margin: 0; }
 
 /* v90-F2: three lines, ranked. The headline is the thing itself, so it reads
