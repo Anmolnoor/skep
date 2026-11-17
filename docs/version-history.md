@@ -3102,4 +3102,5 @@ none saved or the Queen on the ChatGPT plan (ADR 0063), the workers'
 and the worker's own fallback. A profile elsewhere is called without a key,
 which is right for a local server. A remote one fails, and the health row
 and `skep doctor` say to give it its own key (`skep provider set-key <id>`).
-A single-provider home is unchanged.
+A single-provider home whose saved base URL and `profile.json` agree, which
+is every home configured through the daemon, is unchanged.

@@ -388,6 +388,7 @@ def test_doctor_names_a_remote_profile_left_without_a_key(
     from skep.status import build_status
 
     monkeypatch.delenv("SKEP_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("DS_K", raising=False)
     supervisor_home = tmp_path / "supervisor"
     store = RunStore(supervisor_home / "supervisor.sqlite3")
     try:
@@ -398,6 +399,12 @@ def test_doctor_names_a_remote_profile_left_without_a_key(
         store.upsert_provider_profile(_profile(provider_id="openrouter"))
         store.upsert_provider_profile(
             _profile(provider_id="local", protocol="ollama", base_url="http://127.0.0.1:11434")
+        )
+        # Its env var may be set only in the daemon's environment: not flagged.
+        store.upsert_provider_profile(
+            _profile(
+                provider_id="deepseek", base_url="https://api.deepseek.com", api_key_env="DS_K"
+            )
         )
     finally:
         store.close()

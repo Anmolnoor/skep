@@ -315,7 +315,8 @@ def _model_truth_advisories(home: Path) -> list[str]:
 def _legacy_key_advisories(home: Path) -> list[str]:
     """v119-F1: a registry profile on another endpoint no longer borrows the
     main key (llm-secret); name each one that now goes without, and the fix.
-    A loopback profile is left out — a local model server needs no key."""
+    A loopback profile is left out — a local model server needs no key — and
+    so is one naming an env var, which may be set only in the daemon's env."""
     db_path = home / "supervisor" / "supervisor.sqlite3"
     if not db_path.is_file():
         return []
@@ -328,6 +329,7 @@ def _legacy_key_advisories(home: Path) -> list[str]:
             line
             for profile in store.list_provider_profiles()
             if not _is_loopback(profile.base_url)
+            and not profile.api_key_env
             and (line := legacy_key_withheld(home / "supervisor", profile, store))
         ]
     finally:
