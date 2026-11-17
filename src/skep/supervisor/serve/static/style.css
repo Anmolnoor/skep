@@ -246,10 +246,10 @@ code, pre, .mono { font-family: var(--font-mono); }
 .inbox-list { display: flex; flex-direction: column; gap: 6px; max-width: 760px; }
 .inbox-item {
   display: grid; grid-template-columns: 7px minmax(0, 1fr); gap: 2px 10px; align-items: center;
-  padding: 10px 12px; color: var(--text); background: var(--panel);
+  padding: 10px 12px; color: var(--text); background: transparent;
   border: 1px solid var(--border-soft); border-radius: var(--radius-md);
 }
-.inbox-item:hover { background: var(--panel-2); border-color: var(--border); }
+.inbox-item:hover { background: var(--chip-fill); border-color: var(--border); }
 .inbox-title { color: var(--text-strong); }
 .inbox-item small { grid-column: 2; color: var(--muted-2); font-size: 12px; }
 .health {
@@ -378,8 +378,10 @@ tr.click { cursor: pointer; }
 tr.click:hover { background: var(--panel); }
 .command-output { white-space: pre-wrap; max-width: 320px; overflow-wrap: anywhere; }
 
+/* H1-G5: borders only on cards — a card is a hairline on the canvas, so a
+   box inside it is the only fill on screen, not the third. */
 .card {
-  background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+  background: transparent; border: 1px solid var(--border-soft); border-radius: var(--radius-lg);
   padding: 14px 16px; margin: 0 0 16px;
 }
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
@@ -492,7 +494,7 @@ pre.log, pre.diff {
 .nt-grid .composer.stacky .field.grow { min-width: 180px; }
 .stack { display: flex; flex-direction: column; gap: 10px; }
 .item-card {
-  background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+  background: transparent; border: 1px solid var(--border-soft); border-radius: var(--radius-md);
   padding: 12px 14px;
 }
 .item-card textarea { min-height: 74px; }
@@ -554,7 +556,7 @@ main.chat-view { padding: 0; max-width: none; }
 .card-details[open] > summary { margin-bottom: 6px; }
 /* v90-F3: a receipt is a record, not a decision — quieter than a live card,
    and it has no actions row to give it a border-bottom. */
-.receipt-card { opacity: .82; border-style: dashed; }
+.receipt-card { opacity: .82; }
 .receipt-card .card-headline { margin-bottom: 4px; }
 /* Containerless chat: messages sit straight on the page background;
    the log pads itself so the text column stays centered at --chat-max
@@ -715,8 +717,8 @@ main.chat-view { padding: 0; max-width: none; }
 /* v40-F3: the worker activity block — run telemetry inline, read-only. */
 .worker-activity {
   align-self: flex-start; width: 100%; max-width: 100%;
-  border: 1px solid var(--border-soft); border-radius: var(--radius-md);
-  background: rgba(255,255,255,.02); padding: 8px 10px;
+  border: 1px solid var(--border-soft); border-radius: var(--radius-lg);
+  background: transparent; padding: 10px 13px;
 }
 .worker-activity-header { display: flex; align-items: center; gap: 8px; }
 .worker-activity-toggle {
@@ -896,10 +898,28 @@ main.chat-view { padding: 0; max-width: none; }
   border-color: var(--focus); box-shadow: var(--shadow-focus);
 }
 .composer.stacky > button { align-self: flex-start; }
+/* H1-G5: a card is a hairline, no fill. A card waiting on the operator wears
+   the amber hairline and a soft amber halo — the loudest thing on screen —
+   and its primary action is the white button. Resolved and receipt cards
+   drop back to the plain hairline; a HIGH card keeps its 2px red border. */
 .confirm-card {
-  align-self: stretch; border: 1px solid rgba(240,178,62,.28); border-radius: var(--radius-md);
-  background: rgba(240,178,62,.06); padding: 12px 14px;
+  align-self: stretch; border: 1px solid var(--border-soft); border-radius: var(--radius-lg);
+  background: transparent; padding: 12px 14px;
 }
+.confirm-card:not(.resolved):not(.receipt-card):not(.card-high) {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  box-shadow: 0 0 0 3px rgba(240, 178, 62, .06);
+}
+.confirm-card:not(.resolved):not(.receipt-card) .card-kicker::before {
+  content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px;
+  border-radius: 999px; background: var(--warn); vertical-align: 1px;
+}
+.confirm-card .actions { align-items: center; margin: 10px 0 0; }
+.confirm-card .actions button { min-height: 30px; padding: 5px 12px; font-size: 13px; }
+.confirm-card .actions button.danger {
+  background: transparent; color: var(--text); border-color: var(--border);
+}
+.confirm-card .actions button.danger:hover { color: var(--bad); border-color: var(--bad); }
 /* P4-1 (ADR 0059 D5): a doubly tainted chat's card looks different (HIGH). */
 .confirm-card.card-high { border: 2px solid var(--bad); }
 .card-high-label { color: var(--bad); margin: 0 0 .4rem; }
@@ -984,7 +1004,7 @@ main.chat-view { padding: 0; max-width: none; }
   display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 0 0 26px;
 }
 .stat-tile {
-  background: var(--panel); border: 1px solid var(--border-soft);
+  background: transparent; border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg); padding: 18px 20px;
 }
 .stat-value {
@@ -1129,11 +1149,11 @@ main.chat-view { padding: 0; max-width: none; }
 .project-cards { display: flex; flex-direction: column; margin: 0 0 18px; }
 .project-card {
   display: block; padding: 12px 16px; margin: 0 0 8px;
-  background: var(--panel); border: 1px solid var(--border-soft);
+  background: transparent; border: 1px solid var(--border-soft);
   border-radius: var(--radius-md); color: var(--text);
   transition: border-color var(--transition-fast);
 }
-.project-card:hover { border-color: var(--border); background: var(--panel-2); }
+.project-card:hover { border-color: var(--border); background: var(--chip-fill); }
 .project-card-header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .project-card-header .danger { margin-left: auto; }
 .project-card-name { color: var(--text-strong); font-size: 15px; margin-top: 6px; }
@@ -1167,14 +1187,14 @@ main.chat-view { padding: 0; max-width: none; }
 /* v76-F1: the activity feed (runs + approvals merge), the schedule strip,
    and the honest welcome-back banner. */
 .activity-list {
-  background: var(--panel); border: 1px solid var(--border-soft);
+  background: transparent; border: 1px solid var(--border-soft);
   border-radius: var(--radius-md); overflow: hidden;
 }
 .activity-item {
   display: flex; align-items: center; gap: 12px; padding: 11px 14px; color: var(--text);
 }
 .activity-item + .activity-item { border-top: 1px solid var(--border-soft); }
-.activity-item:hover { background: var(--panel-2); }
+.activity-item:hover { background: var(--chip-fill); }
 .activity-dot { flex: none; width: 8px; height: 8px; border-radius: 999px; background: var(--muted); }
 .activity-dot-completed, .activity-dot-passed { background: var(--ok); }
 .activity-dot-failed, .activity-dot-rejected, .activity-dot-worker_crashed,
@@ -1217,9 +1237,9 @@ main.chat-view { padding: 0; max-width: none; }
 .waiting-list { display: flex; flex-direction: column; gap: 10px; }
 .waiting-card {
   display: block; padding: 14px; border-radius: var(--radius-md);
-  background: var(--panel); border: 1px solid var(--border-soft);
+  background: transparent; border: 1px solid var(--border-soft);
 }
-.waiting-card:hover { border-color: var(--border); background: var(--panel-2); }
+.waiting-card:hover { border-color: var(--border); background: var(--chip-fill); }
 .waiting-head { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; }
 .waiting-kind { color: var(--muted); font-size: 12px; }
 .waiting-title { color: var(--text-strong); font-size: 15px; }
@@ -1352,7 +1372,7 @@ main.chat-view { padding: 0; max-width: none; }
 /* v75-F7: Templates & Skills — template cards + the honest skill stepper. */
 .template-cards { display: flex; flex-direction: column; margin: 0 0 18px; }
 .template-card {
-  background: var(--panel); border: 1px solid var(--border-soft);
+  background: transparent; border: 1px solid var(--border-soft);
   border-radius: var(--radius-md); padding: 12px 16px; margin: 0 0 8px;
   transition: border-color var(--transition-fast);
 }
@@ -1415,7 +1435,7 @@ main.chat-view { padding: 0; max-width: none; }
 
 /* v75-F5: Policies — collapsible sections, field help, shell-command editor. */
 .policy-section {
-  margin: 0 0 12px; background: var(--panel); border: 1px solid var(--border-soft);
+  margin: 0 0 12px; background: transparent; border: 1px solid var(--border-soft);
   border-radius: var(--radius-md); overflow: hidden;
 }
 .policy-section-header {
@@ -1453,11 +1473,11 @@ main.chat-view { padding: 0; max-width: none; }
 .run-cards { display: flex; flex-direction: column; }
 .run-card {
   display: block; padding: 12px 16px; margin: 0 0 8px;
-  background: var(--panel); border: 1px solid var(--border-soft);
+  background: transparent; border: 1px solid var(--border-soft);
   border-radius: var(--radius-md); color: var(--text);
   transition: border-color var(--transition-fast), background var(--transition-fast);
 }
-.run-card:hover { border-color: var(--border); background: var(--panel-2); }
+.run-card:hover { border-color: var(--border); background: var(--chip-fill); }
 /* v19-F8: superseded dimming survives the card redesign. */
 .run-card.superseded { opacity: .55; }
 .run-card-header { display: flex; align-items: center; gap: 10px; min-width: 0; }
