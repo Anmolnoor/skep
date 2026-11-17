@@ -175,6 +175,27 @@ def _to_codex_login(tool: str, args: dict[str, Any], store: RunStore | None) -> 
     return uses_codex_login(url)
 
 
+def _role_destination(args: dict[str, Any], store: RunStore | None) -> str:
+    """hive-rooms H2 (ADR 0064 D1, condition 3): a role naming a provider
+    changes where its chats' content goes — the card names the host, in W11's
+    words; on the ChatGPT plan login, in v118's consent words."""
+    from ..codex_login import uses_codex_login
+    from ..providers import provider_host
+
+    role, provider_id = str(args.get("name") or "?"), str(args["provider"]).strip()
+    profile = None if store is None else store.get_provider_profile(provider_id)
+    if profile is None:  # no store: unknown here; off the shelf: refused on confirm
+        shelf = "" if store is None else " (not on the shelf)"
+        return f"it points role {role!r}'s chats at provider {provider_id!r}{shelf}"
+    if uses_codex_login(profile.base_url):
+        return (
+            f"it puts role {role!r} on your ChatGPT plan login (Codex): every prompt "
+            "in its chats leaves this machine for chatgpt.com"
+        )
+    host = provider_host(profile.base_url) or profile.base_url
+    return f"it points role {role!r}'s chats at {host}: every turn in them goes there"
+
+
 def _doubly_tainted(taint: ChatTaint | None) -> bool:
     return taint is not None and taint.private is not None and taint.untrusted is not None
 
@@ -223,6 +244,8 @@ def high_tier(
         return "it installs a forged tool: its code runs on this host"
     if tool == "promote_skill_pack":
         return "it activates a skill pack's scripts"
+    if tool in ("create_role", "edit_role") and str(safe.get("provider") or "").strip():
+        return _role_destination(safe, store)
     if tool in _HIGH_POLICY_TOOLS:
         return "it changes standing policy"
     if tool in ("add_provider", "use_provider", "set_assistant_model") and _to_codex_login(

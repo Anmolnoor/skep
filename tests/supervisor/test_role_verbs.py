@@ -149,7 +149,9 @@ def test_the_chat_can_only_propose_a_role_and_the_card_is_high(
     assert action["tool"] == "create_role"
     from skep.supervisor.serve.cards import high_tier
 
-    assert high_tier("create_role", action["args"]) == "it changes standing policy"
+    assert (
+        high_tier("create_role", action["args"]) == "it points role 'nova''s chats at provider 'p1'"
+    )
     ollama.script_reply("done.")
     client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
     record = json.loads((roles_dir(config.home) / "nova.json").read_text())
@@ -168,3 +170,38 @@ def test_the_chat_can_only_propose_a_role_and_the_card_is_high(
     ollama.script_reply("ok.")
     client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
     assert not (roles_dir(config.home) / "nova.json").exists()
+
+
+def test_a_role_naming_a_provider_is_a_high_card_naming_the_host(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """ADR 0064 D1 condition 3: changing where a role's chats' content goes
+    is HIGH (web UI or CLI only, never folded, never messenger-confirmable)
+    and the card names the host; on the ChatGPT login, v118's consent words."""
+    from skep.supervisor.serve.cards import high_tier
+
+    _shelve(config, "p1")
+    client, chat_id = chat_client(config, ollama)
+    ollama.script_tool_call("edit_role", {"name": "assistant", "provider": "p1"})
+    client.post(f"/api/chats/{chat_id}/messages", json={"content": "move assistant"})
+    card = client.get(f"/api/chats/{chat_id}").json()["actions"][0]["card"]
+    assert card["tier"] == "high"
+    assert (
+        card["high"]
+        == "it points role 'assistant''s chats at p1.example: every turn in them goes there"
+    )
+    store = RunStore(config.db_path)
+    try:
+        store.upsert_provider_profile(
+            ProviderProfile("cx", "openai_responses", "https://chatgpt.com/backend-api/codex", "m")
+        )
+        codex = high_tier("create_role", {"name": "nova", "provider": "cx"}, store=store)
+        assert codex is not None and "ChatGPT plan login (Codex)" in codex
+        assert "chatgpt.com" in codex
+        gone = high_tier("create_role", {"name": "nova", "provider": "zz"}, store=store)
+        assert gone == "it points role 'nova''s chats at provider 'zz' (not on the shelf)"
+        # No provider named: still HIGH, as every policy write.
+        plain = high_tier("create_role", {"name": "nova", "provider": ""}, store=store)
+        assert plain == "it changes standing policy"
+    finally:
+        store.close()
