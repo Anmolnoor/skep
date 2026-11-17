@@ -2131,8 +2131,9 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "set_role",
         "PROPOSE switching THIS chat's role (requires user confirmation): its "
-        "prompt, voice and policy layer change together. A role only tightens "
-        "the approved baseline. builder, operator, assistant, or a custom role.",
+        "prompt, voice, policy layer and the provider/model it talks to change "
+        "together. A role only tightens the approved baseline. builder, "
+        "operator, assistant, or a custom role.",
         {"name": {"type": "string"}},
         ["name"],
     ),

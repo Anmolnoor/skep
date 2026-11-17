@@ -149,8 +149,8 @@ def test_the_chat_can_only_propose_a_role_and_the_card_is_high(
     assert action["tool"] == "create_role"
     from skep.supervisor.serve.cards import high_tier
 
-    assert (
-        high_tier("create_role", action["args"]) == "it points role 'nova''s chats at provider 'p1'"
+    assert high_tier("create_role", action["args"]) == (
+        "it points role 'nova''s chats at provider 'p1': every turn in them goes there"
     )
     ollama.script_reply("done.")
     client.post(f"/api/chats/{chat_id}/actions/{action['action_id']}/confirm")
@@ -186,9 +186,9 @@ def test_a_role_naming_a_provider_is_a_high_card_naming_the_host(
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "move assistant"})
     card = client.get(f"/api/chats/{chat_id}").json()["actions"][0]["card"]
     assert card["tier"] == "high"
-    assert (
-        card["high"]
-        == "it points role 'assistant''s chats at p1.example: every turn in them goes there"
+    assert card["high"] == (
+        "it points role 'assistant''s chats at p1.example: every turn in them goes there, "
+        "including the past transcripts of its 1 chat(s) — every chat with no role is one"
     )
     store = RunStore(config.db_path)
     try:
@@ -199,10 +199,42 @@ def test_a_role_naming_a_provider_is_a_high_card_naming_the_host(
         assert codex is not None and "ChatGPT plan login (Codex)" in codex
         assert "chatgpt.com" in codex
         gone = high_tier("create_role", {"name": "nova", "provider": "zz"}, store=store)
-        assert gone == "it points role 'nova''s chats at provider 'zz' (not on the shelf)"
-        # No provider named: still HIGH, as every policy write.
-        plain = high_tier("create_role", {"name": "nova", "provider": ""}, store=store)
-        assert plain == "it changes standing policy"
+        assert gone == (
+            "it points role 'nova''s chats at provider 'zz' (not on the shelf): "
+            "every turn in them goes there"
+        )
+        # Council round 1: every card that moves content names where it goes.
+        host = "your Settings provider (127.0.0.1)"
+        store.set_chat_role(chat_id, "operator")
+        save_role(store, config.home, "ada", {"provider": "p1"}, create=True)
+        save_role(store, config.home, "builder", {"provider": "p1"}, create=False)
+        cleared = high_tier("edit_role", {"name": "operator", "provider": ""}, store=store)
+        assert cleared == (
+            f"it points role 'operator''s chats at {host}: every turn in them goes there, "
+            "including the past transcripts of its 1 chat(s)"
+        )
+        moved = high_tier("set_role", {"name": "ada"}, store=store)
+        assert moved == (
+            "it moves this chat to role 'ada' at p1.example: its past transcript and every "
+            "later turn go there"
+        )
+        back = high_tier("set_role", {"name": "operator"}, store=store)
+        assert back is not None and host in back
+        reverted = high_tier("delete_role", {"name": "builder"}, store=store)
+        assert (
+            reverted
+            == f"it reverts role 'builder' to the shipped record, moving its chats to {host}"
+        )
+        # Moving nothing: still HIGH, as every policy write.
+        for tool, args in (
+            ("create_role", {"name": "nova"}),
+            ("edit_role", {"name": "nova", "model": "m"}),
+            ("delete_role", {"name": "ada"}),  # custom: in use refuses, unused carries nothing
+            ("delete_role", {"name": "operator"}),  # no override to revert
+            ("set_role", {"name": "warp"}),  # refused on confirm
+        ):
+            assert high_tier(tool, args, store=store) == "it changes standing policy", tool
+        assert high_tier("set_role", {"name": "ada"}) == "it changes standing policy"  # no store
     finally:
         store.close()
 

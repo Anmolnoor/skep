@@ -26,6 +26,7 @@ import json
 import re
 import shlex
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 from ..shell_prefixes import (
@@ -175,25 +176,68 @@ def _to_codex_login(tool: str, args: dict[str, Any], store: RunStore | None) -> 
     return uses_codex_login(url)
 
 
-def _role_destination(args: dict[str, Any], store: RunStore | None) -> str:
-    """hive-rooms H2 (ADR 0064 D1, condition 3): a role naming a provider
-    changes where its chats' content goes — the card names the host, in W11's
-    words; on the ChatGPT plan login, in v118's consent words."""
+def _destination(provider_id: str, store: RunStore | None) -> str:
+    """Where a role's chats' content goes for ``provider_id`` ("" = the role
+    pins none: the Settings endpoint) — a host, never a key."""
     from ..codex_login import uses_codex_login
     from ..providers import provider_host
+    from .llm import LLM_BASE_URL
 
-    role, provider_id = str(args.get("name") or "?"), str(args["provider"]).strip()
+    if not provider_id:
+        url = None if store is None else store.get_setting(LLM_BASE_URL)
+        host = provider_host(url) if isinstance(url, str) else None
+        return f"your Settings provider ({host or 'not set'})"
     profile = None if store is None else store.get_provider_profile(provider_id)
     if profile is None:  # no store: unknown here; off the shelf: refused on confirm
-        shelf = "" if store is None else " (not on the shelf)"
-        return f"it points role {role!r}'s chats at provider {provider_id!r}{shelf}"
+        return f"provider {provider_id!r}" + ("" if store is None else " (not on the shelf)")
     if uses_codex_login(profile.base_url):
+        return "chatgpt.com, on your ChatGPT plan login (Codex)"
+    return provider_host(profile.base_url) or profile.base_url
+
+
+def _carried(role: str, store: RunStore | None) -> str:
+    """The transcripts a role's move carries with it (I8)."""
+    from ..roles import ROLE_LESS_CHAT_ROLE
+
+    chats = [] if store is None else store.list_chats()
+    count = sum(1 for chat in chats if (chat.role or ROLE_LESS_CHAT_ROLE) == role)
+    if not count:
+        return ""
+    every = " — every chat with no role is one" if role == ROLE_LESS_CHAT_ROLE else ""
+    return f", including the past transcripts of its {count} chat(s){every}"
+
+
+def _role_move(tool: str, args: dict[str, Any], store: RunStore | None) -> str | None:
+    """hive-rooms H2 (ADR 0064 D1, condition 3; council round 1): a role card
+    that changes where chat content goes names the destination host and what
+    it carries — create/edit naming a provider (or clearing one), set_role
+    moving this chat, delete_role reverting a pinned override. None when the
+    card moves nothing (it stays HIGH as a policy write)."""
+    from ..roles import SHIPPED_ROLES, load_role
+
+    role = str(args.get("name") or "?")
+    if tool in ("create_role", "edit_role") and "provider" in args:
+        where = _destination(str(args.get("provider") or "").strip(), store)
+        carried = "" if tool == "create_role" else _carried(role, store)
+        return f"it points role {role!r}'s chats at {where}: every turn in them goes there{carried}"
+    if tool not in ("set_role", "delete_role") or store is None:
+        return None
+    # ponytail: the store lives at <supervisor home>/supervisor.sqlite3
+    try:
+        record = load_role(role, Path(store.db_path).parent)
+    except ValueError:
+        return None  # refused on confirm, naming the role
+    if tool == "set_role":
+        where = _destination(record.provider or "", store)
         return (
-            f"it puts role {role!r} on your ChatGPT plan login (Codex): every prompt "
-            "in its chats leaves this machine for chatgpt.com"
+            f"it moves this chat to role {role!r} at {where}: its past transcript and "
+            "every later turn go there"
         )
-    host = provider_host(profile.base_url) or profile.base_url
-    return f"it points role {role!r}'s chats at {host}: every turn in them goes there"
+    if record.provider is None or role not in SHIPPED_ROLES:
+        return None  # a custom role in use refuses; one unused carries nothing
+    where = _destination("", store)
+    carried = _carried(role, store)
+    return f"it reverts role {role!r} to the shipped record, moving its chats to {where}{carried}"
 
 
 def _doubly_tainted(taint: ChatTaint | None) -> bool:
@@ -244,8 +288,9 @@ def high_tier(
         return "it installs a forged tool: its code runs on this host"
     if tool == "promote_skill_pack":
         return "it activates a skill pack's scripts"
-    if tool in ("create_role", "edit_role") and str(safe.get("provider") or "").strip():
-        return _role_destination(safe, store)
+    moved = _role_move(tool, safe, store)
+    if moved is not None:
+        return moved
     if tool in _HIGH_POLICY_TOOLS:
         return "it changes standing policy"
     if tool in ("add_provider", "use_provider", "set_assistant_model") and _to_codex_login(
