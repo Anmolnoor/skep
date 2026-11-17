@@ -456,3 +456,13 @@ test("keyFieldLabel: a chatgpt.com config shows the login, never a key", () => {
   const missing = { api_key_set: false, chatgpt_login: { present: false, problem: "no Codex login on this machine (`codex login`)" } };
   assert.match(app.keyFieldLabel(missing), /not usable — no Codex login.*codex login/);
 });
+
+// ---------- hive-rooms H2: the row records what answered ----------
+
+test("messageLabel: an assistant row shows its stored model@profile, never a recomputed one", () => {
+  const app = loadApp();
+  assert.equal(app.messageLabel({ role: "assistant", model: "glm-a1@pa" }), "glm-a1@pa");
+  assert.equal(app.messageLabel({ role: "assistant", model: null }), "skep"); // before the column
+  assert.equal(app.messageLabel({ role: "user", provenance: "webhook:ci" }), "from webhook:ci");
+  assert.equal(app.messageLabel({ role: "user" }), "You");
+});

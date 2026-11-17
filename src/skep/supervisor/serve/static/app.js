@@ -419,6 +419,14 @@ function authorLabel(message, fallback) {
   return author === "queen" ? "skep" : `from ${author}`;
 }
 
+// hive-rooms H2 (ADR 0064 D1 condition 5): an assistant row names what
+// answered it — the model@profile the server STORED on the row, never one
+// recomputed from the chat or a role file (both editable). Older rows: "skep".
+function messageLabel(message) {
+  if (message.role === "user") return authorLabel(message, "You");
+  return message.model || "skep";
+}
+
 // What a keep would allow (card.keep_covers): each command of a compound line
 // on its own, or a whole URL directory — said on the card, not only "always".
 function keepCovers(card) {
@@ -3613,7 +3621,7 @@ async function viewChat(main, chatId) {
     send.disabled = true;
     chatStreamActive = true;  // v60-F1: the poll must not route() mid-stream
     const replyOptions = {
-      label: activeChat?.model || llm.default_model || "skep",
+      label: "skep", // condition 5: the stored model@profile shows once the row exists
       scroll: scrollBottom,
     };
     let reply = null;
@@ -3758,8 +3766,7 @@ async function viewChat(main, chatId) {
       replayGroup = null;
       const own = message.role === "user" && authorLabel(message, null) === null;
       renderChatMessage(log, message.role, message.content, {
-        label: authorLabel(message,
-          message.role === "user" ? "You" : (activeChat?.model || llm.default_model || "skep")),
+        label: messageLabel(message),
         createdAt: message.created_at,
         thinking: message.thinking,
         onResend: own ? fillInput : null,

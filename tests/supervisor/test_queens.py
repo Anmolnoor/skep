@@ -262,3 +262,63 @@ def test_the_legacy_secret_serves_only_its_own_endpoint(
         )
     assert [r["headers"].get("Authorization") for r in main_llm.requests] == ["Bearer main-key"]
     assert [body["model"] for body in main_llm.chat_bodies()] == ["glm-m"]
+
+
+def test_each_assistant_row_records_what_answered_it(
+    hive: SupervisorConfig, fakes: tuple[FakeOllama, FakeOllama, FakeOpenAI]
+) -> None:
+    """Condition 5: ``chat_messages.model`` is the model@profile that wrote
+    the row — stored, so a later edit of the role file never relabels it.
+    A line skep wrote itself (a provider failure) names no model."""
+    main_llm, a, b = fakes
+    a.script_reply("ada here")
+    b.script_reply("bolt here")
+    main_llm.script_reply("default here")
+    labels: dict[str, list[str | None]] = {}
+    with serve_client(hive) as client:
+        for role in ("ada", "bolt", "assistant"):
+            chat_id = client.post("/api/chats", json={"role": role}).json()["chat_id"]
+            client.post(f"/api/chats/{chat_id}/messages", json={"content": PROMPT})
+            labels[role] = [
+                m["model"]
+                for m in client.get(f"/api/chats/{chat_id}").json()["messages"]
+                if m["role"] == "assistant"
+            ]
+        store = RunStore(hive.db_path)
+        try:
+            save_role(store, hive.home, "ada", {"model": "glm-other"}, create=False)
+        finally:
+            store.close()
+        ada = client.get("/api/chats").json()["chats"]
+        ada_id = next(c["chat_id"] for c in ada if c["role"] == "ada")
+        stored = client.get(f"/api/chats/{ada_id}").json()["messages"]
+        assert [m["model"] for m in stored if m["role"] == "assistant"] == ["glm-a1@pa"]
+        a.fail_statuses = [500, 500, 500]
+        client.post(f"/api/chats/{ada_id}/messages", json={"content": "again"})
+        failed = client.get(f"/api/chats/{ada_id}").json()["messages"][-1]
+    assert labels == {
+        "ada": ["glm-a1@pa"],
+        "bolt": ["gpt-b@pb"],
+        "assistant": ["glm-main@default"],
+    }
+    assert failed["role"] == "assistant" and failed["model"] is None
+
+
+def test_a_store_from_before_the_column_reads_null(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    RunStore(path).close()
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO chat_messages (chat_id, role, content, created_at) "
+        "VALUES ('c', 'assistant', 'old', '2026-01-01')"
+    )
+    conn.execute("ALTER TABLE chat_messages DROP COLUMN model")
+    conn.commit()
+    conn.close()
+    store = RunStore(path)  # migrates the column back in
+    try:
+        assert [m.model for m in store.chat_messages("c")] == [None]
+    finally:
+        store.close()
