@@ -100,10 +100,12 @@ export function loadApp() {
     console, setTimeout, clearTimeout, URL, URLSearchParams,
   });
   context.window = context;
-  vm.runInContext(unmodule(source.slice(0, cut)), context, { filename: "app.js" });
+  // Imported modules first, as the browser evaluates them: app.js's top level
+  // (the routes table) names their functions; they name app.js's only in calls.
   for (const [, name] of source.matchAll(/^import .* from "\.\/([\w-]+\.js)";$/gm)) {
     vm.runInContext(unmodule(readFileSync(new URL(name, STATIC), "utf8")), context, { filename: name });
   }
+  vm.runInContext(unmodule(source.slice(0, cut)), context, { filename: "app.js" });
   // Every network call fails loudly unless a test stubs the route it expects.
   context.api = async (method, path) => { throw new Error(`unstubbed api ${method} ${path}`); };
   context.flashes = [];

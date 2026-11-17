@@ -71,7 +71,6 @@ def test_inbox_lists_every_waiting_card_and_gate_once(
     inbox = client.get("/api/inbox").json()
     cards = {(c["chat_title"], c["tool"]) for c in inbox["cards"]}
     assert cards == {("busy", "set_policy"), ("gated", "approve_review")}
-    assert all(c["description"] for c in inbox["cards"])
     # The mirrored gate shows as its card; the unmirrored one as an approval.
     assert [a["review_id"] for a in inbox["approvals"]] == [ids["loose"]]
 

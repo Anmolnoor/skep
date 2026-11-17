@@ -95,16 +95,6 @@ test("an unchanged list is not torn down; a changed one is", () => {
   assert.notEqual(list.querySelector(".sidebar-chat-item"), first);
 });
 
-test("refreshSidebar reads /api/chats and draws it", async () => {
-  const { app, list } = withSidebar();
-  app.api = async (method, path) => {
-    assert.equal(path, "/api/chats");
-    return { chats: [chat("only")] };
-  };
-  await app.refreshSidebar();
-  assert.deepEqual(rowText(list), ["only"]);
-});
-
 test("thread search filters rows client-side and survives a re-render", () => {
   const { app, list } = withSidebar();
   app.installSidebar();
@@ -117,4 +107,62 @@ test("thread search filters rows client-side and survives a re-render", () => {
   assert.deepEqual(hidden(), ["#/chat/pwa manifest"]);
   app.renderThreads([chat("flaky monitor"), chat("pwa manifest"), chat("new one")]);
   assert.deepEqual(hidden(), ["#/chat/pwa manifest", "#/chat/new one"]);
+});
+
+// ---------- H1: the Inbox ----------
+
+const emptyInbox = { cards: [], approvals: [] };
+const fullInbox = {
+  cards: [{ action_id: "a1", chat_id: "c1", chat_title: "flaky monitor", tool: "dispatch_run", source: "assistant", created_at: "2026-11-17T10:00:00Z" }],
+  approvals: [{ review_id: "r1", task_id: "abcdef1234567890", action: "apply_patch", reason: "land it", requested_at: "2026-11-17T10:00:00Z" }],
+};
+
+test("refreshSidebar draws the threads and counts the Inbox on its badge", async () => {
+  const { app, list } = withSidebar();
+  const badge = app.document.getElementById("inbox-badge");
+  app.api = async (method, path) => (path === "/api/chats" ? { chats: [chat("only")] } : fullInbox);
+  await app.refreshSidebar();
+  assert.deepEqual(rowText(list), ["only"]);
+  assert.equal(badge.textContent, "2");
+  assert.equal(badge.classList.contains("hidden"), false);
+  app.api = async (method, path) => (path === "/api/chats" ? { chats: [] } : emptyInbox);
+  await app.refreshSidebar();
+  assert.equal(badge.classList.contains("hidden"), true);
+});
+
+test("an open Inbox redraws when what it counts changes, and only then", async () => {
+  const { app } = withSidebar("#/inbox");
+  let routed = 0;
+  app.route = () => { routed += 1; };
+  let inbox = emptyInbox;
+  app.api = async (method, path) => (path === "/api/chats" ? { chats: [] } : inbox);
+  await app.refreshSidebar(); // first sight: nothing to compare with
+  await app.refreshSidebar();
+  assert.equal(routed, 0);
+  inbox = fullInbox;
+  await app.refreshSidebar();
+  assert.equal(routed, 1);
+});
+
+test("Inbox view: each item links to where it is resolved, and carries no buttons", async () => {
+  const { app } = withSidebar("#/inbox");
+  app.header = () => {};
+  app.api = async () => fullInbox;
+  const main = app.el("main");
+  await app.viewInbox(main);
+  const items = main.querySelectorAll(".inbox-item");
+  assert.deepEqual(items.map(i => i.getAttribute("href")), ["#/chat/c1", "#/approvals"]);
+  assert.deepEqual(texts(main, "inbox-title"), ["dispatch_run", "apply_patch · run abcdef12"]);
+  assert.match(items[0].querySelector("small").textContent, /^flaky monitor · proposed by the Queen · /);
+  assert.match(items[1].querySelector("small").textContent, /^land it · /);
+  assert.equal(main.querySelectorAll("button").length, 0); // read-only (I6)
+});
+
+test("Inbox view: nothing waiting says so", async () => {
+  const { app } = withSidebar("#/inbox");
+  app.header = () => {};
+  app.api = async () => emptyInbox;
+  const main = app.el("main");
+  await app.viewInbox(main);
+  assert.equal(main.textContent, "Nothing is waiting on you.");
 });

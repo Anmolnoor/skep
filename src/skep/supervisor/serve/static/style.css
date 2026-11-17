@@ -227,6 +227,16 @@ code, pre, .mono { font-family: var(--font-mono); }
 }
 .sidebar-chat-group-toggle:hover { color: var(--text); background: var(--panel-2); }
 .sidebar-chat-group:not([open]) .chat-thinking-chevron { transform: rotate(-90deg); }
+/* H1: the Inbox — one row per thing waiting, each a link to where it lives. */
+.inbox-list { display: flex; flex-direction: column; gap: 6px; max-width: 760px; }
+.inbox-item {
+  display: grid; grid-template-columns: 7px minmax(0, 1fr); gap: 2px 10px; align-items: center;
+  padding: 10px 12px; color: var(--text); background: var(--panel);
+  border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+}
+.inbox-item:hover { background: var(--panel-2); border-color: var(--border); }
+.inbox-title { color: var(--text-strong); }
+.inbox-item small { grid-column: 2; color: var(--muted-2); font-size: 12px; }
 .health {
   flex: none; width: 8px; height: 8px; border-radius: 999px;
   background: var(--ok); font-size: 0; color: transparent;

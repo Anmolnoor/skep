@@ -1471,6 +1471,7 @@ def test_command_palette_navigates_and_never_mutates() -> None:
     for ws in (
         "home",
         "chat",
+        "inbox",
         "runs",
         "approvals",
         "assign",

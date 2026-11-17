@@ -1,6 +1,6 @@
 /* skep — the face (v5 Stage F). No build step: ES modules + fetch + EventSource. */
 import { renderContextPanel } from "./room.js";
-import { installSidebar, refreshSidebar, renderThreads } from "./sidebar.js";
+import { installSidebar, refreshSidebar, renderThreads, viewInbox } from "./sidebar.js";
 
 const TOKEN_KEY = "skep-token";
 
@@ -676,6 +676,7 @@ function installShellHandlers() {
 const RAIL_ICONS = {
   home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>',
   chat: '<path d="M4 4h16v12H9l-5 4V4z"/>',
+  inbox: '<path d="M3 13l3-8h12l3 8v6H3z"/><path d="M3 13h5l1 2h6l1-2h5"/>',
   runs: '<path d="M8 6h12M8 12h12M8 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01"/>',
   approvals: '<circle cx="12" cy="12" r="9"/><path d="M8.4 12l2.3 2.3 4.9-4.9"/>',
   assign: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
@@ -752,6 +753,7 @@ function installSearch() {
 const PALETTE_ACTIONS = [
   { label: "Home", hash: "#/home", keywords: "dashboard hive glance" },
   { label: "New chat", hash: "#/chat", keywords: "queen talk message" },
+  { label: "Inbox", hash: "#/inbox", keywords: "waiting cards approvals pending" },
   { label: "Runs", hash: "#/runs", keywords: "tasks workers history" },
   { label: "Approvals", hash: "#/approvals", keywords: "queue gate pending verdict" },
   { label: "Assign", hash: "#/assign", keywords: "dispatch new task work" },
@@ -921,6 +923,7 @@ const routes = [
   [/^#\/setup$/, viewSetup],
   [/^#\/chat$/, viewChat],
   [/^#\/chat\/([^/]+)$/, viewChat],
+  [/^#\/inbox$/, viewInbox], // H1: everything waiting on you (sidebar.js)
   [/^#\/notes$/, viewNotesTasks],
   [/^#\/memory$/, viewMemory],
   // v75-F7 (C9): tolerate a query suffix — template cards link to
@@ -6382,4 +6385,4 @@ schedulePoll(POLL_MIN_MS);
 
 // H1: the helpers sidebar.js and room.js import back (the cycle is safe: they
 // only declare at top level). After the boot marker, so tests/web never sees it.
-export { api, chatTitle, el, header, iconButton, relativeTime, shortTaskId, stateChip };
+export { api, chatTitle, el, header, iconButton, relativeTime, route, shortTaskId, stateChip };

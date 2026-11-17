@@ -4,7 +4,7 @@
    app.js boots on load, so its helpers come in through the import cycle.
    Safe because this module only declares at top level: by the time any of
    its functions runs, app.js has finished evaluating. */
-import { api, chatTitle, iconButton, el } from "./app.js";
+import { api, chatTitle, el, header, iconButton, relativeTime, route, shortTaskId } from "./app.js";
 
 // v44-F3: channel groups the operator opened; survives re-renders.
 // ponytail: in-memory; localStorage if reload-reset annoys
@@ -161,9 +161,44 @@ function applyChatSearch() {
   }
 }
 
+let lastInbox = null;
+
 export async function refreshSidebar() {
-  const { chats } = await api("GET", "/api/chats");
+  const [{ chats }, inbox] = await Promise.all([api("GET", "/api/chats"), api("GET", "/api/inbox")]);
   renderThreads(chats);
+  const waiting = inbox.cards.length + inbox.approvals.length;
+  const badge = document.getElementById("inbox-badge");
+  badge.textContent = String(waiting);
+  badge.classList.toggle("hidden", waiting === 0);
+  // What the badge counts, the open Inbox shows (the v56-F6 rule).
+  const key = JSON.stringify(inbox);
+  if (lastInbox !== null && key !== lastInbox && location.hash === "#/inbox") route();
+  lastInbox = key;
+}
+
+// ---------- the Inbox (H1, hive-rooms C9) ----------
+// Read-only by construction: every item links to where it is resolved — a
+// card in its thread, a gate on the Approvals page. No verb lives here (I6).
+
+const SOURCE_TEXT = { assistant: "proposed by the Queen", operator: "your command", gate: "a run's gate" };
+
+const inboxItem = (href, title, detail) => el("a", { class: "inbox-item searchable", href },
+  el("span", { class: "thread-dot wait", "aria-hidden": "true" }),
+  el("span", { class: "inbox-title mono" }, title),
+  el("small", {}, detail));
+
+export async function viewInbox(main) {
+  header(main, "Inbox", "Everything waiting on you, across threads. Each one is resolved where it lives.");
+  const { cards, approvals } = await api("GET", "/api/inbox");
+  if (!cards.length && !approvals.length) {
+    main.append(el("p", { class: "note" }, "Nothing is waiting on you."));
+    return;
+  }
+  main.append(el("div", { class: "inbox-list" },
+    cards.map(card => inboxItem(`#/chat/${card.chat_id}`, card.tool,
+      `${card.chat_title} · ${SOURCE_TEXT[card.source] || card.source} · ${relativeTime(card.created_at)}`)),
+    approvals.map(gate => inboxItem("#/approvals", `${gate.action} · run ${shortTaskId(gate.task_id)}`,
+      `${gate.reason || "approval"} · ${relativeTime(gate.requested_at)}`))));
 }
 
 // A folded workspace group opens while its route is showing; its summary

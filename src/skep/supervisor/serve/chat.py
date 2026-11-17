@@ -3619,7 +3619,6 @@ def add_chat_routes(
                     "chat_id": a.chat_id,
                     "chat_title": titles.get(a.chat_id, a.chat_id),
                     "tool": a.tool,
-                    "description": tool_description(a.tool),
                     "source": a.source,
                     "created_at": a.created_at,
                 }
