@@ -16,6 +16,7 @@ adapter at this boundary so the rest of chat sees the same message/tool shape.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -121,7 +122,8 @@ def store_api_key(home: Path, value: str) -> None:
 # provider's credential had nowhere to live. Each profile gets its own 0600
 # file beside llm-secret (the ADR 0019 exception extended per profile,
 # ADR 0051). Resolution order everywhere: the profile's NAMED env var → its
-# own file → the legacy llm-secret (v19-F9 compatibility).
+# own file → the legacy llm-secret (v19-F9 compatibility) — the last only for
+# the endpoint it was saved for (v119-F1, legacy_api_key).
 _PROVIDER_SECRET_PREFIX = "llm-secret-"
 
 
@@ -194,12 +196,14 @@ def chatgpt_login_view() -> dict[str, Any]:
     }
 
 
-def resolve_provider_api_key(home: Path, profile: ProviderProfile) -> str | None:
+def resolve_provider_api_key(
+    home: Path, profile: ProviderProfile, store: RunStore | None = None
+) -> str | None:
     from ..codex_login import uses_codex_login
 
     if uses_codex_login(profile.base_url):
         return _codex_login_key(profile.base_url)
-    key = _raw_provider_api_key(home, profile)
+    key = _raw_provider_api_key(home, profile, store)
     if key is None:
         return None
     from ..providers import provider_host
@@ -236,7 +240,9 @@ def worker_key_profile(store: RunStore, endpoint: str) -> ProviderProfile | None
     return profile
 
 
-def _raw_provider_api_key(home: Path, profile: ProviderProfile) -> str | None:
+def _raw_provider_api_key(
+    home: Path, profile: ProviderProfile, store: RunStore | None = None
+) -> str | None:
     if profile.api_key_env:
         env = os.environ.get(profile.api_key_env, "").strip()
         if env:
@@ -246,7 +252,55 @@ def _raw_provider_api_key(home: Path, profile: ProviderProfile) -> str | None:
         value = path.read_text(encoding="utf-8").strip()
         if value:
             return value
+    return legacy_api_key(home, profile.base_url, store)
+
+
+def legacy_key_endpoint(home: Path, store: RunStore | None) -> str:
+    """v119-F1: the endpoint llm-secret was saved for — the saved
+    LLM_BASE_URL; with none saved, or the Queen on the ChatGPT plan (ADR 0063:
+    the saved key is the workers'), the workers' profile.json endpoint. The
+    sources migrate_legacy_provider seeds the ``default`` profile from, in
+    the same order. ``home`` is the supervisor home."""
+    from ..codex_login import uses_codex_login
+
+    saved = store.get_setting(LLM_BASE_URL) if store is not None else None
+    if isinstance(saved, str) and saved.strip() and not uses_codex_login(saved):
+        return saved.strip().rstrip("/")
+    from skep.profile import load_profile, profile_path
+
+    endpoint = ""
+    if profile_path(home.parent).is_file():
+        with contextlib.suppress(OSError, ValueError):
+            endpoint = load_profile(home.parent).provider.endpoint or ""
+    return endpoint.strip().rstrip("/")
+
+
+def legacy_api_key(home: Path, endpoint: str, store: RunStore | None = None) -> str | None:
+    """v119-F1: llm-secret / SKEP_LLM_API_KEY, for its own endpoint only. It
+    was the fallback for EVERY profile, so the health sweep sent the main key
+    to each keyless profile's host every five minutes. The same URL match
+    resolve_active_api_key and worker_key_profile use; anywhere else gets no
+    key (a local server needs none; a remote one fails, naming the fix)."""
+    if endpoint.strip().rstrip("/") != legacy_key_endpoint(home, store):
+        return None
     return resolve_api_key(home)
+
+
+def legacy_key_withheld(home: Path, profile: ProviderProfile, store: RunStore) -> str | None:
+    """v119-F1: why a profile is called without a key, naming the fix (I9) —
+    None when it has a credential, needs none from skep, or none exists."""
+    from ..codex_login import uses_codex_login
+
+    if uses_codex_login(profile.base_url) or resolve_api_key(home) is None:
+        return None
+    if _raw_provider_api_key(home, profile, store) is not None:
+        return None
+    owner = legacy_key_endpoint(home, store) or "the saved endpoint"
+    return (
+        f"provider {profile.provider_id!r} has no key of its own, and the main key "
+        f"(llm-secret) is only sent to {owner}, so it is called without one — give it "
+        f"its own key: `skep provider set-key {profile.provider_id}`"
+    )
 
 
 def resolve_active_api_key(
@@ -266,7 +320,7 @@ def resolve_active_api_key(
         return resolve_api_key(home)
     if base_url is not None and active.base_url.rstrip("/") != base_url.strip().rstrip("/"):
         return resolve_api_key(home)
-    return resolve_provider_api_key(home, active)
+    return resolve_provider_api_key(home, active, store)
 
 
 def llm_config_view(store: RunStore, home: Path) -> dict[str, Any]:
