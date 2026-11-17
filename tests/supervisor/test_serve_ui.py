@@ -862,6 +862,9 @@ def test_context_panel_follows_cards_resolved_or_raised_outside_a_turn() -> None
     assert "refreshContext();" in resolve[: resolve.index("};")]
     propose = source[source.index("const proposeCommand") :]
     assert "refreshContext();" in propose[: propose.index("};")]
+    # A typed /approve <id> on a gate or deck card resolves with no turn after.
+    by_id = source[source.index("const resolvePendingCardById") :]
+    assert "refreshContext();" in by_id[: by_id.index("} else {")]
     refresh = source[source.index("const refreshContext") :]
     assert 'api("GET", `/api/chats/${activeChatId}`)' in refresh[: refresh.index(".catch")]
 

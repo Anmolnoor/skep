@@ -3309,6 +3309,7 @@ async function viewChat(main, chatId) {
     if (resolvesOnCommands(card)) {
       const result = await api("POST", `/api/chats/${activeChatId}/commands/${id}/${verb}`);
       commandResult(verb === "confirm" ? `${card.tool}: result` : `${card.tool}: canceled`, result);
+      refreshContext(); // no turn follows, so nothing else redraws the panel
     } else {
       await runStream(`/api/chats/${activeChatId}/actions/${id}/${verb}`);
     }
