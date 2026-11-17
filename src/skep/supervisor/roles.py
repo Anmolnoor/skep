@@ -249,6 +249,80 @@ def use_role(
     return {"chat_id": chat_id, "role": role.name, "layer": role.label}
 
 
+# H2 (ADR 0064 D1, ADR 0050): what create/edit may write. "" clears a
+# nullable field on every face — the chat model cannot send a null.
+ROLE_FIELDS = ("policy_layer", "system_prompt", "default_castes", "voice", "provider", "model")
+_NULLABLE = {"policy_layer", "voice", "provider", "model"}
+
+
+def save_role(
+    store: RunStore, home: Path, name: str, fields: dict[str, Any], *, create: bool
+) -> dict[str, Any]:
+    """`skep role create|edit`, ``POST|PUT /api/roles`` and the chat's
+    create_role / edit_role cards: one verb. Writes
+    ``<personal home>/roles/<name>.json``. Edit keeps every field it is not
+    given; editing a shipped role writes the home override that replaces it.
+    The record only names a template, so the role layer still tightens and
+    never loosens (ADR 0055 D2) whatever is written here."""
+    unknown = sorted(set(fields) - set(ROLE_FIELDS))
+    if unknown:
+        raise ValueError(f"unknown role field(s) {unknown}; known: {', '.join(ROLE_FIELDS)}")
+    roles = all_roles(home)
+    if create and name in roles:
+        raise ValueError(f"role {name!r} already exists — edit it (`skep role edit {name}`)")
+    if not create and name not in roles:
+        raise ValueError(f"no role {name!r}; known: {', '.join(roles)} — create it first")
+    record = {} if create else roles[name].model_dump()
+    for key, value in fields.items():
+        if key in _NULLABLE and value == "":
+            value = None
+        record[key] = value
+    record["name"] = name
+    if record.get("system_prompt") is None:
+        record["system_prompt"] = ""
+    record["default_castes"] = tuple(record.get("default_castes") or ())
+    role = Role.model_validate(record)
+    if role.voice is not None:
+        from .serve.chat import validate_personality  # local: serve imports this module
+
+        validate_personality(role.voice)
+    check_role_provider(role, store)
+    path = roles_dir(home) / f"{role.name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(role.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8")
+    return {"role": role.view(), "created": create, "path": str(path)}
+
+
+def delete_role(store: RunStore, home: Path, name: str) -> dict[str, Any]:
+    """`skep role delete`, ``DELETE /api/roles/<name>`` and the delete_role
+    card. A shipped role cannot be deleted — only its home override, which
+    reverts it. A custom role in use refuses naming who uses it (I9): a chat
+    whose role stops loading fails its tools closed."""
+    roles = all_roles(home)  # also validates ``name`` before it becomes a path
+    if name not in roles:
+        raise ValueError(f"no role {name!r}; known: {', '.join(roles)}")
+    path = roles_dir(home) / f"{name}.json"
+    shipped = name in SHIPPED_ROLES
+    if not path.is_file():
+        raise ValueError(
+            f"role {name!r} ships with skep and cannot be deleted; "
+            f"`skep role edit {name}` overrides it"
+        )
+    if not shipped:
+        users = [c.chat_id for c in store.list_chats() if c.role == name]
+        if users:
+            raise ValueError(
+                f"role {name!r} is in use by {len(users)} chat(s) ({', '.join(users[:5])}); "
+                f"switch each first: `skep role use <other> --chat <id>`"
+            )
+        if default_role(store, home) == name:
+            raise ValueError(
+                f"role {name!r} is the role new chats open in; `skep role use <other>` first"
+            )
+    path.unlink()
+    return {"deleted": name, "reverted_to_shipped": shipped}
+
+
 def _role_hits(role: Role, scope: str, action: str, value: str) -> list[PolicyDecision | None]:
     """The role layer's rule per part of the action, None where it has none.
     A chained shell line is judged per simple command (B3-F7's rule)."""

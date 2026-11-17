@@ -112,6 +112,11 @@ _HIGH_POLICY_TOOLS = _POLICY_TOOLS | {
     "detach_policy_group",  # a group can carry denies: detaching it widens
     "set_policy_group",
     "set_role",  # the chat's role is a ceiling on the Queen's own lanes
+    # H2: a role's record is that ceiling, and its provider is where its
+    # chats' content goes
+    "create_role",
+    "edit_role",
+    "delete_role",
 }
 _DISPATCH_TOOLS = frozenset({"dispatch_run", "quick_edit", "setup_project", "batch_dispatch"})
 

@@ -275,6 +275,21 @@ class BaselineApproveRequest(BaseModel):
     approved_by: str | None = None  # ES-F1: ignored; the principal is recorded
 
 
+class RoleWriteRequest(BaseModel):
+    """Body of ``POST /api/roles`` (with ``name``) and ``PUT /api/roles/{name}``
+    (H2, ADR 0064 D1): the record fields to write. A field left out is kept on
+    edit; "" clears a nullable one — the same rule on every face."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = None
+    policy_layer: str | None = None
+    system_prompt: str | None = None
+    default_castes: list[str] | None = None
+    voice: str | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
 class TransparencyRequest(BaseModel):
     """Body of ``POST /api/onboard/transparency`` (first-run O4): false turns
     the why-lines off, true brings them back."""
@@ -773,6 +788,42 @@ def create_app(
 
         try:
             return roles_view(run_store, holder.current.home)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # H2 (ADR 0064 D1, ADR 0050): the operator's role verbs — the same
+    # functions as `skep role create|edit|delete` and the chat's cards.
+    @app.post("/api/roles", status_code=201)
+    def create_role_route(body: RoleWriteRequest) -> dict[str, Any]:
+        from ..roles import save_role
+
+        fields = body.model_dump(exclude_unset=True)
+        name = str(fields.pop("name", None) or "")
+        try:
+            return save_role(run_store, holder.current.home, name, fields, create=True)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/api/roles/{name}")
+    def edit_role_route(name: str, body: RoleWriteRequest) -> dict[str, Any]:
+        from ..roles import save_role
+
+        fields = body.model_dump(exclude_unset=True)
+        if fields.pop("name", name) != name:
+            raise HTTPException(
+                status_code=400, detail="a role cannot be renamed; create a new one"
+            )
+        try:
+            return save_role(run_store, holder.current.home, name, fields, create=False)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/roles/{name}")
+    def delete_role_route(name: str) -> dict[str, Any]:
+        from ..roles import delete_role
+
+        try:
+            return delete_role(run_store, holder.current.home, name)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
