@@ -552,3 +552,35 @@ def test_a_worker_commits_in_its_worktree_and_reads_no_packed_refs_error(
     assert git("log", "-1", "--pretty=%s", cwd=workspace).strip() == "from the wall"
     assert git("rev-parse", "refs/heads/main") == main_before  # refs/ stayed read-only
     assert not (repo / ".git" / "packed-refs.lock").exists()
+
+
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="needs zsh")
+def test_a_zsh_here_document_runs_inside_the_worker_wall(tmp_path: Path) -> None:
+    """v120-F1: zsh puts here-document temp files under $TMPPREFIX (default
+    /tmp/zsh), not $TMPDIR, and /tmp is outside the wall (ES-F5) — so every
+    ``zsh -lc "python3 - <<'PY' ..."`` a Codex run issued died with "can't
+    create temp file for here document". The worker's toolchain env carries a
+    TMPPREFIX inside its TMPDIR; /tmp stays closed."""
+    from skep.supervisor.dispatch import _toolchain_env
+    from skep.supervisor.engines import resolve_engine
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    profile = sandbox.write_profile(
+        tmp_path / "p.sb", workspace=workspace, skep_home=tmp_path / "skep"
+    )
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(workspace),
+        **_toolchain_env(workspace, resolve_engine("codex"), tmp_path / "cache"),
+    }
+    argv = sandbox.wrap_command(["zsh", "-c", "cat <<'PY'\nfrom the wall\nPY"], profile)
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "from the wall\n"
+
+    # The wall did not widen: zsh's /tmp default is still refused.
+    env.pop("TMPPREFIX")
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False, env=env, timeout=30)
+    assert proc.returncode != 0
+    assert "here document" in proc.stderr

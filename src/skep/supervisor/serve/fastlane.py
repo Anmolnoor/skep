@@ -25,7 +25,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from ..sandbox import DENY_ALL_NETWORK, availability, wrap_command, write_profile
+from ..sandbox import (
+    DENY_ALL_NETWORK,
+    availability,
+    in_wall_tmp_env,
+    wrap_command,
+    write_profile,
+)
 from ..spawner import build_worker_env
 
 FAST_LANE_TIMEOUT_SECS = 10
@@ -78,7 +84,7 @@ def run_code_fast(language: str, code: str, *, skep_home: Path) -> dict[str, Any
         # clang/swiftc ignore TMPDIR for their module cache (Mac finding B).
         env = {
             **build_worker_env(()),
-            "TMPDIR": str(workspace),
+            **in_wall_tmp_env(workspace),  # v120-F1: + zsh's TMPPREFIX
             "CLANG_MODULE_CACHE_PATH": str(workspace / "clang"),
         }
         try:

@@ -3482,7 +3482,7 @@ def diagnose_run(
     # F3's lesson applied here too: TMPDIR must live inside the wall.
     tmp_dir = workspace / ".toolchain" / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    env["TMPDIR"] = str(tmp_dir)
+    env.update(sandbox.in_wall_tmp_env(tmp_dir))  # v120-F1: + zsh's TMPPREFIX
     try:
         proc = subprocess.run(
             argv,

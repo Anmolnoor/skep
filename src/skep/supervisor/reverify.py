@@ -219,7 +219,7 @@ def reverify(
         # tmpfs-masks it. Same fix as the worker's toolchain env.
         reverify_tmp = worktree / ".reverify-tmp"
         reverify_tmp.mkdir(parents=True, exist_ok=True)
-        env["TMPDIR"] = str(reverify_tmp)
+        env.update(sandbox.in_wall_tmp_env(reverify_tmp))  # v120-F1: + TMPPREFIX
         env["CLANG_MODULE_CACHE_PATH"] = str(reverify_tmp / "clang")  # ignores TMPDIR
         # v109-F4: a shared cache sits outside the worktree, so both profiles
         # below need it as an explicit writable root (the offline verify still

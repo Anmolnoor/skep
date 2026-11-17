@@ -942,6 +942,17 @@ def build_profile(
     return "\n".join(lines) + "\n"
 
 
+def in_wall_tmp_env(tmp_dir: Path) -> dict[str, str]:
+    """The temp-file env for a sandboxed process whose scratch is ``tmp_dir``.
+
+    v120-F1: TMPDIR alone is not enough — zsh writes here-document temp files
+    under ``$TMPPREFIX`` (default ``/tmp/zsh``), and /tmp is outside the wall
+    (ES-F5), so every ``zsh -c "... <<'PY'"`` died with "can't create temp
+    file for here document". TMPPREFIX is a filename prefix, not a directory.
+    """
+    return {"TMPDIR": str(tmp_dir), "TMPPREFIX": str(tmp_dir / "zsh")}
+
+
 def write_profile(
     profile_path: Path,
     *,
