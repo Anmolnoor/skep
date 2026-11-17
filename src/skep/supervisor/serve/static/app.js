@@ -2952,10 +2952,11 @@ async function viewChat(main, chatId) {
   renderContextPanel(contextPanel, { chat: activeChat, defaultModel: llm.default_model, actions });
   // A card resolved or raised outside a turn (gate, deck command, a verdict)
   // redraws the panel from the server, so "Waiting on you" never lags the
-  // sidebar and the Inbox (I8).
+  // sidebar and the Inbox (I8). The chat row comes from the same read: the
+  // card just resolved may be the one that changed its role or model.
   const refreshContext = () => activeChatId && api("GET", `/api/chats/${activeChatId}`)
     .then(fresh => renderContextPanel(contextPanel,
-      { chat: activeChat, defaultModel: llm.default_model, actions: fresh.actions }))
+      { chat: fresh.chat, defaultModel: llm.default_model, actions: fresh.actions }))
     .catch(() => {});
   const applyContextState = () => {
     layout.classList.toggle("context-hidden", contextHidden);

@@ -866,7 +866,11 @@ def test_context_panel_follows_cards_resolved_or_raised_outside_a_turn() -> None
     by_id = source[source.index("const resolvePendingCardById") :]
     assert "refreshContext();" in by_id[: by_id.index("} else {")]
     refresh = source[source.index("const refreshContext") :]
-    assert 'api("GET", `/api/chats/${activeChatId}`)' in refresh[: refresh.index(".catch")]
+    refresh = refresh[: refresh.index(".catch")]
+    assert 'api("GET", `/api/chats/${activeChatId}`)' in refresh
+    # A confirmed /role card changes the chat's role with no turn after: the
+    # panel draws the row that read returned, not the one the view opened with.
+    assert "chat: fresh.chat," in refresh and "chat: activeChat" not in refresh
 
 
 def test_confirm_cards_render_the_summary_not_the_model_prose() -> None:
