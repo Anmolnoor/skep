@@ -4,7 +4,7 @@
    app.js boots on load, so its helpers come in through the import cycle.
    Safe because this module only declares at top level: by the time any of
    its functions runs, app.js has finished evaluating. */
-import { api, chatTitle, el, header, iconButton, relativeTime, route, shortTaskId } from "./app.js";
+import { api, chatTitle, el, header, iconButton, relativeTime, route, shortTaskId, shortTitle } from "./app.js";
 
 // v44-F3: channel groups the operator opened; survives re-renders.
 // ponytail: in-memory; localStorage if reload-reset annoys
@@ -92,7 +92,7 @@ export function renderThreads(chats) {
       "aria-label": `open chat: ${chatTitle(chat)} (${STATUS_TEXT[status]})`,
     },
       el("span", { class: `thread-dot ${status}`, "aria-hidden": "true" }),
-      el("span", { class: "sidebar-chat-label" }, chatTitle(chat)),
+      el("span", { class: "sidebar-chat-label" }, shortTitle(chatTitle(chat))),
       pin);
   };
   // Pinned first — moved, not duplicated, whatever their group.
@@ -197,7 +197,7 @@ export async function viewInbox(main) {
   }
   main.append(el("div", { class: "inbox-list" },
     cards.map(card => inboxItem(`#/chat/${card.chat_id}`, card.tool,
-      `${chatTitle({ title: card.chat_title })} · ${SOURCE_TEXT[card.source] || card.source} · ${relativeTime(card.created_at)}`)),
+      `${shortTitle(chatTitle({ title: card.chat_title }))} · ${SOURCE_TEXT[card.source] || card.source} · ${relativeTime(card.created_at)}`)),
     approvals.map(gate => inboxItem("#/approvals", `${gate.action} · run ${shortTaskId(gate.task_id)}`,
       `${gate.reason || "approval"} · ${relativeTime(gate.requested_at)}`))));
 }

@@ -184,3 +184,22 @@ test("Inbox view: nothing waiting says so", async () => {
   await app.viewInbox(main);
   assert.equal(main.textContent, "Nothing is waiting on you.");
 });
+
+test("H1-G9: a bare-URL or very long title is shortened for display only", () => {
+  const { app, list } = withSidebar();
+  assert.equal(app.shortTitle("https://www.youtube.com/watch?v=gEJ26rECifc"), "youtube.com/watch?v=gEJ26rECifc");
+  assert.equal(app.shortTitle("https://github.com/Anmolnoor/skep/pull/96"), "github.com/…/96");
+  assert.equal(app.shortTitle("https://example.com/"), "example.com");
+  assert.equal(app.shortTitle("https://x.io/a/b?q=0123456789abcdefghijklmnop"), "x.io/…/…3456789abcdefghijklmnop");
+  assert.equal(app.shortTitle("hello boss"), "hello boss");
+  const long = "Reply with exactly one word: pong, and then explain why in detail please";
+  assert.equal(app.shortTitle(long), `${long.slice(0, 47).trimEnd()}…`);
+  assert.equal(app.shortTitle("not a url: https://a.b/c"), "not a url: https://a.b/c");
+  // The row shows the short form; its tooltip and aria-label keep the stored title.
+  const url = "https://www.youtube.com/watch?v=gEJ26rECifc";
+  app.renderThreads([chat("u", { title: url })]);
+  const row = list.querySelectorAll(".sidebar-chat-item")[0];
+  assert.equal(row.querySelector(".sidebar-chat-label").textContent, "youtube.com/watch?v=gEJ26rECifc");
+  assert.match(row.getAttribute("title"), new RegExp(`^${url.replace(/[?.]/g, "\\$&")} · `));
+  assert.match(row.getAttribute("aria-label"), /youtube\.com\/watch\?v=gEJ26rECifc \(/);
+});

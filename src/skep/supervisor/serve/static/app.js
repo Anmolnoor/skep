@@ -633,6 +633,23 @@ function chatTitle(chat) {
   return (chat?.title || "New Chat").trim() || "New Chat";
 }
 
+// H1-G9: display only. A title that is a bare URL shows its host and the tail
+// of its path; a very long one is cut with an ellipsis. The stored title and
+// every tooltip and aria-label keep the full text.
+function shortTitle(text, max = 48) {
+  let url = null;
+  if (/^https?:\/\/\S+$/i.test(text)) {
+    try { url = new URL(text); } catch { url = null; }
+  }
+  if (!url) return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+  const host = url.hostname.replace(/^www\./, "");
+  const segments = url.pathname.split("/").filter(Boolean);
+  let tail = `${segments.at(-1) || ""}${url.search}`;
+  if (tail.length > 24) tail = `…${tail.slice(-23)}`;
+  if (!tail) return host;
+  return segments.length > 1 ? `${host}/…/${tail}` : `${host}/${tail}`;
+}
+
 function contextLoadPercent(context) {
   // v56-F3: server truth — chat detail carries what the NEXT turn will send
   // vs the model window. Pre-load (no detail yet) shows a resting sliver.
@@ -2449,7 +2466,10 @@ async function viewChat(main, chatId) {
   let activeChat = detail?.chat || chats.find(chat => chat.chat_id === activeChatId) || null;
   // H1-G2: the thread's own header line — its title, not the word "Chat".
   const chatSubtitle = "Talk to the hive — the Queen's own model, with the supervisor at hand.";
-  header(main, activeChat ? chatTitle(activeChat) : "New thread", chatSubtitle);
+  // The header shows the short title; hovering it shows the full one.
+  const titleHeader = chat => header(main, shortTitle(chatTitle(chat)), chatTitle(chat));
+  if (activeChat) titleHeader(activeChat);
+  else header(main, "New thread", chatSubtitle);
   let messages = detail?.messages || [];
   let actions = detail?.actions || [];
   const assistantReady = Boolean(llm.configured && (activeChat?.model || llm.default_model));
@@ -2915,7 +2935,7 @@ async function viewChat(main, chatId) {
   const drawContext = (chat, acts) => {
     roleModel.textContent = chat
       ? `${chat.role || "assistant"} · ${chat.model || llm.default_model || "no model"}` : "";
-    if (chat) header(main, chatTitle(chat), chatSubtitle); // the first turn names it
+    if (chat) titleHeader(chat); // the first turn names it
     return renderContextPanel(contextPanel, { chat, defaultModel: llm.default_model, actions: acts });
   };
   // v92-F1 (was v43-F4's single shared line): the worker loader — one pulsing
@@ -6441,4 +6461,4 @@ schedulePoll(POLL_MIN_MS);
 
 // H1: the helpers sidebar.js and room.js import back (the cycle is safe: they
 // only declare at top level). After the boot marker, so tests/web never sees it.
-export { api, chatTitle, el, header, iconButton, relativeTime, route, shortTaskId, stateChip };
+export { api, chatTitle, el, header, iconButton, relativeTime, route, shortTaskId, shortTitle, stateChip };
