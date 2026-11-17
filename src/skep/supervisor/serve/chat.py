@@ -67,6 +67,7 @@ from .llm import (
     chat_stream,
     llm_config_view,
     resolve_active_api_key,
+    resolve_pinned_api_key,
     resolved_num_ctx,
     tool_delivery,
 )
@@ -1523,9 +1524,18 @@ class ChatEngine:
         return chat
 
     def resolved_llm(self, chat: Any) -> tuple[str, str | None, str, LLMProtocol]:
-        """(base_url, api_key, model, protocol) for this chat, or 409 if unconfigured."""
+        """(base_url, api_key, model, protocol) for this chat, or 409 if unconfigured.
+
+        hive-rooms H2 (ADR 0064 D1): the chat's role picks the model — an
+        explicit ``chats.model`` still wins (condition 4), then the role's
+        ``model``, then the default. A role naming a ``provider`` talks to that
+        profile alone (``_pinned_llm``); one naming neither runs exactly the
+        path below, as before."""
+        role = chat_role(self.home, getattr(chat, "role", None))
+        if role is not None and role.provider is not None:
+            return self._pinned_llm(chat, role)
         config = llm_config_view(self.store, self.home)
-        model = chat.model or config["default_model"]
+        model = chat.model or (role.model if role is not None else None) or config["default_model"]
         if not config["configured"] or not model:
             raise HTTPException(
                 status_code=409,
@@ -1540,6 +1550,30 @@ class ChatEngine:
         except OllamaError as exc:  # v118-F1: the Codex login is unusable; say why
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return str(config["base_url"]), api_key, str(model), config["protocol"]
+
+    def _pinned_llm(self, chat: Any, role: Role) -> tuple[str, str | None, str, LLMProtocol]:
+        """H2: the role's shelf profile supplies base URL, wire protocol and
+        its OWN key (condition 1). Checked every turn (condition 2): a profile
+        removed or renamed since the role was written refuses the turn naming
+        the role, the profile and the fix — never the active profile instead."""
+        from .llm import REGISTRY_PROTOCOLS
+
+        profile = self.store.get_provider_profile(str(role.provider))
+        if profile is None:
+            known = ", ".join(p.provider_id for p in self.store.list_provider_profiles())
+            raise HTTPException(
+                status_code=409,
+                detail=f"role {role.name!r} talks to provider {role.provider!r}, which is no "
+                f"longer on the shelf (known: {known or 'none'}) — point it at one: "
+                f"`skep role edit {role.name} --provider <id>`, or --provider '' for the default",
+            )
+        protocol = REGISTRY_PROTOCOLS[profile.protocol]  # the shelf only holds these
+        try:
+            api_key = resolve_pinned_api_key(self.store, self.home, profile)
+        except OllamaError as exc:
+            raise HTTPException(status_code=409, detail=f"role {role.name!r}: {exc}") from exc
+        model = chat.model or role.model or profile.model
+        return profile.base_url, api_key, str(model), protocol
 
     def _system_prompt(self, chat_id: str) -> str:
         """The operative prompt assembled in the pinned v53 order:

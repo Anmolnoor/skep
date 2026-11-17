@@ -400,7 +400,15 @@ carries `role` (also `role` on `GET /api/policy/why`, `POST
 
 A queen is a role with a model (hive-rooms H2, ADR 0064 D1): a role may pin
 `provider` — a profile already on the shelf (`skep provider list`; any other
-name is refused with the known ones) — and `model`. `role create|edit|delete` are one verb with
+name is refused with the known ones) — and `model`. A chat in that role talks
+to that provider with **that profile's own** key — its named env var or its
+key file (`skep provider key ID`); the main `llm-secret` only when the
+profile's base URL is the Settings one it was saved for. A pinned profile with
+no key refuses the turn and nothing is dialled — and
+to the role's model, else the profile's; an explicit chat model still wins. A
+profile removed since the role named it refuses every turn naming the fix;
+it never falls back to the active one. A role that pins neither uses the
+Settings model exactly as before. `role create|edit|delete` are one verb with
 `POST /api/roles`, `PUT|DELETE /api/roles/<name>` and the chat's
 `create_role`/`edit_role`/`delete_role` cards (HIGH: a role is a policy
 ceiling and names where its chats' content goes). `edit` keeps every field it
