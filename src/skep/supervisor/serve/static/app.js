@@ -2872,17 +2872,30 @@ async function viewChat(main, chatId) {
     suggest.hidden = matches.length === 0;
   };
 
+  // H1-G7: one rounded box — the message on top, then "+", role, model and
+  // send. The "+" menu holds the same attach / dictate / spoken-replies /
+  // project-context buttons as before, each now labelled in words.
+  for (const [button, label] of [[attach, "Attach image"], [mic, "Dictate"],
+    [voiceToggle, "Spoken replies"], [addContext, "Project context"]]) {
+    button.append(el("span", { class: "composer-menu-label" }, label));
+  }
+  const plusMenu = el("details", { class: "composer-plus" },
+    el("summary", {
+      class: "composer-plus-toggle",
+      title: "attach an image, dictate, spoken replies",
+      "aria-label": "more: attach an image, dictate, spoken replies",
+    }, el("span", { "aria-hidden": "true" }, "+")),
+    el("div", { class: "composer-menu" },
+      attach, mic, voiceToggle, boundProject ? addContext : null));
+  plusMenu.querySelector(".composer-menu").addEventListener("click", () => { plusMenu.open = false; });
   const composer = el("div", { class: "composer-shell" },
     suggest,
     queuedNote,
     el("div", { class: "composer" },
-      boundProject ? addContext : null,
       input,
       el("div", { class: "composer-meta" },
-        attach,
+        plusMenu,
         attachInput,
-        mic,
-        voiceToggle,
         roleSelect,
         modelSelect,
         send)));

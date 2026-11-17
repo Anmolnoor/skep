@@ -783,9 +783,50 @@ main.chat-view { padding: 0; max-width: none; }
   margin: 10px auto 12px; width: min(100% - 36px, var(--chat-max));
   display: flex; flex-direction: column; gap: 8px;
 }
+/* H1-G7: the thread composer is one rounded box — the message on top, then
+   "+", role and model as quiet chips, and the white send button. */
 .composer-shell .composer {
-  margin: 0;
+  margin: 0; flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px;
+  padding: 10px 12px 9px; border-radius: var(--radius-xl);
+  background: var(--panel); border-color: var(--border-soft);
 }
+.composer-shell .composer:focus-within { border-color: var(--border); }
+.composer-shell .composer textarea {
+  flex: none; width: 100%; height: 44px; min-height: 44px; padding: 2px 2px; overflow-y: auto;
+}
+.composer-shell .composer-meta { gap: 6px; }
+.composer-shell .composer-model-select {
+  height: 26px; min-height: 26px; padding: 0 8px; flex: none;
+  background: var(--chip-fill); border: 0; border-radius: var(--radius-sm);
+  color: var(--muted); font-size: 12px;
+}
+/* An open thread's role and model are fixed (switch with /role): shown, not
+   dimmed to illegible. */
+.composer-shell .composer-model-select:disabled { opacity: 1; cursor: default; }
+.composer-shell .composer .composer-send.icon-button {
+  margin-left: auto; width: 28px; min-width: 28px; min-height: 28px; height: 28px;
+}
+.composer-plus { position: relative; flex: none; }
+.composer-plus-toggle {
+  list-style: none; display: grid; place-items: center; width: 26px; height: 26px;
+  border-radius: var(--radius-sm); background: var(--chip-fill); color: var(--muted);
+  cursor: pointer; font-size: 15px; line-height: 1;
+}
+.composer-plus-toggle::-webkit-details-marker { display: none; }
+.composer-plus-toggle:hover, .composer-plus[open] .composer-plus-toggle { color: var(--text); }
+.composer-menu {
+  position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 40; min-width: 200px;
+  display: flex; flex-direction: column; padding: 4px;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-pop);
+}
+.composer-shell .composer-menu button.icon-button {
+  width: 100%; min-width: 0; min-height: 32px; height: 32px; padding: 0 8px; gap: 10px;
+  justify-content: flex-start; border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text); font-weight: 400; font-size: 13px; flex: none;
+}
+.composer-shell .composer-menu button.icon-button:hover { background: var(--chip-fill); }
+.composer-shell .composer-menu .button-icon { width: 18px; font-size: 13px; }
 .composer-status-row {
   display: flex; align-items: center; gap: 8px; min-width: 0;
   color: var(--muted); font-size: 12px; padding: 0 26px 0 28px;
