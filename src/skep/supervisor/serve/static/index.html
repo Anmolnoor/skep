@@ -63,13 +63,18 @@
     </nav>
 
     <div class="workspace">
+      <!-- H1-G2: one header line per view. The global top bar is gone: this row
+           is the view's own header — its title, then the controls that view
+           owns (route() clears #view-controls; a view fills it). The list
+           filter, the Queen tile and + Assign show only on the views they
+           belong to (updateShellChrome / route). -->
       <header class="topbar">
         <div id="topbar-title" class="topbar-title">Home</div>
-        <label class="topbar-search">
+        <div id="view-controls" class="view-controls"></div>
+        <label class="topbar-search" hidden>
           <span class="topbar-search-icon" aria-hidden="true"></span>
           <input id="app-search" type="search" autocomplete="off"
-                 placeholder="Search runs, tasks &amp; approvals" aria-label="Search this view">
-          <kbd class="topbar-kbd">⌘K</kbd>
+                 placeholder="Filter this list" aria-label="Search this view">
         </label>
         <div id="topbar-queen-status" class="topbar-queen-status hidden">
           <span class="queen-dot" aria-hidden="true"></span>

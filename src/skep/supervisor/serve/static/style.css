@@ -59,7 +59,7 @@
   --radius-pill: 26px;
   --control-h: 38px;
   --sidebar-w: 248px;
-  --topbar-h: 60px;
+  --topbar-h: 46px;
   --dock-h: 64px;
   --content-max: 1180px;
   --ls-label: .06em;      /* letter-spacing for uppercase micro-labels */
@@ -251,16 +251,43 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 /* --- workspace: top bar + content + dock --- */
 .workspace { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 100vh; }
+/* H1-G2: the view's one header line — title, then the view's own controls. */
 .topbar {
-  position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 16px;
-  height: var(--topbar-h); padding: 0 24px; background: var(--bg);
+  position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 10px;
+  height: var(--topbar-h); padding: 0 20px; background: var(--bg);
   border-bottom: 1px solid var(--border-soft);
 }
-.topbar-title { color: var(--text-strong); font-weight: 650; font-size: 17px; flex: none; }
+.topbar-title {
+  color: var(--text-strong); font-weight: 600; font-size: 15px; flex: 0 1 auto;
+  min-width: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.view-controls { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; }
+.view-controls:empty { flex: 1; }
+.view-role-model {
+  margin-left: auto; flex: none; color: var(--muted); font-size: 12px; white-space: nowrap;
+}
+/* The thread's workspace chips: same nodes as the old composer strip. */
+.topbar .composer-status-row { padding: 0; gap: 6px; flex: 0 1 auto; }
+.topbar .strip-pill, .topbar .strip-project-select {
+  height: 22px; min-height: 22px; padding: 0 7px; border: 0;
+  background: var(--chip-fill); border-radius: var(--radius-sm);
+  color: var(--muted); font-size: 12px;
+}
+.topbar .strip-branch .strip-pill-text { font-family: var(--font-mono); }
+.topbar .strip-btn { height: 22px; min-height: 22px; border-radius: var(--radius-sm); }
+.topbar .context-popover { top: calc(100% + 10px); bottom: auto; }
+.topbar .composer-context-meter { margin-left: 0; flex: none; }
+.topbar .chat-toolbar { gap: 2px; flex: none; }
+.topbar .chat-toolbar-action.icon-button {
+  width: 28px; min-width: 28px; min-height: 28px; height: 28px;
+  background: transparent; border-color: transparent; color: var(--muted);
+}
+.topbar .chat-toolbar-action.icon-button:hover { background: var(--chip-fill); color: var(--text); }
+.topbar .chat-toolbar-action.danger:hover { color: var(--bad); }
 .topbar-search {
-  flex: 1; max-width: 560px; display: flex; align-items: center; gap: 9px;
-  height: 38px; padding: 0 12px; border-radius: var(--radius-md); color: var(--muted-2);
-  background: var(--panel); border: 1px solid var(--border-soft); cursor: text;
+  flex: 0 1 280px; margin-left: auto; display: flex; align-items: center; gap: 8px;
+  height: 30px; padding: 0 10px; border-radius: var(--radius-sm); color: var(--muted-2);
+  background: var(--chip-fill); border: 1px solid transparent; cursor: text;
 }
 .topbar-search:focus-within { border-color: var(--focus); box-shadow: var(--shadow-focus); }
 .topbar-search-icon { flex: none; width: 15px; height: 15px; display: inline-flex; color: var(--muted-2); }
@@ -275,10 +302,10 @@ code, pre, .mono { font-family: var(--font-mono); }
   border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 1px 5px; line-height: 1.4;
 }
 .topbar-assign {
-  flex: none; display: inline-flex; align-items: center; height: 36px; padding: 0 16px;
-  border-radius: var(--radius-md); font-weight: 600; white-space: nowrap;
+  flex: none; display: inline-flex; align-items: center; height: 30px; padding: 0 12px;
+  border-radius: var(--radius-sm); font-weight: 600; font-size: 13px; white-space: nowrap;
 }
-.topbar-assign.primary { background: var(--text-strong); color: var(--on-accent); border: 1px solid var(--text-strong); }
+.topbar-assign.primary { background: var(--accent); color: var(--on-accent); border: 1px solid var(--accent); }
 .topbar-assign.primary:hover { background: #fff; color: var(--on-accent); }
 
 main {
@@ -290,7 +317,6 @@ main {
 body.dock-open main { padding-bottom: 92px; }
 h2 { margin: 0 0 4px; color: var(--text-strong); font-size: 17px; line-height: 1.2; font-weight: 650; }
 h3 { color: var(--text-strong); font-size: 15px; font-weight: 650; margin: 0 0 12px; }
-.sub { color: var(--muted); margin: 0 0 22px; font-size: 15px; }
 
 /* --- chat dock (launcher into Chat) --- */
 .dock {
@@ -461,7 +487,10 @@ pre.log, pre.diff {
 .state.due { background: rgba(240,178,62,.15); color: var(--warn); }
 
 /* chat (v6) */
-.chat-layout { display: flex; gap: 14px; height: calc(100vh - 132px); min-height: 360px; --chat-max: 820px; }
+/* H1-G2: the thread view runs edge to edge under its header line; the
+   context panel sits on the right edge behind a hairline, as in the spec. */
+main.chat-view { padding: 0; max-width: none; }
+.chat-layout { display: flex; height: calc(100vh - var(--topbar-h)); min-height: 360px; --chat-max: 720px; }
 .chat-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
 .chat-toolbar { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
 .chat-toolbar-action.icon-button {
@@ -1463,6 +1492,10 @@ pre.log, pre.diff {
   main { width: 100%; max-width: none; padding: 20px 12px; }
   .chat-layout { height: calc(100vh - 190px); min-height: 420px; }
   .chat-toolbar { justify-content: flex-start; flex-wrap: wrap; }
+  /* H1-G2: a thread's header line wraps its chips instead of clipping them. */
+  .topbar { flex-wrap: wrap; height: auto; padding: 10px 12px; gap: 10px; }
+  .topbar-title { max-width: 100%; }
+  .view-controls { flex-wrap: wrap; flex-basis: 100%; }
   .chat-log { padding: 12px; }
   .chat-message.user { max-width: 90%; }
   .agent-thread { margin-left: 0; }
@@ -1488,7 +1521,6 @@ pre.log, pre.diff {
      redeclared — the two old rules cancelled to the base 34px anyway. */
   .sidebar { flex-wrap: wrap; }
   .rail-group { flex-wrap: wrap; }
-  .topbar { flex-wrap: wrap; height: auto; padding: 10px 12px; gap: 10px; }
   .topbar-search { order: 3; flex-basis: 100%; max-width: none; }
   /* v76-F2: at phone width the label hides, the dot stays. */
   .topbar-queen-status .queen-model-label { display: none; }

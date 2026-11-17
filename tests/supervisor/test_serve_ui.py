@@ -870,7 +870,9 @@ def test_context_panel_follows_cards_resolved_or_raised_outside_a_turn() -> None
     assert 'api("GET", `/api/chats/${activeChatId}`)' in refresh
     # A confirmed /role card changes the chat's role with no turn after: the
     # panel draws the row that read returned, not the one the view opened with.
-    assert "chat: fresh.chat," in refresh and "chat: activeChat" not in refresh
+    # H1-G2: through drawContext, which redraws the header's role and model too.
+    assert "drawContext(fresh.chat, fresh.actions)" in refresh
+    assert "drawContext(activeChat" not in refresh
 
 
 def test_confirm_cards_render_the_summary_not_the_model_prose() -> None:

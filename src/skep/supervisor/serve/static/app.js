@@ -874,6 +874,16 @@ async function refreshDockModel() {
   } catch { /* leave the dock model label blank */ }
 }
 function updateShellChrome(hash) {
+  // H1-G2: the header line is the view's own. + Assign shows where work is
+  // started from (Home, Runs); it is also in the sidebar under Runs and in
+  // ⌘K. The Queen tile (default model + liveness) belongs to Home; a thread
+  // shows its own model in its header.
+  const page = hash.split(/[/?]/)[1] || "home";
+  const assign = document.querySelector(".topbar-assign");
+  if (assign) assign.hidden = !["home", "runs"].includes(page);
+  const queenTile = document.getElementById("topbar-queen-status");
+  if (queenTile) queenTile.hidden = page !== "home";
+  viewControls()?.replaceChildren();
   const hideDock = hash.startsWith("#/chat") || hash.startsWith("#/setup");
   const dock = document.getElementById("dock");
   if (dock) dock.classList.toggle("hidden", hideDock);
@@ -957,6 +967,9 @@ async function route() {
     if (match) {
       const args = view === viewSetup ? [setup] : match.slice(1);
       await view(main, ...args).catch(e => flash("bad", e.message));
+      // H1-G2: the list filter shows only on a view that has a list to filter.
+      const filter = document.getElementById("app-search")?.closest(".topbar-search");
+      if (filter) filter.hidden = !main.querySelector(".searchable");
       return;
     }
   }
@@ -968,12 +981,20 @@ window.addEventListener("hashchange", route);
 // ---------- shared fragments ----------
 
 function header(main, title, subtitle) {
-  // The page title lives in the persistent top bar now; the subtitle stays in
-  // the content column (matching the design's "Home / hive at a glance" split).
+  // The page title lives in the view's one header line. H1-G2: the subtitle
+  // sentence no longer takes a row of its own — it is the title's hover text,
+  // so nothing it said is lost.
   const titleEl = document.getElementById("topbar-title");
-  if (titleEl) titleEl.textContent = title;
+  if (titleEl) {
+    titleEl.textContent = title;
+    titleEl.title = subtitle || "";
+  }
   document.title = `${title} · skep`;
-  if (subtitle) main.append(el("p", { class: "sub" }, subtitle));
+}
+
+// H1-G2: a view puts its own controls in its header line, right of the title.
+function viewControls() {
+  return document.getElementById("view-controls");
 }
 
 async function repoOptions() {
@@ -2426,6 +2447,9 @@ async function viewChat(main, chatId) {
   let detail = activeChatId ? await api("GET", `/api/chats/${activeChatId}`) : null;
   chatBoundRepo = detail?.project?.repo || null;  // v96-F2
   let activeChat = detail?.chat || chats.find(chat => chat.chat_id === activeChatId) || null;
+  // H1-G2: the thread's own header line — its title, not the word "Chat".
+  const chatSubtitle = "Talk to the hive — the Queen's own model, with the supervisor at hand.";
+  header(main, activeChat ? chatTitle(activeChat) : "New thread", chatSubtitle);
   let messages = detail?.messages || [];
   let actions = detail?.actions || [];
   const assistantReady = Boolean(llm.configured && (activeChat?.model || llm.default_model));
@@ -2861,15 +2885,26 @@ async function viewChat(main, chatId) {
         voiceToggle,
         roleSelect,
         modelSelect,
-        send)),
-    el("div", { class: "composer-status-row" },
-      projectSelect,
-      branchPill.pill,
-      policyPill.pill,
-      enginePill.pill,
-      pushBtn,
-      prBtn,
-      contextMeter));
+        send)));
+  // H1-G2: the workspace row moved out of the composer into the thread's
+  // header line — project, branch, policy and engine chips, Push / Open PR —
+  // then role and model at the right, the context meter, and the thread
+  // actions. Same nodes, same handlers; only where they sit changed.
+  const statusRow = el("div", { class: "composer-status-row" },
+    projectSelect,
+    branchPill.pill,
+    policyPill.pill,
+    enginePill.pill,
+    pushBtn,
+    prBtn);
+  const roleModel = el("span", { class: "view-role-model" });
+  // Redrawn wherever the context panel is: a card can change role or model.
+  const drawContext = (chat, acts) => {
+    roleModel.textContent = chat
+      ? `${chat.role || "assistant"} · ${chat.model || llm.default_model || "no model"}` : "";
+    if (chat) header(main, chatTitle(chat), chatSubtitle); // the first turn names it
+    return renderContextPanel(contextPanel, { chat, defaultModel: llm.default_model, actions: acts });
+  };
   // v92-F1 (was v43-F4's single shared line): the worker loader — one pulsing
   // row per live run this chat owns, phase from the status SSE, seconds
   // counted here so the timer runs from dispatch instead of jumping on
@@ -2945,18 +2980,18 @@ async function viewChat(main, chatId) {
   // H1 (hive-rooms C10): role and model, cards waiting, runs, spend.
   const contextPanel = el("aside", { class: "chat-context", "aria-label": "thread context" });
   const layout = el("div", { class: `chat-layout${contextHidden ? " context-hidden" : ""}` },
-    el("div", { class: "chat-content" },
-      el("div", { class: "chat-toolbar" }, toggleContext, newChat, deleteChat),
-      pane),
+    el("div", { class: "chat-content" }, pane),
     contextPanel);
-  renderContextPanel(contextPanel, { chat: activeChat, defaultModel: llm.default_model, actions });
+  main.className = "chat-view";
+  viewControls()?.replaceChildren(statusRow, roleModel, contextMeter,
+    el("div", { class: "chat-toolbar" }, toggleContext, newChat, deleteChat));
+  drawContext(activeChat, actions);
   // A card resolved or raised outside a turn (gate, deck command, a verdict)
   // redraws the panel from the server, so "Waiting on you" never lags the
   // sidebar and the Inbox (I8). The chat row comes from the same read: the
   // card just resolved may be the one that changed its role or model.
   const refreshContext = () => activeChatId && api("GET", `/api/chats/${activeChatId}`)
-    .then(fresh => renderContextPanel(contextPanel,
-      { chat: fresh.chat, defaultModel: llm.default_model, actions: fresh.actions }))
+    .then(fresh => drawContext(fresh.chat, fresh.actions))
     .catch(() => {});
   const applyContextState = () => {
     layout.classList.toggle("context-hidden", contextHidden);
@@ -3645,7 +3680,7 @@ async function viewChat(main, chatId) {
       }
       updateContextMeter();
       renderThreads(chats); // titles may have changed
-      renderContextPanel(contextPanel, { chat: activeChat, defaultModel: llm.default_model, actions });
+      drawContext(activeChat, actions);
       // v103-F1: the turn is over — send whatever the operator typed during it.
       // After the refresh above, so a card raised by this turn has already
       // locked the composer and the steer waits for the verdict instead of
@@ -3654,10 +3689,11 @@ async function viewChat(main, chatId) {
     }
   };
 
-  log.append(el("p", { class: "note" },
-    activeChat
-      ? `${chatTitle(activeChat)} · model: ${activeChat.model || llm.default_model || "(none)"}`
-      : `Start a new chat. Model: ${llm.default_model || "(none — set a default in Settings)"}`));
+  // H1-G2: an open thread's title and model are in its header line now.
+  if (!activeChat) {
+    log.append(el("p", { class: "note" },
+      `Start a new chat. Model: ${llm.default_model || "(none — set a default in Settings)"}`));
+  }
   // v40-F1: replay batches consecutive tool records into one activity group,
   // so a refresh reconstructs exactly what the live stream drew.
   let replayGroup = null;
