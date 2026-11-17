@@ -27,16 +27,19 @@
         <span id="sidebar-machine" class="sidebar-machine" title="the machine this daemon runs on"></span>
         <div id="health" class="health" title="daemon status">…</div>
       </div>
-      <button id="sidebar-search" class="sidebar-search" type="button" aria-label="search pages and runs (⌘K)">
-        <span>Search</span><kbd class="topbar-kbd">⌘K</kbd>
-      </button>
       <div class="rail-group" data-group="daily">
         <a href="#/home" data-ws="home" title="Home">Home</a>
         <a id="sidebar-new-chat" href="#/chat" data-nav="new-chat" data-ws="chat" title="New thread">New thread</a>
         <a href="#/inbox" data-ws="inbox" title="Inbox — everything waiting on you">Inbox <span id="inbox-badge" class="badge hidden"></span></a>
       </div>
+      <!-- H1-G3: one search. ⌘K (this row) is the search — pages and run ids.
+           It does not find threads, so the thread list keeps its own filter,
+           drawn as a quiet row rather than a second search box. -->
+      <button id="sidebar-search" class="sidebar-search" type="button" aria-label="search pages and runs (⌘K)">
+        <span>Search</span><kbd class="topbar-kbd">⌘K</kbd>
+      </button>
       <input id="thread-search" class="chat-sidebar-search" type="search" autocomplete="off"
-             placeholder="Search threads…" aria-label="search threads">
+             placeholder="Filter threads" aria-label="search threads">
       <div id="sidebar-threads" class="sidebar-threads" role="navigation" aria-label="Threads"></div>
       <div class="sidebar-nav">
         <details class="rail-group" data-group="runs">
