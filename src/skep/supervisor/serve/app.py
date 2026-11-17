@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import platform
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -561,6 +562,8 @@ def create_app(
     def status() -> dict[str, Any]:
         return {
             "status": "ok",
+            # H1 (hive-rooms): the sidebar names the machine this daemon runs on.
+            "machine": platform.node(),
             "home": str(config.home),
             "store_ready": config.db_path.is_file(),
             "pending_approvals": len(run_store.pending_approvals()),
@@ -579,10 +582,13 @@ def create_app(
         return apply_default_workspace(run_store, holder.current, apply=body.apply)
 
     @app.get("/api/runs")
-    def list_runs(limit: int = 20) -> dict[str, Any]:
-        return {
-            "runs": [run_summary_view(run_store, r) for r in run_store.recent_runs(min(limit, 500))]
-        }
+    def list_runs(limit: int = 20, chat_id: str | None = None) -> dict[str, Any]:
+        records = run_store.recent_runs(min(limit, 500))
+        if chat_id:
+            # H1 (hive-rooms C10): one thread's runs, by the same link the
+            # chat's status stream uses (the dispatching card's result).
+            records = [r for r in records if run_store.chat_for_task(r.task_id) == chat_id]
+        return {"runs": [run_summary_view(run_store, r) for r in records]}
 
     @app.get("/api/agents")
     def list_agents() -> dict[str, Any]:

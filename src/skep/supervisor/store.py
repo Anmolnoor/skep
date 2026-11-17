@@ -4467,6 +4467,16 @@ class RunStore:
         return [self._row_to_action(row) for row in rows]
 
     @_locked
+    def proposed_chat_actions(self) -> list[ChatActionRecord]:
+        """H1 (hive-rooms C9): every card still waiting on the operator, across
+        all chats, oldest first — the sidebar's dots and the Inbox."""
+        rows = self._conn.execute(
+            f"SELECT {self._ACTION_COLS} FROM chat_actions"
+            " WHERE status = 'proposed' ORDER BY created_at",
+        ).fetchall()
+        return [self._row_to_action(row) for row in rows]
+
+    @_locked
     def supersede_chat_action(self, action_id: str, *, note: str) -> None:
         """v109-F2: a newer proposal for the same subject replaces a pending
         card. Recorded exactly like the resolution-side supersede (v63-F2) —
