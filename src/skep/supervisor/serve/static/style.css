@@ -102,6 +102,12 @@
 }
 
 * { box-sizing: border-box; }
+/* H1-G4: a thin themed scrollbar instead of the bright native one. */
+* { scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, .14) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .14); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .24); }
 
 /* v104-F0: `hidden` means hidden.
    The UA stylesheet's `[hidden] { display: none }` loses to ANY author rule
@@ -566,10 +572,33 @@ main.chat-view { padding: 0; max-width: none; }
   border-radius: var(--radius-md); white-space: normal; overflow-wrap: anywhere;
   display: flex; flex-direction: column; gap: 6px;
 }
+/* H1-G4: the user's message is a quiet right-aligned bubble; the assistant's
+   is plain text on the canvas. Author and time stay in the DOM (the label is
+   kept for screen readers), the copy/retry actions show on hover or focus. */
 .chat-message.user {
-  align-self: flex-end; max-width: min(70%, var(--chat-max));
-  background: var(--panel-2); border-radius: var(--radius-xl); padding: 10px 16px;
+  align-self: flex-end; max-width: min(78%, 560px);
+  background: var(--panel); border-radius: var(--radius-xl); padding: 9px 13px; gap: 2px;
 }
+.chat-message.user .chat-message-dot { display: none; }
+.chat-message.user .chat-message-label {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%);
+}
+/* The bubble holds only the words; its time and actions sit just left of it
+   and show on hover or keyboard focus. */
+.chat-message.user { position: relative; }
+.chat-message.user .chat-message-role,
+.chat-message.user .chat-message-footer {
+  position: absolute; right: 100%; margin: 0 8px 0 0; white-space: nowrap; font-weight: 400;
+  opacity: 0; transition: opacity var(--transition-fast);
+}
+.chat-message.user .chat-message-role { top: 10px; }
+.chat-message.user .chat-message-footer { bottom: 2px; }
+.chat-message.user:hover .chat-message-role,
+.chat-message.user:focus-within .chat-message-role { opacity: 1; }
+.chat-message.assistant .chat-message-dot { display: none; }
+.chat-message-footer { opacity: 0; transition: opacity var(--transition-fast); }
+.chat-message:hover .chat-message-footer,
+.chat-message:focus-within .chat-message-footer { opacity: 1; }
 .chat-message.assistant {
   align-self: flex-start; width: 100%; max-width: 100%;
   background: transparent; padding: 0;
@@ -585,7 +614,6 @@ main.chat-view { padding: 0; max-width: none; }
 .chat-message-dot {
   width: 7px; height: 7px; flex: none; border-radius: 999px; background: var(--muted);
 }
-.chat-message.user .chat-message-dot { background: var(--muted); }
 .chat-message-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-message-time { margin-left: auto; font-weight: 400; opacity: .75; }
 .chat-message-body { white-space: pre-wrap; line-height: 1.5; }
@@ -673,8 +701,8 @@ main.chat-view { padding: 0; max-width: none; }
 .activity-group { align-self: flex-start; width: 100%; max-width: 100%; }
 .activity-group-header {
   display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-  background: transparent; border: none; padding: 4px 0; color: var(--muted);
-  font-size: 13px; cursor: pointer;
+  background: transparent; border: none; padding: 2px 0; min-height: 0; color: var(--muted);
+  font-size: 12px; font-weight: 400; cursor: pointer;
 }
 .activity-group-header:hover { color: var(--text); filter: none; }
 .activity-group-summary {
@@ -1233,7 +1261,7 @@ main.chat-view { padding: 0; max-width: none; }
 .chat-message-body .md-table th {
   background: var(--panel-2); color: var(--text-strong); font-weight: 600;
 }
-.chat-message-body a { color: var(--accent); }
+.chat-message-body a { color: var(--text); text-decoration: underline; text-decoration-color: var(--muted-2); text-underline-offset: 2px; }
 .chat-message-body hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
 
 /* ---------- v75-F1: shared view furniture ---------- */
