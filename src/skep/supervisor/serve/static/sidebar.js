@@ -28,6 +28,7 @@ const SEEN_KEY = "skep-seen-chats";
 function loadSeen(chats) {
   const raw = localStorage.getItem(SEEN_KEY);
   if (raw !== null) return JSON.parse(raw);
+  if (!chats.length) return {}; // nothing loaded yet: seed on the first real list
   const seeded = Object.fromEntries(chats.map(chat => [chat.chat_id, chat.updated_at]));
   localStorage.setItem(SEEN_KEY, JSON.stringify(seeded));
   return seeded;
@@ -196,7 +197,7 @@ export async function viewInbox(main) {
   }
   main.append(el("div", { class: "inbox-list" },
     cards.map(card => inboxItem(`#/chat/${card.chat_id}`, card.tool,
-      `${card.chat_title} · ${SOURCE_TEXT[card.source] || card.source} · ${relativeTime(card.created_at)}`)),
+      `${chatTitle({ title: card.chat_title })} · ${SOURCE_TEXT[card.source] || card.source} · ${relativeTime(card.created_at)}`)),
     approvals.map(gate => inboxItem("#/approvals", `${gate.action} · run ${shortTaskId(gate.task_id)}`,
       `${gate.reason || "approval"} · ${relativeTime(gate.requested_at)}`))));
 }

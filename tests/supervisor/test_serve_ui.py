@@ -852,6 +852,20 @@ def test_context_panel_collapses_from_the_toolbar() -> None:
     assert 'el("div", { class: "chat-toolbar" }, toggleContext, newChat, deleteChat)' in source
 
 
+def test_context_panel_follows_cards_resolved_or_raised_outside_a_turn() -> None:
+    """H1 review S1: the panel's "Waiting on you" redrew only at a turn's end,
+    so a gate approved in the thread or a /command card lagged the sidebar
+    and the Inbox (I8). Every resolution goes through resolveCardUI and every
+    deck card through proposeCommand; both redraw it from the server."""
+    source = (STATIC_DIR / "app.js").read_text()
+    resolve = source[source.index("const resolveCardUI") :]
+    assert "refreshContext();" in resolve[: resolve.index("};")]
+    propose = source[source.index("const proposeCommand") :]
+    assert "refreshContext();" in propose[: propose.index("};")]
+    refresh = source[source.index("const refreshContext") :]
+    assert 'api("GET", `/api/chats/${activeChatId}`)' in refresh[: refresh.index(".catch")]
+
+
 def test_confirm_cards_render_the_summary_not_the_model_prose() -> None:
     """v90-F2: all three card renderers share one body — headline, purpose,
     risk — and the model-facing description plus raw args move behind a

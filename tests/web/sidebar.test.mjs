@@ -65,6 +65,15 @@ test("unread: the first load seeds everything seen; a later change is unread unt
   assert.match(JSON.parse(app.localStorage.getItem("skep-seen-chats")).a, /12:00/);
 });
 
+test("unread: a render before the first list loads seeds nothing, so the real list still reads as seen", () => {
+  const { app, list } = withSidebar();
+  app.renderThreads([]); // a hashchange before the first poll
+  assert.equal(app.localStorage.getItem("skep-seen-chats"), null);
+  app.renderThreads([chat("a"), chat("b")]);
+  assert.match(dotOf(list, "a"), /idle/);
+  assert.match(dotOf(list, "b"), /idle/);
+});
+
 test("status dots: waiting and active show on the row, and the title says it in words", () => {
   const { app, list } = withSidebar();
   app.renderThreads([chat("w", { pending_cards: 2 }), chat("r", { active_runs: 1 })]);
@@ -156,6 +165,15 @@ test("Inbox view: each item links to where it is resolved, and carries no button
   assert.match(items[0].querySelector("small").textContent, /^flaky monitor · proposed by the Queen · /);
   assert.match(items[1].querySelector("small").textContent, /^land it · /);
   assert.equal(main.querySelectorAll("button").length, 0); // read-only (I6)
+});
+
+test("Inbox view: an untitled thread reads as the sidebar names it", async () => {
+  const { app } = withSidebar("#/inbox");
+  app.header = () => {};
+  app.api = async () => ({ cards: [{ ...fullInbox.cards[0], chat_title: "" }], approvals: [] });
+  const main = app.el("main");
+  await app.viewInbox(main);
+  assert.match(main.querySelector(".inbox-item").querySelector("small").textContent, /^New Chat · /);
 });
 
 test("Inbox view: nothing waiting says so", async () => {

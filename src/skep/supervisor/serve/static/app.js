@@ -633,10 +633,6 @@ function chatTitle(chat) {
   return (chat?.title || "New Chat").trim() || "New Chat";
 }
 
-function modelLabel(model) {
-  return (model || "No model").trim() || "No model";
-}
-
 function contextLoadPercent(context) {
   // v56-F3: server truth — chat detail carries what the NEXT turn will send
   // vs the model window. Pre-load (no detail yet) shows a resting sliver.
@@ -2954,6 +2950,13 @@ async function viewChat(main, chatId) {
       pane),
     contextPanel);
   renderContextPanel(contextPanel, { chat: activeChat, defaultModel: llm.default_model, actions });
+  // A card resolved or raised outside a turn (gate, deck command, a verdict)
+  // redraws the panel from the server, so "Waiting on you" never lags the
+  // sidebar and the Inbox (I8).
+  const refreshContext = () => activeChatId && api("GET", `/api/chats/${activeChatId}`)
+    .then(fresh => renderContextPanel(contextPanel,
+      { chat: activeChat, defaultModel: llm.default_model, actions: fresh.actions }))
+    .catch(() => {});
   const applyContextState = () => {
     layout.classList.toggle("context-hidden", contextHidden);
     const label = contextHidden ? "show thread context" : "hide thread context";
@@ -3174,6 +3177,7 @@ async function viewChat(main, chatId) {
   const resolveCardUI = (card, label, verb) => {
     card.classList.add("resolved");
     card.append(el("p", { class: `verdict ${verb === "confirm" ? "approved" : "denied"}` }, label));
+    refreshContext();
   };
 
   // ---------- the command deck executor (v25-F1) ----------
@@ -3291,6 +3295,7 @@ async function viewChat(main, chatId) {
     const action = await api("POST", `/api/chats/${activeChatId}/commands`, { tool, args });
     commandCard(action, notes);
     setComposerLocked(true);
+    refreshContext();
   };
 
   // v51-F0: /approve and /deny accept the id the pending-card hint prints.
