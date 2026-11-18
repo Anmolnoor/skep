@@ -13,8 +13,11 @@ in the sandbox with no network; promotion to ``approved`` requires a human;
 promotion to ``tested`` requires a passing verifier (G10) result; an ``active``
 tool carries provenance and rollback metadata; a ``suspended`` tool cannot run.
 
-This module is the pure state machine; ``skills.py`` / ``capabilities.py`` consult
-``plugin_can_run`` before executing a governed tool.
+This module is the pure state machine. Nothing consults ``plugin_can_run`` at
+call time (v126-F12): the states bite through registration. A forged plugin is
+callable only while its MCP server is registered, so suspension deregisters
+the server; a skill pack is dispatchable only while its registry template
+exists, so suspension removes the template (registered ⟺ active).
 """
 
 from __future__ import annotations

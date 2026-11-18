@@ -103,10 +103,22 @@ def load_packs(store: RunStore) -> dict[str, SkillPackRecord]:
     return packs
 
 
-def save_pack(store: RunStore, record: SkillPackRecord) -> None:
+def save_pack(store: RunStore, record: SkillPackRecord, *, actor: str = "system") -> None:
     packs = load_packs(store)
+    old = packs.get(record.pack_id)
     packs[record.pack_id] = record
     store.set_setting(SKILL_PACKS_SETTINGS_KEY, json.dumps([asdict(p) for p in packs.values()]))
+    # v126-F4: every ladder step and grant change leaves a row.
+    store.record_registry_event(
+        kind="skill_pack",
+        item_id=record.pack_id,
+        action="saved",
+        actor=actor,
+        detail={
+            "old": None if old is None else {"state": old.state, "grants": list(old.grants)},
+            "new": {"state": record.state, "grants": list(record.grants)},
+        },
+    )
 
 
 def draft_pack(
@@ -403,6 +415,7 @@ def promote_pack(
     *,
     extra_grants: tuple[str, ...] = (),
     human_action: bool,
+    actor: str = "system",
 ) -> tuple[SkillPackRecord, WorkflowTemplate | None]:
     """Drive the ladder for one pack in one human-authorized step.
 
@@ -429,10 +442,10 @@ def promote_pack(
         if record.state == "draft":
             require_transition("draft", "sandboxed")
             record = dataclasses.replace(record, state="sandboxed")
-            save_pack(store, record)
+            save_pack(store, record, actor=actor)
         evidence = run_trial(record, store=store, config=config)
         record = dataclasses.replace(record, trial=evidence)
-        save_pack(store, record)
+        save_pack(store, record, actor=actor)
         if not evidence["ok"]:
             # v100-F5: a self-test failure has no failing SCRIPT to name, so
             # the pack's own error is the message when there is one.
@@ -475,14 +488,16 @@ def promote_pack(
             "wins; rename or delete it before activating this pack"
         )
     if existing_template is not None:
-        store.remove_template(record.pack_id)
-    store.add_template(template)
+        store.remove_template(record.pack_id, actor=actor)
+    store.add_template(template, actor=actor)
     record = dataclasses.replace(record, state="active", grants=grants)
-    save_pack(store, record)
+    save_pack(store, record, actor=actor)
     return record, template
 
 
-def suspend_pack(store: RunStore, pack_id: str, *, rollback: bool = False) -> SkillPackRecord:
+def suspend_pack(
+    store: RunStore, pack_id: str, *, rollback: bool = False, actor: str = "system"
+) -> SkillPackRecord:
     """Pause (or retire) a pack. Removing the registry template IS the
     suspension — registered ⟺ active, no dispatchable half-state (I8)."""
     record = load_packs(store).get(pack_id)
@@ -492,7 +507,7 @@ def suspend_pack(store: RunStore, pack_id: str, *, rollback: bool = False) -> Sk
     require_transition(record.state, target)
     template = store.get_template(record.pack_id)
     if template is not None and template.provenance == PACK_PROVENANCE:
-        store.remove_template(record.pack_id)
+        store.remove_template(record.pack_id, actor=actor)
     record = dataclasses.replace(record, state=target)
-    save_pack(store, record)
+    save_pack(store, record, actor=actor)
     return record

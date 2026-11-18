@@ -8,6 +8,7 @@ differs (the versioned package file instead of a landed branch)."""
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -88,8 +89,119 @@ def test_yt_transcript_parsing_and_guards() -> None:
         module.video_id("https://evilyoutube.com/watch?v=dQw4w9WgXcQ")
     assert module.video_id("https://m.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ"
     # upstream drift teaches re-forging instead of mystifying (review item 7)
-    assert module.caption_track_url("<html>no captions marker</html>") is None
+    assert module.innertube_key("<html>no key marker</html>") is None
     assert "re-forging" in module.UPSTREAM_DRIFT
+
+
+# v126-F1: the watch page's own captionTracks URL now carries `exp=xpe` and
+# answers 200 with a 0-byte body; the tool asks the innertube player endpoint
+# (ANDROID client) instead, and each failure says which of three it is.
+_PAGE = '... "INNERTUBE_API_KEY":"KEY123", ...'
+
+
+def _player(tracks: Any = None, status: str = "OK", reason: str = "") -> str:
+    body: dict[str, Any] = {"playabilityStatus": {"status": status, "reason": reason}}
+    if tracks is not None:
+        body["captions"] = {"playerCaptionsTracklistRenderer": {"captionTracks": tracks}}
+    return json.dumps(body)
+
+
+_TRACKS = [
+    {"baseUrl": "https://www.youtube.com/api/timedtext?v=x&lang=de&fmt=srv3", "languageCode": "de"},
+    {"baseUrl": "https://www.youtube.com/api/timedtext?v=x&lang=en&fmt=srv3", "languageCode": "en"},
+]
+_XML = '<?xml version="1.0" ?><transcript><text start="0">We&amp;#39;re here</text></transcript>'
+
+
+def _fake_fetch(responses: dict[str, str], calls: list[tuple[str, Any]]) -> Any:
+    def fetch(url: str, data: bytes | None = None) -> str:
+        calls.append((url, data))
+        for prefix, body in responses.items():
+            if url.startswith(prefix):
+                return body
+        raise AssertionError("unexpected fetch " + url)
+
+    return fetch
+
+
+@pytest.mark.parametrize(
+    ("responses", "expected"),
+    [
+        # the happy path: an English track, srv3 stripped, entities unescaped
+        (
+            {
+                "https://www.youtube.com/watch": _PAGE,
+                "https://www.youtube.com/youtubei/v1/player": _player(_TRACKS),
+                "https://www.youtube.com/api/timedtext": _XML,
+            },
+            ("ok", "We're here"),
+        ),
+        # a playable video with no caption tracks at all
+        (
+            {
+                "https://www.youtube.com/watch": _PAGE,
+                "https://www.youtube.com/youtubei/v1/player": _player(),
+            },
+            ("error", "NO_CAPTIONS"),
+        ),
+        # tracks exist but the caption body comes back empty: blocked
+        (
+            {
+                "https://www.youtube.com/watch": _PAGE,
+                "https://www.youtube.com/youtubei/v1/player": _player(_TRACKS),
+                "https://www.youtube.com/api/timedtext": "",
+            },
+            ("error", "EMPTY_CAPTIONS"),
+        ),
+        # the player refuses the video (bot check, login, private)
+        (
+            {
+                "https://www.youtube.com/watch": _PAGE,
+                "https://www.youtube.com/youtubei/v1/player": _player(
+                    status="LOGIN_REQUIRED", reason="Sign in to confirm you're not a bot"
+                ),
+            },
+            ("error", "not a bot"),
+        ),
+        # page shape drift: no innertube key on the watch page
+        (
+            {"https://www.youtube.com/watch": "<html></html>"},
+            ("error", "re-forging"),
+        ),
+        # player shape drift: not JSON
+        (
+            {
+                "https://www.youtube.com/watch": _PAGE,
+                "https://www.youtube.com/youtubei/v1/player": "<html>",
+            },
+            ("error", "re-forging"),
+        ),
+        # a non-empty caption body with no <text> lines is drift too
+        (
+            {
+                "https://www.youtube.com/watch": _PAGE,
+                "https://www.youtube.com/youtubei/v1/player": _player(_TRACKS),
+                "https://www.youtube.com/api/timedtext": "<html>consent</html>",
+            },
+            ("error", "re-forging"),
+        ),
+    ],
+)
+def test_get_transcript_new_shape_and_distinct_errors(
+    monkeypatch: pytest.MonkeyPatch, responses: dict[str, str], expected: tuple[str, str]
+) -> None:
+    module = _seed_module()
+    calls: list[tuple[str, Any]] = []
+    monkeypatch.setattr(module, "_fetch", _fake_fetch(responses, calls))
+    result = module.call_tool("get_transcript", {"video": "dQw4w9WgXcQ"})
+    kind, needle = expected
+    assert bool(result.get("isError")) is (kind == "error"), result
+    assert needle in result["content"]
+    if kind == "ok":
+        player_url, player_body = calls[1]
+        assert player_url.endswith("key=KEY123")
+        assert json.loads(player_body)["videoId"] == "dQw4w9WgXcQ"
+        assert calls[2][0] == "https://www.youtube.com/api/timedtext?v=x&lang=en"
 
 
 def test_sync_seed_tools_registers_draft_once_and_never_resurrects(

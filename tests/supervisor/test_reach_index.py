@@ -68,9 +68,10 @@ def test_the_prompt_carries_one_reach_roof_with_detail_verbs(
     # Tools by category, detail verb: describe_tools.
     assert "[runs]" in content and "[mcp & plugins]" in content
     assert "describe_tools(names=[...])" in content
-    # Skills by name, detail verb: view_skill (v99-F2: names, no descriptions).
-    assert "release-checklist" in content
-    assert "Steps for cutting a skep release" not in content
+    # Skills, detail verb: view_skill (v126-F8: an operator skill carries its
+    # short description; the recipe stays behind the read).
+    assert "- release-checklist: Steps for cutting a skep release" in content
+    assert "bump, tag, changelog" not in content
     assert "view_skill" in content
     # MCP servers by id only, detail verb: list_mcp_tools.
     assert "- obsidian (stdio)" in content
@@ -96,10 +97,13 @@ def test_reach_block_sizes_are_measured(config: SupervisorConfig) -> None:
         # (approve_policy_baseline): the block measured 9.79KB with it.
         # first-run R1 adds one more (set_role, ADR 0055 D3): 9.86KB.
         # first-run L1 adds list_agents (the presence read): 9.92KB.
-        assert 0 < len(block) < 9_950
+        # v126-F8: the fixture's one operator skill now carries its short
+        # description, and the list_templates/list_skills glosses say what
+        # each returns: measured 9,965.
+        assert 0 < len(block) < 10_000
         # Skills + MCP sections alone (headers + entries) — the fold-in cost.
         skills_and_mcp = block[block.index("Approved skills") :]
-        assert len(skills_and_mcp) < 1_000  # v99-F2: names, not descriptions
+        assert len(skills_and_mcp) < 1_000  # seeds stay names; this fixture has none
     finally:
         store.close()
 

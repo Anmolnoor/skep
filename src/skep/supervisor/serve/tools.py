@@ -419,8 +419,21 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         },
         ["subject"],
     ),
-    _tool("list_templates", "Saved workflow templates (hand-authored and learned).", {}),
-    _tool("list_skills", "Learned-skill candidates and skill-pack ladder states.", {}),
+    # v126-F8: say what each returns — the small model skims these.
+    _tool(
+        "list_templates",
+        "Every runnable skill/template, any provenance. Returns name, "
+        "description, caste, params and provenance (seed, external, chat, "
+        "user, learned, pack); view_skill opens one.",
+        {},
+    ),
+    _tool(
+        "list_skills",
+        "Skill drafts and packs, not runnable skills. Returns learned drafts "
+        "awaiting the human gate and script skill packs with their ladder "
+        "state; runnable skills are in list_templates.",
+        {},
+    ),
     _tool(
         "list_plugins",
         "Forged plugins — MCP tool servers skep authored for itself — with "
@@ -1054,8 +1067,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "delete_skill",
         "PROPOSE deleting one skill/template from the registry (requires "
-        "user confirmation — deletes destroy data). Schedules that reference "
-        "it will fail at their next tick, so check list_schedules first.",
+        "user confirmation — deletes destroy data). Refused while a schedule "
+        "uses it; the error names those schedules.",
         {"name": {"type": "string"}},
         ["name"],
     ),
@@ -4887,7 +4900,7 @@ def _execute_mutation(
                 f"a skill named {skill_name!r} already exists; "
                 "pick another name (no silent overwrite)"
             )
-        store.add_template(template)
+        store.add_template(template, actor=actor)
         return {"created": skill_name, "provenance": "chat"}
     if name == "patch_skill":
         import dataclasses
@@ -4909,12 +4922,15 @@ def _execute_mutation(
             validate_template(patched)
         except TemplateError as exc:
             raise ValueError(str(exc)) from exc
-        store.add_template(patched)
+        store.add_template(patched, actor=actor)
         return {"patched": skill_name}
     if name == "delete_skill":
         skill_name = str(args["name"])
         removed_template = store.get_template(skill_name)
-        if not store.remove_template(skill_name):
+        in_use = store.template_in_use_error(skill_name)
+        if in_use:
+            raise ValueError(in_use)
+        if not store.remove_template(skill_name, actor=actor):
             raise ValueError(f"no skill/template named {skill_name!r}")
         # v83-F12: deleting a seed leaves a tombstone — the startup sync
         # honors it forever, so a restart never resurrects the delete (I8).
@@ -5233,7 +5249,12 @@ def _execute_mutation(
         extra = tuple(str(g) for g in (args.get("allow_scripts") or ()))
         try:
             pack_record, pack_template = promote_pack(
-                store, holder.current, pack_id, extra_grants=extra, human_action=True
+                store,
+                holder.current,
+                pack_id,
+                extra_grants=extra,
+                human_action=True,
+                actor=actor,
             )
         except (SkillPackError, PluginLifecycleError) as exc:
             raise ValueError(str(exc)) from exc
@@ -5254,7 +5275,7 @@ def _execute_mutation(
 
         try:
             pack_record = suspend_pack(
-                store, str(args["pack_id"]), rollback=bool(args.get("rollback"))
+                store, str(args["pack_id"]), rollback=bool(args.get("rollback")), actor=actor
             )
         except (SkillPackError, PluginLifecycleError) as exc:
             raise ValueError(

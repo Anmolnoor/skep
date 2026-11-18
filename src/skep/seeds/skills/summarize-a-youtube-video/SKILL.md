@@ -14,9 +14,14 @@ was forged before the rename and needs re-forging).
 
 1. `call_mcp_tool` get_transcript with the video URL/id → plain-text
    transcript (a read; youtube domains only).
-2. If the transcript tool is missing or the video has none, fall back:
-   `search_web` the video title for coverage, and say the summary is
-   secondhand.
+2. If it errors, say which error it was, then fall back: `search_web` the
+   video title for coverage, and say the summary is secondhand.
+   - `NO_CAPTIONS`: the video has no transcript.
+   - `EMPTY_CAPTIONS` or "refused": YouTube is blocking the tool for now;
+     retrying later may work.
+   - "re-forging": YouTube changed shape; tell the user the tool needs
+     re-forging.
+   - Tool missing: say it can be promoted (above).
 3. Deliver what was asked: a tight summary (key claims + timestamps if
    present), a thread (one idea per post), or study notes. Quote sparingly
    and mark paraphrase vs quote honestly.

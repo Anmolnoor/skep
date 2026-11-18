@@ -122,10 +122,11 @@ def test_operator_skills_outrank_the_shelf_in_the_index(tmp_path: Path) -> None:
             )
         )
         block = skill_index_block(store)
-        # Alphabetically last, but provenance ranks it AHEAD of every seed.
+        # Alphabetically last, but provenance ranks it AHEAD of every seed
+        # (v126-F8: on its own described line, above the seed names).
+        assert block.splitlines()[1] == "- zz-operator-skill: the operator's own"
         listed = [name.strip() for name in block.splitlines()[-1].split(",")]
-        assert listed[0] == "zz-operator-skill"
-        assert len(listed) == 21  # every seed still listed, none evicted
+        assert len(listed) == 20  # every seed still listed, none evicted
     finally:
         store.close()
 
@@ -396,3 +397,261 @@ def test_the_git_skills_state_the_deny_rather_than_softening_it() -> None:
     assert "binds you exactly" in queen
     # And the worker seed has to give the reason, not just the rule.
     assert "diff between the working tree and" in worker
+
+
+# v126-F2: seed and shelf updates reach installs that never edited them; an
+# operator edit still wins and is reported, never silently kept.
+
+
+def _rewrite(root: Path, name: str, body: str) -> None:
+    (root / name / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {name} description\n---\n\n# {name}\n\n{body}\n"
+    )
+
+
+def _patch(store: RunStore, name: str, text: str) -> None:
+    """What patch_skill leaves behind: same provenance, same created_at."""
+    import dataclasses
+
+    row = store.get_template(name)
+    assert row is not None
+    store.add_template(dataclasses.replace(row, instructions=row.instructions + text))
+
+
+def _template_events(store: RunStore, action: str) -> list[str]:
+    return [
+        e.item_id for e in store.note_task_events() if e.kind == "template" and e.action == action
+    ]
+
+
+def test_an_unedited_seed_refreshes_and_an_edited_one_is_kept(tmp_path: Path) -> None:
+    shelf = tmp_path / "shelf"
+    _write_seed(shelf, "plain")
+    _write_seed(shelf, "edited")
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        load_seed_skills(store, root=shelf)
+        _patch(store, "edited", "\nmy tweak")
+        _rewrite(shelf, "plain", "Do the better thing.")
+        _rewrite(shelf, "edited", "Do the better thing.")
+
+        result = load_seed_skills(store, root=shelf)
+        assert result["refreshed"] == ["plain"]
+        assert result["diverged"] == ["edited"]
+        plain = store.get_template("plain")
+        assert plain is not None and "better thing" in plain.instructions
+        assert plain.provenance == SEED_PROVENANCE
+        edited = store.get_template("edited")
+        assert edited is not None and "my tweak" in edited.instructions
+        assert _template_events(store, "refreshed") == ["plain"]
+
+        again = load_seed_skills(store, root=shelf)
+        assert again["refreshed"] == [] and again["diverged"] == ["edited"]
+        assert again["existing"] == 1
+    finally:
+        store.close()
+
+
+def test_a_missing_shelf_reports_nothing(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        result = load_seed_skills(store, root=tmp_path / "gone")
+        assert result["loaded"] == result["refreshed"] == result["diverged"] == []
+    finally:
+        store.close()
+
+
+def test_a_legacy_row_refreshes_only_on_positive_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor import seed_skills
+
+    shelf = tmp_path / "shelf"
+    _write_seed(shelf, "old", body="Version one.")
+    _write_seed(shelf, "current", body="Unchanged.")
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        load_seed_skills(store, root=shelf)
+        store.set_setting(seed_skills.SHIPPED_HASHES_KEY, {})  # a pre-v126 install
+        v1 = store.get_template("old")
+        assert v1 is not None
+        _rewrite(shelf, "old", "Version two.")
+
+        # No record of what shipped, no evidence: kept and reported as legacy.
+        result = load_seed_skills(store, root=shelf)
+        assert result["diverged"] == ["old (legacy)"]
+        assert result["refreshed"] == []
+        # A legacy row equal to today's text is evidence: its hash is recorded.
+        assert seed_skills.shipped_hashes(store).keys() == {"current"}
+
+        # Positive evidence: the row hashes to a text that once shipped.
+        monkeypatch.setitem(
+            seed_skills.LEGACY_SHIPPED, "old", frozenset({seed_skills.skill_fingerprint(v1)})
+        )
+        result = load_seed_skills(store, root=shelf)
+        assert result["refreshed"] == ["old"]
+        refreshed = store.get_template("old")
+        assert refreshed is not None and "Version two." in refreshed.instructions
+    finally:
+        store.close()
+
+
+def test_the_real_youtube_seed_refreshes_from_both_prior_shipped_texts(tmp_path: Path) -> None:
+    """The legacy evidence is real: each text the seed shipped before v126,
+    loaded into a pre-v126 store, is refreshed to today's shipped text."""
+    from skep.supervisor import seed_skills
+
+    name = "summarize-a-youtube-video"
+    fixtures = Path(__file__).parent.parent / "fixtures" / "legacy_seeds"
+    for version in ("v1.0.1", "v122"):
+        shelf = tmp_path / version / "shelf"
+        (shelf / name).mkdir(parents=True)
+        (shelf / name / "SKILL.md").write_text(
+            (fixtures / f"{name}.{version}.md").read_text(encoding="utf-8")
+        )
+        store = RunStore(tmp_path / version / "s.sqlite3")
+        try:
+            load_seed_skills(store, root=shelf)
+            store.set_setting(seed_skills.SHIPPED_HASHES_KEY, {})
+            result = load_seed_skills(store)
+            assert name in result["refreshed"], version
+            assert result["diverged"] == []
+        finally:
+            store.close()
+
+
+def test_shelf_edits_sync_and_the_operator_copy_still_wins(tmp_path: Path) -> None:
+    shelf = tmp_path / "claude-skills"
+    _write_seed(shelf, "community-skill")
+    _write_seed(shelf, "tuned-skill")
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        add_skill_shelf(store, shelf)
+        sync_skill_shelves(store)
+        _patch(store, "tuned-skill", "\nmine")
+        _rewrite(shelf, "community-skill", "New upstream text.")
+        _rewrite(shelf, "tuned-skill", "New upstream text.")
+        report = sync_skill_shelves(store)[str(shelf)]
+        assert report["refreshed"] == ["community-skill"]
+        assert report["diverged"] == ["tuned-skill"]
+        synced = store.get_template("community-skill")
+        assert synced is not None and synced.provenance == EXTERNAL_PROVENANCE
+        assert "New upstream text." in synced.instructions
+    finally:
+        store.close()
+
+
+def test_skill_seed_refresh_takes_the_shipped_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import argparse
+
+    from skep.supervisor import seed_skills
+    from skep.supervisor.cli_cmds import build_config
+    from skep.supervisor.skill_cmds import cmd_skill_seed
+
+    home = tmp_path / "home"
+    shelf = tmp_path / "shelf"
+    _write_seed(shelf, "one")
+    _write_seed(shelf, "two")
+    monkeypatch.setattr(seed_skills, "seeds_root", lambda: shelf)
+
+    def _args(refresh: list[str] | None = None, refresh_all: bool = False) -> argparse.Namespace:
+        return argparse.Namespace(home=home, refresh=refresh, refresh_all=refresh_all)
+
+    assert cmd_skill_seed(_args()) == 0
+    external = tmp_path / "claude-skills"
+    _write_seed(external, "ext")
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        _patch(store, "one", "\nedit one")
+        _patch(store, "two", "\nedit two")
+        add_skill_shelf(store, external)
+        sync_skill_shelves(store)
+        _patch(store, "ext", "\nedit ext")
+        hashes = seed_skills.shipped_hashes(store)
+        del hashes["two"]  # "two" predates v126: a legacy row
+        store.set_setting(seed_skills.SHIPPED_HASHES_KEY, hashes)
+    finally:
+        store.close()
+    _rewrite(shelf, "one", "Shipped fix.")
+    _rewrite(shelf, "two", "Shipped fix.")
+    _rewrite(external, "ext", "Shipped fix.")
+    capsys.readouterr()
+
+    assert cmd_skill_seed(_args()) == 0
+    out = capsys.readouterr().out
+    assert "diverged: one — you edited it" in out and "skep skill seed --refresh one" in out
+    assert "diverged: two (legacy) — no record of what shipped" in out
+    assert "skep skill seed --refresh two`" in out
+
+    assert cmd_skill_seed(_args(refresh=["one"])) == 0
+    assert "refreshed: one" in capsys.readouterr().out
+    assert cmd_skill_seed(_args(refresh_all=True)) == 0
+    out = capsys.readouterr().out
+    assert "refreshed: two" in out
+    assert f"shelf {external}:" in out and "refreshed: ext" in out
+    store = RunStore(build_config(home, None).db_path)
+    try:
+        for name in ("one", "two", "ext"):
+            row = store.get_template(name)
+            assert row is not None and "Shipped fix." in row.instructions
+            assert "edit" not in row.instructions
+        assert [e.actor for e in store.note_task_events() if e.action == "refreshed"] == [
+            "operator"
+        ] * 3
+    finally:
+        store.close()
+
+
+# v126-F9: the shelf is credited, and every recipe can run where it is bound.
+
+
+def test_the_notice_credits_hermes_agent() -> None:
+    root = seeds_root().parents[2].parent  # src/skep/seeds/skills -> repo root
+    notice = (root / "NOTICE").read_text(encoding="utf-8")
+    assert "Hermes Agent" in notice and "2025 Nous Research" in notice and "MIT" in notice
+    license_text = (seeds_root().parent / "LICENSE-hermes-agent.txt").read_text(encoding="utf-8")
+    assert "Copyright (c) 2025 Nous Research" in license_text
+
+
+def test_a_chat_recipe_seed_is_refused_for_worker_binding(tmp_path: Path) -> None:
+    from skep.supervisor.scheduler import make_template_schedule
+    from skep.supervisor.templates import TemplateError, instantiate, is_chat_recipe
+
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        load_seed_skills(store)
+        recipe = store.get_template("notion")
+        assert recipe is not None and is_chat_recipe(recipe)
+        with pytest.raises(TemplateError, match="Queen chat recipe") as refused:
+            instantiate(recipe, repo=str(tmp_path))
+        assert "caste 'prompt'" in str(refused.value)  # it teaches the lane that works
+        with pytest.raises(TemplateError, match="Queen chat recipe"):
+            make_template_schedule(
+                name="nightly-notion",
+                template=recipe,
+                params={},
+                repo=tmp_path,
+                interval_seconds=3600,
+            )
+    finally:
+        store.close()
+    # The marker is the seed's own Tools: line, not the word "seed": an
+    # operator template with the same text still runs on a worker.
+    mine = WorkflowTemplate(name="mine", instructions="Tools: read_url\n\nDo it.")
+    assert not is_chat_recipe(mine)
+    assert instantiate(mine, repo=str(tmp_path)).instructions.startswith("Tools:")
+
+
+def test_notion_and_google_workspace_are_mcp_only() -> None:
+    for name in ("notion", "google-workspace"):
+        body = (seeds_root() / name / "SKILL.md").read_text(encoding="utf-8")
+        assert "MCP-only" in body, name
+        # read_url sends no headers or auth: the seed must not lean on it.
+        assert "allow_fetch_domain" not in body, name
+        assert "Notion-Version" not in body and "header" not in body.lower().replace(
+            "sends no headers", ""
+        ), name
+        tools_line = next(line for line in body.splitlines() if line.startswith("Tools:"))
+        assert "read_url" not in tools_line, name
