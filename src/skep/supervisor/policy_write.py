@@ -52,6 +52,7 @@ from .policy_v3 import (
     Request,
     Stack,
     decide,
+    decision_log_paths,
     floor_verdict,
     load_stack,
     operator_lane,
@@ -445,15 +446,17 @@ def vet_write(
 
 
 def read_log(audit_dir: Path, limit: int = REPLAY_ROWS) -> list[dict[str, Any] | None]:
-    """The last ``limit`` decision-log rows (the rotated ``.1`` first), each a
-    dict or None when unreadable. ponytail: reads the whole file (≤ 10 MB per
-    generation); seek from the end if a write ever waits on it."""
-    path = audit_dir / "policy" / "decisions.jsonl"
+    """The last ``limit`` decision-log rows (the newest rotated generation
+    first, ``decision_log_paths``), each a dict or None when unreadable.
+    ponytail: reads the whole file (≤ 10 MB per generation); seek from the end
+    if a write ever waits on it."""
     lines: deque[str] = deque(maxlen=limit)
-    for each in (path.with_name(path.name + ".1"), path):
-        if each.is_file():
+    for each in decision_log_paths(audit_dir):
+        try:
             with each.open(encoding="utf-8", errors="replace") as handle:
                 lines.extend(handle)
+        except FileNotFoundError:
+            continue  # no log yet, or rotated away between listing and opening
     rows: list[dict[str, Any] | None] = []
     for line in lines:
         try:

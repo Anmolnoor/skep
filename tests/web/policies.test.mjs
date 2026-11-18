@@ -250,6 +250,7 @@ test("Decisions: summary counts, newest-first rows, a verdict filter, and an emp
   await flush();
   const dec = panel(main);
   assert.match(dec.querySelector(".policy-summary").textContent, /1 allowed · 1 asked · 1 denied · 1 observed/);
+  assert.match(dec.querySelector(".policy-summary").textContent, /from the last two log files/);
   const rowText = () => dec.querySelectorAll(".policy-decision").filter(r => !r.classList.contains("hidden")).map(r => r.textContent);
   assert.equal(rowText().length, 4);
   assert.match(rowText()[0], /rm -rf/);
