@@ -1624,6 +1624,8 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     interval_seconds=interval,
                     ref=body.ref,
                     chain=body.chain,
+                    once=body.once,  # v126-F11: accepted, no longer thrown away
+                    start_at=body.start_at,
                 )
             else:
                 if body.instructions is None:

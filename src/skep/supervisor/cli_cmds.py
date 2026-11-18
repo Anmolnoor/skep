@@ -1890,6 +1890,8 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                     repo=repo,
                     interval_seconds=interval,
                     ref=args.ref,
+                    start_at=args.start_at,  # v126-F11
+                    once=args.once,
                 )
             except (TemplateError, ValueError) as exc:
                 return _err(str(exc), next_command=f"skep template show {args.template}")
@@ -1905,16 +1907,21 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                     next_command='skep schedule add NAME <repo> "..." --every 1d'
                     "  |  skep schedule add NAME <repo> --template T --every 1d",
                 )
-            schedule = make_schedule(
-                name=args.name,
-                repo=repo,
-                instructions=args.instructions,
-                interval_seconds=interval,
-                worker_kind=args.caste,
-                ref=args.ref,
-                network=args.network or [],
-                env_allowlist=args.env_allow or [],
-            )
+            try:
+                schedule = make_schedule(
+                    name=args.name,
+                    repo=repo,
+                    instructions=args.instructions,
+                    interval_seconds=interval,
+                    worker_kind=args.caste,
+                    ref=args.ref,
+                    network=args.network or [],
+                    env_allowlist=args.env_allow or [],
+                    start_at=args.start_at,  # v126-F11
+                    once=args.once,
+                )
+            except ValueError as exc:
+                return _err(str(exc))
             store.add_schedule(schedule)
             print(f"scheduled {args.name!r}: {args.caste} on {repo} every {args.every}")
     finally:
@@ -3561,6 +3568,14 @@ def register_supervisor_commands(
     sched_add.add_argument("--ref", default=None, help="git ref to base each run on")
     sched_add.add_argument("--network", action="append", default=[], metavar="DOMAIN")
     sched_add.add_argument("--env-allow", action="append", default=[])
+    sched_add.add_argument(
+        "--start-at",
+        default=None,
+        metavar="ISO",
+        help="first run, e.g. 2026-11-19T08:00:00Z (a naive time is UTC); "
+        "later runs keep this time of day (default: the next tick)",
+    )
+    sched_add.add_argument("--once", action="store_true", help="fire once, then disable")
     sched_add.set_defaults(func=cmd_schedule_add)
 
     sched_list = schedule_sub.add_parser("list", help="list schedules")

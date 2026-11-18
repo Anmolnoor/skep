@@ -172,6 +172,8 @@ skep tick [--worker-cmd COMMAND] [--auto-approve]
 
 - `schedule add` creates a recurring direct run or template-bound run.
 - `--every` accepts intervals such as `30s`, `5m`, `2h`, or `1d`.
+- `--start-at 2026-11-19T08:00:00Z` sets the first run (a naive time is UTC);
+  later runs keep that time of day. `--once` fires once, then disables.
 - `tick` dispatches all due schedules and is intended for cron or another
   scheduler.
 

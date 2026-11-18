@@ -5680,6 +5680,10 @@ def _execute_mutation(
                 repo=repo_path,
                 interval_seconds=interval,
                 chain=schedule_chain,
+                # v126-F11: its time, its once, and the chat whose taint its ticks carry
+                once=bool(args.get("once") or False),
+                start_at=None if args.get("start_at") is None else str(args["start_at"]),
+                chat_id=chat_id,
             )
         else:
             if args.get("instructions") is None:
@@ -5693,6 +5697,7 @@ def _execute_mutation(
                 once=bool(args.get("once") or False),
                 start_at=None if args.get("start_at") is None else str(args["start_at"]),
                 chain=schedule_chain,
+                chat_id=chat_id,  # v126-F11: its ticks carry this chat's taint
             )
         store.add_schedule(schedule)
         return actions.schedule_view(store, schedule)
