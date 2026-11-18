@@ -115,7 +115,11 @@ def text_body(message: email.message.Message) -> str:
             payload = part.get_payload(decode=True)
             if isinstance(payload, bytes):
                 charset = part.get_content_charset() or "utf-8"
-                return payload.decode(charset, errors="replace")[:_BODY_CAP]
+                try:
+                    text = payload.decode(charset, errors="replace")
+                except LookupError:  # a charset Python does not know: read it as utf-8
+                    text = payload.decode("utf-8", errors="replace")
+                return text[:_BODY_CAP]
     return "[no text/plain part in this message]"
 
 
@@ -257,16 +261,23 @@ def _one_line(value: object, cap: int = _DIGEST_HEADER_CAP) -> str:
 
 
 def _digest_block(raw: bytes) -> str:
-    message = email.message_from_bytes(raw, policy=email.policy.default)
-    body = text_body(message).strip()
-    if len(body) > _DIGEST_BODY_CAP:
-        body = body[:_DIGEST_BODY_CAP] + " [...]"
-    quoted = "\n".join("> " + line for line in body.splitlines())
-    return (
-        f"---\nFrom: {_one_line(message.get('From', '?'))}\n"
-        f"Subject: {_one_line(message.get('Subject', '(no subject)'))}\n"
-        f"Date: {_one_line(message.get('Date', '?'))}\n{quoted}"
-    )
+    try:
+        message = email.message_from_bytes(raw, policy=email.policy.default)
+        body = text_body(message).strip()
+        if len(body) > _DIGEST_BODY_CAP:
+            body = body[:_DIGEST_BODY_CAP] + " [...]"
+        quoted = "\n".join("> " + line for line in body.splitlines())
+        return (
+            f"---\nFrom: {_one_line(message.get('From', '?'))}\n"
+            f"Subject: {_one_line(message.get('Subject', '(no subject)'))}\n"
+            f"Date: {_one_line(message.get('Date', '?'))}\n{quoted}"
+        )
+    except Exception as exc:  # one bad message never kills the digest
+        reason = _one_line(f"{type(exc).__name__}: {exc}")
+        return (
+            "---\nFrom: (unreadable header)\nSubject: ?\nDate: ?\n"
+            f"> (this message could not be read: {reason})"
+        )
 
 
 def digest(count: int, mailbox: str = "INBOX") -> str:
@@ -339,6 +350,13 @@ def _digest_main(count: int) -> None:
         print(digest(count))
     except ValueError as exc:
         print(exc, file=sys.stderr)
+        sys.exit(2)
+    except (imaplib.IMAP4.error, OSError) as exc:
+        print(
+            f"mail pull failed: {_one_line(exc)} — check SKEP_MAIL_IMAP_HOST/PORT, "
+            "SKEP_MAIL_USER and ~/.skep/supervisor/mail-secret",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
 

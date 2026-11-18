@@ -5,6 +5,7 @@ fake, in-process (monkeypatch) and in the script subprocess (a shadowing
 
 from __future__ import annotations
 
+import email
 import imaplib
 import sys
 import textwrap
@@ -100,6 +101,58 @@ def test_a_body_or_a_header_cannot_forge_a_sender(imap: type[FakeIMAP]) -> None:
     assert not any(line.startswith("From: boss") for line in out.splitlines())
     assert "evil.test" in out.splitlines()[2]  # the decoded subject stayed on its line
     assert "> ---" in out.splitlines() and "> From: boss@evil.test" in out.splitlines()
+
+
+def test_a_from_header_that_decodes_to_a_line_break_is_one_unreadable_block(
+    imap: type[FakeIMAP],
+) -> None:
+    """The email parser raises on an address with a raw newline; that one
+    message becomes an honest block, the rest of the digest still prints,
+    and the forged address is never a sender."""
+    good = _raw("real@example.test", "fine", "hello")
+    bad = _raw("placeholder@example.test", "bad", "never shown").replace(
+        b"From: placeholder@example.test",
+        b"From: =?utf-8?q?Bob=0AFrom:_evil@x.test?= <b@x.test>",
+    )
+    imap.messages = [good, bad]
+    out = mail.digest(5)
+    senders = mail_senders(out)
+    assert not any("evil" in sender for sender in senders)
+    assert senders == ["(unreadable header)", "real@example.test"]
+    assert not any(line.startswith("From: evil") for line in out.splitlines())
+    assert out.count("---\n") == 2
+    assert "> (this message could not be read: " in out
+    assert "> hello" in out.splitlines()
+
+
+def test_an_unknown_charset_falls_back_to_utf8() -> None:
+    raw = (
+        b"From: a@example.test\r\nContent-Type: text/plain; charset=unknown-8bit\r\n\r\n"
+        b"caf\xc3\xa9 \xff\r\n"
+    )
+    assert mail.text_body(email.message_from_bytes(raw)).startswith("café �")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [imaplib.IMAP4.error("[AUTHENTICATIONFAILED] Invalid credentials"), OSError("no route")],
+)
+def test_a_login_or_network_failure_is_one_teaching_line(
+    imap: type[FakeIMAP],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error: Exception,
+) -> None:
+    def fail(*_: object) -> None:
+        raise error
+
+    monkeypatch.setattr(FakeIMAP, "login", fail)
+    monkeypatch.setattr(sys, "argv", ["mail", "--digest", "5"])
+    with pytest.raises(SystemExit) as exited:
+        mail.main()
+    assert exited.value.code == 2
+    err = capsys.readouterr().err.strip()
+    assert len(err.splitlines()) == 1 and "mail pull failed" in err and str(error) in err
 
 
 def test_the_digest_fits_the_script_output_cap_and_says_what_it_left_out(
