@@ -560,7 +560,8 @@ def first_party_schedule_seeds(
                 every="7d",
                 instructions=(
                     "Review this trusted local project for low-risk maintenance work. "
-                    "Start with the normal verification commands, inspect dependency drift "
+                    "Verify with the project's pinned check if it has one; otherwise make "
+                    "no change and report. Inspect dependency drift "
                     "and obvious test or tooling breakage, then make the smallest justified "
                     "fixes that stay within current project policy. Verify by re-running "
                     "the repo's own checks (its SKEP.md briefing names them when present); "

@@ -68,7 +68,8 @@ def _trusted_local_dev_pack() -> PolicyPack:
                 description="Low-risk maintenance for a trusted local project.",
                 instructions=(
                     "Review this trusted local project for low-risk maintenance work. "
-                    "Run the normal verification commands, inspect dependency drift, "
+                    "Verify with the project's pinned check if it has one; otherwise make "
+                    "no change and report. Inspect dependency drift, "
                     "and make the smallest justified fixes allowed by project policy. "
                     "Verify by re-running the repo's own checks (its SKEP.md briefing "
                     "names them when present); a change without a passing check does "

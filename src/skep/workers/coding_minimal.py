@@ -1061,6 +1061,8 @@ def _execute_llm_plan(
                     repair_context=repair_context,
                     memory=task.memory,
                     usage_tally=tokens,
+                    verify_command=task.verify_command,
+                    shell_allowlist=task.permissions.shell_allowlist,
                 )
         except LlmPlanError as exc:
             raw_content = exc.raw_content
@@ -1525,6 +1527,8 @@ def _execute_react(
             instructions=task.instructions,
             tool_manifest=capabilities.tool_manifest(),
             memory=task.memory,
+            verify_command=task.verify_command,
+            shell_allowlist=task.permissions.shell_allowlist,
         )
         changed_files = []
         commands = []

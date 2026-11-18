@@ -252,6 +252,8 @@ def request_edit_plan(
     repair_context: tuple[str, str] | None = None,
     memory: Sequence[MemoryContextEntry] = (),
     usage_tally: ProviderUsageTally | None = None,
+    verify_command: str = "",
+    shell_allowlist: Sequence[Sequence[str]] = (),
 ) -> LlmWorkerPlan:
     endpoint = _endpoint(provider.profile)
     _ensure_network_allowed(endpoint, network_allowlist, provider_hosts)
@@ -260,6 +262,8 @@ def request_edit_plan(
         instructions=instructions,
         tool_manifest=tool_manifest,
         memory=memory,
+        verify_command=verify_command,
+        shell_allowlist=shell_allowlist,
     )
     if repair_context is not None:
         invalid_output, error = repair_context
@@ -286,7 +290,7 @@ def request_edit_plan(
         _provider_chunks(provider, endpoint=endpoint, messages=messages, tally=usage_tally)
     )
     try:
-        return _parse_plan(content)
+        return _parse_plan(content, default_verify=pin_verify_argv(verify_command))
     except LlmPlanError as exc:
         exc.raw_content = content
         raise
@@ -414,12 +418,59 @@ def _memory_block(memory: Sequence[MemoryContextEntry]) -> str:
     )
 
 
+def pin_verify_argv(verify_command: str) -> tuple[str, ...]:
+    """v127-F1: the verify argv code injects when a plan forgot one — the
+    project's pin when it has one (G10 re-runs it, and it is the only argv on
+    the verify fast-path), else the read-only default listing."""
+    return tuple(shlex.split(verify_command)) if verify_command.strip() else DEFAULT_VERIFY_ARGV
+
+
+def _verify_rules(verify_command: str) -> str:
+    """v127-F1 (I2): with a pin the worker verifies with exactly what G10
+    re-runs; without one, the old stdlib + check.py advice stands."""
+    pin = verify_command.strip()
+    if pin:
+        return (
+            f"skep re-runs `{pin}` on your patch (G10). Verify with exactly `{pin}`. "
+            "Do not edit the files it executes unless the task asks. "
+        )
+    return (
+        "Only the system toolchain is available - do not assume pytest or any "
+        "third-party module is installed; verify with the standard library, and "
+        "prefer a small verify script file over a fragile python -c one-liner. "
+        "A scratch verify script uses ONE canonical name, check.py, and "
+        "overwrites any existing check.py - whether it stays in the repo is "
+        "the repository briefing's call. "
+    )
+
+
+def _shell_approval_rules(shell_allowlist: Sequence[Sequence[str]]) -> str:
+    """v127-F1 (I5/I9): the approval rules as the task resolved them, never
+    a hard-coded claim — ``ls``/``find`` stopped five scheduled runs because
+    the worker could not know they ask."""
+    prefixes = [shlex.join(prefix) for prefix in shell_allowlist if prefix]
+    if not prefixes:
+        return (
+            "Approval rules: no shell command runs without approval (other than the "
+            "pinned verify above, when there is one); anything else stops the run for "
+            "the operator. "
+        )
+    listed = ", ".join(f"`{prefix}`" for prefix in prefixes)
+    return (
+        f"Approval rules: these shell commands run without approval: {listed} "
+        "(as argv prefixes, plus the pinned verify above, when there is one); anything "
+        "else stops the run for the operator. "
+    )
+
+
 def _messages(
     *,
     workspace: Path,
     instructions: str,
     tool_manifest: Sequence[Mapping[str, str]] | None = None,
     memory: Sequence[MemoryContextEntry] = (),
+    verify_command: str = "",
+    shell_allowlist: Sequence[Sequence[str]] = (),
 ) -> list[dict[str, Any]]:
     tools = list(tool_manifest) if tool_manifest is not None else builtin_tool_manifest()
     return [
@@ -463,12 +514,11 @@ def _messages(
                 "allowlist. Verification must succeed within those walls: prefer running "
                 "the task's tests or an import check, and point any program that "
                 "persists data at a workspace path during verify. "
-                "Only the system toolchain is available - do not assume pytest or any "
-                "third-party module is installed; verify with the standard library, and "
-                "prefer a small verify script file over a fragile python -c one-liner. "
-                "A scratch verify script uses ONE canonical name, check.py, and "
-                "overwrites any existing check.py - whether it stays in the repo is "
-                "the repository briefing's call. "
+                f"{_verify_rules(verify_command)}"
+                f"{_shell_approval_rules(shell_allowlist)}"
+                # v127-F1: two facts the 11-13 runs had to guess at.
+                "Your worktree starts at the baseline commit; earlier runs' edits are "
+                "not here unless landed. Write the summary in the language of the task. "
                 "If the task message includes a 'Repository briefing' block (the repo's "
                 "SKEP.md), it is authoritative for this repo's conventions and for HOW "
                 "to verify here - follow it over your own defaults. "
@@ -615,9 +665,9 @@ def _git_files(workspace: Path) -> list[str]:
     return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
-def _parse_plan(text: str) -> LlmWorkerPlan:
+def _parse_plan(text: str, *, default_verify: tuple[str, ...] = ()) -> LlmWorkerPlan:
     payload = _json_object(text)
-    return plan_from_payload(payload)
+    return plan_from_payload(payload, default_verify=default_verify)
 
 
 def plan_to_payload(plan: LlmWorkerPlan) -> dict[str, Any]:
@@ -643,13 +693,16 @@ def plan_to_payload(plan: LlmWorkerPlan) -> dict[str, Any]:
     }
 
 
-def plan_from_payload(payload: Mapping[str, Any]) -> LlmWorkerPlan:
+def plan_from_payload(
+    payload: Mapping[str, Any], *, default_verify: tuple[str, ...] = ()
+) -> LlmWorkerPlan:
+    default_verify = default_verify or DEFAULT_VERIFY_ARGV
     summary = payload.get("summary")
     if not isinstance(summary, str) or not summary.strip():
         summary = "applied LLM edit plan"
     plan_type = payload.get("type")
     if plan_type == "llm_tool_plan" or "steps" in payload or "required_tools" in payload:
-        return _parse_tool_plan(dict(payload), summary.strip())
+        return _parse_tool_plan(dict(payload), summary.strip(), default_verify=default_verify)
     if plan_type not in {None, "llm_edit_plan"}:
         raise LlmPlanError(f"unsupported LLM plan type {plan_type!r}")
     files = payload.get("files")
@@ -663,11 +716,13 @@ def plan_from_payload(payload: Mapping[str, Any]) -> LlmWorkerPlan:
     # re-verification (G10) still governs what "verified" means. A verify
     # block that is present-but-malformed still errors (it earns a repair).
     if verify is None and planned_files:
-        verification = PlannedVerification(argv=DEFAULT_VERIFY_ARGV, expected_stdout=None)
+        verification = PlannedVerification(argv=default_verify, expected_stdout=None)
     elif not isinstance(verify, dict):
         raise LlmPlanError("LLM plan must include a verify object")
     else:
-        verification = _parse_verification(verify, default_when_empty=bool(planned_files))
+        verification = _parse_verification(
+            verify, default_argv=default_verify if planned_files else None
+        )
     return LlmEditPlan(summary=summary.strip(), files=planned_files, verification=verification)
 
 
@@ -693,7 +748,9 @@ def _json_object(text: str) -> dict[str, Any]:
     return payload
 
 
-def _parse_tool_plan(payload: dict[str, Any], summary: str) -> LlmToolPlan:
+def _parse_tool_plan(
+    payload: dict[str, Any], summary: str, *, default_verify: tuple[str, ...]
+) -> LlmToolPlan:
     raw_required = payload.get("required_tools", [])
     raw_steps = payload.get("steps")
     raw_verify = payload.get("verify", {})
@@ -706,7 +763,7 @@ def _parse_tool_plan(payload: dict[str, Any], summary: str) -> LlmToolPlan:
     required = tuple(_parse_tool_id(tool, "required_tools") for tool in raw_required)
     steps = tuple(_parse_tool_step(step) for step in raw_steps)
     _validate_tool_plan_semantics(steps)
-    steps = _ensure_verify_step(steps)
+    steps = _ensure_verify_step(steps, default_verify)
     expected_stdout = raw_verify.get("expected_stdout")
     if expected_stdout is not None and not isinstance(expected_stdout, str):
         raise LlmPlanError("verify.expected_stdout must be a string when provided")
@@ -788,12 +845,15 @@ def _validate_tool_plan_semantics(steps: tuple[PlannedToolStep, ...]) -> None:
                 )
 
 
-def _ensure_verify_step(steps: tuple[PlannedToolStep, ...]) -> tuple[PlannedToolStep, ...]:
+def _ensure_verify_step(
+    steps: tuple[PlannedToolStep, ...], default_verify: tuple[str, ...]
+) -> tuple[PlannedToolStep, ...]:
     """v59-F5: a plan that changes files but forgot its verify step gets the
     default read-only listing appended instead of failing the run. Small
     models drop the verify step constantly (field test 2026-07-18), and the
     supervisor's independent re-verification (G10) still governs what
-    "verified" means — nothing is delegated to the injected step."""
+    "verified" means — nothing is delegated to the injected step. v127-F1:
+    the injected argv is the project's pin when it has one."""
     changes_files = any(step.tool in {"filesystem.write", "filesystem.edit"} for step in steps)
     has_verify = any(
         step.tool == "shell.run" and shell_step_purpose(step.args) == "verify" for step in steps
@@ -803,7 +863,7 @@ def _ensure_verify_step(steps: tuple[PlannedToolStep, ...]) -> tuple[PlannedTool
             *steps,
             PlannedToolStep(
                 tool="shell.run",
-                args={"argv": list(DEFAULT_VERIFY_ARGV), "purpose": "verify"},
+                args={"argv": list(default_verify), "purpose": "verify"},
             ),
         )
     return steps
@@ -891,6 +951,8 @@ def react_conversation(
     instructions: str,
     tool_manifest: Sequence[Mapping[str, str]] | None = None,
     memory: Sequence[MemoryContextEntry] = (),
+    verify_command: str = "",
+    shell_allowlist: Sequence[Sequence[str]] = (),
 ) -> list[dict[str, Any]]:
     """The opening messages of a react run — the same walls, briefing, and
     toolchain teaches as the plan prompt, retargeted at one-action turns."""
@@ -899,6 +961,8 @@ def react_conversation(
         instructions=instructions,
         tool_manifest=tool_manifest,
         memory=memory,
+        verify_command=verify_command,
+        shell_allowlist=shell_allowlist,
     )
     # The shared rules ride verbatim from the plan prompt (everything from
     # "Available tools:" on) so the two protocols cannot drift apart.
@@ -913,9 +977,27 @@ def react_conversation(
         "the task is complete. A denied or failed action is information: read "
         "the error, correct course, and continue. Finish work you started — a "
         "done whose trace only read files is a failed run. "
+        + _read_tool_rules(tool_manifest)
         + base[0]["content"][shared_rules_start:]
     )
     return [{"role": "system", "content": system}, base[1]]
+
+
+_READ_TOOLS = ("repo.list_files", "repo.search", "filesystem.read")
+
+
+def _read_tool_rules(tool_manifest: Sequence[Mapping[str, str]] | None) -> str:
+    """v127-F1: look around with the read tools this run actually has —
+    capability reads, never the shell gate — instead of `ls`/`find`."""
+    manifest = tool_manifest if tool_manifest is not None else builtin_tool_manifest()
+    offered = {str(entry.get("id")) for entry in manifest}
+    tools = [tool for tool in _READ_TOOLS if tool in offered]
+    if not tools:
+        return ""
+    return (
+        f"To look around, use {', '.join(tools)}: they need no approval, while a shell "
+        "command such as ls or find follows the approval rules below. "
+    )
 
 
 def request_next_action(
@@ -969,7 +1051,7 @@ def _parse_react_reply(payload: dict[str, Any]) -> ReactAction | ReactDone:
 
 
 def _parse_verification(
-    raw: dict[str, Any], *, default_when_empty: bool = False
+    raw: dict[str, Any], *, default_argv: tuple[str, ...] | None = None
 ) -> PlannedVerification:
     argv = raw.get("argv")
     expected_stdout = raw.get("expected_stdout")
@@ -982,9 +1064,10 @@ def _parse_verification(
             argv = shlex.split(argv)
         except ValueError:
             argv = []
-    if default_when_empty and (argv is None or argv == []):
-        # v59-F5: missing/empty argv on a file-writing plan → default listing.
-        return PlannedVerification(argv=DEFAULT_VERIFY_ARGV, expected_stdout=None)
+    if default_argv is not None and (argv is None or argv == []):
+        # v59-F5: missing/empty argv on a file-writing plan → default listing
+        # (v127-F1: the project's pin when it has one).
+        return PlannedVerification(argv=default_argv, expected_stdout=None)
     if not isinstance(argv, list) or not argv:
         raise LlmPlanError("verify.argv must be a non-empty list")
     parsed = tuple(str(arg) for arg in argv)
