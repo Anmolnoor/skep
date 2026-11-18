@@ -342,10 +342,14 @@ def available() -> bool:
 # a worker whose caste calls the LLM reads ``llm-secret`` and the ACTIVE
 # profile's ``llm-secret-<id>`` (llm_plan.py) unless its run is relayed
 # (ADR 0062, ``provider_key_relay``): then the proxy holds the credential.
-# The store (supervisor.sqlite3) stays readable: that same worker reads its
-# provider settings from it. Checked when the profile is
+# The store (supervisor.sqlite3) stays readable for that same worker only: it
+# reads its provider settings from it. v127-F6: every other profile (external
+# engines, no-provider castes, relayed runs, re-verify, diagnose) has the store
+# and its WAL masked — it holds every chat and run instruction — and nobody
+# reads the backup dirs or a retired layout's store. Checked when the profile is
 # built, so a secret file created mid-run is not covered (relay-secret is
-# made before the list, ES-F264).
+# made before the list, ES-F264) — nor a store WAL/SHM that appears after it
+# (bwrap binds only paths that exist; serve normally holds them open).
 # W33: the engine logins (~/Library/Keychains, ~/.claude/.credentials.json,
 # ~/.codex/auth.json) are masked too — each external engine's config dir is
 # redirected per run and a dispatch without its auth env is refused (NO AUTH
@@ -461,6 +465,9 @@ def _refuse_home_inside(skep_home: Path, writable_roots: Iterable[Path]) -> None
             )
 
 
+_LIVE_STORE_FILES = ("supervisor.sqlite3", "supervisor.sqlite3-wal", "supervisor.sqlite3-shm")
+
+
 def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]:
     """The existing secret-floor paths to hide from a worker (resolved).
 
@@ -491,6 +498,20 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
             for p in supervisor.iterdir()
             if p.name not in readable and any(fnmatch(p.name, pat) for pat in SKEP_SECRET_NAMES)
         )
+    # v127-F6: the store, its backups and the retired layouts' stores
+    from ..status import _RETIRED_STORE_FILES
+
+    live_store = set(_LIVE_STORE_FILES) if worker_llm_key else set()
+    candidates += [skep_home / "backups", skep_home / "archive"]
+    candidates += [skep_home / rel for rel in _RETIRED_STORE_FILES]
+    for root in (skep_home, supervisor):
+        if root.is_dir():
+            candidates += sorted(
+                p
+                for p in root.iterdir()
+                if fnmatch(p.name, "supervisor*.sqlite3*")
+                and not (root == supervisor and p.name in live_store)
+            )
     # dict: the default ~/.codex/auth.json is already in HOME_SECRETS
     return list(dict.fromkeys(path.resolve() for path in candidates if _exists(path)))
 

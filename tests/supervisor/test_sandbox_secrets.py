@@ -135,6 +135,38 @@ def test_the_worker_reads_only_the_active_profiles_llm_key(
     assert sup / "llm-secret" not in masked
 
 
+def test_a_worker_that_reads_no_llm_key_cannot_read_the_store(
+    fake_homes: tuple[Path, Path],
+) -> None:
+    """v127-F6 (O10): the store holds every chat and every run's
+    instructions. Only the builtin LLM worker on a direct key reads it (its
+    provider settings, llm_plan.py); every other profile — external engines,
+    no-provider castes, relayed runs, re-verify, diagnose — has it masked
+    with its WAL files. Backups and retired stores are masked for all."""
+    _home, skep_home = fake_homes
+    sup = skep_home / "supervisor"
+    store_files = [sup / name for name in ("supervisor.sqlite3", "supervisor.sqlite3-wal")]
+    store_files += [sup / "supervisor-pre-graphite-2026-11-18.sqlite3", sup / "runs.db"]
+    store_files += [skep_home / name for name in ("supervisor.sqlite3", "runs.db", "skep.db")]
+    from skep.supervisor import RunStore
+
+    RunStore(store_files[0]).close()  # a real store: the LLM worker opens it
+    for path in store_files[1:]:
+        path.write_text("CANARY store\n", encoding="utf-8")
+    dirs = [skep_home / "backups", skep_home / "archive"]
+    for path in dirs:
+        path.mkdir()
+    (sup / "notes.txt").write_text("not a store\n", encoding="utf-8")
+    masked = set(sandbox.secret_paths(skep_home))
+    assert set(store_files) | set(dirs) <= masked
+    assert sup / "notes.txt" not in masked
+    # The builtin worker keeps the live store (and its WAL) only; no worker
+    # reads a backup or a retired store.
+    worker = set(sandbox.secret_paths(skep_home, worker_llm_key=True))
+    assert set(store_files) - worker == set(store_files[:2])
+    assert set(dirs) <= worker
+
+
 @pytest.mark.parametrize(
     ("worker_kind", "needs_key"),
     [("coding", True), ("document", True), ("script", False), ("audit", False)],
