@@ -14,12 +14,16 @@ Config (environment):
                        (0600, the llm-secret pattern — never SQLite, never an argument)
 
 Run: python -m skep.mcp_servers.mail
+     python -m skep.mcp_servers.mail --digest N   (v122-F4: print the newest N
+     messages for a script schedule, then exit — a read, same config)
 """
 
 from __future__ import annotations
 
+import argparse
 import email
 import email.message
+import email.policy
 import imaplib
 import json
 import os
@@ -31,6 +35,11 @@ from typing import Any
 
 _BODY_CAP = 8_000
 _LIST_CAP = 20
+# v122-F4: the digest fits a script schedule's output whole —
+# skep.supervisor.scheduler.SCRIPT_OUTPUT_CAP (a test pins the two equal).
+DIGEST_CAP = 4_000
+_DIGEST_BODY_CAP = 500
+_DIGEST_HEADER_CAP = 200
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -241,6 +250,66 @@ def self_test(_arguments: dict[str, Any]) -> dict[str, Any]:
     return {"content": f"self_test passed: compose + body extraction intact{note}"}
 
 
+def _one_line(value: object, cap: int = _DIGEST_HEADER_CAP) -> str:
+    """A header value on one line: str.split() also splits the separators
+    str.splitlines() breaks on, so no header can start a line of its own."""
+    return " ".join(str(value).split())[:cap]
+
+
+def _digest_block(raw: bytes) -> str:
+    message = email.message_from_bytes(raw, policy=email.policy.default)
+    body = text_body(message).strip()
+    if len(body) > _DIGEST_BODY_CAP:
+        body = body[:_DIGEST_BODY_CAP] + " [...]"
+    quoted = "\n".join("> " + line for line in body.splitlines())
+    return (
+        f"---\nFrom: {_one_line(message.get('From', '?'))}\n"
+        f"Subject: {_one_line(message.get('Subject', '(no subject)'))}\n"
+        f"Date: {_one_line(message.get('Date', '?'))}\n{quoted}"
+    )
+
+
+def digest(count: int, mailbox: str = "INBOX") -> str:
+    """The newest ``count`` messages as blocks the v121 injection alarm
+    parses: a ``---`` line, then ``From:``/``Subject:``/``Date:`` at column
+    0, then the plain body with every line prefixed ``> `` (a body cannot
+    forge a sender). Blocks that would pass DIGEST_CAP are dropped and
+    counted. A read: EXAMINE and BODY.PEEK, so no flag changes."""
+    password = resolve_password()
+    if password is None:
+        raise ValueError(
+            "no mail password: write ~/.skep/supervisor/mail-secret (0600) — a script "
+            "schedule finds it through HOME"
+        )
+    with imaplib.IMAP4_SSL(
+        os.environ["SKEP_MAIL_IMAP_HOST"],
+        int(os.environ.get("SKEP_MAIL_IMAP_PORT") or 993),
+    ) as imap:
+        imap.login(os.environ["SKEP_MAIL_USER"], password)
+        imap.select(mailbox, readonly=True)
+        _status, data = imap.uid("search", "ALL")
+        uids = list(reversed((data[0] or b"").split()))[: max(min(count, _LIST_CAP), 0)]
+        blocks: list[str] = []
+        for uid in uids:
+            _status, fetched = imap.uid("fetch", _decode_header_bytes(uid), "(BODY.PEEK[])")
+            raw = next((part[1] for part in fetched if isinstance(part, tuple)), b"")
+            blocks.append(_digest_block(raw if isinstance(raw, bytes) else b""))
+    if not blocks:
+        return f"{mailbox} is empty"
+    shown: list[str] = []
+    for index, block in enumerate(blocks):
+        trailer = (
+            f"\n(+{len(blocks) - index - 1} more not shown)" if index + 1 < len(blocks) else ""
+        )
+        if len("\n".join([*shown, block])) + len(trailer) > DIGEST_CAP:
+            break
+        shown.append(block)
+    out = "\n".join(shown)
+    if len(shown) < len(blocks):
+        out += f"\n(+{len(blocks) - len(shown)} more not shown)"
+    return out
+
+
 _HANDLERS = {
     "list_recent": list_recent,
     "read_message": read_message,
@@ -259,7 +328,27 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return handler(arguments)
 
 
+def _digest_main(count: int) -> None:
+    missing = [n for n in ("SKEP_MAIL_IMAP_HOST", "SKEP_MAIL_USER") if not os.environ.get(n)]
+    try:
+        if missing:
+            raise ValueError(
+                f"mail is not configured: set {', '.join(missing)} inline before the command — "
+                "a script schedule runs with a scrubbed env (docs/daily-driver-setup.md)"
+            )
+        print(digest(count))
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(2)
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(prog="python -m skep.mcp_servers.mail")
+    parser.add_argument("--digest", type=int, metavar="N", help="print the newest N and exit")
+    args = parser.parse_args()
+    if args.digest is not None:
+        _digest_main(args.digest)
+        return
     for line in sys.stdin:
         line = line.strip()
         if not line:
