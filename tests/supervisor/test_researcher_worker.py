@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from email.message import Message
 from pathlib import Path
+from typing import Any
 
 from skep.supervisor.contracts_io import mint_task, write_task_file
 from skep.worker_contract import Permissions
@@ -317,3 +319,52 @@ def test_researcher_caste_is_registered_in_the_default_config(tmp_path: Path) ->
     command = config.command_for("researcher")
     assert command != config.worker_command
     assert command[-2:] == ("-m", "skep.workers.researcher")
+
+
+def test_a_binary_source_is_listed_not_pasted() -> None:
+    """v122-F7: an arXiv PDF was pasted into report.md as U+FFFD blocks. A
+    body that decodes to mostly replacement characters / NULs is listed in
+    Sources as binary and left out of Content; an HTML source is pasted."""
+    pdf = (b"%PDF-1.7\n" + bytes(range(128, 256)) * 40 + b"\x00" * 200).decode(
+        "utf-8", errors="replace"
+    )
+    pages = {"https://arxiv.org/pdf/1": pdf, "https://docs.vllm.ai/": "vLLM serves models fast"}
+    result = run_research(
+        "q", sources=list(pages), allowlist=["arxiv.org", "docs.vllm.ai"], fetch=pages.__getitem__
+    )
+    assert "- [fetched] https://arxiv.org/pdf/1: (binary: unknown content type, not quoted)" in (
+        result.report_md
+    )
+    assert "�" not in result.report_md and "### https://arxiv.org/pdf/1" not in result.report_md
+    assert "### https://docs.vllm.ai/\n\nvLLM serves models fast" in result.report_md
+
+
+def test_a_non_text_content_type_is_named_in_sources(monkeypatch: Any) -> None:
+    """v122-F7: the real fetcher refuses a non-text response by content type,
+    so the report names what it could not quote."""
+    import io
+    import urllib.request
+
+    from skep.workers import researcher
+
+    class _Resp(io.BytesIO):
+        def __init__(self, body: bytes, content_type: str) -> None:
+            super().__init__(body)
+            self.headers = Message()
+            self.headers["Content-Type"] = content_type
+
+    responses = {
+        "https://arxiv.org/pdf/1": _Resp(b"%PDF-1.7 ...", "application/pdf"),
+        "https://api.github.com/x": _Resp(b'{"stars": 5}', "application/json; charset=utf-8"),
+        "https://docs.vllm.ai/": _Resp(b"<p>vLLM</p>", "text/html"),
+    }
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: responses[req.full_url])
+    result = run_research(
+        "q",
+        sources=list(responses),
+        allowlist=["arxiv.org", "api.github.com", "docs.vllm.ai"],
+        fetch=researcher._urllib_fetch,
+    )
+    assert "https://arxiv.org/pdf/1: (binary: application/pdf, not quoted)" in result.report_md
+    assert "%PDF" not in result.report_md
+    assert '{"stars": 5}' in result.report_md and "vLLM" in result.report_md
