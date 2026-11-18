@@ -80,6 +80,14 @@ export function loadApp() {
   const document = {
     createElement: tag => new FakeNode(tag),
     createTextNode: text => new FakeText(text),
+    createDocumentFragment: () => new FakeNode("#fragment"),
+    // A text-node walker (renderMarkdown's run-token linkify), in tree order.
+    createTreeWalker: root => {
+      const nodes = [];
+      const walk = n => { for (const c of n.children || []) { if (c.nodeType === 3) nodes.push(c); walk(c); } };
+      walk(root);
+      return { currentNode: null, nextNode() { this.currentNode = nodes.shift() ?? null; return Boolean(this.currentNode); } };
+    },
     getElementById: () => new FakeNode("div"),
     querySelector: () => null,
     querySelectorAll: () => [],
@@ -99,6 +107,7 @@ export function loadApp() {
     history: { replaceState() {} },
     addEventListener() {},
     console, setTimeout, clearTimeout, URL, URLSearchParams,
+    NodeFilter: { SHOW_TEXT: 4 },
   });
   context.window = context;
   // Imported modules first, as the browser evaluates them: app.js's top level

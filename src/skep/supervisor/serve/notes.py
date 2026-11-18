@@ -30,9 +30,17 @@ class ProposeFromItem(BaseModel):
     raw — and no durable memory exists until a human approves the proposal.
     """
 
-    memory_class: str
+    # v126-F10: omitted, the server classifies, as `skep memory propose` does
+    memory_class: str | None = None
     project_id: str | None = None
     rationale: str | None = None
+
+    def class_for(self, content: str) -> str:
+        from skep.workers.curator import classify_memory_class
+
+        return self.memory_class or classify_memory_class(
+            content, has_project=self.project_id is not None
+        )
 
 
 class TaskCreate(BaseModel):
@@ -75,7 +83,7 @@ def add_notes_tasks_routes(app: FastAPI, *, run_store: RunStore) -> None:
             raise HTTPException(status_code=404, detail=f"no note {note_id!r}")
         try:
             proposal = run_store.create_memory_proposal(
-                memory_class=body.memory_class,
+                memory_class=body.class_for(note.content),
                 content=note.content,
                 actor=API_ACTOR,
                 rationale=body.rationale,
@@ -127,7 +135,7 @@ def add_notes_tasks_routes(app: FastAPI, *, run_store: RunStore) -> None:
             raise HTTPException(status_code=404, detail=f"no task {task_id!r}")
         try:
             proposal = run_store.create_memory_proposal(
-                memory_class=body.memory_class,
+                memory_class=body.class_for(task.title),
                 content=task.title,
                 actor=API_ACTOR,
                 rationale=body.rationale,

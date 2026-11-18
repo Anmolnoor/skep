@@ -502,10 +502,14 @@ PATH lookup) and one argument per row — `acp`, `govern`, `--`, `npx`,
 skep memory list|search|show|forget
 skep memory proposals|propose|approve|reject
 skep memory approve-batch|reject-batch
+skep memory add "<fact>" --class C [--project P]
 ```
 
-Durable memory is proposal-gated: nothing becomes standing context without an
-approval, and `forget` is a soft delete that keeps the audit trail.
+Durable memory is proposal-gated: nothing the Queen files becomes standing
+context without an approval, and `forget` is a soft delete that keeps the audit
+trail. `memory add` is the operator's own one-step write (v126-F10): your typed
+fact becomes a durable item at once, recorded as actor `operator`; no model
+tool, channel or webhook reaches it.
 
 ## Channels and Providers
 

@@ -4,6 +4,7 @@
     skep memory search "query" [--project P]
     skep memory show <memory_id>
     skep memory forget <memory_id>
+    skep memory add "<fact>" --class C [--project P]   (v126-F10, operator-only)
     skep memory proposals [--state pending_review]
     skep memory propose --from-note <id> | --from-task <id> [--class C] [--project P]
     skep memory approve <proposal_id>
@@ -22,10 +23,11 @@ import argparse
 from pathlib import Path
 
 from ..workers.curator import classify_memory_class
-from .memory import MemoryError, MemoryProposal, MemorySource, taint_phrase
+from .memory import MEMORY_CLASSES, MemoryError, MemoryProposal, MemorySource, taint_phrase
 from .store import RunStore
 
 CLI_ACTOR = "cli-user"
+OPERATOR_ACTOR = "operator"  # v126-F10: the operator's own durable write
 
 
 def _open_store_or_empty(home: Path, *, readonly: bool = False) -> RunStore | None:
@@ -119,6 +121,29 @@ def cmd_memory_forget(args: argparse.Namespace) -> int:
     if not forgotten:
         return _err(f"no active memory item {args.memory_id!r}.")
     print(f"forgot memory {args.memory_id!r}")
+    return 0
+
+
+def cmd_memory_add(args: argparse.Namespace) -> int:
+    """v126-F10: the operator teaches a fact in one step. Gating the
+    operator's own typed words adds no safety, so this writes the durable
+    item directly, with the event an approval writes (memory_item created,
+    actor ``operator``). An operator-only face: the model keeps ``remember``
+    → proposal, and no tool, channel or webhook reaches this."""
+    from .cli_cmds import _err, build_config
+
+    content = args.content.strip()
+    if not content:
+        return _err("memory add needs the fact as text.")
+    store = RunStore(build_config(args.home, None).db_path)
+    try:
+        item = store.add_memory_item(
+            memory_class=args.memory_class, content=content, actor=OPERATOR_ACTOR,
+            project_id=args.project,
+        )  # fmt: skip
+    finally:
+        store.close()
+    print(f"remembered {item.memory_id} [{item.memory_class}] ({item.project_id or 'global'})")
     return 0
 
 
@@ -300,6 +325,20 @@ def register_memory_commands(
     forget_p = memory_sub.add_parser("forget", help="forget (soft-delete) a memory item")
     forget_p.add_argument("memory_id")
     forget_p.set_defaults(func=cmd_memory_forget)
+
+    add_p = memory_sub.add_parser(
+        "add", help="remember a fact now: a durable item, no proposal (operator only)"
+    )
+    add_p.add_argument("content", help="the fact, as you want it remembered")
+    add_p.add_argument(
+        "--class",
+        dest="memory_class",
+        required=True,
+        choices=sorted(MEMORY_CLASSES - {"observation"}),
+        help="what kind of memory this is",
+    )
+    add_p.add_argument("--project", default=None, help="scope to a project (default: global)")
+    add_p.set_defaults(func=cmd_memory_add)
 
     proposals_p = memory_sub.add_parser("proposals", help="list memory proposals")
     proposals_p.add_argument("--state", default=None, help="filter by state (e.g. pending_review)")

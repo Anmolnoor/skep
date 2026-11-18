@@ -4,7 +4,8 @@ Raw notes/tasks never become durable memory on their own. A proposal is filed
 by the Queen's ``remember`` tool, ``skep memory propose`` (from a note or task)
 or the notes API's propose route; a human decision (a card, the CLI or the
 memory page) promotes it into a durable ``memory_item`` with recorded evidence.
-The observation harvest (``observe.py``) writes expiring
+The operator may also write a durable item directly (``skep memory add``,
+v126-F10). The observation harvest (``observe.py``) writes expiring
 ``observation`` items without a proposal. This module is the pure domain model —
 the states, the classes, the records, and the legal state transitions. All
 persistence and audit recording lives in ``store.py``; all injection lives in

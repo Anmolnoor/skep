@@ -227,3 +227,16 @@ def test_chat_due_dates_are_carded_and_mutate_only_on_confirm(
     task = client.get("/api/tasks").json()["tasks"][0]
     assert task["due_at"] == "2000-01-01T00:00:00Z"
     assert task["due"] is True
+
+
+def test_v126_f10_propose_from_a_note_classifies_when_no_class_is_given(
+    config: SupervisorConfig,
+) -> None:
+    """The Notes page's Propose button sends no class; the server picks one
+    the way `skep memory propose` does."""
+    client = _client(config)
+    note_id = client.post("/api/notes", json={"content": "never push to main"}).json()["note_id"]
+    proposal = client.post(f"/api/notes/{note_id}/propose", json={})
+    assert proposal.status_code == 201
+    assert proposal.json()["memory_class"] == "not_to_do"
+    assert proposal.json()["state"] == "pending_review"

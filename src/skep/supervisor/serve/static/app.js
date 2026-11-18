@@ -1874,6 +1874,16 @@ async function viewNotesTasks(main) {
       try { await api("DELETE", `/api/notes/${note.note_id}`); route(); }
       catch (e) { flash("bad", e.message); }
     });
+    // v126-F10: the existing propose verb, one click from the note; the
+    // server picks the class and the proposal waits on the Memory page.
+    const propose = el("button", { class: "ghost" }, "Propose to memory");
+    propose.addEventListener("click", async () => {
+      propose.disabled = true;
+      try {
+        const p = await api("POST", `/api/notes/${note.note_id}/propose`, {});
+        flash("ok", `proposed as ${p.memory_class} — approve it on the Memory page`);
+      } catch (e) { flash("bad", e.message); propose.disabled = false; }
+    });
     notesList.append(el("div", { class: "item-card searchable" },
       body,
       content,
@@ -1883,7 +1893,7 @@ async function viewNotesTasks(main) {
         : null,
       el("div", { class: "row" },
         el("span", { class: "note grow" }, fmtTs(note.updated_at)),
-        edit, save, remove)));
+        propose, edit, save, remove)));
   }
   if (!notes.length) notesList.append(el("p", { class: "empty-state" }, "No notes yet."));
 
