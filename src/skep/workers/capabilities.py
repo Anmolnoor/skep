@@ -70,6 +70,7 @@ _CHILD_ENV_PASSTHROUGH: tuple[str, ...] = (
     "SKEP_HOME",
     "npm_config_cache",
     "TMPDIR",
+    "TMPPREFIX",  # v120-F1: zsh here-documents, else /tmp/zsh outside the wall
     "UV_CACHE_DIR",
 )
 
