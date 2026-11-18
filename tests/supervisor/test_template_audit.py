@@ -190,3 +190,58 @@ def test_a_conversation_draft_approval_writes_its_decision_row(tmp_path: Path) -
         assert decisions[0][3]["note"] == "looks right"
     finally:
         store.close()
+
+
+# v126-F12: a skill a schedule depends on cannot be deleted out from under it.
+
+
+def _bound_schedule(store: RunStore, repo: Path) -> None:
+    from skep.supervisor.scheduler import make_template_schedule
+
+    template = WorkflowTemplate(name="nightly-audit", instructions="audit it")
+    store.add_template(template)
+    store.add_schedule(
+        make_template_schedule(
+            name="every-night", template=template, params={}, repo=repo, interval_seconds=86400
+        )
+    )
+
+
+def test_every_delete_face_refuses_while_a_schedule_uses_the_skill(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from skep.supervisor.cli_cmds import build_config, cmd_template_remove
+    from skep.supervisor.serve.tools import execute_mutation
+
+    from .conftest import serve_client
+
+    home = tmp_path / "home"
+    config = build_config(home, None)
+    client = serve_client(config)
+    store = RunStore(config.db_path)
+    try:
+        _bound_schedule(store, config.home)
+        with pytest.raises(ValueError, match="used by schedule\\(s\\) every-night"):
+            execute_mutation(
+                "delete_skill",
+                {"name": "nightly-audit"},
+                store=store,
+                holder=None,  # type: ignore[arg-type]
+                runner=None,  # type: ignore[arg-type]
+                actor="tester",
+            )
+    finally:
+        store.close()
+    refused = client.delete("/api/templates/nightly-audit")
+    assert refused.status_code == 409 and "every-night" in refused.json()["detail"]
+    assert cmd_template_remove(argparse.Namespace(home=home, name="nightly-audit")) != 0
+    assert "every-night" in capsys.readouterr().err
+
+    store = RunStore(config.db_path)
+    try:
+        assert store.get_template("nightly-audit") is not None
+        store.remove_schedule("every-night")
+        assert store.template_in_use_error("nightly-audit") is None
+    finally:
+        store.close()
+    assert client.delete("/api/templates/nightly-audit").json() == {"removed": True}

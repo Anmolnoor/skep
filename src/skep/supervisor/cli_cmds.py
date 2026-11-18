@@ -2440,6 +2440,9 @@ def cmd_template_remove(args: argparse.Namespace) -> int:
         return _err(f"no template named {args.name!r}.")
     store = RunStore(config.db_path)
     try:
+        in_use = store.template_in_use_error(args.name)
+        if in_use:
+            return _err(in_use + ".", next_command="skep schedule list")
         removed = store.remove_template(args.name, actor="cli-user")
     finally:
         store.close()

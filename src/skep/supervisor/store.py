@@ -2653,6 +2653,25 @@ class RunStore:
         return cursor.rowcount > 0
 
     @_locked
+    def schedules_for_template(self, name: str) -> list[str]:
+        """v126-F12: the schedules bound to a template, which a delete would break."""
+        rows = self._conn.execute(
+            "SELECT name FROM schedules WHERE template_name = ? ORDER BY name", (name,)
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def template_in_use_error(self, name: str) -> str | None:
+        """v126-F12: the refusal every delete face gives while schedules depend
+        on the template, or None when nothing does."""
+        users = self.schedules_for_template(name)
+        if not users:
+            return None
+        return (
+            f"skill/template {name!r} is used by schedule(s) {', '.join(users)} — "
+            "remove those schedules or rebind them to another template first, then delete"
+        )
+
+    @_locked
     def rename_template(self, old_name: str, new_name: str) -> bool:
         if old_name == new_name:
             row = self._conn.execute(

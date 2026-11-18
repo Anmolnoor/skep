@@ -1066,8 +1066,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "delete_skill",
         "PROPOSE deleting one skill/template from the registry (requires "
-        "user confirmation — deletes destroy data). Schedules that reference "
-        "it will fail at their next tick, so check list_schedules first.",
+        "user confirmation — deletes destroy data). Refused while a schedule "
+        "uses it; the error names those schedules.",
         {"name": {"type": "string"}},
         ["name"],
     ),
@@ -4835,6 +4835,9 @@ def _execute_mutation(
     if name == "delete_skill":
         skill_name = str(args["name"])
         removed_template = store.get_template(skill_name)
+        in_use = store.template_in_use_error(skill_name)
+        if in_use:
+            raise ValueError(in_use)
         if not store.remove_template(skill_name, actor=actor):
             raise ValueError(f"no skill/template named {skill_name!r}")
         # v83-F12: deleting a seed leaves a tombstone — the startup sync

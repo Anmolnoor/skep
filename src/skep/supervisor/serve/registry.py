@@ -1327,6 +1327,9 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.delete("/api/templates/{name}")
     def delete_template(name: str) -> dict[str, bool]:
+        in_use = run_store.template_in_use_error(name)
+        if in_use:
+            raise HTTPException(status_code=409, detail=in_use)
         if not run_store.remove_template(name, actor="api-user"):
             raise HTTPException(status_code=404, detail=f"no template named {name!r}")
         return {"removed": True}
