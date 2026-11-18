@@ -19,7 +19,7 @@ const POLICY_COLUMNS = [["allow", "Allowed"], ["ask", "Asks first"], ["deny", "D
 // and Setup's lock step names the same three.
 const POLICY_TEMPLATES = ["assistant", "builder", "operator"];
 // Ledger rows that note something rather than decide it (policy_decisions).
-const POLICY_NOTE_SOURCES = ["observed", "forwarded", "delegated"];
+const POLICY_NOTE_SOURCES = ["observed", "forwarded", "delegated", "alarm"];
 // What a group grants, in words; a key not listed shows its own name.
 const GROUP_KEY_LABELS = {
   default_network: "Network hosts",
