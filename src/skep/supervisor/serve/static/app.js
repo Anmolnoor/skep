@@ -1,6 +1,6 @@
 /* skep — the face (v5 Stage F). No build step: ES modules + fetch + EventSource. */
 import { renderContextPanel } from "./room.js";
-import { viewProjects, viewSettings, viewSetup } from "./settings.js";
+import { viewSettings } from "./settings.js";
 import { installSidebar, refreshSidebar, renderThreads, viewInbox } from "./sidebar.js";
 import { viewPolicies } from "./policies.js";
 
@@ -945,7 +945,6 @@ let cleanup = null; // per-view teardown (closes EventSources, timers)
 
 const routes = [
   [/^#\/home$/, viewHome],
-  [/^#\/setup$/, viewSetup],
   [/^#\/chat$/, viewChat],
   [/^#\/chat\/([^/]+)$/, viewChat],
   [/^#\/inbox$/, viewInbox], // H1: everything waiting on you (sidebar.js)
@@ -958,17 +957,28 @@ const routes = [
   [/^#\/runs\/([^/]+)$/, viewRunDetail],
   [/^#\/approvals$/, viewApprovals],
   [/^#\/templates$/, viewTemplates],
-  [/^#\/projects$/, viewProjects],
   // v76-F3: projects stop being write-only — a detail page composes reads.
   [/^#\/projects\/([^/]+)$/, viewProjectDetail],
   [/^#\/schedules$/, viewSchedules],
   // Graphite round A: #/policies/<tab> opens that tab (policies.js).
   [/^#\/policies(?:\/([\w-]+))?$/, viewPolicies],
-  [/^#\/settings$/, viewSettings],
+  // graphite-nav: #/settings/<tab> opens that section (settings.js).
+  [/^#\/settings(?:\/([\w-]+))?$/, viewSettings],
 ];
+
+// graphite-nav: a page that became a section answers at its old hash too.
+// Rewritten in place (no history entry), before anything reads the hash.
+const HASH_ALIASES = {
+  "#/settings": "#/settings/models",
+  "#/projects": "#/settings/projects",
+  "#/setup": "#/settings/setup",
+  "#/policies": "#/policies/now",
+};
 
 async function route() {
   if (cleanup) { cleanup(); cleanup = null; }
+  // replaceState fires no hashchange, so this route() call is the only one.
+  if (HASH_ALIASES[location.hash]) history.replaceState(null, "", HASH_ALIASES[location.hash]);
   const hash = location.hash || "#/home";
   setShellActiveRoute(hash);
   updateShellChrome(hash);
@@ -1025,8 +1035,10 @@ async function setupStatus() {
   return api("GET", "/api/setup/status");
 }
 
+// graphite-nav: every Settings section, so Setup's links to Models and
+// Projects work before setup is complete. #/setup arrives normalised.
 function setupRouteAllowed(hash) {
-  return hash === "#/setup" || hash === "#/settings";
+  return /^#\/settings\/[\w-]+$/.test(hash);
 }
 
 function chatTimeLabel(ts) {

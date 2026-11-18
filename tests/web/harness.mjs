@@ -110,6 +110,7 @@ export function loadApp() {
   context.api = async (method, path) => { throw new Error(`unstubbed api ${method} ${path}`); };
   context.flashes = [];
   context.flash = (kind, text) => context.flashes.push([kind, text]);
+  context.routeImpl = context.route; // the real router, for tests that drive it
   context.route = () => {};
   return context;
 }

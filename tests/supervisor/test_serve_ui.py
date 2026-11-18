@@ -698,12 +698,15 @@ def test_projects_ui_exposes_pack_setup_flow() -> None:
     source = (STATIC_DIR / "app.js").read_text()
     index = (STATIC_DIR / "index.html").read_text()
 
-    assert "[/^#\\/projects$/, viewProjects]" in source
+    # graphite-nav: #/projects is normalised to the Projects section of
+    # Settings (route()); the settings route carries the section name.
+    assert '"#/projects": "#/settings/projects",' in source
+    assert "[/^#\\/settings(?:\\/([\\w-]+))?$/, viewSettings]" in source
     # Graphite round A: Projects is a Settings tab; its line says what a
     # project is, beside a repo, instead of a page header.
     page = (STATIC_DIR / "settings.js").read_text()
     assert "trusted packs, bindings, and the schedules they seed." in page
-    assert "export function viewProjects(main)" in page
+    assert "export async function viewSettings(main" in page
     assert 'api("GET", "/api/projects")' in source
     assert 'api("POST", "/api/projects/setup", body)' in source
     assert "project_id: projectId.value.trim()" in source
@@ -734,11 +737,14 @@ def test_setup_ui_route_and_guard() -> None:
     source = (STATIC_DIR / "app.js").read_text()
     index = (STATIC_DIR / "index.html").read_text()
 
-    assert "[/^#\\/setup$/, viewSetup]" in source
+    # graphite-nav: #/setup is normalised to the Setup section before the
+    # gate reads it, and the gate allows every Settings section (Setup links
+    # to Models and Projects), so a fresh home lands there without a loop.
+    assert '"#/setup": "#/settings/setup",' in source
     assert "async function setupStatus" in source
     assert 'api("GET", "/api/setup/status")' in source
     assert "function setupRouteAllowed" in source
-    assert 'hash === "#/setup" || hash === "#/settings"' in source
+    assert "return /^#\\/settings\\/[\\w-]+$/.test(hash);" in source
     assert 'location.hash = "#/setup"' in source
     assert "setup.missing" in source
     # Graphite round A: Setup is a Settings tab — no sidebar link of its own;
@@ -755,7 +761,7 @@ def test_setup_ui_orchestrates_first_run_endpoints() -> None:
     # one place: the connection and default model in Models (app.js's chat
     # model form), the workspace in Projects, the record on the Setup tab.
     page = (STATIC_DIR / "settings.js").read_text()
-    assert "export function viewSetup(main)" in page
+    assert "export async function viewSettings(main" in page
     chat_model = source[source.index("async function renderAssistantTab") :]
     chat_model = chat_model[: chat_model.index("// -- worker provider")]
     assert 'api("GET", "/api/llm/config")' in chat_model
