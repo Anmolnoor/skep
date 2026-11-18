@@ -1,7 +1,8 @@
 /* Graphite round A: the Policies page, by the question the operator asks —
    Now (what may agents do), Decisions (what did skep decide), Standing grants
-   (what runs without asking), Projects & groups (what is different here) and
-   Defaults (what applies when nothing else says). Reads and writes only the
+   (what runs without asking), Projects & groups (what is different here),
+   Defaults (what applies when nothing else says) and Tree (every setting and
+   which layer decides it, v124). Reads and writes only the
    routes that existed before it (I5); every confirmation the old page had
    stays where the write is.
 
@@ -100,6 +101,7 @@ export async function viewPolicies(main, tab) {
     grants: renderGrantsTab,
     groups: panel => renderGroupsTab(panel, groupEditHandoff),
     defaults: renderDefaultsTab,
+    tree: renderTreeTab,
   };
   const panel = el("div", { class: "tab-panel" });
   main.append(panel);
@@ -165,11 +167,12 @@ function floorBlock(floor) {
 }
 
 async function renderNowTab(panel) {
-  const [baseline, roles, scopes, { projects }] = await Promise.all([
+  const [baseline, roles, scopes, { projects }, { schedules }] = await Promise.all([
     api("GET", "/api/policy/baseline"),
     api("GET", "/api/roles"),
     scopeNames(),
     api("GET", "/api/projects"),
+    api("GET", "/api/schedules"),
   ]);
   const status = baselineStatus(baseline);
   const viewAs = el("select", { class: "policy-view-as", "aria-label": "view the policy as" },
@@ -201,36 +204,58 @@ async function renderNowTab(panel) {
       el("p", { class: "note" }, `New chats open as the ${roles.default} role.`)),
     el("div", { class: "row policy-view-row" }, el("label", {}, "View as"), viewAs),
     table,
-    testAnAction(scopes, projects));
+    testAnAction(scopes, projects, roles, schedules));
   await renderTable();
 }
 
 // The why box: one question, both answers (workers + the Queen), the rule named.
-function testAnAction(scopes, projects) {
+// v124-F3: it sends what the live engine applies — a role and a schedule's
+// delegation hop (schedule:<name>@<role>, v123) — and shows every rule why considered.
+function testAnAction(scopes, projects, roles, schedules, preset = {}) {
   const bound = projects.filter(projectRepoBinding);
   const project = el("select", { "aria-label": "project" },
     ...bound.map(p => el("option", { value: p.project_id }, p.name)));
   const scope = el("select", { "aria-label": "scope" }, ...scopes.map(s => el("option", { value: s }, s)));
+  const role = el("select", { "aria-label": "role" },
+    el("option", { value: "" }, "no role"),
+    ...(roles.roles || []).map(r => el("option", { value: r.name }, r.name)));
+  const delegating = schedules.filter(s => s.role);
+  const schedule = el("select", { "aria-label": "schedule" },
+    el("option", { value: "" }, "no schedule"),
+    ...delegating.map(s => el("option", { value: s.name }, `${s.name} (as ${s.role})`)));
   const action = el("input", { class: "mono", placeholder: "run", "aria-label": "action" });
   const value = el("input", { class: "mono", placeholder: "uv sync", "aria-label": "value" });
+  if (preset.project) project.value = preset.project;
+  if (preset.scope) scope.value = preset.scope;
+  if (preset.action) action.value = preset.action;
   const out = el("div", { class: "policy-test-out" });
   const check = el("button", { type: "button" }, "Check");
   check.addEventListener("click", async () => {
     const picked = bound.find(p => p.project_id === project.value);
     const binding = projectRepoBinding(picked);
     if (!binding) { flash("bad", "pick a project with a repo binding first"); return; }
+    const hop = delegating.find(s => s.name === schedule.value);
     try {
       const why = await api("GET", `/api/policy/why?repo=${encodeURIComponent(binding.value)}`
         + `&scope=${encodeURIComponent(scope.value)}`
         + `&action=${encodeURIComponent(action.value.trim())}`
-        + `&value=${encodeURIComponent(value.value.trim())}`);
-      out.replaceChildren(
+        + `&value=${encodeURIComponent(value.value.trim())}`
+        + (role.value ? `&role=${encodeURIComponent(role.value)}` : "")
+        + (hop ? `&delegation_chain=${encodeURIComponent(`schedule:${hop.name}@${hop.role}`)}` : ""));
+      const considered = why.run.considered || [];
+      out.replaceChildren(...[
         el("p", {}, `Workers in ${picked.name}: `, why.run.error
           ? `could not decide — ${why.run.error}`
           : [el("strong", {}, verdictWord(why.run.verdict)), " — decided by ", el("span", { class: "mono" }, why.run.decided_by)]),
         el("p", {}, "The Queen: ", el("strong", {}, verdictWord(why.operator.verdict)),
           " — decided by ", el("span", { class: "mono" }, why.operator.decided_by)),
-        why.baseline ? el("p", { class: "note" }, why.baseline) : null);
+        why.role ? el("p", {}, `Role: ${why.role.note}`) : null,
+        why.delegation ? el("p", {}, `Delegation: ${why.delegation.note}`) : null,
+        considered.length ? el("p", { class: "note" }, "Rules considered:") : null,
+        considered.length ? el("ul", { class: "policy-rules" },
+          considered.map(r => treeRule(r, r.layer, r.description))) : null,
+        why.baseline ? el("p", { class: "note" }, why.baseline) : null,
+      ].filter(Boolean));  // replaceChildren(null) would render the text "null"
     } catch (e) { out.replaceChildren(policyNote(e.message)); }
   });
   return policySection("Test an action", true,
@@ -241,7 +266,10 @@ function testAnAction(scopes, projects) {
       ? el("div", { class: "policy-test" },
         el("div", { class: "row" },
           policyField("project", project, null), policyField("scope", scope, null),
-          policyField("action", action, null), policyField("value", value, null, { grow: true }),
+          policyField("action", action, null), policyField("value", value, null, { grow: true })),
+        el("div", { class: "row" },
+          policyField("role", role, "The role a chat runs as; it only tightens."),
+          policyField("schedule", schedule, "Ask as this schedule's workers, held to its role."),
           el("div", { class: "field" }, el("label", {}, " "), check)),
         out)
       : policyNote("No project has a repo yet: the answer depends on a project's policy."));
@@ -840,4 +868,242 @@ async function renderDefaultsTab(panel) {
         el("div", { class: "row" }, switchBoxes.map(([s, box]) => el("label", { class: "note" }, box, " ", s))),
         el("div", { class: "actions" }, switchSave))),
     el("div", { class: "actions" }, save));
+}
+
+// ---- Tree: every setting, where it stands (v124-F2, DD-10) ----
+// Group Policy's shape over the reads that already exist (I5): the registry
+// names every key, the RSoP says which layer decided it in one project, the
+// baseline's explain rows carry rule descriptions. Read-only; each leaf links
+// to the editor that already changes it.
+
+const RULE_WORD = { allow: "allow", require_approval: "ask", ask: "ask", deny: "deny" };
+// What a roleless schedule runs as (v123: only worker schedules take a role).
+const SCHEDULE_NO_ROLE = {
+  script: "the script runs as you",
+  prompt: "the prompt runs in its chat's role",
+  note: "a note dispatches no worker",
+  digest: "a digest dispatches no worker",
+};
+
+// A setting's value in Group Policy words: true/false reads Enabled/Disabled.
+const settingWord = value => (typeof value === "boolean" ? (value ? "Enabled" : "Disabled") : plainValue(value));
+const layerName = (layer, name) => (name ? `${layer}:${name}` : layer);
+
+// Scopes → scope → action; Settings → area → key; Schedules → name.
+function treeModel(registry, schedules) {
+  const keys = registry.keys || [];
+  const branch = (key, label, children) => ({ key, label, children });
+  const byFirst = (list, of) => [...new Set(list.map(of))].sort().map(name => [name, list.filter(k => of(k) === name)]);
+  const scopeKeys = keys.filter(k => k.system === "scope_document");
+  const settingKeys = keys.filter(k => k.system !== "scope_document");
+  return [
+    branch("Scopes", "Scopes", byFirst(scopeKeys, k => k.name.split(".")[0]).map(([scope, list]) =>
+      branch(`scope:${scope}`, scope, list.map(k => ({ key: k.name, label: k.name.slice(scope.length + 1), registry: k }))))),
+    branch("Settings", "Settings", byFirst(settingKeys, k => k.system).map(([area, list]) =>
+      branch(`area:${area}`, area, list.map(k => ({ key: k.name, label: k.name, registry: k }))))),
+    branch("Schedules", "Schedules", schedules.map(s => ({ key: `schedule:${s.name}`, label: s.name, schedule: s }))),
+  ];
+}
+
+// The WAI-ARIA tree pattern: one tab stop (roving tabindex), arrows move,
+// Right opens / steps in, Left closes / steps out, Enter opens or selects.
+function buildTree(model, onSelect) {
+  const tree = el("ul", { class: "policy-tree", role: "tree", "aria-label": "policy settings" });
+  let current = null;
+  let selected = null;
+  const focusOn = item => {
+    current.node.setAttribute("tabindex", "-1");
+    current = item;
+    item.node.setAttribute("tabindex", "0");
+    item.node.focus();
+  };
+  const setOpen = (item, open) => {
+    item.open = open;
+    item.node.setAttribute("aria-expanded", String(open));
+    item.group.hidden = !open;
+  };
+  const activate = item => {
+    focusOn(item);
+    if (item.group) { setOpen(item, !item.open); return; }
+    if (selected) selected.node.setAttribute("aria-selected", "false");
+    selected = item;
+    item.node.setAttribute("aria-selected", "true");
+    onSelect(item.data);
+  };
+  const make = (data, parent) => {
+    const label = el("span", { class: "policy-tree-label" }, data.label);
+    const node = el("li", {
+      role: "treeitem", tabindex: "-1", "data-key": data.key,
+      class: data.children ? "policy-tree-branch" : "policy-tree-leaf",
+      "aria-expanded": data.children ? "false" : null,
+      "aria-selected": data.children ? null : "false",
+    }, label);
+    const item = { node, parent, data, open: false, kids: [] };
+    if (data.children) {
+      item.group = el("ul", { role: "group" });
+      item.group.hidden = true;
+      item.kids = data.children.map(child => make(child, item));
+      item.group.append(...item.kids.map(kid => kid.node));
+      node.append(item.group);
+    }
+    // A branch toggles from its label, so a click inside its open group never closes it.
+    (data.children ? label : node).addEventListener("click", e => { e.stopPropagation(); activate(item); });
+    return item;
+  };
+  const roots = model.map(data => make(data, null));
+  tree.append(...roots.map(item => item.node));
+  current = roots[0];
+  current.node.setAttribute("tabindex", "0");
+  const visible = () => {
+    const out = [];
+    const walk = items => { for (const item of items) { out.push(item); if (item.open) walk(item.kids); } };
+    walk(roots);
+    return out;
+  };
+  tree.addEventListener("keydown", e => {
+    const list = visible();
+    const at = list.indexOf(current);
+    const moves = {
+      ArrowDown: () => list[at + 1] && focusOn(list[at + 1]),
+      ArrowUp: () => at > 0 && focusOn(list[at - 1]),
+      ArrowRight: () => current.group && (current.open ? current.kids[0] && focusOn(current.kids[0]) : setOpen(current, true)),
+      ArrowLeft: () => (current.group && current.open ? setOpen(current, false) : current.parent && focusOn(current.parent)),
+      Enter: () => activate(current),
+    };
+    if (!moves[e.key]) return;
+    e.preventDefault();
+    moves[e.key]();
+  });
+  return tree;
+}
+
+const fact = (label, ...value) => el("p", {}, el("strong", {}, `${label}: `), ...value);
+const editLink = (href, text) => el("p", {}, el("a", { href }, text));
+
+// One rule: verdict, pattern, id, the layer that stated it, its explain text.
+function treeRule(rule, layer, description) {
+  return el("li", { class: "policy-tree-rule" },
+    el("strong", {}, RULE_WORD[rule.verdict] || rule.verdict), " ",
+    rule.pattern === "*" ? "anything" : el("code", { class: "mono" }, rule.pattern),
+    " · ", el("span", { class: "mono" }, rule.rule_id),
+    " · ", el("span", { class: "chip tone-info" }, layer || "compiled"),
+    el("span", { class: description ? "field-help" : "note" }, description || "No description"));
+}
+
+function scopeLeafDetail(key, ctx) {
+  const [scope, action] = [key.name.split(".")[0], key.name.slice(key.name.indexOf(".") + 1)];
+  const unmatched = key.default === "deny" ? "denies" : "asks";
+  if (ctx.rsop?.error) return [policyNote(`policy did not resolve: ${ctx.rsop.error}`)];
+  // A description is the baseline's, so it shows only on a rule the baseline stated (I8).
+  const baselineLayer = ctx.explain.name ? `template:${ctx.explain.name}` : null;
+  const explained = new Map((ctx.explain.rules || []).filter(r => r.description)
+    .map(r => [`${r.scope} ${r.rule_id}`, r.description]));
+  const rules = ctx.rsop
+    ? (ctx.rsop.scopes?.[scope] || []).filter(r => r.action === action)
+    : (ctx.explain.rules || []).filter(r => r.scope === scope && r.action === action);
+  const rows = rules.map(r => (ctx.rsop
+    ? treeRule(r, r.layer || r.source,
+      r.description || (r.layer && r.layer === baselineLayer ? explained.get(`${scope} ${r.rule_id}`) : null))
+    : treeRule(r, baselineLayer || "baseline", r.description)));
+  const slot = el("div");
+  const testThis = el("button", { type: "button" }, "Test this");
+  testThis.addEventListener("click", () => slot.replaceChildren(testAnAction(
+    ctx.scopes, ctx.projects, ctx.roles, ctx.schedules, { scope, action, project: ctx.project })));
+  const verdicts = ["allow", "ask", "deny"].filter(v => rules.some(r => RULE_WORD[r.verdict] === v));
+  return [
+    el("p", { class: "policy-tree-state" },
+      verdicts.length ? `Configured: ${verdicts.join(" / ")}` : `Not configured → ${unmatched}`),
+    verdicts.length ? policyNote(`anything no rule matches ${unmatched}`) : null,
+    rows.length ? el("ul", { class: "policy-rules" }, rows) : null,
+    editLink("#/setup", "The baseline changes in Setup →"),
+    el("div", { class: "actions" }, testThis),
+    slot,
+  ];
+}
+
+function keyLeafDetail(key, ctx) {
+  const entry = (ctx.rsop?.keys || []).find(k => k.key === key.name);
+  if (!entry) {
+    return [
+      fact("Default", settingWord(key.default)),
+      fact("May be set at", (key.layers || []).join(", ") || "no layer: built into skep"),
+      key.system === "run_policy" && !ctx.rsop ? policyNote("Pick a project to see which layer decides it.") : null,
+      key.system === "run_policy" ? editLink("#/policies/groups", "Change it in Projects & groups →") : null,
+    ];
+  }
+  // A template layer is the locked baseline, every setting enforced (ADR 0053 D4).
+  const decider = entry.source_layer === "template" ? "Enforced (locked baseline)"
+    : entry.source_layer ? layerName(entry.source_layer, entry.source_name) : null;
+  return [
+    el("p", { class: "policy-tree-state" }, entry.source_layer
+      ? settingWord(entry.value) : `Not configured → ${settingWord(entry.value ?? key.default)}`),
+    decider ? fact("Decided by", el("span", {
+      class: "chip tone-info policy-tree-decider", title: layerName(entry.source_layer, entry.source_name),
+    }, decider)) : null,
+    entry.overridden?.length ? fact("Overrode", entry.overridden.map(o => `${layerName(o.layer, o.name)} (${settingWord(o.value)})`).join(", ")) : null,
+    fact("May be set at", (key.layers || []).join(", ")),
+    editLink("#/policies/groups", "Change it in Projects & groups →"),
+  ];
+}
+
+function scheduleLeafDetail(s) {
+  return [
+    el("h3", { class: "mono" }, s.name),
+    fact("Kind", s.worker_kind),
+    s.role ? fact("Role", el("strong", {}, s.role))
+      : el("p", {}, `No role: ${SCHEDULE_NO_ROLE[s.worker_kind] || "its workers run under the project's policy alone"}`),
+    s.role_note ? el("p", { class: "field-help" }, s.role_note) : null,
+    fact("Network", plainValue(s.network)),
+    fact("Repo", el("span", { class: "mono" }, s.repo)),
+    editLink("#/schedules", "Manage it in Schedules →"),
+  ];
+}
+
+function treeLeafDetail(leaf, ctx) {
+  if (leaf.schedule) return scheduleLeafDetail(leaf.schedule);
+  const key = leaf.registry;
+  return [
+    el("h3", { class: "mono" }, key.name),
+    key.doc ? el("p", {}, key.doc) : null,
+    ...(key.system === "scope_document" ? scopeLeafDetail(key, ctx) : keyLeafDetail(key, ctx)),
+  ];
+}
+
+async function renderTreeTab(panel) {
+  const [registry, { schedules }, { projects }, explain, roles] = await Promise.all([
+    api("GET", "/api/policy/registry"),
+    api("GET", "/api/schedules"),
+    api("GET", "/api/projects"),
+    api("GET", "/api/policy/explain?subject=baseline"),
+    api("GET", "/api/roles"),
+  ]);
+  const scopes = [...new Set((registry.keys || []).filter(k => k.system === "scope_document").map(k => k.name.split(".")[0]))];
+  const bound = projects.filter(projectRepoBinding);
+  const picker = el("select", { class: "policy-tree-project", "aria-label": "project" },
+    el("option", { value: "" }, "no project: the locked baseline"),
+    ...bound.map(p => el("option", { value: p.project_id }, p.name)));
+  picker.value = bound[0]?.project_id || "";
+  const detail = el("div", { class: "policy-tree-detail" }, policyNote("Pick a setting on the left."));
+  let rsop = null;
+  let shown = null;
+  const show = leaf => {
+    shown = leaf;
+    const ctx = { rsop, explain, scopes, projects, roles, schedules, project: picker.value };
+    detail.replaceChildren(...treeLeafDetail(leaf, ctx).filter(Boolean));
+  };
+  const resolve = async () => {
+    const binding = projectRepoBinding(bound.find(p => p.project_id === picker.value));
+    rsop = binding
+      ? await api("GET", `/api/repos/${encodeURIComponent(binding.value)}/rsop`).catch(exc => ({ error: String(exc) }))
+      : null;
+    if (shown) show(shown);
+  };
+  picker.addEventListener("change", resolve);
+  await resolve();
+  panel.append(
+    el("p", { class: "field-help" },
+      "Every setting skep has, as a tree: what it does, its state in the picked project and "
+      + "which layer decided it. Read-only; each setting links to where it changes."),
+    policyField("project", picker, "The answer is per project; none = the locked baseline alone."),
+    el("div", { class: "policy-tree-layout" }, buildTree(treeModel(registry, schedules), show), detail));
 }

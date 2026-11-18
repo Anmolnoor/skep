@@ -1601,6 +1601,24 @@ main.chat-view { padding: 0; max-width: none; }
 .policy-effective td:first-child { white-space: nowrap; }
 .policy-effective .policy-value { min-width: 12em; max-width: 24em; overflow-wrap: break-word; }
 .policy-effective .editor-ctl { display: flex; flex-direction: column; gap: var(--space-1); min-width: 180px; }
+/* v124-F2: the policy tree — the tree beside the picked leaf; stacked when narrow. */
+.policy-tree-layout { display: grid; grid-template-columns: minmax(200px, 1fr) 2fr; gap: var(--space-4); align-items: start; }
+.policy-tree, .policy-tree ul { list-style: none; margin: 0; padding: 0; }
+.policy-tree ul { padding-left: var(--space-4); }
+.policy-tree-label { display: block; padding: 2px var(--space-2); border-radius: var(--radius-sm); cursor: pointer; overflow-wrap: anywhere; }
+.policy-tree-label:hover { background: var(--panel-3); }
+.policy-tree-branch > .policy-tree-label::before { content: "▸ "; color: var(--muted); }
+.policy-tree-branch[aria-expanded="true"] > .policy-tree-label::before { content: "▾ "; }
+.policy-tree-leaf[aria-selected="true"] > .policy-tree-label { background: var(--chip-fill); color: var(--text-strong); }
+.policy-tree-detail {
+  border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4); min-width: 0; overflow-wrap: break-word;
+}
+.policy-tree-detail h3 { margin: 0 0 var(--space-2); }
+.policy-tree-detail p { margin: var(--space-1) 0; }
+.policy-tree-state { font-weight: 600; }
+.policy-tree-rule { display: flex; flex-wrap: wrap; gap: var(--space-1); align-items: baseline; }
+.policy-tree-rule .field-help, .policy-tree-rule .note { flex-basis: 100%; margin: 0; }
 .policy-effective .row { flex-wrap: wrap; gap: var(--space-1); }
 .policy-group-grants {
   display: grid; grid-template-columns: max-content minmax(0, 1fr);
@@ -1674,6 +1692,7 @@ main.chat-view { padding: 0; max-width: none; }
    ========================================================================== */
 
 @media (max-width: 720px) {
+  .policy-tree-layout { grid-template-columns: 1fr; }
   .shell { flex-direction: column; }
   .sidebar {
     width: 100%; height: auto; position: static; flex-direction: row; align-items: center;

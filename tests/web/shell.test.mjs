@@ -57,17 +57,18 @@ function shellApp(hash = "#/home", setup = { complete: true, missing: [] }) {
 const lit = pages => pages.filter(link => link.classList.contains("active")).map(link => link.textContent);
 const surfaceOf = nodes => nodes.shell.dataset.surface;
 
-// The seventeen pages of the surface: route → the item it lights.
+// The eighteen pages of the surface: route → the item it lights.
 const SURFACE = [
   ["#/runs", "Runs"], ["#/approvals", "Approvals"], ["#/assign", "New run"], ["#/schedules", "Schedules"],
   ["#/templates", "Templates & Skills"], ["#/notes", "Notes & Tasks"], ["#/memory", "Memory"],
   ["#/policies/now", "Now"], ["#/policies/decisions", "Decisions"], ["#/policies/grants", "Standing grants"],
   ["#/policies/groups", "Projects & groups"], ["#/policies/defaults", "Defaults"],
+  ["#/policies/tree", "Tree"],
   ["#/settings/models", "Models"], ["#/settings/workers", "Workers"], ["#/settings/projects", "Projects"],
   ["#/settings/channels", "Channels"], ["#/settings/setup", "Setup"],
 ];
 
-test("the surface lists seventeen pages in four captioned groups, in order", () => {
+test("the surface lists eighteen pages in four captioned groups, in order", () => {
   const { pages } = shellApp();
   assert.deepEqual(pages.map(link => link.textContent), SURFACE.map(([, label]) => label));
   assert.deepEqual(pages.map(link => link.getAttribute("href")), SURFACE.map(([hash]) => hash));
@@ -146,6 +147,7 @@ test("route(): every other old hash lands where it did, unrewritten; an unknown 
     ["#/approvals", ["viewApprovals"]], ["#/assign", ["viewAssign"]], ["#/assign?template=x", ["viewAssign"]],
     ["#/schedules", ["viewSchedules"]], ["#/templates", ["viewTemplates"]], ["#/notes", ["viewNotesTasks"]],
     ["#/memory", ["viewMemory"]], ["#/policies/grants", ["viewPolicies", "grants"]],
+    ["#/policies/tree", ["viewPolicies", "tree"]],
     ["#/settings/workers", ["viewSettings", "workers"]], ["#/projects/acme", ["viewProjectDetail", "acme"]],
   ];
   for (const [hash, call] of cases) {
