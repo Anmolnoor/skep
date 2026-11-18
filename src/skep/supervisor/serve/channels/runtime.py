@@ -162,11 +162,14 @@ def send_telegram_markdown(
 
     v122-F6: a long text goes in ordered chunks (split before escaping); the
     keyboard rides only the last, so a card keeps its buttons under its
-    text. False when any chunk failed."""
-    chunks = _telegram_chunks(text)
+    text. False when any chunk failed; after a failure the rest go without
+    the keyboard (a card with a gap must not carry live Confirm/Deny).
+    Whitespace-only chunks are dropped, so the keyboard never rides an
+    empty message."""
+    chunks = [chunk for chunk in _telegram_chunks(text) if chunk.strip()] or [text]
     delivered = True
     for index, chunk in enumerate(chunks):
-        markup = reply_markup if index == len(chunks) - 1 else None
+        markup = reply_markup if delivered and index == len(chunks) - 1 else None
         delivered = _send_telegram_chunk(send, token, chat_id, chunk, markup) and delivered
     return delivered
 

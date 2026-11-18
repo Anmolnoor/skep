@@ -58,3 +58,30 @@ def test_one_failed_chunk_reports_failure_and_the_rest_still_go() -> None:
 
     assert not send_telegram_markdown(send, "tok", "7", "a" * 3500 + "b" * 3500 + "c" * 100)
     assert sent == ["a", "b", "b", "c"]
+
+
+def test_a_trailing_newline_never_sends_an_empty_last_chunk_with_the_keyboard() -> None:
+    sent, send = _recorder()
+    assert send_telegram_markdown(send, "tok", "7", "y" * 3500 + "\n", KEYBOARD)
+    assert len(sent) == 1 and sent[0][0].strip() and sent[0][1] == KEYBOARD
+    sent, send = _recorder()
+    # a run of spaces with no break in it is hard-cut into a whitespace-only chunk
+    assert send_telegram_markdown(
+        send, "tok", "7", "a" * 3400 + "\n" + " " * 3600 + "\nb", KEYBOARD
+    )
+    assert [text.strip()[:1] for text, _, _ in sent] == ["a", "b"]
+    assert sent[-1][1] == KEYBOARD
+
+
+def test_after_a_failed_chunk_the_rest_go_without_the_keyboard() -> None:
+    """A card with a gap must not carry live Confirm/Deny."""
+    markups: list[Any] = []
+
+    def send(
+        token: str, chat_id: str, text: str, reply_markup: Any = None, parse_mode: Any = None
+    ) -> bool:
+        markups.append(reply_markup)
+        return not text.startswith("a")  # the first chunk fails both ways
+
+    assert not send_telegram_markdown(send, "tok", "7", "a" * 3500 + "b" * 100, KEYBOARD)
+    assert markups == [None, None, None]  # a fails twice; b goes once, bare
