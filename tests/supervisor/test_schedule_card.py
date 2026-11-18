@@ -244,3 +244,37 @@ def test_replacing_a_schedule_says_when_its_role_changes(live: Any) -> None:
     facts = schedule_facts(note, env.store)
     assert facts is not None
     assert facts["replaces"] == "your coding schedule 'ops' (was role operator → no role)"
+
+
+def test_a_confirm_after_the_chat_role_changed_refuses(live: Any) -> None:
+    """v123-F2 review (I8): the card shows the role at proposal; a confirm
+    after the chat's role changed would store another — it refuses, saying
+    so, and nothing is stored. An unchanged role confirms as shown."""
+    from .conftest import git
+
+    env = live("builder")
+    git(env.paths["repo"], "init", "-q", "-b", "main")
+    chat = env.chat(role="builder")
+    repo = str(env.paths["repo"])
+    for name in ("moved", "kept"):
+        env.ollama.script_tool_call(
+            "propose_schedule", {"name": name, "repo": repo, "every": "1d", "instructions": "x"}
+        )
+        (card,) = cards(env.turn(chat, f"schedule {name}"))
+        if name == "moved":
+            env.store.set_chat_role(chat, "operator")  # "kept" is proposed as operator
+        env.ollama.script_reply("ok")
+        env.verdict(chat, card["action_id"], confirm=True, actor="chat-user", keep="once")
+        resolved = env.store.get_chat_action(card["action_id"])
+        assert resolved is not None and resolved.result is not None
+        if name == "moved":
+            assert resolved.result["ok"] is False
+            assert resolved.result["error"] == (
+                "this chat's role changed since the card was shown (builder → operator); "
+                "propose the schedule again"
+            )
+            assert env.store.get_schedule("moved") is None
+        else:
+            assert resolved.result["ok"] is True, resolved.result
+            stored = env.store.get_schedule("kept")
+            assert stored is not None and stored.role == "operator"
