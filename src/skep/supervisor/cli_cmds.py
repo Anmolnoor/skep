@@ -2241,9 +2241,11 @@ def cmd_tick(args: argparse.Namespace) -> int:
     if not config.db_path.is_file():
         print("no schedules to run")
         return 0
+    from .serve.settings import ConfigHolder
+
     store = RunStore(config.db_path)
     try:
-        results = run_due(store=store, config=config)
+        results = run_due(store=store, config=config, holder=ConfigHolder(config, store))
     finally:
         store.close()
     if not results:

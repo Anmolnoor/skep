@@ -347,6 +347,7 @@ class Ticker(threading.Thread):
                 config=self._holder.current,
                 notify=self._notify,
                 prompt_turn=self._prompt_turn(),
+                holder=self._holder,
             )
         except Exception:  # one broken tick must never kill the daemon
             logger.exception("scheduler tick failed")

@@ -673,8 +673,10 @@ def test_deny_executes_nothing_and_tells_the_model(
 def test_confirmed_propose_schedule_creates_a_ticking_schedule(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    """v41-F1: the chat face of POST /api/schedules — card first, row on confirm."""
-    client, chat_id = chat_client(config, ollama)
+    """v41-F1: the chat face of POST /api/schedules — card first, row on confirm.
+    v123-F1: a worker schedule runs in the chat's role (an assistant chat's
+    refuses: it denies workspace writes), so this chat is a builder."""
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call(
         "propose_schedule",
         {"name": "nightly-lint", "repo": str(repo), "every": "1d", "instructions": "run lint"},
@@ -695,6 +697,7 @@ def test_confirmed_propose_schedule_creates_a_ticking_schedule(
     assert schedules[0]["interval_seconds"] == 86400
     assert schedules[0]["enabled"] is True
     assert schedules[0]["instructions"] == "run lint"
+    assert schedules[0]["role"] == "builder"
     action = client.get(f"/api/chats/{chat_id}").json()["actions"][0]
     assert action["status"] == "confirmed"
     assert action["result"]["ok"] is True

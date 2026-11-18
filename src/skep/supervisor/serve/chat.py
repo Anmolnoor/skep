@@ -108,6 +108,7 @@ from .tools import (
     log_denied_dispatch_asks,
     mutation_execution_decision,
     policy_write_preview,
+    schedule_role_line,
     search_web_verdict,
     store_write_taint_ask,
     taint_decision,
@@ -2639,7 +2640,19 @@ class ChatEngine:
                         # W39: the decision and a policy write's replay ride
                         # the record, so a reloaded card is the live one
                         card={
-                            **(recorded_card(name, args, high, self.store, manifest) or {}),
+                            **(
+                                recorded_card(
+                                    name,
+                                    args,
+                                    high,
+                                    self.store,
+                                    manifest,
+                                    schedule_role_line(self.store, self.holder, args, chat_id)
+                                    if name == "propose_schedule"
+                                    else None,
+                                )
+                                or {}
+                            ),
                             **({"decision": asdict(decision)} if decision is not None else {}),
                             **({"checked": checked} if checked else {}),
                             **_resolution(name, args),

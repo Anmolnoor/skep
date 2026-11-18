@@ -2827,6 +2827,40 @@ def _queen_chain(
     return [f"queen@{role.name}"] if role else []
 
 
+def _schedule_role(
+    store: RunStore, holder: ConfigHolder, chat_id: str | None, actor: str, args: dict[str, Any]
+) -> str | None:
+    """v123-F1 (decision 8): a worker schedule the model proposes runs in the
+    chat's role, as its dispatches do (``_queen_chain``); the chat cannot name
+    another. A wider or other role is the operator's, from the CLI or REST.
+    An operator-typed /schedule is the human's own act: no role."""
+    if actor == "operator-command":
+        return None
+    role = _chat_role(store, holder, chat_id)
+    name = None if role is None else role.name
+    if args.get("role") is not None and str(args["role"]) != name:
+        raise ValueError(
+            f"a schedule proposed here runs in this chat's role {name or '(none)'}; another "
+            "role is set from the CLI (skep schedule add --role) or REST"
+        )
+    return name
+
+
+def schedule_role_line(
+    store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
+) -> str | None:
+    """v123-F1: the card's line for a worker schedule this chat proposes —
+    the role it will run as and what that narrows. None for a repo-less kind
+    or no role; a role the confirm refuses gets no line (the refusal says it)."""
+    if args.get("caste") in actions.ROLELESS_SCHEDULE_KINDS:
+        return None
+    try:
+        name = _schedule_role(store, holder, chat_id, "chat-user", args)
+    except ValueError:
+        return None
+    return None if name is None else f"runs as role {name}: {actions.SCHEDULE_ROLE_NOTE}"
+
+
 def _human_answers(store: RunStore, chat_id: str | None) -> bool:
     """ADR 0059 D3 (V7): can a human answer the gate cards of a run this
     chat dispatches? Not with no chat, nor in a messenger chat whose channel
@@ -5660,7 +5694,10 @@ def _execute_mutation(
                 once=bool(args.get("once") or False),
                 start_at=None if args.get("start_at") is None else str(args["start_at"]),
                 chain=schedule_chain,
+                # v123-F1: repo-less kinds store none; one named here refuses
+                role=None if args.get("role") is None else str(args["role"]),
             )
+            actions.check_schedule_role(holder, store, schedule)
             store.add_schedule(schedule)
             return actions.schedule_view(store, schedule)
         if args.get("repo") is None:
@@ -5668,6 +5705,7 @@ def _execute_mutation(
         repo_path = resolve_repo_arg(str(args["repo"]), repos_root(holder), store)
         if not (repo_path / ".git").exists():
             raise ValueError(f"{repo_path} is not a git repository")
+        schedule_role = _schedule_role(store, holder, chat_id, actor, args)
         if args.get("template") is not None:
             schedule_template = store.get_template(str(args["template"]))
             if schedule_template is None:
@@ -5680,6 +5718,7 @@ def _execute_mutation(
                 repo=repo_path,
                 interval_seconds=interval,
                 chain=schedule_chain,
+                role=schedule_role,
             )
         else:
             if args.get("instructions") is None:
@@ -5693,7 +5732,9 @@ def _execute_mutation(
                 once=bool(args.get("once") or False),
                 start_at=None if args.get("start_at") is None else str(args["start_at"]),
                 chain=schedule_chain,
+                role=schedule_role,
             )
+        actions.check_schedule_role(holder, store, schedule)
         store.add_schedule(schedule)
         return actions.schedule_view(store, schedule)
     if name == "delete_schedule":

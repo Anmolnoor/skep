@@ -149,3 +149,20 @@ def test_the_model_proposed_card_records_the_facts_and_a_resolved_card_shows_the
     assert resolved is not None
     shown = env.engine._card(chat, resolved.tool, resolved.args, action=resolved)
     assert shown["schedule"] == pending.card["schedule"]  # as recorded, not recomputed
+
+
+def test_a_worker_schedule_card_says_its_role_and_what_the_role_narrows(live: Any) -> None:
+    """v123-F1: a worker schedule a builder chat proposes runs as builder;
+    the card says so, and exactly what a role narrows (and that asks drop)."""
+    from skep.supervisor.serve.actions import SCHEDULE_ROLE_NOTE
+
+    env = live("builder")
+    chat = env.chat(role="builder")
+    proposal = {"name": "n", "repo": str(env.paths["repo"]), "every": "1d", "instructions": "x"}
+    env.ollama.script_tool_call("propose_schedule", proposal)
+    (card,) = cards(env.turn(chat, "tidy nightly"))
+    runs = f"runs as role builder: {SCHEDULE_ROLE_NOTE}"
+    assert card["card"]["schedule"]["runs"] == runs
+    (pending,) = env.store.pending_chat_actions(chat)
+    assert pending.card is not None and pending.card["schedule"]["runs"] == runs
+    assert "asks are dropped on a schedule" in runs and "not env_allowlist" in runs

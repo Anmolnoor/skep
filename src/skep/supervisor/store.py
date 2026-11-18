@@ -238,7 +238,9 @@ CREATE TABLE IF NOT EXISTS schedules (
     once INTEGER NOT NULL DEFAULT 0,
     -- v53-F5: cron context chaining — B reads A's last stored output.
     chain TEXT,
-    last_output TEXT
+    last_output TEXT,
+    -- v123-F1: a worker schedule's role, held to as a delegator; NULL = none.
+    role TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules (enabled, next_run_at);
 CREATE TABLE IF NOT EXISTS schedule_health (
@@ -849,6 +851,9 @@ class ScheduleRecord:
     chat_id: str | None = None
     # v44-F2: one-shot — the tick disables the schedule after its first fire.
     once: bool = False
+    # v123-F1: a worker schedule's role — its workers are held to it as to a
+    # delegator (``schedule:<name>@<role>``); None runs as before.
+    role: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1073,6 +1078,9 @@ class RunStore:
             # v53-F5: cron context chaining — B reads A's last output.
             self._conn.execute("ALTER TABLE schedules ADD COLUMN chain TEXT")
             self._conn.execute("ALTER TABLE schedules ADD COLUMN last_output TEXT")
+        if "role" not in schedule_columns:
+            # v123-F1: a worker schedule's role; old rows read NULL (no role).
+            self._conn.execute("ALTER TABLE schedules ADD COLUMN role TEXT")
         channel_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(channel_configs)")
         }
@@ -2297,12 +2305,13 @@ class RunStore:
             once=bool(row[17]),
             chain=None if row[18] is None else str(row[18]),
             last_output=None if row[19] is None else str(row[19]),
+            role=None if row[20] is None else str(row[20]),
         )
 
     _SCHEDULE_COLS = (
         "name, repo, ref, worker_kind, instructions, network_json, env_allow_json,"
         " interval_seconds, enabled, created_at, last_run_at, next_run_at, last_task_id,"
-        " last_state, template_name, params_json, chat_id, once, chain, last_output"
+        " last_state, template_name, params_json, chat_id, once, chain, last_output, role"
     )
 
     @_locked
@@ -2310,7 +2319,7 @@ class RunStore:
         """Insert or replace a schedule by name."""
         self._conn.execute(
             f"INSERT OR REPLACE INTO schedules ({self._SCHEDULE_COLS})"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 schedule.name,
                 schedule.repo,
@@ -2332,6 +2341,7 @@ class RunStore:
                 1 if schedule.once else 0,
                 schedule.chain,
                 schedule.last_output,
+                schedule.role,
             ),
         )
         self._conn.commit()

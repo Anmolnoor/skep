@@ -2616,7 +2616,43 @@ def schedule_view(store: RunStore, schedule: Any) -> dict[str, Any]:
     project_context = project_context_for_schedule(store, schedule)
     if project_context is not None:
         row["project_context"] = project_context
+    if schedule.role is not None:
+        row["role_note"] = SCHEDULE_ROLE_NOTE
     return row
+
+
+# v123-F1 (DD-7): what a schedule's role narrows and what it does not, in the
+# words every card and view uses (I8).
+SCHEDULE_ROLE_NOTE = (
+    "the role narrows shell prefixes, network hosts and workspace writes, not "
+    "env_allowlist, execution mode, auto-apply or the budget; asks are dropped on a "
+    "schedule: only what the role allows is kept"
+)
+# The kinds that dispatch no worker, so no role has anything to narrow.
+ROLELESS_SCHEDULE_KINDS = ("script", "prompt", "note", "digest")
+
+
+def check_schedule_role(holder: ConfigHolder, store: RunStore, schedule: Any) -> None:
+    """v123-F1/F2: the one creation check every face runs (CLI, REST, chat)
+    before a schedule with a role is stored. ValueError: a kind no role
+    narrows, an unknown role (I9), or a role that denies the worker's
+    workspace write (its tick could only refuse)."""
+    if schedule.role is None:
+        return
+    if schedule.worker_kind in ROLELESS_SCHEDULE_KINDS:
+        raise ValueError(
+            f"a {schedule.worker_kind} schedule takes no role: it dispatches no worker for "
+            "a role to narrow; a role narrows a worker schedule (coding, audit, researcher "
+            "or document)"
+        )
+    role = resolve_role(schedule.role, holder.current.home)
+    hop = Delegator(f"schedule:{schedule.name}@{role.name}", role)
+    repo = Path(schedule.repo).expanduser().resolve()
+    if _delegated_write_refusal(holder, store, repo, [hop], ["workspace"], record=False):
+        raise ValueError(
+            f"role {role.name} cannot run a {schedule.worker_kind}: it denies workspace "
+            "writes; use a role that holds them, or none"
+        )
 
 
 def stale_base_info(store: RunStore, task_id: str) -> dict[str, Any] | None:
@@ -5283,13 +5319,24 @@ TEAM_DEPTH = 2  # R3 (ADR 0055 D5): Queen → manager → workers, and no deeper
 
 
 def delegation_inputs(
-    holder: ConfigHolder, delegation_chain: Sequence[str], role: str | None, *, team: str | None
+    holder: ConfigHolder,
+    delegation_chain: Sequence[str | Delegator],
+    role: str | None,
+    *,
+    team: str | None,
 ) -> tuple[list[Delegator], Role | None]:
     """The chain and the worker's role, resolved (I9) and shape-checked
     (``check_dispatch_chain``) — a 400 naming what is wrong before anything
-    is dispatched. One helper for every dispatch face (REST, chat, the CLI)."""
+    is dispatched. One helper for every dispatch face (REST, chat, the CLI).
+    A hop already resolved (v123-F1: a schedule's, whose name may hold an
+    ``@``) is taken as it is."""
     try:
-        chain = parse_delegation_chain(delegation_chain, holder.current.home)
+        chain = [
+            hop
+            if isinstance(hop, Delegator)
+            else parse_delegation_chain([hop], holder.current.home)[0]
+            for hop in delegation_chain
+        ]
         worker_role = resolve_role(role, holder.current.home) if role is not None else None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -5304,7 +5351,7 @@ def delegate_permissions(
     permissions: Permissions,
     *,
     role: str | None,
-    delegation_chain: Sequence[str],
+    delegation_chain: Sequence[str | Delegator],
     team: str | None = None,
     deferred_asks: bool = False,
     record: bool = True,
