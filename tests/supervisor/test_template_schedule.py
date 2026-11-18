@@ -120,7 +120,7 @@ def test_tick_runs_a_template_bound_schedule(tmp_path: Path) -> None:
         assert reverify is not None and reverify.confirmed  # G10 confirms it
         # advanced one interval, just like any schedule
         advanced = store.get_schedule("nightly")
-        assert advanced is not None and advanced.next_run_at == "2026-06-12T09:00:00Z"
+        assert advanced is not None and advanced.next_run_at == "2026-06-12T00:00:00Z"
     finally:
         store.close()
 
@@ -243,7 +243,7 @@ def test_template_bound_schedule_blocks_without_project_auto_dispatch(tmp_path: 
         assert store.recent_runs() == []
         advanced = store.get_schedule("nightly")
         assert advanced is not None
-        assert advanced.next_run_at == "2026-06-12T09:00:00Z"
+        assert advanced.next_run_at == "2026-06-12T00:00:00Z"
     finally:
         store.close()
 

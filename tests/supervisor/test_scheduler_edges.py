@@ -396,3 +396,42 @@ def test_a_seeded_schedule_first_fires_one_interval_out(
         assert run_due(store=store, config=config) == []
     finally:
         store.close()
+
+
+def _daily_at_1630(store: RunStore) -> None:
+    store.add_schedule(
+        make_schedule(
+            name="digest", repo="", instructions="mail", interval_seconds=86400,
+            worker_kind="note", start_at="2026-11-20T16:30:00Z",
+        )
+    )  # fmt: skip
+
+
+def test_a_late_tick_keeps_the_time_of_day(store: RunStore, config: SupervisorConfig) -> None:
+    """v122-F5: the next run counted from when the tick ran, so a tick 3 h
+    late moved a 16:30 schedule to 19:30 for good."""
+    _daily_at_1630(store)
+    run_due(store=store, config=config, now="2026-11-20T19:30:00Z")
+    digest = store.get_schedule("digest")
+    assert digest is not None and digest.next_run_at == "2026-11-21T16:30:00Z"
+
+
+def test_missed_days_fire_once_then_back_on_the_slot(
+    store: RunStore, config: SupervisorConfig
+) -> None:
+    """v122-F5: three days asleep → one run (no catch-up burst), then 16:30."""
+    _daily_at_1630(store)
+    assert len(run_due(store=store, config=config, now="2026-11-23T09:00:00Z")) == 1
+    assert run_due(store=store, config=config, now="2026-11-23T09:00:01Z") == []
+    digest = store.get_schedule("digest")
+    assert digest is not None and digest.next_run_at == "2026-11-23T16:30:00Z"
+
+
+def test_the_card_lists_a_past_start_on_its_slot() -> None:
+    """v122-F5: the card shows the runs the scheduler will make — a past
+    start fires at once, then stays on its own time of day."""
+    from skep.supervisor.scheduler import next_fire_times
+
+    first, second, third = next_fire_times("2020-01-01T16:30:00Z", 86400)
+    assert second.endswith("T16:30:00Z") and third.endswith("T16:30:00Z")
+    assert first < second

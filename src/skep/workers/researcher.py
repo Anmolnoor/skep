@@ -61,8 +61,27 @@ from .worker_runtime import (
     write_result as _write_result,
 )
 
-# fetch(url) -> page text, or raises for an unreachable/denied source.
+# fetch(url) -> page text, or raises for an unreachable/denied source
+# (NotText for a response that is not text).
 Fetcher = Callable[[str], str]
+
+
+class NotText(Exception):
+    """v122-F7: the response is not text (a PDF, an image): the source is
+    listed in the report, never pasted into it."""
+
+    def __init__(self, content_type: str) -> None:
+        super().__init__(content_type)
+        self.content_type = content_type
+
+
+def _is_text_type(content_type: str) -> bool:
+    return content_type.startswith("text/") or "json" in content_type or "xml" in content_type
+
+
+def _mostly_binary(body: str) -> bool:
+    """A body that decoded to mostly U+FFFD / NUL was bytes, whatever its label."""
+    return (body.count("\ufffd") + body.count("\x00")) * 2 > len(body)
 
 
 def source_host(url: str) -> str:
@@ -148,6 +167,18 @@ def run_research(
             continue
         try:
             body = fetch(url)
+            if _mostly_binary(body):
+                raise NotText("unknown content type")
+        except NotText as exc:  # fetched, but there is nothing readable to quote
+            evidence.append(
+                SourceEvidence(
+                    url,
+                    allowed=True,
+                    fetched=True,
+                    detail=f"(binary: {exc.content_type}, not quoted)",
+                )
+            )
+            continue
         except Exception as exc:  # an unreachable/denied source is recorded, not fatal
             evidence.append(
                 SourceEvidence(
@@ -274,6 +305,9 @@ _FETCH_HEADERS = {
 def _urllib_fetch(url: str) -> str:
     request = urllib.request.Request(url, method="GET", headers=_FETCH_HEADERS)
     with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:
+        content_type = response.headers.get_content_type()
+        if not _is_text_type(content_type):
+            raise NotText(content_type)
         body = response.read(_FETCH_MAX_BYTES)
     return html_to_text(body.decode("utf-8", errors="replace"))
 
