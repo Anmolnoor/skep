@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -698,9 +699,45 @@ def _strategy_note(strategy: str, source: str, policy: dict[str, Any]) -> str:
     )
 
 
-# v127-F8: the probe behind a new project's default mode, by its own name so
-# the suite can pin it (tests/conftest.py) without touching the unlocked guard.
+# v127-F8: the probe behind a new project's default mode (and F9's engine
+# hint), by its own name so the suite can pin it (tests/conftest.py) without
+# touching the unlocked guard.
 new_project_sandbox_probe = sandbox_availability
+
+
+def _engine_hints(home: Path, policy: dict[str, Any]) -> list[str]:
+    """v127-F9: which CLI engine this host could run for the project — a hint
+    after a setup that named none; never writes ``coding_engine`` (I2, I5).
+    Ready = binary on PATH, auth in the shell or ``<home>/serve.env`` (or
+    codex's opted-in ChatGPT login), a usable sandbox, a pin that is not
+    known-vacuous. aider and pi are never recommended."""
+    from .. import engines
+    from ..codex_login import POLICY_KEY, login_status
+    from .serve_cmds import SERVE_ENV_FILE, load_serve_env
+
+    pin = str(policy.get("verify_command") or "").strip()
+    if known_vacuous_verify(pin) is not None or not new_project_sandbox_probe().usable:
+        return []
+    serve_env: dict[str, str] = {}  # names checked; this process's env untouched
+    load_serve_env(home / SERVE_ENV_FILE, serve_env)
+    hints: list[str] = []
+    for name in ("codex", "claude_code"):
+        engine = engines.CODING_ENGINES[name]
+        if not engines.engine_available(engine)[0]:
+            continue
+        auth = next((f"{v} in your shell" for v in engine.auth_env if os.environ.get(v)), None)
+        auth = auth or next(
+            (f"{v} in serve.env" for v in engine.auth_env if serve_env.get(v)), None
+        )
+        if auth is None and engine.login_host is not None and policy.get(POLICY_KEY) is True:
+            auth = "your ChatGPT plan login" if login_status().problem is None else None
+        if auth is not None:
+            hints.append(
+                f"{name} is ready here ({auth}, sandbox usable): add `--engine {name}`. "
+                "Its commands bypass skep's capability layer; the sandbox is its only "
+                "wall (ADR 0047)."
+            )
+    return hints
 
 
 def _default_execution_mode(
@@ -1258,6 +1295,11 @@ def setup_project_record(
     result["seeded_verify_command"] = seeded_verify_command
     result["seeds_skipped"] = seeds_skipped
     result["notes"] = [_strategy_note(strategy, strategy_source, project.policy), *notes]
+    if (
+        "coding_engine" not in (policy_overrides or {})
+        and project.policy.get("coding_engine", "builtin") == "builtin"
+    ):
+        result["notes"] += _engine_hints(root.parent, project.policy)
     attached_groups = [str(n) for n in project.policy.get("policy_groups") or []]
     result["suggested_policy_groups"] = [
         suggestion
