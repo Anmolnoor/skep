@@ -368,3 +368,15 @@ def test_a_non_text_content_type_is_named_in_sources(monkeypatch: Any) -> None:
     assert "https://arxiv.org/pdf/1: (binary: application/pdf, not quoted)" in result.report_md
     assert "%PDF" not in result.report_md
     assert '{"stars": 5}' in result.report_md and "vLLM" in result.report_md
+
+
+def test_a_run_that_fetched_only_binary_sources_fails_honestly(tmp_path: Path) -> None:
+    """v122-F7 (judge): a PDF quotes nothing, so a run whose every source was
+    binary is not completed research, and the summary says why."""
+    _workspace, _task, task_file = _research_task_file(tmp_path)
+    out = tmp_path / "result.json"
+    binary = "�" * 50
+    assert run_researcher_task(task_file, out, fetch=lambda _u: binary) == 3
+    result = json.loads(out.read_text())
+    assert result["status"] == "failed"
+    assert "binary, not quoted" in result["verification"]["details"]

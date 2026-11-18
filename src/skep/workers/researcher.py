@@ -75,6 +75,9 @@ class NotText(Exception):
         self.content_type = content_type
 
 
+BINARY = "(binary: "
+
+
 def _is_text_type(content_type: str) -> bool:
     return content_type.startswith("text/") or "json" in content_type or "xml" in content_type
 
@@ -175,7 +178,7 @@ def run_research(
                     url,
                     allowed=True,
                     fetched=True,
-                    detail=f"(binary: {exc.content_type}, not quoted)",
+                    detail=f"{BINARY}{exc.content_type}, not quoted)",
                 )
             )
             continue
@@ -420,9 +423,15 @@ def _execute(
     (workspace / SOURCES_JSON_PATH).write_text(research.sources_json, encoding="utf-8")
 
     # Honest verification: a report that read nothing is not completed research.
-    fetched = sum(1 for item in research.evidence if item.fetched)
+    # v122-F7: a binary source was fetched but quotes nothing, so it does not count.
+    fetched = sum(
+        1 for item in research.evidence if item.fetched and not item.detail.startswith(BINARY)
+    )
+    binary = sum(1 for item in research.evidence if item.detail.startswith(BINARY))
     outcome = VerificationOutcome.PASSED if fetched else VerificationOutcome.FAILED
-    detail = f"fetched {fetched}/{len(research.evidence)} allow-listed source(s)"
+    detail = f"fetched {fetched}/{len(research.evidence)} allow-listed source(s)" + (
+        f" ({binary} binary, not quoted)" if binary else ""
+    )
     stream.emit(
         EventType.VERIFY_RESULT,
         {"outcome": outcome.value, "details": detail, "commands": []},

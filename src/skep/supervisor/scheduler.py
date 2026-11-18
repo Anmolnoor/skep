@@ -261,6 +261,8 @@ def next_run_after(reference: str, interval_seconds: int, *, now: str | None = N
     is advanced in whole intervals until it is after ``now`` — a late or
     missed tick keeps the schedule's time of day and fires once, no catch-up
     storm."""
+    if interval_seconds <= 0:  # parse_interval never makes one; a hand-edited row can
+        raise ValueError(f"interval must be positive, got {interval_seconds}s")
     step = timedelta(seconds=interval_seconds)
     slot = _parse_ts(reference) + step
     if now is not None:

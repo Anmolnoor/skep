@@ -1055,3 +1055,14 @@ def test_prompt_failed_turn_records_the_reason(
         assert stored is not None and stored.last_output == "provider is down"
     finally:
         store.close()
+
+
+def test_a_zero_interval_row_is_a_teaching_value_error() -> None:
+    """v122-F5 (judge): parse_interval never makes 0, but a hand-edited row
+    must fail as ValueError (the auto-disable catch), not ZeroDivisionError."""
+    import pytest
+
+    from skep.supervisor.scheduler import next_run_after
+
+    with pytest.raises(ValueError, match="interval must be positive"):
+        next_run_after("2026-11-18T16:30:00Z", 0, now="2026-11-18T17:00:00Z")
