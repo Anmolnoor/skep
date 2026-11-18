@@ -78,6 +78,8 @@ class ScheduleRequest(BaseModel):
     start_at: str | None = None
     # v53-F5: run with the named schedule's last output as labeled context.
     chain: str | None = None
+    # v123-F2: a worker schedule's role, set at creation (re-create to change).
+    role: str | None = None
 
 
 class ScheduleToggle(BaseModel):
@@ -1570,6 +1572,8 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.post("/api/schedules", status_code=201)
     def add_schedule(body: ScheduleRequest) -> dict[str, Any]:
+        from . import actions
+
         if body.caste in ("note", "script"):
             # note/script schedules are repo-less: the tick posts the text
             # (note) or runs the command supervisor-side and posts its output
@@ -1597,7 +1601,9 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     once=body.once,
                     start_at=body.start_at,
                     chain=body.chain,
+                    role=body.role,
                 )
+                actions.check_schedule_role(holder, run_store, schedule)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             run_store.add_schedule(schedule)
@@ -1624,6 +1630,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     interval_seconds=interval,
                     ref=body.ref,
                     chain=body.chain,
+                    role=body.role,
                 )
             else:
                 if body.instructions is None:
@@ -1642,7 +1649,9 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     once=body.once,
                     start_at=body.start_at,
                     chain=body.chain,
+                    role=body.role,
                 )
+            actions.check_schedule_role(holder, run_store, schedule)
         except (TemplateError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         run_store.add_schedule(schedule)

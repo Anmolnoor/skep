@@ -1863,6 +1863,18 @@ def _humanize_interval(seconds: int) -> str:
     return f"{seconds}s"
 
 
+def _schedule_role_refusal(config: SupervisorConfig, store: RunStore, schedule: Any) -> int | None:
+    """v123-F2: the create check every face runs (``actions.check_schedule_role``)."""
+    from .serve.actions import check_schedule_role
+    from .serve.settings import ConfigHolder
+
+    try:
+        check_schedule_role(ConfigHolder(config, store), store, schedule)
+    except ValueError as exc:
+        return _err(str(exc), next_command="skep role list")
+    return None
+
+
 def cmd_schedule_add(args: argparse.Namespace) -> int:
     repo = Path(args.repo).expanduser().resolve()
     if not (repo / ".git").exists():
@@ -1890,9 +1902,13 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                     repo=repo,
                     interval_seconds=interval,
                     ref=args.ref,
+                    role=args.role,
                 )
             except (TemplateError, ValueError) as exc:
                 return _err(str(exc), next_command=f"skep template show {args.template}")
+            refusal = _schedule_role_refusal(config, store, schedule)
+            if refusal is not None:
+                return refusal
             store.add_schedule(schedule)
             print(
                 f"scheduled {args.name!r}: template {template.name!r} "
@@ -1914,7 +1930,11 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                 ref=args.ref,
                 network=args.network or [],
                 env_allowlist=args.env_allow or [],
+                role=args.role,
             )
+            refusal = _schedule_role_refusal(config, store, schedule)
+            if refusal is not None:
+                return refusal
             store.add_schedule(schedule)
             print(f"scheduled {args.name!r}: {args.caste} on {repo} every {args.every}")
     finally:
@@ -1943,12 +1963,17 @@ def cmd_schedule_list(args: argparse.Namespace) -> int:
     print(header)
     for s in schedules:
         source = f"template {s.template_name}" if s.template_name else "inline"
+        source += f" · role {s.role}" if s.role else ""
         last_state = s.last_state or "-"
         print(
             f"{s.name[:15]:<16} {s.worker_kind:<8} {_humanize_interval(s.interval_seconds):<7} "
             f"{'yes' if s.enabled else 'no':<5} {s.next_run_at:<22} {(s.last_run_at or '-'):<22} "
             f"{last_state:<40} {source}"
         )
+    if any(s.role for s in schedules):
+        from .serve.actions import SCHEDULE_ROLE_NOTE
+
+        print(f"role: {SCHEDULE_ROLE_NOTE}")
     return 0
 
 
@@ -3563,6 +3588,13 @@ def register_supervisor_commands(
     sched_add.add_argument("--ref", default=None, help="git ref to base each run on")
     sched_add.add_argument("--network", action="append", default=[], metavar="DOMAIN")
     sched_add.add_argument("--env-allow", action="append", default=[])
+    sched_add.add_argument(
+        "--role",
+        default=None,
+        metavar="NAME",
+        help="hold this worker schedule's runs to a role: it narrows shell prefixes, "
+        "hosts and workspace writes (v123)",
+    )
     sched_add.set_defaults(func=cmd_schedule_add)
 
     sched_list = schedule_sub.add_parser("list", help="list schedules")
