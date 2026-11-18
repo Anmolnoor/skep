@@ -360,9 +360,20 @@ def _digest_main(count: int) -> None:
         sys.exit(2)
 
 
+def _digest_count(value: str) -> int:
+    count = int(value)
+    if not 1 <= count <= _LIST_CAP:
+        raise argparse.ArgumentTypeError(
+            f"N must be between 1 and {_LIST_CAP} (got {count}); 5 fits the script output cap"
+        )
+    return count
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m skep.mcp_servers.mail")
-    parser.add_argument("--digest", type=int, metavar="N", help="print the newest N and exit")
+    parser.add_argument(
+        "--digest", type=_digest_count, metavar="N", help="print the newest N (1-20) and exit"
+    )
     args = parser.parse_args()
     if args.digest is not None:
         _digest_main(args.digest)

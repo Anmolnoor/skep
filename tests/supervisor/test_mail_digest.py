@@ -239,3 +239,20 @@ def test_the_documented_command_runs_as_a_script_schedule_and_the_alarm_parses_i
     output, ok = run_schedule_script(f"PYTHONPATH={fake} {command}")
     assert ok, output
     assert mail_senders(output) == [f"sender{i}@example.test" for i in (6, 5, 4, 3, 2)]
+
+
+@pytest.mark.parametrize("count", ["0", "-1", "21", "50"])
+def test_a_digest_count_outside_1_to_20_is_a_teaching_error(
+    imap: type[FakeIMAP],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    count: str,
+) -> None:
+    imap.messages = [_raw("a@example.test", "s", "b")]
+    monkeypatch.setattr(sys, "argv", ["mail", "--digest", count])
+    with pytest.raises(SystemExit) as exited:
+        mail.main()
+    assert exited.value.code == 2
+    captured = capsys.readouterr()
+    assert "between 1 and 20" in captured.err and "empty" not in captured.out
+    assert not imap.calls  # rejected before any connection
