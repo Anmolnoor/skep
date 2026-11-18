@@ -25,11 +25,12 @@ UPSTREAM_DRIFT = (
 
 TOOLS: list[dict[str, Any]] = [
     {
-        "name": "yt_transcript",
+        "name": "get_transcript",
         "description": "Fetch a YouTube video's transcript as plain text. "
         "Arguments: {video: string} — a watch URL, youtu.be link, or bare "
-        "11-char video id. Example: {name: yt_transcript, arguments: "
+        "11-char video id. Example: {name: get_transcript, arguments: "
         "{video: dQw4w9WgXcQ}}. Read-only; youtube.com only.",
+        "annotations": {"readOnlyHint": True},  # B09: a read verb + the hint
         "inputSchema": {
             "type": "object",
             "properties": {"video": {"type": "string"}},
@@ -47,6 +48,10 @@ TOOLS: list[dict[str, Any]] = [
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
+def _is_youtube(host: str) -> bool:
+    return host == "youtube.com" or host.endswith(".youtube.com")
+
+
 def video_id(value: str) -> str:
     value = value.strip()
     if _ID_RE.match(value):
@@ -55,7 +60,7 @@ def video_id(value: str) -> str:
     host = (parsed.hostname or "").lower()
     if host in ("youtu.be", "www.youtu.be"):
         candidate = parsed.path.lstrip("/").split("/")[0]
-    elif host.endswith("youtube.com"):
+    elif _is_youtube(host):
         candidate = urllib.parse.parse_qs(parsed.query).get("v", [""])[0]
         if not candidate and parsed.path.startswith(("/shorts/", "/embed/", "/live/")):
             candidate = parsed.path.split("/")[2] if len(parsed.path.split("/")) > 2 else ""
@@ -72,7 +77,7 @@ def video_id(value: str) -> str:
 def _fetch(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").lower()
-    if not (host == "youtu.be" or host.endswith("youtube.com")):
+    if not (host == "youtu.be" or _is_youtube(host)):
         raise ValueError("refusing non-youtube host " + repr(host))
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 skep-yt-transcript"})
     with urllib.request.urlopen(request, timeout=20) as response:
@@ -128,7 +133,7 @@ _FIXTURE_XML = (
 
 
 def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    if name == "yt_transcript":
+    if name == "get_transcript":
         try:
             vid = video_id(str(arguments.get("video") or ""))
         except ValueError as exc:

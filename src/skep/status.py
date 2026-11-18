@@ -61,6 +61,7 @@ def build_status(
             + _unlocked_advisories(home)
             + _policy_migration_advisories(home)
             + _channel_user_advisories(home)
+            + _phone_flow_advisories(home)
         )
         payload["stale_pending"] = stale_pending
         payload["approvals"] = approvals
@@ -100,6 +101,7 @@ def build_status(
         + _unlocked_advisories(home)
         + _policy_migration_advisories(home)
         + _channel_user_advisories(home)
+        + _phone_flow_advisories(home)
     )
     payload["stale_pending"] = stale_pending
     payload["approvals"] = approvals
@@ -267,6 +269,87 @@ def _channel_user_advisories(home: Path) -> list[str]:
         for config in configs
         if config.enabled and not config.allowed_users
     ]
+
+
+def _phone_flow_advisories(home: Path) -> list[str]:
+    """v122-F3: the daily-driver setup steps (docs/daily-driver-setup.md)
+    still undone — each line fires only while its step is undone (I8) and
+    names the step (I9). The transcript lines need a phone: silent with no
+    enabled channel, and after the operator suspended or rolled back the
+    seed (their decision)."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from fnmatch import fnmatch
+
+    from .supervisor.forge import load_plugins
+    from .supervisor.policy_schema import POLICY_DOCUMENT_SETTINGS_KEY, document_from_settings
+    from .supervisor.serve.channels import CHANNEL_CONFIRMABLE_ACTIONS
+    from .supervisor.serve.chat import chat_role
+    from .supervisor.serve.tools import hidden_tools
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path, readonly=True)
+    try:
+        enabled = [config for config in store.list_channel_configs() if config.enabled]
+        enabled_names = {config.channel for config in enabled}
+        bound = []
+        for chat in store.list_chats():
+            binding = store.channel_binding_for_chat(chat.chat_id)
+            if binding is not None and binding.channel in enabled_names:
+                bound.append(chat)
+        seed = load_plugins(store).get("yt-transcript")
+        document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
+    finally:
+        store.close()
+    classes = f"the {len(CHANNEL_CONFIRMABLE_ACTIONS)} channel-confirmable classes"
+    lines = [
+        f"channel {config.channel} is enabled but channel_can_confirm is off — the phone "
+        "confirms nothing and every card says to use the web UI; turn it on: "
+        f'PUT /api/channels/{config.channel} {{"channel_can_confirm": true}} or the web '
+        f"UI's channel panel (the phone still confirms only {classes})"
+        for config in enabled
+        if not config.channel_can_confirm
+    ]
+    # One line, only when NO chat on an enabled channel can start research: a
+    # delivery group left on assistant is the documented setup, not a problem.
+    hiding: list[str] = []
+    for chat in bound:
+        role = chat_role(home / "supervisor", chat.role)
+        rule = hidden_tools(role).get("start_research")
+        if role is None or rule is None:
+            hiding = []
+            break
+        hiding.append(f"{chat.chat_id} ({role.name}: {rule})")
+    if hiding:
+        target = bound[0].chat_id if len(bound) == 1 else "<chat id>"
+        lines.append(
+            f"no channel chat can start research — every one runs as a role that hides "
+            f"start_research: {', '.join(hiding)}; `skep role use operator --chat {target}` "
+            "on the chat you research from allows it (whoever holds that messenger account "
+            f"then has operator's tools; the phone still confirms only {classes}), or keep "
+            "research on the web"
+        )
+    if not enabled or seed is None or seed.state in ("suspended", "rolled_back"):
+        return lines
+    value = f"{seed.server_id}:get_transcript"
+    if seed.state != "active":
+        lines.append(
+            f"the seed tool {seed.plugin_id} (get_transcript) is not promoted ({seed.state}) — "
+            "a YouTube summary from the phone has no transcript; from a web chat ask to "
+            f"`promote_tool {seed.plugin_id}` and confirm the card there"
+        )
+    elif document is None or not any(
+        rule.scope == "mcp" and rule.action == "call" and fnmatch(value, rule.pattern)
+        for rule in document.learned
+    ):
+        lines.append(
+            f"{value} is active but no allow rule names it — every role asks on MCP calls "
+            "(mcp-gated), so each transcript from the phone is a card only the web can "
+            f"confirm; from a web chat ask for `allow_mcp_tool server_id={seed.server_id} "
+            "tool=get_transcript` and confirm it there"
+        )
+    return lines
 
 
 # v111-F5: store files from retired layouts. Each migration left its sqlite

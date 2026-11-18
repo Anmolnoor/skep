@@ -26,11 +26,13 @@ from skep.supervisor.forge import (
     trial_script,
     trial_verdict,
 )
-from skep.supervisor.mcp_client import load_mcp_servers
+from skep.supervisor.mcp_client import load_mcp_servers, runner_for_config
 from skep.supervisor.serve import tools as tools_module
 from skep.supervisor.serve.jobs import Dispatcher
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_mutation
+
+from .card_rig import cards, live_fixture  # noqa: F401  (the `live` fixture)
 
 
 def _run_harness(source: str, workdir: Path) -> dict[str, Any]:
@@ -60,7 +62,7 @@ def test_yt_transcript_passes_the_real_trial_harness(tmp_path: Path) -> None:
         _run_harness(seed_tool_source("yt_transcript.py"), tmp_path)
     )
     assert ok, reason
-    assert evidence["tools"] == ["yt_transcript", "self_test"]
+    assert evidence["tools"] == ["get_transcript", "self_test"]
     assert "offline" in str(evidence["self_test"])
 
 
@@ -79,6 +81,12 @@ def test_yt_transcript_parsing_and_guards() -> None:
     # the tool refuses non-youtube hosts ITSELF, before any fetch
     with pytest.raises(ValueError, match="non-youtube"):
         module._fetch("https://evil.example/watch?v=dQw4w9WgXcQ")
+    # v122-F1: a host that merely ends in "youtube.com" is not youtube
+    with pytest.raises(ValueError, match="non-youtube"):
+        module._fetch("https://evilyoutube.com/watch?v=dQw4w9WgXcQ")
+    with pytest.raises(ValueError, match="video id"):
+        module.video_id("https://evilyoutube.com/watch?v=dQw4w9WgXcQ")
+    assert module.video_id("https://m.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ"
     # upstream drift teaches re-forging instead of mystifying (review item 7)
     assert module.caption_track_url("<html>no captions marker</html>") is None
     assert "re-forging" in module.UPSTREAM_DRIFT
@@ -156,3 +164,61 @@ def test_promote_seed_tool_trials_installs_and_registers(
         assert server.command == (sys.executable, str(installed))
     finally:
         store.close()
+
+
+def test_get_transcript_is_listed_read_only_and_classifies_read(tmp_path: Path) -> None:
+    """v122-F1: the real seed, spoken to over stdio, lists ``get_transcript``
+    with ``readOnlyHint`` — a read verb plus the hint is what B09 needs, so
+    the call is a read and a phone call is not a HIGH card."""
+    from skep.supervisor.mcp_client import (
+        MCPClient,
+        MCPServerConfig,
+        classify_mcp_risk,
+    )
+
+    config = MCPServerConfig(
+        server_id="yt",
+        transport="stdio",
+        command=(sys.executable, str(seed_tools_root() / "yt_transcript.py")),
+    )
+    tools = {t.name: t for t in MCPClient(config, runner=runner_for_config(config)).list_tools()}
+    assert tools["get_transcript"].read_only is True
+    assert classify_mcp_risk(tools["get_transcript"]) == "read"
+
+
+def test_an_allowed_get_transcript_call_runs_in_turn_with_no_card(
+    live: Any, tmp_path: Path
+) -> None:
+    """v122-F1 acceptance shape: with one allow rule (a glob, so not the
+    operator's by-name trust mark) a chat call to the seed runs in-turn. The
+    real seed answers over stdio; a non-video argument keeps it offline."""
+    from unittest import mock
+
+    from skep.supervisor import mcp_client
+    from skep.supervisor.mcp_client import MCPServerConfig, save_mcp_server
+    from skep.supervisor.serve import actions
+
+    env = live("builder")
+    save_mcp_server(
+        env.store,
+        MCPServerConfig(
+            server_id="yt",
+            transport="stdio",
+            command=(sys.executable, str(seed_tools_root() / "yt_transcript.py")),
+        ),
+    )
+    actions.learn_policy_rule(
+        env.store, rule_id="mcp:yt:*", action="call",
+        pattern="yt:*", scope="mcp", provenance="allow-always:op",
+    )  # fmt: skip
+    chat = env.chat()
+    env.ollama.script_tool_call(
+        "call_mcp_tool",
+        {"server_id": "yt", "tool": "get_transcript", "arguments": {"video": "not a video"}},
+    )
+    env.ollama.script_reply("done")
+    with mock.patch.object(mcp_client, "runner_for_config", runner_for_config):  # the real one
+        events = env.turn(chat, "summarize this video")
+    assert cards(events) == []
+    row = next(r for r in env.store.chat_messages(chat) if r.tool_name == "call_mcp_tool")
+    assert "could not extract a video id" in row.content

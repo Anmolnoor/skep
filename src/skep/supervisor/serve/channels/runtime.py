@@ -126,6 +126,28 @@ def _default_send(
     return response.status_code == 200
 
 
+# v122-F6: Telegram rejects a text over 4096 characters. Chunks are cut well
+# under it so MarkdownV2 escaping usually still fits.
+TELEGRAM_MAX_CHARS = 4096
+TELEGRAM_CHUNK_CHARS = 3500
+
+
+def _telegram_chunks(text: str) -> list[str]:
+    """Cut ``text`` into chunks of at most TELEGRAM_CHUNK_CHARS, on a paragraph
+    break, else a line break, else hard."""
+    chunks: list[str] = []
+    while len(text) > TELEGRAM_CHUNK_CHARS:
+        cut = text.rfind("\n\n", 0, TELEGRAM_CHUNK_CHARS)
+        if cut <= 0:
+            cut = text.rfind("\n", 0, TELEGRAM_CHUNK_CHARS)
+        if cut <= 0:
+            cut = TELEGRAM_CHUNK_CHARS
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    chunks.append(text)
+    return chunks
+
+
 def send_telegram_markdown(
     send: SendText,
     token: str,
@@ -136,10 +158,31 @@ def send_telegram_markdown(
     """v78-F5: try MarkdownV2, resend plain when rejected. Telegram 400s on
     bad entities, and a formatting gamble must never cost the operator a
     message (the delivery-never-corrupts contract). Both edges use this: the
-    poller's replies/cards and the outbound push."""
+    poller's replies/cards and the outbound push.
+
+    v122-F6: a long text goes in ordered chunks (split before escaping); the
+    keyboard rides only the last, so a card keeps its buttons under its
+    text. False when any chunk failed; after a failure the rest go without
+    the keyboard (a card with a gap must not carry live Confirm/Deny).
+    Whitespace-only chunks are dropped, so the keyboard never rides an
+    empty message."""
+    chunks = [chunk for chunk in _telegram_chunks(text) if chunk.strip()] or [text]
+    delivered = True
+    for index, chunk in enumerate(chunks):
+        markup = reply_markup if delivered and index == len(chunks) - 1 else None
+        delivered = _send_telegram_chunk(send, token, chat_id, chunk, markup) and delivered
+    return delivered
+
+
+def _send_telegram_chunk(
+    send: SendText, token: str, chat_id: str, text: str, reply_markup: dict[str, object] | None
+) -> bool:
     try:
         converted = telegram_adapter.to_markdown_v2(text)
-        if send(token, chat_id, converted, reply_markup, parse_mode="MarkdownV2"):
+        # escaping can push a chunk past the limit: that one goes plain
+        if len(converted) <= TELEGRAM_MAX_CHARS and send(
+            token, chat_id, converted, reply_markup, parse_mode="MarkdownV2"
+        ):
             return True
     except Exception:
         logger.debug("telegram markdown send failed; resending plain", exc_info=True)

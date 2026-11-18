@@ -256,9 +256,20 @@ def _start_slot(start_at: str | None) -> str | None:
 MAX_SCHEDULE_CONSECUTIVE_FAILURES = 5
 
 
-def next_run_after(reference: str, interval_seconds: int) -> str:
-    """Next fire time = reference + interval (scheduled from the tick, so no catch-up storm)."""
-    return _fmt_ts(_parse_ts(reference) + timedelta(seconds=interval_seconds))
+def next_run_after(reference: str, interval_seconds: int, *, now: str | None = None) -> str:
+    """Next fire time = reference + interval. v122-F5: with ``now``, the slot
+    is advanced in whole intervals until it is after ``now`` — a late or
+    missed tick keeps the schedule's time of day and fires once, no catch-up
+    storm."""
+    if interval_seconds <= 0:  # parse_interval never makes one; a hand-edited row can
+        raise ValueError(f"interval must be positive, got {interval_seconds}s")
+    step = timedelta(seconds=interval_seconds)
+    slot = _parse_ts(reference) + step
+    if now is not None:
+        late = _parse_ts(now) - slot
+        if late >= timedelta(0):
+            slot += step * (late // step + 1)
+    return _fmt_ts(slot)
 
 
 def next_fire_times(
@@ -266,15 +277,17 @@ def next_fire_times(
 ) -> list[str]:
     """The next ``count`` fire times of a schedule created now, by the
     scheduler's own rules: the first is ``start_at`` (normalised) or the next
-    tick, each later one ``next_run_after`` the previous. A tick that runs
-    late pushes the rest later by as much (no catch-up storm). ``once`` fires
-    once. A ``start_at`` already past is due at once: the next tick fires it.
-    ValueError on a bad ``start_at``."""
+    tick, each later one the next slot on the schedule's own clock (v122-F5:
+    a late tick does not move the rest). ``once`` fires once. A ``start_at``
+    already past is due at once: the next tick fires it, then the schedule
+    is back on its slot. ValueError on a bad ``start_at``."""
     now = now_ts()
     start = _start_slot(start_at)
-    times = [start if start is not None and start > now else now]
+    slot = start if start is not None else now
+    times = [max(slot, now)]
     while not once and len(times) < count:
-        times.append(next_run_after(times[-1], interval_seconds))
+        slot = next_run_after(slot, interval_seconds, now=times[-1])
+        times.append(slot)
     return times
 
 
@@ -625,7 +638,7 @@ def run_due(
             # whose interval no clock can hold (stored before the cap) raised
             # here after its note had posted, outside the try, and killed the
             # whole tick every second.
-            next_at = next_run_after(moment, schedule.interval_seconds)
+            next_at = next_run_after(schedule.next_run_at, schedule.interval_seconds, now=moment)
         except (OverflowError, ValueError) as exc:
             state = f"dispatch_error: interval {schedule.interval_seconds}s is unusable ({exc})"
             store.set_schedule_enabled(schedule.name, enabled=False)

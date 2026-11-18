@@ -3325,12 +3325,14 @@ def queen_shell_decision(
 
 def _draft_excerpt(artifacts: list[dict[str, Any]]) -> str | None:
     """v72-F2: a document run's deliverable, quotable without a second hop.
-    Reads the audit copy of ``draft.md`` (capped); None for other runs."""
+    Reads the audit copy of ``draft.md`` — or a researcher's ``report.md``
+    (v122-F2) — capped; None for other runs."""
     row = next(
         (
             a
             for a in artifacts
-            if a.get("kind") == "file" and str(a.get("path") or "").endswith("draft.md")
+            if a.get("kind") == "file"
+            and Path(str(a.get("path") or "")).name in ("draft.md", "report.md")
         ),
         None,
     )

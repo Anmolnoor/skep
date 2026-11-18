@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from email.message import Message
 from pathlib import Path
+from typing import Any
 
 from skep.supervisor.contracts_io import mint_task, write_task_file
 from skep.worker_contract import Permissions
@@ -317,3 +319,106 @@ def test_researcher_caste_is_registered_in_the_default_config(tmp_path: Path) ->
     command = config.command_for("researcher")
     assert command != config.worker_command
     assert command[-2:] == ("-m", "skep.workers.researcher")
+
+
+def test_a_binary_source_is_listed_not_pasted() -> None:
+    """v122-F7: an arXiv PDF was pasted into report.md as U+FFFD blocks. A
+    body that decodes to mostly replacement characters / NULs is listed in
+    Sources as binary and left out of Content; an HTML source is pasted."""
+    pdf = (b"%PDF-1.7\n" + bytes(range(128, 256)) * 40 + b"\x00" * 200).decode(
+        "utf-8", errors="replace"
+    )
+    pages = {"https://arxiv.org/pdf/1": pdf, "https://docs.vllm.ai/": "vLLM serves models fast"}
+    result = run_research(
+        "q", sources=list(pages), allowlist=["arxiv.org", "docs.vllm.ai"], fetch=pages.__getitem__
+    )
+    assert "- [fetched] https://arxiv.org/pdf/1: (binary: unknown content type, not quoted)" in (
+        result.report_md
+    )
+    assert "�" not in result.report_md and "### https://arxiv.org/pdf/1" not in result.report_md
+    assert "### https://docs.vllm.ai/\n\nvLLM serves models fast" in result.report_md
+
+
+def test_a_non_text_content_type_is_named_in_sources(monkeypatch: Any) -> None:
+    """v122-F7: the real fetcher refuses a non-text response by content type,
+    so the report names what it could not quote."""
+    import io
+    import urllib.request
+
+    from skep.workers import researcher
+
+    class _Resp(io.BytesIO):
+        def __init__(self, body: bytes, content_type: str) -> None:
+            super().__init__(body)
+            self.headers = Message()
+            self.headers["Content-Type"] = content_type
+
+    responses = {
+        "https://arxiv.org/pdf/1": _Resp(b"%PDF-1.7 ...", "application/pdf"),
+        "https://api.github.com/x": _Resp(b'{"stars": 5}', "application/json; charset=utf-8"),
+        "https://docs.vllm.ai/": _Resp(b"<p>vLLM</p>", "text/html"),
+    }
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: responses[req.full_url])
+    result = run_research(
+        "q",
+        sources=list(responses),
+        allowlist=["arxiv.org", "api.github.com", "docs.vllm.ai"],
+        fetch=researcher._urllib_fetch,
+    )
+    assert "https://arxiv.org/pdf/1: (binary: application/pdf, not quoted)" in result.report_md
+    assert "%PDF" not in result.report_md
+    assert '{"stars": 5}' in result.report_md and "vLLM" in result.report_md
+
+
+def test_a_run_that_fetched_only_binary_sources_fails_honestly(tmp_path: Path) -> None:
+    """v122-F7 (judge): a PDF quotes nothing, so a run whose every source was
+    binary is not completed research, and the summary says why."""
+    _workspace, _task, task_file = _research_task_file(tmp_path)
+    out = tmp_path / "result.json"
+    binary = "�" * 50
+    assert run_researcher_task(task_file, out, fetch=lambda _u: binary) == 3
+    result = json.loads(out.read_text())
+    assert result["status"] == "failed"
+    assert "binary, not quoted" in result["verification"]["details"]
+
+
+def test_the_real_fetcher_decides_binary_from_the_bytes(monkeypatch: Any) -> None:
+    """v122-F7 review: compressed bytes decode to a mix of U+FFFD and junk
+    characters that slipped past the post-decode check, ``"xml" in`` matched
+    a docx, and a missing Content-Type read as text/plain."""
+    import io
+    import os
+    import urllib.request
+    import zlib
+
+    from skep.workers import researcher
+
+    class _Resp(io.BytesIO):
+        def __init__(self, body: bytes, content_type: str | None) -> None:
+            super().__init__(body)
+            self.headers = Message()
+            if content_type is not None:
+                self.headers["Content-Type"] = content_type
+
+    docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    compressed = zlib.compress(os.urandom(4000))
+    responses = {
+        "https://a.test/gz": _Resp(compressed, "text/html"),
+        "https://a.test/blob": _Resp(compressed, None),
+        "https://a.test/nul": _Resp(b"looks like text\x00but is not", "text/plain"),
+        "https://a.test/doc.docx": _Resp(b"PK\x03\x04 word/document.xml", docx),
+        "https://a.test/plain": _Resp("café notes".encode(), None),
+        "https://a.test/api": _Resp(b'{"ok": true}', "application/vnd.api+json"),
+        "https://a.test/feed": _Resp(b"<feed>entries</feed>", "application/atom+xml"),
+    }
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: responses[req.full_url])
+    result = run_research(
+        "q", sources=list(responses), allowlist=["a.test"], fetch=researcher._urllib_fetch
+    )
+    report = result.report_md
+    assert "https://a.test/gz: (binary: text/html, not quoted)" in report
+    assert "https://a.test/blob: (binary: unknown, not quoted)" in report
+    assert "https://a.test/nul: (binary: text/plain, not quoted)" in report
+    assert f"https://a.test/doc.docx: (binary: {docx}, not quoted)" in report
+    assert "café notes" in report and '{"ok": true}' in report and "entries" in report
+    assert "�" not in report and "word/document" not in report

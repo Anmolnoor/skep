@@ -61,8 +61,43 @@ from .worker_runtime import (
     write_result as _write_result,
 )
 
-# fetch(url) -> page text, or raises for an unreachable/denied source.
+# fetch(url) -> page text, or raises for an unreachable/denied source
+# (NotText for a response that is not text).
 Fetcher = Callable[[str], str]
+
+
+class NotText(Exception):
+    """v122-F7: the response is not text (a PDF, an image): the source is
+    listed in the report, never pasted into it."""
+
+    def __init__(self, content_type: str) -> None:
+        super().__init__(content_type)
+        self.content_type = content_type
+
+
+BINARY = "(binary: "
+
+
+def _is_text_type(content_type: str) -> bool:
+    return (
+        content_type.startswith("text/")
+        or content_type in ("application/json", "application/xml")
+        or content_type.endswith(("+json", "+xml"))
+    )
+
+
+def _binary_bytes(body: bytes) -> bool:
+    """Raw bytes that are not text: any NUL, or more than 10% of the bytes
+    undecodable as UTF-8 (compressed data decodes to junk that is not all
+    U+FFFD, so this must run before decoding)."""
+    undecodable = len(body) - len(body.decode("utf-8", errors="ignore").encode("utf-8"))
+    return b"\x00" in body or undecodable * 10 > len(body)
+
+
+def _mostly_binary(body: str) -> bool:
+    """A body that decoded to mostly U+FFFD / NUL was bytes, whatever its
+    label — the fallback for an injected fetcher, which returns text."""
+    return (body.count("\ufffd") + body.count("\x00")) * 2 > len(body)
 
 
 def source_host(url: str) -> str:
@@ -148,6 +183,18 @@ def run_research(
             continue
         try:
             body = fetch(url)
+            if _mostly_binary(body):
+                raise NotText("unknown content type")
+        except NotText as exc:  # fetched, but there is nothing readable to quote
+            evidence.append(
+                SourceEvidence(
+                    url,
+                    allowed=True,
+                    fetched=True,
+                    detail=f"{BINARY}{exc.content_type}, not quoted)",
+                )
+            )
+            continue
         except Exception as exc:  # an unreachable/denied source is recorded, not fatal
             evidence.append(
                 SourceEvidence(
@@ -274,7 +321,16 @@ _FETCH_HEADERS = {
 def _urllib_fetch(url: str) -> str:
     request = urllib.request.Request(url, method="GET", headers=_FETCH_HEADERS)
     with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:
+        # get_content_type() says text/plain when the header is missing: a
+        # missing type is decided by the bytes alone
+        content_type = (
+            response.headers.get_content_type() if response.headers.get("Content-Type") else ""
+        )
+        if content_type and not _is_text_type(content_type):
+            raise NotText(content_type)
         body = response.read(_FETCH_MAX_BYTES)
+    if _binary_bytes(body):
+        raise NotText(content_type or "unknown")
     return html_to_text(body.decode("utf-8", errors="replace"))
 
 
@@ -386,9 +442,15 @@ def _execute(
     (workspace / SOURCES_JSON_PATH).write_text(research.sources_json, encoding="utf-8")
 
     # Honest verification: a report that read nothing is not completed research.
-    fetched = sum(1 for item in research.evidence if item.fetched)
+    # v122-F7: a binary source was fetched but quotes nothing, so it does not count.
+    fetched = sum(
+        1 for item in research.evidence if item.fetched and not item.detail.startswith(BINARY)
+    )
+    binary = sum(1 for item in research.evidence if item.detail.startswith(BINARY))
     outcome = VerificationOutcome.PASSED if fetched else VerificationOutcome.FAILED
-    detail = f"fetched {fetched}/{len(research.evidence)} allow-listed source(s)"
+    detail = f"fetched {fetched}/{len(research.evidence)} allow-listed source(s)" + (
+        f" ({binary} binary, not quoted)" if binary else ""
+    )
     stream.emit(
         EventType.VERIFY_RESULT,
         {"outcome": outcome.value, "details": detail, "commands": []},
