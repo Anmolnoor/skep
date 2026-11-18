@@ -128,7 +128,9 @@ def test_the_active_key_follows_the_url_not_the_active_profile(
         assert resolve_active_api_key(store, tmp_path, base_url=CODEX_BASE) == _access_token(
             codex_home
         )
-        # ...and the ollama endpoint keeps exactly the key it had.
+        # ...and the ollama endpoint keeps exactly the key it had (v119-F1:
+        # llm-secret is the saved endpoint's, so the settings point there).
+        store.set_setting(LLM_BASE_URL, "https://ollama.com")
         assert resolve_active_api_key(store, tmp_path, base_url="https://ollama.com") == (
             "decoy-skep-env"
         )

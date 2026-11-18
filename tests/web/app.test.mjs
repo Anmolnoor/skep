@@ -3,11 +3,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, texts } from "./harness.mjs";
 
-const byText = (root, tag, text) =>
-  root.querySelectorAll(tag).find(n => n.textContent === text);
-const byPlaceholder = (root, placeholder) =>
-  root.querySelectorAll("input").find(n => n.getAttribute("placeholder") === placeholder);
-
 // ---------- R1 / ADR 0059 decision #4: the role picker ----------
 
 test("roleChoices: a chat with no stored role says it runs as assistant", () => {
@@ -131,79 +126,6 @@ test("keepSelect: no choice, no selector; a grantable card offers the server's l
   assert.deepEqual(options.map(o => o.getAttribute("value")), ["once", "session", "always"]);
   assert.deepEqual(options.map(o => o.textContent), ["once", "this chat, this session", "always"]);
   assert.equal(options[1].getAttribute("selected"), "");
-});
-
-// ---------- O3: the web onboard card ----------
-
-function onboardApp(onboard, calls = []) {
-  const app = loadApp();
-  app.api = async (method, path, body) => {
-    calls.push([method, path, body]);
-    if (method === "GET" && path === "/api/onboard") return onboard;
-    if (method === "GET" && path.startsWith("/api/onboard/template?")) {
-      return { locked: false, table: "| rule | verdict |", sha256: "abc123", tightened: [], diff: [] };
-    }
-    if (method === "POST") return {};
-    throw new Error(`unexpected ${method} ${path}`);
-  };
-  return app;
-}
-
-test("onboard card: done steps show their record, open steps say so", async () => {
-  const app = onboardApp({
-    relock: null,
-    steps: {
-      model: { provider: "ollama", model: "qwen3:14b", egress: "local only" },
-      template: { template: "builder", sha256: "0123456789abcdef" },
-    },
-  });
-  const states = texts(await app.onboardCard(), "note").filter(t => /^(done|not done|re-lock)/.test(t));
-  assert.deepEqual(states, [
-    "done: ollama qwen3:14b — local only",
-    "not done yet",
-    "not done yet",
-    "done: builder locked, sha256 0123456789ab",
-    "not done yet",
-  ]);
-});
-
-test("onboard card: a sandbox switch after the lock says why step 4 re-opened (O3-F1)", async () => {
-  const app = onboardApp({ relock: "builder", steps: {} });
-  const notes = texts(await app.onboardCard(), "note");
-  assert.ok(notes.includes(
-    "re-lock needed: the locked baseline is not what builder locks under this sandbox"));
-});
-
-test("onboard card: lock needs a preview and a typed yes, then posts the previewed sha", async () => {
-  const calls = [];
-  const app = onboardApp({ relock: null, steps: {} }, calls);
-  const card = await app.onboardCard();
-  const lock = byText(card, "button", "Lock baseline");
-  assert.equal(lock.disabled, true);
-
-  await byText(card, "button", "Preview").click();
-  assert.equal(lock.disabled, false);
-  await lock.click();
-  assert.deepEqual(app.flashes.at(-1), ["bad", "preview, then type yes"]);
-  assert.equal(calls.filter(([m]) => m === "POST").length, 0);
-
-  byPlaceholder(card, "type yes to lock this as the policy baseline").value = "yes";
-  await lock.click();
-  // JSON round-trip: the bodies were built inside the vm realm.
-  const posts = JSON.parse(JSON.stringify(calls.filter(([m]) => m === "POST")));
-  assert.deepEqual(posts, [["POST", "/api/onboard/template",
-    { template: "assistant", expect_sha256: "abc123", approved_by: "web" }]]);
-});
-
-test("onboard card: changing the template throws away the preview", async () => {
-  const app = onboardApp({ relock: null, steps: {} });
-  const card = await app.onboardCard();
-  const lock = byText(card, "button", "Lock baseline");
-  await byText(card, "button", "Preview").click();
-  const template = card.querySelectorAll("select").find(s => s.value === "assistant");
-  template.value = "operator";
-  for (const fn of template.listeners.change) fn();
-  assert.equal(lock.disabled, true);
 });
 
 test("a denial receipt says denied, not 'ran without asking' (T3-2, web twin of v115-F3)", () => {

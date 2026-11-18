@@ -19,38 +19,62 @@
 
   <div id="shell" class="shell hidden">
     <nav class="sidebar" aria-label="Primary">
-      <a class="brand" href="#/home" title="skep" aria-label="skep — home">skep</a>
+      <!-- H1 (hive-rooms C10): the sidebar replaced the 60px icon rail. Every
+           data-ws anchor stays (structure tests pin them); the old workspaces
+           fold into the groups under the threads. -->
+      <div class="sidebar-head">
+        <a class="brand" href="#/home" title="skep" aria-label="skep — home">skep</a>
+        <span id="sidebar-machine" class="sidebar-machine" title="the machine this daemon runs on"></span>
+        <div id="health" class="health" title="daemon status">…</div>
+      </div>
       <div class="rail-group" data-group="daily">
         <a href="#/home" data-ws="home" title="Home">Home</a>
-        <a id="sidebar-new-chat" href="#/chat" data-nav="new-chat" data-ws="chat" title="Chat">New Chat</a>
-        <a href="#/runs" data-ws="runs" title="Runs">Runs</a>
-        <a href="#/approvals" data-ws="approvals" title="Approvals">Approvals <span id="approvals-badge" class="badge hidden"></span></a>
+        <a id="sidebar-new-chat" href="#/chat" data-nav="new-chat" data-ws="chat" title="New thread">New thread</a>
+        <a href="#/inbox" data-ws="inbox" title="Inbox — everything waiting on you">Inbox <span id="inbox-badge" class="badge hidden"></span></a>
       </div>
-      <div class="rail-group" data-group="manage">
-        <a href="#/assign" data-ws="assign" title="Assign">Assign</a>
-        <a title="Projects" href="#/projects" data-ws="projects">Projects</a>
+      <!-- H1-G3: one search. ⌘K (this row) is the search — pages and run ids.
+           It does not find threads, so the thread list keeps its own filter,
+           drawn as a quiet row rather than a second search box. -->
+      <button id="sidebar-search" class="sidebar-search" type="button" aria-label="search pages and runs (⌘K)">
+        <span>Search</span><kbd class="topbar-kbd">⌘K</kbd>
+      </button>
+      <input id="thread-search" class="chat-sidebar-search" type="search" autocomplete="off"
+             placeholder="Filter threads" aria-label="search threads">
+      <div id="sidebar-threads" class="sidebar-threads" role="navigation" aria-label="Threads"></div>
+      <div class="sidebar-nav">
+        <details class="rail-group" data-group="runs">
+          <summary>Runs</summary>
+          <a href="#/runs" data-ws="runs" title="Runs">Runs</a>
+          <a href="#/approvals" data-ws="approvals" title="Approvals">Approvals <span id="approvals-badge" class="badge hidden"></span></a>
+          <a href="#/assign" data-ws="assign" title="Assign">Assign</a>
+        </details>
         <a href="#/schedules" data-ws="schedules" title="Schedules">Schedules</a>
-        <a href="#/templates" data-ws="templates" title="Templates &amp; Skills">Templates &amp; Skills</a>
-      </div>
-      <div class="rail-group" data-group="configure">
-        <a href="#/notes" data-ws="notes" title="Notes &amp; Tasks">Notes &amp; Tasks <span id="tasks-badge" class="badge hidden"></span></a>
-        <a href="#/memory" data-ws="memory" title="Memory">Memory <span id="memory-badge" class="badge hidden"></span></a>
+        <details class="rail-group" data-group="library">
+          <summary>Library</summary>
+          <a href="#/templates" data-ws="templates" title="Templates &amp; Skills">Templates &amp; Skills</a>
+          <a href="#/notes" data-ws="notes" title="Notes &amp; Tasks">Notes &amp; Tasks <span id="tasks-badge" class="badge hidden"></span></a>
+          <a href="#/memory" data-ws="memory" title="Memory">Memory <span id="memory-badge" class="badge hidden"></span></a>
+        </details>
         <a href="#/policies" data-ws="policies" title="Policies">Policies</a>
-        <a title="Setup" href="#/setup" data-ws="setup">Setup</a>
+        <!-- Graphite round A: one Settings link. Projects and Setup are its
+             tabs; #/projects… and #/setup light it (setShellActiveRoute). -->
         <a href="#/settings" data-ws="settings" title="Settings">Settings</a>
       </div>
-      <div class="spacer"></div>
-      <div id="health" class="health" title="daemon status">…</div>
     </nav>
 
     <div class="workspace">
+      <!-- H1-G2: one header line per view. The global top bar is gone: this row
+           is the view's own header — its title, then the controls that view
+           owns (route() clears #view-controls; a view fills it). The list
+           filter, the Queen tile and + Assign show only on the views they
+           belong to (updateShellChrome / route). -->
       <header class="topbar">
         <div id="topbar-title" class="topbar-title">Home</div>
-        <label class="topbar-search">
+        <div id="view-controls" class="view-controls"></div>
+        <label class="topbar-search" hidden>
           <span class="topbar-search-icon" aria-hidden="true"></span>
           <input id="app-search" type="search" autocomplete="off"
-                 placeholder="Search runs, tasks &amp; approvals" aria-label="Search this view">
-          <kbd class="topbar-kbd">⌘K</kbd>
+                 placeholder="Filter this list" aria-label="Search this view">
         </label>
         <div id="topbar-queen-status" class="topbar-queen-status hidden">
           <span class="queen-dot" aria-hidden="true"></span>

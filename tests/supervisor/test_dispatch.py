@@ -467,10 +467,20 @@ def test_toolchain_env_resolves_engine_declarations(tmp_path: Path) -> None:
 
     assert Path(env["TMPDIR"]) == workspace / ".toolchain" / "tmp"
     assert Path(env["TMPDIR"]).is_dir()
+    # v120-F1: zsh writes here-documents under $TMPPREFIX (default /tmp/zsh),
+    # not $TMPDIR — a prefix inside the in-wall TMPDIR, not a directory.
+    assert Path(env["TMPPREFIX"]) == Path(env["TMPDIR"]) / "zsh"
+    assert not Path(env["TMPPREFIX"]).exists()
 
     builtin = _toolchain_env(workspace, resolve_engine(None), cache_root)
     assert "CLAUDE_CONFIG_DIR" not in builtin
-    assert set(builtin) == {"npm_config_cache", "UV_CACHE_DIR", "CLANG_MODULE_CACHE_PATH", "TMPDIR"}
+    assert set(builtin) == {
+        "npm_config_cache",
+        "UV_CACHE_DIR",
+        "CLANG_MODULE_CACHE_PATH",
+        "TMPDIR",
+        "TMPPREFIX",
+    }
 
 
 def test_project_cache_roots_never_shared_across_projects_or_repos(
@@ -546,6 +556,7 @@ def test_grandchildren_inherit_the_toolchain_env(repo: Path, config: SupervisorC
     tmpdir = grandchild_env.get("TMPDIR", "")
     assert f"{os.sep}.toolchain{os.sep}tmp" in tmpdir
     assert outcome.record.workspace in tmpdir
+    assert grandchild_env.get("TMPPREFIX") == str(Path(tmpdir) / "zsh")  # v120-F1
     cache_prefix = str(config.home / "cache" / "projects")
     assert grandchild_env.get("UV_CACHE_DIR", "").startswith(cache_prefix)
     assert grandchild_env.get("npm_config_cache", "").startswith(cache_prefix)

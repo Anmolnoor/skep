@@ -1,4 +1,8 @@
 /* skep — the face (v5 Stage F). No build step: ES modules + fetch + EventSource. */
+import { renderContextPanel } from "./room.js";
+import { viewProjects, viewSettings, viewSetup } from "./settings.js";
+import { installSidebar, refreshSidebar, renderThreads, viewInbox } from "./sidebar.js";
+import { viewPolicies } from "./policies.js";
 
 const TOKEN_KEY = "skep-token";
 
@@ -631,8 +635,21 @@ function chatTitle(chat) {
   return (chat?.title || "New Chat").trim() || "New Chat";
 }
 
-function modelLabel(model) {
-  return (model || "No model").trim() || "No model";
+// H1-G9: display only. A title that is a bare URL shows its host and the tail
+// of its path; a very long one is cut with an ellipsis. The stored title and
+// every tooltip and aria-label keep the full text.
+function shortTitle(text, max = 48) {
+  let url = null;
+  if (/^https?:\/\/\S+$/i.test(text)) {
+    try { url = new URL(text); } catch { url = null; }
+  }
+  if (!url) return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
+  const host = url.hostname.replace(/^www\./, "");
+  const segments = url.pathname.split("/").filter(Boolean);
+  let tail = `${segments.at(-1) || ""}${url.search}`;
+  if (tail.length > 24) tail = `…${tail.slice(-23)}`;
+  if (!tail) return host;
+  return segments.length > 1 ? `${host}/…/${tail}` : `${host}/${tail}`;
 }
 
 function contextLoadPercent(context) {
@@ -650,103 +667,10 @@ function setShellActiveRoute(hash) {
     if (ws === "chat") {
       active = nav === "new-chat" && hash === "#/chat";
     }
+    // Graphite round A: Projects and Setup are Settings tabs (settings.js).
+    if (ws === "settings") active = /^#\/(settings|projects|setup)\b/.test(hash);
     link.classList.toggle("active", active);
   }
-}
-
-// v44-F3: sources whose group the operator opened; survives re-renders.
-// ponytail: in-memory; localStorage if reload-reset annoys
-const openChatGroups = new Set();
-
-// v76-F8: pinned chats are a UI preference (localStorage, I11), not a
-// server fact — the daily-driver conversation stays on top. The search
-// query survives re-renders the same way the open groups do.
-const pinnedChats = new Set(JSON.parse(localStorage.getItem("skep-pinned-chats") || "[]"));
-let chatSearchQuery = "";
-
-function savePinnedChats() {
-  localStorage.setItem("skep-pinned-chats", JSON.stringify([...pinnedChats]));
-}
-
-function renderSidebarChats(list, chats, activeChatId, fallbackModel) {
-  if (!list) return;
-  list.replaceChildren();
-  const applyChatSearch = () => {
-    const q = chatSearchQuery.trim().toLowerCase();
-    for (const node of list.querySelectorAll(".sidebar-chat-item")) {
-      node.classList.toggle("search-hidden",
-        Boolean(q) && !node.textContent.toLowerCase().includes(q));
-    }
-  };
-  const searchInput = el("input", {
-    class: "chat-sidebar-search", type: "search",
-    placeholder: "Search chats…", value: chatSearchQuery,
-    "aria-label": "search chats",
-  });
-  searchInput.addEventListener("input", () => {
-    chatSearchQuery = searchInput.value;
-    applyChatSearch();
-  });
-  list.append(searchInput);
-  const item = (chat) => {
-    const model = modelLabel(chat.model || fallbackModel);
-    const isPinned = pinnedChats.has(chat.chat_id);
-    const pin = iconButton(isPinned ? "unpin chat" : "pin chat", isPinned ? "●" : "○", {
-      class: `chat-pin icon-button ghost${isPinned ? " pinned" : ""}`,
-      onclick: (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (isPinned) pinnedChats.delete(chat.chat_id);
-        else pinnedChats.add(chat.chat_id);
-        savePinnedChats();
-        renderSidebarChats(list, chats, activeChatId, fallbackModel);
-      },
-    });
-    return el("a", {
-      class: `sidebar-chat-item${chat.chat_id === activeChatId ? " active" : ""}`,
-      href: `#/chat/${chat.chat_id}`,
-      title: `${chatTitle(chat)} · ${model}`,
-      "aria-label": `open chat: ${chatTitle(chat)}`,
-    },
-      el("span", { class: "sidebar-chat-label" }, `${chatTitle(chat)} · ${model}`),
-      pin);
-  };
-  // Pinned first — moved, not duplicated, whatever their source group.
-  const pinned = chats.filter(chat => pinnedChats.has(chat.chat_id));
-  if (pinned.length) {
-    list.append(el("div", { class: "sidebar-chat-pinned" },
-      el("div", { class: "sidebar-chat-pinned-label" }, "pinned"),
-      pinned.map(item)));
-  }
-  const groups = new Map(); // insertion order = recency (list arrives updated_at DESC)
-  for (const chat of chats) {
-    if (pinnedChats.has(chat.chat_id)) continue;
-    const source = chat.source || "web";
-    if (source === "web") { list.append(item(chat)); continue; }
-    if (!groups.has(source)) groups.set(source, []);
-    groups.get(source).push(chat);
-  }
-  for (const [source, group] of groups) {
-    const open = openChatGroups.has(source) || group.some((c) => c.chat_id === activeChatId);
-    list.append(el("details", {
-      class: "sidebar-chat-group",
-      open: open ? "" : null,
-      ontoggle: (event) => {
-        if (event.target.open) openChatGroups.add(source);
-        else openChatGroups.delete(source);
-      },
-    },
-      el("summary", {
-        class: "sidebar-chat-group-toggle",
-        title: `toggle ${source} chats`,
-        "aria-label": `toggle ${source} chats`,
-      },
-        source,
-        el("span", { class: "badge" }, String(group.length)),
-        el("span", { class: "chat-thinking-chevron button-icon", "aria-hidden": "true" }, "⌄")),
-      group.map(item)));
-  }
-  applyChatSearch(); // a re-render keeps the live filter applied
 }
 
 function installShellHandlers() {
@@ -769,18 +693,17 @@ function installShellHandlers() {
 const RAIL_ICONS = {
   home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>',
   chat: '<path d="M4 4h16v12H9l-5 4V4z"/>',
+  inbox: '<path d="M3 13l3-8h12l3 8v6H3z"/><path d="M3 13h5l1 2h6l1-2h5"/>',
   runs: '<path d="M8 6h12M8 12h12M8 18h12"/><path d="M4 6h.01M4 12h.01M4 18h.01"/>',
   approvals: '<circle cx="12" cy="12" r="9"/><path d="M8.4 12l2.3 2.3 4.9-4.9"/>',
   assign: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>',
   templates:
     '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/>' +
     '<rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
-  projects: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   schedules: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/>',
   notes: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/>',
   memory: '<path d="M7 4h10a1 1 0 0 1 1 1v16l-6-4-6 4V5a1 1 0 0 1 1-1z"/>',
   policies: '<path d="M12 3l7 3v6c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/>',
-  setup: '<path d="M6 21V4M6 4h11l-2 4 2 4H6"/>',
   settings:
     '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6' +
     'M5.2 5.2l1.9 1.9M16.9 16.9l1.9 1.9M18.8 5.2l-1.9 1.9M7.1 16.9l-1.9 1.9"/>',
@@ -845,6 +768,7 @@ function installSearch() {
 const PALETTE_ACTIONS = [
   { label: "Home", hash: "#/home", keywords: "dashboard hive glance" },
   { label: "New chat", hash: "#/chat", keywords: "queen talk message" },
+  { label: "Inbox", hash: "#/inbox", keywords: "waiting cards approvals pending" },
   { label: "Runs", hash: "#/runs", keywords: "tasks workers history" },
   { label: "Approvals", hash: "#/approvals", keywords: "queue gate pending verdict" },
   { label: "Assign", hash: "#/assign", keywords: "dispatch new task work" },
@@ -969,7 +893,17 @@ async function refreshDockModel() {
   } catch { /* leave the dock model label blank */ }
 }
 function updateShellChrome(hash) {
-  const hideDock = hash.startsWith("#/chat") || hash.startsWith("#/setup");
+  // H1-G2: the header line is the view's own. + Assign shows where work is
+  // started from (Home, Runs); it is also in the sidebar under Runs and in
+  // ⌘K. The Queen tile (default model + liveness) belongs to Home; a thread
+  // shows its own model in its header.
+  const page = hash.split(/[/?]/)[1] || "home";
+  const assign = document.querySelector(".topbar-assign");
+  if (assign) assign.hidden = !["home", "runs"].includes(page);
+  const queenTile = document.getElementById("topbar-queen-status");
+  if (queenTile) queenTile.hidden = page !== "home";
+  viewControls()?.replaceChildren();
+  const hideDock = hash.startsWith("#/chat");
   const dock = document.getElementById("dock");
   if (dock) dock.classList.toggle("hidden", hideDock);
   // Reserve space so the sticky dock never hides the tail of long content.
@@ -1014,6 +948,7 @@ const routes = [
   [/^#\/setup$/, viewSetup],
   [/^#\/chat$/, viewChat],
   [/^#\/chat\/([^/]+)$/, viewChat],
+  [/^#\/inbox$/, viewInbox], // H1: everything waiting on you (sidebar.js)
   [/^#\/notes$/, viewNotesTasks],
   [/^#\/memory$/, viewMemory],
   // v75-F7 (C9): tolerate a query suffix — template cards link to
@@ -1027,7 +962,8 @@ const routes = [
   // v76-F3: projects stop being write-only — a detail page composes reads.
   [/^#\/projects\/([^/]+)$/, viewProjectDetail],
   [/^#\/schedules$/, viewSchedules],
-  [/^#\/policies$/, viewPolicies],
+  // Graphite round A: #/policies/<tab> opens that tab (policies.js).
+  [/^#\/policies(?:\/([\w-]+))?$/, viewPolicies],
   [/^#\/settings$/, viewSettings],
 ];
 
@@ -1049,8 +985,10 @@ async function route() {
   for (const [pattern, view] of routes) {
     const match = hash.match(pattern);
     if (match) {
-      const args = view === viewSetup ? [setup] : match.slice(1);
-      await view(main, ...args).catch(e => flash("bad", e.message));
+      await view(main, ...match.slice(1)).catch(e => flash("bad", e.message));
+      // H1-G2: the list filter shows only on a view that has a list to filter.
+      const filter = document.getElementById("app-search")?.closest(".topbar-search");
+      if (filter) filter.hidden = !main.querySelector(".searchable");
       return;
     }
   }
@@ -1062,12 +1000,20 @@ window.addEventListener("hashchange", route);
 // ---------- shared fragments ----------
 
 function header(main, title, subtitle) {
-  // The page title lives in the persistent top bar now; the subtitle stays in
-  // the content column (matching the design's "Home / hive at a glance" split).
+  // The page title lives in the view's one header line. H1-G2: the subtitle
+  // sentence no longer takes a row of its own — it is the title's hover text,
+  // so nothing it said is lost.
   const titleEl = document.getElementById("topbar-title");
-  if (titleEl) titleEl.textContent = title;
+  if (titleEl) {
+    titleEl.textContent = title;
+    titleEl.title = subtitle || "";
+  }
   document.title = `${title} · skep`;
-  if (subtitle) main.append(el("p", { class: "sub" }, subtitle));
+}
+
+// H1-G2: a view puts its own controls in its header line, right of the title.
+function viewControls() {
+  return document.getElementById("view-controls");
 }
 
 async function repoOptions() {
@@ -1779,258 +1725,8 @@ async function viewHome(main) {
 
 // ---------- Setup ----------
 
-async function viewSetup(main, setup) {
-  header(main, "Setup", "Connect a model, bind a project, and choose the first-run policy.");
-  const missing = setupMissingLabels(setup);
-  main.append(el("div", { class: "card" },
-    el("h3", {}, setup.complete ? "Ready" : "Missing"),
-    setup.missing.length
-      ? el("p", { class: "note" }, missing.join(", "))
-      : el("p", { class: "note" }, "Setup is complete."),
-    setup.marked_complete && setup.completed_at
-      ? el("p", { class: "note" }, `completed ${fmtTs(setup.completed_at)}`)
-      : null));
-
-  main.append(await onboardCard());
-
-  const llm = await api("GET", "/api/llm/config");
-
-  const protocol = el("select", {},
-    el("option", { value: "ollama" }, "Ollama"),
-    el("option", { value: "openai-compat" }, "OpenAI-compatible"),
-    el("option", { value: "anthropic" }, "Anthropic"),
-    el("option", { value: "openai-responses" }, "OpenAI Responses"),
-    el("option", { value: "bedrock" }, "AWS Bedrock"));
-  protocol.value = llm.protocol || "ollama";
-  const baseUrl = el("input", {
-    value: llm.base_url || "",
-    placeholder: "https://ollama.com or http://localhost:11434",
-  });
-  const apiKey = el("input", {
-    type: "password",
-    autocomplete: "off",
-    placeholder: llm.api_key_set ? "key saved — paste to replace" : "API key",
-  });
-  const modelSelect = el("select", {},
-    llm.default_model
-      ? el("option", { value: llm.default_model }, llm.default_model)
-      : el("option", { value: "" }, "(test connection first)"));
-  modelSelect.disabled = !llm.default_model;
-  const modelStatus = el("p", { class: "note" },
-    llm.default_model ? `default model: ${llm.default_model}` : "No default model saved.");
-  const setModelOptions = (models) => {
-    const known = [...new Set([llm.default_model, ...models].filter(Boolean))];
-    modelSelect.replaceChildren(...(known.length
-      ? known.map(model => el("option", { value: model }, model))
-      : [el("option", { value: "" }, "(no models found)")]));
-    modelSelect.disabled = known.length === 0;
-    if (llm.default_model) modelSelect.value = llm.default_model;
-    modelStatus.textContent = `${models.length} model(s) available`;
-  };
-  const loadModels = async () => {
-    try {
-      const { models } = await api("GET", "/api/llm/models");
-      setModelOptions(models);
-    } catch (e) {
-      modelStatus.textContent = `cannot list models: ${e.message}`;
-    }
-  };
-  if (llm.configured) loadModels();
-  const testConnection = el("button", { class: "primary" }, "Test connection");
-  testConnection.addEventListener("click", async () => {
-    testConnection.disabled = true;
-    try {
-      const body = { base_url: baseUrl.value.trim(), protocol: protocol.value };
-      if (apiKey.value.trim()) body.api_key = apiKey.value.trim();
-      const verdict = await api("POST", "/api/llm/test", body);
-      if (!verdict.ok) throw new Error(verdict.detail || "connection failed");
-      await api("PUT", "/api/llm/config", body);
-      const { models } = await api("GET", "/api/llm/models");
-      setModelOptions(models);
-      flash("ok", `connected — ${verdict.models} model(s) available`);
-    } catch (e) { flash("bad", e.message); }
-    finally { testConnection.disabled = false; }
-  });
-  const saveModel = el("button", { class: "primary" }, "Save default model");
-  saveModel.addEventListener("click", async () => {
-    if (!modelSelect.value) return;
-    try {
-      await api("PUT", "/api/llm/config", { default_model: modelSelect.value });
-      flash("ok", `default model: ${modelSelect.value}`);
-      route();
-    } catch (e) { flash("bad", e.message); }
-  });
-  main.append(el("div", { class: "card" },
-    el("h3", {}, "LLM"),
-    el("div", { class: "row" },
-      el("div", { class: "field" }, el("label", {}, "preset"), buildPresetPicker(protocol, baseUrl)),
-      el("div", { class: "field" }, el("label", {}, "protocol"), protocol),
-      el("div", { class: "field grow" }, el("label", {}, "base URL"), baseUrl),
-      el("div", { class: "field grow" }, el("label", {}, "API key"), apiKey),
-      testConnection),
-    el("div", { class: "row" },
-      el("div", { class: "field grow" }, el("label", {}, "default model"), modelSelect),
-      saveModel),
-    modelStatus));
-
-  const applyWorkspace = el("input", { type: "checkbox" });
-  applyWorkspace.checked = !setup.workspace_project.ready;
-  const workspace = setup.default_workspace || {};
-  const saveWorkspace = el("button", { class: "primary" }, "Apply workspace");
-  saveWorkspace.addEventListener("click", async () => {
-    saveWorkspace.disabled = true;
-    try {
-      const result = await api("POST", "/api/setup/default-workspace", { apply: applyWorkspace.checked });
-      flash("ok", result.applied ? "workspace applied" : "workspace skipped");
-      route();
-    } catch (e) { flash("bad", e.message); saveWorkspace.disabled = false; }
-  });
-  main.append(el("div", { class: "card" },
-    el("h3", {}, "Workspace"),
-    el("p", { class: "note" },
-      `Default path: ${workspace.path || "~/workspace"}`),
-    el("p", { class: "note" },
-      "Predefined policy: trusted_local_dev, build phase, workspace execution."),
-    el("div", { class: "row" },
-      el("label", { class: "field" }, applyWorkspace, " Use default workspace"),
-      saveWorkspace)));
-
-  const finish = el("button", { class: "primary" }, "Finish setup");
-  finish.addEventListener("click", async () => {
-    finish.disabled = true;
-    try {
-      if (applyWorkspace.checked && !setup.workspace_project.ready) {
-        await api("POST", "/api/setup/default-workspace", { apply: true });
-      }
-      const done = await api("POST", "/api/setup/complete");
-      if (done.complete) {
-        flash("ok", "setup complete");
-        location.hash = "#/runs";
-      }
-    } catch (e) { flash("bad", e.message); finish.disabled = false; }
-  });
-  main.append(el("div", { class: "actions" }, finish));
-}
-
-// first-run O3 (ADR 0056 D7): `skep onboard`'s five steps as a thin form over
-// the same step functions (POST /api/onboard/<step>). The CLI resumes from the
-// records these write, and the other way round.
-async function onboardCard() {
-  const { steps, relock } = await api("GET", "/api/onboard");
-  const summaries = {
-    model: r => `${r.provider} ${r.model} — ${r.egress}`,
-    workdir: r => `${r.path} (project ${r.project_id})`,
-    sandbox: r => `${r.backend} — ${r.rings}`,
-    template: r => `${r.template} locked, sha256 ${String(r.sha256).slice(0, 12)}`,
-    role: r => r.role,
-  };
-  // O3-F1: a sandbox switch after the lock re-opens step 4 — say why.
-  const state = name => el("p", { class: "note" },
-    steps[name] ? `done: ${summaries[name](steps[name])}`
-      : name === "template" && relock
-        ? `re-lock needed: the locked baseline is not what ${relock} locks under this sandbox`
-        : "not done yet");
-  const field = (label, input) => el("div", { class: "field grow" }, el("label", {}, label), input);
-  const select = (values, value) => {
-    const node = el("select", {}, ...values.map(v => el("option", { value: v }, v)));
-    node.value = value;
-    return node;
-  };
-  const post = async (step, body, button) => {
-    button.disabled = true;
-    try {
-      await api("POST", `/api/onboard/${step}`, body);
-      flash("ok", `${step} recorded`);
-      route();
-    } catch (e) { flash("bad", e.message); button.disabled = false; }
-  };
-
-  const model = steps.model || {};
-  const provider = el("input", { value: model.provider || "ollama" });
-  const modelName = el("input", { value: model.model || "", placeholder: "e.g. qwen3:14b" });
-  const endpoint = el("input", { value: model.endpoint || "", placeholder: "http://localhost:11434" });
-  const keyEnv = el("input", { value: model.api_key_env || "", placeholder: "env var NAME, never the key" });
-  const saveModel = el("button", { class: "primary" }, "Test and save");
-  saveModel.addEventListener("click", () => post("model", {
-    provider: provider.value.trim(),
-    model: modelName.value.trim(),
-    endpoint: endpoint.value.trim() || null,
-    api_key_env: keyEnv.value.trim() || null,
-  }, saveModel));
-
-  const workdir = el("input", { value: (steps.workdir || {}).path || "", placeholder: "~/workspace" });
-  const saveWorkdir = el("button", { class: "primary" }, "Register");
-  saveWorkdir.addEventListener("click", () => post("workdir", { path: workdir.value.trim() }, saveWorkdir));
-
-  const backend = select(["auto", "podman", "none"], (steps.sandbox || {}).backend || "auto");
-  const detected = el("p", { class: "note" }, "");
-  const detect = el("button", { class: "ghost" }, "Detect");
-  detect.addEventListener("click", async () => {
-    try {
-      const found = await api("GET", "/api/onboard/sandboxes");
-      backend.value = found.recommended;
-      detected.textContent = Object.entries(found.backends)
-        .map(([name, v]) => `${name}: ${v.usable ? "usable" : "unusable"} (${v.detail})`)
-        .concat(`docker: ${found.docker.detail}`).join(" · ");
-    } catch (e) { flash("bad", e.message); }
-  });
-  const saveSandbox = el("button", { class: "primary" }, "Save");
-  saveSandbox.addEventListener("click", () => post("sandbox", { backend: backend.value }, saveSandbox));
-
-  const template = select(["assistant", "builder", "operator"], (steps.template || {}).template || relock || "assistant");
-  const table = el("pre", { class: "mono worker-command-output onboard-table" }, "");
-  const typed = el("input", { placeholder: "type yes to lock this as the policy baseline" });
-  const lock = el("button", { class: "primary" }, "Lock baseline");
-  lock.disabled = true;
-  let shown = null;
-  const preview = el("button", { class: "ghost" }, "Preview");
-  preview.addEventListener("click", async () => {
-    try {
-      shown = await api("GET", `/api/onboard/template?template=${encodeURIComponent(template.value)}`);
-      table.textContent = shown.locked
-        ? "this is already the locked baseline"
-        : [shown.table, ...(shown.tightened || []), ...(shown.diff || [])].join("\n");
-      lock.disabled = false;
-    } catch (e) { flash("bad", e.message); }
-  });
-  template.addEventListener("change", () => { shown = null; lock.disabled = true; table.textContent = ""; });
-  lock.addEventListener("click", () => {
-    if (!shown || typed.value.trim() !== "yes") { flash("bad", "preview, then type yes"); return; }
-    post("template", { template: template.value, expect_sha256: shown.sha256, approved_by: "web" }, lock);
-  });
-
-  const role = select(["assistant", "builder", "operator"],
-    (steps.role || {}).role || (steps.template || {}).template || "assistant");
-  const saveRole = el("button", { class: "primary" }, "Save");
-  saveRole.addEventListener("click", () => post("role", { role: role.value }, saveRole));
-
-  const report = el("pre", { class: "mono worker-command-output onboard-table" }, "");
-  const check = el("button", { class: "ghost" }, "Run onboard --check");
-  check.addEventListener("click", async () => {
-    try {
-      const result = await api("GET", "/api/onboard/check");
-      report.textContent = result.report;
-      flash(result.ready ? "ok" : "bad", result.ready ? "ready" : "not ready yet");
-    } catch (e) { flash("bad", e.message); }
-  });
-
-  return el("div", { class: "card" },
-    el("h3", {}, "First run (skep onboard)"),
-    el("p", { class: "note" }, "The same five steps as `skep onboard` in a terminal."),
-    el("h4", {}, "1 · Model"), state("model"),
-    el("div", { class: "row" }, field("provider", provider), field("model", modelName),
-      field("endpoint", endpoint), field("API key env var", keyEnv), saveModel),
-    el("h4", {}, "2 · Work directory"), state("workdir"),
-    el("div", { class: "row" }, field("path", workdir), saveWorkdir),
-    el("h4", {}, "3 · Sandbox"), state("sandbox"),
-    el("div", { class: "row" }, field("backend", backend), detect, saveSandbox), detected,
-    el("h4", {}, "4 · Policy template"), state("template"),
-    el("div", { class: "row" }, field("template", template), preview, field("approval", typed), lock),
-    table,
-    el("h4", {}, "5 · Role"), state("role"),
-    el("div", { class: "row" }, field("role", role), saveRole),
-    el("div", { class: "row" }, check), report);
-}
+// Graphite round A: Setup is the last tab of Settings — the first-run
+// checklist and the older setup flag live in settings.js.
 
 // ---------- Notes & Tasks (v76-F7: markdown notes + due-grouped tasks) ----------
 
@@ -2506,8 +2202,7 @@ async function viewChat(main, chatId) {
     api("GET", "/api/roles").catch(() => ({ roles: [], default: null })),
   ]);
   let chats = chatList.chats;
-  const chatSidebar = el("nav", { class: "chat-sidebar", "aria-label": "Chats" });
-  renderSidebarChats(chatSidebar, chats, activeChatId, llm.default_model);
+  renderThreads(chats); // H1: the thread list lives in the sidebar now
 
   header(main, "Chat", "Talk to the hive — the Queen's own model, with the supervisor at hand.");
   if (!llm.configured) {
@@ -2521,6 +2216,12 @@ async function viewChat(main, chatId) {
   let detail = activeChatId ? await api("GET", `/api/chats/${activeChatId}`) : null;
   chatBoundRepo = detail?.project?.repo || null;  // v96-F2
   let activeChat = detail?.chat || chats.find(chat => chat.chat_id === activeChatId) || null;
+  // H1-G2: the thread's own header line — its title, not the word "Chat".
+  const chatSubtitle = "Talk to the hive — the Queen's own model, with the supervisor at hand.";
+  // The header shows the short title; hovering it shows the full one.
+  const titleHeader = chat => header(main, shortTitle(chatTitle(chat)), chatTitle(chat));
+  if (activeChat) titleHeader(activeChat);
+  else header(main, "New thread", chatSubtitle);
   let messages = detail?.messages || [];
   let actions = detail?.actions || [];
   const assistantReady = Boolean(llm.configured && (activeChat?.model || llm.default_model));
@@ -2870,12 +2571,13 @@ async function viewChat(main, chatId) {
     refreshStrip();
   });
   loadStripProjects().then(() => refreshStrip());
-  // v88-F2: collapsing the chat list is a UI preference, so it lives in
+  // v88-F2: collapsing a panel is a UI preference, so it lives in
   // localStorage like the v76-F8 pins — operator-owned local state, never
-  // server state (I11).
-  let sidebarHidden = localStorage.getItem("skep-chat-sidebar") === "hidden";
-  const toggleSidebar = iconButton("hide chat list", "☰", {
-    class: "chat-toolbar-action icon-button ghost chat-sidebar-toggle",
+  // server state (I11). H1: the chat list moved to the sidebar; the toggle
+  // folds the context panel instead.
+  let contextHidden = localStorage.getItem("skep-context-panel") === "hidden";
+  const toggleContext = iconButton("hide thread context", "ⓘ", {
+    class: "chat-toolbar-action icon-button ghost chat-context-toggle",
   });
   const newChat = iconButton("new chat", "+", { class: "chat-toolbar-action icon-button ghost" });
   const deleteChat = iconButton("delete current chat", "×", {
@@ -2890,7 +2592,7 @@ async function viewChat(main, chatId) {
     if (!activeChatId) return;
     await api("DELETE", `/api/chats/${activeChatId}`);
     chats = (await api("GET", "/api/chats")).chats;
-    renderSidebarChats(chatSidebar, chats, null, llm.default_model);
+    renderThreads(chats);
     location.hash = "#/chat";
   });
   // v75-F2: the two always-disabled placeholder pills (codeChrome) are gone —
@@ -2942,28 +2644,52 @@ async function viewChat(main, chatId) {
     suggest.hidden = matches.length === 0;
   };
 
+  // H1-G7: one rounded box — the message on top, then "+", role, model and
+  // send. The "+" menu holds the same attach / dictate / spoken-replies /
+  // project-context buttons as before, each now labelled in words.
+  for (const [button, label] of [[attach, "Attach image"], [mic, "Dictate"],
+    [voiceToggle, "Spoken replies"], [addContext, "Project context"]]) {
+    button.append(el("span", { class: "composer-menu-label" }, label));
+  }
+  const plusMenu = el("details", { class: "composer-plus" },
+    el("summary", {
+      class: "composer-plus-toggle",
+      title: "attach an image, dictate, spoken replies",
+      "aria-label": "more: attach an image, dictate, spoken replies",
+    }, el("span", { "aria-hidden": "true" }, "+")),
+    el("div", { class: "composer-menu" },
+      attach, mic, voiceToggle, boundProject ? addContext : null));
+  plusMenu.querySelector(".composer-menu").addEventListener("click", () => { plusMenu.open = false; });
   const composer = el("div", { class: "composer-shell" },
     suggest,
     queuedNote,
     el("div", { class: "composer" },
-      boundProject ? addContext : null,
       input,
       el("div", { class: "composer-meta" },
-        attach,
+        plusMenu,
         attachInput,
-        mic,
-        voiceToggle,
         roleSelect,
         modelSelect,
-        send)),
-    el("div", { class: "composer-status-row" },
-      projectSelect,
-      branchPill.pill,
-      policyPill.pill,
-      enginePill.pill,
-      pushBtn,
-      prBtn,
-      contextMeter));
+        send)));
+  // H1-G2: the workspace row moved out of the composer into the thread's
+  // header line — project, branch, policy and engine chips, Push / Open PR —
+  // then role and model at the right, the context meter, and the thread
+  // actions. Same nodes, same handlers; only where they sit changed.
+  const statusRow = el("div", { class: "composer-status-row" },
+    projectSelect,
+    branchPill.pill,
+    policyPill.pill,
+    enginePill.pill,
+    pushBtn,
+    prBtn);
+  const roleModel = el("span", { class: "view-role-model" });
+  // Redrawn wherever the context panel is: a card can change role or model.
+  const drawContext = (chat, acts) => {
+    roleModel.textContent = chat
+      ? `${chat.role || "assistant"} · ${chat.model || llm.default_model || "no model"}` : "";
+    if (chat) titleHeader(chat); // the first turn names it
+    return renderContextPanel(contextPanel, { chat, defaultModel: llm.default_model, actions: acts });
+  };
   // v92-F1 (was v43-F4's single shared line): the worker loader — one pulsing
   // row per live run this chat owns, phase from the status SSE, seconds
   // counted here so the timer runs from dispatch instead of jumping on
@@ -3036,24 +2762,35 @@ async function viewChat(main, chatId) {
     };
   };
   const pane = el("div", { class: "chat-main" }, log, statusLine, composer);
-  const layout = el("div", { class: `chat-layout${sidebarHidden ? " sidebar-hidden" : ""}` },
-    chatSidebar,
-    el("div", { class: "chat-content" },
-      el("div", { class: "chat-toolbar" }, toggleSidebar, newChat, deleteChat),
-      pane));
-  const applySidebarState = () => {
-    layout.classList.toggle("sidebar-hidden", sidebarHidden);
-    const label = sidebarHidden ? "show chat list" : "hide chat list";
-    toggleSidebar.title = label;
-    toggleSidebar.setAttribute("aria-label", label);
-    toggleSidebar.setAttribute("aria-expanded", String(!sidebarHidden));
+  // H1 (hive-rooms C10): role and model, cards waiting, runs, spend.
+  const contextPanel = el("aside", { class: "chat-context", "aria-label": "thread context" });
+  const layout = el("div", { class: `chat-layout${contextHidden ? " context-hidden" : ""}` },
+    el("div", { class: "chat-content" }, pane),
+    contextPanel);
+  main.className = "chat-view";
+  viewControls()?.replaceChildren(statusRow, roleModel, contextMeter,
+    el("div", { class: "chat-toolbar" }, toggleContext, newChat, deleteChat));
+  drawContext(activeChat, actions);
+  // A card resolved or raised outside a turn (gate, deck command, a verdict)
+  // redraws the panel from the server, so "Waiting on you" never lags the
+  // sidebar and the Inbox (I8). The chat row comes from the same read: the
+  // card just resolved may be the one that changed its role or model.
+  const refreshContext = () => activeChatId && api("GET", `/api/chats/${activeChatId}`)
+    .then(fresh => drawContext(fresh.chat, fresh.actions))
+    .catch(() => {});
+  const applyContextState = () => {
+    layout.classList.toggle("context-hidden", contextHidden);
+    const label = contextHidden ? "show thread context" : "hide thread context";
+    toggleContext.title = label;
+    toggleContext.setAttribute("aria-label", label);
+    toggleContext.setAttribute("aria-expanded", String(!contextHidden));
   };
-  toggleSidebar.addEventListener("click", () => {
-    sidebarHidden = !sidebarHidden;
-    localStorage.setItem("skep-chat-sidebar", sidebarHidden ? "hidden" : "shown");
-    applySidebarState();
+  toggleContext.addEventListener("click", () => {
+    contextHidden = !contextHidden;
+    localStorage.setItem("skep-context-panel", contextHidden ? "hidden" : "shown");
+    applyContextState();
   });
-  applySidebarState();
+  applyContextState();
   main.append(layout);
 
   const scrollBottom = () => { log.scrollTop = log.scrollHeight; };
@@ -3261,6 +2998,7 @@ async function viewChat(main, chatId) {
   const resolveCardUI = (card, label, verb) => {
     card.classList.add("resolved");
     card.append(el("p", { class: `verdict ${verb === "confirm" ? "approved" : "denied"}` }, label));
+    refreshContext();
   };
 
   // ---------- the command deck executor (v25-F1) ----------
@@ -3378,6 +3116,7 @@ async function viewChat(main, chatId) {
     const action = await api("POST", `/api/chats/${activeChatId}/commands`, { tool, args });
     commandCard(action, notes);
     setComposerLocked(true);
+    refreshContext();
   };
 
   // v51-F0: /approve and /deny accept the id the pending-card hint prints.
@@ -3391,6 +3130,7 @@ async function viewChat(main, chatId) {
     if (resolvesOnCommands(card)) {
       const result = await api("POST", `/api/chats/${activeChatId}/commands/${id}/${verb}`);
       commandResult(verb === "confirm" ? `${card.tool}: result` : `${card.tool}: canceled`, result);
+      refreshContext(); // no turn follows, so nothing else redraws the panel
     } else {
       await runStream(`/api/chats/${activeChatId}/actions/${id}/${verb}`);
     }
@@ -3724,7 +3464,8 @@ async function viewChat(main, chatId) {
         renderPendingCards();
       }
       updateContextMeter();
-      renderSidebarChats(chatSidebar, chats, activeChatId, llm.default_model); // titles may have changed
+      renderThreads(chats); // titles may have changed
+      drawContext(activeChat, actions);
       // v103-F1: the turn is over — send whatever the operator typed during it.
       // After the refresh above, so a card raised by this turn has already
       // locked the composer and the steer waits for the verdict instead of
@@ -3733,10 +3474,11 @@ async function viewChat(main, chatId) {
     }
   };
 
-  log.append(el("p", { class: "note" },
-    activeChat
-      ? `${chatTitle(activeChat)} · model: ${activeChat.model || llm.default_model || "(none)"}`
-      : `Start a new chat. Model: ${llm.default_model || "(none — set a default in Settings)"}`));
+  // H1-G2: an open thread's title and model are in its header line now.
+  if (!activeChat) {
+    log.append(el("p", { class: "note" },
+      `Start a new chat. Model: ${llm.default_model || "(none — set a default in Settings)"}`));
+  }
   // v40-F1: replay batches consecutive tool records into one activity group,
   // so a refresh reconstructs exactly what the live stream drew.
   let replayGroup = null;
@@ -3787,7 +3529,7 @@ async function viewChat(main, chatId) {
     roleSelect.title = "switch with /role <name>";
     history.replaceState(null, "", `#/chat/${activeChatId}`);
     setShellActiveRoute(location.hash);
-    renderSidebarChats(chatSidebar, chats, activeChatId, llm.default_model);
+    renderThreads(chats);
     deleteChat.disabled = false;
     // v96-F3: a project picked before the first message binds now.
     if (pendingProjectId) {
@@ -4850,8 +4592,9 @@ async function renderSkillsTab(panel) {
 
 // ---------- Schedules ----------
 
-async function viewProjects(main) {
-  header(main, "Projects", "Trusted packs, bindings, and the schedules they seed.");
+// Graphite round A: the project cards and setup form, drawn into Settings →
+// Projects (settings.js) — no page header of their own any more.
+async function renderProjectList(main) {
   const [{ projects }, { packs }, { repos }, { templates }, { schedules }] = await Promise.all([
     api("GET", "/api/projects"),
     api("GET", "/api/projects/packs"),
@@ -5243,640 +4986,12 @@ async function viewSchedules(main) {
       add)));
 }
 
-// ---------- Policies (v75-F5: four sections + field-help + argv-safe editor) ----------
-
-// v75-F5 (C8): each row holds ONE command as its exact JSON array, so argv
-// semantics survive — ["bash", "-c", "a b"] never becomes four words. The
-// raw-JSON toggle is the whole-list escape hatch; the server-side validation
-// stays the authority either way.
-function buildShellCommandEditor(commands) {
-  const rows = el("div", { class: "shell-cmd-list" });
-  const rawBox = el("textarea", { class: "mono hidden" });
-  let raw = false;
-  const renderRows = () => {
-    rows.replaceChildren(...commands.map((command, i) => {
-      const input = el("input", { class: "mono", value: JSON.stringify(command) });
-      input.addEventListener("change", () => {
-        try {
-          const parsed = JSON.parse(input.value || "[]");
-          if (!Array.isArray(parsed) || !parsed.every(part => typeof part === "string")) {
-            throw new Error("not a string array");
-          }
-          commands[i] = parsed;
-        } catch {
-          flash("bad", 'each command is a JSON string array, e.g. ["ruff", "check"]');
-          input.value = JSON.stringify(commands[i]);
-        }
-      });
-      return el("div", { class: "shell-cmd-row" },
-        input,
-        iconButton("remove command", "×", {
-          class: "danger ghost",
-          onclick: () => { commands.splice(i, 1); renderRows(); },
-        }));
-    }));
-  };
-  renderRows();
-  const addRow = el("button", { type: "button", class: "ghost" }, "+ Add command");
-  addRow.addEventListener("click", () => { commands.push([]); renderRows(); });
-  const structured = el("div", {}, rows, addRow);
-  const toggle = el("button", { type: "button", class: "ghost" }, "raw JSON");
-  toggle.addEventListener("click", () => {
-    if (!raw) {
-      rawBox.value = JSON.stringify(commands, null, 2);
-      structured.classList.add("hidden");
-      rawBox.classList.remove("hidden");
-      toggle.textContent = "row editor";
-      raw = true;
-      return;
-    }
-    try {
-      const parsed = JSON.parse(rawBox.value || "[]");
-      commands.splice(0, commands.length, ...parsed);
-    } catch {
-      flash("bad", "raw JSON does not parse — fix it, or save straight from raw mode");
-      return;
-    }
-    renderRows();
-    rawBox.classList.add("hidden");
-    structured.classList.remove("hidden");
-    toggle.textContent = "raw JSON";
-    raw = false;
-  });
-  return {
-    node: el("div", { class: "shell-cmd-editor" }, structured, rawBox,
-      el("div", { class: "actions" }, toggle)),
-    value: () => {
-      if (!raw) return commands;
-      try { return JSON.parse(rawBox.value || "[]"); }
-      catch { throw new Error("allowed shell commands: the raw JSON does not parse"); }
-    },
-  };
-}
-
-// P2 (ADR 0053): one typed control per registry knob. The registry's `type`
-// string decides the widget; `value()` returns the JSON the routes expect.
-function knobInput(knob, current) {
-  const type = knob.type || "str";
-  if (type === "bool") {
-    const box = el("input", { type: "checkbox" });
-    box.checked = current === true;
-    return { node: box, value: () => box.checked };
-  }
-  if (type === "int") {
-    const input = el("input", { type: "number", class: "mono", value: String(current ?? knob.default ?? 0) });
-    return { node: input, value: () => Number(input.value) };
-  }
-  if (type.startsWith("enum[")) {
-    const options = type.slice(5, -1).split("|");
-    const select = el("select", {}, ...options.map(o => el("option", { value: o }, o)));
-    select.value = options.includes(current) ? current : options[0];
-    return { node: select, value: () => select.value };
-  }
-  if (type === "list[argv]") {
-    const editor = buildShellCommandEditor((Array.isArray(current) ? current : []).map(c => [...c]));
-    return { node: editor.node, value: () => editor.value() };
-  }
-  if (type === "list[str]") {
-    const input = el("input", { class: "mono", value: (Array.isArray(current) ? current : []).join(", ") });
-    return { node: input, value: () => input.value.split(",").map(s => s.trim()).filter(Boolean) };
-  }
-  const input = el("input", { class: "mono", value: current == null ? "" : String(current) });
-  return { node: input, value: () => input.value.trim() };
-}
-
-async function viewPolicies(main) {
-  header(main, "Policies",
-    "Policy and scopes: autonomy and defaults. Every change rebuilds the config for the next "
-    + "run; templates (skep setup --template) set these in one move.");
-  // v109-F9: every policy tier on one page — Global knobs, the Queen's
-  // Operator rules, Groups, and the Learned grants that auto-run things —
-  // behind the shared filter-bar pattern (Runs/Approvals).
-  const [policy, { groups }, ruleData, registry, { projects }] = await Promise.all([
-    api("GET", "/api/policy"),
-    api("GET", "/api/policy-groups"),
-    api("GET", "/api/policy/rules"),
-    api("GET", "/api/policy/registry"),
-    api("GET", "/api/projects"),
-  ]);
-  const tiers = {
-    global: el("div", { class: "policy-tier" }),
-    resolve: el("div", { class: "policy-tier" }),
-    operator: el("div", { class: "policy-tier" }),
-    groups: el("div", { class: "policy-tier" }),
-    learned: el("div", { class: "policy-tier" }),
-  };
-  const auto = el("input", { type: "checkbox" });
-  auto.checked = policy.auto_approve;
-  const workerCmd = el("input", { value: policy.worker_cmd, class: "mono" });
-  const network = el("input", { value: policy.default_network.join(", ") });
-  const env = el("input", { value: policy.default_env_allowlist.join(", ") });
-  const mode = el("select", {},
-    el("option", { value: "ask" }, "ask"),
-    el("option", { value: "workspace" }, "workspace"),
-    el("option", { value: "sandbox" }, "sandbox"));
-  mode.value = policy.default_execution_mode;
-  const trustedRoots = el("input", { value: policy.trusted_workspace_roots.join(", ") });
-  const sandboxRequired = el("input", { value: policy.sandbox_required_for.join(", ") });
-  const shellEditor = buildShellCommandEditor(
-    (policy.allowed_shell_commands || []).map(command => [...command]));
-  const tick = el("input", { type: "number", min: "1", value: String(policy.ticker_interval_seconds) });
-  const defaultWall = el("input", { type: "number", min: "1", value: String(policy.default_wall_clock_seconds) });
-  const defaultIterations = el("input", { type: "number", min: "1", value: String(policy.default_max_iterations) });
-  const defaultActions = el("input", { type: "number", min: "1", value: String(policy.default_max_actions) });
-  const defaultProviderCalls = el("input", { type: "number", min: "0", value: String(policy.default_max_provider_calls) });
-  const save = el("button", { class: "primary" }, "Save policy");
-  save.addEventListener("click", async () => {
-    try {
-      await api("PUT", "/api/policy", {
-        auto_approve: auto.checked,
-        worker_cmd: workerCmd.value.trim(),
-        default_network: network.value.split(",").map(s => s.trim()).filter(Boolean),
-        default_env_allowlist: env.value.split(",").map(s => s.trim()).filter(Boolean),
-        default_execution_mode: mode.value,
-        trusted_workspace_roots: trustedRoots.value.split(",").map(s => s.trim()).filter(Boolean),
-        sandbox_required_for: sandboxRequired.value.split(",").map(s => s.trim()).filter(Boolean),
-        ticker_interval_seconds: Number(tick.value),
-        default_wall_clock_seconds: Number(defaultWall.value),
-        default_max_iterations: Number(defaultIterations.value),
-        default_max_actions: Number(defaultActions.value),
-        default_max_provider_calls: Number(defaultProviderCalls.value),
-        allowed_shell_commands: shellEditor.value(),
-      });
-      flash("ok", "policy saved — applies to the next run");
-    } catch (e) { flash("bad", e.message); }
-  });
-
-  // v75-F5: every field teaches (I9) — a one-line "what this does" hint.
-  const field = (label, input, help, grow = false) => el("div",
-    { class: `field${grow ? " grow" : ""}` },
-    el("label", {}, label),
-    help ? el("p", { class: "field-help" }, help) : null,
-    input);
-  const section = (title, open, ...body) => el("details",
-    { class: "policy-section", open: open ? "" : null },
-    el("summary", { class: "policy-section-header" }, title),
-    el("div", { class: "policy-section-body" }, body));
-
-  tiers.global.append(
-    section("Execution defaults", true,
-      el("div", { class: "row" },
-        field("default execution", mode,
-          "Where workers run: workspace (a checkout under a trusted root) or "
-          + "sandbox (bubblewrap/seatbelt walls); ask = choose per dispatch."),
-        field("wall clock (s)", defaultWall,
-          "Maximum seconds a worker may run before it is stopped."),
-        field("max iterations", defaultIterations,
-          "Plan/act rounds a worker gets before it must finish."),
-        field("max actions", defaultActions,
-          "Total capability calls (files, shell, …) per run."),
-        field("max provider calls", defaultProviderCalls,
-          "LLM requests a run may spend — the cost ceiling."))),
-    section("Security", false,
-      el("div", { class: "row" },
-        field("default network allowlist (D1)", network,
-          "Domains workers may reach, comma-separated. Empty = deny all network.", true),
-        field("default env allowlist (G2)", env,
-          "Environment variable NAMES passed through to workers — never values.", true)),
-      el("div", { class: "row" },
-        field("trusted workspace roots", trustedRoots,
-          "Directories where workspace (non-sandbox) execution is allowed, comma-separated.", true),
-        field("sandbox required for", sandboxRequired,
-          "Repos or paths that must always run sandboxed, whatever the mode says.", true))),
-    section("Advanced", false,
-      el("div", { class: "row" },
-        field("worker command", workerCmd,
-          "The command skep uses to spawn the coding worker.", true),
-        field("ticker interval (s)", tick,
-          "How often the in-process scheduler checks for due schedules.")),
-      field("allowed shell commands", shellEditor.node,
-        "Commands workers may run without an approval card. One row per "
-        + "command, as a JSON array — quoted arguments survive exactly.")),
-    section("Auto-approval", false,
-      el("div", { class: "field" },
-        el("label", {}, "auto-approval (D3: verified + re-verified manifest-only fixes)"),
-        el("p", { class: "field-help" },
-          "Auto-applies only verified, re-verified, manifest-only fixes on the "
-          + "constrained skep/ integration branch — never on main, never for "
-          + "other change classes."),
-        el("div", {}, auto, " auto-apply safe dependency fixes"))),
-    el("div", { class: "actions" }, save));
-
-  // v97-F5 (ADR 0048): policy groups — named convenience-grant bundles,
-  // live-composed into every attached project's run policy. Edit once, all
-  // follow; "Save as new group" is the copy-on-write escape hatch.
-  let groupEditHandoff = null;
-  try {
-    const raw = sessionStorage.getItem("skep-group-edit");
-    sessionStorage.removeItem("skep-group-edit");
-    groupEditHandoff = raw ? JSON.parse(raw) : null;
-  } catch { groupEditHandoff = null; }
-
-  const groupRow = (group) => {
-    const fromProject = groupEditHandoff?.group === group.name
-      ? groupEditHandoff.project : null;
-    const textarea = el("textarea", { class: "mono", rows: "7" });
-    textarea.value = JSON.stringify(group.policy, null, 2);
-    const forkBox = el("input", { type: "checkbox" });
-    // Context-sensitive default: opened FROM a project's view while the
-    // group serves more than one project → the protective choice (fork)
-    // starts checked; on this global page editing the shared thing is the
-    // point, so it starts unchecked. The click decides either way.
-    forkBox.checked = Boolean(fromProject && group.attached_projects.length > 1);
-    const forkName = el("input", { class: "mono", value: `${group.name}-2` });
-    const repoint = el("select", {},
-      el("option", { value: "" }, "repoint: none"),
-      ...group.attached_projects.map(p =>
-        el("option", { value: p }, `repoint ${p}`)));
-    if (fromProject && group.attached_projects.includes(fromProject)) {
-      repoint.value = fromProject;
-    }
-    const syncFork = () => { forkName.hidden = repoint.hidden = !forkBox.checked; };
-    forkBox.addEventListener("change", syncFork);
-    syncFork();
-    const saveGroup = el("button", { class: "primary" }, "Save");
-    const removeGroup = el("button", { class: "danger" }, "Delete");
-    saveGroup.addEventListener("click", async () => {
-      let policy;
-      try { policy = JSON.parse(textarea.value); }
-      catch { flash("bad", "policy must be valid JSON"); return; }
-      try {
-        if (forkBox.checked) {
-          const newName = forkName.value.trim();
-          await api("POST", `/api/policy-groups/${encodeURIComponent(group.name)}/fork`, {
-            new_name: newName,
-            policy,
-            repoint_project: repoint.value || null,
-          });
-          flash("ok", `forked ${group.name} → ${newName}`
-            + (repoint.value ? ` and repointed ${repoint.value}` : "")
-            + " — the source group is untouched");
-        } else {
-          const affected = group.attached_projects.length
-            ? `every attached project follows: ${group.attached_projects.join(", ")}`
-            : "no projects attach it yet";
-          if (!window.confirm(`Update ${group.name} IN PLACE — ${affected}. Continue?`)) return;
-          await api("PUT", `/api/policy-groups/${encodeURIComponent(group.name)}`, policy);
-          flash("ok", `updated ${group.name} — ${affected}`);
-        }
-        route();
-      } catch (e) { flash("bad", e.message); }
-    });
-    removeGroup.addEventListener("click", async () => {
-      try {
-        await api("DELETE", `/api/policy-groups/${encodeURIComponent(group.name)}`);
-        flash("ok", `deleted ${group.name}`);
-        route();
-      } catch (e) { flash("bad", e.message); }  // attached → the refusal names the projects
-    });
-    const badge = group.builtin ? (group.edited ? "builtin · edited" : "builtin") : "custom";
-    const attachedNote = group.attached_projects.length
-      ? `attached: ${group.attached_projects.join(", ")}` : "attached: none";
-    return el("details", { class: "policy-group-row", open: fromProject ? "" : null },
-      el("summary", {},
-        el("span", { class: "mono" }, group.name),
-        el("span", { class: "note" }, ` ${badge} · ${attachedNote}`)),
-      el("p", { class: "field-help" },
-        "Save updates IN PLACE (every attached project follows on its next "
-        + "dispatch). “Save as new group” forks copy-on-write: the source and "
-        + "its other projects stay untouched."),
-      textarea,
-      el("div", { class: "row" },
-        el("label", {}, forkBox, " Save as new group"),
-        forkName, repoint, saveGroup, removeGroup));
-  };
-
-  const newGroupName = el("input", { class: "mono", placeholder: "new-group-name" });
-  const newGroupBtn = el("button", {}, "Create group");
-  newGroupBtn.addEventListener("click", async () => {
-    try {
-      await api("PUT", `/api/policy-groups/${encodeURIComponent(newGroupName.value.trim())}`,
-        { default_network: [] });
-      flash("ok", `created ${newGroupName.value.trim()} — edit its grants below`);
-      route();
-    } catch (e) { flash("bad", e.message); }
-  });
-
-  // v109-F9: within Groups, filter by attached project — the same chip
-  // pattern, one level down.
-  const attachedProjects = [...new Set(groups.flatMap(g => g.attached_projects))].sort();
-  const groupList = el("div", {});
-  const renderGroupRows = (projectKey) => {
-    groupList.replaceChildren(...groups
-      .filter(g => projectKey === "all" || g.attached_projects.includes(projectKey))
-      .map(groupRow));
-  };
-  const projectBar = attachedProjects.length
-    ? buildFilterBar(
-      [{ key: "all", label: "All projects" },
-        ...attachedProjects.map(p => ({ key: p, label: p }))],
-      Object.fromEntries([
-        ["all", groups.length],
-        ...attachedProjects.map(p =>
-          [p, groups.filter(g => g.attached_projects.includes(p)).length]),
-      ]),
-      renderGroupRows)
-    : null;
-  renderGroupRows("all");
-  tiers.groups.append(
-    el("details", { class: "policy-section", open: groupEditHandoff ? "" : null },
-      el("summary", { class: "policy-section-header" }, "Policy groups"),
-      el("div", { class: "policy-section-body" },
-        el("p", { class: "field-help" },
-          "Reusable grant bundles (network hosts, shell prefixes, env vars, "
-          + "budgets, engine) attached to projects and composed live — the "
-          + "project's own policy always wins scalars; trust-ramp keys can "
-          + "never ride a group."),
-        projectBar,
-        groupList,
-        el("div", { class: "row" }, newGroupName, newGroupBtn))));
-
-  // v109-F9: the Queen's standing operator document — visible, read-only
-  // (its edits stay the carded set_operator_policy chat verb).
-  const operatorRules = ruleData.operator_rules || [];
-  tiers.operator.append(
-    section("Operator rules (the Queen's standing policy)", true,
-      el("p", { class: "field-help" },
-        "The Queen's own standing document (the set_operator_policy chat "
-        + "verb) — it governs Queen-side reads and fetches only, never "
-        + "workers. Read-only here."),
-      operatorRules.length
-        ? el("table", {},
-          el("thead", {}, el("tr", {},
-            ["scope", "action", "pattern", "verdict"].map(h => el("th", {}, h)))),
-          el("tbody", {}, operatorRules.map(r => el("tr", {},
-            el("td", {}, r.scope),
-            el("td", {}, r.action),
-            el("td", { class: "mono" }, r.pattern),
-            el("td", {}, r.verdict)))))
-        : el("p", { class: "empty-state" }, "No operator rules stored.")));
-
-  // v109-F9: learned rules — the standing grants that auto-run things. Until
-  // this section the operator could grant them but never see or revoke them.
-  const learnedRules = ruleData.rules || [];
-  const ruleRow = (rule) => {
-    const revoke = el("button", { class: "danger" }, "Revoke");
-    revoke.addEventListener("click", async () => {
-      if (!window.confirm(
-        `Revoke ${rule.rule_id}? The next matching action cards again.`)) return;
-      try {
-        await api("DELETE", `/api/policy/rules/${encodeURIComponent(rule.rule_id)}`);
-        flash("ok", `revoked ${rule.rule_id} — the next matching action cards again`);
-        route();
-      } catch (e) { flash("bad", e.message); }
-    });
-    return el("div", { class: "item-card learned-rule-row" },
-      el("div", { class: "row" },
-        el("span", { class: "mono" }, rule.rule_id),
-        el("span", { class: "note" },
-          `${rule.scope}/${rule.action} · `
-          + (rule.tier === "session" ? "session (ends on restart)" : "always")
-          + ` · ${rule.provenance}`
-          + (rule.created_at ? ` · granted ${rule.created_at}` : "")),
-        revoke));
-  };
-  tiers.learned.append(
-    section("Learned rules (standing grants)", true,
-      el("p", { class: "field-help" },
-        "Written by allow-always confirmations and approved cards — each rule "
-        + "lets its exact subject auto-run without a card. Session rules end "
-        + "when serve restarts; Revoke ends any rule now."),
-      learnedRules.length
-        ? el("div", { class: "stack" }, learnedRules.map(ruleRow))
-        : el("p", { class: "empty-state" },
-          "No learned rules — nothing auto-runs beyond stored policy.")));
-
-  // P2 (ADR 0053): the registry-driven editor. Every knob the registry
-  // names renders with the layer that decided it (RSoP), everything it
-  // overrode, the layers that may set it, and a tri-state control at the
-  // layer being edited — inherit (absent from the overlay) or set. Writes
-  // go through the routes that already exist (I5): a project overlay is the
-  // definition re-POSTed (the upsert), global knobs are PUT /api/policy.
-  // Explicit "cleared" has no stored form yet (D3/D7); the hint says so.
-  const knobs = (registry.keys || []).filter(k =>
-    k.kind === "knob" && k.system === "run_policy" && k.name !== "policy_engine_v2_scopes");
-  const scopeNames = [...new Set((registry.keys || [])
-    .filter(k => k.kind === "rule" && k.system === "scope_document")
-    .map(k => k.name.split(".")[0]))];
-  const picker = el("select", {},
-    el("option", { value: "" }, "global knobs (no project)"),
-    ...projects.map(p => el("option", { value: p.project_id }, `${p.name} (${p.project_id})`)));
-  const editorBody = el("div", { class: "stack" });
-  const chipFor = (layer, name) => el("span", { class: "chip tone-info" },
-    name ? `${layer}:${name}` : layer);
-  const renderEditor = async () => {
-    editorBody.replaceChildren(el("p", { class: "note" }, "resolving…"));
-    const projectId = picker.value;
-    let project = null;
-    let rsop = null;
-    try {
-      project = projectId
-        ? await api("GET", `/api/projects/${encodeURIComponent(projectId)}`) : null;
-      const binding = (project?.bindings || [])
-        .find(b => b.kind === "repo_path" || b.kind === "repo_slug");
-      rsop = binding
-        ? await api("GET", `/api/repos/${encodeURIComponent(binding.value)}/rsop`)
-          .catch(exc => ({ error: String(exc) }))
-        : null;
-    } catch (e) { editorBody.replaceChildren(el("p", { class: "note" }, e.message)); return; }
-    const byKey = new Map((rsop?.keys || []).map(k => [k.key, k]));
-    const editLayer = project ? "project" : "global";
-    const overlay = project ? { ...(project.policy || {}) } : null;
-    const rows = [];
-    const table = el("table", { class: "rsop-table rsop-editor" },
-      el("thead", {}, el("tr", {},
-        ["key", "effective value", "decided by", "overrode", "may be set at", `edit at ${editLayer}`]
-          .map(h => el("th", {}, h)))),
-      el("tbody", {}, knobs.map(knob => {
-        const entry = byKey.get(knob.name);
-        const effective = project ? entry?.value : policy[knob.name];
-        const decided = project
-          ? (entry && entry.source_layer ? chipFor(entry.source_layer, entry.source_name)
-            : el("span", { class: "chip tone-muted" }, "unresolved"))
-          : el("span", { class: "chip tone-info" }, "global");
-        const overrode = el("div", { class: "row" },
-          (entry?.overridden || []).map(o => el("span", { class: "chip tone-muted", title: JSON.stringify(o.value) },
-            o.name ? `${o.layer}:${o.name}` : o.layer)));
-        const mayBeSet = el("span", { class: "note" }, (knob.layers || []).join(" · "));
-        const canEdit = (knob.layers || []).includes(editLayer)
-          && (project || Object.hasOwn(policy, knob.name));
-        const control = el("div", { class: "editor-ctl" });
-        if (canEdit) {
-          const inOverlay = project ? Object.hasOwn(overlay, knob.name) : true;
-          const state = el("select", {},
-            el("option", { value: "inherit" }, "inherit"),
-            el("option", { value: "set" }, "set"));
-          state.value = inOverlay ? "set" : "inherit";
-          const input = knobInput(knob, inOverlay ? (project ? overlay[knob.name] : policy[knob.name])
-            : (entry?.value ?? knob.default));
-          input.node.classList.toggle("hidden", !inOverlay);
-          state.addEventListener("change", () => {
-            input.node.classList.toggle("hidden", state.value !== "set");
-          });
-          if (project) control.append(state);
-          control.append(input.node);
-          rows.push({ key: knob.name, state: () => (project ? state.value : "set"), value: input.value });
-        } else {
-          control.append(el("span", { class: "note" }, project ? "not settable here" : "read-only"));
-        }
-        return el("tr", {},
-          el("td", { class: "mono", title: `${knob.doc} (${knob.invariant})` }, knob.name),
-          el("td", { class: "mono" }, effective === undefined ? "—" : JSON.stringify(effective)),
-          el("td", {}, decided),
-          el("td", {}, overrode),
-          el("td", {}, mayBeSet),
-          el("td", {}, control));
-      })));
-    const save = el("button", { class: "primary" },
-      project ? `Save ${project.name} overlay` : "Save global knobs");
-    save.addEventListener("click", async () => {
-      try {
-        if (project) {
-          const nextPolicy = { ...overlay };
-          for (const row of rows) {
-            if (row.state() === "set") nextPolicy[row.key] = row.value();
-            else delete nextPolicy[row.key];
-          }
-          await api("POST", "/api/projects", { ...project, policy: nextPolicy });
-          flash("ok", `${project.name}: overlay saved — the next dispatch resolves it`);
-          await renderEditor();  // stay on this project; the RSoP re-resolves
-          return;
-        } else {
-          const body = {};
-          for (const row of rows) {
-            const next = row.value();
-            if (JSON.stringify(next) !== JSON.stringify(policy[row.key])) body[row.key] = next;
-          }
-          if (!Object.keys(body).length) { flash("ok", "nothing changed"); return; }
-          await api("PUT", "/api/policy", body);
-          flash("ok", "global policy saved — applies to the next run");
-        }
-        route();
-      } catch (e) { flash("bad", e.message); }
-    });
-    const engineNote = rsop?.engine
-      ? el("p", { class: "field-help" },
-        `engine: v2 on [${(rsop.engine.v2_scopes || []).join(", ") || "none"}]`
-        + (rsop.engine.routed_keys ? ` · routed ${rsop.engine.routed_keys.length} knob(s)` : "")
-        + (rsop.engine.rule_refusals?.length ? ` · ${rsop.engine.rule_refusals.length} rule refusal(s)` : ""))
-      : null;
-    editorBody.replaceChildren(...[
-      rsop?.error ? el("p", { class: "note" }, `policy did not resolve: ${rsop.error}`) : table,
-      engineNote,
-      el("p", { class: "field-help" },
-        "inherit = the key is absent from this layer (the layer below decides); set = this "
-        + "layer decides. An explicit \"cleared\" state has no stored form yet — remove the "
-        + "key here and edit the layer below."),
-      el("div", { class: "actions" }, save),
-    ].filter(Boolean));  // replaceChildren(null) would render the text "null"
-  };
-  picker.addEventListener("change", renderEditor);
-
-  // The why box: one question, both answers (run + Queen), the rule named.
-  const whyScope = el("select", {}, ...scopeNames.map(s => el("option", { value: s }, s)));
-  const whyAction = el("input", { class: "mono", placeholder: "run" });
-  const whyValue = el("input", { class: "mono", placeholder: "uv sync" });
-  const whyOut = el("pre", { class: "mono" });
-  const ask = el("button", {}, "why?");
-  ask.addEventListener("click", async () => {
-    const project = projects.find(p => p.project_id === picker.value);
-    const binding = (project?.bindings || [])
-      .find(b => b.kind === "repo_path" || b.kind === "repo_slug");
-    if (!binding) { flash("bad", "pick a project with a repo binding first"); return; }
-    try {
-      const out = await api("GET", `/api/policy/why?repo=${encodeURIComponent(binding.value)}`
-        + `&scope=${encodeURIComponent(whyScope.value)}`
-        + `&action=${encodeURIComponent(whyAction.value.trim())}`
-        + `&value=${encodeURIComponent(whyValue.value.trim())}`);
-      whyOut.textContent = `run: ${out.run.verdict} — ${out.run.decided_by}\n`
-        + `operator: ${out.operator.verdict} — ${out.operator.decided_by}`;
-    } catch (e) { whyOut.textContent = e.message; }
-  });
-
-  // The engine switch (P1, ADR 0053 D6) lives where the operator stands when
-  // cutting over; every flip is a line in <audit>/policy/engine-flips.jsonl.
-  const switchBoxes = scopeNames.map(s => {
-    const box = el("input", { type: "checkbox" });
-    box.checked = (policy.policy_engine_v2_scopes || []).includes(s);
-    return [s, box];
-  });
-  const switchSave = el("button", {}, "Apply engine switch");
-  switchSave.addEventListener("click", async () => {
-    const scopes = switchBoxes.filter(([, box]) => box.checked).map(([s]) => s);
-    if (!window.confirm(`Route ${scopes.length ? scopes.join(", ") : "no scope"} through policy `
-      + "engine v2? The flip is recorded in the audit trail.")) return;
-    try {
-      await api("PUT", "/api/policy", { policy_engine_v2_scopes: scopes });
-      flash("ok", "engine switch saved — recorded in the audit trail");
-      route();
-    } catch (e) { flash("bad", e.message); }
-  });
-  tiers.resolve.append(
-    section("Resolve & edit (registry-driven)", true,
-      el("p", { class: "field-help" },
-        "Every policy knob skep has, from the registry: what decides it for the picked "
-        + "project, what lost, and where it may be set. Edits write the project overlay "
-        + "(or the global knobs) through the same routes the CLI and chat use."),
-      field("project", picker, "Pick a project to resolve against its repo; none = global knobs."),
-      editorBody,
-      el("div", { class: "row" },
-        field("scope", whyScope, null), field("action", whyAction, null),
-        field("value", whyValue, null, true), el("div", { class: "field" }, el("label", {}, "\u00a0"), ask)),
-      whyOut,
-      el("div", { class: "field" },
-        el("label", {}, "policy engine v2 — scopes routed through the new engine"),
-        el("p", { class: "field-help" },
-          "Cut over one scope at a time, shell first, after the golden parity suite is green. "
-          + "Flip back is one save; both are recorded."),
-        el("div", { class: "row" }, switchBoxes.map(([s, box]) => el("label", { class: "note" }, box, " ", s))),
-        el("div", { class: "actions" }, switchSave))));
-  renderEditor();
-
-  // The tier filter shows one tier (or all); counts follow the tier contents.
-  const TIER_FILTERS = [
-    { key: "all", label: "All" },
-    { key: "global", label: "Global" },
-    { key: "resolve", label: "Resolve & edit" },
-    { key: "operator", label: "Operator" },
-    { key: "groups", label: "Groups" },
-    { key: "learned", label: "Learned" },
-  ];
-  const globalSections = 4; // Execution defaults / Security / Advanced / Auto-approval
-  const tierCounts = {
-    all: globalSections + knobs.length + operatorRules.length + groups.length + learnedRules.length,
-    global: globalSections,
-    resolve: knobs.length,
-    operator: operatorRules.length,
-    groups: groups.length,
-    learned: learnedRules.length,
-  };
-  main.append(
-    buildFilterBar(TIER_FILTERS, tierCounts, (key) => {
-      for (const [tier, wrap] of Object.entries(tiers)) {
-        wrap.classList.toggle("hidden", key !== "all" && key !== tier);
-      }
-    }),
-    tiers.global, tiers.resolve, tiers.operator, tiers.groups, tiers.learned);
-}
+// ---------- Policies (graphite round A: the page lives in policies.js) ----------
 
 // ---------- Settings (v75-F3: five tabs — one section's DOM at a time) ----------
 
-// Per-session tab memory (the openChatGroups pattern): route() re-renders
-// after a save land back on the tab the operator was using.
-let activeSettingsTab = "assistant";
-
-async function viewSettings(main) {
-  header(main, "Settings",
-    "The assistant the Queen chats with, the worker's provider, and the repos the hive may work on.");
-  const tabs = buildTabBar([
-    { key: "assistant", label: "Assistant", render: renderAssistantTab },
-    { key: "worker", label: "Worker", render: renderWorkerTab },
-    { key: "channels", label: "Channels", render: renderChannelsTab },
-    { key: "webhooks", label: "Webhooks", render: renderWebhooksTab },
-    { key: "repos", label: "Repos", render: renderReposTab },
-  ], { initial: activeSettingsTab, onActivate: (key) => { activeSettingsTab = key; } });
-  main.append(tabs.bar, tabs.content);
-}
+// Graphite round A: the page and its five tabs (Models, Workers, Projects,
+// Channels, Setup) are composed in settings.js; the forms below are its parts.
 
 // v108-F9: the preset picker — one catalog row (GET /api/provider-presets)
 // fills protocol + base URL; registry spelling maps to the wire spelling by
@@ -6103,12 +5218,14 @@ function renderWorkerRoster(panel, roster) {
       + "(ADR 0047). Patches still land only through a human approval.")));
 }
 
-async function renderWorkerTab(panel) {
-  const [settings, roster] = await Promise.all([
-    api("GET", "/api/settings"),
-    api("GET", "/api/workers"),
-  ]);
-  renderWorkerRoster(panel, roster);
+// Graphite round A: the roster is Settings → Workers; the override below is
+// the "Worker model" block of Settings → Models.
+async function renderWorkersTab(panel) {
+  renderWorkerRoster(panel, await api("GET", "/api/workers"));
+}
+
+async function renderWorkerModel(panel) {
+  const settings = await api("GET", "/api/settings");
   const provider = el("input", { value: settings.provider || "", placeholder: "anthropic" });
   const model = el("input", { value: settings.model || "", placeholder: "claude-fable-5" });
   const endpoint = el("input", { value: settings.endpoint || "", placeholder: "(provider default)" });
@@ -6124,10 +5241,9 @@ async function renderWorkerTab(panel) {
     } catch (e) { flash("bad", e.message); }
   });
   panel.append(el("div", { class: "card" },
-    el("h3", {}, "Worker LLM override"),
     settings.configured ? null
       : el("p", { class: "note" },
-        "Optional override — the default coding worker uses the assistant connection above."),
+        "Optional override — the default coding worker uses the chat model's connection above."),
     el("div", { class: "row" },
       el("div", { class: "field" }, el("label", {}, "provider"), provider),
       el("div", { class: "field grow" }, el("label", {}, "model"), model)),
@@ -6373,6 +5489,8 @@ async function poll() {
     const status = await api("GET", "/api/status");
     document.getElementById("health").textContent =
       `${status.status} · ${status.pending_approvals} pending`;
+    document.getElementById("sidebar-machine").textContent = status.machine; // H1
+    refreshSidebar().catch(() => {}); // H1: dots and counts ride this poll too
     // v76-F2: the Queen tile's liveness rides THIS poll — no new timer. The
     // tile unhides once the model label is filled (an empty tile is a lie).
     const queenTile = document.getElementById("topbar-queen-status");
@@ -6462,6 +5580,11 @@ decorateShell();
 installSearch();
 installPalette();
 installDock();
+installSidebar();
 if (await tryConnect()) { await route(); refreshDockModel(); }
 poll();
 schedulePoll(POLL_MIN_MS);
+
+// H1: the helpers sidebar.js and room.js import back (the cycle is safe: they
+// only declare at top level). After the boot marker, so tests/web never sees it.
+export { api, buildFilterBar, buildTabBar, chatTitle, el, flash, fmtTs, header, iconButton, relativeTime, renderAssistantTab, renderChannelsTab, renderProjectList, renderReposTab, renderWebhooksTab, renderWorkerModel, renderWorkersTab, route, setupMissingLabels, setupStatus, shortTaskId, shortTitle, stateChip };

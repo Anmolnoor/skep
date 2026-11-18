@@ -1,7 +1,7 @@
 """P2 (ADR 0053): the registry-driven policy editor on the Policies page.
 
 The UI is a no-build static app (I11), so the pins are text checks over
-app.js in the `test_style_tokens` idiom — the tier exists, it reads the
+app.js and policies.js in the `test_style_tokens` idiom — the tier exists, it reads the
 registry and the RSoP, it asks `why`, and it writes through the routes that
 already exist (I5) — plus the one route change the editor needed: the
 project upsert keeps the pack it was given.
@@ -15,12 +15,14 @@ from skep.supervisor import SupervisorConfig
 
 from .conftest import serve_client
 
-APP_JS = Path(__file__).resolve().parents[2] / "src/skep/supervisor/serve/static/app.js"
+STATIC = Path(__file__).resolve().parents[2] / "src/skep/supervisor/serve/static"
 
 
 def test_the_editor_tier_reads_the_registry_and_writes_through_existing_routes() -> None:
-    text = APP_JS.read_text()
-    assert 'key: "resolve", label: "Resolve & edit"' in text
+    # Graphite round A: the page moved to policies.js; the editor is the
+    # Projects & groups tab.
+    text = (STATIC / "app.js").read_text() + (STATIC / "policies.js").read_text()
+    assert '{ key: "groups", label: "Projects & groups"' in text
     assert 'api("GET", "/api/policy/registry")' in text
     assert "/rsop`" in text
     assert "/api/policy/why?repo=" in text

@@ -3089,3 +3089,18 @@ wire differences: `store: false` on the body and the listing's
 byte-identical. F3 is the preset and its egress line and card. F4 keeps the
 login the Queen's alone: workers, the reviewer caste and the key relay keep
 the provider they had, and no run is routed or pinned to chatgpt.com.
+
+## v119 — the main key stays on its own endpoint (2026-11-17)
+
+F1 closes a leak from v108-F4. A provider profile with no key of its own
+fell back to the legacy `llm-secret` / `SKEP_LLM_API_KEY` whatever its host,
+and the ticker's health sweep probed every profile, so the main key went to
+each keyless profile's endpoint every five minutes. The legacy secret now
+goes only to the endpoint it was saved for: the saved base URL, or, with
+none saved or the Queen on the ChatGPT plan (ADR 0063), the workers'
+`profile.json` endpoint. That covers the health probe, the chat resolver
+and the worker's own fallback. A profile elsewhere is called without a key,
+which is right for a local server. A remote one fails, and the health row
+and `skep doctor` say to give it its own key (`skep provider set-key <id>`).
+A single-provider home whose saved base URL and `profile.json` agree, which
+is every home configured through the daemon, is unchanged.

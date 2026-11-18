@@ -3,23 +3,33 @@
 One llm-secret could not serve a multi-provider registry — chat, workers,
 and probes all collapsed onto it. Each profile now owns a 0600
 ``llm-secret-<provider_id>`` file; resolution everywhere is the profile's
-NAMED env var → its own file → the legacy llm-secret. Values never touch
-sqlite, any GET body, or the chat surface."""
+NAMED env var → its own file → the legacy llm-secret (v119-F1: the last only
+for the endpoint it was saved for). Values never touch sqlite, any GET body,
+or the chat surface."""
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import io
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from skep.profile import run_personal_setup
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.cli_cmds import cmd_provider_add, cmd_provider_set_key
-from skep.supervisor.providers import ProviderError, ProviderProfile, validate_provider_profile
+from skep.supervisor.providers import (
+    ProviderError,
+    ProviderProfile,
+    check_provider_health,
+    validate_provider_profile,
+)
 from skep.supervisor.serve.llm import (
+    LLM_BASE_URL,
     provider_secret_path,
+    resolve_active_api_key,
     resolve_provider_api_key,
     store_api_key,
     store_provider_api_key,
@@ -57,13 +67,16 @@ def test_resolution_order_env_then_file_then_legacy(
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("SKEP_LLM_API_KEY", raising=False)
 
-    assert resolve_provider_api_key(home, profile) is None
+    store = RunStore(home / "supervisor.sqlite3")
+    store.set_setting(LLM_BASE_URL, profile.base_url)  # the legacy key's own endpoint
+    assert resolve_provider_api_key(home, profile, store) is None
     store_api_key(home, "sk-legacy")
-    assert resolve_provider_api_key(home, profile) == "sk-legacy"
+    assert resolve_provider_api_key(home, profile, store) == "sk-legacy"
     store_provider_api_key(home, "openrouter", "sk-file")
-    assert resolve_provider_api_key(home, profile) == "sk-file"
+    assert resolve_provider_api_key(home, profile, store) == "sk-file"
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-env")
-    assert resolve_provider_api_key(home, profile) == "sk-env"
+    assert resolve_provider_api_key(home, profile, store) == "sk-env"
+    store.close()
 
     # 0600, and clearable.
     assert provider_secret_path(home, "openrouter").stat().st_mode & 0o777 == 0o600
@@ -221,7 +234,189 @@ def test_activation_and_probe_get_per_profile_keys(tmp_path: Path) -> None:
             store.close()
         assert profile is not None
         store_provider_api_key(tmp_path, "probe-me", "sk-probe")
-        models = _probe_list_models(tmp_path)(profile)
+        store = RunStore(tmp_path / "supervisor.sqlite3")
+        try:
+            models = _probe_list_models(tmp_path, store)(profile)
+        finally:
+            store.close()
         assert "llama3.2" in models or models
     finally:
         ollama.stop()
+
+
+def test_legacy_key_goes_only_to_the_saved_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v119-F1: llm-secret was the fallback for EVERY profile, so the health
+    sweep sent the main key to each keyless profile's host every five minutes.
+    It belongs to the saved endpoint; a profile elsewhere is called keyless."""
+    from skep.supervisor.serve.ticker import _probe_list_models
+
+    monkeypatch.delenv("SKEP_LLM_API_KEY", raising=False)
+    saved = FakeOllama(api_key="sk-legacy").start()
+    other = FakeOllama().start()  # a keyless local server: answers anyone
+    store = RunStore(tmp_path / "supervisor.sqlite3")
+    try:
+        store.set_setting(LLM_BASE_URL, saved.base_url)
+        store_api_key(tmp_path, "sk-legacy")
+        main = store.upsert_provider_profile(
+            _profile(provider_id="main", protocol="ollama", base_url=saved.base_url, active=True)
+        )
+        lan = store.upsert_provider_profile(
+            _profile(provider_id="lan", protocol="ollama", base_url=other.base_url)
+        )
+        probe = _probe_list_models(tmp_path, store)
+
+        # (1) another endpoint (same host, other port) is probed with no key...
+        assert probe(lan)
+        assert all("Authorization" not in r["headers"] for r in other.requests)
+        assert resolve_provider_api_key(tmp_path, lan, store) is None
+        # ...and the chat resolver gives the active profile none either.
+        store.set_active_provider("lan")
+        assert resolve_active_api_key(store, tmp_path) is None
+        # A diverged config still speaks to the SAVED endpoint with its key.
+        assert resolve_active_api_key(store, tmp_path, base_url=saved.base_url) == "sk-legacy"
+
+        # (2) the profile on the saved endpoint keeps the legacy key (the fake
+        # enforces the bearer, so this listing only works if it was sent).
+        assert probe(main)
+    finally:
+        store.close()
+        saved.stop()
+        other.stop()
+
+
+def test_a_keyless_probe_that_fails_names_the_fix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v119-F1: the profile that rode on llm-secret now fails — the health row
+    says to give it its own key, not just "unreachable". (3) Its own key file
+    or named env var works exactly as before."""
+    from skep.supervisor.serve.ticker import _probe_list_models
+
+    monkeypatch.delenv("SKEP_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LAN_API_KEY", raising=False)
+    other = FakeOllama(api_key="sk-lan-own").start()
+    store = RunStore(tmp_path / "supervisor.sqlite3")
+    try:
+        store.set_setting(LLM_BASE_URL, "https://ollama.com")
+        store_api_key(tmp_path, "sk-legacy")
+        lan = store.upsert_provider_profile(
+            _profile(
+                provider_id="lan", protocol="ollama", base_url=other.base_url, model="llama3.2"
+            )
+        )
+        probe = _probe_list_models(tmp_path, store)
+        health = check_provider_health(lan, list_models=probe, now="t")
+        assert not health.reachable
+        assert health.error is not None
+        assert "no key of its own" in health.error
+        assert "skep provider set-key lan" in health.error
+        assert "sk-" not in health.error  # names the key, never a value
+
+        store_provider_api_key(tmp_path, "lan", "sk-lan-own")
+        assert check_provider_health(lan, list_models=probe, now="t").model_found
+        store_provider_api_key(tmp_path, "lan", "")
+        by_env = store.upsert_provider_profile(dataclasses.replace(lan, api_key_env="LAN_API_KEY"))
+        monkeypatch.setenv("LAN_API_KEY", "sk-lan-own")
+        assert check_provider_health(by_env, list_models=probe, now="t").model_found
+        # A probe that fails for another reason with a key in hand is not relabelled.
+        monkeypatch.setenv("LAN_API_KEY", "sk-wrong")
+        refused = check_provider_health(by_env, list_models=probe, now="t")
+        assert refused.error is not None and "no key of its own" not in refused.error
+    finally:
+        store.close()
+        other.stop()
+
+
+def test_worker_sends_the_legacy_key_only_to_the_saved_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v119-F1: a worker's profile.json endpoint with no key env got llm-secret
+    whatever the endpoint was. Now only while it is the saved one (the
+    write-through case every daemon-configured home is in)."""
+    monkeypatch.delenv("SKEP_LLM_API_KEY", raising=False)
+    personal = tmp_path
+    supervisor_home = personal / "supervisor"
+    run_personal_setup(personal, provider="ollama", model="m", endpoint="https://lan.example")
+    store_api_key(supervisor_home, "sk-legacy")
+    # No daemon store (a CLI-only home): profile.json IS the legacy config.
+    provider = worker_provider_from_home(personal)
+    assert provider is not None and provider.api_key == "sk-legacy"
+
+    store = RunStore(supervisor_home / "supervisor.sqlite3")
+    store.set_setting(LLM_BASE_URL, "https://ollama.com")
+    store.close()
+    provider = worker_provider_from_home(personal)
+    assert provider is not None and provider.api_key is None
+
+    store = RunStore(supervisor_home / "supervisor.sqlite3")
+    store.set_setting(LLM_BASE_URL, "https://lan.example/")
+    store.close()
+    provider = worker_provider_from_home(personal)
+    assert provider is not None and provider.api_key == "sk-legacy"
+
+
+def test_codex_queen_leaves_the_legacy_key_with_the_workers_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v119-F1 + ADR 0063: with the Queen on the ChatGPT plan the saved
+    endpoint is chatgpt.com, where llm-secret never goes; the saved key is the
+    workers', so their profile.json endpoint keeps it."""
+    monkeypatch.delenv("SKEP_LLM_API_KEY", raising=False)
+    supervisor_home = tmp_path / "supervisor"
+    run_personal_setup(tmp_path, provider="ollama", model="m", endpoint="https://ollama.com")
+    store_api_key(supervisor_home, "sk-legacy")
+    store = RunStore(supervisor_home / "supervisor.sqlite3")
+    try:
+        store.set_setting(LLM_BASE_URL, "https://chatgpt.com/backend-api/codex")
+        default = store.upsert_provider_profile(
+            _profile(provider_id="default", protocol="ollama", base_url="https://ollama.com")
+        )
+        other = store.upsert_provider_profile(_profile(provider_id="openrouter"))
+        assert resolve_provider_api_key(supervisor_home, default, store) == "sk-legacy"
+        assert resolve_provider_api_key(supervisor_home, other, store) is None
+    finally:
+        store.close()
+
+
+def test_doctor_names_a_remote_profile_left_without_a_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v119-F1: `skep doctor` says which profile no longer borrows the main
+    key and how to fix it; the saved endpoint's and local profiles are fine."""
+    from skep.status import build_status
+
+    monkeypatch.delenv("SKEP_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("DS_K", raising=False)
+    supervisor_home = tmp_path / "supervisor"
+    store = RunStore(supervisor_home / "supervisor.sqlite3")
+    try:
+        store.set_setting(LLM_BASE_URL, "https://ollama.com")
+        store.upsert_provider_profile(
+            _profile(provider_id="default", protocol="ollama", base_url="https://ollama.com")
+        )
+        store.upsert_provider_profile(_profile(provider_id="openrouter"))
+        store.upsert_provider_profile(
+            _profile(provider_id="local", protocol="ollama", base_url="http://127.0.0.1:11434")
+        )
+        # Its env var may be set only in the daemon's environment: not flagged.
+        store.upsert_provider_profile(
+            _profile(
+                provider_id="deepseek", base_url="https://api.deepseek.com", api_key_env="DS_K"
+            )
+        )
+    finally:
+        store.close()
+
+    def keyless(advisories: list[str]) -> list[str]:
+        return [a for a in advisories if "no key of its own" in a]
+
+    assert keyless(build_status(tmp_path)["advisories"]) == []  # no legacy key, nothing withheld
+    store_api_key(supervisor_home, "sk-legacy")
+    lines = keyless(build_status(tmp_path)["advisories"])
+    assert len(lines) == 1
+    assert "'openrouter'" in lines[0] and "skep provider set-key openrouter" in lines[0]
+    assert "https://ollama.com" in lines[0]
+    store_provider_api_key(supervisor_home, "openrouter", "sk-own")
+    assert keyless(build_status(tmp_path)["advisories"]) == []

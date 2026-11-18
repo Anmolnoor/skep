@@ -655,7 +655,7 @@ def _run_forged_sandboxed(
             skep_home=skep_home,
         )
         env = {name: os.environ[name] for name in ("PATH", "LANG") if name in os.environ}
-        env.update(HOME=str(workspace), TMPDIR=str(workspace))
+        env.update(HOME=str(workspace), **sandbox.in_wall_tmp_env(workspace))
         return subprocess.run(
             sandbox.wrap_command(list(config.command), profile),
             input=payload,

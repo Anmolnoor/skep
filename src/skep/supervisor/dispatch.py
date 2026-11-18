@@ -81,7 +81,7 @@ from .provider_hosts import provider_hosts_for
 from .provider_relay import provider_relay_for_run, readopted_relay, relay_worker_env
 from .providers import ProviderProfile
 from .reverify import reverify_run
-from .sandbox import PODMAN, NetworkPolicy, SandboxUnavailableError
+from .sandbox import PODMAN, NetworkPolicy, SandboxUnavailableError, in_wall_tmp_env
 from .sandbox import availability as sandbox_availability
 from .secret_floor import CODEX_RUN_LOGIN
 from .spawner import effective_network_domains, resolve_sandbox_backend, spawn_worker
@@ -311,11 +311,12 @@ def _toolchain_env(workspace: Path, engine: CodingEngine, cache_root: Path) -> d
     # process's tmp files. The 2026-08-03 dogfood run's "~184 tests blocked
     # by network isolation" was THIS: loopback was fine (bwrap brings lo up);
     # the suite passes in-sandbox once TMPDIR points into the workspace.
-    env["TMPDIR"] = str(scratch / "tmp")
+    env.update(in_wall_tmp_env(scratch / "tmp"))  # v120-F1: + zsh's TMPPREFIX
     for name, subdir in engine.toolchain_env:
         env[name] = str(scratch / subdir)
-    for target in env.values():
-        Path(target).mkdir(parents=True, exist_ok=True)
+    for name, target in env.items():
+        if name != "TMPPREFIX":  # a filename prefix, not a directory
+            Path(target).mkdir(parents=True, exist_ok=True)
     return env
 
 

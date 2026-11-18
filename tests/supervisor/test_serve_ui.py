@@ -416,13 +416,16 @@ def test_memory_chips_and_chat_sidebar_search_pinning() -> None:
     assert "proposed ${relativeTime(p.created_at)}" in memory
     assert "items · ${memKb} KB" in memory
 
-    sidebar = app_js[app_js.index("function renderSidebarChats") :]
-    sidebar = sidebar[: sidebar.index("function installShellHandlers")]
+    # H1: the chat list moved to the sidebar (sidebar.js renderThreads); the
+    # search input is a fixed element there, so a re-render never steals focus.
+    sidebar_js = (STATIC_DIR / "sidebar.js").read_text()
+    sidebar = sidebar_js[sidebar_js.index("export function renderThreads") :]
+    sidebar = sidebar[: sidebar.index("export async function refreshSidebar")]
     assert "api(" not in sidebar  # search + pin are pure client state (I11)
-    assert 'class: "chat-sidebar-search"' in sidebar
+    assert 'class="chat-sidebar-search"' in (STATIC_DIR / "index.html").read_text()
     # Pinning round-trips localStorage; pinned renders before the groups.
-    assert '"skep-pinned-chats"' in app_js
-    assert sidebar.index("sidebar-chat-pinned") < sidebar.index("const groups = new Map()")
+    assert '"skep-pinned-chats"' in sidebar_js
+    assert sidebar.index("sidebar-chat-pinned") < sidebar.index("const projects = new Map()")
     assert "pinnedChats.has(chat.chat_id)) continue;" in sidebar  # moved, not duplicated
 
     for selector in (
@@ -497,19 +500,20 @@ def test_index_and_assets_are_public(config: SupervisorConfig) -> None:
 
 
 def test_ui_calls_only_routes_that_exist(config: SupervisorConfig) -> None:
-    """Every /api/ path mentioned in app.js resolves to a real route."""
+    """Every /api/ path mentioned in app.js — or a module it imports (H1) —
+    resolves to a real route."""
     import re
 
     app = create_app(config)
     known = {route.path for route in app.routes}
-    source = (STATIC_DIR / "app.js").read_text()
+    source = "\n".join(p.read_text() for p in sorted(STATIC_DIR.glob("*.js")))
     for raw in set(re.findall(r"\"(/api/[^\"?$`]*)", source)) | set(
         re.findall(r"`(/api/[^`?]*)`?", source)
     ):
         path = re.sub(r"\$\{[^}]+\}", "{x}", raw).rstrip("/")
         pattern = "^" + re.sub(r"\{[^}]+\}", "[^/]+", path) + "$"
         assert any(re.match(pattern, re.sub(r"\{[^}]+\}", "x", k)) for k in known), (
-            f"app.js calls {raw} but no such route exists"
+            f"the UI calls {raw} but no such route exists"
         )
 
 
@@ -517,10 +521,11 @@ def test_app_js_parses_as_an_es_module(tmp_path: Path) -> None:
     """No build step means no compile check — parse it with node when available."""
     if shutil.which("node") is None:
         pytest.skip("node not installed; parsing is exercised by the browser instead")
-    target = tmp_path / "app.mjs"  # .mjs makes --check parse it as a module
-    target.write_text((STATIC_DIR / "app.js").read_text())
-    result = subprocess.run(["node", "--check", str(target)], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
+    for source in sorted(STATIC_DIR.glob("*.js")):  # H1: and every module it imports
+        target = tmp_path / f"{source.stem}.mjs"  # .mjs makes --check parse it as a module
+        target.write_text(source.read_text())
+        result = subprocess.run(["node", "--check", str(target)], capture_output=True, text=True)
+        assert result.returncode == 0, f"{source.name}: {result.stderr}"
 
 
 def test_settings_shell_renders_before_model_list_fetch() -> None:
@@ -535,26 +540,30 @@ def test_settings_shell_renders_before_model_list_fetch() -> None:
 
 
 def test_settings_splits_into_tabs() -> None:
-    """v75-F3: Settings is five tabs (Assistant / Worker / Channels / Webhooks
-    / Repos) on the shared tab bar — one tab's DOM rendered at a time (lazy
-    render), with a channels status summary that reads only fields the API
-    returns (I8) and per-session tab memory."""
+    """v75-F3: Settings is five tabs on the shared tab bar — one tab's DOM
+    rendered at a time (lazy render), with a channels status summary that
+    reads only fields the API returns (I8) and per-session tab memory.
+    Graphite round A: the five tabs are plain questions (Models / Workers /
+    Projects / Channels / Setup), composed in settings.js; Webhooks rides the
+    Channels tab and Repos the Projects tab."""
     source = (STATIC_DIR / "app.js").read_text()
+    page = (STATIC_DIR / "settings.js").read_text()
     css = (STATIC_DIR / "style.css").read_text()
 
-    settings = source[source.index("async function viewSettings") :]
-    settings = settings[: settings.index("// ---------- health poll")]
+    settings = page[page.index("async function viewSettings") :]
     for tab in (
-        '{ key: "assistant", label: "Assistant", render: renderAssistantTab }',
-        '{ key: "worker", label: "Worker", render: renderWorkerTab }',
-        '{ key: "channels", label: "Channels", render: renderChannelsTab }',
-        '{ key: "webhooks", label: "Webhooks", render: renderWebhooksTab }',
-        '{ key: "repos", label: "Repos", render: renderReposTab }',
+        '{ key: "models", label: "Models", render: renderModelsTab }',
+        '{ key: "workers", label: "Workers", render: renderWorkersTab }',
+        '{ key: "projects", label: "Projects", render: renderProjectsTab }',
+        '{ key: "channels", label: "Channels", render: renderChannelsAndWebhooks }',
+        '{ key: "setup", label: "Setup", render:',
     ):
         assert tab in settings, tab
+    assert "await renderWebhooksTab(panel)" in page
+    assert "await renderReposTab(panel)" in page
     # Per-session tab memory: a save's route() lands back on the same tab.
-    assert "let activeSettingsTab" in source
-    assert "initial: activeSettingsTab" in source
+    assert "let activeSettingsTab" in page
+    assert "initial: activeSettingsTab" in page
 
     # The channels summary claims only enabled / live / secret_configured.
     channels = source[source.index("async function renderChannelsTab") :]
@@ -690,15 +699,20 @@ def test_projects_ui_exposes_pack_setup_flow() -> None:
     index = (STATIC_DIR / "index.html").read_text()
 
     assert "[/^#\\/projects$/, viewProjects]" in source
-    assert (
-        'header(main, "Projects", "Trusted packs, bindings, and the schedules they seed.")'
-        in source
-    )
+    # Graphite round A: Projects is a Settings tab; its line says what a
+    # project is, beside a repo, instead of a page header.
+    page = (STATIC_DIR / "settings.js").read_text()
+    assert "trusted packs, bindings, and the schedules they seed." in page
+    assert "export function viewProjects(main)" in page
     assert 'api("GET", "/api/projects")' in source
     assert 'api("POST", "/api/projects/setup", body)' in source
     assert "project_id: projectId.value.trim()" in source
     assert "seed_default_schedules: seedSchedules.checked" in source
-    assert 'href="#/projects" data-ws="projects">Projects</a>' in index
+    # Graphite round A: the sidebar's one Settings link stands for Projects,
+    # and #/projects… lights it.
+    assert 'href="#/settings" data-ws="settings" title="Settings">Settings</a>' in index
+    assert 'data-ws="projects"' not in index
+    assert "/^#\\/(settings|projects|setup)\\b/" in source
 
 
 def test_projects_ui_supports_pack_preview_before_save() -> None:
@@ -727,23 +741,37 @@ def test_setup_ui_route_and_guard() -> None:
     assert 'hash === "#/setup" || hash === "#/settings"' in source
     assert 'location.hash = "#/setup"' in source
     assert "setup.missing" in source
-    assert 'href="#/setup" data-ws="setup">Setup</a>' in index
+    # Graphite round A: Setup is a Settings tab — no sidebar link of its own;
+    # the gate's #/setup lands on the Settings page, which it allows.
+    assert 'data-ws="setup"' not in index
+    assert 'href="#/settings" data-ws="settings"' in index
 
 
 def test_setup_ui_orchestrates_first_run_endpoints() -> None:
     source = (STATIC_DIR / "app.js").read_text()
 
-    assert "async function viewSetup" in source
-    setup = source[source.index("async function viewSetup") : source.index("// ---------- Notes")]
-    assert 'api("GET", "/api/llm/config")' in setup
-    assert 'api("POST", "/api/llm/test", body)' in setup
-    assert 'api("GET", "/api/llm/models")' in setup
-    assert 'api("PUT", "/api/llm/config"' in setup
+    # Graphite round A: #/setup is the Setup tab of Settings (settings.js).
+    # A fresh home finishes first run from Settings alone, each thing set in
+    # one place: the connection and default model in Models (app.js's chat
+    # model form), the workspace in Projects, the record on the Setup tab.
+    page = (STATIC_DIR / "settings.js").read_text()
+    assert "export function viewSetup(main)" in page
+    chat_model = source[source.index("async function renderAssistantTab") :]
+    chat_model = chat_model[: chat_model.index("// -- worker provider")]
+    assert 'api("GET", "/api/llm/config")' in chat_model
+    assert 'api("POST", "/api/llm/test", {})' in chat_model
+    assert 'api("GET", "/api/llm/models")' in chat_model
+    assert 'api("PUT", "/api/llm/config"' in chat_model
+    assert 'api("PUT", "/api/llm/config"' not in page  # not a second time
+    setup = page[page.index("function defaultWorkspaceCard") :]
     assert 'api("POST", "/api/setup/default-workspace", { apply:' in setup
     assert 'api("POST", "/api/setup/complete")' in setup
     assert "setup.default_workspace" in setup
     assert "Use default workspace" in setup
     assert "trusted_local_dev" in setup
+    # Each thing the older flag misses names the tab where it is set.
+    assert 'llm: ["models", "Models"]' in setup
+    assert 'workspace_project: ["projects", "Projects"]' in setup
     assert "project policy overrides" not in setup
     assert "trusted roots" not in setup
     assert "network allowlist" not in setup
@@ -824,26 +852,50 @@ def test_sidebar_chat_rows_are_one_height() -> None:
     assert "flex: none; height: 32px; }" in styles
 
 
-def test_chat_sidebar_collapses_from_the_toolbar() -> None:
+def test_context_panel_collapses_from_the_toolbar() -> None:
     """v88-F2: the toggle is pure client state — a UI preference in
-    localStorage, not server state (I11), like the v76-F8 pins."""
+    localStorage, not server state (I11), like the v76-F8 pins. H1: the chat
+    list it used to fold moved to the sidebar; it folds the context panel."""
     source = (STATIC_DIR / "app.js").read_text()
     styles = (STATIC_DIR / "style.css").read_text()
 
-    assert ".chat-layout.sidebar-hidden .chat-sidebar { display: none; }" in styles
-    assert ".chat-sidebar-toggle { margin-right: auto; }" in styles
+    assert ".chat-layout.context-hidden .chat-context { display: none; }" in styles
+    assert ".chat-context-toggle { margin-right: auto; }" in styles
 
-    assert 'class: "chat-toolbar-action icon-button ghost chat-sidebar-toggle"' in source
-    assert '"skep-chat-sidebar"' in source
+    assert 'class: "chat-toolbar-action icon-button ghost chat-context-toggle"' in source
+    assert '"skep-context-panel"' in source
     # The toggle never talks to the server, and it announces its state.
-    toggle = source[source.index("const applySidebarState") :]
+    toggle = source[source.index("const applyContextState") :]
     toggle = toggle[: toggle.index("main.append(layout)")]
     assert "api(" not in toggle
     assert '"aria-expanded"' in toggle
-    assert '"show chat list"' in toggle and '"hide chat list"' in toggle
-    # The toolbar renders it alongside the existing actions, not in the sidebar
+    assert '"show thread context"' in toggle and '"hide thread context"' in toggle
+    # The toolbar renders it alongside the existing actions, not in the panel
     # itself — a control that hides its own container must outlive it.
-    assert 'el("div", { class: "chat-toolbar" }, toggleSidebar, newChat, deleteChat)' in source
+    assert 'el("div", { class: "chat-toolbar" }, toggleContext, newChat, deleteChat)' in source
+
+
+def test_context_panel_follows_cards_resolved_or_raised_outside_a_turn() -> None:
+    """H1 review S1: the panel's "Waiting on you" redrew only at a turn's end,
+    so a gate approved in the thread or a /command card lagged the sidebar
+    and the Inbox (I8). Every resolution goes through resolveCardUI and every
+    deck card through proposeCommand; both redraw it from the server."""
+    source = (STATIC_DIR / "app.js").read_text()
+    resolve = source[source.index("const resolveCardUI") :]
+    assert "refreshContext();" in resolve[: resolve.index("};")]
+    propose = source[source.index("const proposeCommand") :]
+    assert "refreshContext();" in propose[: propose.index("};")]
+    # A typed /approve <id> on a gate or deck card resolves with no turn after.
+    by_id = source[source.index("const resolvePendingCardById") :]
+    assert "refreshContext();" in by_id[: by_id.index("} else {")]
+    refresh = source[source.index("const refreshContext") :]
+    refresh = refresh[: refresh.index(".catch")]
+    assert 'api("GET", `/api/chats/${activeChatId}`)' in refresh
+    # A confirmed /role card changes the chat's role with no turn after: the
+    # panel draws the row that read returned, not the one the view opened with.
+    # H1-G2: through drawContext, which redraws the header's role and model too.
+    assert "drawContext(fresh.chat, fresh.actions)" in refresh
+    assert "drawContext(activeChat" not in refresh
 
 
 def test_confirm_cards_render_the_summary_not_the_model_prose() -> None:
@@ -1142,8 +1194,9 @@ def test_flat_reading_styles_prose_and_mobile_output() -> None:
 
 def test_user_facing_vocabulary_names_gates_and_templates() -> None:
     """v40-F13 (v36-F9): user-facing language is Policy/Scope/Gate/Template;
-    internal names stay. One string-presence pin per renamed surface."""
-    source = (STATIC_DIR / "app.js").read_text()
+    internal names stay. One string-presence pin per renamed surface. The
+    Policies subtitle lives in policies.js since graphite round A."""
+    source = (STATIC_DIR / "app.js").read_text() + (STATIC_DIR / "policies.js").read_text()
     assert "The gate queue: risky work waits here" in source
     assert "Policy and scopes: autonomy and defaults" in source
     assert "skep setup --template" in source
@@ -1242,9 +1295,13 @@ def test_v75_foundation_tokens_helpers_and_rail_groups() -> None:
     ):
         assert token_name in css, token_name
 
-    # The rail groups wrap the pinned anchors without touching them.
-    for group in ("daily", "manage", "configure"):
-        assert f'class="rail-group" data-group="{group}"' in index
+    # The groups wrap the pinned anchors without touching them. H1: the daily
+    # pair on top; the old workspaces fold into Runs / Library. Graphite round
+    # A: Settings collapsed to one link (Projects and Setup are its tabs).
+    assert 'class="rail-group" data-group="daily"' in index
+    for group in ("runs", "library"):
+        assert f'<details class="rail-group" data-group="{group}">' in index
+    assert 'data-group="settings"' not in index
     assert ".rail-group" in css
 
     # The shared helpers exist; the tab bar persists panels across switches
@@ -1322,34 +1379,38 @@ def test_runs_page_renders_filter_tabs_and_grouped_cards() -> None:
 
 
 def test_policies_sections_help_and_shell_editor() -> None:
-    """v75-F5: Policies is four collapsible sections (Execution defaults open,
-    Security / Advanced / Auto-approval collapsed), every field carries a
-    one-line help hint (I9), and the shell-command editor is argv-safe (C8):
-    each row round-trips its command through exact JSON — no whitespace
-    splitting anywhere — with a raw-JSON escape hatch."""
+    """v75-F5, regrouped by graphite round A: the Defaults tab is collapsible
+    sections (Limits, Network and environment, Where workers run, Auto-apply
+    open; Advanced collapsed), every field carries a one-line help hint (I9),
+    and the shell-command editor is argv-safe (C8): each row round-trips its
+    command through exact JSON — no whitespace splitting anywhere — with a
+    raw-JSON escape hatch. The page lives in policies.js; app.js keeps the
+    marker comment the Schedules slice ends on."""
     source = (STATIC_DIR / "app.js").read_text()
+    policies = (STATIC_DIR / "policies.js").read_text()
     css = (STATIC_DIR / "style.css").read_text()
 
-    policies = source[
-        source.index("// ---------- Policies (v75-F5") : source.index(
-            "// ---------- Settings (v75-F3"
-        )
-    ]
-    assert 'section("Execution defaults", true,' in policies
-    assert 'section("Security", false,' in policies
-    assert 'section("Advanced", false,' in policies
-    assert 'section("Auto-approval", false,' in policies
-    # Auto-approval copy survives verbatim (the upgrade plan's KEEP).
-    assert "auto-approval (D3: verified + re-verified manifest-only fixes)" in policies
+    assert "// ---------- Policies (graphite round A" in source
+    assert 'import { viewPolicies } from "./policies.js";' in source
+    assert 'policySection("Limits", true,' in policies
+    assert 'policySection("Network and environment", true,' in policies
+    assert 'policySection("Where workers run", true,' in policies
+    assert 'policySection("Auto-apply", true,' in policies
+    assert 'policySection("Advanced", false,' in policies
+    # Auto-approval copy survives verbatim (the upgrade plan's KEEP) — its D3
+    # tag now rides the label's hover text, not the label.
+    assert 'title: "auto-approval (D3: verified + re-verified manifest-only fixes)"' in policies
     assert "auto-apply safe dependency fixes" in policies
     # Field help exists and rides every section (spot-pin one per section).
-    assert 'class: "field-help"' in source or "field-help" in policies
+    assert 'class: "field-help"' in policies
     assert "Empty = deny all network." in policies
     assert "the cost ceiling" in policies
 
     # C8: argv-safe editor — rows hold exact JSON arrays; the source never
     # whitespace-splits a command; the raw toggle exists.
-    editor = policies[: policies.index("async function viewPolicies")]
+    editor = policies[
+        policies.index("function buildShellCommandEditor") : policies.index("function knobInput")
+    ]
     assert "JSON.stringify(command)" in editor
     assert 'JSON.parse(input.value || "[]")' in editor
     assert ".split(/\\s+/)" not in policies  # never split argv on whitespace
@@ -1463,6 +1524,7 @@ def test_command_palette_navigates_and_never_mutates() -> None:
     for ws in (
         "home",
         "chat",
+        "inbox",
         "runs",
         "approvals",
         "assign",
@@ -1626,7 +1688,12 @@ def test_settings_worker_tab_shows_the_roster_above_the_provider_card() -> None:
 
     # The section it gained did not cost it the one it had.
     assert "Save provider" in worker and 'api("PUT", "/api/settings"' in worker
-    assert worker.index("Castes") < worker.index("Worker LLM override")
+    assert worker.index("Castes") < worker.index("async function renderWorkerModel")
+    # Graphite round A: the roster is Settings → Workers; the override is the
+    # "Worker model" block of Settings → Models (settings.js).
+    page = (STATIC_DIR / "settings.js").read_text()
+    assert '{ key: "workers", label: "Workers", render: renderWorkersTab }' in page
+    assert 'block("Worker model",' in page and "renderWorkerModel(worker)" in page
 
     # I12: the boundary is stated where the engine is chosen, not in a doc.
     assert "do NOT pass skep's capability layer" in worker
