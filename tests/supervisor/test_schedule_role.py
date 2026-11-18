@@ -500,3 +500,35 @@ def test_a_role_bound_schedule_name_holds_no_at_or_slash(
     with pytest.raises(ValueError, match="a schedule that runs as a role cannot have '@' or '/'"):
         _check(config, name=name, repo=repo, instructions="x", role="builder")
     _check(config, name=name, repo=repo, instructions="x", role=None)  # no role: no hop
+
+
+def test_a_template_bound_schedule_tick_is_held_to_its_role(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    """v123-F1 review: the template branch of the tick narrows too — the
+    same drops as an inline schedule, named by the schedule's hop."""
+    from skep.supervisor.scheduler import make_template_schedule
+    from skep.supervisor.templates import WorkflowTemplate
+
+    _custom_role(config, "ops", policy_layer="operator")
+    captured: dict[str, Any] = {}
+
+    def capture(repo_arg: Path, instructions: str, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        raise RuntimeError("stop after capture")
+
+    store = RunStore(config.db_path)
+    try:
+        template = WorkflowTemplate(name="tidy", instructions="tidy up", network=tuple(HOSTS))
+        store.add_template(template)
+        store.add_schedule(make_template_schedule(
+            name="nightly", template=template, params={}, repo=repo, interval_seconds=86400,
+            start_at="2026-06-11T00:00:00Z", role="ops",
+        ))  # fmt: skip
+        run_due(store=store, config=config, now=NOW, dispatch=capture)
+    finally:
+        store.close()
+    held = captured["permissions"]
+    assert "pypi.org" in held.network and "example.com" not in held.network
+    assert ["uv", "sync"] not in held.shell_allowlist
+    assert captured["dispatch_decision"].delegation["chain"] == ["schedule:nightly@ops"]
