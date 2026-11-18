@@ -154,7 +154,11 @@ def _mirror_gate_card(store: RunStore, task_id: str, chat_id: str) -> None:
 
 
 def run_terminal_text(
-    store: RunStore, task_id: str, *, audit_dir: Path | None = None
+    store: RunStore,
+    task_id: str,
+    *,
+    audit_dir: Path | None = None,
+    completion_opt_in: bool = True,
 ) -> tuple[str, str] | None:
     """The one honest (line, kind) for a terminal run — None when there is
     nothing the operator must hear (a healthy landed completion without the
@@ -162,7 +166,9 @@ def run_terminal_text(
     through the same vocabulary as chat-dispatched runs. The kind (v78-F1)
     classifies delivery for notification_level: "action_needed" for the
     waiting-on-you shapes (pending gate, unlanded patch, G10 disagreement,
-    crash with a live resume checkpoint), "info" for everything else."""
+    crash with a live resume checkpoint), "info" for everything else.
+    ``completion_opt_in=False`` ignores the notify_run_completion opt-in:
+    only the shapes the operator must hear regardless."""
     from .actions import (
         applied_branch_for,
         created_transition_views_for_task,
@@ -174,7 +180,9 @@ def run_terminal_text(
     if run is None:
         return None
     completed_opt_in = (
-        run.state == "completed" and store.get_setting(NOTIFY_COMPLETION_SETTING) is True
+        completion_opt_in
+        and run.state == "completed"
+        and store.get_setting(NOTIFY_COMPLETION_SETTING) is True
     )
     # v59-F2: a completed run whose patch has not landed is a call to action
     # exactly like a pending gate — the work is on NO branch until land_run.

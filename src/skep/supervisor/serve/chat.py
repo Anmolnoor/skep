@@ -3588,9 +3588,11 @@ def run_completion_turn(
     from .run_status import run_terminal_text
 
     # v122-F2: the reply reaches a messenger-bound chat too (a no-op for web
-    # chats). Runs that already got their notice (failed, gated, unlanded)
-    # are not pushed twice.
-    if reply and run_terminal_text(store, task_id) is None:
+    # chats). Runs that already got their notice (failed, gated, unlanded,
+    # re-verify disagreed) are not pushed twice. The notify_run_completion
+    # opt-in does not count: its one-line "completed" notice plus this
+    # summary is acceptable, and the summary is what the phone is waiting for.
+    if reply and run_terminal_text(store, task_id, completion_opt_in=False) is None:
         push_to_chat_channel(store, home, chat_id, reply, kind="info")
     return (reply, bool(reply))
 

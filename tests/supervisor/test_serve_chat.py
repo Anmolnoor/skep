@@ -381,6 +381,45 @@ def test_a_finished_research_run_dms_its_summary_naming_the_saved_report(
         store.close()
 
 
+def test_the_completion_opt_in_does_not_swallow_the_summary_dm(
+    repo: Path, config: SupervisorConfig, ollama: FakeOllama, monkeypatch: Any
+) -> None:
+    """v122-F2 review: with notify_run_completion on, run_terminal_text has a
+    line for EVERY completed run, so the summary push was skipped and the
+    phone got only "completed". The opt-in line is not the summary."""
+    from skep.supervisor.serve.channels import outbound
+    from skep.supervisor.serve.chat import _CONTINUED, run_completion_turn
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.run_status import NOTIFY_COMPLETION_SETTING
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.store import RunStore
+
+    sent: list[str] = []
+
+    def _send(token: str, cid: str, text: str, reply_markup: Any = None, **_kw: Any) -> bool:
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(outbound, "_default_send", _send)
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting(NOTIFY_COMPLETION_SETTING, True)
+        _telegram_bind(store, config.home, chat_id)
+        task_id = _bound_run(store, chat_id, repo)  # completed, patchless (research)
+        _CONTINUED.discard(task_id)
+        ollama.script_reply("llama.cpp runs anywhere; report saved")
+        holder = ConfigHolder(config, store)
+        reply, ok = run_completion_turn(
+            store, holder, Dispatcher(store=store, holder=holder), config.home, task_id
+        )
+        assert ok, reply
+        assert len(sent) == 1 and "report saved" in sent[0]
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("shape", ["web chat", "failed run"])
 def test_a_continuation_pushes_nothing_unbound_or_already_notified(
     shape: str, repo: Path, config: SupervisorConfig, ollama: FakeOllama, monkeypatch: Any
