@@ -179,6 +179,32 @@ def is_chat_recipe(template: WorkflowTemplate) -> bool:
     return template.provenance == "seed" and bool(_QUEEN_TOOLS_LINE.search(template.instructions))
 
 
+def _chat_recipe_refusal(template: WorkflowTemplate) -> str:
+    """v126-F9 (review): suggest a prompt schedule only when a prompt tick
+    (read-only, unattended) offers every tool the recipe lists."""
+    from .serve.chat import off_menu
+
+    lead = (
+        f"skill {template.name!r} is a Queen chat recipe (it lists Queen Tools:), "
+        "not a worker task — a worker cannot call those tools."
+    )
+    listed: list[str] = []
+    for line in template.instructions.splitlines():
+        if _QUEEN_TOOLS_LINE.match(line):
+            listed += [t for t in re.split(r"[,\s]+", line[len("Tools: ") :]) if t]
+    refused = [t for t in listed if t in off_menu(read_only=True, unattended=True)]
+    if refused:
+        return (
+            f"{lead} A prompt schedule's unattended tick refuses {', '.join(refused)}, "
+            f"so run it from chat (view_skill {template.name})."
+        )
+    return (
+        f"{lead} Follow it in chat (view_skill {template.name}), or to run it on a "
+        "timer use a prompt schedule: propose_schedule with caste 'prompt' and "
+        f"instructions like 'follow the {template.name} skill'."
+    )
+
+
 def instantiate(
     template: WorkflowTemplate,
     params: Mapping[str, str] | None = None,
@@ -196,13 +222,7 @@ def instantiate(
     """
     validate_template(template)
     if is_chat_recipe(template):
-        raise TemplateError(
-            f"skill {template.name!r} is a Queen chat recipe (it lists Queen Tools:), "
-            "not a worker task — a worker cannot call those tools. Follow it in chat "
-            f"(view_skill {template.name}), or to run it on a timer use a prompt "
-            f"schedule: propose_schedule with caste 'prompt' and instructions like "
-            f"'follow the {template.name} skill'."
-        )
+        raise TemplateError(_chat_recipe_refusal(template))
     values = resolve_params(template, params or {})
     instructions = substitute(template.instructions, values)
     target_repo = repo if repo is not None else template.repo

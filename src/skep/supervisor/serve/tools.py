@@ -422,9 +422,10 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     # v126-F8: say what each returns — the small model skims these.
     _tool(
         "list_templates",
-        "Every runnable skill/template, any provenance. Returns name, "
-        "description, caste, params and provenance (seed, external, chat, "
-        "user, learned, pack); view_skill opens one.",
+        "Every skill/template, any provenance. Returns name, description, "
+        "caste, params and provenance (seed, external, chat, user, learned, "
+        "pack). Seeds are chat recipes: view_skill one and follow it yourself; "
+        "the rest run as worker tasks.",
         {},
     ),
     _tool(

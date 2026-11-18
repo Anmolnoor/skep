@@ -626,7 +626,13 @@ def test_a_chat_recipe_seed_is_refused_for_worker_binding(tmp_path: Path) -> Non
         assert recipe is not None and is_chat_recipe(recipe)
         with pytest.raises(TemplateError, match="Queen chat recipe") as refused:
             instantiate(recipe, repo=str(tmp_path))
-        assert "caste 'prompt'" in str(refused.value)  # it teaches the lane that works
+        # v126-F9 (review): a prompt tick refuses call_mcp_tool and
+        # register_mcp_server, so the error names them and points at chat.
+        message = str(refused.value)
+        assert "call_mcp_tool" in message and "register_mcp_server" in message
+        assert "list_mcp_tools" not in message.split("refuses")[-1]
+        assert "run it from chat (view_skill notion)" in message
+        assert "caste 'prompt'" not in message
         with pytest.raises(TemplateError, match="Queen chat recipe"):
             make_template_schedule(
                 name="nightly-notion",
@@ -642,6 +648,22 @@ def test_a_chat_recipe_seed_is_refused_for_worker_binding(tmp_path: Path) -> Non
     mine = WorkflowTemplate(name="mine", instructions="Tools: read_url\n\nDo it.")
     assert not is_chat_recipe(mine)
     assert instantiate(mine, repo=str(tmp_path)).instructions.startswith("Tools:")
+
+
+def test_a_recipe_whose_tools_a_prompt_tick_offers_suggests_the_prompt_schedule(
+    tmp_path: Path,
+) -> None:
+    """v126-F9 (review): the prompt schedule is suggested only when every
+    tool the recipe lists is one a read-only unattended tick offers."""
+    from skep.supervisor.templates import TemplateError, instantiate
+
+    recipe = WorkflowTemplate(
+        name="digest", instructions="Tools: list_notes, list_runs\n\nDo it.", provenance="seed"
+    )
+    with pytest.raises(TemplateError, match="Queen chat recipe") as refused:
+        instantiate(recipe, repo=str(tmp_path))
+    assert "caste 'prompt'" in str(refused.value)
+    assert "refuses" not in str(refused.value)
 
 
 def test_notion_and_google_workspace_are_mcp_only() -> None:
