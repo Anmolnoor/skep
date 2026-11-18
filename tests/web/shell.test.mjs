@@ -110,11 +110,14 @@ test("thread-view routes turn the surface off and light no surface item", () => 
   assert.equal(inbox.getAttribute("aria-current"), "page");
 });
 
-test("the footer is three icon links — Settings, Runs, Policies — each named for a screen reader", () => {
-  const { links } = shellApp();
-  const footLinks = links.filter(link => !link.inPages && link.getAttribute("aria-label"));
-  assert.deepEqual(footLinks.map(link => link.getAttribute("href")), ["#/settings", "#/runs", "#/policies"]);
-  for (const link of footLinks) assert.equal(link.getAttribute("title"), link.getAttribute("aria-label"));
+test("the footer is one link, the Settings gear, named for a screen reader", () => {
+  const foot = INDEX.slice(INDEX.indexOf('<div class="sidebar-foot">'));
+  const footLinks = [...foot.slice(0, foot.indexOf("</div>")).matchAll(/<a ([^>]*)>/g)].map(m => m[1]);
+  assert.equal(footLinks.length, 1);
+  assert.match(footLinks[0], /href="#\/settings"/);
+  assert.match(footLinks[0], /data-ws="settings"/);
+  assert.match(footLinks[0], /title="Settings"/);
+  assert.match(footLinks[0], /aria-label="Settings"/);
 });
 
 test("route() normalises every old hash in place, before anything reads it, and opens the right view", async () => {

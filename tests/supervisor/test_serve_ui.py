@@ -1352,16 +1352,18 @@ def test_v75_foundation_tokens_helpers_and_rail_groups() -> None:
 def test_graphite_nav_settings_surface_shell() -> None:
     """graphite-nav: the sidebar's bottom block became the Settings surface —
     a route-driven mode of the one shell (one attribute CSS reads), not a
-    modal. The thread view keeps a three-icon footer; the badges keep their
-    ids for the poll; the waiting-approval dot is CSS only."""
+    modal. The thread view keeps one footer link, the Settings gear (D2 as
+    changed by the operator: Runs and Policies live in the surface only); the
+    badges keep their ids for the poll; the waiting-approval dot on the gear
+    is CSS only."""
     index = (STATIC_DIR / "index.html").read_text()
     css = (STATIC_DIR / "style.css").read_text()
     source = (STATIC_DIR / "app.js").read_text()
 
     foot = index[index.index('<div class="sidebar-foot">') :]
     foot = foot[: foot.index("</div>")]
-    for label, href in (("Settings", "#/settings"), ("Runs", "#/runs"), ("Policies", "#/policies")):
-        assert f'aria-label="{label}" href="{href}"' in foot, label
+    assert foot.count("<a ") == 1
+    assert '<a aria-label="Settings" href="#/settings" data-ws="settings" title="Settings">' in foot
     for badge in ("inbox-badge", "approvals-badge", "tasks-badge", "memory-badge"):
         assert f'id="{badge}"' in index, badge
     assert '<button id="surface-close" class="surface-close icon-button" type="button"' in index
@@ -1371,7 +1373,8 @@ def test_graphite_nav_settings_surface_shell() -> None:
     assert '.shell[data-surface="settings"] .sidebar-pages { display: flex; }' in css
     assert '.shell[data-surface="settings"] .sidebar-foot { display: none; }' in css
     assert (
-        '.sidebar:has(#approvals-badge:not(.hidden)) .sidebar-foot a[data-ws="runs"]::after' in css
+        '.sidebar:has(#approvals-badge:not(.hidden)) .sidebar-foot a[data-ws="settings"]::after'
+        in css
     )
     assert "details.rail-group" not in css
     assert ".sidebar-nav" not in css

@@ -227,7 +227,8 @@ code, pre, .mono { font-family: var(--font-mono); }
 .shell[data-surface="settings"] .chat-sidebar-search,
 .shell[data-surface="settings"] .sidebar-foot { display: none; }
 .rail-caption { color: var(--muted-2); font-size: 11px; padding: 0 8px 2px; }
-/* The thread view's footer: three icon links, labels kept for screen readers. */
+/* The thread view's footer: the Settings gear alone, bottom left; its label
+   kept for screen readers. */
 .sidebar-foot {
   flex: none; display: flex; gap: 2px;
   padding-top: 8px; border-top: 1px solid var(--border-soft);
@@ -235,7 +236,7 @@ code, pre, .mono { font-family: var(--font-mono); }
 .sidebar-foot a[data-ws] { width: 30px; padding: 0; justify-content: center; font-size: 0; }
 /* An approval waiting shows from the thread view too — no JS, the badge's own
    hidden class drives it. */
-.sidebar:has(#approvals-badge:not(.hidden)) .sidebar-foot a[data-ws="runs"]::after {
+.sidebar:has(#approvals-badge:not(.hidden)) .sidebar-foot a[data-ws="settings"]::after {
   content: ""; position: absolute; top: 5px; right: 5px;
   width: 7px; height: 7px; border-radius: 999px; background: var(--warn);
 }
