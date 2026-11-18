@@ -269,14 +269,15 @@ test("Models: the chat model and the worker model, one form each, each saying wh
   assert.equal(panel.querySelectorAll("button").filter(b => b.textContent === "Test & save connection").length, 1);
 });
 
-test("#/setup and #/projects (main's routes until the router normalises them) render their page in place", async () => {
-  for (const [view, tab] of [["viewSetup", "setup"], ["viewProjects", "projects"]]) {
+// The router rewrites #/setup and #/projects to these tabs (shell.test.mjs pins the aliases).
+test("the setup and projects tabs render their page in place", async () => {
+  for (const tab of ["setup", "projects"]) {
     const { app, replaced } = settingsApp();
     const main = app.el("div");
-    await app[view](main);
+    await app.viewSettings(main, tab);
     await settle();
-    assert.ok(PAGE_MARK[tab](main), view);
-    assert.deepEqual(replaced, [], view);
+    assert.ok(PAGE_MARK[tab](main), tab);
+    assert.deepEqual(replaced, [], tab);
   }
 });
 

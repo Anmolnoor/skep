@@ -27,12 +27,6 @@ export async function viewSettings(main, tab) {
   await (pages[tab] || pages.models)(panel);
 }
 
-// graphite-nav: compatibility for main's app.js routes (#/setup, #/projects);
-// the router's alias normalisation replaces them at merge.
-export function viewSetup(main) { return viewSettings(main, "setup"); }
-
-export function viewProjects(main) { return viewSettings(main, "projects"); }
-
 // A block on a tab: what it controls and where it is stored, in one line each.
 function block(title, where, body) {
   return el("section", { class: "settings-block" },
