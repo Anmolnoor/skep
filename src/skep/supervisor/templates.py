@@ -26,6 +26,7 @@ from typing import Any
 
 from skep.worker_contract import KNOWN_WORKER_KINDS, Budget, Permissions
 
+from .castes import RETIRED_CASTES
 from .contracts_io import DEFAULT_BUDGET
 
 # ``{{ name }}`` with optional inner whitespace; double-brace to avoid colliding
@@ -125,6 +126,11 @@ def validate_template(template: WorkflowTemplate) -> None:
         raise TemplateError(
             f"template {template.name!r}: unknown worker_kind {template.worker_kind!r}; "
             f"the contract supports {known}"
+        )
+    if template.worker_kind in RETIRED_CASTES:  # v127-F11
+        raise TemplateError(
+            f"template {template.name!r}: caste {template.worker_kind!r} is retired: "
+            f"{RETIRED_CASTES[template.worker_kind]}"
         )
     seen: set[str] = set()
     for param in template.params:

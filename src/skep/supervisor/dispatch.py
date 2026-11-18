@@ -58,7 +58,7 @@ from skep.worker_contract import (
 
 from .apply import RefreshError, refresh_clone, repo_default_branch, resolve_commit
 from .autonomy import AutonomyDecision, AutonomyVerdict
-from .castes import CASTES
+from .castes import CASTES, resolve_caste
 from .config import SupervisorConfig
 from .contracts_io import (
     DEFAULT_BUDGET,
@@ -403,6 +403,10 @@ def run_task(
     skep's own worker. An EXTERNAL engine's own commands do not pass the
     capability layer — the sandbox is what confines it.
     """
+    # v127-F11 (I9): the funnel for every face that skips submit_run (CLI run,
+    # scheduler tick, resume, batch) — an unknown or retired caste is refused
+    # here, before a run row exists, never routed to the coding worker (v42).
+    resolve_caste(worker_kind)
     owns_store = store is None
     run_store = store if store is not None else RunStore(config.db_path)
     proxy: FilteringProxy | None = None

@@ -17,6 +17,7 @@ import pytest
 from skep.supervisor.castes import (
     CASTES,
     DEFAULT_CASTE,
+    RETIRED_CASTES,
     UNIMPLEMENTED_CASTES,
     caste_names,
     caste_worker_commands,
@@ -28,12 +29,90 @@ from skep.worker_contract.task import KNOWN_WORKER_KINDS
 def test_the_registry_covers_the_contract() -> None:
     """The contract is authoritative for WHICH names exist; the registry routes
     them. v101-F1 landed with `verifier` as a declared hole; v101-F2 wrote the
-    worker, so the sets are equal and declaring a caste without registering it
-    now fails the gates instead of failing a field run."""
-    assert set(CASTES) | UNIMPLEMENTED_CASTES == set(KNOWN_WORKER_KINDS)
+    worker; v127-F11 retired it (G10 already re-runs the pin on every patch)
+    without removing it from the additive contract — so every contract name is
+    routed, unimplemented or retired, and never two of those."""
+    assert set(CASTES) | UNIMPLEMENTED_CASTES | set(RETIRED_CASTES) == set(KNOWN_WORKER_KINDS)
     assert set(CASTES).isdisjoint(UNIMPLEMENTED_CASTES)
+    assert set(CASTES).isdisjoint(RETIRED_CASTES)
     assert not UNIMPLEMENTED_CASTES  # v101-F2 emptied it
-    assert set(CASTES) == set(KNOWN_WORKER_KINDS)
+    assert set(RETIRED_CASTES) == {"verifier"}
+
+
+def test_a_retired_caste_is_refused_with_its_reason() -> None:
+    """v127-F11 (I2): the verifier duplicated G10 and never ran in the field.
+    Naming it is refused with the reason, never routed to the coding worker
+    (the v42 fallback) and never run."""
+    with pytest.raises(ValueError) as excinfo:
+        resolve_caste("verifier")
+    message = str(excinfo.value)
+    assert "retired" in message
+    assert "skep re-runs the project's pinned verify_command on every patch (G10)" in message
+    assert "verifier" not in caste_worker_commands()
+
+
+def test_a_retired_caste_never_reaches_a_worker(repo: Path, config: Any) -> None:
+    """Every face that dispatches without submit_run (CLI run, scheduler tick,
+    resume, batch) funnels through run_task; it refuses before any run row
+    exists, and the scheduler records the refusal as the tick's state."""
+    from skep.supervisor import RunStore, run_task
+
+    with pytest.raises(ValueError, match="retired"):
+        run_task(repo, "Verify.", config=config, worker_kind="verifier")
+    store = RunStore(config.db_path)
+    try:
+        assert store.recent_runs() == []
+    finally:
+        store.close()
+
+
+def test_a_stored_verifier_schedule_tick_records_the_refusal(repo: Path, config: Any) -> None:
+    """A schedule stored before v127 still names `verifier`: its tick refuses
+    and the schedule's state says why (I8), instead of running a coding worker."""
+    from dataclasses import replace
+
+    from skep.supervisor import RunStore
+    from skep.supervisor.scheduler import make_schedule, run_due
+
+    store = RunStore(config.db_path)
+    try:
+        stale = make_schedule(name="old-verify", repo=repo, instructions="x", interval_seconds=60)
+        store.add_schedule(replace(stale, worker_kind="verifier"))
+        results = run_due(store=store, config=config)
+        assert [r.name for r in results] == ["old-verify"]
+        assert results[0].task_id is None
+        assert "retired" in results[0].state
+        assert store.recent_runs() == []
+    finally:
+        store.close()
+
+
+def test_a_retired_caste_is_refused_by_templates_and_schedules(tmp_path: Path) -> None:
+    from skep.supervisor.scheduler import make_schedule
+    from skep.supervisor.templates import TemplateError, WorkflowTemplate, validate_template
+
+    with pytest.raises(TemplateError, match="retired"):
+        validate_template(WorkflowTemplate(name="v", instructions="x", worker_kind="verifier"))
+    with pytest.raises(ValueError, match="retired"):
+        make_schedule(
+            name="v", repo=tmp_path, instructions="x", interval_seconds=60, worker_kind="verifier"
+        )
+
+
+def test_the_envelope_verify_command_field_is_additive(tmp_path: Path) -> None:
+    """Contract 0.3.4 (kept from the retired verifier's tests): `verify_command`
+    is optional, so a 0.3.3 task without it parses unchanged."""
+    import json
+
+    from skep.supervisor.contracts_io import mint_task
+    from skep.worker_contract import CodingWorkerTask
+
+    task = mint_task(workspace=tmp_path, instructions="x", verify_command="uv run pytest")
+    assert task.verify_command == "uv run pytest"
+    raw = json.loads(task.model_dump_json())
+    del raw["verify_command"]
+    raw["contract_version"] = "0.3.3"
+    assert CodingWorkerTask.model_validate(raw).verify_command == ""
 
 
 def test_every_registered_caste_routes_somewhere_importable() -> None:
@@ -129,3 +208,17 @@ def test_the_schedules_enum_is_still_not_wired_to_the_registry() -> None:
     assert kinds != caste_names()
     assert "note" in kinds and "digest" in kinds  # schedule kinds, not castes
     assert "reviewer" not in kinds
+
+
+def test_the_cli_faces_refuse_a_retired_caste_with_its_reason(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from skep.cli import main
+
+    home = ["--home", str(tmp_path / "home")]
+    assert main([*home, "schedule", "add", "v", str(repo), "x", "--every", "1d",
+                 "--caste", "verifier"]) != 0  # fmt: skip
+    assert "pinned verify_command on every patch (G10)" in capsys.readouterr().err
+    assert main([*home, "run", str(repo), "Verify.", "--caste", "verifier", "--quiet",
+                 "--execution-mode", "workspace"]) != 0  # fmt: skip
+    assert "pinned verify_command on every patch (G10)" in capsys.readouterr().err

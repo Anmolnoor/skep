@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 from skep.worker_contract import Permissions
 
 from .autonomy import AutonomyDecision, project_policy_dispatch_decision
-from .castes import CASTES
+from .castes import CASTES, RETIRED_CASTES
 from .config import SupervisorConfig
 from .contracts_io import DEFAULT_BUDGET
 from .dispatch import run_task
@@ -315,6 +315,8 @@ def make_schedule(
     chain: str | None = None,
     role: str | None = None,
 ) -> ScheduleRecord:
+    if worker_kind in RETIRED_CASTES:  # v127-F11: refused at creation, every face
+        raise ValueError(f"caste {worker_kind!r} is retired: {RETIRED_CASTES[worker_kind]}")
     created = now_ts()
     start = _start_slot(start_at)
     return ScheduleRecord(

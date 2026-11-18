@@ -37,13 +37,14 @@ chain is no constraint — exactly today.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from .castes import CASTES
+from .castes import CASTES, RETIRED_CASTES
 from .policy_engine import Layer, resolve_stack
 from .policy_schema import (
     _VERDICT_RANK,
@@ -55,6 +56,8 @@ from .policy_schema import (
 )
 from .policy_templates import TEMPLATE_NAMES, load_policy_template
 from .store import RunStore
+
+logger = logging.getLogger(__name__)
 
 ROLE_LAYER = "role"
 ROLES_DIR = "roles"  # under the personal home (``<supervisor home>/..``)
@@ -91,6 +94,12 @@ class Role(BaseModel):
     @field_validator("default_castes")
     @classmethod
     def _known_castes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        # v127-F11: a role file written before a caste retired drops it with a
+        # warning — one stale role must not break all_roles for every chat.
+        retired = [caste for caste in value if caste in RETIRED_CASTES]
+        if retired:
+            logger.warning("role drops retired caste(s) %s: %s", retired, RETIRED_CASTES)
+            value = tuple(caste for caste in value if caste not in RETIRED_CASTES)
         unknown = [caste for caste in value if caste not in CASTES]
         if unknown:
             raise ValueError(f"unknown caste(s) {unknown}; known: {', '.join(CASTES)}")
@@ -125,7 +134,7 @@ SHIPPED_ROLES: dict[str, Role] = {
             "Prefer dispatching a coding run over describing a change; review and "
             "verify before proposing a landing."
         ),
-        default_castes=("coding", "reviewer", "verifier"),
+        default_castes=("coding", "reviewer"),
         voice="technical",
     ),
     "operator": Role(
@@ -135,7 +144,7 @@ SHIPPED_ROLES: dict[str, Role] = {
             "You are working as an operator: ops, research and scheduling. Inspect "
             "and report first; changes go through dispatched runs and cards."
         ),
-        default_castes=("audit", "researcher", "verifier"),
+        default_castes=("audit", "researcher"),
         voice="concise",
     ),
     "assistant": Role(

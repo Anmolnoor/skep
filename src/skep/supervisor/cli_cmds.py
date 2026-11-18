@@ -1921,17 +1921,20 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                     next_command='skep schedule add NAME <repo> "..." --every 1d'
                     "  |  skep schedule add NAME <repo> --template T --every 1d",
                 )
-            schedule = make_schedule(
-                name=args.name,
-                repo=repo,
-                instructions=args.instructions,
-                interval_seconds=interval,
-                worker_kind=args.caste,
-                ref=args.ref,
-                network=args.network or [],
-                env_allowlist=args.env_allow or [],
-                role=args.role,
-            )
+            try:
+                schedule = make_schedule(
+                    name=args.name,
+                    repo=repo,
+                    instructions=args.instructions,
+                    interval_seconds=interval,
+                    worker_kind=args.caste,
+                    ref=args.ref,
+                    network=args.network or [],
+                    env_allowlist=args.env_allow or [],
+                    role=args.role,
+                )
+            except ValueError as exc:  # v127-F11: a retired caste
+                return _err(str(exc), next_command="skep schedule add ... --caste coding")
             refusal = _schedule_role_refusal(config, store, schedule)
             if refusal is not None:
                 return refusal

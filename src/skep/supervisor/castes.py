@@ -110,17 +110,6 @@ CASTES: dict[str, Caste] = {
         needs_provider=False,
         needs_network=True,
     ),
-    "verifier": Caste(
-        name="verifier",
-        argv=(sys.executable, "-m", "skep.workers.verifier"),
-        summary=(
-            "Runs the project's PINNED verify_command and reports the verdict. "
-            "Never nominates its own check; nothing lands."
-        ),
-        lands=False,
-        needs_provider=False,
-        needs_network=False,
-    ),
     "reviewer": Caste(
         name="reviewer",
         argv=(sys.executable, "-m", "skep.workers.reviewer"),
@@ -147,10 +136,18 @@ CASTES: dict[str, Caste] = {
 
 # v101-F1 declared one hole here — ``verifier``, in KNOWN_WORKER_KINDS since v17
 # and never written. v101-F2 wrote the worker and registered it, so the set is
-# empty and the parity test is now a plain equality. It stays as a named concept
-# because the NEXT caste added to the contract without a worker needs somewhere
-# honest to sit for one commit (I8).
+# empty. It stays as a named concept because the NEXT caste added to the
+# contract without a worker needs somewhere honest to sit for one commit (I8).
 UNIMPLEMENTED_CASTES: frozenset[str] = frozenset()
+
+# v127-F11: contract names with no worker ON PURPOSE, each with the reason a
+# refusal gives. The contract is additive, so a retired name stays in
+# KNOWN_WORKER_KINDS; this is where the supervisor says why it won't run it.
+# ``verifier`` re-ran the pin G10 already re-runs on every patch, and never
+# ran in the field (I2: the supervisor re-verifies, not a caste).
+RETIRED_CASTES: dict[str, str] = {
+    "verifier": "skep re-runs the project's pinned verify_command on every patch (G10)",
+}
 
 
 def caste_names() -> list[str]:
@@ -167,6 +164,8 @@ def resolve_caste(name: str | None) -> Caste:
     """
     if not name:
         return CASTES[DEFAULT_CASTE]
+    if name in RETIRED_CASTES:
+        raise ValueError(f"caste {name!r} is retired: {RETIRED_CASTES[name]}")
     caste = CASTES.get(name)
     if caste is None:
         raise ValueError(f"unknown caste {name!r}; known: {', '.join(caste_names())}")
