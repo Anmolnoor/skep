@@ -4186,7 +4186,10 @@ class RunStore:
         """Append one transcript row. ``provenance`` names its author when that
         is not the one its role implies (ADR 0059 D5): a row from outside —
         a webhook, a script, a worker — also sets the chat's ``untrusted`` bit,
-        in the same write, so no reader can see the row before the bit."""
+        in the same write, so no reader can see the row before the bit.
+        v121-F3: a ``schedule:`` row sets ``private`` too — a schedule's output
+        is the operator's (a mail pull, a chain of model text read from one),
+        and no lookup of the source's kind can fail open on a renamed one."""
         now = _now()
         cursor = self._conn.execute(
             "INSERT INTO chat_messages (chat_id, role, content, thinking, tool_calls_json,"
@@ -4208,7 +4211,8 @@ class RunStore:
         message_id = int(cursor.lastrowid or 0)
         self._conn.execute("UPDATE chats SET updated_at = ? WHERE chat_id = ?", (now, chat_id))
         if provenance is not None and not self.covered_by_trust(chat_id, provenance):
-            self._add_chat_taint(chat_id, untrusted=message_id)
+            private = message_id if provenance.startswith("schedule:") else None
+            self._add_chat_taint(chat_id, private=private, untrusted=message_id)
         self._conn.commit()
         return message_id
 

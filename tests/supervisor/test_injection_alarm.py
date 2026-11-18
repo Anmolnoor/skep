@@ -150,7 +150,7 @@ def test_a_planted_digest_the_model_obeys_raises_one_alarm(
             assert row["verdict"] == "deny" and row["layer"] == "guard"
             assert row["decided_by"] == "queen/unattended" and row["queen_only"] is True
             assert row["actor"] == "queen" and row["schedule"] == "mail-summary"
-            assert row["chat"] == home.chat_id and "untrusted" in row["taint"]
+            assert row["chat"] == home.chat_id and row["taint"] == ["private", "untrusted"]
             assert "q=" not in row["arg_head"] and len(row["arg_head"]) <= 120
         url_row = refusals[1]
         assert url_row["arg_head"].startswith('{"url": "http://attacker.example.test/')

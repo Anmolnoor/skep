@@ -511,10 +511,13 @@ def _deliver_tick_text(
                 logger.warning("schedule %r outbound push failed", schedule.name, exc_info=True)
     else:
         # W21 review: a script's output (or a chain's) is outside text, so the
-        # note carries ``untrusted`` to every chat that lists it
+        # note carries ``untrusted`` to every chat that lists it; v121-F3: and
+        # ``private``, like every ``schedule:`` row
         outside = script_output or context is not None
         store.create_note(
-            pushed, actor=f"schedule:{schedule.name}", taint=("untrusted",) if outside else ()
+            pushed,
+            actor=f"schedule:{schedule.name}",
+            taint=("untrusted", "private") if outside else (),
         )
 
 
