@@ -45,6 +45,9 @@ that), so if you can't find it below, it doesn't exist yet.
   calendar MCP servers (v72), and the registry-then-forge pattern
 - [`mobile.md`](mobile.md) — approve from your phone: what a messenger
   can confirm, what stays web-UI-only, what pushes to you
+- [`daily-driver-setup.md`](daily-driver-setup.md) — the phone setup
+  checklist: confirm from Telegram, research, YouTube summaries, the 16:30
+  mail summary; `skep doctor` names each step still undone
 - [`workers.md`](workers.md) — Claude Code, Codex, Aider, and the adapter
   contract
 - [`version-history.md`](version-history.md) — per-version changelog

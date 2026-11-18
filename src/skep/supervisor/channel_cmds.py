@@ -46,6 +46,8 @@ def cmd_channel_status(args: argparse.Namespace) -> int:
             )
             delivery = _breadcrumb(store.get_setting(f"channel_last_delivery:{channel}"))
             line = f"{channel:<9} {state}; secret: {secret}; last delivery: {delivery}"
+            if row is not None:  # v122-F3: off = the phone can confirm no card
+                line += f"; can_confirm: {'on' if row.channel_can_confirm else 'off'}"
             if channel == "discord":
                 gateway = store.get_setting("channel_gateway_state:discord")
                 line += f"; gateway: {_breadcrumb(gateway, key='state')}"
