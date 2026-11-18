@@ -545,25 +545,29 @@ def test_settings_splits_into_tabs() -> None:
     reads only fields the API returns (I8) and per-session tab memory.
     Graphite round A: the five tabs are plain questions (Models / Workers /
     Projects / Channels / Setup), composed in settings.js; Webhooks rides the
-    Channels tab and Repos the Projects tab."""
+    Channels tab and Repos the Projects tab. graphite-nav: the tab bar is the
+    sidebar's Settings surface — #/settings/<tab> renders one page, Models
+    when the tab is missing or unknown."""
     source = (STATIC_DIR / "app.js").read_text()
     page = (STATIC_DIR / "settings.js").read_text()
     css = (STATIC_DIR / "style.css").read_text()
 
     settings = page[page.index("async function viewSettings") :]
     for tab in (
-        '{ key: "models", label: "Models", render: renderModelsTab }',
-        '{ key: "workers", label: "Workers", render: renderWorkersTab }',
-        '{ key: "projects", label: "Projects", render: renderProjectsTab }',
-        '{ key: "channels", label: "Channels", render: renderChannelsAndWebhooks }',
-        '{ key: "setup", label: "Setup", render:',
+        "models: renderModelsTab,",
+        "workers: renderWorkersTab,",
+        "projects: renderProjectsTab,",
+        "channels: renderChannelsAndWebhooks,",
+        "setup: renderSetupTab,",
     ):
         assert tab in settings, tab
     assert "await renderWebhooksTab(panel)" in page
     assert "await renderReposTab(panel)" in page
-    # Per-session tab memory: a save's route() lands back on the same tab.
-    assert "let activeSettingsTab" in page
-    assert "initial: activeSettingsTab" in page
+    # The hash names the page, so a save's route() lands back on it: no tab
+    # bar, no per-session tab memory.
+    assert "await (pages[tab] || pages.models)(panel);" in settings
+    assert "activeSettingsTab" not in page
+    assert "buildTabBar" not in page
 
     # The channels summary claims only enabled / live / secret_configured.
     channels = source[source.index("async function renderChannelsTab") :]
@@ -1690,9 +1694,10 @@ def test_settings_worker_tab_shows_the_roster_above_the_provider_card() -> None:
     assert "Save provider" in worker and 'api("PUT", "/api/settings"' in worker
     assert worker.index("Castes") < worker.index("async function renderWorkerModel")
     # Graphite round A: the roster is Settings → Workers; the override is the
-    # "Worker model" block of Settings → Models (settings.js).
+    # "Worker model" block of Settings → Models (settings.js). graphite-nav:
+    # Workers is the page #/settings/workers renders.
     page = (STATIC_DIR / "settings.js").read_text()
-    assert '{ key: "workers", label: "Workers", render: renderWorkersTab }' in page
+    assert "workers: renderWorkersTab," in page
     assert 'block("Worker model",' in page and "renderWorkerModel(worker)" in page
 
     # I12: the boundary is stated where the engine is chosen, not in a doc.
