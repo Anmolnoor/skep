@@ -3104,3 +3104,17 @@ which is right for a local server. A remote one fails, and the health row
 and `skep doctor` say to give it its own key (`skep provider set-key <id>`).
 A single-provider home whose saved base URL and `profile.json` agree, which
 is every home configured through the daemon, is unchanged.
+
+## v1.4.2 — a thread-first web UI, the Queen on a ChatGPT plan (2026-11-18)
+
+Everything merged since 1.4.1 (#93, #94, #101):
+
+- **v117:** a chat keeps the project you pick and starts in `workspace`; the
+  Queen can create projects.
+- **v118:** the Queen runs on a ChatGPT plan, with the Codex login as a provider.
+- **v119:** the main key stays on its own endpoint.
+- **v120-F1:** zsh here-documents work inside the macOS sandbox (`TMPPREFIX`
+  is set beside `TMPDIR`; `/tmp` stays closed).
+- **H1, H1-G, Graphite A:** the web UI is thread-first (sidebar, Inbox,
+  context panel) in the Graphite look; Policies opens on what agents may do,
+  and Settings and Setup are one place each.
