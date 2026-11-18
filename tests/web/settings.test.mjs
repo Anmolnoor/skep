@@ -1,5 +1,6 @@
-// Graphite round A: Settings as one page of five tabs, Setup as one checklist
-// (settings.js), executed. Run: node --test tests/web/
+// Graphite round A: Settings as five pages, Setup as one checklist
+// (settings.js), executed. graphite-nav: #/settings/<tab> renders the one page
+// it names; the sidebar's Settings surface is the list. Run: node --test tests/web/
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, texts } from "./harness.mjs";
@@ -8,7 +9,7 @@ const byText = (root, tag, text) =>
   root.querySelectorAll(tag).find(n => n.textContent === text);
 const byPlaceholder = (root, placeholder) =>
   root.querySelectorAll("input").find(n => n.getAttribute("placeholder") === placeholder);
-// A tab's render() starts inside buildTabBar and is not awaited by the view.
+// A page's forms load their own reads after the view resolves.
 const settle = async () => { for (let i = 0; i < 5; i += 1) await new Promise(r => setTimeout(r, 0)); };
 
 // ---------- the Setup checklist (moved from app.test.mjs's O3 onboard card) ----------
@@ -155,19 +156,19 @@ const SETUP = {
 test("older flag: complete is one plain line with its date, then the checklist", async () => {
   const app = setupApp(SETUP);
   const panel = app.el("div");
-  await app.renderSetupTab(panel, () => {});
+  await app.renderSetupTab(panel);
   assert.deepEqual(texts(panel, "setup-flag"), ["The older setup flag: complete since 2026-07-08 09:00:00."]);
   assert.equal(panel.querySelectorAll(".card").length, 0); // no "Ready" card above "not done yet"
   assert.equal(panel.querySelectorAll(".setup-step").length, 5);
   assert.equal(byText(panel, "button", "Finish setup"), undefined);
 });
 
-test("older flag: each missing item names where it is set and opens that tab", async () => {
+test("older flag: each missing item names where it is set and opens that page's route", async () => {
   const opened = [];
   const app = setupApp({ ...SETUP, complete: false, marked_complete: false, completed_at: null,
     missing: ["llm", "default_model", "workspace_project", "policy"] });
   const panel = app.el("div");
-  await app.renderSetupTab(panel, key => opened.push(key));
+  await app.renderSetupTab(panel);
   const flag = panel.querySelector(".setup-flag");
   assert.match(flag.textContent, /^The older setup flag: not complete/);
   const links = flag.querySelectorAll("button");
@@ -175,60 +176,89 @@ test("older flag: each missing item names where it is set and opens that tab", a
     ["Open Models", "Open Models", "Open Projects", "Open Projects"]);
   assert.ok(flag.textContent.includes("LLM connection"));
   assert.ok(flag.textContent.includes("execution policy"));
-  for (const link of links) await link.click();
-  assert.deepEqual(opened, ["models", "models", "projects", "projects"]);
+  for (const link of links) { await link.click(); opened.push(app.location.hash); }
+  assert.deepEqual(opened, ["#/settings/models", "#/settings/models", "#/settings/projects", "#/settings/projects"]);
 });
 
 test("older flag: everything set but not recorded offers Finish, which records it", async () => {
   const calls = [];
   const app = setupApp({ ...SETUP, marked_complete: false, completed_at: null }, calls);
   const panel = app.el("div");
-  await app.renderSetupTab(panel, () => {});
+  await app.renderSetupTab(panel);
   await byText(panel, "button", "Finish setup").click();
   assert.deepEqual(calls.filter(([m]) => m === "POST"), [["POST", "/api/setup/complete"]]);
   assert.deepEqual(app.flashes.at(-1), ["ok", "setup complete"]);
 });
 
-// ---------- the page: five tabs, old routes land on theirs ----------
+// ---------- the pages: #/settings/<tab> renders that one; a save stays on it ----------
 
-function settingsApp() {
+const PROJECT_READS = { projects: [], packs: [], repos: [], templates: [], schedules: [] };
+
+function settingsApp(extra = {}) {
   const app = loadApp();
   const replaced = [];
+  const calls = [];
   app.history.replaceState = (_state, _title, url) => replaced.push(url);
-  app.api = async (method, path) => {
-    if (path === "/api/setup/status") return SETUP;
-    if (path === "/api/onboard") return { relock: null, steps: {} };
-    if (path === "/api/llm/config") return { configured: false, protocol: "ollama", num_ctx: 8192, num_ctx_source: "default" };
-    if (path === "/api/llm/usage") return { last_5h: { total_tokens: 0, requests: 0 }, last_7d: { total_tokens: 0, requests: 0 } };
-    if (path === "/api/provider-presets") return { presets: [] };
-    if (path === "/api/settings") return { configured: false };
+  const table = {
+    "GET /api/setup/status": SETUP,
+    "GET /api/onboard": { relock: null, steps: {} },
+    "GET /api/llm/config": { configured: false, protocol: "ollama", num_ctx: 8192, num_ctx_source: "default" },
+    "GET /api/llm/usage": { last_5h: { total_tokens: 0, requests: 0 }, last_7d: { total_tokens: 0, requests: 0 } },
+    "GET /api/provider-presets": { presets: [] },
+    "GET /api/settings": { configured: false },
+    "GET /api/workers": { castes: [], engines: [] },
+    "GET /api/channels": { channels: {} },
+    "GET /api/webhooks": { webhooks: [] },
+    ...extra,
+  };
+  app.api = async (method, path, body) => {
+    calls.push([method, path, body]);
+    const key = `${method} ${path}`;
+    if (key in table) return table[key];
+    if (method === "GET" && /^\/api\/(projects|repos|templates|schedules)/.test(path)) return PROJECT_READS;
     throw new Error(`unstubbed api ${method} ${path}`);
   };
-  return { app, replaced };
+  return { app, replaced, calls };
 }
 
-test("Settings is five tabs named by plain question, opening on the last one used", async () => {
-  const { app } = settingsApp();
-  const main = app.el("div");
-  await app.viewSettings(main);
-  await settle();
-  assert.deepEqual(texts(main, "tab-button"), ["Models", "Workers", "Projects", "Channels", "Setup"]);
-  const active = () => main.querySelectorAll(".tab-button").find(b => b.classList.contains("active")).textContent;
-  assert.equal(active(), "Models");
-  await byText(main, "button", "Setup").click();
-  await settle();
-  const again = app.el("div");
-  await app.viewSettings(again);
-  await settle();
-  assert.equal(again.querySelectorAll(".tab-button").find(b => b.classList.contains("active")).textContent, "Setup");
+// What each page puts first: its one marker, never another page's.
+const PAGE_MARK = {
+  models: main => texts(main, "settings-block-title").includes("Chat model (the Queen)"),
+  workers: main => main.querySelectorAll("h3").some(h => h.textContent === "Castes"),
+  projects: main => texts(main, "settings-block-title").includes("Repos"),
+  channels: main => texts(main, "settings-block-title").includes("Webhooks"),
+  setup: main => Boolean(main.querySelector(".setup-checklist")),
+};
+
+test("#/settings/<tab> renders that one page and no tab bar; unknown or missing falls back to Models", async () => {
+  for (const tab of Object.keys(PAGE_MARK)) {
+    const { app, replaced } = settingsApp();
+    const main = app.el("div");
+    await app.viewSettings(main, tab);
+    await settle();
+    assert.equal(main.querySelectorAll(".tab-bar").length + main.querySelectorAll(".tab-button").length, 0, tab);
+    assert.equal(main.querySelectorAll(".tab-panel").length, 1, tab);
+    for (const [other, shows] of Object.entries(PAGE_MARK)) {
+      assert.equal(shows(main), other === tab, `${tab} page shows ${other}?`);
+    }
+    // The hash already names the page: the view never rewrites it.
+    assert.deepEqual(replaced, [], tab);
+  }
+  for (const tab of [undefined, "nope"]) {
+    const { app } = settingsApp();
+    const main = app.el("div");
+    await app.viewSettings(main, tab);
+    await settle();
+    assert.ok(PAGE_MARK.models(main), String(tab));
+  }
 });
 
 test("Models: the chat model and the worker model, one form each, each saying where it is stored", async () => {
   const { app } = settingsApp();
   const main = app.el("div");
-  await app.viewSettings(main);
+  await app.viewSettings(main, "models");
   await settle();
-  const panel = main.querySelectorAll(".tab-panel")[0];
+  const panel = main.querySelector(".tab-panel");
   assert.deepEqual(texts(panel, "settings-block-title"), ["Chat model (the Queen)", "Worker model"]);
   assert.equal(panel.querySelectorAll(".settings-block-where").length, 2);
   // No setting editable twice on this page: one protocol select, one save per record.
@@ -239,20 +269,52 @@ test("Models: the chat model and the worker model, one form each, each saying wh
   assert.equal(panel.querySelectorAll("button").filter(b => b.textContent === "Test & save connection").length, 1);
 });
 
-test("#/setup and #/projects open their Settings tab and show #/settings", async () => {
-  for (const [view, label] of [["viewSetup", "Setup"], ["viewProjects", "Projects"]]) {
+// The router rewrites #/setup and #/projects to these tabs (shell.test.mjs pins the aliases).
+test("the setup and projects tabs render their page in place", async () => {
+  for (const tab of ["setup", "projects"]) {
     const { app, replaced } = settingsApp();
-    app.api = async (method, path) => {
-      if (path === "/api/setup/status") return SETUP;
-      if (path === "/api/onboard") return { relock: null, steps: {} };
-      return { projects: [], packs: [], repos: [], templates: [], schedules: [] };
-    };
     const main = app.el("div");
-    await app[view](main);
+    await app.viewSettings(main, tab);
     await settle();
-    assert.equal(main.querySelectorAll(".tab-button").find(b => b.classList.contains("active")).textContent, label);
-    // A save's route() re-renders #/settings, so it lands back on the tab in use.
-    assert.deepEqual(replaced, ["#/settings"]);
+    assert.ok(PAGE_MARK[tab](main), tab);
+    assert.deepEqual(replaced, [], tab);
+  }
+});
+
+// A save calls route(); the router re-renders from the hash, which still names
+// the page, so the operator stays where they were. One save per former tab
+// that has one (Workers is a read-only roster: nothing to save there).
+test("a save on each page re-renders that page: route() runs with the hash untouched", async () => {
+  const saves = {
+    models: ["Test & save connection", { "PUT /api/llm/config": {}, "POST /api/llm/test": { ok: true, models: 2 } }],
+    projects: ["Use default workspace", {
+      "GET /api/setup/status": { ...SETUP, workspace_project: { ready: false } },
+      "POST /api/setup/default-workspace": {},
+    }],
+    channels: ["Save channel", {
+      "GET /api/channels": { channels: { slack: { enabled: false, live: false, allowed_users: [] } } },
+      "PUT /api/channels/slack": {},
+    }],
+    setup: ["Finish setup", {
+      "GET /api/setup/status": { ...SETUP, marked_complete: false, completed_at: null },
+      "POST /api/setup/complete": { complete: true },
+    }],
+  };
+  for (const [tab, [label, routes]] of Object.entries(saves)) {
+    const { app, replaced } = settingsApp(routes);
+    const hash = `#/settings/${tab}`;
+    app.location.hash = hash;
+    const rerendered = [];
+    app.route = () => rerendered.push(app.location.hash);
+    const main = app.el("div");
+    await app.viewSettings(main, tab);
+    await settle();
+    const button = main.querySelectorAll("button").find(b => b.textContent === label);
+    assert.ok(button, `${tab}: ${label}`);
+    await button.click();
+    await settle();
+    assert.deepEqual(rerendered, [hash], tab);
+    assert.deepEqual(replaced, [], tab);
   }
 });
 

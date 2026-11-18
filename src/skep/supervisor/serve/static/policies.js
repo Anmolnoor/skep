@@ -8,10 +8,7 @@
    app.js boots on load, so its helpers come in through the import cycle.
    Safe because this module only declares at top level: by the time any of
    its functions runs, app.js has finished evaluating. */
-import { api, buildFilterBar, buildTabBar, el, flash, fmtTs, header, iconButton, relativeTime, route } from "./app.js";
-
-// Per-session tab memory (the activeSettingsTab pattern); #/policies/<tab> wins.
-let activePoliciesTab = "now";
+import { api, buildFilterBar, el, flash, fmtTs, header, iconButton, relativeTime, route } from "./app.js";
 
 // The engine's verdicts in the operator's words. Explain says allow/ask/deny,
 // why and the decision ledger say allow/require_approval/deny: an ask is
@@ -79,36 +76,34 @@ async function scopeNames() {
 }
 
 export async function viewPolicies(main, tab) {
+  // v97-F5: a project page hands a group over to edit (sessionStorage, read
+  // once, on the groups page). graphite-nav: the hand-off lands on
+  // #/policies/groups, so the sidebar lights that page and a save stays there.
+  let groupEditHandoff = null;
+  try {
+    const raw = sessionStorage.getItem("skep-group-edit");
+    if (raw && tab !== "groups") {
+      location.hash = "#/policies/groups"; // its hashchange re-renders this view
+      return;
+    }
+    sessionStorage.removeItem("skep-group-edit");
+    groupEditHandoff = raw ? JSON.parse(raw) : null;
+  } catch { groupEditHandoff = null; }
   header(main, "Policies",
     "Policy and scopes: autonomy and defaults — what agents may do now, what skep decided, "
     + "what runs without asking, what differs per project. A template (skep setup --template) "
     + "sets the baseline in one move.");
-  // v97-F5: a project page hands a group over to edit (sessionStorage, read once).
-  let groupEditHandoff = null;
-  try {
-    const raw = sessionStorage.getItem("skep-group-edit");
-    sessionStorage.removeItem("skep-group-edit");
-    groupEditHandoff = raw ? JSON.parse(raw) : null;
-  } catch { groupEditHandoff = null; }
-  const tabs = [
-    { key: "now", label: "Now", render: renderNowTab },
-    { key: "decisions", label: "Decisions", render: renderDecisionsTab },
-    { key: "grants", label: "Standing grants", render: renderGrantsTab },
-    { key: "groups", label: "Projects & groups", render: panel => renderGroupsTab(panel, groupEditHandoff) },
-    { key: "defaults", label: "Defaults", render: renderDefaultsTab },
-  ];
-  const initial = groupEditHandoff ? "groups"
-    : (tabs.some(t => t.key === tab) ? tab : activePoliciesTab);
-  const bar = buildTabBar(tabs, {
-    initial,
-    onActivate: (key) => {
-      activePoliciesTab = key;
-      // The hash names the tab, so route() after a save lands back here; no
-      // hashchange fires, so the page is not rebuilt under the click.
-      history.replaceState(null, "", `#/policies/${key}`);
-    },
-  });
-  main.append(bar.bar, bar.content);
+  // One page per #/policies/<tab>: the sidebar's list is the tab bar.
+  const pages = {
+    now: renderNowTab,
+    decisions: renderDecisionsTab,
+    grants: renderGrantsTab,
+    groups: panel => renderGroupsTab(panel, groupEditHandoff),
+    defaults: renderDefaultsTab,
+  };
+  const panel = el("div", { class: "tab-panel" });
+  main.append(panel);
+  await (pages[tab] || pages.now)(panel);
 }
 
 // ---- Now: what may agents do right now? ----

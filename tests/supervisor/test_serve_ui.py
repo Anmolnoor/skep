@@ -545,25 +545,29 @@ def test_settings_splits_into_tabs() -> None:
     reads only fields the API returns (I8) and per-session tab memory.
     Graphite round A: the five tabs are plain questions (Models / Workers /
     Projects / Channels / Setup), composed in settings.js; Webhooks rides the
-    Channels tab and Repos the Projects tab."""
+    Channels tab and Repos the Projects tab. graphite-nav: the tab bar is the
+    sidebar's Settings surface — #/settings/<tab> renders one page, Models
+    when the tab is missing or unknown."""
     source = (STATIC_DIR / "app.js").read_text()
     page = (STATIC_DIR / "settings.js").read_text()
     css = (STATIC_DIR / "style.css").read_text()
 
     settings = page[page.index("async function viewSettings") :]
     for tab in (
-        '{ key: "models", label: "Models", render: renderModelsTab }',
-        '{ key: "workers", label: "Workers", render: renderWorkersTab }',
-        '{ key: "projects", label: "Projects", render: renderProjectsTab }',
-        '{ key: "channels", label: "Channels", render: renderChannelsAndWebhooks }',
-        '{ key: "setup", label: "Setup", render:',
+        "models: renderModelsTab,",
+        "workers: renderWorkersTab,",
+        "projects: renderProjectsTab,",
+        "channels: renderChannelsAndWebhooks,",
+        "setup: renderSetupTab,",
     ):
         assert tab in settings, tab
     assert "await renderWebhooksTab(panel)" in page
     assert "await renderReposTab(panel)" in page
-    # Per-session tab memory: a save's route() lands back on the same tab.
-    assert "let activeSettingsTab" in page
-    assert "initial: activeSettingsTab" in page
+    # The hash names the page, so a save's route() lands back on it: no tab
+    # bar, no per-session tab memory.
+    assert "await (pages[tab] || pages.models)(panel);" in settings
+    assert "activeSettingsTab" not in page
+    assert "buildTabBar" not in page
 
     # The channels summary claims only enabled / live / secret_configured.
     channels = source[source.index("async function renderChannelsTab") :]
@@ -698,12 +702,15 @@ def test_projects_ui_exposes_pack_setup_flow() -> None:
     source = (STATIC_DIR / "app.js").read_text()
     index = (STATIC_DIR / "index.html").read_text()
 
-    assert "[/^#\\/projects$/, viewProjects]" in source
+    # graphite-nav: #/projects is normalised to the Projects section of
+    # Settings (route()); the settings route carries the section name.
+    assert '"#/projects": "#/settings/projects",' in source
+    assert "[/^#\\/settings(?:\\/([\\w-]+))?$/, viewSettings]" in source
     # Graphite round A: Projects is a Settings tab; its line says what a
     # project is, beside a repo, instead of a page header.
     page = (STATIC_DIR / "settings.js").read_text()
     assert "trusted packs, bindings, and the schedules they seed." in page
-    assert "export function viewProjects(main)" in page
+    assert "export async function viewSettings(main" in page
     assert 'api("GET", "/api/projects")' in source
     assert 'api("POST", "/api/projects/setup", body)' in source
     assert "project_id: projectId.value.trim()" in source
@@ -734,11 +741,14 @@ def test_setup_ui_route_and_guard() -> None:
     source = (STATIC_DIR / "app.js").read_text()
     index = (STATIC_DIR / "index.html").read_text()
 
-    assert "[/^#\\/setup$/, viewSetup]" in source
+    # graphite-nav: #/setup is normalised to the Setup section before the
+    # gate reads it, and the gate allows every Settings section (Setup links
+    # to Models and Projects), so a fresh home lands there without a loop.
+    assert '"#/setup": "#/settings/setup",' in source
     assert "async function setupStatus" in source
     assert 'api("GET", "/api/setup/status")' in source
     assert "function setupRouteAllowed" in source
-    assert 'hash === "#/setup" || hash === "#/settings"' in source
+    assert "return /^#\\/settings\\/[\\w-]+$/.test(hash);" in source
     assert 'location.hash = "#/setup"' in source
     assert "setup.missing" in source
     # Graphite round A: Setup is a Settings tab — no sidebar link of its own;
@@ -755,7 +765,7 @@ def test_setup_ui_orchestrates_first_run_endpoints() -> None:
     # one place: the connection and default model in Models (app.js's chat
     # model form), the workspace in Projects, the record on the Setup tab.
     page = (STATIC_DIR / "settings.js").read_text()
-    assert "export function viewSetup(main)" in page
+    assert "export async function viewSettings(main" in page
     chat_model = source[source.index("async function renderAssistantTab") :]
     chat_model = chat_model[: chat_model.index("// -- worker provider")]
     assert 'api("GET", "/api/llm/config")' in chat_model
@@ -1296,11 +1306,13 @@ def test_v75_foundation_tokens_helpers_and_rail_groups() -> None:
         assert token_name in css, token_name
 
     # The groups wrap the pinned anchors without touching them. H1: the daily
-    # pair on top; the old workspaces fold into Runs / Library. Graphite round
-    # A: Settings collapsed to one link (Projects and Setup are its tabs).
+    # pair on top. graphite-nav: the old workspaces are the Settings surface —
+    # four captioned groups in one labelled nav, no <details> fold.
     assert 'class="rail-group" data-group="daily"' in index
-    for group in ("runs", "library"):
-        assert f'<details class="rail-group" data-group="{group}">' in index
+    assert '<nav class="sidebar-pages" aria-label="Settings pages">' in index
+    for group in ("work", "library", "policies", "setup"):
+        assert f'<div class="rail-group" data-group="{group}">' in index
+    assert "<details" not in index
     assert 'data-group="settings"' not in index
     assert ".rail-group" in css
 
@@ -1335,6 +1347,45 @@ def test_v75_foundation_tokens_helpers_and_rail_groups() -> None:
     mobile = css[css.index("/* v75-F1 (C11):") :]
     assert ".rail-group { flex-direction: row; }" in mobile
     assert ".tab-bar, .filter-bar { overflow-x: auto;" in mobile
+    # graphite-nav: the surface's pages and the footer flow along the strip;
+    # at phone width the pages take their own row and scroll inside it.
+    assert ".sidebar-pages, .sidebar-foot { flex-direction: row;" in mobile
+    assert ".sidebar-pages { flex: 0 0 100%; max-width: 100%; overflow-x: auto; }" in mobile
+
+
+def test_graphite_nav_settings_surface_shell() -> None:
+    """graphite-nav: the sidebar's bottom block became the Settings surface —
+    a route-driven mode of the one shell (one attribute CSS reads), not a
+    modal. The thread view keeps one footer link, the Settings gear (D2 as
+    changed by the operator: Runs and Policies live in the surface only); the
+    badges keep their ids for the poll; the waiting-approval dot on the gear
+    is CSS only."""
+    index = (STATIC_DIR / "index.html").read_text()
+    css = (STATIC_DIR / "style.css").read_text()
+    source = (STATIC_DIR / "app.js").read_text()
+
+    foot = index[index.index('<div class="sidebar-foot">') :]
+    foot = foot[: foot.index("</div>")]
+    assert foot.count("<a ") == 1
+    assert '<a aria-label="Settings" href="#/settings" data-ws="settings" title="Settings">' in foot
+    for badge in ("inbox-badge", "approvals-badge", "tasks-badge", "memory-badge"):
+        assert f'id="{badge}"' in index, badge
+    assert '<button id="surface-close" class="surface-close icon-button" type="button"' in index
+    assert 'aria-label="Close settings" hidden>' in index
+
+    assert ".sidebar-pages {\n  display: none;" in css
+    assert '.shell[data-surface="settings"] .sidebar-pages { display: flex; }' in css
+    assert '.shell[data-surface="settings"] .sidebar-foot { display: none; }' in css
+    for badge in ("approvals-badge", "tasks-badge", "memory-badge"):
+        assert (
+            f'.sidebar:has(#{badge}:not(.hidden)) .sidebar-foot a[data-ws="settings"]::after' in css
+        ), badge
+    assert "details.rail-group" not in css
+    assert ".sidebar-nav" not in css
+
+    assert 'shell.dataset.surface = "settings";' in source
+    assert 'link.setAttribute("aria-current", "page");' in source
+    assert 'location.hash = surfaceReturn || "#/home";' in source
 
 
 def test_runs_page_renders_filter_tabs_and_grouped_cards() -> None:
@@ -1690,9 +1741,10 @@ def test_settings_worker_tab_shows_the_roster_above_the_provider_card() -> None:
     assert "Save provider" in worker and 'api("PUT", "/api/settings"' in worker
     assert worker.index("Castes") < worker.index("async function renderWorkerModel")
     # Graphite round A: the roster is Settings → Workers; the override is the
-    # "Worker model" block of Settings → Models (settings.js).
+    # "Worker model" block of Settings → Models (settings.js). graphite-nav:
+    # Workers is the page #/settings/workers renders.
     page = (STATIC_DIR / "settings.js").read_text()
-    assert '{ key: "workers", label: "Workers", render: renderWorkersTab }' in page
+    assert "workers: renderWorkersTab," in page
     assert 'block("Worker model",' in page and "renderWorkerModel(worker)" in page
 
     # I12: the boundary is stated where the engine is chosen, not in a doc.

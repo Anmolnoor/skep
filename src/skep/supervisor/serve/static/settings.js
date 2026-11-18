@@ -1,43 +1,31 @@
-/* Graphite round A: Settings is one page of five tabs, each a plain question —
+/* Graphite round A: Settings is five pages, each a plain question —
    Models, Workers, Projects, Channels, Setup — and Setup is one checklist.
-   #/projects and #/setup open their tab here; #/projects/<id> stays app.js's
-   detail view. The forms themselves are app.js's, unchanged: this module
-   composes them so each record is edited in exactly one place.
+   graphite-nav: the sidebar's Settings surface lists the five; #/settings/<tab>
+   renders the one it names, so a save's route() re-renders the same page.
+   #/projects/<id> stays app.js's detail view. The forms themselves are
+   app.js's, unchanged: this module composes them so each record is edited in
+   exactly one place.
 
    app.js boots on load, so its helpers come in through the import cycle.
    Safe because this module only declares at top level: by the time any of
    its functions runs, app.js has finished evaluating. */
-import { api, buildTabBar, el, flash, fmtTs, header, renderAssistantTab, renderChannelsTab, renderProjectList, renderReposTab, renderWebhooksTab, renderWorkerModel, renderWorkersTab, route, setupMissingLabels, setupStatus } from "./app.js";
+import { api, el, flash, fmtTs, header, renderAssistantTab, renderChannelsTab, renderProjectList, renderReposTab, renderWebhooksTab, renderWorkerModel, renderWorkersTab, route, setupMissingLabels, setupStatus } from "./app.js";
 
-// Per-session tab memory (the openChatGroups pattern): route() re-renders
-// after a save land back on the tab the operator was using.
-let activeSettingsTab = "models";
-
-export async function viewSettings(main) {
+export async function viewSettings(main, tab) {
   header(main, "Settings",
     "Which model does what, the workers, your projects and repos, the channels, and first-run setup.");
-  const tabs = buildTabBar([
-    { key: "models", label: "Models", render: renderModelsTab },
-    { key: "workers", label: "Workers", render: renderWorkersTab },
-    { key: "projects", label: "Projects", render: renderProjectsTab },
-    { key: "channels", label: "Channels", render: renderChannelsAndWebhooks },
-    // `tabs` is read only on a click, after buildTabBar has returned.
-    { key: "setup", label: "Setup", render: panel => renderSetupTab(panel, key => tabs.activate(key)) },
-  ], { initial: activeSettingsTab, onActivate: (key) => { activeSettingsTab = key; } });
-  main.append(tabs.bar, tabs.content);
+  // Built here, not at top level: app.js's renderers exist only once it has run.
+  const pages = {
+    models: renderModelsTab,
+    workers: renderWorkersTab,
+    projects: renderProjectsTab,
+    channels: renderChannelsAndWebhooks,
+    setup: renderSetupTab,
+  };
+  const panel = el("div", { class: "tab-panel" });
+  main.append(panel);
+  await (pages[tab] || pages.models)(panel);
 }
-
-// #/setup and #/projects are tabs of this page. The hash becomes #/settings
-// so the route() a save runs re-renders the tab in use, not the alias's tab.
-function openSettingsTab(main, key) {
-  activeSettingsTab = key;
-  history.replaceState(null, "", "#/settings");
-  return viewSettings(main);
-}
-
-export function viewSetup(main) { return openSettingsTab(main, "setup"); }
-
-export function viewProjects(main) { return openSettingsTab(main, "projects"); }
 
 // A block on a tab: what it controls and where it is stored, in one line each.
 function block(title, where, body) {
@@ -111,15 +99,15 @@ const SETUP_WHERE = {
   policy: ["projects", "Projects"],
 };
 
-export async function renderSetupTab(panel, openTab) {
+export async function renderSetupTab(panel) {
   const setup = await setupStatus();
-  panel.append(olderFlag(setup, openTab), await onboardChecklist());
+  panel.append(olderFlag(setup), await onboardChecklist());
 }
 
 // `/api/setup/status` is the older record (and the gate in route()); the
 // checklist below is `/api/onboard`. They are separate in the backend, so the
 // older one is stated, never drawn as a card that contradicts the checklist.
-function olderFlag(setup, openTab) {
+function olderFlag(setup) {
   if (!setup.complete) {
     const labels = setupMissingLabels(setup);
     return el("div", { class: "setup-flag" },
@@ -128,7 +116,7 @@ function olderFlag(setup, openTab) {
       el("ul", { class: "setup-missing" }, setup.missing.map((key, i) => {
         const [tab, name] = SETUP_WHERE[key] || ["setup", "Setup"];
         return el("li", {}, `${labels[i]} — `,
-          el("button", { type: "button", class: "ghost", onclick: () => openTab(tab) }, `Open ${name}`));
+          el("button", { type: "button", class: "ghost", onclick: () => { location.hash = `#/settings/${tab}`; } }, `Open ${name}`));
       })));
   }
   if (setup.marked_complete && setup.completed_at) {

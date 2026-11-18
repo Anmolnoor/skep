@@ -42,6 +42,7 @@ class FakeNode {
   }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   getAttribute(name) { return this.attributes[name] ?? null; }
+  removeAttribute(name) { delete this.attributes[name]; }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   append(...nodes) {
     this._text = undefined;
@@ -110,6 +111,7 @@ export function loadApp() {
   context.api = async (method, path) => { throw new Error(`unstubbed api ${method} ${path}`); };
   context.flashes = [];
   context.flash = (kind, text) => context.flashes.push([kind, text]);
+  context.routeImpl = context.route; // the real router, for tests that drive it
   context.route = () => {};
   return context;
 }

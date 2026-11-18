@@ -1,5 +1,7 @@
-// Graphite round A: the Policies page (policies.js), executed — five tabs,
+// Graphite round A: the Policies page (policies.js), executed — five pages,
 // each answering one question, built from reads the server already serves.
+// graphite-nav: #/policies/<tab> renders the one page it names; the sidebar's
+// Settings surface is the list.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
@@ -77,19 +79,37 @@ function withPolicies(routes = {}) {
   return { app, calls, main: app.el("main") };
 }
 
-const panel = (main, i) => main.querySelectorAll(".tab-panel")[i];
-const visible = main => main.querySelectorAll(".tab-panel").findIndex(p => !p.classList.contains("hidden"));
+const panel = main => main.querySelector(".tab-panel");
+// What each page puts first: its one marker, never another page's.
+const PAGE_MARK = {
+  now: main => Boolean(main.querySelector(".policy-status")),
+  decisions: main => Boolean(main.querySelector(".policy-summary")) || /Nothing decided yet/.test(main.textContent),
+  grants: main => texts(main, "policy-section-header").includes("Standing grants"),
+  groups: main => Boolean(main.querySelector(".policy-effective")),
+  defaults: main => texts(main, "policy-section-header").includes("Limits"),
+};
+const shown = main => Object.keys(PAGE_MARK).filter(tab => PAGE_MARK[tab](main));
 
-test("five tabs, Now first; a #/policies/<tab> suffix opens that tab and is accepted by the router", async () => {
-  const { app, main } = withPolicies();
-  await app.viewPolicies(main);
-  await flush();
-  assert.deepEqual(texts(main, "tab-button"), ["Now", "Decisions", "Standing grants", "Projects & groups", "Defaults"]);
-  assert.equal(visible(main), 0);
-  const second = withPolicies();
-  await second.app.viewPolicies(second.main, "decisions");
-  await flush();
-  assert.equal(visible(second.main), 1);
+test("#/policies/<tab> renders that one page and no tab bar; missing or unknown is Now; the router passes the tab", async () => {
+  for (const tab of Object.keys(PAGE_MARK)) {
+    const { app, main } = withPolicies();
+    const replaced = [];
+    app.history.replaceState = (_s, _t, url) => replaced.push(url);
+    await app.viewPolicies(main, tab);
+    await flush();
+    assert.equal(main.querySelectorAll(".tab-bar").length + main.querySelectorAll(".tab-button").length, 0, tab);
+    assert.equal(main.querySelectorAll(".tab-panel").length, 1, tab);
+    assert.deepEqual(shown(main), [tab]);
+    // The hash already names the page: the view never rewrites it.
+    assert.deepEqual(replaced, [], tab);
+  }
+  for (const tab of [undefined, "nope"]) {
+    const { app, main } = withPolicies();
+    await app.viewPolicies(main, tab);
+    await flush();
+    assert.deepEqual(shown(main), ["now"], String(tab));
+  }
+  const { app } = withPolicies();
   const routes = vm.runInContext("routes", app);
   const hit = routes.find(([pattern]) => pattern.test("#/policies/decisions"));
   assert.ok(hit && hit[1] === app.viewPolicies);
@@ -97,24 +117,50 @@ test("five tabs, Now first; a #/policies/<tab> suffix opens that tab and is acce
   assert.ok(hit[0].test("#/policies"));
 });
 
-test("the active tab is remembered for the session and written to the hash", async () => {
-  const { app, main } = withPolicies();
-  await app.viewPolicies(main);
-  await flush();
-  await main.querySelectorAll(".tab-button")[4].click();
-  await flush();
-  assert.equal(app.location.hash, "#/policies/defaults");
-  const again = app.el("main");
-  await app.viewPolicies(again);
-  await flush();
-  assert.equal(visible(again), 4);
+// A save calls route(); the router re-renders from the hash, which still names
+// the page, so the operator stays where they were. One save per former tab
+// that has one (Now and Decisions only read).
+test("a save on each page re-renders that page: route() runs with the hash untouched", async () => {
+  const saves = {
+    grants: [main => main.querySelector(".policy-grant").querySelector("button"), {
+      "GET /api/policy/rules": {
+        rules: [{ rule_id: "r1", scope: "shell", action: "run", pattern: "uv sync", tier: "session", provenance: "card" }],
+        operator_rules: [],
+      },
+      "DELETE /api/policy/rules/": {},
+    }],
+    groups: [main => main.querySelector(".policy-group-row").querySelectorAll("button").find(b => b.textContent === "Save"), {
+      "PUT /api/policy-groups/": {},
+    }],
+    // "Save defaults" only flashes; the engine switch is the one that re-renders.
+    defaults: [main => main.querySelectorAll("button").find(b => b.textContent === "Apply engine switch"), { "PUT /api/policy": {} }],
+  };
+  for (const [tab, [find, routes]] of Object.entries(saves)) {
+    const { app, main, calls } = withPolicies(routes);
+    const replaced = [];
+    app.history.replaceState = (_s, _t, url) => replaced.push(url);
+    app.confirm = () => true;
+    const hash = `#/policies/${tab}`;
+    app.location.hash = hash;
+    const rerendered = [];
+    app.route = () => rerendered.push(app.location.hash);
+    await app.viewPolicies(main, tab);
+    await flush();
+    const button = find(main);
+    assert.ok(button, tab);
+    await button.click();
+    await flush();
+    assert.ok(calls.some(([m]) => m !== "GET"), `${tab}: the save wrote`);
+    assert.deepEqual(rerendered, [hash], tab);
+    assert.deepEqual(replaced, [], tab);
+  }
 });
 
 test("Now: three columns by verdict word, grouped by scope; an ask never sits under Allowed", async () => {
   const { main, app } = withPolicies();
   await app.viewPolicies(main);
   await flush();
-  const now = panel(main, 0);
+  const now = panel(main);
   assert.match(now.querySelector(".policy-status").textContent, /Baseline locked: the builder template/);
   assert.match(now.querySelector(".policy-status").textContent, /New chats open as the builder role/);
   const cols = now.querySelectorAll(".policy-col");
@@ -137,14 +183,14 @@ test("Now: View as offers the baseline, each role and each template, and re-read
   const { main, app, calls } = withPolicies();
   await app.viewPolicies(main);
   await flush();
-  const select = panel(main, 0).querySelector(".policy-view-as");
+  const select = panel(main).querySelector(".policy-view-as");
   const values = select.children.map(o => o.getAttribute("value"));
   assert.deepEqual(values, ["baseline", "role:builder", "role:assistant", "assistant", "builder", "operator"]);
   select.value = "role:assistant";
   await Promise.all(select.listeners.change.map(fn => fn()));
   await flush();
   assert.ok(calls.some(([, path]) => path === "/api/policy/explain?subject=role%3Aassistant"));
-  assert.match(panel(main, 0).textContent, /it only tightens/);
+  assert.match(panel(main).textContent, /it only tightens/);
 });
 
 test("Now: no baseline says so and links to Setup — no lock form here", async () => {
@@ -154,7 +200,7 @@ test("Now: no baseline says so and links to Setup — no lock form here", async 
   });
   await app.viewPolicies(main);
   await flush();
-  const now = panel(main, 0);
+  const now = panel(main);
   assert.match(now.querySelector(".policy-status").textContent, /No baseline locked: every decision asks first until one is/);
   assert.ok(now.querySelectorAll("a").some(a => a.getAttribute("href") === "#/setup"));
   assert.equal(now.querySelectorAll("input").filter(i => /yes/.test(i.getAttribute("placeholder") || "")).length, 0);
@@ -166,7 +212,7 @@ test("Now: a tampered baseline names since when and what that means", async () =
   });
   await app.viewPolicies(main);
   await flush();
-  const status = panel(main, 0).querySelector(".policy-status").textContent;
+  const status = panel(main).querySelector(".policy-status").textContent;
   assert.match(status, /Baseline tampered since 2026-11-17 08:00:00/);
   assert.match(status, /dispatch refuses until it is re-approved/);
   assert.match(status, /- shell: allow run uv sync/);
@@ -178,7 +224,7 @@ test("Now: Test an action asks /api/policy/why and names both verdicts in words"
   });
   await app.viewPolicies(main);
   await flush();
-  const box = panel(main, 0).querySelector(".policy-test");
+  const box = panel(main).querySelector(".policy-test");
   const [project, scope] = box.querySelectorAll("select");
   const [action, value] = box.querySelectorAll("input");
   project.value = "app"; scope.value = "shell"; action.value = "run"; value.value = "curl x";
@@ -202,7 +248,7 @@ test("Decisions: summary counts, newest-first rows, a verdict filter, and an emp
   });
   await app.viewPolicies(main, "decisions");
   await flush();
-  const dec = panel(main, 1);
+  const dec = panel(main);
   assert.match(dec.querySelector(".policy-summary").textContent, /1 allowed · 1 asked · 1 denied · 1 observed/);
   const rowText = () => dec.querySelectorAll(".policy-decision").filter(r => !r.classList.contains("hidden")).map(r => r.textContent);
   assert.equal(rowText().length, 4);
@@ -218,7 +264,7 @@ test("Decisions: summary counts, newest-first rows, a verdict filter, and an emp
   const empty = withPolicies();
   await empty.app.viewPolicies(empty.main, "decisions");
   await flush();
-  assert.match(panel(empty.main, 1).querySelector(".empty-state").textContent, /Nothing decided yet/);
+  assert.match(panel(empty.main).querySelector(".empty-state").textContent, /Nothing decided yet/);
 });
 
 test("Standing grants: one line per rule; Revoke keeps its confirm wording and DELETEs", async () => {
@@ -233,7 +279,7 @@ test("Standing grants: one line per rule; Revoke keeps its confirm wording and D
   app.confirm = text => { asked = text; return true; };
   await app.viewPolicies(main, "grants");
   await flush();
-  const grants = panel(main, 2);
+  const grants = panel(main);
   const row = grants.querySelector(".policy-grant");
   assert.match(row.textContent, /shell run/);
   assert.match(row.textContent, /until serve restarts/);
@@ -248,7 +294,7 @@ test("Projects & groups: a group reads as plain grants; its JSON opens on Edit",
   const { main, app } = withPolicies({ "GET /api/projects/app": { project_id: "app", name: "app", policy: {}, bindings: [] } });
   await app.viewPolicies(main, "groups");
   await flush();
-  const groups = panel(main, 3);
+  const groups = panel(main);
   const row = groups.querySelector(".policy-group-row");
   const summary = row.querySelector(".policy-group-grants").textContent;
   assert.match(summary, /Network hosts/);
@@ -262,15 +308,23 @@ test("Projects & groups: a group reads as plain grants; its JSON opens on Edit",
   assert.match(editor.querySelector("textarea").value, /"default_network"/);
 });
 
-test("Projects & groups: the hand-off from a project page opens this tab on that group's editor", async () => {
+test("Projects & groups: the hand-off from a project page lands on #/policies/groups, on that group's editor", async () => {
   const { main, app } = withPolicies();
   const store = new Map([["skep-group-edit", JSON.stringify({ group: "python-bootstrap", project: "app" })]]);
   app.sessionStorage = { getItem: k => store.get(k) ?? null, removeItem: k => store.delete(k), setItem: (k, v) => store.set(k, v) };
-  await app.viewPolicies(main);
+  // The project page sets #/policies; the router renders Now, which moves the
+  // hash to the groups page and keeps the hand-off for it.
+  await app.viewPolicies(main, "now");
   await flush();
-  assert.equal(visible(main), 3);
+  assert.equal(app.location.hash, "#/policies/groups");
+  assert.equal(main.children.length, 0);
+  assert.equal(store.size, 1);
+  // That hash change re-renders the view on groups, which reads it once.
+  await app.viewPolicies(main, "groups");
+  await flush();
+  assert.deepEqual(shown(main), ["groups"]);
   assert.equal(store.size, 0);
-  const row = panel(main, 3).querySelector(".policy-group-row");
+  const row = panel(main).querySelector(".policy-group-row");
   assert.equal(row.getAttribute("open"), "");
   assert.ok(!row.querySelector(".policy-group-editor").classList.contains("hidden"));
 });
@@ -279,19 +333,19 @@ test("Projects & groups: the effective table names columns in plain words and sh
   const { main, app } = withPolicies();
   await app.viewPolicies(main, "groups");
   await flush();
-  const table = panel(main, 3).querySelector(".policy-effective");
+  const table = panel(main).querySelector(".policy-effective");
   assert.deepEqual(table.querySelectorAll("th").map(th => th.textContent), ["Setting", "Value", "Decided by", "Overrode", "Change here"]);
   const values = table.querySelectorAll(".policy-value").map(td => td.textContent);
   assert.ok(values.includes("pypi.org"), values.join(" | "));
   assert.ok(!values.some(v => v.includes("[")), values.join(" | "));
-  assert.ok(panel(main, 3).querySelector(".policy-table-wrap"));
+  assert.ok(panel(main).querySelector(".policy-table-wrap"));
 });
 
 test("Defaults: grouped sections, Advanced closed, tags in hover text, the same PUT body", async () => {
   const { main, app, calls } = withPolicies({ "PUT /api/policy": {} });
   await app.viewPolicies(main, "defaults");
   await flush();
-  const defaults = panel(main, 4);
+  const defaults = panel(main);
   assert.deepEqual(texts(defaults, "policy-section-header"), ["Limits", "Network and environment", "Where workers run", "Auto-apply", "Advanced"]);
   const advanced = defaults.querySelectorAll(".policy-section").at(-1);
   assert.equal(advanced.getAttribute("open"), null);
@@ -316,7 +370,7 @@ test("Defaults: the engine switch keeps its confirm", async () => {
   app.confirm = text => { asked = text; return false; };
   await app.viewPolicies(main, "defaults");
   await flush();
-  const button = panel(main, 4).querySelectorAll("button").find(b => b.textContent === "Apply engine switch");
+  const button = panel(main).querySelectorAll("button").find(b => b.textContent === "Apply engine switch");
   await button.click();
   assert.match(asked, /Route shell through policy engine v2\?/);
   assert.ok(!calls.some(([m]) => m === "PUT"));

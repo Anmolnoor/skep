@@ -1,6 +1,6 @@
 /* skep — the face (v5 Stage F). No build step: ES modules + fetch + EventSource. */
 import { renderContextPanel } from "./room.js";
-import { viewProjects, viewSettings, viewSetup } from "./settings.js";
+import { viewSettings } from "./settings.js";
 import { installSidebar, refreshSidebar, renderThreads, viewInbox } from "./sidebar.js";
 import { viewPolicies } from "./policies.js";
 
@@ -659,7 +659,23 @@ function contextLoadPercent(context) {
   return Math.min(100, Math.max(4, Math.round(context.percent)));
 }
 
+// graphite-nav: these pages open in the Settings surface — the sidebar shows
+// the pages list in place of the threads, the header reads "Settings / …".
+const SURFACE_PAGES = new Set(["runs", "approvals", "assign", "schedules", "templates", "notes",
+  "memory", "policies", "settings", "projects", "setup"]);
+const isSurface = hash => SURFACE_PAGES.has(hash.split(/[/?]/)[1]);
+// Where the surface's close button goes: the last hash outside it (I11:
+// in-memory only, a reload forgets it and close goes Home).
+let surfaceReturn = null;
+
 function setShellActiveRoute(hash) {
+  const surface = isSurface(hash);
+  if (!surface) surfaceReturn = hash;
+  const shell = document.getElementById("shell");
+  if (shell) {
+    if (surface) shell.dataset.surface = "settings";
+    else delete shell.dataset.surface;
+  }
   for (const link of document.querySelectorAll(".sidebar a[data-ws]")) {
     const ws = link.dataset.ws;
     const nav = link.dataset.nav || "";
@@ -669,11 +685,22 @@ function setShellActiveRoute(hash) {
     }
     // Graphite round A: Projects and Setup are Settings tabs (settings.js).
     if (ws === "settings") active = /^#\/(settings|projects|setup)\b/.test(hash);
+    // graphite-nav: a surface item for one tab is lit by its own hash; a
+    // project's detail page lights Projects.
+    if (link.dataset.tab) {
+      active = link.getAttribute("href") === hash
+        || (link.dataset.tab === "projects" && hash.startsWith("#/projects/"));
+    }
     link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
   }
 }
 
 function installShellHandlers() {
+  document.getElementById("surface-close")?.addEventListener("click", () => {
+    location.hash = surfaceReturn || "#/home";
+  });
   const newChat = document.getElementById("sidebar-new-chat");
   if (newChat) {
     newChat.addEventListener("click", (event) => {
@@ -894,14 +921,16 @@ async function refreshDockModel() {
 }
 function updateShellChrome(hash) {
   // H1-G2: the header line is the view's own. + Assign shows where work is
-  // started from (Home, Runs); it is also in the sidebar under Runs and in
-  // ⌘K. The Queen tile (default model + liveness) belongs to Home; a thread
+  // started from (Home, Runs); it is also "New run" in the Settings
+  // surface and in ⌘K. The Queen tile (default model + liveness) belongs to Home; a thread
   // shows its own model in its header.
   const page = hash.split(/[/?]/)[1] || "home";
   const assign = document.querySelector(".topbar-assign");
   if (assign) assign.hidden = !["home", "runs"].includes(page);
   const queenTile = document.getElementById("topbar-queen-status");
   if (queenTile) queenTile.hidden = page !== "home";
+  const close = document.getElementById("surface-close");
+  if (close) close.hidden = !isSurface(hash);
   viewControls()?.replaceChildren();
   const hideDock = hash.startsWith("#/chat");
   const dock = document.getElementById("dock");
@@ -945,7 +974,6 @@ let cleanup = null; // per-view teardown (closes EventSources, timers)
 
 const routes = [
   [/^#\/home$/, viewHome],
-  [/^#\/setup$/, viewSetup],
   [/^#\/chat$/, viewChat],
   [/^#\/chat\/([^/]+)$/, viewChat],
   [/^#\/inbox$/, viewInbox], // H1: everything waiting on you (sidebar.js)
@@ -958,17 +986,38 @@ const routes = [
   [/^#\/runs\/([^/]+)$/, viewRunDetail],
   [/^#\/approvals$/, viewApprovals],
   [/^#\/templates$/, viewTemplates],
-  [/^#\/projects$/, viewProjects],
   // v76-F3: projects stop being write-only — a detail page composes reads.
   [/^#\/projects\/([^/]+)$/, viewProjectDetail],
   [/^#\/schedules$/, viewSchedules],
   // Graphite round A: #/policies/<tab> opens that tab (policies.js).
   [/^#\/policies(?:\/([\w-]+))?$/, viewPolicies],
-  [/^#\/settings$/, viewSettings],
+  // graphite-nav: #/settings/<tab> opens that section (settings.js).
+  [/^#\/settings(?:\/([\w-]+))?$/, viewSettings],
 ];
+
+// graphite-nav: a page that became a section answers at its old hash too.
+// Rewritten in place (no history entry), before anything reads the hash.
+const HASH_ALIASES = {
+  "#/settings": "#/settings/models",
+  "#/projects": "#/settings/projects",
+  "#/setup": "#/settings/setup",
+  "#/policies": "#/policies/now",
+};
+// The sections behind #/settings/<tab> and #/policies/<tab>, first = fallback.
+// An unknown tab is rewritten to the first, so an item is always lit.
+const SECTIONS = {
+  settings: ["models", "workers", "projects", "channels", "setup"],
+  policies: ["now", "decisions", "grants", "groups", "defaults"],
+};
 
 async function route() {
   if (cleanup) { cleanup(); cleanup = null; }
+  // replaceState fires no hashchange, so this route() call is the only one.
+  if (HASH_ALIASES[location.hash]) history.replaceState(null, "", HASH_ALIASES[location.hash]);
+  const tabbed = location.hash.match(/^#\/(settings|policies)\/([\w-]+)$/);
+  if (tabbed && !SECTIONS[tabbed[1]].includes(tabbed[2])) {
+    history.replaceState(null, "", `#/${tabbed[1]}/${SECTIONS[tabbed[1]][0]}`);
+  }
   const hash = location.hash || "#/home";
   setShellActiveRoute(hash);
   updateShellChrome(hash);
@@ -981,6 +1030,11 @@ async function route() {
   if (!setup.complete && !setupRouteAllowed(hash)) {
     location.hash = "#/setup";
     return;
+  }
+  // First run: there is nowhere to close to — the gate would bounce back here.
+  if (!setup.complete) {
+    const close = document.getElementById("surface-close");
+    if (close) close.hidden = true;
   }
   for (const [pattern, view] of routes) {
     const match = hash.match(pattern);
@@ -1005,10 +1059,19 @@ function header(main, title, subtitle) {
   // so nothing it said is lost.
   const titleEl = document.getElementById("topbar-title");
   if (titleEl) {
-    titleEl.textContent = title;
+    titleEl.textContent = isSurface(location.hash || "#/home") ? surfaceCrumb(title) : title;
     titleEl.title = subtitle || "";
   }
   document.title = `${title} · skep`;
+}
+
+// graphite-nav: "Settings / <page>"; a one-tab page adds its tab's label
+// ("Settings / Policies / Now"); a repeat ("Settings / Settings") is dropped.
+function surfaceCrumb(title) {
+  const item = [...document.querySelectorAll(".sidebar-pages a[data-tab]")]
+    .find(link => link.getAttribute("href") === location.hash);
+  const parts = ["Settings", title, item?.textContent.trim()];
+  return parts.filter((part, i) => part && parts.indexOf(part) === i).join(" / ");
 }
 
 // H1-G2: a view puts its own controls in its header line, right of the title.
@@ -1025,8 +1088,10 @@ async function setupStatus() {
   return api("GET", "/api/setup/status");
 }
 
+// graphite-nav: every Settings section, so Setup's links to Models and
+// Projects work before setup is complete. #/setup arrives normalised.
 function setupRouteAllowed(hash) {
-  return hash === "#/setup" || hash === "#/settings";
+  return /^#\/settings\/[\w-]+$/.test(hash);
 }
 
 function chatTimeLabel(ts) {
@@ -4787,7 +4852,8 @@ async function viewProjectDetail(main, projectId) {
         onclick: () => {
           sessionStorage.setItem("skep-group-edit",
             JSON.stringify({ group: name, project: projectId }));
-          location.hash = "#/policies";
+          // graphite-nav: name the section, so the lit item is the one shown.
+          location.hash = "#/policies/groups";
         },
       }, `${name} ✎`))));
   }
