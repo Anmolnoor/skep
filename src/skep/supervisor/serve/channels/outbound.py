@@ -57,13 +57,39 @@ def push_to_chat_channel(
     disabled or secret-less, the channel's notification_level filters ``kind``
     (v78-F1 — the ONE choke point every push routes through; the level filters
     delivery, never the record), or the send fails — the chat row is already
-    the durable copy; the push is best-effort.
+    the durable copy; the push is best-effort. ``push_outcome`` says which.
     """
+    outcome = push_outcome(
+        store, home, chat_id, text, kind=kind, run_ref=run_ref, web_ui_url=web_ui_url,
+        send_discord=send_discord, send_telegram=send_telegram, send_slack=send_slack,
+        send_discord_file=send_discord_file,
+    )  # fmt: skip
+    return outcome == "delivered"
+
+
+def push_outcome(
+    store: RunStore,
+    home: Path,
+    chat_id: str,
+    text: str,
+    *,
+    kind: str = "info",
+    run_ref: str | None = None,
+    web_ui_url: str = "",
+    send_discord: SendDiscord | None = None,
+    send_telegram: SendTelegram | None = None,
+    send_slack: SendSlack | None = None,
+    send_discord_file: SendDiscordFile | None = None,
+) -> str:
+    """``push_to_chat_channel``, saying how it went (v121-F2: the alarm records
+    it): ``"delivered"``, or why not — ``"no channel"``, ``"never configured"``,
+    ``"channel off"``, ``"secret missing"``, ``"level <level>"``, ``"send failed"``
+    or ``"send raised"``."""
     if not text:
-        return False
+        return "empty text"
     binding = store.channel_binding_for_chat(chat_id)
     if binding is None:
-        return False  # unbound chats are the common case — no delivery expected
+        return "no channel"  # unbound chats are the common case — no delivery expected
     # v87-F3: from here on a delivery IS expected — every miss says why, in
     # the log AND the health breadcrumb (the day-long silent diagnosis was
     # the bug: "not configured" presented as "broken", I8).
@@ -72,7 +98,7 @@ def push_to_chat_channel(
         why = "channel never configured" if config is None else "channel disabled"
         logger.info("outbound push to %s skipped: %s", binding.channel, why)
         _note_delivery(store, binding.channel, ok=False, kind=kind, note=why)
-        return False
+        return "never configured" if config is None else "channel off"
     # a "reply" answers the operator's own click, like an in-turn reply: no filter
     if kind != "reply" and (
         config.notification_level == "none"
@@ -85,14 +111,14 @@ def push_to_chat_channel(
             config.notification_level,
             kind,
         )
-        return False
+        return f"level {config.notification_level}"
     token = resolve_channel_secret(home, binding.channel)
     if not token:
         logger.info("outbound push to %s skipped: secret missing", binding.channel)
         _note_delivery(store, binding.channel, ok=False, kind=kind, note="secret missing")
-        return False
+        return "secret missing"
 
-    def _finish(delivered: bool) -> bool:
+    def _finish(delivered: bool) -> str:
         logger.info(
             "outbound push to %s %s (kind=%s)",
             binding.channel,
@@ -106,7 +132,7 @@ def push_to_chat_channel(
             kind=kind,
             note="delivered" if delivered else "send failed",
         )
-        return delivered
+        return "delivered" if delivered else "send failed"
 
     try:
         if binding.channel == "discord":
@@ -160,8 +186,8 @@ def push_to_chat_channel(
     except Exception:
         logger.warning("outbound push to %s failed", binding.channel, exc_info=True)
         _note_delivery(store, binding.channel, ok=False, kind=kind, note="send raised")
-        return False
-    return False
+        return "send raised"
+    return f"no sender for channel {binding.channel!r}"
 
 
 def _note_delivery(store: RunStore, channel: str, *, ok: bool, kind: str, note: str) -> None:

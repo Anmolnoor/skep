@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 from ..policy_v3 import CHANNEL_CHATS, UNATTENDED_CHATS, redact
 from ..policy_write import PolicyWriteRejected
 from . import actions
+from .alarm import alarm_line, now_stamp, record_unattended_refusal, send_alarm
 from .cards import (
     card_summary,
     fold_subject,
@@ -1294,6 +1295,17 @@ _SECRET_ARG_KEY = re.compile(
 )
 
 
+def off_menu(*, read_only: bool, unattended: bool) -> frozenset[str]:
+    """v121-F2: the tools an unattended turn refuses, so it is never offered
+    them — by schema or by the system prompt's index. A scheduled turn
+    (``read_only``) is offered no mutation either. Every call it makes off
+    this menu is one it was never offered: the alarm's signal."""
+    if not unattended:
+        return frozenset()
+    blocked = UNATTENDED_BLOCKED_STORE_WRITES | UNATTENDED_BLOCKED_READ_TOOLS
+    return frozenset(blocked | MUTATING_TOOL_NAMES) if read_only else blocked
+
+
 def stream_args(args: dict[str, Any]) -> dict[str, Any]:
     """The arguments as the operator watching the stream sees them: every
     string through the decision log's secret masker (``redact``), a
@@ -1544,7 +1556,7 @@ class ChatEngine:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return str(config["base_url"]), api_key, str(model), config["protocol"]
 
-    def _system_prompt(self, chat_id: str) -> str:
+    def _system_prompt(self, chat_id: str, off_menu: frozenset[str] = frozenset()) -> str:
         """The operative prompt assembled in the pinned v53 order:
         persona + rules-win bridge (F4) → rules (the authority) → the
         operator's clock (v73-F8) → memory (context, not authority) → style
@@ -1584,7 +1596,7 @@ class ChatEngine:
             parts.append(memory)
         # v74-F5: the one "You can reach:" roof — the F3 tool index, the
         # v53-F7 skill index, and the registered MCP server ids, folded.
-        reach = reach_block(self.store, self._hidden(chat))
+        reach = reach_block(self.store, self._hidden(chat) | off_menu)
         if reach:
             parts.append(reach)
         preamble = personality_preamble(
@@ -1599,14 +1611,18 @@ class ChatEngine:
         role alone, so the list is the same on every turn."""
         return frozenset(hidden_tools(chat_role(self.home, getattr(chat, "role", None))))
 
-    def _advertised_tools(self, chat: Any, *, read_only: bool = False) -> list[dict[str, Any]]:
+    def _advertised_tools(
+        self, chat: Any, *, read_only: bool = False, unattended: bool = False
+    ) -> list[dict[str, Any]]:
         """The specs this chat's next round advertises (v74-F3).
 
         Advertisement, never permission (I5/I6): the executor dispatches on
         the tool NAME, so an indexed-but-inactive tool still executes when
         called, mutations still card, and deny space stays unreachable. A
-        tool the chat's role hides (P3-6) is neither offered nor run."""
-        hidden = self._hidden(chat)
+        tool the chat's role hides (P3-6) is neither offered nor run.
+        v121-F2: nor is a tool an unattended turn refuses — so every call such
+        a turn makes off its menu is one it was never offered (the alarm)."""
+        hidden = self._hidden(chat) | off_menu(read_only=read_only, unattended=unattended)
         if tool_delivery(self.store) == "full":
             specs = READ_TOOL_SPECS if read_only else TOOL_SPECS
             specs = [t for t in specs if t["function"]["name"] not in hidden]
@@ -1652,16 +1668,17 @@ class ChatEngine:
         return self._history_budget(len(self._system_prompt(chat_id)) + len(summary), chat)
 
     def _turn_messages(
-        self, chat_id: str, *, budget_cap: int | None = None
+        self, chat_id: str, *, budget_cap: int | None = None, off_menu: frozenset[str] = frozenset()
     ) -> list[dict[str, Any]]:
         """System prompt (+ compaction digest) and the budgeted replay.
 
         The stored transcript is complete and untouched; this bounds only what
         the model is resent each round, with honest markers for what isn't.
-        ``budget_cap`` is the v73-F1 shrink: the 4xx retry resends less."""
+        ``budget_cap`` is the v73-F1 shrink: the 4xx retry resends less.
+        ``off_menu``: what an unattended turn is never offered (v121-F2)."""
         self._compact_if_needed(chat_id)
         chat = self.store.get_chat(chat_id)
-        system = self._system_prompt(chat_id)
+        system = self._system_prompt(chat_id, off_menu)
         summary = (chat.context_summary or "") if chat else ""
         budget = self._history_budget(len(system) + len(summary), chat)
         if budget_cap is not None:
@@ -2004,6 +2021,7 @@ class ChatEngine:
         read_only: bool = False,
         unattended: bool = False,
         channel: bool = False,
+        schedule: str | None = None,
     ) -> Iterator[ChatEvent]:
         """One assistant turn: stream deltas, run read tools, pause on mutations.
 
@@ -2014,6 +2032,10 @@ class ChatEngine:
         network-read tools — store reads only while nobody is watching.
         ES-F3 (B08): and they never execute a mutation, even one policy would
         auto-allow — it becomes a card (run-finish continuations).
+
+        v121-F2: ``schedule`` names the prompt schedule a scheduled turn runs
+        for; each call it refuses off its menu is a decisions row and an
+        ``("alarm", row)`` event.
         """
         # W24: nobody is at the desk — the chat's session keeps sit this out;
         # D16: nor are they for a messenger's members
@@ -2023,6 +2045,7 @@ class ChatEngine:
             yield from self._turn_events(
                 chat_id, base_url=base_url, api_key=api_key, model=model,
                 protocol=protocol, read_only=read_only, unattended=unattended,
+                schedule=schedule,
             )  # fmt: skip
         finally:
             marks.discard(chat_id)
@@ -2038,8 +2061,10 @@ class ChatEngine:
         protocol: LLMProtocol,
         read_only: bool = False,
         unattended: bool = False,
+        schedule: str | None = None,
     ) -> Iterator[ChatEvent]:
         previous_read_tool: str | None = None
+        hidden = off_menu(read_only=read_only, unattended=unattended)  # v121-F2
         # v59-F7: byte-identical read call returning a byte-identical result is
         # a loop, not diligence (field test 2026-07-18: ~20 list_runs/repo_state
         # repeats narrated as "let me pull everything one final time"). Repeats
@@ -2070,14 +2095,14 @@ class ChatEngine:
             # v74-F3: recomputed every round — a describe_tools call in the
             # previous round advertises its tools from this one on.
             tools_payload = self._advertised_tools(
-                self.store.get_chat(chat_id), read_only=read_only
+                self.store.get_chat(chat_id), read_only=read_only, unattended=unattended
             )
             # v87-F7: a waiting turn says what it is waiting for — cloud
             # prefill on a large prompt is minutes of dead air otherwise,
             # indistinguishable from a hung daemon (I8).
             yield ("turn_status", {"state": "thinking"})
             while True:  # at most two passes: full, then halved after a 4xx
-                messages = self._turn_messages(chat_id, budget_cap=shrink_budget)
+                messages = self._turn_messages(chat_id, budget_cap=shrink_budget, off_menu=hidden)
                 if nudge is not None:
                     # v70-F1: the stall correction rides as a transient trailing
                     # system instruction (the v62-F2 mechanism — never stored;
@@ -2328,6 +2353,10 @@ class ChatEngine:
                             content=json.dumps(refusal, ensure_ascii=True),
                         )
                         yield ("tool", {"tool": name, "args": shown_args, "result": refusal})
+                        if unattended:  # v121-F2: a scheduled turn's off-menu call
+                            yield ("alarm", self._refused(
+                                chat_id, name, args, "unattended_mutation", schedule, alarm=True,
+                            ))  # fmt: skip
                         continue
                     decision = search_ask or mutation_execution_decision(
                         name, args, store=self.store, holder=self.holder, chat_id=chat_id
@@ -2430,6 +2459,10 @@ class ChatEngine:
                             content=json.dumps(waiting, ensure_ascii=True),
                         )
                         yield ("tool", {"tool": name, "args": shown_args, "result": waiting})
+                        if unattended:  # v121-F2: recorded; a tainted follow-up is no attack
+                            self._refused(
+                                chat_id, name, args, "unattended_mutation", schedule, alarm=False
+                            )
                         continue
                     if taint_ask:
                         taint_carded.add(name)
@@ -2640,6 +2673,17 @@ class ChatEngine:
                     # legitimately block for minutes.
                     yield ("turn_status", {"state": "tool", "tool": name})
                     call_key = (name, json.dumps(args, sort_keys=True, ensure_ascii=True))
+                    blocked = unattended and name in (
+                        UNATTENDED_BLOCKED_READ_TOOLS | UNATTENDED_BLOCKED_STORE_WRITES
+                    )
+                    if blocked:
+                        # v121-F2: never offered (_advertised_tools), so a call
+                        # is recorded; a scheduled turn's call is an alarm.
+                        row = self._refused(
+                            chat_id, name, args, "unattended_blocked", schedule, alarm=read_only
+                        )
+                        if read_only:
+                            yield ("alarm", row)
                     if unattended and name in UNATTENDED_BLOCKED_READ_TOOLS:
                         # v83-F5 (ADR 0042): store reads only, unattended.
                         turn = "a scheduled turn" if read_only else "an unattended follow-up turn"
@@ -2755,6 +2799,23 @@ class ChatEngine:
                 break
         yield from self._final_no_tool_events(
             chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+            off_menu=hidden,
+        )  # fmt: skip
+
+    def _refused(
+        self,
+        chat_id: str,
+        name: str,
+        args: dict[str, Any],
+        rule_id: str,
+        schedule: str | None,
+        *,
+        alarm: bool,
+    ) -> dict[str, Any]:
+        """v121-F2: the decisions row for a call an unattended turn refused."""
+        return record_unattended_refusal(
+            self.holder, self.store, chat_id, tool=name, args=args, rule_id=rule_id,
+            schedule=schedule, alarm=alarm,
         )  # fmt: skip
 
     def _final_no_tool_events(
@@ -2765,6 +2826,7 @@ class ChatEngine:
         api_key: str | None,
         model: str,
         protocol: LLMProtocol,
+        off_menu: frozenset[str] = frozenset(),
     ) -> Iterator[ChatEvent]:
         """After the read-tool cap, let the model summarize the last result once.
 
@@ -2783,7 +2845,7 @@ class ChatEngine:
         shrink_budget: int | None = None  # v73-F1: same one-shrink rule as the loop
         while True:
             messages = [
-                *self._turn_messages(chat_id, budget_cap=shrink_budget),
+                *self._turn_messages(chat_id, budget_cap=shrink_budget, off_menu=off_menu),
                 final_nudge,
             ]
             try:
@@ -3306,7 +3368,11 @@ def run_scheduled_prompt(
     Read-only AND unattended by construction: mutations refuse (never card —
     nobody is watching to confirm, I6) and network reads refuse (store reads
     only). The engine writes the chat transcript itself; the returned text
-    is for the tick record and the outbound push. (reply, ok)."""
+    is for the tick record and the outbound push. (reply, ok).
+
+    v121-F2: every call the turn refused off its menu is collected, and ONE
+    alarm line goes out in the ``finally`` — a timeout, a broken turn and an
+    empty reply alarm too."""
     chat_id = schedule.chat_id
     if not chat_id or store.get_chat(chat_id) is None:
         return (
@@ -3326,6 +3392,8 @@ def run_scheduled_prompt(
     if not lock.acquire(blocking=False):
         return ("the bound chat was mid-turn, so this tick was skipped", False)
     parts: list[str] = []
+    alarms: list[dict[str, Any]] = []
+    started = now_stamp()
     try:
         if chained is not None:
             # v53-F5 chain semantics: labeled CONTEXT, never new instructions —
@@ -3349,8 +3417,11 @@ def run_scheduled_prompt(
             protocol=protocol,
             read_only=True,
             unattended=True,
+            schedule=schedule.name,
         )
         for event, data in events:
+            if event == "alarm":
+                alarms.append(data)
             if event is None and isinstance(data.get("content"), str):
                 parts.append(str(data["content"]))
             if time.monotonic() > deadline:
@@ -3365,6 +3436,10 @@ def run_scheduled_prompt(
         return (f"prompt tick failed mid-turn: {exc}", False)
     finally:
         lock.release()
+        if alarms:
+            source = schedule.chain if chained is not None else None
+            line = alarm_line(schedule.name, source, alarms, chained, started)
+            send_alarm(holder, store, home, chat_id, schedule=schedule.name, line=line)
     reply = "".join(parts).strip()
     if not reply:
         return ("the scheduled turn produced no reply", False)

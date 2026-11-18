@@ -8,7 +8,8 @@ and a serve restart reloads them from the store.
 
 ``private``: a read_file that resolved OUTSIDE the operator roots, a
 search_files with hits outside them, ANY run_shell / start_process /
-read_process_log output (operator decision #3), an email read. Not: a read
+read_process_log output (operator decision #3), an email read, a schedule's
+stored output (``list_schedules name=``, v121-F3). Not: a read
 inside the roots, a refused read (the secret floor, a deny, a missing path —
 nothing was read), a tool that failed before producing output.
 
@@ -68,11 +69,12 @@ _SOURCES = {
     "list_notes": "read a note a tainted chat wrote",
     "list_tasks": "read a task a tainted chat wrote",
     "list_memory_proposals": "read memory a tainted chat filed",
+    "list_schedules": "read a schedule's output",
 }
 _AUTHORS = {
     "webhook": "received a webhook message",
     "channel": "received a message from outside",
-    "schedule": "received a script's output",
+    "schedule": "received a schedule's output",
     "worker": "received a worker's report",
 }
 
@@ -166,6 +168,10 @@ def record_tool_taint(
         private, untrusted = "private" in bits, "untrusted" in bits
     elif name in _PRIVATE_OUTPUT:
         private = True
+    elif name == "list_schedules":
+        # v121-F3: a schedule's stored output is a script's (or a chained
+        # turn's) — the operator's data and outside text at once
+        private = untrusted = bool((result.get("schedule") or {}).get("last_output"))
     elif name in _UNTRUSTED_OUTPUT:
         untrusted = True
         if name == "call_mcp_tool":

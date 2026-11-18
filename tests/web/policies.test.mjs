@@ -268,6 +268,23 @@ test("Decisions: summary counts, newest-first rows, a verdict filter, and an emp
   assert.match(panel(empty.main).querySelector(".empty-state").textContent, /Nothing decided yet/);
 });
 
+test("Decisions: an alarm delivery row is a note, never a verdict (v121-F2)", async () => {
+  const rows = [
+    { at: "2026-11-18T10:00:00Z", actor: "queen", scope: "queen", action: "alarm", value: "mail-summary", source: "alarm", decided_by: "queen/unattended", alarm_delivered: true },
+  ];
+  const { main, app } = withPolicies({
+    "GET /api/policy/decisions": { rows, total: 1, summary: { allow: 0, deny: 0, require_approval: 0, observed: 0, forwarded: 0, delegated: 0, alarm: 1 } },
+  });
+  await app.viewPolicies(main, "decisions");
+  await flush();
+  const dec = panel(main);
+  assert.match(dec.querySelector(".policy-summary").textContent, /1 alarm/);
+  const row = dec.querySelector(".policy-decision");
+  assert.equal(row.getAttribute("data-kind"), "note");
+  assert.match(row.textContent, /alarm/);
+  assert.doesNotMatch(row.textContent, /undefined/);
+});
+
 test("Standing grants: one line per rule; Revoke keeps its confirm wording and DELETEs", async () => {
   const { main, app, calls } = withPolicies({
     "GET /api/policy/rules": {

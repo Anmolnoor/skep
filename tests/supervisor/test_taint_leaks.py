@@ -274,8 +274,9 @@ def test_an_unattended_turn_decides_without_the_chats_session_keeps(env: Live) -
 
 def test_a_script_schedules_output_note_is_untrusted(tmp_path: Path) -> None:
     """A script schedule with no chat files its output as a note: what the
-    script printed is outside text, so the note carries ``untrusted``. A note
-    schedule's own text is the operator's and carries nothing."""
+    script printed is outside text, so the note carries ``untrusted`` (and,
+    v121-F3, ``private``). A note schedule's own text is the operator's and
+    carries nothing."""
     from skep.supervisor import RunStore
     from skep.supervisor.scheduler import _deliver_tick_text, make_schedule
 
@@ -287,7 +288,7 @@ def test_a_script_schedules_output_note_is_untrusted(tmp_path: Path) -> None:
             )
             _deliver_tick_text(store, schedule, f"{kind} said", None, script_output=script)
         bits = {n.content: store.content_taint("note", [n.note_id]) for n in store.list_notes()}
-        assert bits == {"script said": {"untrusted"}, "note said": set()}
+        assert bits == {"script said": {"private", "untrusted"}, "note said": set()}
     finally:
         store.close()
 

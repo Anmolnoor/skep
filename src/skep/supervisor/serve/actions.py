@@ -2319,7 +2319,7 @@ def approve_policy_baseline(
 def policy_note(
     audit_dir: Path,
     *,
-    source: Literal["observed", "forwarded", "delegated"],
+    source: Literal["observed", "forwarded", "delegated", "alarm"],
     actor: str,
     repo: str | None,
     scope: str | None,
@@ -2330,7 +2330,8 @@ def policy_note(
     """ADR 0054 A9: a ledger row that is not a decision — what an ACP agent
     ran unasked (``observed``) or what the human behind the client answered
     (``forwarded``), and R3's ``delegated`` — one dispatch hop, who handed
-    what to whom under which role. ``source`` discriminates these rows from decisions; they
+    what to whom under which role, and v121-F2's ``alarm`` — whether an injection
+    alarm reached its channel. ``source`` discriminates these rows from decisions; they
     carry no ``verdict``. Same ``decisions.jsonl`` as ``policy_decide``."""
     row: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -6524,7 +6525,7 @@ def policy_decisions(
     ``observed`` or ``forwarded`` row is not a decision (I8)."""
     if limit <= 0:
         raise ValueError("limit must be a positive integer")
-    notes = ("observed", "forwarded", "delegated")
+    notes = ("observed", "forwarded", "delegated", "alarm")
     summary = dict.fromkeys(("allow", "deny", "require_approval", *notes), 0)
     rows: list[dict[str, Any]] = []
     # ponytail: reads both files whole (at most 2 x 10 MB); tail-seek if that hurts
