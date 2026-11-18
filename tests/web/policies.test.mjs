@@ -5,8 +5,15 @@
 // Settings surface is the list.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { loadApp, texts } from "./harness.mjs";
+
+// The engine's real answers on a throwaway home with the builder baseline
+// locked (tests/supervisor/test_policy_tree_fixtures.py pins them).
+const LOCKED = JSON.parse(readFileSync(new URL("./fixtures/policy-locked.json", import.meta.url), "utf8"));
+const REAL = Object.fromEntries(["GET /api/projects", "GET /api/schedules", "GET /api/roles"].map(k => [k, LOCKED[k]]));
+const WHY_UV_SYNC = "GET /api/policy/why?repo=%2Ffixture%2Fapp&scope=shell&action=run&value=uv%20sync";
 
 const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
 
@@ -281,6 +288,29 @@ test("Now: Test an action sends the role and a schedule's delegation chain, and 
   assert.equal(considered.length, 2);
   assert.match(considered[0], /allow.*uv sync.*shell-uv-sync.*template:builder.*Lets a worker install the locked dependencies\./s);
   assert.match(considered[1], /ask.*shell:uv.*No description/s);
+});
+
+// v124 review (F1/F3): the deciding rule's description rides each face of
+// why (_deciding_text); it shows under that face's verdict line.
+test("Now: Test an action shows each face's deciding-rule description under its verdict", async () => {
+  const why = LOCKED[WHY_UV_SYNC];
+  assert.ok(why.operator.description);
+  const { main, app } = withPolicies({ ...REAL, [WHY_UV_SYNC]: why });
+  await app.viewPolicies(main);
+  await flush();
+  const box = panel(main).querySelector(".policy-test");
+  const [project, scope] = box.querySelectorAll("select");
+  const [action, value] = box.querySelectorAll("input");
+  project.value = "app"; scope.value = "shell"; action.value = "run"; value.value = "uv sync";
+  await box.querySelector("button").click();
+  const out = box.querySelector(".policy-test-out");
+  const lines = out.children.map(n => n.textContent);
+  const queen = lines.findIndex(t => t.startsWith("The Queen: "));
+  assert.equal(lines[queen + 1], why.operator.description);
+  // The workers' deciding rule is compiled from a knob: no shipped sentence, none shown.
+  assert.equal(why.run.description, undefined);
+  assert.match(lines[0], /^Workers in app: allowed/);
+  assert.ok(lines[1].startsWith("The Queen: "));
 });
 
 test("Decisions: summary counts, newest-first rows, a verdict filter, and an empty state", async () => {

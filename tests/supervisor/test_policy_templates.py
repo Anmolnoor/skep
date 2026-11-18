@@ -51,6 +51,7 @@ from skep.supervisor.policy_templates import (
     load_policy_template,
     render_policy_table,
     resolve_template_name,
+    shipped_descriptions,
 )
 from skep.supervisor.serve.actions import policy_decide, policy_why
 from skep.supervisor.serve.settings import ConfigHolder
@@ -556,6 +557,12 @@ def test_every_shipped_rule_has_a_description_and_none_is_stale() -> None:
         assert set(texts[name]) == {rule.rule_id for rule in template.rules}, name
         assert all(isinstance(t, str) and t.strip() for t in texts[name].values()), name
     assert sum(map(len, texts.values())) == 69
+
+
+def test_shipped_descriptions_are_read_once_per_template() -> None:
+    """v124 review nit 9: ``why`` looks one up per considered row — the JSON
+    and the template load once, not per row."""
+    assert shipped_descriptions("builder") is shipped_descriptions("builder")
 
 
 def test_explain_rows_carry_the_shipped_description(config: SupervisorConfig) -> None:

@@ -247,8 +247,11 @@ function testAnAction(scopes, projects, roles, schedules, preset = {}) {
         el("p", {}, `Workers in ${picked.name}: `, why.run.error
           ? `could not decide — ${why.run.error}`
           : [el("strong", {}, verdictWord(why.run.verdict)), " — decided by ", el("span", { class: "mono" }, why.run.decided_by)]),
+        // The deciding rule's sentence, when a shipped baseline rule decided (_deciding_text).
+        why.run.description ? el("p", { class: "field-help" }, why.run.description) : null,
         el("p", {}, "The Queen: ", el("strong", {}, verdictWord(why.operator.verdict)),
           " — decided by ", el("span", { class: "mono" }, why.operator.decided_by)),
+        why.operator.description ? el("p", { class: "field-help" }, why.operator.description) : null,
         why.role ? el("p", {}, `Role: ${why.role.note}`) : null,
         why.delegation ? el("p", {}, `Delegation: ${why.delegation.note}`) : null,
         considered.length ? el("p", { class: "note" }, "Rules considered:") : null,
@@ -1000,10 +1003,11 @@ function scopeLeafDetail(key, ctx) {
   const [scope, action] = [key.name.split(".")[0], key.name.slice(key.name.indexOf(".") + 1)];
   const unmatched = key.default === "deny" ? "denies" : "asks";
   if (!ctx.guard && ctx.rsop?.error) return [policyNote(`policy did not resolve: ${ctx.rsop.error}`)];
-  // A description is the baseline's, so it shows only on a rule the baseline stated (I8).
+  // A description is the baseline's, so it shows only on a rule the baseline
+  // stated, matched whole — never by id alone (I8, policy_templates.shipped_descriptions).
   const baselineLayer = ctx.explain.name ? `template:${ctx.explain.name}` : null;
-  const explained = new Map((ctx.explain.rules || []).filter(r => r.description)
-    .map(r => [`${r.scope} ${r.rule_id}`, r.description]));
+  const whole = r => [r.scope ?? scope, RULE_WORD[r.verdict], r.action, r.pattern, r.rule_id].join("\u0000");
+  const explained = new Map((ctx.explain.rules || []).filter(r => r.description).map(r => [whole(r), r.description]));
   // Whose answer it is: the workers' compiled run lane in the project, and the
   // Queen's lane (the baseline without its shell allows, plus her documents);
   // with no project, the locked baseline's layer as stated — no lane's answer.
@@ -1024,7 +1028,7 @@ function scopeLeafDetail(key, ctx) {
       el("p", { class: "policy-tree-state" }, `${who}: ${said}`),
       !ctx.guard && verdicts.length ? policyNote(`anything no rule matches ${unmatched}`) : null,
       !ctx.guard && rules.length ? el("ul", { class: "policy-rules" }, rules.map(r => treeRule(r, r.layer || r.source,
-        r.description || (r.layer && r.layer === baselineLayer ? explained.get(`${scope} ${r.rule_id}`) : null)))) : null,
+        r.description || (r.layer && r.layer === baselineLayer ? explained.get(whole(r)) : null)))) : null,
     ];
   };
   const slot = el("div");

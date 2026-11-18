@@ -36,6 +36,7 @@ packs own (strategy, schedules, provider defaults).
 
 from __future__ import annotations
 
+import functools
 import json
 import shlex
 from pathlib import Path
@@ -318,6 +319,7 @@ def floor_rows() -> list[dict[str, str]]:
     return rows
 
 
+@functools.cache  # shipped files: read once per process, not per why row (v124 review)
 def shipped_descriptions(name: str) -> dict[tuple[str, str, str, str, str], str]:
     """v124-F1: a shipped template's one-sentence explanations, keyed by the
     whole rule (scope, verdict, action, pattern, rule_id) — never by id alone,

@@ -288,3 +288,29 @@ test("schedule leaves say what network and policy each kind really runs under", 
     assert.doesNotMatch(text, /Network|hosts/, name);
   }
 });
+
+// v124 review (F1): a description is the baseline's — it shows where a rule
+// the baseline layer stated applies (the Queen's lane, the no-project view),
+// matched on the whole rule, never by id alone (I8).
+test("the Queen's baseline rules carry their description; a changed rule with the same id does not", async () => {
+  const { main } = await openTree();
+  const explain = LOCKED["GET /api/policy/explain?subject=baseline"];
+  const learnable = explain.rules.find(r => r.rule_id === "shell-learnable");
+  await pick(main, "shell.run");
+  const queen = detail(main).querySelectorAll(".policy-tree-rule").find(n => /shell-learnable/.test(n.textContent));
+  assert.ok(queen.textContent.endsWith(learnable.description), queen.textContent);
+  // The workers' rules are compiled from knobs: no shipped sentence.
+  const worker = detail(main).querySelectorAll(".policy-tree-rule").find(n => /shell:uv sync/.test(n.textContent));
+  assert.match(worker.textContent, /No description$/);
+  // The same id with another pattern (a lock approved before the rule changed) borrows nothing.
+  const rsop = structuredClone(LOCKED[RSOP_ROUTE]);
+  rsop.operator.shell = rsop.operator.shell.map(r => (r.rule_id === "shell-learnable" ? { ...r, pattern: "git *" } : r));
+  const changed = await openTree({ [RSOP_ROUTE]: rsop });
+  await pick(changed.main, "shell.run");
+  const moved = detail(changed.main).querySelectorAll(".policy-tree-rule").find(n => /shell-learnable/.test(n.textContent));
+  assert.match(moved.textContent, /No description$/);
+  // No project: the baseline's own rows, each with its sentence.
+  await noProject(main);
+  await pick(main, "network.search");
+  assert.ok(detail(main).textContent.includes(explain.rules.find(r => r.rule_id === "net-search").description));
+});
