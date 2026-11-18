@@ -593,12 +593,14 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "list_memory",
-        "Durable curated memory items (optionally scoped to a project).",
+        "Memory items the operator approved or taught, plus unreviewed "
+        "observations (optionally scoped to a project). Worker-written items "
+        "are left out: read run outcomes with get_run / await_runs.",
         {"project": {"type": "string", "description": "optional project id"}},
     ),
     _tool(
         "search_memory",
-        "Full-text search durable curated memory.",
+        "Full-text search the same memory list_memory returns (worker-written items left out).",
         {
             "query": {"type": "string"},
             "project": {"type": "string", "description": "optional project id"},
@@ -4093,14 +4095,17 @@ def execute_read_tool(
             action="reopened",
         )
         return {"task": None if updated_task is None else asdict(updated_task)}
+    # v126-F3 (review): worker-written items stay out — nearly every live
+    # item is one, so returning them tainted almost every read. Run outcomes
+    # reach the Queen through get_run / await_runs, which taint.
     if name == "list_memory":
         project = None if args.get("project") is None else str(args["project"])
         items = store.list_memory_items(project_id=project)
-        return {"items": [_memory_payload(item) for item in items]}
+        return {"items": [_memory_payload(i) for i in items if i.provenance is None]}
     if name == "search_memory":
         project = None if args.get("project") is None else str(args["project"])
         hits = store.search_memory(str(args["query"]), project_id=project)
-        return {"items": [_memory_payload(item) for item in hits]}
+        return {"items": [_memory_payload(i) for i in hits if i.provenance is None]}
     if name == "search_chats":
         limit = min(int(args.get("limit") or 20), 50)
         scope = None if args.get("chat_id") is None else str(args["chat_id"])
