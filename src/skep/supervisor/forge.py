@@ -281,6 +281,26 @@ def sync_seed_tools(store: RunStore) -> list[str]:
     return added
 
 
+def seed_tool_updates(store: RunStore, config: Any) -> list[str]:
+    """v126-F1: ACTIVE seed plugins whose installed copy differs from the
+    source this build ships. sync_seed_tools only adds unknown ids, so a
+    fixed seed never reached an install where it was already active;
+    promote_tool takes the update (same trial, same card)."""
+    waiting: list[str] = []
+    for record in load_plugins(store).values():
+        if record.provenance != "seed" or record.state != "active":
+            continue
+        installed = installed_tools_root(config) / f"{record.plugin_id}.py"
+        current = installed.read_text(encoding="utf-8") if installed.is_file() else None
+        try:
+            shipped = seed_tool_source(record.rel_path)
+        except ValueError:
+            continue  # nothing shipped to update to
+        if current != shipped:
+            waiting.append(record.plugin_id)
+    return sorted(waiting)
+
+
 def landed_source(repo: Path, branch: str, rel_path: str) -> str:
     """The tool source EXACTLY as the approved landing left it (git show)."""
     probe = subprocess.run(

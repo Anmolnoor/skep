@@ -1195,7 +1195,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "the server's tools and pass its zero-argument self_test; only then "
         "is the source installed and registered as a stdio MCP server "
         "whose tools call_mcp_tool can reach (every call runs sandboxed). A "
-        "suspended plugin reactivates the same way. Fails honestly (and stays "
+        "suspended plugin reactivates the same way, and an active seed tool "
+        "takes a shipped update the same way. Fails honestly (and stays "
         "demoted) if a forged plugin's authoring run has not landed or the "
         "trial fails.",
         {"plugin_id": {"type": "string", "description": "from list_plugins"}},
@@ -5125,7 +5126,12 @@ def _execute_mutation(
         if record is None:
             known = ", ".join(sorted(plugins)) or "none yet — forge_tool creates one"
             raise ValueError(f"no forged plugin {plugin_id!r}; known: {known}")
-        if record.state == "active":
+        # v126-F1: an ACTIVE seed whose installed copy differs from the
+        # shipped source takes the update through the same trial + card.
+        reinstall = record.state == "active" and plugin_id in forge.seed_tool_updates(
+            store, holder.current
+        )
+        if record.state == "active" and not reinstall:
             return {"plugin_id": plugin_id, "state": "active", "note": "already active"}
         if record.state == "rolled_back":
             raise ValueError(
@@ -5154,33 +5160,39 @@ def _execute_mutation(
                     "source to promote"
                 )
             source = forge.landed_source(Path(record.repo), branch, record.rel_path)
-        if record.state == "suspended":
-            # Reactivation: the pause ends on this confirmed card; the source
-            # was already trialed and approved, so only the registration returns.
-            require_transition("suspended", "active")
-        else:
-            if record.state == "draft":
-                require_transition("draft", "sandboxed")
-                record = dataclasses.replace(record, state="sandboxed")
-                forge.save_plugin(store, record)
-            trial_result = _forge_trial(
-                store,
-                holder,
-                runner,
-                source=source,
-                repo=trial_repo,
-                decision=decision,
-                delegation_chain=_queen_chain(store, holder, chat_id, actor),
-            )
-            ok, reason, evidence = forge.trial_verdict(trial_result)
-            record = dataclasses.replace(record, trial=evidence)
+        if record.state == "draft":
+            require_transition("draft", "sandboxed")
+            record = dataclasses.replace(record, state="sandboxed")
             forge.save_plugin(store, record)
-            if not ok:
-                raise ValueError(
-                    f"the sandboxed trial did not pass: {reason} — the plugin stays "
-                    "'sandboxed'. Fix the tool in the forge repo (forge_tool again "
-                    "re-briefs a worker), land the fix, then promote_tool again."
-                )
+        # v126-F1: every install is trialed — reactivation and a seed update
+        # write fresh source too, so they pass the same sandboxed trial.
+        trial_result = _forge_trial(
+            store,
+            holder,
+            runner,
+            source=source,
+            repo=trial_repo,
+            decision=decision,
+            delegation_chain=_queen_chain(store, holder, chat_id, actor),
+        )
+        ok, reason, evidence = forge.trial_verdict(trial_result)
+        record = dataclasses.replace(record, trial=evidence)
+        forge.save_plugin(store, record)
+        if not ok:
+            kept = (
+                "the installed copy keeps running unchanged"
+                if reinstall
+                else f"the plugin stays {record.state!r}"
+            )
+            raise ValueError(
+                f"the sandboxed trial did not pass: {reason} — {kept}. Fix the tool "
+                "in the forge repo (forge_tool again re-briefs a worker), land the "
+                "fix, then promote_tool again."
+            )
+        if record.state == "suspended":
+            # Reactivation: the pause ends on this confirmed card.
+            require_transition("suspended", "active")
+        elif not reinstall:
             require_transition("sandboxed", "tested", verifier_passed=True)
             require_transition("tested", "reviewed")
             # The card the operator just confirmed IS the human action (I6/I7
@@ -5201,9 +5213,18 @@ def _execute_mutation(
             raise ValueError(str(exc)) from exc
         record = dataclasses.replace(record, state="active")
         forge.save_plugin(store, record)
+        if reinstall:
+            store.record_registry_event(
+                kind="plugin",
+                item_id=plugin_id,
+                action="reinstalled",
+                actor=actor,
+                detail={"provenance": "seed", "why": "the shipped source changed"},
+            )
         return {
             "plugin_id": plugin_id,
             "state": "active",
+            "reinstalled": reinstall,
             "server_id": record.server_id,
             "landed_branch": branch,
             "installed": str(installed),

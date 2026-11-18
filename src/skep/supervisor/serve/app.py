@@ -500,6 +500,17 @@ def create_app(
                     "seed tool available (draft): %s — promote_tool to trial + activate",
                     plugin_id,
                 )
+            # v126-F1: an ACTIVE seed whose shipped source changed — sync only
+            # adds unknown ids, so say which tool takes the update.
+            from ..forge import seed_tool_updates
+
+            for plugin_id in seed_tool_updates(run_store, holder.current):
+                logging.getLogger("skep.serve").info(
+                    "seed tool update waiting: %s (the installed copy differs from this "
+                    "build) — promote_tool %s trials and installs it",
+                    plugin_id,
+                    plugin_id,
+                )
         except Exception:
             logging.getLogger("skep.serve").exception("seed-skill sync failed")
         ticker = Ticker(holder, run_store, runner=runner) if start_ticker else None
