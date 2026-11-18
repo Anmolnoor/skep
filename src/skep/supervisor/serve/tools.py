@@ -2863,6 +2863,21 @@ def _schedule_role(
     return name
 
 
+def proposed_schedule_role(
+    store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
+) -> str | None:
+    """v123 review: the role a model-proposed schedule will store — this
+    chat's, for a worker kind (``_schedule_role``); None for a repo-less kind,
+    no chat, or a role that no longer loads (that refuses before a card)."""
+    if args.get("caste") in actions.ROLELESS_SCHEDULE_KINDS:
+        return None
+    try:
+        role = _chat_role(store, holder, chat_id)
+    except ValueError:
+        return None
+    return None if role is None else role.name
+
+
 def schedule_role_line(
     store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
 ) -> str | None:

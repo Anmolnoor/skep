@@ -483,13 +483,17 @@ SCRIPT_SENTENCE = "runs as you, on this host, unattended, until disabled"
 
 
 def schedule_facts(
-    args: dict[str, Any], store: RunStore | None = None, role_line: str | None = None
+    args: dict[str, Any],
+    store: RunStore | None = None,
+    role_line: str | None = None,
+    role: str | None = None,
 ) -> dict[str, Any] | None:
     """P4-2 (ADR 0059 D6, F3 lesson 1): what a script, chained, replacing or
     (v123-F1) role-bound schedule will really do — the command, the interval,
     the env names the script really gets (``scheduler.script_env``), the next
     three fire times (``scheduler.next_fire_times``), the chain it reads
-    from, what it replaces, the role it runs as (``role_line``). None for any
+    from, what it replaces (and, v123 review, the role it had when ``role``
+    differs), the role it runs as (``role_line``). None for any
     other schedule. With no ``store`` (a resolved card) the chain is the one
     named, not walked."""
     from ..scheduler import next_fire_times, parse_interval, script_env
@@ -523,7 +527,13 @@ def schedule_facts(
         facts["chain"] = chain  # this one reads chain[0]'s output, which reads chain[1]'s…
     if existing is not None:
         facts["replaces"] = f"your {existing.worker_kind} schedule {existing.name!r}"
+        if existing.role != role:  # never a silent role change (I8)
+            facts["replaces"] += f" (was {_role_words(existing.role)} → {_role_words(role)})"
     return facts
+
+
+def _role_words(role: str | None) -> str:
+    return "no role" if role is None else f"role {role}"
 
 
 def recorded_card(
@@ -533,17 +543,20 @@ def recorded_card(
     store: RunStore,
     manifest: dict[str, Any] | None = None,
     schedule_role: str | None = None,
+    schedule_role_name: str | None = None,
 ) -> dict[str, Any] | None:
     """What the server records on a card when it is proposed (P4-2): its
     HIGH tier, a dispatch's manifest, and for a schedule the facts the card
-    shows (v123-F1: with the role line, ``tools.schedule_role_line``)."""
+    shows (v123-F1: with the role line, ``tools.schedule_role_line``, and
+    the role it will store, ``tools.proposed_schedule_role``)."""
     record: dict[str, Any] = {} if high is None else {"tier": "high", "high": high}
     if manifest is not None:
         record["manifest"] = manifest
     if schedule_role is not None:
         record["schedule_role"] = schedule_role
     if tool == "propose_schedule":
-        facts = schedule_facts(args, store, schedule_role)
+        record["schedule_role_name"] = schedule_role_name
+        facts = schedule_facts(args, store, schedule_role, schedule_role_name)
         if facts is not None:
             record["schedule"] = facts
     return record or None
@@ -658,7 +671,12 @@ def card_summary(
         # a pending card says what confirming NOW does; a resolved one what
         # the server recorded when it was proposed
         facts = (
-            schedule_facts(safe_args, store, (recorded or {}).get("schedule_role"))
+            schedule_facts(
+                safe_args,
+                store,
+                (recorded or {}).get("schedule_role"),
+                (recorded or {}).get("schedule_role_name"),
+            )
             if live_tier
             else (recorded or {}).get("schedule")
         )

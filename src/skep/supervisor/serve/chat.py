@@ -108,6 +108,7 @@ from .tools import (
     log_denied_dispatch_asks,
     mutation_execution_decision,
     policy_write_preview,
+    proposed_schedule_role,
     schedule_role_line,
     search_web_verdict,
     store_write_taint_ask,
@@ -2648,6 +2649,9 @@ class ChatEngine:
                                     self.store,
                                     manifest,
                                     schedule_role_line(self.store, self.holder, args, chat_id)
+                                    if name == "propose_schedule"
+                                    else None,
+                                    proposed_schedule_role(self.store, self.holder, args, chat_id)
                                     if name == "propose_schedule"
                                     else None,
                                 )

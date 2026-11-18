@@ -214,3 +214,33 @@ def test_propose_schedule_says_a_worker_schedule_runs_in_the_chat_role() -> None
     said = spec["function"]["description"]
     assert "A worker schedule runs in this chat's role" in said
     assert "an assistant chat cannot schedule workers" in said
+
+
+def test_replacing_a_schedule_says_when_its_role_changes(live: Any) -> None:
+    """v123-F2 review (I8): re-proposing a schedule by name never changes its
+    role silently — the ``replaces`` line says was → now."""
+    env = live("builder")
+    chat = env.chat(role="builder")
+    repo = str(env.paths["repo"])
+    for name, role in (("bare", None), ("ops", "operator"), ("same", "builder")):
+        env.store.add_schedule(
+            make_schedule(name=name, repo=repo, instructions="x", interval_seconds=60, role=role)
+        )
+    replaced = {}
+    for name in ("bare", "ops", "same"):
+        env.ollama.script_tool_call(
+            "propose_schedule", {"name": name, "repo": repo, "every": "1d", "instructions": "x"}
+        )
+        (card,) = cards(env.turn(chat, f"redo {name}"))
+        replaced[name] = card["card"]["schedule"]["replaces"]
+        env.store.resolve_chat_action(card["action_id"], status="denied", result={"ok": False})
+    assert replaced == {
+        "bare": "your coding schedule 'bare' (was no role → role builder)",
+        "ops": "your coding schedule 'ops' (was role operator → role builder)",
+        "same": "your coding schedule 'same'",
+    }
+    # a repo-less kind stores no role: replacing a role-bound schedule says so
+    note = {"name": "ops", "caste": "note", "instructions": "hi", "every": "1d"}
+    facts = schedule_facts(note, env.store)
+    assert facts is not None
+    assert facts["replaces"] == "your coding schedule 'ops' (was role operator → no role)"
