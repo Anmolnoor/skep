@@ -90,9 +90,11 @@ Confirm the card on the web. A script schedule is always a HIGH card.
 
 ## 7. Summarize it at 16:30 (a chained prompt schedule, from the group)
 
-Send this exact sentence in the Telegram group:
+Send this exact sentence in the Telegram group (it starts with `@yourbot`,
+your bot's username, because privacy mode drops group messages that do not
+mention the bot):
 
-> Every day, start_at 2026-11-20T16:30:00-08:00, run a prompt schedule named
+> @yourbot Every day, start_at 2026-11-20T16:30:00-08:00, run a prompt schedule named
 > mail-summary chained to mail-pull: summarize my new mail in five bullets and
 > name each sender.
 
@@ -100,7 +102,9 @@ The card goes to the web, because a chained schedule is HIGH. Confirm it
 there. Give an explicit UTC offset (`-08:00` here). A bare time is read as
 UTC. The pull runs five minutes earlier because the chain reads mail-pull's
 **last** output. A schedule keeps its time of day. "Run now" moves the slot
-to the moment you pressed it.
+to the moment you pressed it. A daily schedule is a fixed 24 h interval, so
+its local time shifts by an hour at daylight-saving changes: re-create it
+then, or accept the shift.
 
 ## 8. Keep the research chat clean
 

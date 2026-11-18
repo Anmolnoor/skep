@@ -206,3 +206,12 @@ def test_the_setup_doc_names_the_mail_digest_command_and_an_explicit_offset() ->
     assert command.endswith("-m skep.mcp_servers.mail --digest 5")
     assert "SKEP_HOME" not in command and "PASSWORD" not in command  # queen_skep_refusal
     assert re.search(r"start_at \d{4}-\d\d-\d\dT16:30:00[-+]\d\d:\d\d", text)
+
+
+def test_the_group_sentence_mentions_the_bot_and_the_doc_says_daily_shifts_at_dst() -> None:
+    """Privacy mode drops a group message that does not mention the bot; a
+    daily schedule is a fixed 24 h interval, not a wall-clock time."""
+    text = DOC.read_text(encoding="utf-8")
+    (sentence,) = re.findall(r"> (Every day.*|@yourbot.*)", text)
+    assert sentence.startswith("@yourbot ")
+    assert "daylight-saving" in text and "24 h" in text
