@@ -143,6 +143,18 @@ def test_text_tokens_clear_aa_on_every_surface_they_are_painted_on() -> None:
     assert not failures, f"below AA (4.5:1): {failures}"
 
 
+def test_policy_verdict_words_clear_aa_on_the_canvas() -> None:
+    """Graphite round A: the Policies page writes its verdict words (allowed,
+    asks first, denied) in the status colours, straight on the canvas — its
+    cards are hairlines with no fill. Each must clear 4.5:1 there."""
+    tokens = _tokens()
+    css = _css()
+    for verdict, token in (("allow", "--ok"), ("ask", "--warn"), ("deny", "--bad")):
+        assert f".verdict-{verdict} {{ color: var({token}); }}" in css
+        assert _contrast(tokens[token], tokens["--bg"]) >= 4.5, token
+    assert ".verdict-note { color: var(--muted); }" in css
+
+
 def test_the_palette_is_graphite() -> None:
     """H1-G1: the operator chose "A · Graphite" (skep-design
     plans/hive-rooms/design-graphite.html, theme a) after seeing H1 keep the
