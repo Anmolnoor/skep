@@ -149,6 +149,14 @@ def _write_patch(capabilities: CapabilityRegistry, patch_path: Path) -> bool:
     return bool((diff.output or "").strip())
 
 
+def _patch_file_count(capabilities: CapabilityRegistry) -> int:
+    """v127-F3 (I8): the files the patch changes — git.diff against the
+    startup baseline, not HEAD (a granted git.commit moves HEAD) — so a
+    shell-run edit such as a lockfile bump is counted, not just tool writes."""
+    diff = capabilities.invoke("git.diff", {}).output or ""
+    return sum(1 for line in diff.splitlines() if line.startswith("diff --git "))
+
+
 def _resume_checkpoint_artifact(
     workspace: Path, plan: LlmEditPlan | LlmToolPlan, cursor: ResumeCursor | None = None
 ) -> Artifact:
@@ -2189,7 +2197,7 @@ def _apply_llm_tool_plan(
         total=len(plan.steps),
         verify_word=verify_word,
         verification_command=verification_command,
-        changed=len(changed_files),
+        changed=_patch_file_count(capabilities),
         skipped=skipped,
     )
     if status is not TaskState.COMPLETED:

@@ -8,6 +8,7 @@ the pin and told the worker to write and run check.py.
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -244,3 +245,81 @@ def test_a_file_named_in_the_task_reaches_the_snapshot_even_when_large(repo: Pat
     named_at = snapshot.index("--- src/named.mdx")
     assert named_at < snapshot.index("--- existing.py")  # named files go first
     assert _repository_snapshot(repo).count("--- src/named.mdx") == 0
+
+
+# ---------- F3: the summary counts what the patch changed ----------
+
+
+def _run_tool_plan(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: list[dict[str, Any]]
+) -> Any:
+    import sys
+
+    from skep.supervisor.contracts_io import read_result
+
+    verify = [sys.executable, "-c", "print('ok')"]
+    task = mint_task(
+        workspace=repo,
+        instructions="Bump the lockfile.",
+        permissions=Permissions(
+            read=["workspace"],
+            write=["workspace"],
+            network=["*"],
+            env_allowlist=[],
+            shell_allowlist=[[sys.executable, "-c"]],
+        ),
+        budget=DEFAULT_BUDGET,
+        verify_command=shlex.join(verify),
+    )
+    plan = plan_from_payload(
+        {
+            # two sentences: the digest leads (v114-F4), so `changed N` shows
+            "summary": "Bump the lockfile. Then verify it.",
+            "steps": [*steps, {"tool": "shell.run", "args": {"argv": verify, "purpose": "verify"}}],
+        }
+    )
+    stream = EventStream(
+        repo / ".events" / f"{task.task_id}.ndjson", task_id=task.task_id, trace_id=task.trace_id
+    )
+    monkeypatch.setattr(coding_worker, "worker_provider_from_env", lambda: object())
+    monkeypatch.setattr(coding_worker, "request_edit_plan", lambda *a, **k: plan)
+    out_path = tmp_path / "out.json"
+    coding_worker._execute(task, repo, stream, out_path)
+    return read_result(out_path)
+
+
+def _shell_write(name: str) -> dict[str, Any]:
+    import sys
+
+    code = f"open({name!r}, 'w').write('x')"
+    return {"tool": "shell.run", "args": {"argv": [sys.executable, "-c", code]}}
+
+
+def test_a_shell_run_edit_is_counted(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _run_tool_plan(repo, tmp_path, monkeypatch, [_shell_write("uv.lock")])
+    assert "changed 1 file(s)" in result.summary, result.summary
+    assert result.changed_files == []  # reverify's field stays the tool-write list
+
+
+def test_a_granted_commit_does_not_hide_files(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit inside the run moves HEAD; the count diffs against the
+    startup baseline, so the committed file still counts. (A plan cannot
+    request git.commit — model-internal — so an allowlisted step commits.)"""
+    import sys
+
+    commit = (
+        "import subprocess as s; open('a.txt', 'w').write('a'); "
+        "s.run(['git', 'add', 'a.txt'], check=True); "
+        "s.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'a'], "
+        "check=True)"
+    )
+    steps = [
+        {"tool": "shell.run", "args": {"argv": [sys.executable, "-c", commit]}},
+        _shell_write("b.txt"),
+    ]
+    result = _run_tool_plan(repo, tmp_path, monkeypatch, steps)
+    assert "changed 2 file(s)" in result.summary, result.summary
