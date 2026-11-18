@@ -499,7 +499,9 @@ def test_ui_carries_the_groups_section_and_the_fork_toggle() -> None:
     static_dir = (
         Path(__file__).resolve().parents[2] / "src" / "skep" / "supervisor" / "serve" / "static"
     )
-    app_js = (static_dir / "app.js").read_text()
+    # Graphite round A: the groups editor lives in policies.js; the project
+    # view's hand-off and strip popover stay in app.js.
+    app_js = (static_dir / "app.js").read_text() + (static_dir / "policies.js").read_text()
     css = (static_dir / "style.css").read_text()
     for needle in (
         'api("GET", "/api/policy-groups")',

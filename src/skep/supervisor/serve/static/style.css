@@ -1487,16 +1487,76 @@ main.chat-view { padding: 0; max-width: none; }
 .policy-group-row .row { align-items: center; gap: 10px; flex-wrap: wrap; }
 .project-group-edit { padding: 2px 10px; min-height: 26px; font-size: 12px; margin-right: 6px; }
 .field-help { color: var(--muted-2); font-size: 12px; margin: 0; line-height: 1.4; }
-/* v109-F9: learned-rule rows (Policies) + the RSoP decided-by table
-   (project detail). Long patterns and list values wrap, never overflow. */
-.learned-rule-row .row { align-items: center; gap: 10px; flex-wrap: wrap; }
-.learned-rule-row .mono { word-break: break-all; }
-.learned-rule-row button { margin-left: auto; }
+/* v109-F9: the RSoP decided-by table (project detail). Long patterns and
+   list values wrap, never overflow. */
 .rsop-table td { word-break: break-word; vertical-align: top; }
-/* P2 (ADR 0053): the registry-driven editor — one control column per knob. */
-.rsop-editor td:first-child, .rsop-editor td:nth-child(5) { white-space: nowrap; }
-.rsop-editor .editor-ctl { display: flex; flex-direction: column; gap: var(--space-1); min-width: 160px; }
-.rsop-editor .row { flex-wrap: wrap; gap: var(--space-1); }
+/* ---- Policies (graphite round A) ---- */
+/* Now: the baseline line, three verdict columns, the fixed floor. Colour is a
+   status only and never alone: each column is named by its word and sits in
+   its place (allowed, asks first, denied). */
+.verdict-allow { color: var(--ok); }
+.verdict-ask { color: var(--warn); }
+.verdict-deny { color: var(--bad); }
+.verdict-note { color: var(--muted); }
+.policy-status { margin: 0 0 var(--space-3); }
+.policy-status p { margin: 0 0 var(--space-1); }
+.policy-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 999px;
+  margin-right: var(--space-2); vertical-align: middle; background: var(--muted);
+}
+.policy-dot.tone-ok { background: var(--ok); }
+.policy-dot.tone-warn { background: var(--warn); }
+.policy-dot.tone-bad { background: var(--bad); }
+.policy-diff { margin: var(--space-1) 0; padding-left: var(--space-4); font-size: var(--text-sm); color: var(--muted); }
+.policy-view-row { align-items: center; margin: 0 0 var(--space-3); }
+.policy-view-row label { color: var(--muted); font-size: var(--text-sm); }
+.policy-columns {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-3); margin: 0 0 var(--space-3);
+}
+.policy-col, .policy-floor {
+  border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4); min-width: 0;
+}
+.policy-floor { margin: 0 0 var(--space-4); }
+.policy-col-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin: 0 0 var(--space-2); font-size: var(--text-body); font-weight: 600;
+}
+.policy-floor .policy-rules + .policy-col-head { margin-top: var(--space-3); }
+.policy-scope { margin: 0 0 var(--space-2); }
+.policy-scope-name { color: var(--muted); font-size: var(--text-sm); }
+.policy-rules { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.policy-rules li { overflow-wrap: break-word; min-width: 0; }
+.policy-rules code, .policy-rules .mono { font-size: var(--text-sm); }
+.policy-test-out p { margin: var(--space-1) 0; }
+/* Decisions and standing grants: one line each, wrapping inside the page. */
+.policy-summary { margin: 0 0 var(--space-2); }
+.policy-decision, .policy-grant {
+  display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); align-items: baseline;
+  padding: var(--space-2) 0; border-bottom: 1px solid var(--border-soft);
+}
+.policy-decision code, .policy-grant code { overflow-wrap: anywhere; min-width: 0; }
+.policy-verdict { font-weight: 600; min-width: 6em; }
+.policy-grant button { margin-left: auto; }
+/* Projects & groups: a list value reads as text, and a table wider than the
+   page scrolls inside its wrapper, never the page. overflow-wrap: break-word
+   (not word-break) keeps a cell's min-content at its longest word, so the
+   value column is never squeezed to one character per line. */
+.policy-table-wrap { overflow-x: auto; max-width: 100%; }
+.policy-effective { min-width: 720px; }
+.policy-effective td { vertical-align: top; }
+.policy-effective td:first-child { white-space: nowrap; }
+.policy-effective .policy-value { min-width: 12em; max-width: 24em; overflow-wrap: break-word; }
+.policy-effective .editor-ctl { display: flex; flex-direction: column; gap: var(--space-1); min-width: 180px; }
+.policy-effective .row { flex-wrap: wrap; gap: var(--space-1); }
+.policy-group-grants {
+  display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-4); margin: var(--space-2) 0;
+}
+.policy-group-grants dt { color: var(--muted); }
+.policy-group-grants dd { margin: 0; min-width: 0; overflow-wrap: break-word; }
+.policy-group-editor { margin-top: var(--space-2); }
 .shell-cmd-list { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; }
 .shell-cmd-row { display: flex; gap: 6px; align-items: center; }
 .shell-cmd-row input { flex: 1; min-width: 0; }
