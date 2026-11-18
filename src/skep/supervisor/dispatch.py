@@ -58,6 +58,7 @@ from skep.worker_contract import (
 
 from .apply import RefreshError, refresh_clone, repo_default_branch, resolve_commit
 from .autonomy import AutonomyDecision, AutonomyVerdict
+from .castes import CASTES
 from .config import SupervisorConfig
 from .contracts_io import (
     DEFAULT_BUDGET,
@@ -490,6 +491,15 @@ def run_task(
             f"the sandbox confines (ADR 0047): run in 'sandbox', not {execution_mode!r}"
         )
         execution_mode = "sandbox"
+    if execution_mode != "sandbox" and getattr(CASTES.get(worker_kind), "needs_network", False):
+        # v127-F7 (v94-F4 pattern): a fetching caste reaches the web with its
+        # own urllib — no capability gate sees it, the sandbox's egress pin is
+        # its only wall. The resolver coerces; this covers resume and flags.
+        raise ValueError(
+            f"the {worker_kind} caste fetches from the web and only the sandbox confines "
+            f"it — it never runs in {execution_mode!r} mode; dispatch it with execution "
+            "mode 'sandbox' (no usable sandbox here? `skep doctor` names the fix)"
+        )
     if execution_mode == "sandbox" and config.sandbox:
         # ES-F1 (B47, I12): every sandbox-mode run, not only external engines
         # (v94-F4) — the builtin worker and run_code's script caste took the

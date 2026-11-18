@@ -27,6 +27,7 @@ from skep.worker_contract import (
     ProjectContextPayload,
 )
 
+from .castes import CASTES
 from .config import SupervisorConfig
 from .policy_registry import registry_keys
 from .policy_schema import (
@@ -733,7 +734,14 @@ def resolve_run_policy(
     # D36 (ES-F255): keyed on what actually runs — a worker command that is
     # an external agent's module (--worker-cmd / SKEP_WORKER_CMD) is coerced
     # as its engine id would be.
-    if chosen_engine.external or policy.get("unlocked") is True or wrapped is not None:
+    # v127-F7: the same for a caste that fetches (the researcher, its own
+    # urllib): the sandbox's egress pin is its only wall.
+    if (
+        chosen_engine.external
+        or policy.get("unlocked") is True
+        or wrapped is not None
+        or getattr(CASTES.get(caste), "needs_network", False)
+    ):
         resolved_execution_mode = "sandbox"
     # L10: what the run gets with no explicit network — the project's default,
     # its registries and remembered hosts. D5 (operator decision 2026-11-13):
