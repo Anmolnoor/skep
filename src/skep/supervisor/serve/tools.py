@@ -1710,6 +1710,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "strategy": {
                 "type": "string",
                 "enum": ["public_free", "trusted_local_dev", "trusted_local_ops"],
+                "description": "omit to keep the project's own, or trusted_local_dev "
+                "for a new project",
             },
             "phase": {
                 "type": "string",
@@ -1749,7 +1751,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "policy_overrides": {"type": "object"},
             "seed_default_schedules": {"type": "boolean"},
         },
-        ["project_id", "name", "strategy"],
+        ["project_id", "name"],
     ),
     _tool(
         "copy_project_policy",

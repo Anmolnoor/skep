@@ -28,6 +28,7 @@ from ..packs import PolicyPack, builtin_policy_packs, get_policy_pack
 from ..policy import known_vacuous_verify
 from ..policy_layers import baseline_guard
 from ..projects import (
+    PROJECT_STRATEGIES,
     ProjectBinding,
     first_party_project_policy,
     first_party_schedule_seeds,
@@ -660,6 +661,43 @@ def _coerce_auto_apply_default(policy: dict[str, Any], notes: list[str]) -> None
     )
 
 
+def _choose_strategy(
+    run_store: RunStore, project_id: str, strategy: str | None, pack_name: str | None
+) -> tuple[str, str | None, str]:
+    """v127-F10: the strategy (and pack) a setup uses, and where it came from.
+    Neither given: the project's stored one, else ``trusted_local_dev`` for a
+    new project — the quick start never names ``--strategy``. Unknown names
+    refuse listing the valid strategies and packs (I9)."""
+    source = "given"
+    if strategy is None and pack_name is None:
+        stored = run_store.get_project_policy(project_id)
+        if stored is not None:
+            strategy, pack_name, source = stored.strategy, stored.pack_name, "the project's own"
+        else:
+            strategy, source = "trusted_local_dev", "the default for a new project"
+    choices = (
+        f" — valid strategies: {', '.join(sorted(PROJECT_STRATEGIES))}; "
+        f"packs: {', '.join(sorted(builtin_policy_packs()))}"
+    )
+    if pack_name is not None:
+        try:
+            strategy = get_policy_pack(pack_name).strategy
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"{exc}{choices}") from exc
+        source = f"pack {pack_name}" if source == "given" else source
+    if strategy not in PROJECT_STRATEGIES:
+        raise HTTPException(status_code=400, detail=f"unknown strategy {strategy!r}{choices}")
+    assert strategy is not None
+    return strategy, pack_name, source
+
+
+def _strategy_note(strategy: str, source: str, policy: dict[str, Any]) -> str:
+    dispatch = policy.get("auto_dispatch_allowed") is True
+    return f"strategy {strategy} ({source}): auto_dispatch_allowed={dispatch} — " + (
+        "schedules and chat dispatches run without a card" if dispatch else "every dispatch asks"
+    )
+
+
 # v127-F8: the probe behind a new project's default mode, by its own name so
 # the suite can pin it (tests/conftest.py) without touching the unlocked guard.
 new_project_sandbox_probe = sandbox_availability
@@ -1082,15 +1120,10 @@ def setup_project_record(
             detail="project setup requires at least one binding "
             "(repo_path, repo_slug, or template_names)",
         )
-    pack: PolicyPack | None = None
-    if pack_name is not None:
-        try:
-            pack = get_policy_pack(pack_name)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        strategy = pack.strategy
-    if strategy is None:
-        raise HTTPException(status_code=400, detail="project setup requires a pack or strategy")
+    strategy, pack_name, strategy_source = _choose_strategy(
+        run_store, project_id, strategy, pack_name
+    )
+    pack = None if pack_name is None else get_policy_pack(pack_name)
     base_policy = (
         dict(pack.phase_defaults[phase])
         if pack is not None
@@ -1224,7 +1257,7 @@ def setup_project_record(
     result["seeded_shell_commands"] = seeded_shell_commands
     result["seeded_verify_command"] = seeded_verify_command
     result["seeds_skipped"] = seeds_skipped
-    result["notes"] = notes
+    result["notes"] = [_strategy_note(strategy, strategy_source, project.policy), *notes]
     attached_groups = [str(n) for n in project.policy.get("policy_groups") or []]
     result["suggested_policy_groups"] = [
         suggestion
@@ -1306,15 +1339,10 @@ def preview_project_setup(
     seed_shell_commands: bool = True,
     repo_path_may_be_missing: bool = False,
 ) -> dict[str, Any]:
-    pack: PolicyPack | None = None
-    if pack_name is not None:
-        try:
-            pack = get_policy_pack(pack_name)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        strategy = pack.strategy
-    if strategy is None:
-        raise HTTPException(status_code=400, detail="project preview requires a pack or strategy")
+    strategy, pack_name, strategy_source = _choose_strategy(
+        run_store, project_id, strategy, pack_name
+    )
+    pack = None if pack_name is None else get_policy_pack(pack_name)
     bindings: list[ProjectBinding] = []
     if repo_path:
         bindings.append(ProjectBinding(kind="repo_path", value=repo_path))
@@ -1401,7 +1429,7 @@ def preview_project_setup(
         "seeded_schedules": [] if pack is None else _pack_schedule_plan(project.project_id, pack),
         "sample_dispatch_decision": _dispatch_decision_payload(project.policy),
         "sample_landing_decision": _landing_decision_payload(project.policy),
-        "notes": notes,
+        "notes": [_strategy_note(strategy, strategy_source, project.policy), *notes],
     }
 
 
