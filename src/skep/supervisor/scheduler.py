@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import select
 import signal
 import subprocess
@@ -28,15 +29,17 @@ from typing import TYPE_CHECKING, Any
 from skep.worker_contract import Permissions
 
 from .autonomy import AutonomyDecision, project_policy_dispatch_decision
+from .castes import CASTES
 from .config import SupervisorConfig
 from .contracts_io import DEFAULT_BUDGET
 from .dispatch import run_task
+from .engines import resolve_engine
 from .ingest import IngestOutcome
 from .nodes import OPS_INSPECT_CAPABILITIES, OPS_MUTATING_CAPABILITIES
 from .policy_resolver import PolicyResolutionError, resolve_run_policy, run_policy_for_repo
 from .providers import ProviderHealth, ProviderProfile, check_provider_health
 from .spawner import build_worker_env
-from .store import SCHEDULE_SUCCESS_STATES, RunStore, ScheduleRecord
+from .store import PROVIDER_BLOCKED_STATE, SCHEDULE_SUCCESS_STATES, RunStore, ScheduleRecord
 from .templates import WorkflowTemplate, instantiate
 
 if TYPE_CHECKING:
@@ -679,6 +682,43 @@ def _held_to_role(
     return narrowed, delegated_decision(decision, delegation, note), None
 
 
+# v127-F4: the text the builtin worker writes when its provider refuses the
+# key (``llm_plan._chat_chunks``: "provider request failed: <OllamaError>",
+# an OllamaError reads "401 from <url>"). A text match is the signal until a
+# run carries a structured provider-failure field.
+_PROVIDER_AUTH_FAILURE = re.compile(r"provider request failed: (40[13]\b[^\n]*)")
+
+
+def _uses_worker_provider(
+    store: RunStore, config: SupervisorConfig, schedule: ScheduleRecord
+) -> bool:
+    """v127-F4: does this schedule's run call skep's worker provider? Its
+    caste must need one, and a coding run on an external engine
+    authenticates on its own (ADR 0047) — skep's dead key is not its key."""
+    caste = CASTES.get(schedule.worker_kind)
+    if caste is None or not caste.needs_provider:
+        return False
+    if schedule.worker_kind != "coding":
+        return True
+    policy = run_policy_for_repo(
+        store,
+        config,
+        Path(schedule.repo).expanduser().resolve(),
+        binding_candidates=(
+            [("template_name", schedule.template_name)] if schedule.template_name else []
+        ),
+    )
+    return not resolve_engine(str(policy.get("coding_engine") or "")).external
+
+
+def _provider_blocked(reason: str) -> str:
+    return (
+        f"{PROVIDER_BLOCKED_STATE}: skipped without a run — {reason}. Fix the worker "
+        "provider key (`skep doctor` shows the coding worker check); the schedule "
+        "resumes on its next tick, and this skip never counts toward auto-disable"
+    )
+
+
 def run_due(
     *,
     store: RunStore,
@@ -699,6 +739,11 @@ def run_due(
     """
     moment = now or now_ts()
     results: list[TickResult] = []
+    # v127-F4: one worker-provider probe per tick (a real completion, so only
+    # when a provider-needing schedule is due); a dead key — or the first run
+    # this tick that died on one — skips the rest without a run row.
+    provider_block: str | None = None
+    provider_probed = False
     for schedule in _sources_first(store.due_schedules(moment)):
         task_id: str | None
         held: tuple[dict[str, Any], Path] | None = None  # v123 review: the receipt owed (I13)
@@ -717,10 +762,23 @@ def run_due(
             continue
         try:
             blocked_state: str | None = None
+            if _uses_worker_provider(store, config, schedule):
+                if provider_block is None and not provider_probed:
+                    provider_probed = True
+                    from .. import status
+
+                    probe = status._worker_provider_check(config.home.parent, 5.0)
+                    if probe.get("status") == "blocked":
+                        provider_block = _provider_blocked(
+                            f"the worker provider probe failed ({probe.get('detail')})"
+                        )
+                blocked_state = provider_block
             # v53-F5: a chained schedule reads its source's last output as
             # labeled CONTEXT — never as new instructions.
             chained = _chained_context(store, schedule)
-            if schedule.worker_kind == "note":
+            if blocked_state is not None:
+                pass  # v127-F4: provider-blocked, nothing runs
+            elif schedule.worker_kind == "note":
                 # A 'note' schedule posts its text at tick time — into the chat
                 # that created it (v43-F6) when one is bound and still exists,
                 # otherwise as an inert note (the twin of chat add_note). No
@@ -973,6 +1031,13 @@ def run_due(
                     )
             if blocked_state is None:
                 task_id, state = outcome.record.task_id, outcome.record.state
+                auth_failure = _PROVIDER_AUTH_FAILURE.search(
+                    getattr(outcome.record, "summary", None) or ""
+                )
+                if auth_failure and provider_block is None:
+                    provider_block = _provider_blocked(
+                        f"run {task_id} this tick failed on the provider ({auth_failure.group(1)})"
+                    )
                 if schedule.role is not None and dispatch_decision.delegation is not None:
                     held = dict(dispatch_decision.delegation), repo
             else:
@@ -1034,7 +1099,7 @@ def run_due(
                     "set_schedule_enabled to resume",
                     notify,
                 )
-            if schedule.once:
+            if schedule.once and not state.startswith(PROVIDER_BLOCKED_STATE):
                 # v44-F2: one-shot means ONE fire, success or not — retrying a
                 # failed one-shot every interval forever would be worse than the
                 # failure. The disabled row + reason is the record of what happened.

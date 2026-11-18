@@ -568,6 +568,10 @@ SCHEDULE_SUCCESS_STATES: frozenset[str] = frozenset(
     {"completed", "note_posted", "script_ran", "digest_posted", "prompt_posted"}
 )
 _SCHEDULE_HEALTH_WINDOW = 20
+# v127-F4: a tick skipped because the worker provider refused (dead key) is a
+# health failure event, but never counts toward auto-disable — fixing the key
+# must resume the schedule, not find it disabled.
+PROVIDER_BLOCKED_STATE = "provider_blocked"
 
 
 def schedule_state_ok(state: str) -> bool:
@@ -2433,7 +2437,7 @@ class RunStore:
             consecutive = 0
             failure_reason = None
         else:
-            consecutive = prior + 1
+            consecutive = prior if state.startswith(PROVIDER_BLOCKED_STATE) else prior + 1
             failure_reason = reason or state
         self._conn.execute(
             "INSERT INTO schedule_health (name, consecutive_failures, last_failure_reason,"

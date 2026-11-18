@@ -750,7 +750,7 @@ def _repo_registry_advisories(home: Path) -> list[str]:
     if not db_path.is_file():
         return []
     from .supervisor.projects import list_projects
-    from .supervisor.store import RunStore
+    from .supervisor.store import PROVIDER_BLOCKED_STATE, RunStore
 
     store = RunStore(db_path, readonly=True)
     try:
@@ -783,6 +783,12 @@ def _repo_registry_advisories(home: Path) -> list[str]:
             for health in store.list_schedule_health()
             if health.disabled_reason
         ]
+        # v127-F4: skipped on a dead worker-provider key, never auto-disabled
+        provider_blocked = sorted(
+            schedule.name
+            for schedule in store.list_schedules()
+            if schedule.enabled and (schedule.last_state or "").startswith(PROVIDER_BLOCKED_STATE)
+        )
     finally:
         store.close()
     advisories: list[str] = []
@@ -805,6 +811,12 @@ def _repo_registry_advisories(home: Path) -> list[str]:
         advisories.append(
             f"{len(disabled)} schedule(s) are auto-disabled after repeated failures: "
             f"{', '.join(sorted(disabled))}. Fix the cause and re-enable, or delete them."
+        )
+    if provider_blocked:
+        advisories.append(
+            f"{len(provider_blocked)} schedule(s) skipped their last tick because the worker "
+            f"provider refused the key: {', '.join(provider_blocked)}. Fix the key (see the "
+            "coding worker check); they resume on their next tick."
         )
     return advisories
 
