@@ -500,6 +500,7 @@ def _deliver_tick_text(
     *,
     script_output: bool = False,
     context: str | None = None,
+    worker: str | None = None,
 ) -> None:
     """Deliver a repo-less tick's text: bound chat (+ best-effort outbound
     push, v44-F2) when it still exists, otherwise an inert note. The chat row
@@ -511,7 +512,10 @@ def _deliver_tick_text(
     ADR 0059 D5 (B26): a script's output (``script_output``, or a chained
     source's ``context``) is outside content — a user row from
     ``schedule:<name>``, replayed wrapped, setting the chat's ``untrusted``
-    bit; never the Queen's own words. The push carries the same text."""
+    bit; never the Queen's own words. The push carries the same text.
+    v123-F3 review (W21c): a scheduled run's terminal notice quotes its
+    worker (``worker``: the task id) — a user row from ``worker:<task_id>``,
+    exactly as ``run_status.notify_run_terminal`` writes it."""
     prefix = "" if context is None else f"[Context from schedule {schedule.chain!r}]:\n{context}"
     pushed = f"{prefix}\n\n{text}" if prefix else text
     if schedule.chat_id and store.get_chat(schedule.chat_id) is not None:
@@ -520,7 +524,11 @@ def _deliver_tick_text(
                 schedule.chat_id, role="user", content=prefix,
                 provenance=f"schedule:{schedule.chain}",
             )  # fmt: skip
-        if script_output:
+        if worker is not None:
+            store.add_chat_message(
+                schedule.chat_id, role="user", content=text, provenance=f"worker:{worker}"
+            )
+        elif script_output:
             store.add_chat_message(
                 schedule.chat_id, role="user", content=text,
                 provenance=f"schedule:{schedule.name}",
@@ -536,7 +544,7 @@ def _deliver_tick_text(
         # W21 review: a script's output (or a chain's) is outside text, so the
         # note carries ``untrusted`` to every chat that lists it; v121-F3: and
         # ``private``, like every ``schedule:`` row
-        outside = script_output or context is not None
+        outside = script_output or context is not None or worker is not None
         store.create_note(
             pushed,
             actor=f"schedule:{schedule.name}",
@@ -996,6 +1004,7 @@ def run_due(
                         f"[{schedule.name}] {terminal_text}",
                         notify,
                         kind=terminal_kind,
+                        worker=task_id,
                     )
             # v14 Step 2: a schedule that keeps failing (e.g. a persistent policy
             # block) is auto-disabled rather than retried every interval forever —
