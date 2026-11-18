@@ -462,3 +462,30 @@ def test_the_card_says_which_hosts_the_role_will_drop(
         assert schedule_role_line(store, holder, {**args, "network": HOSTS}, chat_id) == kept
     finally:
         store.close()
+
+
+def test_a_scheduled_run_writes_its_delegated_receipt(config: SupervisorConfig, repo: Path) -> None:
+    """v123-F1 review (I13): like submit_run, a scheduled run with a role
+    writes one ``delegated`` ledger row naming ``schedule:<name>@<role>``."""
+    from types import SimpleNamespace
+
+    store = RunStore(config.db_path)
+    try:
+        for name, role in (("nightly", "builder"), ("plain", None)):
+            store.add_schedule(make_schedule(
+                name=name, repo=repo, instructions="x", interval_seconds=86400,
+                start_at="2026-06-11T00:00:00Z", role=role,
+            ))  # fmt: skip
+        ids = iter(["t-7", "t-8"])
+
+        def dispatch(repo_arg: Path, instructions: str, **kwargs: Any) -> Any:
+            return SimpleNamespace(record=SimpleNamespace(task_id=next(ids), state="completed"))
+
+        run_due(store=store, config=config, now=NOW, dispatch=dispatch)
+    finally:
+        store.close()
+    (row,) = [row for row in _ledger(config) if row["source"] == "delegated"]
+    assert row["actor"] == "schedule:nightly@builder"
+    assert row["delegation_chain"] == ["schedule:nightly@builder"]
+    assert row["value"] == "worker" and row["task_id"] in ("t-7", "t-8")
+    assert row["repo"] == str(repo.resolve())

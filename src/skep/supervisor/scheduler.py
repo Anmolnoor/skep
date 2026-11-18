@@ -23,7 +23,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from skep.worker_contract import Permissions
 
@@ -701,6 +701,7 @@ def run_due(
     results: list[TickResult] = []
     for schedule in _sources_first(store.due_schedules(moment)):
         task_id: str | None
+        held: tuple[dict[str, Any], Path] | None = None  # v123 review: the receipt owed (I13)
         try:
             # ES B110: computed BEFORE the side effect, inside the try — a row
             # whose interval no clock can hold (stored before the cap) raised
@@ -972,6 +973,8 @@ def run_due(
                     )
             if blocked_state is None:
                 task_id, state = outcome.record.task_id, outcome.record.state
+                if schedule.role is not None and dispatch_decision.delegation is not None:
+                    held = dict(dispatch_decision.delegation), repo
             else:
                 task_id, state = None, blocked_state
         except Exception as exc:  # a broken schedule must not abort the rest of the tick
@@ -1037,6 +1040,13 @@ def run_due(
                 # failure. The disabled row + reason is the record of what happened.
                 store.set_schedule_enabled(schedule.name, enabled=False)
                 store.set_schedule_disabled_reason(schedule.name, f"one-shot: fired ({state})")
+            if held is not None and task_id is not None:
+                # v123-F1 review (I13, R3): one ``delegated`` row naming
+                # ``schedule:<name>@<role>``, as submit_run writes it — last,
+                # so a ledger failure never re-fires or misreports the run
+                from .serve.actions import record_delegation
+
+                record_delegation(config.audit_dir, held[0], repo=str(held[1]), task=task_id)
         except Exception:
             logger.exception("schedule %r: recording its tick failed", schedule.name)
         results.append(TickResult(name=schedule.name, task_id=task_id, state=state))
