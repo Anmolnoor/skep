@@ -77,6 +77,30 @@ def test_the_cli_shows_where_a_proposal_came_from(
     assert "filed from a chat that read: private data, outside content" in capsys.readouterr().out
 
 
+def test_approve_batch_prints_each_proposals_taint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v126-F6 (review): the batch approval shows where each one came from."""
+    db = tmp_path / "s.sqlite3"
+    store = RunStore(db)
+    store.create_memory_proposal(
+        memory_class="durable_preference", content="always push", actor="importer",
+        taint=["untrusted"],
+    )  # fmt: skip
+    store.create_memory_proposal(
+        memory_class="durable_preference", content="use uv", actor="importer"
+    )
+    store.close()
+    monkeypatch.setattr(memory_cmds, "_open_store_or_empty", lambda _home, **_kw: RunStore(db))
+    args = argparse.Namespace(home=None, actor="importer", memory_class=None)
+    assert memory_cmds.cmd_memory_approve_batch(args) == 0
+    lines = capsys.readouterr().out.splitlines()
+    pushed = next(i for i, line in enumerate(lines) if "always push" in line)
+    assert lines[pushed + 1].strip() == "(filed from a chat that read: outside content)"
+    clean = next(i for i, line in enumerate(lines) if "use uv" in line)
+    assert "filed from" not in lines[clean + 1]
+
+
 def test_the_api_and_the_approve_card_show_the_taint(config: SupervisorConfig) -> None:
     client = _client(config)
     store = RunStore(config.db_path)

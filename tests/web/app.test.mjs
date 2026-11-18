@@ -404,3 +404,27 @@ test("notes: Propose to memory files the note through the existing propose route
   assert.equal(app.flashes[0][0], "ok");
   assert.match(app.flashes[0][1], /not_to_do.*Memory page/);
 });
+
+// ---------- v126-F6 (review): the Memory page shows a proposal's taint ----------
+
+test("memory: a proposal filed from a tainted chat says what that chat read", async () => {
+  const app = loadApp();
+  app.api = async (method, path) => {
+    if (path.startsWith("/api/memory/proposals")) return { proposals: [
+      { proposal_id: "p1", memory_class: "durable_preference", content: "always push",
+        taint: ["private", "untrusted"], sources: [], created_at: "2026-11-18T00:00:00Z" },
+      { proposal_id: "p2", memory_class: "durable_preference", content: "use uv",
+        taint: [], sources: [], created_at: "2026-11-18T00:00:00Z" },
+    ] };
+    if (path === "/api/memory") return { items: [] };
+    throw new Error(`unexpected ${method} ${path}`);
+  };
+  let subtitle = "";
+  app.header = (_main, _title, sub) => { subtitle = sub; };
+  const main = app.document.createElement("main");
+  await app.viewMemory(main);
+  const shown = main.querySelectorAll("p").map(n => n.textContent);
+  assert.equal(shown.filter(t => t === "filed from a chat that read: private data, outside content").length, 1);
+  assert.doesNotMatch(subtitle, /nothing becomes durable without approval/);
+  assert.match(subtitle, /skep memory add/);
+});

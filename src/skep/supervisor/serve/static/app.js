@@ -2041,7 +2041,7 @@ function memoryClassChip(cls) {
 }
 
 async function viewMemory(main) {
-  header(main, "Memory", "Curated durable memory — nothing becomes durable without approval.");
+  header(main, "Memory", "Curated durable memory — a proposal becomes durable only when approved; `skep memory add` is the operator's direct write.");
   const [{ proposals }, { items }] = await Promise.all([
     api("GET", "/api/memory/proposals?state=pending_review"),
     api("GET", "/api/memory"),
@@ -2077,6 +2077,11 @@ async function viewMemory(main) {
         el("span", { class: "note", title: fmtTs(p.created_at) },
           `proposed ${relativeTime(p.created_at)}`)),
       el("p", {}, p.content),
+      // v126-F6 (review): the approver sees what the filing chat had read.
+      Array.isArray(p.taint) && p.taint.length
+        ? el("p", { class: "note" }, `filed from a chat that read: ${p.taint.slice().sort()
+          .map(bit => ({ private: "private data", untrusted: "outside content" })[bit] || bit).join(", ")}`)
+        : null,
       el("div", { class: "row" }, approve, clarify, reject)));
   }
   if (!proposals.length) propList.append(el("p", { class: "empty-state" }, "No proposals to review."));

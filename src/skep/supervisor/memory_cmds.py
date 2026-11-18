@@ -272,6 +272,9 @@ def cmd_memory_approve_batch(args: argparse.Namespace) -> int:
         for proposal in targets:
             first_line = proposal.content.splitlines()[0][:70]
             print(f"  {proposal.proposal_id} [{proposal.memory_class}] {first_line}")
+            filed = taint_phrase(proposal.taint)  # v126-F6 (review)
+            if filed:
+                print(f"    ({filed})")
             try:
                 store.approve_memory_proposal(proposal.proposal_id, actor=CLI_ACTOR)
             except MemoryError as exc:
