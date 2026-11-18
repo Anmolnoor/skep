@@ -381,7 +381,7 @@ def test_the_decision_log_line_rotates_at_10_mb_and_holds_no_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """D1: one JSON line per decide() from a wired face, under
-    <audit>/policy/decisions.jsonl; past 10 MB the file becomes ``.1``. A
+    <audit>/policy/decisions.jsonl; past 10 MB the file becomes ``.<N>``. A
     path or a host is logged as is; an inline credential never is."""
     from skep.supervisor import policy_v3
 
@@ -391,7 +391,7 @@ def test_the_decision_log_line_rotates_at_10_mb_and_holds_no_secret(
     record = _decide(home, scope="filesystem", action="write", value="/etc/x", repo=str(repo),
                      actor="t", role="builder")  # fmt: skip
     (line,) = [json.loads(raw) for raw in log.read_text().splitlines()]
-    assert line == {**record, "value": "/etc/x"}
+    assert line == {**record, "value": "/etc/x", "v": 1}
     assert set(line) >= {"at", "actor", "repo", "scope", "action", "value", "source", "verdict",
                          "rule_id", "decided_by", "layer", "role", "project"}  # fmt: skip
     secrets = (
@@ -499,7 +499,7 @@ def test_a_writer_that_loses_the_rotation_race_still_logs_its_line(
     monkeypatch.setattr(Path, "replace", racing)
     policy_v3.log_decision(tmp_path, {"value": "ls"})
     assert log.with_name("decisions.jsonl.1").read_text() == '{"old": 1}\n'
-    assert json.loads(log.read_text()) == {"value": "ls"}
+    assert json.loads(log.read_text()) == {"value": "ls", "v": 1}
 
 
 @pytest.mark.parametrize("role", ["builder", "operator"])

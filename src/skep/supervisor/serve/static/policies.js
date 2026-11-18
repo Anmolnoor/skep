@@ -19,7 +19,7 @@ const POLICY_COLUMNS = [["allow", "Allowed"], ["ask", "Asks first"], ["deny", "D
 // and Setup's lock step names the same three.
 const POLICY_TEMPLATES = ["assistant", "builder", "operator"];
 // Ledger rows that note something rather than decide it (policy_decisions).
-const POLICY_NOTE_SOURCES = ["observed", "forwarded", "delegated"];
+const POLICY_NOTE_SOURCES = ["observed", "forwarded", "delegated", "alarm"];
 // What a group grants, in words; a key not listed shows its own name.
 const GROUP_KEY_LABELS = {
   default_network: "Network hosts",
@@ -258,7 +258,10 @@ async function renderDecisionsTab(panel) {
     ...POLICY_NOTE_SOURCES.filter(s => summary[s]).map(s => `${summary[s]} ${s}`),
   ].join(" · ");
   panel.append(el("p", { class: "policy-summary" }, counts,
-    total > rows.length ? el("span", { class: "note" }, ` — the newest ${rows.length} of ${total} shown`) : null));
+    // v121-F4: the read window is the newest rotated log file + the live one.
+    el("span", { class: "note" }, total > rows.length
+      ? ` — the newest ${rows.length} of ${total} in the last two log files shown`
+      : " — from the last two log files")));
   if (!rows.length) {
     panel.append(el("p", { class: "empty-state" },
       "Nothing decided yet. Every policy decision skep records (decisions.jsonl in the audit "

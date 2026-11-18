@@ -434,6 +434,12 @@ def test_an_unattended_turn_refuses_a_taint_ask_instead_of_carding(
     assert env.pending(chat) == []
     row = [m for m in env.store.chat_messages(chat) if m.tool_name == "run_shell"][-1]
     assert "nobody is watching" in row.content and "taint/untrusted-action" in row.content
+    # v121-F2: the refusal is a ledger row, but a tainted follow-up is no attack signal
+    log = env.holder.current.audit_dir / "policy" / "decisions.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    (refused,) = [r for r in rows if r.get("decided_by") == "queen/unattended"]
+    assert refused["rule_id"] == "unattended_mutation" and refused["tool"] == "run_shell"
+    assert "alarm" not in refused and refused["taint"] == ["untrusted"]
 
 
 def test_taint_is_sticky_across_a_serve_restart_and_compaction(tmp_path: Path) -> None:

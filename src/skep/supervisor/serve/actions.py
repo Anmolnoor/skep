@@ -93,7 +93,16 @@ from ..policy_schema import (
     shell_segments,
 )
 from ..policy_templates import PolicyTemplate, layer_view, load_policy_template
-from ..policy_v3 import Request, Stack, Verdict, floor_verdict, load_stack, log_decision, redact
+from ..policy_v3 import (
+    Request,
+    Stack,
+    Verdict,
+    decision_log_paths,
+    floor_verdict,
+    load_stack,
+    log_decision,
+    redact,
+)
 from ..policy_v3 import decide as decide_v3
 from ..projects import (
     PROJECT_PHASES,
@@ -2310,7 +2319,7 @@ def approve_policy_baseline(
 def policy_note(
     audit_dir: Path,
     *,
-    source: Literal["observed", "forwarded", "delegated"],
+    source: Literal["observed", "forwarded", "delegated", "alarm"],
     actor: str,
     repo: str | None,
     scope: str | None,
@@ -2321,7 +2330,8 @@ def policy_note(
     """ADR 0054 A9: a ledger row that is not a decision — what an ACP agent
     ran unasked (``observed``) or what the human behind the client answered
     (``forwarded``), and R3's ``delegated`` — one dispatch hop, who handed
-    what to whom under which role. ``source`` discriminates these rows from decisions; they
+    what to whom under which role, and v121-F2's ``alarm`` — whether an injection
+    alarm reached its channel. ``source`` discriminates these rows from decisions; they
     carry no ``verdict``. Same ``decisions.jsonl`` as ``policy_decide``."""
     row: dict[str, Any] = {
         "at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -6515,17 +6525,16 @@ def policy_decisions(
     ``observed`` or ``forwarded`` row is not a decision (I8)."""
     if limit <= 0:
         raise ValueError("limit must be a positive integer")
-    path = audit_dir / "policy" / "decisions.jsonl"
-    notes = ("observed", "forwarded", "delegated")
+    notes = ("observed", "forwarded", "delegated", "alarm")
     summary = dict.fromkeys(("allow", "deny", "require_approval", *notes), 0)
     rows: list[dict[str, Any]] = []
-    # ponytail: reads both generations whole (at most 2 x 10 MB); tail-seek if that hurts
-    lines = [
-        line
-        for file in (path.with_name(path.name + ".1"), path)
-        if file.exists()
-        for line in file.read_text(encoding="utf-8").splitlines()
-    ]
+    # ponytail: reads both files whole (at most 2 x 10 MB); tail-seek if that hurts
+    lines: list[str] = []
+    for file in decision_log_paths(audit_dir):  # v121-F4: newest generation + live
+        try:
+            lines.extend(file.read_text(encoding="utf-8").splitlines())
+        except FileNotFoundError:
+            continue  # no log yet, or rotated away between listing and opening
     for line in lines:
         try:
             row = json.loads(line)

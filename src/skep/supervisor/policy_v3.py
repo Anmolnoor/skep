@@ -33,6 +33,7 @@ face — ``taint_verdict``).
 
 from __future__ import annotations
 
+import fcntl
 import glob
 import json
 import logging
@@ -971,7 +972,7 @@ def log_queen_floor(
 
 
 # D1: the decision log. Every decide() a wired face makes is one line here;
-# V11's replay reads it back. Rotated at 10 MB to one ``.1`` generation.
+# V11's replay reads it back. Rotated at 10 MB to ``.<N>``; no generation is deleted (v121-F4).
 DECISION_LOG_MAX_BYTES = 10 * 1024 * 1024
 _MASK = "***"
 # ponytail: the common inline-credential shapes only (UPPERCASE env assignments, auth
@@ -1046,22 +1047,45 @@ def install_log_redaction() -> None:
             logger.addFilter(RedactFilter())
 
 
+def _rotated_generations(live: Path) -> list[Path]:
+    """``decisions.jsonl.<N>`` oldest first, sorted by N as a number (``.10`` after ``.9``)."""
+    prefix = live.name + "."
+    numbered = [
+        (int(p.name[len(prefix) :]), p)
+        for p in live.parent.glob(glob.escape(prefix) + "*")
+        if p.name[len(prefix) :].isdigit()
+    ]
+    return [p for _, p in sorted(numbered)]
+
+
+def decision_log_paths(audit_dir: Path) -> list[Path]:
+    """v121-F4: what the readers read — the newest rotated generation (if any) and
+    the live file, so a read stays bounded at two files. Older generations are
+    kept for forensics, never read here. A listed file can vanish before it is
+    opened (a rotation in between); callers skip it."""
+    live = audit_dir / "policy" / "decisions.jsonl"
+    return [*_rotated_generations(live)[-1:], live]
+
+
 def log_decision(audit_dir: Path, row: dict[str, Any]) -> None:
-    """Append one row to ``<audit>/policy/decisions.jsonl`` (I8, I13) with its
-    ``value`` redacted; a file past 10 MB first becomes ``decisions.jsonl.1``."""
+    """Append one row (with ``"v": 1``) to ``<audit>/policy/decisions.jsonl``
+    (I8, I13) with its ``value`` redacted. v121-F4: a file past 10 MB first
+    becomes ``decisions.jsonl.<N>`` (N = highest + 1) — no generation is ever
+    deleted — and size check, rotation and append run under one flock on
+    ``policy/decisions.lock``, so serve, the CLI and hooks lose no row."""
     path = audit_dir / "policy" / "decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    # ponytail: unlocked rotation; a writer that loses the race finds nothing to rename
-    # (fine), but one that stat'd the old file can rename a fresh one over ``.1`` and
-    # drop that generation. flock the rotation if a home ever loses lines to it.
-    try:
-        if path.stat().st_size >= DECISION_LOG_MAX_BYTES:
-            path.replace(path.with_name(path.name + ".1"))
-    except FileNotFoundError:
-        pass  # no log yet, or another writer rotated it first
     if isinstance(row.get("value"), str):
         row = {**row, "value": redact(row["value"])}
-    # ponytail: the append is unlocked; concurrent writers interleave whole <4 KiB
-    # lines on POSIX — lock when a home gets a second writer
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row) + "\n")
+    line = json.dumps({**row, "v": 1}) + "\n"
+    with (path.parent / "decisions.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            if path.stat().st_size >= DECISION_LOG_MAX_BYTES:
+                generations = _rotated_generations(path)
+                last = int(generations[-1].name.rsplit(".", 1)[1]) if generations else 0
+                path.replace(path.with_name(f"{path.name}.{last + 1}"))
+        except FileNotFoundError:
+            pass  # no log yet
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
