@@ -1309,17 +1309,25 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.post("/api/templates", status_code=201)
     def put_template(body: dict[str, Any]) -> dict[str, Any]:
+        replace = bool(body.pop("replace", False))
         try:
             template = template_from_dict(body)
             validate_template(template)
         except (TemplateError, ValueError, KeyError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        run_store.add_template(template)
+        # v126-F4: no silent overwrite — a grant change takes replace: true.
+        if not replace and run_store.get_template(template.name) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"template {template.name!r} already exists; send replace: true "
+                "to overwrite it (the old and new grants are recorded)",
+            )
+        run_store.add_template(template, actor="api-user")
         return template_to_dict(template)
 
     @app.delete("/api/templates/{name}")
     def delete_template(name: str) -> dict[str, bool]:
-        if not run_store.remove_template(name):
+        if not run_store.remove_template(name, actor="api-user"):
             raise HTTPException(status_code=404, detail=f"no template named {name!r}")
         return {"removed": True}
 

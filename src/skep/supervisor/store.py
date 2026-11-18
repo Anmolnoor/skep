@@ -555,6 +555,27 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _template_grants(template: WorkflowTemplate) -> dict[str, Any]:
+    """v126-F4: what a template lets a run do, for its audit rows."""
+    return {
+        "network": list(template.network),
+        "env_allowlist": list(template.env_allowlist),
+        "shell_allowlist": [list(command) for command in template.shell_allowlist],
+        "allow_git_mutation": template.allow_git_mutation,
+    }
+
+
+def _template_write_detail(old: WorkflowTemplate | None, new: WorkflowTemplate) -> dict[str, Any]:
+    old_grants = None if old is None else _template_grants(old)
+    new_grants = _template_grants(new)
+    return {
+        "provenance": new.provenance,
+        "old": old_grants,
+        "new": new_grants,
+        "grants_changed": old_grants != new_grants,
+    }
+
+
 # v14: a schedule tick "succeeds" only when its run completed. Everything else —
 # failed, rejected, worker crash/timeout, policy_blocked, dispatch_error — is a
 # health failure that increments the consecutive-failure count. A 'note'
@@ -2551,8 +2572,16 @@ class RunStore:
         )
 
     @_locked
-    def add_template(self, template: WorkflowTemplate) -> None:
-        """Insert or replace a template by name (single writer, G4)."""
+    def add_template(self, template: WorkflowTemplate, *, actor: str = "system") -> None:
+        """Insert or replace a template by name (single writer, G4).
+
+        v126-F4: every write leaves a row with the old and new grants — a
+        schedule re-reads its template at each tick, so a silent overwrite
+        was a silent grant change."""
+        old_row = self._conn.execute(
+            f"SELECT {self._TEMPLATE_COLS} FROM templates WHERE name = ?", (template.name,)
+        ).fetchone()
+        old = self._row_to_template(old_row) if old_row is not None else None
         params_json = json.dumps(
             [
                 {"name": p.name, "description": p.description, "default": p.default}
@@ -2582,6 +2611,13 @@ class RunStore:
                 template.provenance,
             ),
         )
+        self._record_note_task_event(
+            kind="template",
+            item_id=template.name,
+            action="added" if old is None else "replaced",
+            actor=actor,
+            detail=_template_write_detail(old, template),
+        )
         self._conn.commit()
 
     @_locked
@@ -2599,8 +2635,20 @@ class RunStore:
         return [self._row_to_template(row) for row in rows]
 
     @_locked
-    def remove_template(self, name: str) -> bool:
+    def remove_template(self, name: str, *, actor: str = "system") -> bool:
+        row = self._conn.execute(
+            f"SELECT {self._TEMPLATE_COLS} FROM templates WHERE name = ?", (name,)
+        ).fetchone()
         cursor = self._conn.execute("DELETE FROM templates WHERE name = ?", (name,))
+        if cursor.rowcount and row is not None:  # v126-F4: the removal is recorded too
+            old = self._row_to_template(row)
+            self._record_note_task_event(
+                kind="template",
+                item_id=name,
+                action="removed",
+                actor=actor,
+                detail={"provenance": old.provenance, "old": _template_grants(old), "new": None},
+            )
         self._conn.commit()
         return cursor.rowcount > 0
 
@@ -2978,8 +3026,9 @@ class RunStore:
     def record_registry_event(
         self, *, kind: str, item_id: str, action: str, actor: str, detail: dict[str, Any]
     ) -> None:
-        """v126-F2: an audit row for a registry write outside a run (a skill
-        refreshed from its shelf), in the same table notes and memory use."""
+        """v126-F2/F4: an audit row for a registry write outside a run (a skill
+        refreshed from its shelf, a skill-pack step, a conversation-draft
+        decision), in the same table notes and memory use."""
         self._record_note_task_event(
             kind=kind, item_id=item_id, action=action, actor=actor, detail=detail
         )

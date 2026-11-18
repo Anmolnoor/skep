@@ -4795,7 +4795,7 @@ def _execute_mutation(
                 f"a skill named {skill_name!r} already exists; "
                 "pick another name (no silent overwrite)"
             )
-        store.add_template(template)
+        store.add_template(template, actor=actor)
         return {"created": skill_name, "provenance": "chat"}
     if name == "patch_skill":
         import dataclasses
@@ -4817,12 +4817,12 @@ def _execute_mutation(
             validate_template(patched)
         except TemplateError as exc:
             raise ValueError(str(exc)) from exc
-        store.add_template(patched)
+        store.add_template(patched, actor=actor)
         return {"patched": skill_name}
     if name == "delete_skill":
         skill_name = str(args["name"])
         removed_template = store.get_template(skill_name)
-        if not store.remove_template(skill_name):
+        if not store.remove_template(skill_name, actor=actor):
             raise ValueError(f"no skill/template named {skill_name!r}")
         # v83-F12: deleting a seed leaves a tombstone — the startup sync
         # honors it forever, so a restart never resurrects the delete (I8).
@@ -5141,7 +5141,12 @@ def _execute_mutation(
         extra = tuple(str(g) for g in (args.get("allow_scripts") or ()))
         try:
             pack_record, pack_template = promote_pack(
-                store, holder.current, pack_id, extra_grants=extra, human_action=True
+                store,
+                holder.current,
+                pack_id,
+                extra_grants=extra,
+                human_action=True,
+                actor=actor,
             )
         except (SkillPackError, PluginLifecycleError) as exc:
             raise ValueError(str(exc)) from exc
@@ -5162,7 +5167,7 @@ def _execute_mutation(
 
         try:
             pack_record = suspend_pack(
-                store, str(args["pack_id"]), rollback=bool(args.get("rollback"))
+                store, str(args["pack_id"]), rollback=bool(args.get("rollback")), actor=actor
             )
         except (SkillPackError, PluginLifecycleError) as exc:
             raise ValueError(

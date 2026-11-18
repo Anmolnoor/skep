@@ -206,7 +206,7 @@ def load_seed_skills(
         shipped = skill_fingerprint(template)
         row = store.get_template(pack.name)
         if row is None:
-            store.add_template(template)
+            store.add_template(template, actor="shelf-sync")
             hashes[pack.name] = shipped
             loaded.append(pack.name)
             continue
@@ -228,7 +228,7 @@ def load_seed_skills(
         else:
             diverged.append(pack.name if recorded is not None else f"{pack.name} (legacy)")
             continue
-        store.add_template(dataclasses.replace(template, created_at=row.created_at))
+        store.add_template(dataclasses.replace(template, created_at=row.created_at), actor=actor)
         hashes[pack.name] = shipped
         refreshed.append(pack.name)
         store.record_registry_event(

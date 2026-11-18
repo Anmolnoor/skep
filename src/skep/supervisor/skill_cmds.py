@@ -142,6 +142,7 @@ def _evidence_note(candidate: SkillCandidate) -> str:
 def _record_decision(
     store: RunStore,
     *,
+    name: str,
     anchor_task_id: str | None,
     reason: str,
     approved: bool,
@@ -149,9 +150,16 @@ def _record_decision(
     note: str,
 ) -> None:
     """Mirror patch-approval: record the decision in the approval queue, anchored to
-    the evidence run. Skipped only when there is no run to anchor to (rejecting an
-    untested draft) — the candidate row is the durable record in that case."""
+    the evidence run. v126-F4: with no run to anchor to (a conversation draft, or
+    rejecting an untested draft) the decision still leaves an audit row."""
     if anchor_task_id is None:
+        store.record_registry_event(
+            kind="skill_candidate",
+            item_id=name,
+            action="approved" if approved else "rejected",
+            actor=actor,
+            detail={"reason": reason, "note": note},
+        )
         return
     review_id = store.enqueue_approval(anchor_task_id, action="promote_skill", reason=reason)
     store.resolve_approval(review_id, approved=approved, actor=actor, note=note)
@@ -225,6 +233,7 @@ def run_candidate_test(
         )
         _record_decision(
             store,
+            name=name,
             anchor_task_id=result.task_id,
             reason=f"skill {name!r} test gate: {detail}",
             approved=False,
@@ -279,11 +288,12 @@ def approve(
         )
     moment = now or now_ts()
     template = promote_to_template(candidate, name=target, created_at=moment)
-    store.add_template(template)
+    store.add_template(template, actor=actor)
 
     decision_note = note or f"approved into registry as {target!r}"
     _record_decision(
         store,
+        name=name,
         anchor_task_id=candidate.test_task_id,
         reason=f"promote learned skill {name!r}: {_evidence_note(candidate)}",
         approved=True,
@@ -326,6 +336,7 @@ def reject(
     decision_note = note or "rejected by human review"
     _record_decision(
         store,
+        name=name,
         anchor_task_id=candidate.test_task_id,
         reason=f"reject learned skill {name!r}",
         approved=False,
@@ -778,6 +789,7 @@ def cmd_skill_promote(args: argparse.Namespace) -> int:
                 args.pack_id,
                 extra_grants=tuple(args.allow_script or ()),
                 human_action=True,
+                actor="cli-user",
             )
         except SkillPackError as exc:
             return _err(str(exc))
