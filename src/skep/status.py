@@ -292,9 +292,12 @@ def _phone_flow_advisories(home: Path) -> list[str]:
     store = RunStore(db_path, readonly=True)
     try:
         enabled = [config for config in store.list_channel_configs() if config.enabled]
-        bound = [
-            chat for chat in store.list_chats() if store.channel_binding_for_chat(chat.chat_id)
-        ]
+        enabled_names = {config.channel for config in enabled}
+        bound = []
+        for chat in store.list_chats():
+            binding = store.channel_binding_for_chat(chat.chat_id)
+            if binding is not None and binding.channel in enabled_names:
+                bound.append(chat)
         seed = load_plugins(store).get("yt-transcript")
         document = document_from_settings(store.get_setting(POLICY_DOCUMENT_SETTINGS_KEY))
     finally:
@@ -308,17 +311,25 @@ def _phone_flow_advisories(home: Path) -> list[str]:
         for config in enabled
         if not config.channel_can_confirm
     ]
+    # One line, only when NO chat on an enabled channel can start research: a
+    # delivery group left on assistant is the documented setup, not a problem.
+    hiding: list[str] = []
     for chat in bound:
         role = chat_role(home / "supervisor", chat.role)
         rule = hidden_tools(role).get("start_research")
-        if role is not None and rule is not None:
-            lines.append(
-                f"channel chat {chat.chat_id} runs as {role.name}, which hides start_research "
-                f"({rule}) — research cannot start from the phone; `skep role use operator "
-                f"--chat {chat.chat_id}` allows it (whoever holds that messenger account then "
-                f"has operator's tools; the phone still confirms only {classes}), or keep "
-                "research on the web"
-            )
+        if role is None or rule is None:
+            hiding = []
+            break
+        hiding.append(f"{chat.chat_id} ({role.name}: {rule})")
+    if hiding:
+        target = bound[0].chat_id if len(bound) == 1 else "<chat id>"
+        lines.append(
+            f"no channel chat can start research — every one runs as a role that hides "
+            f"start_research: {', '.join(hiding)}; `skep role use operator --chat {target}` "
+            "on the chat you research from allows it (whoever holds that messenger account "
+            f"then has operator's tools; the phone still confirms only {classes}), or keep "
+            "research on the web"
+        )
     if not enabled or seed is None or seed.state in ("suspended", "rolled_back"):
         return lines
     value = f"{seed.server_id}:get_transcript"

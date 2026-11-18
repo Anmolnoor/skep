@@ -96,6 +96,38 @@ def test_a_channel_chat_whose_role_hides_research_names_the_role_use_command(
     assert "only the 4 channel-confirmable classes" in advisory  # the risk, said plainly
 
 
+def _bind(store: RunStore, channel: str, key: str, role: str) -> str:
+    chat = store.create_chat(title=key, model=None, source=channel, role=role).chat_id
+    store.bind_channel_session(session_key=key, channel=channel, identity_id="42", chat_id=chat)
+    return chat
+
+
+def test_a_delivery_group_in_assistant_is_quiet_while_the_dm_can_research(
+    home: Path, store: RunStore
+) -> None:
+    """The doc's own setup — DM on operator, delivery group on assistant —
+    leaves doctor silent."""
+    _done(store)
+    _bind(store, "telegram", "tg:group", "assistant")
+    assert _phone_flow_advisories(home) == []
+
+
+def test_research_from_a_disabled_channel_does_not_count_and_names_every_chat(
+    home: Path, store: RunStore
+) -> None:
+    _done(store)
+    store.upsert_channel_config(ChannelConfig(channel="slack", allowed_users=("42",)))  # disabled
+    dm = store.list_chats()[0].chat_id
+    store.set_chat_role(dm, "assistant")
+    group = _bind(store, "telegram", "tg:group", "assistant")
+    _bind(store, "slack", "sl:1", "operator")  # can research, but its channel is off
+    (advisory,) = _phone_flow_advisories(home)
+    assert dm in advisory and group in advisory and "start_research" in advisory
+    assert "skep role use operator --chat <chat id>" in advisory
+    store.set_chat_role(group, "operator")
+    assert _phone_flow_advisories(home) == []
+
+
 def test_the_transcript_seed_not_promoted_is_named(home: Path, store: RunStore) -> None:
     _done(store)
     save_plugin(store, SEED)  # back to draft
