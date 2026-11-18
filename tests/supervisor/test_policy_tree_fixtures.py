@@ -145,7 +145,9 @@ def _check(name: str, payload: dict[str, Any]) -> None:
 
 REPO = f"{ROOT}/app"
 RSOP = f"/api/repos/{quote(REPO, safe='')}/rsop"
-CHAIN = "&role=assistant&delegation_chain=" + quote("schedule:nightly@builder", safe="")
+# A chat's role, or a schedule tick's hop (role=None, scheduler.run_due) — never both.
+ROLE = "&role=assistant"
+CHAIN = "&delegation_chain=" + quote("schedule:nightly@builder", safe="")
 TREE_READS = [
     "/api/policy/registry",
     "/api/schedules",
@@ -162,6 +164,7 @@ def test_locked_builder_home_fixture(tmp_path: Path) -> None:
     _check("policy-locked", _read(tmp_path, config, [
         *TREE_READS,
         _why(REPO, "shell", "run", "uv sync"),
+        _why(REPO, "shell", "run", "uv sync", ROLE),
         _why(REPO, "shell", "run", "uv sync", CHAIN),
         _why(REPO, "network", "search", "python"),
     ]))  # fmt: skip

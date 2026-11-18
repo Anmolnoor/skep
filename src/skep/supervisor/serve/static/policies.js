@@ -228,23 +228,33 @@ function testAnAction(scopes, projects, roles, schedules, preset = {}) {
   if (preset.project) project.value = preset.project;
   if (preset.scope) scope.value = preset.scope;
   if (preset.action) action.value = preset.action;
+  // A schedule's tick sends no role, only its hop, against its own repo
+  // (scheduler.run_due): picking one takes the role and the project with it.
+  const ownProject = hop => bound.find(p => projectRepoBinding(p).value === hop.repo);
+  schedule.addEventListener("change", () => {
+    const hop = delegating.find(s => s.name === schedule.value);
+    role.disabled = project.disabled = Boolean(hop);
+    if (!hop) return;
+    role.value = "";
+    project.value = ownProject(hop)?.project_id ?? "";
+  });
   const out = el("div", { class: "policy-test-out" });
   const check = el("button", { type: "button" }, "Check");
   check.addEventListener("click", async () => {
-    const picked = bound.find(p => p.project_id === project.value);
-    const binding = projectRepoBinding(picked);
-    if (!binding) { flash("bad", "pick a project with a repo binding first"); return; }
     const hop = delegating.find(s => s.name === schedule.value);
+    const picked = hop ? ownProject(hop) : bound.find(p => p.project_id === project.value);
+    const repo = hop ? hop.repo : projectRepoBinding(picked)?.value;
+    if (!repo) { flash("bad", "pick a project with a repo binding first"); return; }
     try {
-      const why = await api("GET", `/api/policy/why?repo=${encodeURIComponent(binding.value)}`
+      const why = await api("GET", `/api/policy/why?repo=${encodeURIComponent(repo)}`
         + `&scope=${encodeURIComponent(scope.value)}`
         + `&action=${encodeURIComponent(action.value.trim())}`
         + `&value=${encodeURIComponent(value.value.trim())}`
-        + (role.value ? `&role=${encodeURIComponent(role.value)}` : "")
+        + (role.value && !hop ? `&role=${encodeURIComponent(role.value)}` : "")
         + (hop ? `&delegation_chain=${encodeURIComponent(`schedule:${hop.name}@${hop.role}`)}` : ""));
       const considered = why.run.considered || [];
       out.replaceChildren(...[
-        el("p", {}, `Workers in ${picked.name}: `, why.run.error
+        el("p", {}, `Workers in ${picked?.name || repo}: `, why.run.error
           ? `could not decide — ${why.run.error}`
           : [el("strong", {}, verdictWord(why.run.verdict)), " — decided by ", el("span", { class: "mono" }, why.run.decided_by)]),
         // The deciding rule's sentence, when a shipped baseline rule decided (_deciding_text).

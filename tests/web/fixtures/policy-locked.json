@@ -1245,7 +1245,7 @@
   "scope": "shell",
   "value": "uv sync"
  },
- "GET /api/policy/why?repo=%2Ffixture%2Fapp&scope=shell&action=run&value=uv%20sync&role=assistant&delegation_chain=schedule%3Anightly%40builder": {
+ "GET /api/policy/why?repo=%2Ffixture%2Fapp&scope=shell&action=run&value=uv%20sync&delegation_chain=schedule%3Anightly%40builder": {
   "action": "run",
   "baseline": "baseline: builder approved 2026-11-18T09:00:00Z sha256 000000000000",
   "delegation": {
@@ -1265,6 +1265,41 @@
    },
    "note": "delegated by schedule:nightly@builder: the delegatee holds no more than schedule:nightly@builder does \u2014 the stricter verdict stands; beyond it is exceeds_delegator"
   },
+  "operator": {
+   "decided_by": "template:builder/shell-learnable",
+   "description": "Any other shell command asks first, and an approval can be remembered for that exact command line; the floor's denies still apply.",
+   "rule_id": "shell-learnable",
+   "verdict": "require_approval"
+  },
+  "project": {
+   "name": "app",
+   "phase": "build",
+   "project_id": "app",
+   "strategy": "trusted_local_dev"
+  },
+  "repo": "/fixture/app",
+  "run": {
+   "considered": [
+    {
+     "action": "run",
+     "exact": false,
+     "layer": "template:builder",
+     "matcher": null,
+     "pattern": "uv sync",
+     "rule_id": "shell:uv sync",
+     "verdict": "allow"
+    }
+   ],
+   "decided_by": "template:builder/shell:uv sync",
+   "rule_id": "shell:uv sync",
+   "verdict": "allow"
+  },
+  "scope": "shell",
+  "value": "uv sync"
+ },
+ "GET /api/policy/why?repo=%2Ffixture%2Fapp&scope=shell&action=run&value=uv%20sync&role=assistant": {
+  "action": "run",
+  "baseline": "baseline: builder approved 2026-11-18T09:00:00Z sha256 000000000000",
   "operator": {
    "decided_by": "template:builder/shell-learnable",
    "description": "Any other shell command asks first, and an approval can be remembered for that exact command line; the floor's denies still apply.",
