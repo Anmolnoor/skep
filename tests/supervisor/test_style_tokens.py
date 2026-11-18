@@ -143,6 +143,19 @@ def test_text_tokens_clear_aa_on_every_surface_they_are_painted_on() -> None:
     assert not failures, f"below AA (4.5:1): {failures}"
 
 
+def test_setup_checklist_marks_clear_aa_on_the_canvas() -> None:
+    """Graphite round A: the Setup checklist paints its row marks in status
+    colour (.setup-mark.done in --ok, .relock in --warn) on the canvas, inside
+    the tab panel. The mark is never the only signal (the row says "done" /
+    "re-lock needed"), but text it is, so it clears the same bar."""
+    css = _css()
+    assert ".setup-mark.done { color: var(--ok); }" in css
+    assert ".setup-mark.relock { color: var(--warn); }" in css
+    tokens = _tokens()
+    for fg in ("--ok", "--warn"):
+        assert _contrast(tokens[fg], tokens["--bg"]) >= 4.5, fg
+
+
 def test_the_palette_is_graphite() -> None:
     """H1-G1: the operator chose "A · Graphite" (skep-design
     plans/hive-rooms/design-graphite.html, theme a) after seeing H1 keep the

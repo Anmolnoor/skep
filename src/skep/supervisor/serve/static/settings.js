@@ -281,7 +281,7 @@ export async function onboardChecklist() {
         el("span", { class: `setup-mark ${mark}`, "aria-hidden": "true" },
           done ? "✓" : reLock ? "!" : "○"),
         el("span", { class: "setup-label" }, STEP_LABELS[name]),
-        el("span", { class: "note setup-state" }, state),
+        el("span", { class: "note setup-state", title: state }, state),
         toggle),
       form);
   };

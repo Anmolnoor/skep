@@ -1371,6 +1371,35 @@ main.chat-view { padding: 0; max-width: none; }
 .channel-status-dot.live { background: var(--ok); }
 .channel-status-dot.off { background: var(--muted-2); }
 
+/* ---- Settings and setup (graphite round A) ---- */
+/* A tab's blocks: a title, one line on what it controls and where it is
+   stored, then its form. The Setup checklist is hairline-separated rows —
+   mark, step, state, one button — that wrap rather than squeeze at phone
+   width, so no breakpoint is needed. Colour marks status only; the row's
+   own words ("done", "not done yet", "re-lock needed") carry it too. */
+.settings-block { margin: 0 0 var(--space-5); }
+.settings-block-title { margin: 0 0 var(--space-1); font-size: var(--text-md); color: var(--text-strong); }
+.settings-block-where { margin: 0 0 var(--space-3); }
+.setup-flag { margin: 0 0 var(--space-4); }
+.setup-flag.row { align-items: center; }
+.setup-flag .note { margin: 0; }
+.setup-missing { margin: var(--space-2) 0 0; padding-left: var(--space-4); color: var(--muted); }
+.setup-missing li { margin: 0 0 var(--space-1); }
+.setup-checklist > .field-help { margin: 0 0 var(--space-2); }
+.setup-checklist > .row { padding: var(--space-3) 0 0; border-top: 1px solid var(--border-soft); }
+.setup-step { border-top: 1px solid var(--border-soft); padding: var(--space-2) 0; }
+.setup-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); }
+.setup-mark { flex: none; width: var(--space-4); text-align: center; color: var(--muted); }
+.setup-mark.done { color: var(--ok); }
+.setup-mark.relock { color: var(--warn); }
+.setup-label { flex: 0 0 120px; color: var(--text); font-weight: 500; }
+.setup-state {
+  flex: 1 1 240px; min-width: 0; margin: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.setup-toggle { margin-left: auto; }
+.setup-form { padding: var(--space-3) 0 var(--space-1) var(--space-6); }
+
 /* Sparkline bars inside stat tiles. */
 .stat-sparkline { display: block; margin-top: 8px; height: 20px; }
 .stat-sparkline .spark-ok { fill: var(--ok); }
