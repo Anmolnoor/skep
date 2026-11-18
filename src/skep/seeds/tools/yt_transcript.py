@@ -5,7 +5,9 @@ v83-F14: a shipped seed tool in the forge's single-file stdio MCP format
 is youtube.com only, and the tool refuses any other host itself. The
 youtubei/timedtext surface is UNOFFICIAL and unversioned — when it
 drifts, the error says so plainly instead of mystifying (the tool then
-needs re-forging).
+needs re-forging). v126-F1: captions come from the innertube player
+endpoint; no captions, an empty (blocked) caption body and page drift
+are three different errors.
 """
 
 import html
@@ -19,9 +21,20 @@ from typing import Any
 UPSTREAM_DRIFT = (
     "the YouTube page no longer matches the shape this tool knows — the "
     "unofficial endpoint changed; the tool needs re-forging (forge_tool a "
-    "replacement). If the video simply has no captions, there is nothing "
-    "to fetch."
+    "replacement)."
 )
+# v126-F1: the three failures are told apart, so the model can say which.
+NO_CAPTIONS = "NO_CAPTIONS: this video has no caption tracks — there is no transcript to fetch."
+EMPTY_CAPTIONS = (
+    "EMPTY_CAPTIONS: YouTube listed a caption track but answered with an "
+    "empty body — it is blocking this client right now (rate limit or bot "
+    "check). Try again later; the tool itself is not broken."
+)
+# v126-F1: the watch page's own captionTracks URL carries `exp=xpe` and now
+# returns 200 with a 0-byte body; the innertube player endpoint asked as the
+# ANDROID client returns caption URLs that still answer (the method
+# youtube-transcript-api uses; verified live 2026-11-18).
+_PLAYER_CLIENT = {"clientName": "ANDROID", "clientVersion": "20.10.38"}
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -40,7 +53,7 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "self_test",
         "description": "Zero-argument offline self-check; exercises the "
-        "caption-track extraction and timedtext parsing on fixtures.",
+        "player caption-track extraction and timedtext parsing on fixtures.",
         "inputSchema": {"type": "object", "properties": {}},
     },
 ]
@@ -74,39 +87,37 @@ def video_id(value: str) -> str:
     return candidate
 
 
-def _fetch(url: str) -> str:
+def _fetch(url: str, data: bytes | None = None) -> str:
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").lower()
     if not (host == "youtu.be" or _is_youtube(host)):
         raise ValueError("refusing non-youtube host " + repr(host))
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 skep-yt-transcript"})
+    headers = {"User-Agent": "Mozilla/5.0 skep-yt-transcript", "Accept-Language": "en-US"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers)
     with urllib.request.urlopen(request, timeout=20) as response:
         return str(response.read().decode("utf-8", errors="replace"))
 
 
-def caption_track_url(page: str) -> str | None:
-    """The first captionTracks baseUrl in a watch page, or None."""
-    marker = page.find('"captionTracks":')
-    if marker == -1:
+def innertube_key(page: str) -> str | None:
+    """The watch page's INNERTUBE_API_KEY, or None (page drift)."""
+    match = re.search(r'"INNERTUBE_API_KEY":\s*"([^"]+)"', page)
+    return match.group(1) if match else None
+
+
+def caption_track_url(player: Any) -> str | None:
+    """An English (else the first) caption track URL from a player response,
+    or None when the video has no tracks. Raises ValueError on drift."""
+    if not isinstance(player, dict):
+        raise ValueError("player response is not an object")
+    renderer = (player.get("captions") or {}).get("playerCaptionsTracklistRenderer") or {}
+    tracks = [t for t in renderer.get("captionTracks") or [] if isinstance(t, dict)]
+    tracks = [t for t in tracks if t.get("baseUrl")]
+    if not tracks:
         return None
-    start = page.find("[", marker)
-    depth = 0
-    for index in range(start, min(len(page), start + 200_000)):
-        if page[index] == "[":
-            depth += 1
-        elif page[index] == "]":
-            depth -= 1
-            if depth == 0:
-                try:
-                    tracks = json.loads(page[start : index + 1])
-                except ValueError:
-                    return None
-                for track in tracks:
-                    base = track.get("baseUrl") if isinstance(track, dict) else None
-                    if base:
-                        return str(base).replace("\\u0026", "&")
-                return None
-    return None
+    english = [t for t in tracks if str(t.get("languageCode", "")).startswith("en")]
+    return str((english or tracks)[0]["baseUrl"]).replace("&fmt=srv3", "")
 
 
 def timedtext_to_text(xml: str) -> str:
@@ -121,15 +132,67 @@ def timedtext_to_text(xml: str) -> str:
 
 
 # Offline fixtures for self_test — the parsing logic, exercised for real.
-_FIXTURE_PAGE = (
-    '... "captions":{"playerCaptionsTracklistRenderer":{"captionTracks":'
-    '[{"baseUrl":"https://www.youtube.com/api/timedtext?v=x\\u0026lang=en",'
-    '"languageCode":"en"}]}} ...'
-)
+_FIXTURE_PLAYER = {
+    "playabilityStatus": {"status": "OK"},
+    "captions": {
+        "playerCaptionsTracklistRenderer": {
+            "captionTracks": [
+                {
+                    "baseUrl": "https://www.youtube.com/api/timedtext?v=x&lang=de",
+                    "languageCode": "de",
+                },
+                {
+                    "baseUrl": "https://www.youtube.com/api/timedtext?v=x&lang=en&fmt=srv3",
+                    "languageCode": "en",
+                },
+            ]
+        }
+    },
+}
 _FIXTURE_XML = (
     '<transcript><text start="0" dur="2">Hello &amp;amp; welcome</text>'
     '<text start="2" dur="3">to the demo</text></transcript>'
 )
+
+
+def _error(message: str) -> dict[str, Any]:
+    return {"content": message, "isError": True}
+
+
+def get_transcript(vid: str) -> dict[str, Any]:
+    try:
+        page = _fetch("https://www.youtube.com/watch?v=" + vid)
+    except Exception as exc:
+        return _error("fetch failed: " + str(exc))
+    key = innertube_key(page)
+    if key is None:
+        return _error(UPSTREAM_DRIFT)
+    body = json.dumps({"context": {"client": _PLAYER_CLIENT}, "videoId": vid}).encode()
+    try:
+        raw = _fetch("https://www.youtube.com/youtubei/v1/player?key=" + key, body)
+    except Exception as exc:
+        return _error("player request failed: " + str(exc))
+    try:
+        player = json.loads(raw)
+        track = caption_track_url(player)
+    except ValueError:
+        return _error(UPSTREAM_DRIFT)
+    status = player.get("playabilityStatus") or {}
+    if track is None and status.get("status") not in (None, "OK"):
+        reason = str(status.get("reason") or status.get("status"))
+        return _error("YouTube refused this video to the tool: " + reason)
+    if track is None:
+        return _error(NO_CAPTIONS)
+    try:
+        xml = _fetch(track)
+    except Exception as exc:
+        return _error("caption fetch failed: " + str(exc))
+    if not xml.strip():
+        return _error(EMPTY_CAPTIONS)
+    text = timedtext_to_text(xml)
+    if not text:
+        return _error(UPSTREAM_DRIFT)
+    return {"content": text}
 
 
 def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -137,36 +200,22 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
             vid = video_id(str(arguments.get("video") or ""))
         except ValueError as exc:
-            return {"content": str(exc), "isError": True}
-        try:
-            page = _fetch("https://www.youtube.com/watch?v=" + vid)
-        except Exception as exc:
-            return {"content": "fetch failed: " + str(exc), "isError": True}
-        track = caption_track_url(page)
-        if track is None:
-            return {"content": UPSTREAM_DRIFT, "isError": True}
-        try:
-            xml = _fetch(track)
-        except Exception as exc:
-            return {"content": "caption fetch failed: " + str(exc), "isError": True}
-        text = timedtext_to_text(xml)
-        if not text:
-            return {"content": UPSTREAM_DRIFT, "isError": True}
-        return {"content": text}
+            return _error(str(exc))
+        return get_transcript(vid)
     if name == "self_test":
-        track = caption_track_url(_FIXTURE_PAGE)
+        track = caption_track_url(_FIXTURE_PLAYER)
         if track != "https://www.youtube.com/api/timedtext?v=x&lang=en":
-            return {"content": "captionTracks extraction broken", "isError": True}
+            return _error("captionTracks extraction broken")
         text = timedtext_to_text(_FIXTURE_XML)
         if text != "Hello & welcome\nto the demo":
-            return {"content": "timedtext parsing broken: " + repr(text), "isError": True}
+            return _error("timedtext parsing broken: " + repr(text))
         try:
             video_id("https://youtu.be/dQw4w9WgXcQ")
         except ValueError:
-            return {"content": "video id extraction broken", "isError": True}
+            return _error("video id extraction broken")
         return {"content": "self_test passed: extraction + parsing intact (offline)"}
     known = ", ".join(str(tool["name"]) for tool in TOOLS)
-    return {"content": "no tool named " + repr(name) + "; tools: " + known, "isError": True}
+    return _error("no tool named " + repr(name) + "; tools: " + known)
 
 
 def main() -> None:
