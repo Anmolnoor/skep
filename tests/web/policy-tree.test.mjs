@@ -232,3 +232,35 @@ test("a locked baseline shows no guard note", async () => {
   const { main } = await openTree();
   assert.equal(main.querySelector(".policy-tree-guard"), null);
 });
+
+// v124 review (F2, I8): policy_v3.OPERATOR_LANES — network.search and
+// network.fetch are decided on the Queen's lane even from a checkout, so the
+// tree reads rsop.operator for them; every state names whose answer it is.
+test("network.search and network.fetch are the Queen's answer, read from rsop.operator", async () => {
+  const { main } = await openTree();
+  const why = LOCKED["GET /api/policy/why?repo=%2Ffixture%2Fapp&scope=network&action=search&value=python"];
+  assert.equal(why.operator.verdict, "allow"); // what the live engine gives search
+  await pick(main, "network.search");
+  assert.deepEqual(states(main), ["The Queen: Configured: allow"]);
+  const rules = detail(main).querySelectorAll(".policy-tree-rule").map(n => n.textContent);
+  assert.ok(rules.some(r => /net-search/.test(r)), rules.join("\n"));
+  await pick(main, "network.fetch");
+  assert.deepEqual(states(main), ["The Queen: Configured: ask"]);
+  assert.match(detail(main).textContent, /net-fetch-gated/);
+});
+
+test("every other scope·action names the workers' answer in the project and the Queen's", async () => {
+  const { main } = await openTree();
+  const why = LOCKED["GET /api/policy/why?repo=%2Ffixture%2Fapp&scope=shell&action=run&value=uv%20sync"];
+  assert.equal(why.run.verdict, "allow");
+  assert.equal(why.operator.verdict, "require_approval"); // queen_view drops the baseline's shell allows
+  await pick(main, "shell.run");
+  assert.deepEqual(states(main), ["Workers in app: Configured: allow", "The Queen: Configured: ask"]);
+  assert.match(detail(main).textContent, /anything no rule matches asks/);
+  await pick(main, "shell.run_repo");
+  assert.deepEqual(states(main), ["Workers in app: Not configured → denies", "The Queen: Not configured → denies"]);
+  // No project: the locked baseline's layer as stated, named as that — not a lane's answer.
+  await noProject(main);
+  await pick(main, "shell.run");
+  assert.deepEqual(states(main), ["The locked baseline: Configured: allow / ask"]);
+});

@@ -993,33 +993,46 @@ function treeRule(rule, layer, description) {
     el("span", { class: description ? "field-help" : "note" }, description || "No description"));
 }
 
+// policy_v3.OPERATOR_LANES: decided on the Queen's lane even from a checkout.
+const QUEEN_LANES = ["network.search", "network.fetch"];
+
 function scopeLeafDetail(key, ctx) {
   const [scope, action] = [key.name.split(".")[0], key.name.slice(key.name.indexOf(".") + 1)];
   const unmatched = key.default === "deny" ? "denies" : "asks";
-  // The guard answers before any rule (I8): nothing below it is live, so no rule shows.
-  if (ctx.guard) return [el("p", { class: "policy-tree-state" }, `Asks: baseline ${ctx.guard}`)];
-  if (ctx.rsop?.error) return [policyNote(`policy did not resolve: ${ctx.rsop.error}`)];
+  if (!ctx.guard && ctx.rsop?.error) return [policyNote(`policy did not resolve: ${ctx.rsop.error}`)];
   // A description is the baseline's, so it shows only on a rule the baseline stated (I8).
   const baselineLayer = ctx.explain.name ? `template:${ctx.explain.name}` : null;
   const explained = new Map((ctx.explain.rules || []).filter(r => r.description)
     .map(r => [`${r.scope} ${r.rule_id}`, r.description]));
-  const rules = ctx.rsop
-    ? (ctx.rsop.scopes?.[scope] || []).filter(r => r.action === action)
-    : (ctx.explain.rules || []).filter(r => r.scope === scope && r.action === action);
-  const rows = rules.map(r => (ctx.rsop
-    ? treeRule(r, r.layer || r.source,
-      r.description || (r.layer && r.layer === baselineLayer ? explained.get(`${scope} ${r.rule_id}`) : null))
-    : treeRule(r, baselineLayer || "baseline", r.description)));
+  // Whose answer it is: the workers' compiled run lane in the project, and the
+  // Queen's lane (the baseline without its shell allows, plus her documents);
+  // with no project, the locked baseline's layer as stated — no lane's answer.
+  const lanes = ctx.rsop
+    ? [
+      QUEEN_LANES.includes(key.name) ? null : [`Workers in ${ctx.rsop.project?.name || ctx.rsop.repo}`, ctx.rsop.scopes?.[scope]],
+      ["The Queen", ctx.rsop.operator?.[scope]],
+    ].filter(Boolean)
+    : [[ctx.guard ? "Every decision" : "The locked baseline",
+      (ctx.explain.rules || []).filter(r => r.scope === scope).map(r => ({ ...r, layer: baselineLayer || "baseline" }))]];
+  const lane = ([who, all]) => {
+    const rules = (all || []).filter(r => r.action === action);
+    const verdicts = ["allow", "ask", "deny"].filter(v => rules.some(r => RULE_WORD[r.verdict] === v));
+    // The guard answers before any rule (I8): nothing below it is live, so no rule shows.
+    const said = ctx.guard ? `Asks: baseline ${ctx.guard}`
+      : verdicts.length ? `Configured: ${verdicts.join(" / ")}` : `Not configured → ${unmatched}`;
+    return [
+      el("p", { class: "policy-tree-state" }, `${who}: ${said}`),
+      !ctx.guard && verdicts.length ? policyNote(`anything no rule matches ${unmatched}`) : null,
+      !ctx.guard && rules.length ? el("ul", { class: "policy-rules" }, rules.map(r => treeRule(r, r.layer || r.source,
+        r.description || (r.layer && r.layer === baselineLayer ? explained.get(`${scope} ${r.rule_id}`) : null)))) : null,
+    ];
+  };
   const slot = el("div");
   const testThis = el("button", { type: "button" }, "Test this");
   testThis.addEventListener("click", () => slot.replaceChildren(testAnAction(
     ctx.scopes, ctx.projects, ctx.roles, ctx.schedules, { scope, action, project: ctx.project })));
-  const verdicts = ["allow", "ask", "deny"].filter(v => rules.some(r => RULE_WORD[r.verdict] === v));
   return [
-    el("p", { class: "policy-tree-state" },
-      verdicts.length ? `Configured: ${verdicts.join(" / ")}` : `Not configured → ${unmatched}`),
-    verdicts.length ? policyNote(`anything no rule matches ${unmatched}`) : null,
-    rows.length ? el("ul", { class: "policy-rules" }, rows) : null,
+    ...lanes.flatMap(lane),
     editLink("#/setup", "The baseline changes in Setup →"),
     el("div", { class: "actions" }, testThis),
     slot,
