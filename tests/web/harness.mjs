@@ -42,6 +42,7 @@ class FakeNode {
   }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   getAttribute(name) { return this.attributes[name] ?? null; }
+  removeAttribute(name) { delete this.attributes[name]; }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   append(...nodes) {
     this._text = undefined;

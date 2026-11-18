@@ -1,5 +1,6 @@
 /* H1 (hive-rooms C10): the sidebar — this machine, search, threads grouped
-   by project with a status dot each, then the old workspaces folded below.
+   by project with a status dot each. graphite-nav: the old workspaces are
+   the Settings surface (index.html, setShellActiveRoute in app.js).
 
    app.js boots on load, so its helpers come in through the import cycle.
    Safe because this module only declares at top level: by the time any of
@@ -202,15 +203,6 @@ export async function viewInbox(main) {
       `${gate.reason || "approval"} · ${relativeTime(gate.requested_at)}`))));
 }
 
-// A folded workspace group opens while its route is showing; its summary
-// goes to the group's first page, so a closed group is one click away.
-function openActiveGroup() {
-  const ws = (location.hash || "#/home").split(/[/?]/)[1];
-  for (const group of document.querySelectorAll(".sidebar details.rail-group")) {
-    if ([...group.querySelectorAll("a")].some(a => a.getAttribute("data-ws") === ws)) group.open = true;
-  }
-}
-
 export function installSidebar() {
   const search = document.getElementById("thread-search");
   search?.addEventListener("input", () => {
@@ -220,17 +212,7 @@ export function installSidebar() {
   // The search row is the existing ⌘K palette, opened the way the key does.
   document.getElementById("sidebar-search")?.addEventListener("click", () =>
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true })));
-  for (const group of document.querySelectorAll(".sidebar details.rail-group")) {
-    // The summary wears its first page's icon (decorateShell drew it already).
-    const icon = group.querySelector(".rail-icon");
-    if (icon) group.querySelector("summary").prepend(icon.cloneNode(true));
-    group.querySelector("summary").addEventListener("click", () => {
-      if (!group.open) location.hash = group.querySelector("a").getAttribute("href");
-    });
-  }
-  addEventListener("hashchange", () => {
-    openActiveGroup();
-    renderThreads(lastChats); // the active row follows the route
-  });
-  openActiveGroup();
+  // graphite-nav: the list keeps rendering while the Settings surface hides
+  // it, so pins, unread dots, the filter and open groups survive a visit.
+  addEventListener("hashchange", () => renderThreads(lastChats)); // the active row follows the route
 }

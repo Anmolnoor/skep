@@ -1302,11 +1302,13 @@ def test_v75_foundation_tokens_helpers_and_rail_groups() -> None:
         assert token_name in css, token_name
 
     # The groups wrap the pinned anchors without touching them. H1: the daily
-    # pair on top; the old workspaces fold into Runs / Library. Graphite round
-    # A: Settings collapsed to one link (Projects and Setup are its tabs).
+    # pair on top. graphite-nav: the old workspaces are the Settings surface —
+    # four captioned groups in one labelled nav, no <details> fold.
     assert 'class="rail-group" data-group="daily"' in index
-    for group in ("runs", "library"):
-        assert f'<details class="rail-group" data-group="{group}">' in index
+    assert '<nav class="sidebar-pages" aria-label="Settings pages">' in index
+    for group in ("work", "library", "policies", "setup"):
+        assert f'<div class="rail-group" data-group="{group}">' in index
+    assert "<details" not in index
     assert 'data-group="settings"' not in index
     assert ".rail-group" in css
 
@@ -1341,6 +1343,42 @@ def test_v75_foundation_tokens_helpers_and_rail_groups() -> None:
     mobile = css[css.index("/* v75-F1 (C11):") :]
     assert ".rail-group { flex-direction: row; }" in mobile
     assert ".tab-bar, .filter-bar { overflow-x: auto;" in mobile
+    # graphite-nav: the surface's pages and the footer flow along the strip;
+    # at phone width the pages take their own row and scroll inside it.
+    assert ".sidebar-pages, .sidebar-foot { flex-direction: row;" in mobile
+    assert ".sidebar-pages { flex: 0 0 100%; max-width: 100%; overflow-x: auto; }" in mobile
+
+
+def test_graphite_nav_settings_surface_shell() -> None:
+    """graphite-nav: the sidebar's bottom block became the Settings surface —
+    a route-driven mode of the one shell (one attribute CSS reads), not a
+    modal. The thread view keeps a three-icon footer; the badges keep their
+    ids for the poll; the waiting-approval dot is CSS only."""
+    index = (STATIC_DIR / "index.html").read_text()
+    css = (STATIC_DIR / "style.css").read_text()
+    source = (STATIC_DIR / "app.js").read_text()
+
+    foot = index[index.index('<div class="sidebar-foot">') :]
+    foot = foot[: foot.index("</div>")]
+    for label, href in (("Settings", "#/settings"), ("Runs", "#/runs"), ("Policies", "#/policies")):
+        assert f'aria-label="{label}" href="{href}"' in foot, label
+    for badge in ("inbox-badge", "approvals-badge", "tasks-badge", "memory-badge"):
+        assert f'id="{badge}"' in index, badge
+    assert '<button id="surface-close" class="surface-close icon-button" type="button"' in index
+    assert 'aria-label="Close settings" hidden>' in index
+
+    assert ".sidebar-pages {\n  display: none;" in css
+    assert '.shell[data-surface="settings"] .sidebar-pages { display: flex; }' in css
+    assert '.shell[data-surface="settings"] .sidebar-foot { display: none; }' in css
+    assert (
+        '.sidebar:has(#approvals-badge:not(.hidden)) .sidebar-foot a[data-ws="runs"]::after' in css
+    )
+    assert "details.rail-group" not in css
+    assert ".sidebar-nav" not in css
+
+    assert 'shell.dataset.surface = "settings";' in source
+    assert 'link.setAttribute("aria-current", "page");' in source
+    assert 'location.hash = surfaceReturn || "#/home";' in source
 
 
 def test_runs_page_renders_filter_tabs_and_grouped_cards() -> None:

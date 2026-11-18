@@ -21,7 +21,7 @@
     <nav class="sidebar" aria-label="Primary">
       <!-- H1 (hive-rooms C10): the sidebar replaced the 60px icon rail. Every
            data-ws anchor stays (structure tests pin them); the old workspaces
-           fold into the groups under the threads. -->
+           live in the Settings surface below (graphite-nav). -->
       <div class="sidebar-head">
         <a class="brand" href="#/home" title="skep" aria-label="skep — home">skep</a>
         <span id="sidebar-machine" class="sidebar-machine" title="the machine this daemon runs on"></span>
@@ -41,24 +41,48 @@
       <input id="thread-search" class="chat-sidebar-search" type="search" autocomplete="off"
              placeholder="Filter threads" aria-label="search threads">
       <div id="sidebar-threads" class="sidebar-threads" role="navigation" aria-label="Threads"></div>
-      <div class="sidebar-nav">
-        <details class="rail-group" data-group="runs">
-          <summary>Runs</summary>
+      <!-- graphite-nav: every page below the threads is one flat list in
+           captioned groups — the Settings surface. It shows in place of the
+           threads while a page of it is open (#shell[data-surface], set by
+           setShellActiveRoute); the thread view keeps only the footer. Every
+           data-ws anchor and badge id stays. -->
+      <nav class="sidebar-pages" aria-label="Settings pages">
+        <div class="rail-group" data-group="work">
+          <div class="rail-caption">Work</div>
           <a href="#/runs" data-ws="runs" title="Runs">Runs</a>
           <a href="#/approvals" data-ws="approvals" title="Approvals">Approvals <span id="approvals-badge" class="badge hidden"></span></a>
-          <a href="#/assign" data-ws="assign" title="Assign">Assign</a>
-        </details>
-        <a href="#/schedules" data-ws="schedules" title="Schedules">Schedules</a>
-        <details class="rail-group" data-group="library">
-          <summary>Library</summary>
+          <a href="#/assign" data-ws="assign" title="New run">New run</a>
+          <a href="#/schedules" data-ws="schedules" title="Schedules">Schedules</a>
+        </div>
+        <div class="rail-group" data-group="library">
+          <div class="rail-caption">Library</div>
           <a href="#/templates" data-ws="templates" title="Templates &amp; Skills">Templates &amp; Skills</a>
           <a href="#/notes" data-ws="notes" title="Notes &amp; Tasks">Notes &amp; Tasks <span id="tasks-badge" class="badge hidden"></span></a>
           <a href="#/memory" data-ws="memory" title="Memory">Memory <span id="memory-badge" class="badge hidden"></span></a>
-        </details>
-        <a href="#/policies" data-ws="policies" title="Policies">Policies</a>
-        <!-- Graphite round A: one Settings link. Projects and Setup are its
-             tabs; #/projects… and #/setup light it (setShellActiveRoute). -->
-        <a href="#/settings" data-ws="settings" title="Settings">Settings</a>
+        </div>
+        <div class="rail-group" data-group="policies">
+          <div class="rail-caption">Policies</div>
+          <a href="#/policies/now" data-ws="policies" data-tab="now" title="Policies: now">Now</a>
+          <a href="#/policies/decisions" data-ws="policies" data-tab="decisions" title="Policies: decisions">Decisions</a>
+          <a href="#/policies/grants" data-ws="policies" data-tab="grants" title="Policies: standing grants">Standing grants</a>
+          <a href="#/policies/groups" data-ws="policies" data-tab="groups" title="Policies: projects &amp; groups">Projects &amp; groups</a>
+          <a href="#/policies/defaults" data-ws="policies" data-tab="defaults" title="Policies: defaults">Defaults</a>
+        </div>
+        <div class="rail-group" data-group="setup">
+          <div class="rail-caption">Setup</div>
+          <a href="#/settings/models" data-ws="settings" data-tab="models" title="Models">Models</a>
+          <a href="#/settings/workers" data-ws="settings" data-tab="workers" title="Workers">Workers</a>
+          <a href="#/settings/projects" data-ws="settings" data-tab="projects" title="Projects">Projects</a>
+          <a href="#/settings/channels" data-ws="settings" data-tab="channels" title="Channels">Channels</a>
+          <a href="#/settings/setup" data-ws="settings" data-tab="setup" title="Setup">Setup</a>
+        </div>
+      </nav>
+      <!-- graphite-nav: the thread view's footer — three icons. The gear opens
+           the surface; the dot on Runs says an approval waits (CSS :has). -->
+      <div class="sidebar-foot">
+        <a aria-label="Settings" href="#/settings" data-ws="settings" title="Settings">Settings</a>
+        <a aria-label="Runs" href="#/runs" data-ws="runs" title="Runs">Runs</a>
+        <a aria-label="Policies" href="#/policies" data-ws="policies" title="Policies">Policies</a>
       </div>
     </nav>
 
@@ -81,6 +105,11 @@
           <span id="queen-model-label" class="queen-model-label mono"></span>
         </div>
         <a class="topbar-assign primary" href="#/assign">+ Assign</a>
+        <!-- graphite-nav: closes the Settings surface, back to where you were. -->
+        <button id="surface-close" class="surface-close icon-button" type="button"
+                title="Close settings" aria-label="Close settings" hidden>
+          <span class="button-icon" aria-hidden="true">×</span>
+        </button>
       </header>
 
       <main id="main"></main>

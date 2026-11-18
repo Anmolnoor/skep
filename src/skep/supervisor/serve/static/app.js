@@ -659,7 +659,23 @@ function contextLoadPercent(context) {
   return Math.min(100, Math.max(4, Math.round(context.percent)));
 }
 
+// graphite-nav: these pages open in the Settings surface — the sidebar shows
+// the pages list in place of the threads, the header reads "Settings / …".
+const SURFACE_PAGES = new Set(["runs", "approvals", "assign", "schedules", "templates", "notes",
+  "memory", "policies", "settings", "projects", "setup"]);
+const isSurface = hash => SURFACE_PAGES.has(hash.split(/[/?]/)[1]);
+// Where the surface's close button goes: the last hash outside it (I11:
+// in-memory only, a reload forgets it and close goes Home).
+let surfaceReturn = null;
+
 function setShellActiveRoute(hash) {
+  const surface = isSurface(hash);
+  if (!surface) surfaceReturn = hash;
+  const shell = document.getElementById("shell");
+  if (shell) {
+    if (surface) shell.dataset.surface = "settings";
+    else delete shell.dataset.surface;
+  }
   for (const link of document.querySelectorAll(".sidebar a[data-ws]")) {
     const ws = link.dataset.ws;
     const nav = link.dataset.nav || "";
@@ -669,11 +685,22 @@ function setShellActiveRoute(hash) {
     }
     // Graphite round A: Projects and Setup are Settings tabs (settings.js).
     if (ws === "settings") active = /^#\/(settings|projects|setup)\b/.test(hash);
+    // graphite-nav: a surface item for one tab is lit by its own hash; a
+    // project's detail page lights Projects.
+    if (link.dataset.tab) {
+      active = link.getAttribute("href") === hash
+        || (link.dataset.tab === "projects" && hash.startsWith("#/projects/"));
+    }
     link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
   }
 }
 
 function installShellHandlers() {
+  document.getElementById("surface-close")?.addEventListener("click", () => {
+    location.hash = surfaceReturn || "#/home";
+  });
   const newChat = document.getElementById("sidebar-new-chat");
   if (newChat) {
     newChat.addEventListener("click", (event) => {
@@ -902,6 +929,8 @@ function updateShellChrome(hash) {
   if (assign) assign.hidden = !["home", "runs"].includes(page);
   const queenTile = document.getElementById("topbar-queen-status");
   if (queenTile) queenTile.hidden = page !== "home";
+  const close = document.getElementById("surface-close");
+  if (close) close.hidden = !isSurface(hash);
   viewControls()?.replaceChildren();
   const hideDock = hash.startsWith("#/chat");
   const dock = document.getElementById("dock");
@@ -1015,10 +1044,19 @@ function header(main, title, subtitle) {
   // so nothing it said is lost.
   const titleEl = document.getElementById("topbar-title");
   if (titleEl) {
-    titleEl.textContent = title;
+    titleEl.textContent = isSurface(location.hash || "#/home") ? surfaceCrumb(title) : title;
     titleEl.title = subtitle || "";
   }
   document.title = `${title} · skep`;
+}
+
+// graphite-nav: "Settings / <page>"; a one-tab page adds its tab's label
+// ("Settings / Policies / Now"); a repeat ("Settings / Settings") is dropped.
+function surfaceCrumb(title) {
+  const item = [...document.querySelectorAll(".sidebar-pages a[data-tab]")]
+    .find(link => link.getAttribute("href") === location.hash);
+  const parts = ["Settings", title, item?.textContent.trim()];
+  return parts.filter((part, i) => part && parts.indexOf(part) === i).join(" / ");
 }
 
 // H1-G2: a view puts its own controls in its header line, right of the title.
