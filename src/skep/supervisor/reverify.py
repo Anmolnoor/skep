@@ -20,7 +20,9 @@ the worker's nomination, and the outcome detail always says which was used (I8).
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -98,6 +100,75 @@ def _needs_uv_priming(worktree: Path, commands: list[str]) -> bool:
     return wants_uv and (worktree / "pyproject.toml").is_file()
 
 
+# v127-A0 (O12): a Node pin needs node_modules, which a fresh worktree never
+# has. Which installer is decided by the BASELINE lockfile (first match wins);
+# every one installs exactly what the lockfile pins, lifecycle scripts off, so
+# no package's code runs while the network is open.
+# ponytail: yarn 2+ (berry) rejects --frozen-lockfile/--ignore-scripts, so its
+# prime fails and re-verify says unavailable; add `--immutable --mode=skip-build`
+# when a berry repo is pinned.
+_NODE_TOOLS = frozenset({"npm", "npx", "pnpm", "yarn"})
+_NODE_INSTALLS = (
+    ("pnpm-lock.yaml", "pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile"),
+    ("yarn.lock", "yarn install --frozen-lockfile --ignore-scripts"),
+    ("package-lock.json", "npm ci --ignore-scripts"),
+    ("npm-shrinkwrap.json", "npm ci --ignore-scripts"),
+)
+# What a patch must not change before an install that has the network:
+# `.npmrc` can re-enable scripts or reroute the registry, a yarnPath or a
+# pnpmfile is code the installer runs.
+_NODE_INSTALLER_CONFIG = frozenset({".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs"})
+_NODE_DEPENDENCY_KEYS = (
+    "dependencies",
+    "devDependencies",
+    "optionalDependencies",
+    "peerDependencies",
+)
+
+
+def _node_prime(worktree: Path, commands: list[str]) -> tuple[str, str] | None:
+    """v127-A0: ``(lockfile, install command)`` when this re-verify runs a Node
+    pin in a repo whose package.json declares dependencies; ``("", "")`` when
+    it does but there is no lockfile to install from; None when nothing needs
+    priming (not a Node pin, no package.json, or no dependencies)."""
+    if not any(command.split()[:1] in ([tool] for tool in _NODE_TOOLS) for command in commands):
+        return None
+    try:
+        manifest = json.loads((worktree / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict) or not any(manifest.get(k) for k in _NODE_DEPENDENCY_KEYS):
+        return None
+    for lockfile, install in _NODE_INSTALLS:
+        if (worktree / lockfile).is_file():
+            return lockfile, install
+    return "", ""
+
+
+def _node_cache_env(cache_dir: Path) -> dict[str, str]:
+    """Every installer's cache under one root outside the worktree (like the
+    uv cache), never the operator's ~/.npm, ~/.cache or ~/Library."""
+    return {
+        "npm_config_cache": str(cache_dir / "npm"),
+        "npm_config_store_dir": str(cache_dir / "pnpm-store"),
+        "YARN_CACHE_FOLDER": str(cache_dir / "yarn"),
+        "XDG_CACHE_HOME": str(cache_dir / "xdg-cache"),
+        "XDG_DATA_HOME": str(cache_dir / "xdg-data"),
+    }
+
+
+def _patch_paths(worktree: Path, patch_path: Path) -> set[str]:
+    """Every path the patch names, new and untracked files included (``git
+    diff`` would miss those)."""
+    listed = subprocess.run(
+        ["git", "-C", str(worktree), "apply", "--numstat", "-z", str(patch_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return set(re.split(r"[\t\0]", listed.stdout))
+
+
 def command_timeout_seconds(budget_seconds: float | None) -> float:
     """The re-run bound: the run's own wall-clock budget, floored at the
     historic 300s default — a small budget must never tighten G10 below what
@@ -161,6 +232,7 @@ def reverify(
     uv_cache_dir: Path | None = None,
     evidence_dir: Path | None = None,
     loopback_ports: tuple[int, ...] = (),
+    node_cache_dir: Path | None = None,
 ) -> ReverifyOutcome:
     """Apply the patch to a clean worktree and re-run the verification command(s).
 
@@ -176,6 +248,9 @@ def reverify(
     ``loopback_ports`` (D6, I2): the run's loopback ports (the project's and
     its local model provider's, ES-F252), so a verify that talks to a local
     service runs as the worker's did.
+
+    ``node_cache_dir`` (v127-A0) is the uv cache's twin for a Node prime; None
+    keeps a worktree-local throwaway.
     """
     if patch_path is None or not patch_path.is_file():
         # v65-F1: 58 of the first 94 reverifications were patch-less runs
@@ -225,10 +300,32 @@ def reverify(
         # below need it as an explicit writable root (the offline verify still
         # takes locks in the cache; content-addressed artifacts, never patch
         # material). The worktree-local throwaway needed nothing.
-        cache_writable = [uv_cache_dir] if uv_cache_dir is not None else []
+        cache_writable = [d for d in (uv_cache_dir, node_cache_dir) if d is not None]
         primed = ""
         prime_profile: Path | None = None
-        if _needs_uv_priming(worktree, commands):
+        node_prime = _node_prime(worktree, commands)
+        if node_prime == ("", ""):
+            return ReverifyOutcome(
+                "unavailable",
+                commands,
+                [],
+                "not confirmed: no lockfile to prime from — package.json declares "
+                "dependencies but the baseline has no package-lock.json, "
+                "npm-shrinkwrap.json, pnpm-lock.yaml or yarn.lock; the verification "
+                "command was not run",
+            )
+        uv_prime = _needs_uv_priming(worktree, commands)
+        if profile_path is not None and (uv_prime or node_prime):
+            prime_profile = profile_path.with_suffix(".prime.sb")
+            sandbox.write_profile(
+                prime_profile,
+                workspace=worktree,
+                extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
+                extra_readable=git_metadata_readable_roots(worktree),
+                network=sandbox.ALLOW_ALL_NETWORK,
+                skep_home=config.home.parent,
+            )
+        if uv_prime:
             # v94-F7: prime the BASELINE env before the patch is applied — only
             # code the operator's repo already contains at HEAD runs with the
             # network; patch code stays offline under the deny-all profile
@@ -237,16 +334,6 @@ def reverify(
             # when the caller resolved it — a workspace-local cache dies with
             # the worktree, which made every re-verify resolve from zero.
             cache_dir = uv_cache_dir if uv_cache_dir is not None else worktree / ".uv-cache"
-            if profile_path is not None:
-                prime_profile = profile_path.with_suffix(".prime.sb")
-                sandbox.write_profile(
-                    prime_profile,
-                    workspace=worktree,
-                    extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
-                    extra_readable=git_metadata_readable_roots(worktree),
-                    network=sandbox.ALLOW_ALL_NETWORK,
-                    skep_home=config.home.parent,
-                )
             prime_code, _prime_tail = _run_command(
                 "uv sync",
                 cwd=worktree,
@@ -268,6 +355,27 @@ def reverify(
             env["UV_CACHE_DIR"] = str(cache_dir)
             env["UV_NO_SYNC"] = "1"
             primed = "; deps primed from the baseline (uv sync), verify ran offline"
+        if node_prime:
+            # v127-A0: the same shape for Node — the BASELINE lockfile installs
+            # under the prime profile; patch code stays offline below.
+            node_install = node_prime[1]
+            env.update(_node_cache_env(node_cache_dir or worktree / ".node-cache"))
+            prime_code, prime_tail = _run_command(
+                node_install, cwd=worktree, env=env, profile_path=prime_profile
+            )
+            if prime_code != 0:
+                return ReverifyOutcome(
+                    "unavailable",
+                    commands,
+                    [prime_code],
+                    "could not prime the baseline Node dependencies for offline "
+                    f"re-verification ({node_install} exited {prime_code}); the "
+                    "verification command was not run\n--- install output (tail) ---\n"
+                    f"{prime_tail or '(no output)'}",
+                )
+            primed = (
+                f"{primed}; node deps primed from the baseline ({node_install}), verify ran offline"
+            )
         network = sandbox.DENY_ALL_NETWORK
         ports = run_loopback_ports(loopback_ports, (), config.home)
         if profile_path is not None and ports and sandbox.availability().backend == "bubblewrap":
@@ -323,7 +431,7 @@ def reverify(
                 f"patch did not apply to a clean worktree at {ref or 'HEAD'}: "
                 f"{applied.stderr.strip()}",
             )
-        if primed and _patch_touches_lockfile(worktree):
+        if uv_prime and _patch_touches_lockfile(worktree):
             # v115-F13 (I2): the baseline prime installed the OLD dependencies;
             # a patch that changes the lockfile must be verified against the
             # NEW ones. Run 01a16157 bumped starlette 1.3.0 → 1.9.0 in uv.lock
@@ -345,6 +453,41 @@ def reverify(
                     "was not run — a dependency change is never confirmed against the "
                     "old dependencies\n--- uv sync output (tail) ---\n"
                     f"{resync_tail or '(no output)'}",
+                )
+            primed = f"{primed}; re-primed against the patched lockfile"
+        touched = _patch_paths(worktree, patch_path) if node_prime else set()
+        if node_prime and touched & {node_prime[0], "package.json"}:
+            # v127-A0, the v115-F13 twin: a lockfile change is verified against
+            # the NEW packages. That install has the network, so a patch that
+            # also changes what the installer obeys is not installed at all.
+            config_changed = sorted(
+                path
+                for path in touched
+                if path in _NODE_INSTALLER_CONFIG or path.startswith(".yarn/")
+            )
+            if config_changed:
+                return ReverifyOutcome(
+                    "unavailable",
+                    commands,
+                    [],
+                    "the patch changes the lockfile and the package manager's config "
+                    f"({', '.join(config_changed)}), so its packages were not installed "
+                    "with the network; the verification command was not run — a "
+                    "dependency change is never confirmed against the old dependencies",
+                )
+            reprime_code, reprime_tail = _run_command(
+                node_prime[1], cwd=worktree, env=env, profile_path=prime_profile
+            )
+            if reprime_code != 0:
+                return ReverifyOutcome(
+                    "unavailable",
+                    commands,
+                    [reprime_code],
+                    "the patch changes the lockfile and its packages could not be "
+                    f"primed ({node_prime[1]} exited {reprime_code}); the verification "
+                    "command was not run — a dependency change is never confirmed "
+                    "against the old dependencies\n--- install output (tail) ---\n"
+                    f"{reprime_tail or '(no output)'}",
                 )
             primed = f"{primed}; re-primed against the patched lockfile"
         exit_codes: list[int] = []
@@ -464,6 +607,8 @@ def reverify_run(
 
     uv_cache_dir = project_cache_root(store, config, repo) / "uv"
     uv_cache_dir.mkdir(parents=True, exist_ok=True)
+    node_cache_dir = uv_cache_dir.parent / "node"  # v127-A0: the same root, Node's half
+    node_cache_dir.mkdir(exist_ok=True)
 
     # ES-F3 (B131, I2): pin the commit BEFORE re-verifying, and verify on that
     # commit — a name like `main` can move between this run and the landing,
@@ -483,6 +628,7 @@ def reverify_run(
         timeout_seconds=timeout_seconds,
         uv_cache_dir=uv_cache_dir,
         loopback_ports=loopback_ports,
+        node_cache_dir=node_cache_dir,
     )
     # I8: the record says WHAT it re-ran, not just how it went — "passed" means
     # something different when the worker chose the command than when the

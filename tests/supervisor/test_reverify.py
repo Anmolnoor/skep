@@ -684,3 +684,211 @@ def test_es_f3_landing_builds_on_the_exact_base_g10_verified(
         store.close()
     parent = git(repo, "rev-parse", f"{landed['branch']}^").stdout.strip()
     assert parent == verified_on
+
+
+# --- v127-A0: G10 confirms Node patches -------------------------------------
+
+
+def _node_stubs(tmp_path: Path) -> tuple[Path, Path]:
+    """Fake `npm`/`pnpm`/`yarn` that log each call (tool, argv, whether the
+    patch had landed, the npm cache) — no network, like `_uv_stub`."""
+    bin_dir = tmp_path / "nodebin"
+    bin_dir.mkdir()
+    log = tmp_path / "node.log"
+    for tool in ("npm", "pnpm", "yarn"):
+        stub = bin_dir / tool
+        stub.write_text(
+            "#!/bin/sh\n"
+            'patched="no"\n'
+            '[ -e patched_marker.txt ] && patched="yes"\n'
+            f'echo "{tool} $* patched=$patched cache=${{npm_config_cache:-unset}}" >> "$NODE_LOG"\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+    return bin_dir, log
+
+
+def _node_project(repo: Path, lockfile: str | None = "package-lock.json") -> None:
+    (repo / "package.json").write_text(
+        '{"name": "x", "devDependencies": {"jest": "1.0.0"}}\n', encoding="utf-8"
+    )
+    files = ["package.json"]
+    if lockfile is not None:
+        (repo / lockfile).write_text('{"lockfileVersion": 3, "jest": "1.0.0"}\n', encoding="utf-8")
+        files.append(lockfile)
+    git(repo, "add", *files)
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "node project")
+
+
+def _node_lock_bump_patch(tmp_path: Path, *, extra: str = "") -> Path:
+    patch = tmp_path / "node-lock.patch"
+    patch.write_text(
+        "diff --git a/package-lock.json b/package-lock.json\n"
+        "--- a/package-lock.json\n"
+        "+++ b/package-lock.json\n"
+        "@@ -1 +1 @@\n"
+        '-{"lockfileVersion": 3, "jest": "1.0.0"}\n'
+        '+{"lockfileVersion": 3, "jest": "2.0.0"}\n'
+        "diff --git a/patched_marker.txt b/patched_marker.txt\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/patched_marker.txt\n"
+        "@@ -0,0 +1 @@\n"
+        "+patched\n" + extra,
+        encoding="utf-8",
+    )
+    return patch
+
+
+def _node_reverify(
+    repo: Path, config: SupervisorConfig, patch: Path, bin_dir: Path, log: Path, pin: str
+) -> ReverifyOutcome:
+    return reverify(
+        repo=repo,
+        ref=None,
+        patch_path=patch,
+        commands=[pin],
+        config=config,
+        profile_path=None,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+    )
+
+
+@pytest.mark.parametrize(
+    ("lockfile", "pin", "install"),
+    [
+        ("package-lock.json", "npm test", "npm ci --ignore-scripts"),
+        (
+            "pnpm-lock.yaml",
+            "pnpm test",
+            "pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile",
+        ),
+        ("yarn.lock", "yarn test", "yarn install --frozen-lockfile --ignore-scripts"),
+    ],
+)
+def test_a_node_pin_primes_from_the_baseline_lockfile_then_verifies_offline(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, lockfile: str, pin: str, install: str
+) -> None:
+    """v127-A0 (O12, I2): G10 re-ran `npm test` in a fresh worktree with no
+    node_modules, so every Node patch read NOT CONFIRMED. The baseline
+    lockfile is installed first — lifecycle scripts off, before the patch
+    lands — then the pin runs as before."""
+    _node_project(repo, lockfile)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, pin)
+    assert outcome.outcome == "passed", outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith(f"{install} ") and "patched=no" in lines[0]
+    assert "cache=unset" not in lines[0]  # never the operator's ~/.npm
+    assert lines[1].startswith(f"{pin} ") and "patched=yes" in lines[1]
+    assert "primed from the baseline" in outcome.detail
+    assert len(lines) == 2  # no lockfile change, no second install
+
+
+def test_a_node_lockfile_patch_is_primed_again_after_it_applies(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v127-A0, the v115-F13 twin: a patch that bumps the lockfile is verified
+    against the NEW packages, not the baseline's."""
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(
+        repo, config, _node_lock_bump_patch(tmp_path), bin_dir, log, "npm test"
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    assert "re-primed against the patched lockfile" in outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("npm ci --ignore-scripts ") and "patched=no" in lines[0]
+    assert lines[1].startswith("npm ci --ignore-scripts ") and "patched=yes" in lines[1]
+    assert lines[2].startswith("npm test ") and "patched=yes" in lines[2]
+
+
+def test_a_node_lockfile_patch_that_also_edits_installer_config_is_not_reprimed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """The re-prime has the network. `--ignore-scripts` keeps lifecycle scripts
+    off, but a patched `.yarnrc.yml` (yarnPath) or `.npmrc` would run patch
+    code or reroute the install anyway — so that patch is not re-primed and
+    is never confirmed against the old packages either (I2, I12)."""
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    npmrc = (
+        "diff --git a/.npmrc b/.npmrc\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/.npmrc\n"
+        "@@ -0,0 +1 @@\n"
+        "+ignore-scripts=false\n"
+    )
+    outcome = _node_reverify(
+        repo, config, _node_lock_bump_patch(tmp_path, extra=npmrc), bin_dir, log, "npm test"
+    )
+    assert outcome.outcome == "unavailable"
+    assert ".npmrc" in outcome.detail and "was not run" in outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1 and "patched=no" in lines[0]  # baseline prime only
+
+
+def test_a_node_repo_with_dependencies_and_no_lockfile_is_not_confirmed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """No lockfile, nothing to install from deterministically: the truthful
+    verdict, not a crash and not a re-run against missing node_modules."""
+    _node_project(repo, lockfile=None)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, "npm test")
+    assert outcome.outcome == "unavailable"
+    assert "not confirmed: no lockfile to prime from" in outcome.detail
+    assert not log.exists()  # neither an install nor the pin ran
+
+
+def test_a_dependency_free_node_repo_runs_its_pin_unprimed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """A package.json with no dependencies has nothing to prime — the pin runs
+    exactly as it did before A0."""
+    (repo / "package.json").write_text('{"name": "x"}\n', encoding="utf-8")
+    git(repo, "add", "package.json")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "bare node")
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, "npm test")
+    assert outcome.outcome == "passed", outcome.detail
+    assert log.read_text(encoding="utf-8").splitlines()[0].startswith("npm test ")
+
+
+def test_a_failed_node_prime_is_unavailable_not_patch_guilt(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    (bin_dir / "npm").write_text("#!/bin/sh\necho 'registry down' >&2\nexit 9\n", encoding="utf-8")
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, "npm test")
+    assert outcome.outcome == "unavailable"
+    assert outcome.exit_codes == [9]
+    assert "npm ci --ignore-scripts" in outcome.detail and "was not run" in outcome.detail
+
+
+def test_a_node_lockfile_patch_that_cannot_be_primed_is_unavailable_not_passed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    (bin_dir / "npm").write_text(
+        "#!/bin/sh\n"
+        'echo "npm $*" >> "$NODE_LOG"\n'
+        'if [ -e patched_marker.txt ]; then echo "no tarball for jest 2.0.0" >&2; exit 7; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    outcome = _node_reverify(
+        repo, config, _node_lock_bump_patch(tmp_path), bin_dir, log, "npm test"
+    )
+    assert outcome.outcome == "unavailable"
+    assert outcome.exit_codes == [7]
+    assert "never confirmed against the old dependencies" in outcome.detail
+    assert "no tarball for jest 2.0.0" in outcome.detail
+    assert [line.split()[1] for line in log.read_text(encoding="utf-8").splitlines()] == [
+        "ci",
+        "ci",
+    ]  # the pin never ran
