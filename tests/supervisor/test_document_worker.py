@@ -240,3 +240,38 @@ def test_document_caste_is_registered_in_the_default_config(tmp_path: Path) -> N
     command = config.command_for("document")
     assert command != config.worker_command
     assert command[-2:] == ("-m", "skep.workers.document")
+
+
+def _task_start(workspace: Path) -> dict[str, Any]:
+    (events,) = (workspace / ".events").glob("*.ndjson")
+    lines = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
+    return next(e["payload"] for e in lines if e["type"] == "task.start")
+
+
+def test_v126_f5_the_document_prompt_carries_memory_and_the_audit_says_so(
+    tmp_path: Path,
+) -> None:
+    from skep.worker_contract import MemoryContextEntry
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    task = mint_task(
+        workspace=workspace,
+        instructions="Draft a short greeting.\nMust include: hello",
+        worker_kind="document",
+        permissions=Permissions(read=["workspace"], write=["workspace"], network=[],
+                                env_allowlist=[]),
+        memory=[MemoryContextEntry(memory_id="m1", memory_class="durable_preference",
+                                   content="sign off as Anmol's bot")],
+    )  # fmt: skip
+    task_file = write_task_file(task, tmp_path / "task.json")
+    seen: list[str] = []
+
+    def generate(_task: CodingWorkerTask, messages: list[dict[str, Any]]) -> str:
+        seen.append(str(messages[1]["content"]))
+        return "hello."
+
+    assert run_document_task(task_file, tmp_path / "r.json", generate=generate) == 0
+    assert "- [durable_preference] sign off as Anmol's bot" in seen[0]
+    assert "NOT authority" in seen[0]
+    assert _task_start(workspace)["memory_delivered"] == ["m1"]

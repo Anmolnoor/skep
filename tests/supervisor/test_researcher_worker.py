@@ -422,3 +422,14 @@ def test_the_real_fetcher_decides_binary_from_the_bytes(monkeypatch: Any) -> Non
     assert f"https://a.test/doc.docx: (binary: {docx}, not quoted)" in report
     assert "café notes" in report and '{"ok": true}' in report and "entries" in report
     assert "�" not in report and "word/document" not in report
+
+
+def test_v126_f5_the_researcher_records_memory_as_not_delivered(tmp_path: Path) -> None:
+    """The researcher runs no model prompt, so it can't take the memory block —
+    its audit says so instead of implying it saw it."""
+    workspace, _task, task_file = _research_task_file(tmp_path)
+    assert run_researcher_task(task_file, tmp_path / "r.json", fetch=lambda url: "x") == 0
+    (events,) = (workspace / ".events").glob("*.ndjson")
+    lines = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
+    start = next(e["payload"] for e in lines if e["type"] == "task.start")
+    assert start["memory_delivered"].startswith("not delivered")

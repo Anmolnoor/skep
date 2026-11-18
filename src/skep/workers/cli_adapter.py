@@ -42,6 +42,7 @@ from skep.worker_contract import (
     VerificationOutcome,
     check_supported,
 )
+from skep.workers.worker_runtime import memory_block
 
 EXIT_COMPLETED = 0
 EXIT_INVOCATION_ERROR = 2
@@ -131,6 +132,8 @@ def _task_start_payload(task: CodingWorkerTask, spec: AdapterSpec) -> dict[str, 
         payload["dispatch_decision"] = task.dispatch_decision.model_dump(mode="json")
     if task.landing_decision is not None:
         payload["landing_decision"] = task.landing_decision.model_dump(mode="json")
+    # v126-F5: the audit names the memory that reached the agent's prompt
+    payload["memory_delivered"] = [entry.memory_id for entry in task.memory]
     return payload
 
 
@@ -297,7 +300,10 @@ def _execute(
     stream.emit(EventType.PLAN_CREATED, {"steps": list(spec.plan_steps)})
 
     timeout = task.budget.wall_clock_seconds
-    agent_argv = spec.build_argv(spec.command_from_env(), UNATTENDED_PREAMBLE + task.instructions)
+    # v126-F5: a Claude/Codex run knows what the Queen knows — the same block
+    # the builtin worker gets (worker-written lines already wrapped).
+    prompt = UNATTENDED_PREAMBLE + task.instructions + memory_block(task.memory)
+    agent_argv = spec.build_argv(spec.command_from_env(), prompt)
     agent_proc, agent_record = _run(
         agent_argv, cwd=workspace, timeout=timeout, stream=stream, purpose="agent"
     )
