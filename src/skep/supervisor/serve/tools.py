@@ -24,11 +24,12 @@ from fastapi import HTTPException
 from ..apply import validate_landing_branch
 from ..autonomy import AutonomyDecision
 from ..castes import CASTES, caste_names
+from ..contracts_io import DEFAULT_PERMISSIONS
 from ..engines import engine_names
 from ..memory import MEMORY_CLASSES, MemoryError
 from ..projects import list_projects, project_to_dict
 from ..providers import PROVIDER_COST_CLASSES, PROVIDER_PROTOCOLS
-from ..roles import Role, role_denies_every, role_for_chat
+from ..roles import Delegator, Role, resolve_role, role_denies_every, role_for_chat
 from ..store import ChatSearchHit, RunStore
 from . import actions
 from .jobs import Dispatcher
@@ -1957,7 +1958,16 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "params": {"type": "object", "description": "template placeholder values"},
             "caste": {
                 "type": "string",
-                "enum": ["coding", "audit", "note", "script", "digest", "prompt"],
+                "enum": [
+                    "coding",
+                    "audit",
+                    "researcher",
+                    "document",
+                    "note",
+                    "script",
+                    "digest",
+                    "prompt",
+                ],
                 "description": (
                     "'note' posts the text each tick; 'script' runs the instructions "
                     "as a shell command on the supervisor host and posts its output; "
@@ -1966,6 +1976,12 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                     "instructions as a read-only Queen turn in this chat. None of "
                     "these dispatch a worker; all need the user's confirmation."
                 ),
+            },
+            "network": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "hosts a worker schedule may reach; this chat's role "
+                "drops any it does not allow",
             },
             "once": {
                 "type": "boolean",
@@ -2858,7 +2874,25 @@ def schedule_role_line(
         name = _schedule_role(store, holder, chat_id, "chat-user", args)
     except ValueError:
         return None
-    return None if name is None else f"runs as role {name}: {actions.SCHEDULE_ROLE_NOTE}"
+    if name is None:
+        return None
+    line = f"runs as role {name}: {actions.SCHEDULE_ROLE_NOTE}"
+    hosts = [str(host) for host in args.get("network") or []]
+    try:  # v123-F3: the named hosts, decided as the tick will decide them
+        repo = resolve_repo_arg(str(args.get("repo") or ""), repos_root(holder), store)
+        hop = Delegator(
+            f"schedule:{args.get('name')}@{name}", resolve_role(name, holder.current.home)
+        )
+        held, _, _ = actions.delegate_permissions(
+            holder, store, repo,
+            # only the named hosts: no writes to refuse, no prefixes to judge
+            DEFAULT_PERMISSIONS.model_copy(update={"write": [], "network": hosts}),
+            role=None, delegation_chain=[hop], deferred_asks=False, record=False,
+        )  # fmt: skip
+    except (HTTPException, ValueError, OSError):
+        return line  # the confirm refuses it, saying why
+    dropped = [host for host in hosts if host not in held.network]
+    return f"{line}; drops hosts: {', '.join(dropped)}" if dropped else line
 
 
 def _human_answers(store: RunStore, chat_id: str | None) -> bool:
@@ -5719,6 +5753,7 @@ def _execute_mutation(
                 interval_seconds=interval,
                 chain=schedule_chain,
                 role=schedule_role,
+                chat_id=chat_id,
             )
         else:
             if args.get("instructions") is None:
@@ -5733,6 +5768,9 @@ def _execute_mutation(
                 start_at=None if args.get("start_at") is None else str(args["start_at"]),
                 chain=schedule_chain,
                 role=schedule_role,
+                # v123-F3: its hosts (the role decides each at tick) and its chat
+                network=[str(host) for host in args.get("network") or []],
+                chat_id=chat_id,
             )
         actions.check_schedule_role(holder, store, schedule)
         store.add_schedule(schedule)

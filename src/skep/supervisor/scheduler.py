@@ -348,6 +348,7 @@ def make_template_schedule(
     enabled: bool = True,
     chain: str | None = None,
     role: str | None = None,
+    chat_id: str | None = None,
 ) -> ScheduleRecord:
     """A schedule bound to a template (v3.5): "run template X with these params".
 
@@ -379,6 +380,7 @@ def make_template_schedule(
         params=dict(params),
         chain=chain,
         role=role,
+        chat_id=chat_id,
     )
 
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.scheduler import make_schedule, run_due
@@ -279,7 +280,7 @@ def test_a_builder_chat_coding_schedule_keeps_only_what_its_role_allows(
     config: SupervisorConfig, repo: Path
 ) -> None:
     view = _propose(
-        config, {"repo": str(repo), "instructions": "tidy up"},
+        config, {"repo": str(repo), "instructions": "tidy up", "network": HOSTS},
         chat_role="builder", actor="chat-user",
     )  # fmt: skip
     assert view["role"] == "builder"
@@ -295,11 +296,15 @@ def test_a_builder_chat_coding_schedule_keeps_only_what_its_role_allows(
         run_due(store=store, config=config, now="2099-01-01T00:00:00Z", dispatch=capture)
     finally:
         store.close()
-    # the builder baseline's own grants: the builder role holds every one
+    # the builder baseline's own grants the builder role holds; the named
+    # example.com it only asks for, and a schedule drops asks (v123-F3)
     assert ["uv", "sync"] in captured["permissions"].shell_allowlist
     assert "pypi.org" in captured["permissions"].network
+    assert "example.com" not in captured["permissions"].network
     assert captured["dispatch_decision"].delegation["chain"] == ["schedule:nightly@builder"]
-    assert captured["dispatch_decision"].detail.endswith("delegated by schedule:nightly@builder")
+    note = captured["dispatch_decision"].detail
+    assert "delegated by schedule:nightly@builder; beyond the delegator, dropped: " in note
+    assert note.endswith("network.connect example.com")
 
 
 def test_a_chat_cannot_name_another_role(config: SupervisorConfig, repo: Path) -> None:
@@ -352,5 +357,73 @@ def test_the_card_line_is_absent_when_the_confirm_would_refuse_the_role(
         assert schedule_role_line(store, holder, {**args, "role": "operator"}, chat_id) is None
         assert schedule_role_line(store, holder, {**args, "caste": "note"}, chat_id) is None
         assert schedule_role_line(store, holder, args, None) is None  # no chat, no role
+    finally:
+        store.close()
+
+
+def test_a_chat_created_researcher_schedule_keeps_its_hosts_and_its_chat(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v123-F3 (DD-9): a research schedule from chat stores its hosts and its
+    chat; at tick its role drops the hosts it denies, and the terminal notice
+    reaches the chat."""
+    from types import SimpleNamespace
+
+    from skep.supervisor.serve import run_status
+
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="c", model=None, role="builder").chat_id
+        execute_mutation(
+            "propose_schedule",
+            {"name": "digest-web", "every": "1d", "repo": str(repo), "caste": "researcher",
+             "instructions": "what changed in uv", "network": HOSTS},
+            store=store, holder=ConfigHolder(config, store),
+            runner=None,  # type: ignore[arg-type]
+            actor="chat-user", chat_id=chat_id,
+        )  # fmt: skip
+        stored = store.get_schedule("digest-web")
+        assert stored is not None
+        assert (stored.network, stored.chat_id, stored.role) == (HOSTS, chat_id, "builder")
+        captured: dict[str, Any] = {}
+
+        def dispatch(repo_arg: Path, instructions: str, **kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return SimpleNamespace(record=SimpleNamespace(task_id="t-1", state="failed"))
+
+        monkeypatch.setattr(
+            run_status, "run_terminal_text", lambda *a, **kw: ("research failed: boom", "error")
+        )
+        run_due(store=store, config=config, now="2099-01-01T00:00:00Z", dispatch=dispatch)
+        assert captured["worker_kind"] == "researcher"
+        assert "pypi.org" in captured["permissions"].network
+        assert "example.com" not in captured["permissions"].network
+        said = [m.content for m in store.chat_messages(chat_id)]
+        assert "[digest-web] research failed: boom" in said
+    finally:
+        store.close()
+
+
+def test_the_card_says_which_hosts_the_role_will_drop(
+    config: SupervisorConfig, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.serve.tools import schedule_role_line
+
+    store = RunStore(config.db_path)
+    try:
+        holder = ConfigHolder(config, store)
+        chat_id = store.create_chat(title="c", model=None, role="builder").chat_id
+        args = {"name": "n", "repo": str(repo), "every": "1d", "instructions": "x"}
+        kept = f"runs as role builder: {actions.SCHEDULE_ROLE_NOTE}"
+        line = schedule_role_line(store, holder, {**args, "network": HOSTS}, chat_id)
+        assert line == f"{kept}; drops hosts: example.com"
+        assert schedule_role_line(store, holder, {**args, "network": ["pypi.org"]}, chat_id) == kept
+
+        def refuse(*a: Any, **kw: Any) -> Any:
+            raise HTTPException(status_code=403, detail="baseline tampered")
+
+        monkeypatch.setattr(actions, "delegate_permissions", refuse)
+        # a narrowing that refuses names no hosts: the confirm says why
+        assert schedule_role_line(store, holder, {**args, "network": HOSTS}, chat_id) == kept
     finally:
         store.close()
