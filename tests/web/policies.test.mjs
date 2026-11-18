@@ -240,6 +240,49 @@ test("Now: Test an action asks /api/policy/why and names both verdicts in words"
   assert.match(out, /template:builder\/shell-ask/);
 });
 
+test("Now: Test an action sends the role and a schedule's delegation chain, and shows what why returns", async () => {
+  const { main, app, calls } = withPolicies({
+    "GET /api/schedules": { schedules: [
+      { name: "nightly", worker_kind: "coding", role: "builder", repo: "/r/app" },
+      { name: "backup", worker_kind: "script", role: null, repo: "/r/app" },
+    ] },
+    "GET /api/policy/why": {
+      run: {
+        verdict: "require_approval", decided_by: "delegation:schedule:nightly@builder/role:builder/shell-ask",
+        considered: [
+          { verdict: "allow", rule_id: "shell-uv-sync", action: "run", pattern: "uv sync", layer: "template:builder", description: "Lets a worker install the locked dependencies." },
+          { verdict: "require_approval", rule_id: "shell:uv", action: "run", pattern: "uv", layer: null },
+        ],
+      },
+      operator: { verdict: "deny", decided_by: "floor" },
+      baseline: "b",
+      role: { name: "assistant", layer: "role:assistant", verdict: null, decided_by: null, note: "role:assistant sits under the baseline and only tightens: it has no rule for this" },
+      delegation: { chain: ["schedule:nightly@builder"], delegator: "schedule:nightly@builder", held: { run: null, operator: null }, note: "delegated by schedule:nightly@builder: the delegatee holds no more" },
+    },
+  });
+  await app.viewPolicies(main);
+  await flush();
+  const box = panel(main).querySelector(".policy-test");
+  const [project, scope, role, schedule] = box.querySelectorAll("select");
+  // Roles from /api/roles; only schedules that run as a role can delegate.
+  assert.deepEqual(role.children.map(o => o.getAttribute("value")), ["", "builder", "assistant"]);
+  assert.deepEqual(schedule.children.map(o => o.getAttribute("value")), ["", "nightly"]);
+  assert.match(schedule.children[1].textContent, /nightly.*builder/);
+  const [action, value] = box.querySelectorAll("input");
+  project.value = "app"; scope.value = "shell"; action.value = "run"; value.value = "uv sync";
+  role.value = "assistant"; schedule.value = "nightly";
+  await box.querySelector("button").click();
+  assert.ok(calls.some(([, p]) => p === "/api/policy/why?repo=%2Fr%2Fapp&scope=shell&action=run&value=uv%20sync"
+    + "&role=assistant&delegation_chain=schedule%3Anightly%40builder"), calls.map(c => c[1]).join("\n"));
+  const out = box.querySelector(".policy-test-out").textContent;
+  assert.match(out, /role:assistant sits under the baseline/);
+  assert.match(out, /delegated by schedule:nightly@builder/);
+  const considered = box.querySelectorAll(".policy-tree-rule").map(n => n.textContent);
+  assert.equal(considered.length, 2);
+  assert.match(considered[0], /allow.*uv sync.*shell-uv-sync.*template:builder.*Lets a worker install the locked dependencies\./s);
+  assert.match(considered[1], /ask.*shell:uv.*No description/s);
+});
+
 test("Decisions: summary counts, newest-first rows, a verdict filter, and an empty state", async () => {
   const rows = [
     { at: "2026-11-18T10:00:00Z", actor: "acp:claude", scope: "shell", action: "run", value: "rm -rf /", verdict: "deny", decided_by: "floor" },

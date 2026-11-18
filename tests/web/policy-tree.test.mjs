@@ -241,3 +241,23 @@ test("keyboard: arrows move, Right opens, Left closes, Enter opens a leaf", asyn
   const schedulesNode = empty.main.querySelectorAll(".policy-tree-branch").find(n => n.getAttribute("data-key") === "Schedules");
   assert.equal(schedulesNode.getAttribute("tabindex"), "0");
 });
+
+test("a scope·action leaf offers Test an action, preset to that scope and action", async () => {
+  const { main, calls } = await openTree({
+    "GET /api/policy/why": { run: { verdict: "allow", decided_by: "template:builder/shell-uv-sync", considered: [] }, operator: { verdict: "allow", decided_by: "x" }, baseline: "b" },
+  });
+  await pick(main, "shell.run");
+  const button = detail(main).querySelectorAll("button").find(b => b.textContent === "Test this");
+  assert.ok(button);
+  await button.click();
+  await flush();
+  const box = detail(main).querySelector(".policy-test");
+  assert.ok(box);
+  const [, scope] = box.querySelectorAll("select");
+  const [action, value] = box.querySelectorAll("input");
+  assert.equal(scope.value, "shell");
+  assert.equal(action.value, "run");
+  value.value = "uv sync";
+  await box.querySelectorAll("button").find(b => b.textContent === "Check").click();
+  assert.ok(calls.some(([, p]) => p === "/api/policy/why?repo=%2Fr%2Fapp&scope=shell&action=run&value=uv%20sync"));
+});
