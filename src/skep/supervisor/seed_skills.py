@@ -60,6 +60,11 @@ LEGACY_SHIPPED: dict[str, frozenset[str]] = {
             "30ae6ceaae7b388bf45b481d5bc0bd3091aa86bd6f9502a5ba03ac5f6d4d68d1",  # v122-F1
         }
     ),
+    # v126-F9 rewrote both to MCP-only; these are their v1.0.1 texts.
+    "notion": frozenset({"e78ce06057114b70e77e48e53be8b12c35c56fcd9b1f3168da726ffc39813a01"}),
+    "google-workspace": frozenset(
+        {"070276b40b9607fb95ff3e6c4ed06c81d103b8d204faded85b016b5f80e2a43c"}
+    ),
 }
 
 

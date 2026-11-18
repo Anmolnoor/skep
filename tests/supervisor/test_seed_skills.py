@@ -602,3 +602,56 @@ def test_skill_seed_refresh_takes_the_shipped_text(
         ] * 3
     finally:
         store.close()
+
+
+# v126-F9: the shelf is credited, and every recipe can run where it is bound.
+
+
+def test_the_notice_credits_hermes_agent() -> None:
+    root = seeds_root().parents[2].parent  # src/skep/seeds/skills -> repo root
+    notice = (root / "NOTICE").read_text(encoding="utf-8")
+    assert "Hermes Agent" in notice and "2025 Nous Research" in notice and "MIT" in notice
+    license_text = (seeds_root().parent / "LICENSE-hermes-agent.txt").read_text(encoding="utf-8")
+    assert "Copyright (c) 2025 Nous Research" in license_text
+
+
+def test_a_chat_recipe_seed_is_refused_for_worker_binding(tmp_path: Path) -> None:
+    from skep.supervisor.scheduler import make_template_schedule
+    from skep.supervisor.templates import TemplateError, instantiate, is_chat_recipe
+
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        load_seed_skills(store)
+        recipe = store.get_template("notion")
+        assert recipe is not None and is_chat_recipe(recipe)
+        with pytest.raises(TemplateError, match="Queen chat recipe") as refused:
+            instantiate(recipe, repo=str(tmp_path))
+        assert "caste 'prompt'" in str(refused.value)  # it teaches the lane that works
+        with pytest.raises(TemplateError, match="Queen chat recipe"):
+            make_template_schedule(
+                name="nightly-notion",
+                template=recipe,
+                params={},
+                repo=tmp_path,
+                interval_seconds=3600,
+            )
+    finally:
+        store.close()
+    # The marker is the seed's own Tools: line, not the word "seed": an
+    # operator template with the same text still runs on a worker.
+    mine = WorkflowTemplate(name="mine", instructions="Tools: read_url\n\nDo it.")
+    assert not is_chat_recipe(mine)
+    assert instantiate(mine, repo=str(tmp_path)).instructions.startswith("Tools:")
+
+
+def test_notion_and_google_workspace_are_mcp_only() -> None:
+    for name in ("notion", "google-workspace"):
+        body = (seeds_root() / name / "SKILL.md").read_text(encoding="utf-8")
+        assert "MCP-only" in body, name
+        # read_url sends no headers or auth: the seed must not lean on it.
+        assert "allow_fetch_domain" not in body, name
+        assert "Notion-Version" not in body and "header" not in body.lower().replace(
+            "sends no headers", ""
+        ), name
+        tools_line = next(line for line in body.splitlines() if line.startswith("Tools:"))
+        assert "read_url" not in tools_line, name

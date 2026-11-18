@@ -169,6 +169,16 @@ def resolve_params(template: WorkflowTemplate, params: Mapping[str, str]) -> dic
     return resolved
 
 
+# v126-F9: a seed that declares Queen `Tools:` is a chat recipe — the Queen
+# follows it with her own tools. A worker has none of them, so binding one
+# to a worker run or a worker schedule dispatches a task that cannot work.
+_QUEEN_TOOLS_LINE = re.compile(r"^Tools: ", re.MULTILINE)
+
+
+def is_chat_recipe(template: WorkflowTemplate) -> bool:
+    return template.provenance == "seed" and bool(_QUEEN_TOOLS_LINE.search(template.instructions))
+
+
 def instantiate(
     template: WorkflowTemplate,
     params: Mapping[str, str] | None = None,
@@ -181,8 +191,18 @@ def instantiate(
     ``repo``/``ref`` override the template's defaults (the target a schedule or
     ``run`` aims at). Raises ``TemplateError`` if the template is inconsistent,
     a required parameter is missing, an unknown one is passed, or no repo resolves.
+    Every worker run and worker schedule built from a template comes through
+    here, so a chat recipe (v126-F9) is refused here once.
     """
     validate_template(template)
+    if is_chat_recipe(template):
+        raise TemplateError(
+            f"skill {template.name!r} is a Queen chat recipe (it lists Queen Tools:), "
+            "not a worker task — a worker cannot call those tools. Follow it in chat "
+            f"(view_skill {template.name}), or to run it on a timer use a prompt "
+            f"schedule: propose_schedule with caste 'prompt' and instructions like "
+            f"'follow the {template.name} skill'."
+        )
     values = resolve_params(template, params or {})
     instructions = substitute(template.instructions, values)
     target_repo = repo if repo is not None else template.repo
