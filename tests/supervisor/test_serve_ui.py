@@ -708,7 +708,11 @@ def test_projects_ui_exposes_pack_setup_flow() -> None:
     assert 'api("POST", "/api/projects/setup", body)' in source
     assert "project_id: projectId.value.trim()" in source
     assert "seed_default_schedules: seedSchedules.checked" in source
-    assert 'href="#/projects" data-ws="projects">Projects</a>' in index
+    # Graphite round A: the sidebar's one Settings link stands for Projects,
+    # and #/projects… lights it.
+    assert 'href="#/settings" data-ws="settings" title="Settings">Settings</a>' in index
+    assert 'data-ws="projects"' not in index
+    assert "/^#\\/(settings|projects|setup)\\b/" in source
 
 
 def test_projects_ui_supports_pack_preview_before_save() -> None:
@@ -737,7 +741,10 @@ def test_setup_ui_route_and_guard() -> None:
     assert 'hash === "#/setup" || hash === "#/settings"' in source
     assert 'location.hash = "#/setup"' in source
     assert "setup.missing" in source
-    assert 'href="#/setup" data-ws="setup">Setup</a>' in index
+    # Graphite round A: Setup is a Settings tab — no sidebar link of its own;
+    # the gate's #/setup lands on the Settings page, which it allows.
+    assert 'data-ws="setup"' not in index
+    assert 'href="#/settings" data-ws="settings"' in index
 
 
 def test_setup_ui_orchestrates_first_run_endpoints() -> None:
@@ -1288,10 +1295,12 @@ def test_v75_foundation_tokens_helpers_and_rail_groups() -> None:
         assert token_name in css, token_name
 
     # The groups wrap the pinned anchors without touching them. H1: the daily
-    # pair on top; the old workspaces fold into Runs / Library / Settings.
+    # pair on top; the old workspaces fold into Runs / Library. Graphite round
+    # A: Settings collapsed to one link (Projects and Setup are its tabs).
     assert 'class="rail-group" data-group="daily"' in index
-    for group in ("runs", "library", "settings"):
+    for group in ("runs", "library"):
         assert f'<details class="rail-group" data-group="{group}">' in index
+    assert 'data-group="settings"' not in index
     assert ".rail-group" in css
 
     # The shared helpers exist; the tab bar persists panels across switches

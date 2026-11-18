@@ -56,12 +56,9 @@
           <a href="#/memory" data-ws="memory" title="Memory">Memory <span id="memory-badge" class="badge hidden"></span></a>
         </details>
         <a href="#/policies" data-ws="policies" title="Policies">Policies</a>
-        <details class="rail-group" data-group="settings">
-          <summary>Settings</summary>
-          <a href="#/settings" data-ws="settings" title="Settings">Settings</a>
-          <a title="Projects" href="#/projects" data-ws="projects">Projects</a>
-          <a title="Setup" href="#/setup" data-ws="setup">Setup</a>
-        </details>
+        <!-- Graphite round A: one Settings link. Projects and Setup are its
+             tabs; #/projects… and #/setup light it (setShellActiveRoute). -->
+        <a href="#/settings" data-ws="settings" title="Settings">Settings</a>
       </div>
     </nav>
 
