@@ -264,3 +264,27 @@ test("every other scope·action names the workers' answer in the project and the
   await pick(main, "shell.run");
   assert.deepEqual(states(main), ["The locked baseline: Configured: allow / ask"]);
 });
+
+// v124 review (F2, I8): what a schedule's network really is (scheduler.run_due):
+// a script runs via /bin/sh as you; a bound worker's empty list takes the
+// project's default_network; an unbound repo runs on the global defaults.
+test("schedule leaves say what network and policy each kind really runs under", async () => {
+  const { main } = await openTree();
+  let text = await pick(main, "schedule:nightly");
+  assert.match(text, /Extra hosts requested: none \(the project's default_network applies\)/);
+  assert.doesNotMatch(text, /Network: none/);
+  text = await pick(main, "schedule:extra");
+  assert.match(text, /Extra hosts requested: example\.com, on top of the project's default_network/);
+  assert.match(text, /No role: its workers run under app's policy alone/);
+  text = await pick(main, "schedule:stray");
+  assert.match(text, /No role: its repo is bound to no project, so its workers run on the global defaults/);
+  assert.doesNotMatch(text, /project's policy/);
+  assert.match(text, /Network: none — no project adds any/);
+  text = await pick(main, "schedule:backup");
+  assert.match(text, /No role: the script runs as you/);
+  assert.match(text, /Network: yours — the script runs via \/bin\/sh as you, outside every policy/);
+  for (const name of ["morning", "memo", "digest"]) {
+    text = await pick(main, `schedule:${name}`);
+    assert.doesNotMatch(text, /Network|hosts/, name);
+  }
+});

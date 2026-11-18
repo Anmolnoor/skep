@@ -1064,14 +1064,32 @@ function keyLeafDetail(key, ctx) {
   ];
 }
 
+// What a schedule's network really is (scheduler.run_due): a script runs via
+// /bin/sh as you; a worker in a bound repo adds its hosts to the project's
+// default_network (none listed: that list alone); an unbound repo's worker
+// gets only its own list. Notes, digests and prompts reach no network here.
+function scheduleNetwork(s, project) {
+  if (s.worker_kind === "script") return fact("Network", "yours — the script runs via /bin/sh as you, outside every policy");
+  if (SCHEDULE_NO_ROLE[s.worker_kind]) return null;
+  if (project) {
+    return fact("Extra hosts requested", s.network.length
+      ? `${plainValue(s.network)}, on top of the project's default_network`
+      : "none (the project's default_network applies)");
+  }
+  return fact("Network", `${plainValue(s.network)} — no project adds any`);
+}
+
 function scheduleLeafDetail(s) {
+  const project = s.project_context?.name;
+  const roleless = SCHEDULE_NO_ROLE[s.worker_kind]
+    || (project ? `its workers run under ${project}'s policy alone`
+      : "its repo is bound to no project, so its workers run on the global defaults");
   return [
     el("h3", { class: "mono" }, s.name),
     fact("Kind", s.worker_kind),
-    s.role ? fact("Role", el("strong", {}, s.role))
-      : el("p", {}, `No role: ${SCHEDULE_NO_ROLE[s.worker_kind] || "its workers run under the project's policy alone"}`),
+    s.role ? fact("Role", el("strong", {}, s.role)) : el("p", {}, `No role: ${roleless}`),
     s.role_note ? el("p", { class: "field-help" }, s.role_note) : null,
-    fact("Network", plainValue(s.network)),
+    scheduleNetwork(s, project),
     fact("Repo", el("span", { class: "mono" }, s.repo)),
     editLink("#/schedules", "Manage it in Schedules →"),
   ];
