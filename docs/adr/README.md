@@ -67,3 +67,4 @@ touches.
 | [0061](0061-unlocked-mode.md) | Unlocked mode on policy v3: a zero-ask project as one step inside decide() |
 | [0062](0062-provider-key-relay.md) | The provider-key relay: the worker never holds the provider key (V6b; behind a kill switch, default off) |
 | [0063](0063-codex-login-provider.md) | The Queen on a ChatGPT plan: the Codex login as a provider credential, Queen only (v118) |
+| [0066](0066-sandbox-by-default.md) | New projects run sandboxed when the host can sandbox; stored modes are carried forward (v127-F8) |

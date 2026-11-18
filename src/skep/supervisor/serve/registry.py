@@ -660,6 +660,44 @@ def _coerce_auto_apply_default(policy: dict[str, Any], notes: list[str]) -> None
     )
 
 
+# v127-F8: the probe behind a new project's default mode, by its own name so
+# the suite can pin it (tests/conftest.py) without touching the unlocked guard.
+new_project_sandbox_probe = sandbox_availability
+
+
+def _default_execution_mode(
+    run_store: RunStore,
+    *,
+    project_id: str,
+    policy: dict[str, Any],
+    overrides: dict[str, Any],
+    notes: list[str],
+) -> None:
+    """v127-F8 (ADR 0066): a NEW project runs sandboxed when the host can
+    sandbox. An explicit mode wins; an existing project keeps its stored mode
+    (a re-setup or phase change would otherwise re-derive the strategy
+    default over it). Never downgrades a pack's own ``sandbox``."""
+    key = "default_execution_mode"
+    if key in overrides:
+        return
+    stored = run_store.get_project_policy(project_id)
+    if stored is not None:
+        if key in stored.policy:
+            policy[key] = stored.policy[key]
+        return
+    if policy.get(key, "workspace") != "workspace":
+        return
+    probe = new_project_sandbox_probe()
+    if probe.usable:
+        policy[key] = "sandbox"
+        return
+    notes.append(
+        "workers run unsandboxed (workspace): this host has no usable sandbox "
+        f"({probe.reason or 'unavailable'}: {probe.detail or 'no detail'}). Fix it "
+        "(`skep doctor`), then `skep project setup <repo> --execution-mode sandbox`."
+    )
+
+
 def _persist_project(run_store: RunStore, project: Any) -> dict[str, Any]:
     block = unlocked_block_reason(run_store, project.policy) or auto_apply_block_reason(
         project.policy
@@ -1060,6 +1098,14 @@ def setup_project_record(
     )
     base_policy.update(policy_overrides or {})
     supplied = list(bindings)
+    notes: list[str] = []
+    _default_execution_mode(
+        run_store,
+        project_id=project_id,
+        policy=base_policy,
+        overrides=policy_overrides or {},
+        notes=notes,
+    )
     base_policy, bindings = _carry_forward_existing(
         run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
     )
@@ -1070,7 +1116,6 @@ def setup_project_record(
         seed_dir = _seed_repo_dir(root, repo_path, repo_slug)
         seeded_shell_commands = _merge_shell_seeds(base_policy, seed_dir)
         seeded_verify_command = _merge_verify_seed(base_policy, seed_dir)
-    notes: list[str] = []
     if "auto_apply_verified_patch" not in (policy_overrides or {}):
         _coerce_auto_apply_default(base_policy, notes)
     try:
@@ -1216,6 +1261,9 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
     if pinned_verify and not policy.get("verify_command"):
         policy["verify_command"] = pinned_verify
     notes: list[str] = []
+    _default_execution_mode(
+        run_store, project_id=project_id, policy=policy, overrides={}, notes=notes
+    )
     _coerce_auto_apply_default(policy, notes)
     try:
         updated = validate_project_definition(
@@ -1289,6 +1337,14 @@ def preview_project_setup(
     # The preview must show what setup will actually write, carry-forward and
     # all — v94-F6's lesson, where the preview said "none detected" for the very
     # pin it had just inferred.
+    notes: list[str] = []
+    _default_execution_mode(
+        run_store,
+        project_id=project_id,
+        policy=base_policy,
+        overrides=policy_overrides,
+        notes=notes,
+    )
     base_policy, bindings = _carry_forward_existing(
         run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
     )
@@ -1299,7 +1355,6 @@ def preview_project_setup(
         seed_dir = _seed_repo_dir(root, repo_path, repo_slug)
         seeded_shell_commands = _merge_shell_seeds(base_policy, seed_dir)
         seeded_verify_command = _merge_verify_seed(base_policy, seed_dir)
-    notes: list[str] = []
     if "auto_apply_verified_patch" not in policy_overrides:
         _coerce_auto_apply_default(base_policy, notes)
     block = auto_apply_block_reason(base_policy)

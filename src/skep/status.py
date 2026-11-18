@@ -49,6 +49,7 @@ def build_status(
             + _auto_approve_advisories(home)
             + _browse_advisories(home)
             + _verify_pin_advisories(home)
+            + _workspace_mode_advisories(home)
             + _repo_registry_advisories(home)
             + _stale_store_advisories(home)
             + _model_truth_advisories(home)
@@ -89,6 +90,7 @@ def build_status(
         + _auto_approve_advisories(home)
         + _browse_advisories(home)
         + _verify_pin_advisories(home)
+        + _workspace_mode_advisories(home)
         + _repo_registry_advisories(home)
         + _stale_store_advisories(home)
         + _model_truth_advisories(home)
@@ -731,6 +733,32 @@ def _verify_pin_advisories(home: Path) -> list[str]:
             '`skep project setup <repo> --verify-command "<runnable command>"`.'
         )
     return advisories
+
+
+def _workspace_mode_advisories(home: Path) -> list[str]:
+    """v127-F8 (ADR 0066): new projects default to the sandbox; existing ones
+    keep their stored mode, so name the ones still running unsandboxed."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path, readonly=True)
+    try:
+        workspace = sorted(
+            record.project_id
+            for record in store.list_project_policies()
+            if record.policy.get("default_execution_mode") == "workspace"
+        )
+    finally:
+        store.close()
+    if not workspace:
+        return []
+    return [
+        f"{len(workspace)} project(s) run workers unsandboxed (workspace): "
+        f"{', '.join(workspace)}. Move one into the sandbox: `skep project setup <repo> "
+        f"--project-id {workspace[0]} --execution-mode sandbox`."
+    ]
 
 
 def _repo_registry_advisories(home: Path) -> list[str]:

@@ -2531,6 +2531,9 @@ def _project_policy_overrides(args: argparse.Namespace) -> dict[str, Any]:
     unlocked = getattr(args, "unlocked", None)
     if unlocked is not None:
         overrides["unlocked"] = bool(unlocked)
+    execution_mode = getattr(args, "execution_mode", None)
+    if execution_mode:  # v127-F8: the doctor's fix line needs a CLI face
+        overrides["default_execution_mode"] = execution_mode
     return overrides
 
 
@@ -3831,6 +3834,13 @@ def register_supervisor_commands(
         "refresh token (ES-F121; `skep doctor` shows the login); "
         "--no-codex-chatgpt-login turns it off",
     )
+    project_preview.add_argument(
+        "--execution-mode",
+        choices=("sandbox", "workspace"),
+        default=None,
+        help="where this project's workers run (v127-F8, ADR 0066): a new project "
+        "defaults to sandbox when this host can sandbox; an existing one keeps its own",
+    )
     project_preview.set_defaults(func=cmd_project_preview)
 
     project_setup = project_sub.add_parser("setup", help="save a project policy setup")
@@ -3904,6 +3914,13 @@ def register_supervisor_commands(
         "lands on skep/*; denies, named asks and the floor still hold. Needs a pinned "
         "verify command, a usable sandbox and an approved baseline; --no-unlocked "
         "turns it off",
+    )
+    project_setup.add_argument(
+        "--execution-mode",
+        choices=("sandbox", "workspace"),
+        default=None,
+        help="where this project's workers run (v127-F8, ADR 0066): a new project "
+        "defaults to sandbox when this host can sandbox; an existing one keeps its own",
     )
     project_setup.set_defaults(func=cmd_project_setup)
 
