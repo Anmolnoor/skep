@@ -3332,7 +3332,7 @@ def _draft_excerpt(artifacts: list[dict[str, Any]]) -> str | None:
             a
             for a in artifacts
             if a.get("kind") == "file"
-            and str(a.get("path") or "").endswith(("draft.md", "report.md"))
+            and Path(str(a.get("path") or "")).name in ("draft.md", "report.md")
         ),
         None,
     )
