@@ -2622,11 +2622,14 @@ def schedule_view(store: RunStore, schedule: Any) -> dict[str, Any]:
 
 
 # v123-F1 (DD-7): what a schedule's role narrows and what it does not, in the
-# words every card and view uses (I8).
+# words every card and view uses (I8). The untouched list is every
+# Permissions field ``_within_delegation`` leaves as it is (v123 review).
 SCHEDULE_ROLE_NOTE = (
     "the role narrows shell prefixes, network hosts and workspace writes, not "
-    "env_allowlist, execution mode, auto-apply or the budget; asks are dropped on a "
-    "schedule: only what the role allows is kept"
+    "env_allowlist, execution mode, auto-apply, the budget, allow_git_mutation, "
+    "loopback_ports, allowed_tools or allowed_plugin_risks; what lies beyond the role is "
+    "dropped from its grants: a host beyond it is denied, a command beyond it stops at a "
+    "gate for you"
 )
 # The kinds that dispatch no worker, so no role has anything to narrow.
 ROLELESS_SCHEDULE_KINDS = ("script", "prompt", "note", "digest")

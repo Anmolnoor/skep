@@ -166,7 +166,22 @@ def test_a_worker_schedule_card_says_its_role_and_what_the_role_narrows(live: An
     assert card["card"]["schedule"]["runs"] == runs
     (pending,) = env.store.pending_chat_actions(chat)
     assert pending.card is not None and pending.card["schedule"]["runs"] == runs
-    assert "asks are dropped on a schedule" in runs and "not env_allowlist" in runs
+    assert "dropped from its grants" in runs and "env_allowlist" in runs
+
+
+def test_the_role_note_names_everything_a_role_leaves_untouched() -> None:
+    """v123-F1 review (I8): the note's list of what a role does not touch is
+    complete — every Permissions field ``delegate_permissions`` leaves as it
+    is — and says truly what happens to what lies beyond the role."""
+    from skep.supervisor.serve.actions import SCHEDULE_ROLE_NOTE
+
+    for untouched in ("env_allowlist", "execution mode", "auto-apply", "the budget",
+                      "allow_git_mutation", "loopback_ports", "allowed_tools",
+                      "allowed_plugin_risks"):  # fmt: skip
+        assert untouched in SCHEDULE_ROLE_NOTE, untouched
+    assert "asks are dropped on a schedule" not in SCHEDULE_ROLE_NOTE
+    assert "dropped from its grants" in SCHEDULE_ROLE_NOTE
+    assert "a command beyond it stops at a gate for you" in SCHEDULE_ROLE_NOTE
 
 
 @pytest.mark.parametrize("role", ["assistant", None])
