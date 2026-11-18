@@ -2,13 +2,18 @@
 // so its render functions run under `node --test` — no npm, no jsdom. The
 // boot section (connect, route, poll) is cut off; everything above it is
 // plain function/const declarations plus three listener registrations.
+// H1: the modules app.js imports (sidebar.js, room.js) load into the same
+// context with their import/export lines blanked, so both sides of the import
+// cycle resolve to the one set of globals a test can stub.
 // ponytail: the fake DOM covers what app.js's render paths touch (el(),
 // append, textContent, listeners, a class/tag querySelectorAll); grow it when
 // a test reaches for more.
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-const APP = new URL("../../src/skep/supervisor/serve/static/app.js", import.meta.url);
+const STATIC = new URL("../../src/skep/supervisor/serve/static/", import.meta.url);
+// Blank, never delete, so line numbers in a stack trace stay true.
+const unmodule = text => text.replace(/^import .*$/gm, "").replace(/^export /gm, "");
 
 class FakeNode {
   constructor(tag) {
@@ -43,11 +48,12 @@ class FakeNode {
     for (const n of nodes) this.children.push(typeof n === "object" ? n : new FakeText(n));
   }
   appendChild(node) { this.append(node); return node; }
+  replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
   get textContent() { return this._text ?? this.children.map(c => c.textContent).join(""); }
   set textContent(value) { this._text = String(value); this.children = []; }
   // Fire listeners and wait for any async handler, so a test can assert after.
   async click() {
-    await Promise.all((this.listeners.click || []).map(fn => fn({ target: this, preventDefault() {} })));
+    await Promise.all((this.listeners.click || []).map(fn => fn({ target: this, preventDefault() {}, stopPropagation() {} })));
   }
   // ".cls" or "tag" only — enough to find a card's parts.
   querySelectorAll(selector) {
@@ -67,7 +73,7 @@ class FakeText {
 }
 
 export function loadApp() {
-  const source = readFileSync(APP, "utf8");
+  const source = readFileSync(new URL("app.js", STATIC), "utf8");
   const cut = source.indexOf("// ---------- boot ----------");
   if (cut < 0) throw new Error("app.js boot marker moved — update tests/web/harness.mjs");
   const document = {
@@ -94,7 +100,12 @@ export function loadApp() {
     console, setTimeout, clearTimeout, URL, URLSearchParams,
   });
   context.window = context;
-  vm.runInContext(source.slice(0, cut), context, { filename: "app.js" });
+  // Imported modules first, as the browser evaluates them: app.js's top level
+  // (the routes table) names their functions; they name app.js's only in calls.
+  for (const [, name] of source.matchAll(/^import .* from "\.\/([\w-]+\.js)";$/gm)) {
+    vm.runInContext(unmodule(readFileSync(new URL(name, STATIC), "utf8")), context, { filename: name });
+  }
+  vm.runInContext(unmodule(source.slice(0, cut)), context, { filename: "app.js" });
   // Every network call fails loudly unless a test stubs the route it expects.
   context.api = async (method, path) => { throw new Error(`unstubbed api ${method} ${path}`); };
   context.flashes = [];

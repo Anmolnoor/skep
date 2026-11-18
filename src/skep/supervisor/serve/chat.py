@@ -29,6 +29,7 @@ import threading
 import time
 import uuid
 import weakref
+from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -39,6 +40,8 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
+
+from skep.worker_contract import TERMINAL_STATES, TaskState
 
 from ..codex_login import QUEEN_LOGIN_NAME
 from ..roles import ROLE_LESS_CHAT_ROLE
@@ -3582,7 +3585,49 @@ def add_chat_routes(
 
     @app.get("/api/chats")
     def list_chats() -> dict[str, Any]:
-        return {"chats": [asdict(c) for c in run_store.list_chats()]}
+        """H1 (hive-rooms C9): each row carries what the sidebar's status dot
+        needs — cards waiting, runs this chat dispatched that are still live,
+        and whether a turn holds the chat's lock right now."""
+        cards = Counter(a.chat_id for a in run_store.proposed_chat_actions())
+        live = [s.value for s in TaskState if s not in TERMINAL_STATES]
+        runs = Counter(run_store.chat_for_task(r.task_id) for r in run_store.runs_with_states(live))
+        return {
+            "chats": [
+                {
+                    **asdict(c),
+                    "pending_cards": cards[c.chat_id],
+                    "active_runs": runs[c.chat_id],
+                    "turn_active": bool((lock := _TURN_LOCKS.get(c.chat_id)) and lock.locked()),
+                }
+                for c in run_store.list_chats()
+            ]
+        }
+
+    @app.get("/api/inbox")
+    def inbox() -> dict[str, Any]:
+        """H1 (hive-rooms C9): everything waiting on the operator, across
+        threads — read-only; each item is resolved where it lives. A gate the
+        chat already mirrors as an approve_review card (v87-F2) is listed once,
+        as that card."""
+        titles = {c.chat_id: c.title for c in run_store.list_chats()}
+        cards = run_store.proposed_chat_actions()
+        mirrored = {a.args.get("review_id") for a in cards if a.tool == "approve_review"}
+        return {
+            "cards": [
+                {
+                    "action_id": a.action_id,
+                    "chat_id": a.chat_id,
+                    "chat_title": titles.get(a.chat_id, a.chat_id),
+                    "tool": a.tool,
+                    "source": a.source,
+                    "created_at": a.created_at,
+                }
+                for a in cards
+            ],
+            "approvals": [
+                asdict(a) for a in run_store.pending_approvals() if a.review_id not in mirrored
+            ],
+        }
 
     @app.post("/api/chats", status_code=201)
     def create_chat(body: ChatCreate) -> dict[str, Any]:

@@ -75,8 +75,9 @@ def test_ui_selects_offer_every_protocol() -> None:
     source = (STATIC_DIR / "app.js").read_text()
     for protocol in get_args(LLMProtocol):
         needle = f'el("option", {{ value: "{protocol}" }}'
-        # Two protocol <select> blocks: the setup wizard and Settings.
-        assert source.count(needle) >= 2, f"{protocol!r} missing from a protocol <select>"
+        # Graphite round A: one protocol <select> — Settings → Models. The
+        # setup wizard's copy left with the duplicate LLM card.
+        assert source.count(needle) >= 1, f"{protocol!r} missing from a protocol <select>"
 
 
 def test_chat_tool_enum_and_prose_follow_the_literal() -> None:

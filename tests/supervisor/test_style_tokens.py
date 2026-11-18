@@ -143,6 +143,54 @@ def test_text_tokens_clear_aa_on_every_surface_they_are_painted_on() -> None:
     assert not failures, f"below AA (4.5:1): {failures}"
 
 
+def test_policy_verdict_words_clear_aa_on_the_canvas() -> None:
+    """Graphite round A: the Policies page writes its verdict words (allowed,
+    asks first, denied) in the status colours, straight on the canvas — its
+    cards are hairlines with no fill. Each must clear 4.5:1 there."""
+    tokens = _tokens()
+    css = _css()
+    for verdict, token in (("allow", "--ok"), ("ask", "--warn"), ("deny", "--bad")):
+        assert f".verdict-{verdict} {{ color: var({token}); }}" in css
+        assert _contrast(tokens[token], tokens["--bg"]) >= 4.5, token
+    assert ".verdict-note { color: var(--muted); }" in css
+
+
+def test_setup_checklist_marks_clear_aa_on_the_canvas() -> None:
+    """Graphite round A: the Setup checklist paints its row marks in status
+    colour (.setup-mark.done in --ok, .relock in --warn) on the canvas, inside
+    the tab panel. The mark is never the only signal (the row says "done" /
+    "re-lock needed"), but text it is, so it clears the same bar."""
+    css = _css()
+    assert ".setup-mark.done { color: var(--ok); }" in css
+    assert ".setup-mark.relock { color: var(--warn); }" in css
+    tokens = _tokens()
+    for fg in ("--ok", "--warn"):
+        assert _contrast(tokens[fg], tokens["--bg"]) >= 4.5, fg
+
+
+def test_the_palette_is_graphite() -> None:
+    """H1-G1: the operator chose "A · Graphite" (skep-design
+    plans/hive-rooms/design-graphite.html, theme a) after seeing H1 keep the
+    warm brown-black, cream and green. Pinned so a later pass cannot drift the
+    canvas back to a hue: neutral greys, a white primary, and colour that means
+    a status — green ok, amber waiting on you — never decoration."""
+    tokens = _tokens()
+    assert tokens["--bg"] == "#0f1011"
+    assert tokens["--chrome"] == "#0b0c0d"  # the sidebar
+    assert tokens["--panel"] == "#17181a"  # the raised surface
+    assert tokens["--text"] == "#ececed"
+    assert tokens["--muted"] == "#85888e"
+    assert tokens["--ok"] == "#3ecf8e"
+    assert tokens["--warn"] == "#f0b23e"
+    # The primary button is white with canvas-coloured text, and the accent
+    # that used to be the hive green is that white: not a status colour.
+    assert tokens["--accent"] == "#ececed"
+    assert tokens["--on-accent"] == tokens["--bg"]
+    assert tokens["--accent"] not in {tokens["--ok"], tokens["--warn"], tokens["--bad"]}
+    root = _css().split(":root {", 1)[1].split("\n}", 1)[0]
+    assert "--border-soft: rgba(255, 255, 255, .075);" in root  # the hairline
+
+
 def test_muted_2_stays_a_step_below_muted() -> None:
     """Legibility is not the only requirement — tertiary text that reads as
     body text has lost the hierarchy the token exists for."""
@@ -251,21 +299,19 @@ def test_every_id_that_has_a_class_rule_also_carries_the_class() -> None:
     assert not orphans, f"id has a matching .class rule but no class attribute: {orphans}"
 
 
-def test_the_rail_active_indicator_stays_inside_the_rail() -> None:
-    """v104-F0: the rail is --rail-w wide and its items are 42px, centred, so
-    an item's left edge sits at (rail - 42) / 2. The indicator was at
-    `left: -10px`, which put it past the rail's own left edge and the viewport
-    clipped it. Computed from the tokens so a wider rail cannot silently
+def test_the_sidebar_active_indicator_stays_inside_the_sidebar() -> None:
+    """v104-F0: the indicator was at `left: -10px`, past the rail's own left
+    edge, and the viewport clipped it. H1 replaced the rail with a sidebar
+    whose items start at its horizontal padding; the bar must still land at
+    x >= 0. Computed from the stylesheet so a padding change cannot silently
     re-break it."""
     css = _css()
-    rail_match = re.search(r"--rail-w:\s*(\d+)px", css)
-    offset_match = re.search(
+    sidebar = re.search(r"\n\.sidebar \{[^}]*padding:\s*\d+px (\d+)px", css)
+    offset = re.search(
         r"\.sidebar a\[data-ws\]\.active::after\s*\{[^}]*left:\s*(-?\d+)px", css, re.S
     )
-    assert rail_match and offset_match, "rail width / active-bar offset not found"
-    rail = int(rail_match.group(1))
-    offset = int(offset_match.group(1))
-    item_left = (rail - 42) // 2
-    assert item_left + offset >= 0, (
-        f"active bar renders at x={item_left + offset} — outside the {rail}px rail"
+    assert sidebar and offset, "sidebar padding / active-bar offset not found"
+    item_left = int(sidebar.group(1))
+    assert item_left + int(offset.group(1)) >= 0, (
+        f"active bar renders at x={item_left + int(offset.group(1))} — outside the sidebar"
     )
