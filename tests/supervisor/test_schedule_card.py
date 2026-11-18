@@ -8,6 +8,7 @@ host, unattended, until disabled". Create, replace-by-name and chain alike."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -166,3 +167,35 @@ def test_a_worker_schedule_card_says_its_role_and_what_the_role_narrows(live: An
     (pending,) = env.store.pending_chat_actions(chat)
     assert pending.card is not None and pending.card["schedule"]["runs"] == runs
     assert "asks are dropped on a schedule" in runs and "not env_allowlist" in runs
+
+
+@pytest.mark.parametrize("role", ["assistant", None])
+def test_a_worker_schedule_its_chat_role_cannot_run_is_refused_without_a_card(
+    live: Any, role: str | None
+) -> None:
+    """v123-F1/F2 review (B22/B122): a worker schedule from an assistant (or
+    role-less) chat could only fail at confirm — refused now, no card, and
+    the refusal teaches what works."""
+    from .conftest import git
+
+    env = live("builder")
+    git(env.paths["repo"], "init", "-q", "-b", "main")
+    chat = env.chat(role=role)
+    proposal = {"name": "n", "repo": str(env.paths["repo"]), "every": "1d", "instructions": "x"}
+    env.ollama.script_tool_call("propose_schedule", proposal)
+    events = env.turn(chat, "tidy nightly")
+    assert cards(events) == [] and env.store.pending_chat_actions(chat) == []
+    (result,) = [data["result"] for event, data in events if event == "tool"]
+    said = json.dumps(result)
+    assert "role assistant cannot run a coding: it denies workspace writes" in said
+    assert "runs in this chat's role" in said and "/role" in said
+    assert env.store.get_schedule("n") is None
+
+
+def test_propose_schedule_says_a_worker_schedule_runs_in_the_chat_role() -> None:
+    from skep.supervisor.serve.tools import MUTATING_TOOL_SPECS
+
+    (spec,) = [s for s in MUTATING_TOOL_SPECS if s["function"]["name"] == "propose_schedule"]
+    said = spec["function"]["description"]
+    assert "A worker schedule runs in this chat's role" in said
+    assert "an assistant chat cannot schedule workers" in said

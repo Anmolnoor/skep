@@ -706,7 +706,8 @@ def test_confirmed_propose_schedule_creates_a_ticking_schedule(
 def test_denied_propose_schedule_leaves_no_row(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    client, chat_id = chat_client(config, ollama)
+    # v123 review: an assistant chat's worker schedule gets no card at all
+    client, chat_id = chat_client(config, ollama, role="builder")
     ollama.script_tool_call(
         "propose_schedule",
         {"name": "nightly-lint", "repo": str(repo), "every": "1d", "instructions": "run lint"},

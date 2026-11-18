@@ -1939,7 +1939,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "tick (read-only: it can read the store and summarize — 'every morning "
         "summarize yesterday's runs' — but never fetch the web, card, or "
         "mutate). Only for genuinely RECURRING asks ('every morning', "
-        "'weekly') — a one-time task is a dispatch_run, not a schedule.",
+        "'weekly') — a one-time task is a dispatch_run, not a schedule. A worker "
+        "schedule runs in this chat's role; an assistant chat cannot schedule workers.",
         {
             "name": {"type": "string", "description": "schedule name (reuse replaces)"},
             "repo": {
@@ -6062,6 +6063,47 @@ def _schedule_skep_refusal(args: dict[str, Any], holder: ConfigHolder) -> str | 
     return queen_skep_refusal(str(args["instructions"]), home=holder.current.home, cwd=None)
 
 
+def _schedule_role_refusal(
+    store: RunStore, holder: ConfigHolder, chat_id: str | None, args: dict[str, Any]
+) -> str | None:
+    """v123-F1/F2 review: the confirm's own role checks (``_schedule_role``,
+    ``actions.check_schedule_role``) run at proposal, so a schedule whose
+    role can only refuse gets no card. Arguments the confirm rejects for
+    another reason (no repo, an unknown template) are left for it to say."""
+    from types import SimpleNamespace
+
+    caste = str(args.get("caste") or "coding")
+    if caste in actions.ROLELESS_SCHEDULE_KINDS:
+        role, repo = (None if args.get("role") is None else str(args["role"])), Path()
+    else:
+        try:
+            role = _schedule_role(store, holder, chat_id, "chat-user", args)
+            repo = resolve_repo_arg(str(args.get("repo") or ""), repos_root(holder), store)
+        except ValueError as exc:  # names another role (an unloadable one refused already)
+            return str(exc)
+        if not (repo / ".git").exists():
+            return None
+        if args.get("template") is not None:
+            template = store.get_template(str(args["template"]))
+            caste = caste if template is None else template.worker_kind
+    if role is None:
+        return None
+    try:
+        name = str(args.get("name") or "")
+        actions.check_schedule_role(
+            holder, store, SimpleNamespace(name=name, worker_kind=caste, repo=str(repo), role=role)
+        )
+    except ValueError as exc:
+        if caste in actions.ROLELESS_SCHEDULE_KINDS:
+            return str(exc)
+        return (
+            f"{exc}. A worker schedule proposed here runs in this chat's role ({role}); the "
+            "user can switch the chat's role (/role <name>) or add the schedule from the CLI "
+            "(skep schedule add --role)"
+        )
+    return None
+
+
 def mutation_execution_decision(
     name: str,
     args: dict[str, Any],
@@ -6139,6 +6181,11 @@ def _mutation_execution_decision(
     skep_self = _schedule_skep_refusal(args, holder) if name == "propose_schedule" else None
     if skep_self is not None:  # D11: refused at proposal, no card
         return AutonomyDecision(verdict="deny", reason="schedule.deny.skep_self", detail=skep_self)
+    role_refused = (
+        _schedule_role_refusal(store, holder, chat_id, args) if name == "propose_schedule" else None
+    )
+    if role_refused is not None:  # v123-F1/F2 review (B22/B122): its confirm refuses, no card
+        return AutonomyDecision(verdict="deny", reason="schedule.deny.role", detail=role_refused)
     if name == "run_schedule_now":
         # ES (B122): a disabled/unknown schedule can only fail on confirm —
         # refuse now, without a card, and tell the model why.
