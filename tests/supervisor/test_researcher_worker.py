@@ -380,3 +380,45 @@ def test_a_run_that_fetched_only_binary_sources_fails_honestly(tmp_path: Path) -
     result = json.loads(out.read_text())
     assert result["status"] == "failed"
     assert "binary, not quoted" in result["verification"]["details"]
+
+
+def test_the_real_fetcher_decides_binary_from_the_bytes(monkeypatch: Any) -> None:
+    """v122-F7 review: compressed bytes decode to a mix of U+FFFD and junk
+    characters that slipped past the post-decode check, ``"xml" in`` matched
+    a docx, and a missing Content-Type read as text/plain."""
+    import io
+    import os
+    import urllib.request
+    import zlib
+
+    from skep.workers import researcher
+
+    class _Resp(io.BytesIO):
+        def __init__(self, body: bytes, content_type: str | None) -> None:
+            super().__init__(body)
+            self.headers = Message()
+            if content_type is not None:
+                self.headers["Content-Type"] = content_type
+
+    docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    compressed = zlib.compress(os.urandom(4000))
+    responses = {
+        "https://a.test/gz": _Resp(compressed, "text/html"),
+        "https://a.test/blob": _Resp(compressed, None),
+        "https://a.test/nul": _Resp(b"looks like text\x00but is not", "text/plain"),
+        "https://a.test/doc.docx": _Resp(b"PK\x03\x04 word/document.xml", docx),
+        "https://a.test/plain": _Resp("café notes".encode(), None),
+        "https://a.test/api": _Resp(b'{"ok": true}', "application/vnd.api+json"),
+        "https://a.test/feed": _Resp(b"<feed>entries</feed>", "application/atom+xml"),
+    }
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: responses[req.full_url])
+    result = run_research(
+        "q", sources=list(responses), allowlist=["a.test"], fetch=researcher._urllib_fetch
+    )
+    report = result.report_md
+    assert "https://a.test/gz: (binary: text/html, not quoted)" in report
+    assert "https://a.test/blob: (binary: unknown, not quoted)" in report
+    assert "https://a.test/nul: (binary: text/plain, not quoted)" in report
+    assert f"https://a.test/doc.docx: (binary: {docx}, not quoted)" in report
+    assert "café notes" in report and '{"ok": true}' in report and "entries" in report
+    assert "�" not in report and "word/document" not in report

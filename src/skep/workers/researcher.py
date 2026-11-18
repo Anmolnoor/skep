@@ -79,11 +79,24 @@ BINARY = "(binary: "
 
 
 def _is_text_type(content_type: str) -> bool:
-    return content_type.startswith("text/") or "json" in content_type or "xml" in content_type
+    return (
+        content_type.startswith("text/")
+        or content_type in ("application/json", "application/xml")
+        or content_type.endswith(("+json", "+xml"))
+    )
+
+
+def _binary_bytes(body: bytes) -> bool:
+    """Raw bytes that are not text: any NUL, or more than 10% of the bytes
+    undecodable as UTF-8 (compressed data decodes to junk that is not all
+    U+FFFD, so this must run before decoding)."""
+    undecodable = len(body) - len(body.decode("utf-8", errors="ignore").encode("utf-8"))
+    return b"\x00" in body or undecodable * 10 > len(body)
 
 
 def _mostly_binary(body: str) -> bool:
-    """A body that decoded to mostly U+FFFD / NUL was bytes, whatever its label."""
+    """A body that decoded to mostly U+FFFD / NUL was bytes, whatever its
+    label — the fallback for an injected fetcher, which returns text."""
     return (body.count("\ufffd") + body.count("\x00")) * 2 > len(body)
 
 
@@ -308,10 +321,16 @@ _FETCH_HEADERS = {
 def _urllib_fetch(url: str) -> str:
     request = urllib.request.Request(url, method="GET", headers=_FETCH_HEADERS)
     with urllib.request.urlopen(request, timeout=_FETCH_TIMEOUT_SECONDS) as response:
-        content_type = response.headers.get_content_type()
-        if not _is_text_type(content_type):
+        # get_content_type() says text/plain when the header is missing: a
+        # missing type is decided by the bytes alone
+        content_type = (
+            response.headers.get_content_type() if response.headers.get("Content-Type") else ""
+        )
+        if content_type and not _is_text_type(content_type):
             raise NotText(content_type)
         body = response.read(_FETCH_MAX_BYTES)
+    if _binary_bytes(body):
+        raise NotText(content_type or "unknown")
     return html_to_text(body.decode("utf-8", errors="replace"))
 
 
