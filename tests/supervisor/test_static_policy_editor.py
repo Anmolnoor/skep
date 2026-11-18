@@ -20,9 +20,9 @@ STATIC = Path(__file__).resolve().parents[2] / "src/skep/supervisor/serve/static
 
 def test_the_editor_tier_reads_the_registry_and_writes_through_existing_routes() -> None:
     # Graphite round A: the page moved to policies.js; the editor is the
-    # Projects & groups tab.
+    # Projects & groups tab. graphite-nav: the page #/policies/groups renders.
     text = (STATIC / "app.js").read_text() + (STATIC / "policies.js").read_text()
-    assert '{ key: "groups", label: "Projects & groups"' in text
+    assert "groups: panel => renderGroupsTab(panel, groupEditHandoff)," in text
     assert 'api("GET", "/api/policy/registry")' in text
     assert "/rsop`" in text
     assert "/api/policy/why?repo=" in text
