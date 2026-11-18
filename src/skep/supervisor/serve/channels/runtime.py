@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -107,7 +108,12 @@ def _default_send(
     reply_markup: dict[str, object] | None = None,
     parse_mode: str | None = None,
 ) -> bool:
-    payload: dict[str, object] = {"chat_id": chat_id, "text": text}
+    # v121-F1: never let Telegram fetch a URL in our text to build a preview.
+    payload: dict[str, object] = {
+        "chat_id": chat_id,
+        "text": text,
+        "link_preview_options": {"is_disabled": True},
+    }
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     if parse_mode is not None:
@@ -484,6 +490,8 @@ def _default_slack_send(
         "channel": channel_id,
         "blocks": blocks,
         "text": fallback or "skep",
+        "unfurl_links": False,  # v121-F1: no preview fetch of URLs in our text
+        "unfurl_media": False,
     }
     if thread_ts is not None:
         payload["thread_ts"] = thread_ts  # v78-F6: reply in-thread
@@ -727,7 +735,25 @@ RegisterCommands = Callable[[str, str, "list[dict[str, object]]"], int]
 CreateThread = Callable[[str, str, str, str], "str | None"]
 
 
+# v121-F1: Discord's no-preview syntax is <url>; SUPPRESS_EMBEDS is flag 4.
+_DISCORD_BARE_URL = re.compile(r"(?<!<)https?://[^\s<>]+")
+_DISCORD_SUPPRESS_EMBEDS = 4
+
+
+def _discord_no_previews(payload: dict[str, object]) -> dict[str, object]:
+    """v121-F1: a text payload suppresses embeds outright; one that carries our
+    own embeds (cards, the run-status embed) keeps them, and every URL in its
+    content is wrapped as <url> so Discord fetches no preview for it."""
+    if "embeds" not in payload:
+        return {**payload, "flags": _DISCORD_SUPPRESS_EMBEDS}
+    content = payload.get("content")
+    if not isinstance(content, str):
+        return payload
+    return {**payload, "content": _DISCORD_BARE_URL.sub(r"<\g<0>>", content)}
+
+
 def _default_discord_send(token: str, channel_id: str, payload: dict[str, object]) -> bool:
+    payload = _discord_no_previews(payload)
     response = httpx.post(
         f"{DISCORD_API}/channels/{channel_id}/messages",
         headers={"Authorization": f"Bot {token}"},
@@ -788,7 +814,7 @@ def _default_discord_ack(interaction_id: str, interaction_token: str, text: str)
     # type 4 = "respond with a channel message".
     response = httpx.post(
         f"{DISCORD_API}/interactions/{interaction_id}/{interaction_token}/callback",
-        json={"type": 4, "data": {"content": text}},
+        json={"type": 4, "data": {"content": text, "flags": _DISCORD_SUPPRESS_EMBEDS}},
         timeout=httpx.Timeout(30.0, connect=10.0),
     )
     return response.status_code == 204
@@ -812,7 +838,7 @@ def _default_discord_followup(application_id: str, interaction_token: str, text:
     # reply to the click, in-thread, exactly where the button lives.
     response = httpx.post(
         f"{DISCORD_API}/webhooks/{application_id}/{interaction_token}",
-        json={"content": text},
+        json={"content": text, "flags": _DISCORD_SUPPRESS_EMBEDS},
         timeout=httpx.Timeout(30.0, connect=10.0),
     )
     return response.status_code in (200, 204)
