@@ -436,3 +436,24 @@ def test_a_queued_follow_up_never_replies_to_a_conversation_the_click_did_not_co
     _wait_follow_ups()
     assert "not for discord:c1" in [m.content for m in env.store.chat_messages(chat)]
     assert pushed == []
+
+
+def test_get_run_quotes_a_research_report_and_taints_the_reader(env: Live) -> None:
+    """v122-F2: a researcher writes ``report.md``, not ``draft.md``; get_run
+    inlined only the latter, so the follow-up turn could not quote the report."""
+    from skep.supervisor.contracts_io import DEFAULT_BUDGET, mint_task
+
+    task = mint_task(workspace=env.paths["repo"], instructions="x", budget=DEFAULT_BUDGET)
+    env.store.create_run(task, repo=env.paths["repo"], ref=None, execution_mode="sandbox")
+    report = env.holder.current.home / "audit" / task.task_id / "report.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text("# llama.cpp\nruns on a laptop\n", encoding="utf-8")
+    env.store.add_artifact(task.task_id, kind="file", audit_path=report, sha256="")
+    env.store.transition(task.task_id, "completed", "done")
+    chat = env.chat()
+    env.ollama.script_tool_call("get_run", {"task_id": task.task_id})
+    env.ollama.script_reply("ok")
+    env.turn(chat, "what did it find?")
+    (result,) = _tool_results(env, chat, "get_run")
+    assert result["draft"] == "# llama.cpp\nruns on a laptop\n"
+    assert env.store.get_chat_taint(chat).untrusted is not None

@@ -3526,6 +3526,12 @@ def run_completion_turn(
         facts.append(f"repo={run.repo}")
     summary = (run.summary or "").strip()
     finished = f"[run {task_id[:12]} finished — {', '.join(facts)}]\n"
+    # v122-F2: a delivered report is named in the summary, so the phone knows
+    # where it was saved without asking.
+    delivered = next(
+        (path for kind, path, _ in store.artifacts_for(task_id) if kind == "workspace_delivery"),
+        None,
+    )
     seed = (
         ("" if summary else finished)
         + "\nThis is the run we were working on. Continue — do not just restate "
@@ -3533,6 +3539,11 @@ def run_completion_turn(
         "clear next step (landing the patch, opening a PR, a follow-up run), "
         "propose it as a card. If the run failed, say what you think went wrong "
         "and what you would change. If nothing is needed, say so in one line."
+        + (
+            f" Its report was saved to {delivered} — name that path in your summary."
+            if delivered
+            else ""
+        )
     )
     parts: list[str] = []
     # ES-F2 (B13): queue behind the turn in flight — this runs on its own
@@ -3573,6 +3584,14 @@ def run_completion_turn(
             return (f"continuation failed mid-turn: {exc}", False)
     store.clear_run_follow_up(task_id)
     reply = "".join(parts).strip()
+    from .channels.outbound import push_to_chat_channel
+    from .run_status import run_terminal_text
+
+    # v122-F2: the reply reaches a messenger-bound chat too (a no-op for web
+    # chats). Runs that already got their notice (failed, gated, unlanded)
+    # are not pushed twice.
+    if reply and run_terminal_text(store, task_id) is None:
+        push_to_chat_channel(store, home, chat_id, reply, kind="info")
     return (reply, bool(reply))
 
 

@@ -319,6 +319,106 @@ def test_a_finished_run_continues_the_conversation(
         store.close()
 
 
+def _telegram_bind(store: Any, home: Path, chat_id: str) -> None:
+    from skep.supervisor.serve.channels import ChannelConfig, store_channel_secret
+
+    store.bind_channel_session(
+        session_key="telegram:7", channel="telegram", identity_id="7", chat_id=chat_id
+    )
+    store.upsert_channel_config(ChannelConfig(channel="telegram", enabled=True))
+    store_channel_secret(home, "telegram", "tok-t")
+
+
+@pytest.mark.parametrize("site", ["run-finish", "startup-resume"])
+def test_a_finished_research_run_dms_its_summary_naming_the_saved_report(
+    site: str, repo: Path, config: SupervisorConfig, ollama: FakeOllama, monkeypatch: Any
+) -> None:
+    """v122-F2: the continuation's reply was written to the chat only, so a
+    research run started from Telegram never reached the phone. Both start
+    sites (app._on_run_finished and the startup resume) run the same turn,
+    which now pushes its reply once as ``info``; the seed names the report."""
+    import threading
+
+    from skep.supervisor.serve import chat as chat_module
+    from skep.supervisor.serve.channels import outbound
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.store import RunStore
+
+    sent: list[str] = []
+
+    def _send(token: str, cid: str, text: str, reply_markup: Any = None, **_kw: Any) -> bool:
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(outbound, "_default_send", _send)
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        _telegram_bind(store, config.home, chat_id)
+        task_id = _bound_run(store, chat_id, repo)
+        saved = config.home / "workspace" / "research-llama"
+        store.add_artifact(task_id, kind="workspace_delivery", audit_path=saved, sha256="")
+        chat_module._CONTINUED.discard(task_id)
+        ollama.script_reply("llama.cpp runs anywhere; report saved")
+        if site == "run-finish":
+            holder = ConfigHolder(config, store)
+            reply, ok = chat_module.run_completion_turn(
+                store, holder, Dispatcher(store=store, holder=holder), config.home, task_id
+            )
+            assert ok, reply
+        else:
+            store.queue_run_follow_up(task_id, "queued")
+            with _client(config, start_ticker=False):
+                for thread in threading.enumerate():
+                    if thread.name.startswith("skep-continue-"):
+                        thread.join(10)
+        assert len(sent) == 1 and "report saved" in sent[0]
+        seed = [m for m in store.chat_messages(chat_id) if m.role == "user"][-1]
+        assert str(saved) in seed.content
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("shape", ["web chat", "failed run"])
+def test_a_continuation_pushes_nothing_unbound_or_already_notified(
+    shape: str, repo: Path, config: SupervisorConfig, ollama: FakeOllama, monkeypatch: Any
+) -> None:
+    """v122-F2: a web chat has no messenger; a failed run already got its
+    notice from notify_run_terminal — a second DM would double it."""
+    from skep.supervisor.serve.channels import outbound
+    from skep.supervisor.serve.chat import _CONTINUED, run_completion_turn
+    from skep.supervisor.serve.jobs import Dispatcher
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.store import RunStore
+
+    sent: list[str] = []
+
+    def _send(token: str, cid: str, text: str, reply_markup: Any = None, **_kw: Any) -> bool:
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(outbound, "_default_send", _send)
+    client = configured_client(config, ollama)
+    chat_id = client.post("/api/chats", json={}).json()["chat_id"]
+    store = RunStore(config.db_path)
+    try:
+        if shape == "failed run":
+            _telegram_bind(store, config.home, chat_id)
+        task_id = _bound_run(store, chat_id, repo, "completed" if shape == "web chat" else "failed")
+        _CONTINUED.discard(task_id)
+        ollama.script_reply("here is what happened")
+        holder = ConfigHolder(config, store)
+        reply, ok = run_completion_turn(
+            store, holder, Dispatcher(store=store, holder=holder), config.home, task_id
+        )
+        assert ok, reply
+        assert sent == []
+    finally:
+        store.close()
+
+
 def test_a_run_finish_follow_up_refuses_web_reads_as_a_follow_up(
     repo: Path, config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
