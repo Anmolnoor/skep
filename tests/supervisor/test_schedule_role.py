@@ -447,7 +447,11 @@ def test_the_card_says_which_hosts_the_role_will_drop(
         args = {"name": "n", "repo": str(repo), "every": "1d", "instructions": "x"}
         kept = f"runs as role builder: {actions.SCHEDULE_ROLE_NOTE}"
         line = schedule_role_line(store, holder, {**args, "network": HOSTS}, chat_id)
-        assert line == f"{kept}; drops hosts: example.com"
+        # it judged only the hosts named here, and says so (I8)
+        assert line == (
+            f"{kept}; of the hosts named here, the role drops: example.com; the role also "
+            "narrows the project's own hosts and commands at each run"
+        )
         assert schedule_role_line(store, holder, {**args, "network": ["pypi.org"]}, chat_id) == kept
 
         def refuse(*a: Any, **kw: Any) -> Any:

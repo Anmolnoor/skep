@@ -2893,7 +2893,13 @@ def schedule_role_line(
     except (HTTPException, ValueError, OSError):
         return line  # the confirm refuses it, saying why
     dropped = [host for host in hosts if host not in held.network]
-    return f"{line}; drops hosts: {', '.join(dropped)}" if dropped else line
+    if not dropped:
+        return line
+    # v123-F1 review (I8): the preview judges only the hosts named here
+    return (
+        f"{line}; of the hosts named here, the role drops: {', '.join(dropped)}; the role "
+        "also narrows the project's own hosts and commands at each run"
+    )
 
 
 def _human_answers(store: RunStore, chat_id: str | None) -> bool:
