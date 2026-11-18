@@ -24,11 +24,12 @@ from fastapi import HTTPException
 from ..apply import validate_landing_branch
 from ..autonomy import AutonomyDecision
 from ..castes import CASTES, caste_names
+from ..contracts_io import DEFAULT_PERMISSIONS
 from ..engines import engine_names
 from ..memory import MEMORY_CLASSES, MemoryError
 from ..projects import list_projects, project_to_dict
 from ..providers import PROVIDER_COST_CLASSES, PROVIDER_PROTOCOLS
-from ..roles import Role, role_denies_every, role_for_chat
+from ..roles import Delegator, Role, resolve_role, role_denies_every, role_for_chat
 from ..store import ChatSearchHit, RunStore
 from . import actions
 from .jobs import Dispatcher
@@ -1938,7 +1939,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "tick (read-only: it can read the store and summarize — 'every morning "
         "summarize yesterday's runs' — but never fetch the web, card, or "
         "mutate). Only for genuinely RECURRING asks ('every morning', "
-        "'weekly') — a one-time task is a dispatch_run, not a schedule.",
+        "'weekly') — a one-time task is a dispatch_run, not a schedule. A worker "
+        "schedule runs in this chat's role; an assistant chat cannot schedule workers.",
         {
             "name": {"type": "string", "description": "schedule name (reuse replaces)"},
             "repo": {
@@ -1957,15 +1959,32 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
             "params": {"type": "object", "description": "template placeholder values"},
             "caste": {
                 "type": "string",
-                "enum": ["coding", "audit", "note", "script", "digest", "prompt"],
+                "enum": [
+                    "coding",
+                    "audit",
+                    "researcher",
+                    "document",
+                    "note",
+                    "script",
+                    "digest",
+                    "prompt",
+                ],
                 "description": (
                     "'note' posts the text each tick; 'script' runs the instructions "
                     "as a shell command on the supervisor host and posts its output; "
                     "'digest' posts a summary of pending approvals/runs/schedules "
                     "(no repo or instructions needed); 'prompt' runs the "
-                    "instructions as a read-only Queen turn in this chat. None of "
-                    "these dispatch a worker; all need the user's confirmation."
+                    "instructions as a read-only Queen turn in this chat; these four "
+                    "dispatch no worker. 'coding', 'audit', 'researcher' and 'document' "
+                    "dispatch a worker on the repo, in this chat's role. All need the "
+                    "user's confirmation."
                 ),
+            },
+            "network": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "hosts a worker schedule may reach; this chat's role "
+                "drops any it does not allow",
             },
             "once": {
                 "type": "boolean",
@@ -2825,6 +2844,79 @@ def _queen_chain(
         return []
     role = _chat_role(store, holder, chat_id)
     return [f"queen@{role.name}"] if role else []
+
+
+def _schedule_role(
+    store: RunStore, holder: ConfigHolder, chat_id: str | None, actor: str, args: dict[str, Any]
+) -> str | None:
+    """v123-F1 (decision 8): a worker schedule the model proposes runs in the
+    chat's role, as its dispatches do (``_queen_chain``); the chat cannot name
+    another. A wider or other role is the operator's, from the CLI or REST.
+    An operator-typed /schedule is the human's own act: no role."""
+    if actor == "operator-command":
+        return None
+    role = _chat_role(store, holder, chat_id)
+    name = None if role is None else role.name
+    if args.get("role") is not None and str(args["role"]) != name:
+        raise ValueError(
+            f"a schedule proposed here runs in this chat's role {name or '(none)'}; another "
+            "role is set from the CLI (skep schedule add --role) or REST"
+        )
+    return name
+
+
+def proposed_schedule_role(
+    store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
+) -> str | None:
+    """v123 review: the role a model-proposed schedule will store — this
+    chat's, for a worker kind (``_schedule_role``); None for a repo-less kind,
+    no chat, or a role that no longer loads (that refuses before a card)."""
+    if args.get("caste") in actions.ROLELESS_SCHEDULE_KINDS:
+        return None
+    try:
+        role = _chat_role(store, holder, chat_id)
+    except ValueError:
+        return None
+    return None if role is None else role.name
+
+
+def schedule_role_line(
+    store: RunStore, holder: ConfigHolder, args: dict[str, Any], chat_id: str | None
+) -> str | None:
+    """v123-F1: the card's line for a worker schedule this chat proposes —
+    the role it will run as and what that narrows. None for a repo-less kind
+    or no role; a role the confirm refuses gets no line (the refusal says it)."""
+    if args.get("caste") in actions.ROLELESS_SCHEDULE_KINDS:
+        return None
+    try:
+        name = _schedule_role(store, holder, chat_id, "chat-user", args)
+    except ValueError:
+        return None
+    if name is None:
+        return None
+    line = f"runs as role {name}: {actions.SCHEDULE_ROLE_NOTE}"
+    hosts = [str(host) for host in args.get("network") or []]
+    try:  # v123-F3: the named hosts, decided as the tick will decide them
+        repo = resolve_repo_arg(str(args.get("repo") or ""), repos_root(holder), store)
+        hop = Delegator(
+            f"schedule:{args.get('name')}@{name}", resolve_role(name, holder.current.home)
+        )
+        held, _, _ = actions.delegate_permissions(
+            holder, store, repo,
+            # only the named hosts: no writes to refuse, no prefixes to judge
+            DEFAULT_PERMISSIONS.model_copy(update={"write": [], "network": hosts}),
+            role=None, delegation_chain=[hop], deferred_asks=False, record=False,
+        )  # fmt: skip
+    except (HTTPException, ValueError, OSError):
+        return line  # the confirm refuses it, saying why
+    dropped = [host for host in hosts if host not in held.network]
+    if not dropped:
+        return line
+    # v123-F1 review (I8): the preview judges only the hosts named here
+    return (
+        f"{line}; of the hosts named here, the role drops: {', '.join(dropped)}; the role "
+        "also narrows the project's own hosts and commands at each run"
+    )
 
 
 def _human_answers(store: RunStore, chat_id: str | None) -> bool:
@@ -5660,7 +5752,10 @@ def _execute_mutation(
                 once=bool(args.get("once") or False),
                 start_at=None if args.get("start_at") is None else str(args["start_at"]),
                 chain=schedule_chain,
+                # v123-F1: repo-less kinds store none; one named here refuses
+                role=None if args.get("role") is None else str(args["role"]),
             )
+            actions.check_schedule_role(holder, store, schedule)
             store.add_schedule(schedule)
             return actions.schedule_view(store, schedule)
         if args.get("repo") is None:
@@ -5668,6 +5763,7 @@ def _execute_mutation(
         repo_path = resolve_repo_arg(str(args["repo"]), repos_root(holder), store)
         if not (repo_path / ".git").exists():
             raise ValueError(f"{repo_path} is not a git repository")
+        schedule_role = _schedule_role(store, holder, chat_id, actor, args)
         if args.get("template") is not None:
             schedule_template = store.get_template(str(args["template"]))
             if schedule_template is None:
@@ -5680,6 +5776,8 @@ def _execute_mutation(
                 repo=repo_path,
                 interval_seconds=interval,
                 chain=schedule_chain,
+                role=schedule_role,
+                chat_id=chat_id,
             )
         else:
             if args.get("instructions") is None:
@@ -5693,7 +5791,12 @@ def _execute_mutation(
                 once=bool(args.get("once") or False),
                 start_at=None if args.get("start_at") is None else str(args["start_at"]),
                 chain=schedule_chain,
+                role=schedule_role,
+                # v123-F3: its hosts (the role decides each at tick) and its chat
+                network=[str(host) for host in args.get("network") or []],
+                chat_id=chat_id,
             )
+        actions.check_schedule_role(holder, store, schedule)
         store.add_schedule(schedule)
         return actions.schedule_view(store, schedule)
     if name == "delete_schedule":
@@ -5983,6 +6086,47 @@ def _schedule_skep_refusal(args: dict[str, Any], holder: ConfigHolder) -> str | 
     return queen_skep_refusal(str(args["instructions"]), home=holder.current.home, cwd=None)
 
 
+def _schedule_role_refusal(
+    store: RunStore, holder: ConfigHolder, chat_id: str | None, args: dict[str, Any]
+) -> str | None:
+    """v123-F1/F2 review: the confirm's own role checks (``_schedule_role``,
+    ``actions.check_schedule_role``) run at proposal, so a schedule whose
+    role can only refuse gets no card. Arguments the confirm rejects for
+    another reason (no repo, an unknown template) are left for it to say."""
+    from types import SimpleNamespace
+
+    caste = str(args.get("caste") or "coding")
+    if caste in actions.ROLELESS_SCHEDULE_KINDS:
+        role, repo = (None if args.get("role") is None else str(args["role"])), Path()
+    else:
+        try:
+            role = _schedule_role(store, holder, chat_id, "chat-user", args)
+            repo = resolve_repo_arg(str(args.get("repo") or ""), repos_root(holder), store)
+        except ValueError as exc:  # names another role (an unloadable one refused already)
+            return str(exc)
+        if not (repo / ".git").exists():
+            return None
+        if args.get("template") is not None:
+            template = store.get_template(str(args["template"]))
+            caste = caste if template is None else template.worker_kind
+    if role is None:
+        return None
+    try:
+        name = str(args.get("name") or "")
+        actions.check_schedule_role(
+            holder, store, SimpleNamespace(name=name, worker_kind=caste, repo=str(repo), role=role)
+        )
+    except ValueError as exc:
+        if caste in actions.ROLELESS_SCHEDULE_KINDS:
+            return str(exc)
+        return (
+            f"{exc}. A worker schedule proposed here runs in this chat's role ({role}); the "
+            "user can switch the chat's role (/role <name>) or add the schedule from the CLI "
+            "(skep schedule add --role)"
+        )
+    return None
+
+
 def mutation_execution_decision(
     name: str,
     args: dict[str, Any],
@@ -6060,6 +6204,11 @@ def _mutation_execution_decision(
     skep_self = _schedule_skep_refusal(args, holder) if name == "propose_schedule" else None
     if skep_self is not None:  # D11: refused at proposal, no card
         return AutonomyDecision(verdict="deny", reason="schedule.deny.skep_self", detail=skep_self)
+    role_refused = (
+        _schedule_role_refusal(store, holder, chat_id, args) if name == "propose_schedule" else None
+    )
+    if role_refused is not None:  # v123-F1/F2 review (B22/B122): its confirm refuses, no card
+        return AutonomyDecision(verdict="deny", reason="schedule.deny.role", detail=role_refused)
     if name == "run_schedule_now":
         # ES (B122): a disabled/unknown schedule can only fail on confirm —
         # refuse now, without a card, and tell the model why.

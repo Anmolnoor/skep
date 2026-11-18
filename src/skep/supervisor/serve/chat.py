@@ -108,6 +108,8 @@ from .tools import (
     log_denied_dispatch_asks,
     mutation_execution_decision,
     policy_write_preview,
+    proposed_schedule_role,
+    schedule_role_line,
     search_web_verdict,
     store_write_taint_ask,
     taint_decision,
@@ -2639,7 +2641,22 @@ class ChatEngine:
                         # W39: the decision and a policy write's replay ride
                         # the record, so a reloaded card is the live one
                         card={
-                            **(recorded_card(name, args, high, self.store, manifest) or {}),
+                            **(
+                                recorded_card(
+                                    name,
+                                    args,
+                                    high,
+                                    self.store,
+                                    manifest,
+                                    schedule_role_line(self.store, self.holder, args, chat_id)
+                                    if name == "propose_schedule"
+                                    else None,
+                                    proposed_schedule_role(self.store, self.holder, args, chat_id)
+                                    if name == "propose_schedule"
+                                    else None,
+                                )
+                                or {}
+                            ),
                             **({"decision": asdict(decision)} if decision is not None else {}),
                             **({"checked": checked} if checked else {}),
                             **_resolution(name, args),
@@ -3159,9 +3176,23 @@ class ChatEngine:
         actor: str,
         keep: str,
         preanswered: dict[str, Any] | None = None,
+        card: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Run one confirmed call (a card's own, or one folded item)."""
+        """Run one confirmed call (a card's own, or one folded item). ``card``
+        is what the server recorded when the card was proposed."""
         try:
+            if tool == "propose_schedule" and "schedule_role_name" in (card or {}):
+                # v123-F2 review (I8): the role stored is the one the card showed
+                shown = (card or {})["schedule_role_name"]
+                now = proposed_schedule_role(self.store, self.holder, args, chat_id)
+                if now != shown:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"this chat's role changed since the card was shown ({shown or 'none'}"
+                            f" → {now or 'none'}); propose the schedule again"
+                        ),
+                    )
             result = execute_mutation(
                 tool,
                 args,
@@ -3242,6 +3273,7 @@ class ChatEngine:
                             actor=actor,
                             keep=keep,
                             preanswered=preanswered,
+                            card=action.card,
                         )
                     )
             except Exception as exc:

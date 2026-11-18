@@ -8,6 +8,7 @@ host, unattended, until disabled". Create, replace-by-name and chain alike."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -149,3 +150,142 @@ def test_the_model_proposed_card_records_the_facts_and_a_resolved_card_shows_the
     assert resolved is not None
     shown = env.engine._card(chat, resolved.tool, resolved.args, action=resolved)
     assert shown["schedule"] == pending.card["schedule"]  # as recorded, not recomputed
+
+
+def test_a_worker_schedule_card_says_its_role_and_what_the_role_narrows(live: Any) -> None:
+    """v123-F1: a worker schedule a builder chat proposes runs as builder;
+    the card says so, and exactly what a role narrows (and that asks drop)."""
+    from skep.supervisor.serve.actions import SCHEDULE_ROLE_NOTE
+
+    env = live("builder")
+    chat = env.chat(role="builder")
+    proposal = {"name": "n", "repo": str(env.paths["repo"]), "every": "1d", "instructions": "x"}
+    env.ollama.script_tool_call("propose_schedule", proposal)
+    (card,) = cards(env.turn(chat, "tidy nightly"))
+    runs = f"runs as role builder: {SCHEDULE_ROLE_NOTE}"
+    assert card["card"]["schedule"]["runs"] == runs
+    (pending,) = env.store.pending_chat_actions(chat)
+    assert pending.card is not None and pending.card["schedule"]["runs"] == runs
+    assert "dropped from its grants" in runs and "env_allowlist" in runs
+
+
+def test_the_role_note_names_everything_a_role_leaves_untouched() -> None:
+    """v123-F1 review (I8): the note's list of what a role does not touch is
+    complete — every Permissions field ``delegate_permissions`` leaves as it
+    is — and says truly what happens to what lies beyond the role."""
+    from skep.supervisor.serve.actions import SCHEDULE_ROLE_NOTE
+
+    for untouched in ("env_allowlist", "execution mode", "auto-apply", "the budget",
+                      "allow_git_mutation", "loopback_ports", "allowed_tools",
+                      "allowed_plugin_risks"):  # fmt: skip
+        assert untouched in SCHEDULE_ROLE_NOTE, untouched
+    assert "asks are dropped on a schedule" not in SCHEDULE_ROLE_NOTE
+    assert "dropped from its grants" in SCHEDULE_ROLE_NOTE
+    assert "a command beyond it stops at a gate for you" in SCHEDULE_ROLE_NOTE
+
+
+@pytest.mark.parametrize("role", ["assistant", None])
+def test_a_worker_schedule_its_chat_role_cannot_run_is_refused_without_a_card(
+    live: Any, role: str | None
+) -> None:
+    """v123-F1/F2 review (B22/B122): a worker schedule from an assistant (or
+    role-less) chat could only fail at confirm — refused now, no card, and
+    the refusal teaches what works."""
+    from .conftest import git
+
+    env = live("builder")
+    git(env.paths["repo"], "init", "-q", "-b", "main")
+    chat = env.chat(role=role)
+    proposal = {"name": "n", "repo": str(env.paths["repo"]), "every": "1d", "instructions": "x"}
+    env.ollama.script_tool_call("propose_schedule", proposal)
+    events = env.turn(chat, "tidy nightly")
+    assert cards(events) == [] and env.store.pending_chat_actions(chat) == []
+    (result,) = [data["result"] for event, data in events if event == "tool"]
+    said = json.dumps(result)
+    assert "role assistant cannot run a coding: it denies workspace writes" in said
+    assert "runs in this chat's role" in said and "/role" in said
+    assert env.store.get_schedule("n") is None
+
+
+def test_propose_schedule_says_a_worker_schedule_runs_in_the_chat_role() -> None:
+    from skep.supervisor.serve.tools import MUTATING_TOOL_SPECS
+
+    (spec,) = [s for s in MUTATING_TOOL_SPECS if s["function"]["name"] == "propose_schedule"]
+    said = spec["function"]["description"]
+    assert "A worker schedule runs in this chat's role" in said
+    assert "an assistant chat cannot schedule workers" in said
+
+
+def test_replacing_a_schedule_says_when_its_role_changes(live: Any) -> None:
+    """v123-F2 review (I8): re-proposing a schedule by name never changes its
+    role silently — the ``replaces`` line says was → now."""
+    env = live("builder")
+    chat = env.chat(role="builder")
+    repo = str(env.paths["repo"])
+    for name, role in (("bare", None), ("ops", "operator"), ("same", "builder")):
+        env.store.add_schedule(
+            make_schedule(name=name, repo=repo, instructions="x", interval_seconds=60, role=role)
+        )
+    replaced = {}
+    for name in ("bare", "ops", "same"):
+        env.ollama.script_tool_call(
+            "propose_schedule", {"name": name, "repo": repo, "every": "1d", "instructions": "x"}
+        )
+        (card,) = cards(env.turn(chat, f"redo {name}"))
+        replaced[name] = card["card"]["schedule"]["replaces"]
+        env.store.resolve_chat_action(card["action_id"], status="denied", result={"ok": False})
+    assert replaced == {
+        "bare": "your coding schedule 'bare' (was no role → role builder)",
+        "ops": "your coding schedule 'ops' (was role operator → role builder)",
+        "same": "your coding schedule 'same'",
+    }
+    # a repo-less kind stores no role: replacing a role-bound schedule says so
+    note = {"name": "ops", "caste": "note", "instructions": "hi", "every": "1d"}
+    facts = schedule_facts(note, env.store)
+    assert facts is not None
+    assert facts["replaces"] == "your coding schedule 'ops' (was role operator → no role)"
+
+
+def test_a_confirm_after_the_chat_role_changed_refuses(live: Any) -> None:
+    """v123-F2 review (I8): the card shows the role at proposal; a confirm
+    after the chat's role changed would store another — it refuses, saying
+    so, and nothing is stored. An unchanged role confirms as shown."""
+    from .conftest import git
+
+    env = live("builder")
+    git(env.paths["repo"], "init", "-q", "-b", "main")
+    chat = env.chat(role="builder")
+    repo = str(env.paths["repo"])
+    for name in ("moved", "kept"):
+        env.ollama.script_tool_call(
+            "propose_schedule", {"name": name, "repo": repo, "every": "1d", "instructions": "x"}
+        )
+        (card,) = cards(env.turn(chat, f"schedule {name}"))
+        if name == "moved":
+            env.store.set_chat_role(chat, "operator")  # "kept" is proposed as operator
+        env.ollama.script_reply("ok")
+        env.verdict(chat, card["action_id"], confirm=True, actor="chat-user", keep="once")
+        resolved = env.store.get_chat_action(card["action_id"])
+        assert resolved is not None and resolved.result is not None
+        if name == "moved":
+            assert resolved.result["ok"] is False
+            assert resolved.result["error"] == (
+                "this chat's role changed since the card was shown (builder → operator); "
+                "propose the schedule again"
+            )
+            assert env.store.get_schedule("moved") is None
+        else:
+            assert resolved.result["ok"] is True, resolved.result
+            stored = env.store.get_schedule("kept")
+            assert stored is not None and stored.role == "operator"
+
+
+def test_propose_schedule_caste_help_names_the_worker_castes_and_the_role_rule() -> None:
+    from skep.supervisor.serve.tools import MUTATING_TOOL_SPECS
+
+    (spec,) = [s for s in MUTATING_TOOL_SPECS if s["function"]["name"] == "propose_schedule"]
+    help_text = spec["function"]["parameters"]["properties"]["caste"]["description"]
+    assert "None of these dispatch a worker" not in help_text
+    assert "these four dispatch no worker" in help_text
+    assert "'coding', 'audit', 'researcher' and 'document' dispatch a worker" in help_text
+    assert "in this chat's role" in help_text

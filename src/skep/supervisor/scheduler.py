@@ -23,6 +23,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from skep.worker_contract import Permissions
 
@@ -37,6 +38,9 @@ from .providers import ProviderHealth, ProviderProfile, check_provider_health
 from .spawner import build_worker_env
 from .store import SCHEDULE_SUCCESS_STATES, RunStore, ScheduleRecord
 from .templates import WorkflowTemplate, instantiate
+
+if TYPE_CHECKING:
+    from .serve.settings import ConfigHolder
 
 logger = logging.getLogger("skep.scheduler")
 
@@ -306,6 +310,7 @@ def make_schedule(
     chat_id: str | None = None,
     once: bool = False,
     chain: str | None = None,
+    role: str | None = None,
 ) -> ScheduleRecord:
     created = now_ts()
     start = _start_slot(start_at)
@@ -327,6 +332,7 @@ def make_schedule(
         chat_id=chat_id,
         once=once,
         chain=chain,
+        role=role,
     )
 
 
@@ -341,6 +347,8 @@ def make_template_schedule(
     start_at: str | None = None,
     enabled: bool = True,
     chain: str | None = None,
+    role: str | None = None,
+    chat_id: str | None = None,
 ) -> ScheduleRecord:
     """A schedule bound to a template (v3.5): "run template X with these params".
 
@@ -371,6 +379,8 @@ def make_template_schedule(
         template_name=template.name,
         params=dict(params),
         chain=chain,
+        role=role,
+        chat_id=chat_id,
     )
 
 
@@ -490,6 +500,7 @@ def _deliver_tick_text(
     *,
     script_output: bool = False,
     context: str | None = None,
+    worker: str | None = None,
 ) -> None:
     """Deliver a repo-less tick's text: bound chat (+ best-effort outbound
     push, v44-F2) when it still exists, otherwise an inert note. The chat row
@@ -501,7 +512,10 @@ def _deliver_tick_text(
     ADR 0059 D5 (B26): a script's output (``script_output``, or a chained
     source's ``context``) is outside content — a user row from
     ``schedule:<name>``, replayed wrapped, setting the chat's ``untrusted``
-    bit; never the Queen's own words. The push carries the same text."""
+    bit; never the Queen's own words. The push carries the same text.
+    v123-F3 review (W21c): a scheduled run's terminal notice quotes its
+    worker (``worker``: the task id) — a user row from ``worker:<task_id>``,
+    exactly as ``run_status.notify_run_terminal`` writes it."""
     prefix = "" if context is None else f"[Context from schedule {schedule.chain!r}]:\n{context}"
     pushed = f"{prefix}\n\n{text}" if prefix else text
     if schedule.chat_id and store.get_chat(schedule.chat_id) is not None:
@@ -510,7 +524,11 @@ def _deliver_tick_text(
                 schedule.chat_id, role="user", content=prefix,
                 provenance=f"schedule:{schedule.chain}",
             )  # fmt: skip
-        if script_output:
+        if worker is not None:
+            store.add_chat_message(
+                schedule.chat_id, role="user", content=text, provenance=f"worker:{worker}"
+            )
+        elif script_output:
             store.add_chat_message(
                 schedule.chat_id, role="user", content=text,
                 provenance=f"schedule:{schedule.name}",
@@ -526,7 +544,7 @@ def _deliver_tick_text(
         # W21 review: a script's output (or a chain's) is outside text, so the
         # note carries ``untrusted`` to every chat that lists it; v121-F3: and
         # ``private``, like every ``schedule:`` row
-        outside = script_output or context is not None
+        outside = script_output or context is not None or worker is not None
         store.create_note(
             pushed,
             actor=f"schedule:{schedule.name}",
@@ -614,6 +632,53 @@ def _sources_first(due: list[ScheduleRecord]) -> list[ScheduleRecord]:
 PromptTurnFn = Callable[[ScheduleRecord, "str | None"], tuple[str, bool]]
 
 
+def _held_to_role(
+    store: RunStore,
+    config: SupervisorConfig,
+    holder: ConfigHolder | None,
+    schedule: ScheduleRecord,
+    repo: Path,
+    permissions: Permissions,
+    decision: AutonomyDecision,
+) -> tuple[Permissions, AutonomyDecision, str | None]:
+    """v123-F1 (DD-7, ADR 0055 D4): a schedule with a role is a delegator,
+    ``schedule:<name>@<role>``. Every shell prefix and host its worker gets is
+    decided under it by the chat's own narrowing (``delegate_permissions``,
+    I5), so the role only ever tightens what the project allows. Headless:
+    asks are dropped, never carded. A role that no longer resolves, or a
+    narrowing that refuses, is the third value — ``policy_blocked: <why>`` —
+    and the tick dispatches nothing: it never runs without its role."""
+    if schedule.role is None:
+        return permissions, decision, None
+    from fastapi import HTTPException
+
+    from .roles import Delegator, resolve_role
+    from .serve.actions import delegate_permissions, delegated_decision
+    from .serve.settings import ConfigHolder
+
+    live = holder or ConfigHolder(config, store)
+    try:
+        role = resolve_role(schedule.role, live.current.home)
+    except ValueError as exc:
+        return (
+            permissions,
+            decision,
+            (
+                f"policy_blocked: schedule {schedule.name!r} runs as role {schedule.role!r}, "
+                f"which no longer resolves ({exc}); re-create the schedule with a role that "
+                "exists, or with none"
+            ),
+        )
+    hop = Delegator(f"schedule:{schedule.name}@{role.name}", role)
+    try:
+        narrowed, delegation, note = delegate_permissions(
+            live, store, repo, permissions, role=None, delegation_chain=[hop], deferred_asks=False
+        )
+    except HTTPException as exc:
+        return permissions, decision, f"policy_blocked: {exc.detail}"
+    return narrowed, delegated_decision(decision, delegation, note), None
+
+
 def run_due(
     *,
     store: RunStore,
@@ -622,17 +687,21 @@ def run_due(
     dispatch: DispatchFn = run_task,
     notify: Callable[[str, str, str], None] | None = None,
     prompt_turn: PromptTurnFn | None = None,
+    holder: ConfigHolder | None = None,
 ) -> list[TickResult]:
     """Dispatch every schedule whose next_run_at has arrived; advance each one.
 
     A schedule that raises is recorded and skipped — one broken schedule never
     aborts the rest of the tick. Each due schedule shares the single-writer store
     (G4), so the whole tick is one writer even while dispatching several repos.
+    ``holder`` is the live config a schedule's role is decided against (v123-F1);
+    none builds one from ``config``.
     """
     moment = now or now_ts()
     results: list[TickResult] = []
     for schedule in _sources_first(store.due_schedules(moment)):
         task_id: str | None
+        held: tuple[dict[str, Any], Path] | None = None  # v123 review: the receipt owed (I13)
         try:
             # ES B110: computed BEFORE the side effect, inside the try — a row
             # whose interval no clock can hold (stored before the cap) raised
@@ -800,6 +869,10 @@ def run_due(
                     project_context = None
                     auto_apply_verified_patch = None
                 if blocked_state is None:
+                    permissions, dispatch_decision, blocked_state = _held_to_role(
+                        store, config, holder, schedule, repo, permissions, dispatch_decision
+                    )
+                if blocked_state is None:
                     outcome = dispatch(
                         repo,
                         instance.instructions
@@ -878,6 +951,10 @@ def run_due(
                     project_context = None
                     auto_apply_verified_patch = None
                 if blocked_state is None:
+                    permissions, dispatch_decision, blocked_state = _held_to_role(
+                        store, config, holder, schedule, repo, permissions, dispatch_decision
+                    )
+                if blocked_state is None:
                     outcome = dispatch(
                         repo,
                         schedule.instructions
@@ -896,6 +973,8 @@ def run_due(
                     )
             if blocked_state is None:
                 task_id, state = outcome.record.task_id, outcome.record.state
+                if schedule.role is not None and dispatch_decision.delegation is not None:
+                    held = dict(dispatch_decision.delegation), repo
             else:
                 task_id, state = None, blocked_state
         except Exception as exc:  # a broken schedule must not abort the rest of the tick
@@ -928,6 +1007,7 @@ def run_due(
                         f"[{schedule.name}] {terminal_text}",
                         notify,
                         kind=terminal_kind,
+                        worker=task_id,
                     )
             # v14 Step 2: a schedule that keeps failing (e.g. a persistent policy
             # block) is auto-disabled rather than retried every interval forever —
@@ -960,6 +1040,13 @@ def run_due(
                 # failure. The disabled row + reason is the record of what happened.
                 store.set_schedule_enabled(schedule.name, enabled=False)
                 store.set_schedule_disabled_reason(schedule.name, f"one-shot: fired ({state})")
+            if held is not None and task_id is not None:
+                # v123-F1 review (I13, R3): one ``delegated`` row naming
+                # ``schedule:<name>@<role>``, as submit_run writes it — last,
+                # so a ledger failure never re-fires or misreports the run
+                from .serve.actions import record_delegation
+
+                record_delegation(config.audit_dir, held[0], repo=str(held[1]), task=task_id)
         except Exception:
             logger.exception("schedule %r: recording its tick failed", schedule.name)
         results.append(TickResult(name=schedule.name, task_id=task_id, state=state))
