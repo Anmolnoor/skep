@@ -22,7 +22,7 @@ import argparse
 from pathlib import Path
 
 from ..workers.curator import classify_memory_class
-from .memory import MemoryError, MemoryProposal, MemorySource
+from .memory import MemoryError, MemoryProposal, MemorySource, taint_phrase
 from .store import RunStore
 
 CLI_ACTOR = "cli-user"
@@ -82,6 +82,10 @@ def cmd_memory_show(args: argparse.Namespace) -> int:
         return _err(f"no memory item {args.memory_id!r}.")
     try:
         item = store.get_memory_item(args.memory_id)
+        proposal = (
+            None if item is None or item.proposal_id is None
+            else store.get_memory_proposal(item.proposal_id)
+        )  # fmt: skip
     finally:
         store.close()
     if item is None:
@@ -93,6 +97,9 @@ def cmd_memory_show(args: argparse.Namespace) -> int:
     print(f"created: {item.created_at}")
     if item.proposal_id is not None:
         print(f"from:    proposal {item.proposal_id}")
+        filed = taint_phrase(proposal.taint) if proposal is not None else None
+        if filed:
+            print(f"         ({filed})")  # v126-F6
     if item.provenance is not None:
         print(f"written: by {item.provenance}")
     print(f"\n{item.content}")
@@ -128,7 +135,10 @@ def cmd_memory_proposals(args: argparse.Namespace) -> int:
         print("no proposals")
         return 0
     for p in proposals:
+        filed = taint_phrase(p.taint)  # v126-F6
         print(f"{p.proposal_id}  [{p.memory_class}] {p.state}  {p.content}")
+        if filed:
+            print(f"    ({filed})")
     return 0
 
 

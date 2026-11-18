@@ -113,6 +113,19 @@ class MemoryProposal:
     decided_by: str | None = None
     decision_reason: str | None = None
     sources: tuple[MemorySource, ...] = field(default_factory=tuple)
+    # v126-F6: the taint bits of the chat (or note) it was filed from (W21)
+    taint: tuple[str, ...] = ()
+
+
+_TAINT_WORDS = {"private": "private data", "untrusted": "outside content"}
+
+
+def taint_phrase(taint: tuple[str, ...]) -> str | None:
+    """v126-F6: what an approver is told about a tainted proposal."""
+    if not taint:
+        return None
+    words = ", ".join(_TAINT_WORDS.get(bit, bit) for bit in sorted(taint))
+    return f"filed from a chat that read: {words}"
 
 
 @dataclass(frozen=True)
