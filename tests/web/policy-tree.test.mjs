@@ -314,3 +314,20 @@ test("the Queen's baseline rules carry their description; a changed rule with th
   await pick(main, "network.search");
   assert.ok(detail(main).textContent.includes(explain.rules.find(r => r.rule_id === "net-search").description));
 });
+
+// v124 review (F2, I8): with no project the settings leaf shows what the locked
+// baseline sets (explain.settings), not the registry's default.
+test("no project: a setting the locked baseline sets shows its value, enforced", async () => {
+  const { main } = await openTree();
+  const set = LOCKED["GET /api/policy/explain?subject=baseline"].settings.find(s => s.key === "default_network");
+  await noProject(main);
+  await pick(main, "default_network");
+  assert.equal(state(main), set.value.join(", "));
+  assert.equal(detail(main).querySelector(".policy-tree-decider").textContent, "Enforced (locked baseline)");
+  assert.doesNotMatch(detail(main).textContent, /Default:/);
+  // A tampered lock's settings are not live: no "Enforced" from its old layer.
+  const tampered = await openTree(TAMPERED);
+  await noProject(tampered.main);
+  await pick(tampered.main, "default_network");
+  assert.doesNotMatch(detail(tampered.main).textContent, /Enforced/);
+});

@@ -1055,6 +1055,18 @@ function scopeLeafDetail(key, ctx) {
 
 function keyLeafDetail(key, ctx) {
   const entry = (ctx.rsop?.keys || []).find(k => k.key === key.name);
+  // No project: what the locked baseline sets — unless it does not verify, when nothing of it is live.
+  const baselineSets = !ctx.rsop && !ctx.guard && (ctx.explain.settings || []).find(s => s.key === key.name);
+  if (baselineSets) {
+    return [
+      el("p", { class: "policy-tree-state" }, settingWord(baselineSets.value)),
+      // A template layer is the locked baseline, every setting enforced (ADR 0053 D4).
+      fact("Decided by", el("span", { class: "chip tone-info policy-tree-decider", title: `template:${ctx.explain.name}` },
+        "Enforced (locked baseline)")),
+      fact("May be set at", (key.layers || []).join(", ")),
+      editLink("#/setup", "The baseline changes in Setup →"),
+    ];
+  }
   if (!entry) {
     return [
       fact("Default", settingWord(key.default)),
