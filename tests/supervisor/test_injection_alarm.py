@@ -424,3 +424,87 @@ def test_push_outcome_names_why_a_push_did_not_arrive(config: SupervisorConfig) 
 def test_a_span_strips_newlines_and_backticks() -> None:
     line = alarm.alarm_line("b", None, [{"tool": "t", "arg_head": "a\n`b`\nc.example"}], None, "T")
     assert "`a b c[.]example`" in line and "\n" not in line
+
+
+# -- review fixes (v121 reviewer) ------------------------------------------------
+
+
+def test_a_huge_from_line_cannot_make_the_alarm_undeliverable() -> None:
+    sender = '"' + "a." * 500 + '" <x@y.test>'
+    digest = "".join(f"---\nFrom: {i}{sender}\nSubject: s\nDate: d\n> body\n" for i in range(9))
+    rows = [{"tool": f"tool_{i}", "arg_head": "a." * 200} for i in range(20)]
+    line = alarm.alarm_line("mail-summary", "mail-pull", rows, digest, "T")
+    assert len(line) <= alarm.ALARM_MAX_CHARS
+    assert "(+15 more)" in line and "(+6 more)" in line
+    assert line.endswith("--since T")
+
+
+def test_the_argument_head_drops_queries_in_any_case_with_spaces_or_quotes() -> None:
+    heads = [
+        alarm.argument_head({"url": "HTTPS://attacker.example.test/p/q?q=secret"}),
+        alarm.argument_head({"url": "http://attacker.test/?q=my secret notes"}),
+        alarm.argument_head({"u": 'http://a.test/x/?a="b=secret'}),
+        alarm.argument_head({"nested": ["see http://a.test/x/y#frag secret"]}),
+    ]
+    for head in heads:
+        assert "secret" not in head and "(query dropped)" in head
+    assert alarm.argument_head({"c": "see http://a.test/x/y and more"}) == (
+        '{"c": "see http://a.test/x/ and more"}'
+    )
+
+
+def test_a_span_makes_slack_control_sequences_inert() -> None:
+    assert "<" not in alarm._span("<!channel> <@U0123>")
+
+
+def test_a_refused_call_is_recorded_before_its_tool_event(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    home = Home(config, ollama, bound=False)
+    try:
+        ollama.script_tool_call("dispatch_run", {"repo": "demo", "instructions": "x"})
+        ollama.script_reply("done")
+        kinds = [e for e, _ in _turn(home, read_only=True, unattended=True)]
+        assert kinds.index("alarm") < kinds.index("tool")
+    finally:
+        home.store.close()
+
+
+def test_a_push_that_raises_still_writes_the_delivery_note(
+    config: SupervisorConfig, ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Home(config, ollama, bound=True)
+    try:
+
+        def boom(*_a: Any, **_k: Any) -> str:
+            raise RuntimeError("binding lookup failed")
+
+        monkeypatch.setattr(outbound, "push_outcome", boom)
+        alarm.send_alarm(home.holder, home.store, config.home, home.chat_id, schedule="s", line="x")
+        (note,) = home.rows()
+        assert note["alarm_delivered"] is False and note["reason"] == "send raised"
+    finally:
+        home.store.close()
+
+
+def test_a_tainted_follow_ups_refused_ask_is_recorded_without_an_alarm(
+    config: SupervisorConfig, ollama: FakeOllama, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.supervisor.autonomy import AutonomyDecision
+    from skep.supervisor.serve import chat as chat_module
+
+    ask = AutonomyDecision(
+        verdict="require_approval", reason="taint.require_approval.t", detail="tainted",
+        decided_by="taint/egress",
+    )  # fmt: skip
+    monkeypatch.setattr(chat_module, "mutation_execution_decision", lambda *_a, **_k: ask)
+    home = Home(config, ollama, bound=False)
+    try:
+        ollama.script_tool_call("read_url", {"url": "https://example.test/page"})
+        ollama.script_reply("done")
+        events = _turn(home, unattended=True)  # a run-finish follow-up, read_only=False
+        assert not [e for e, _ in events if e == "alarm"]
+        rows = [r for r in home.rows() if r.get("rule_id") == "unattended_mutation"]
+        assert len(rows) == 1 and "alarm" not in rows[0]
+    finally:
+        home.store.close()

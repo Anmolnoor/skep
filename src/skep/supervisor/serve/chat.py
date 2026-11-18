@@ -2352,11 +2352,13 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(refusal, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "args": shown_args, "result": refusal})
-                        if unattended:  # v121-F2: a scheduled turn's off-menu call
+                        if unattended:  # v121-F2: a scheduled turn's off-menu call —
+                            # recorded before the tool event, so a deadline that
+                            # closes the turn on that event cannot lose the row (I8)
                             yield ("alarm", self._refused(
                                 chat_id, name, args, "unattended_mutation", schedule, alarm=True,
                             ))  # fmt: skip
+                        yield ("tool", {"tool": name, "args": shown_args, "result": refusal})
                         continue
                     decision = search_ask or mutation_execution_decision(
                         name, args, store=self.store, holder=self.holder, chat_id=chat_id
@@ -2458,11 +2460,11 @@ class ChatEngine:
                             tool_call_id=call_id,
                             content=json.dumps(waiting, ensure_ascii=True),
                         )
-                        yield ("tool", {"tool": name, "args": shown_args, "result": waiting})
                         if unattended:  # v121-F2: recorded; a tainted follow-up is no attack
                             self._refused(
                                 chat_id, name, args, "unattended_mutation", schedule, alarm=False
                             )
+                        yield ("tool", {"tool": name, "args": shown_args, "result": waiting})
                         continue
                     if taint_ask:
                         taint_carded.add(name)
