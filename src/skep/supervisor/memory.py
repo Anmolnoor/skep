@@ -1,8 +1,11 @@
 """v13: curated-memory domain model.
 
-Raw inbox notes/tasks never become durable memory on their own. A curator worker
-proposes memory; a human/Queen decision promotes a proposal into a durable
-``memory_item`` with recorded evidence. This module is the pure domain model —
+Raw notes/tasks never become durable memory on their own. A proposal is filed
+by the Queen's ``remember`` tool, ``skep memory propose`` (from a note or task)
+or the notes API's propose route; a human decision (a card, the CLI or the
+memory page) promotes it into a durable ``memory_item`` with recorded evidence.
+The observation harvest (``observe.py``) writes expiring
+``observation`` items without a proposal. This module is the pure domain model —
 the states, the classes, the records, and the legal state transitions. All
 persistence and audit recording lives in ``store.py``; all injection lives in
 ``policy_resolver.py``. Memory reuses the same trust engine — approval is a
@@ -21,7 +24,7 @@ TERMINAL_PROPOSAL_STATES: frozenset[str] = frozenset({"approved", "rejected"})
 
 # What a durable memory item *is*. Not a proposal state.
 # ``observation`` (v71-F5) is the one NON-durable class: the daily-companion
-# lane. Curator-written WITHOUT a proposal (it grants nothing and expires),
+# lane. Harvest-written WITHOUT a proposal (it grants nothing and expires),
 # swept after OBSERVATION_TTL_DAYS by the ticker, and promotable to a durable
 # class only through the ordinary proposal gate — the human gate stays where
 # permanence begins.

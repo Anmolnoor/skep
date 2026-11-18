@@ -3,10 +3,14 @@
 The curator turns raw inbox items (notes/tasks materialized into its workspace)
 into *memory proposals* — it never writes durable memory. It speaks the same
 contract envelope, event stream, states, and result as every other caste; only
-the output differs: a ``proposals.json`` artifact the supervisor ingests into the
-``pending_review`` queue, where a human/Queen decision (Step 4) is required
-before anything becomes durable. Fully deterministic and offline, so it is
-gate-safe on its own.
+the output differs: a ``proposals.json`` artifact. Fully deterministic and
+offline, so it is gate-safe on its own.
+
+v126-F7: nothing ingests that artifact any more — the ingest path was dead
+(called only from tests, and nothing wrote ``inbox.json``) and is deleted. The
+caste stays because the worker contract names it (``KNOWN_WORKER_KINDS``) and
+so does the ``document`` role's default castes; ``classify_memory_class`` here
+is live — the observation harvest and ``skep memory propose`` use it.
 
     python -m skep.workers.curator --headless --task-file task.json --out result.json
 
