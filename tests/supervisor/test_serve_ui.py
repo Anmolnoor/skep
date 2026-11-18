@@ -1171,8 +1171,9 @@ def test_flat_reading_styles_prose_and_mobile_output() -> None:
 
 def test_user_facing_vocabulary_names_gates_and_templates() -> None:
     """v40-F13 (v36-F9): user-facing language is Policy/Scope/Gate/Template;
-    internal names stay. One string-presence pin per renamed surface."""
-    source = (STATIC_DIR / "app.js").read_text()
+    internal names stay. One string-presence pin per renamed surface. The
+    Policies subtitle lives in policies.js since graphite round A."""
+    source = (STATIC_DIR / "app.js").read_text() + (STATIC_DIR / "policies.js").read_text()
     assert "The gate queue: risky work waits here" in source
     assert "Policy and scopes: autonomy and defaults" in source
     assert "skep setup --template" in source
@@ -1353,34 +1354,38 @@ def test_runs_page_renders_filter_tabs_and_grouped_cards() -> None:
 
 
 def test_policies_sections_help_and_shell_editor() -> None:
-    """v75-F5: Policies is four collapsible sections (Execution defaults open,
-    Security / Advanced / Auto-approval collapsed), every field carries a
-    one-line help hint (I9), and the shell-command editor is argv-safe (C8):
-    each row round-trips its command through exact JSON — no whitespace
-    splitting anywhere — with a raw-JSON escape hatch."""
+    """v75-F5, regrouped by graphite round A: the Defaults tab is collapsible
+    sections (Limits, Network and environment, Where workers run, Auto-apply
+    open; Advanced collapsed), every field carries a one-line help hint (I9),
+    and the shell-command editor is argv-safe (C8): each row round-trips its
+    command through exact JSON — no whitespace splitting anywhere — with a
+    raw-JSON escape hatch. The page lives in policies.js; app.js keeps the
+    marker comment the Schedules slice ends on."""
     source = (STATIC_DIR / "app.js").read_text()
+    policies = (STATIC_DIR / "policies.js").read_text()
     css = (STATIC_DIR / "style.css").read_text()
 
-    policies = source[
-        source.index("// ---------- Policies (v75-F5") : source.index(
-            "// ---------- Settings (v75-F3"
-        )
-    ]
-    assert 'section("Execution defaults", true,' in policies
-    assert 'section("Security", false,' in policies
-    assert 'section("Advanced", false,' in policies
-    assert 'section("Auto-approval", false,' in policies
-    # Auto-approval copy survives verbatim (the upgrade plan's KEEP).
-    assert "auto-approval (D3: verified + re-verified manifest-only fixes)" in policies
+    assert "// ---------- Policies (graphite round A" in source
+    assert 'import { viewPolicies } from "./policies.js";' in source
+    assert 'policySection("Limits", true,' in policies
+    assert 'policySection("Network and environment", true,' in policies
+    assert 'policySection("Where workers run", true,' in policies
+    assert 'policySection("Auto-apply", true,' in policies
+    assert 'policySection("Advanced", false,' in policies
+    # Auto-approval copy survives verbatim (the upgrade plan's KEEP) — its D3
+    # tag now rides the label's hover text, not the label.
+    assert 'title: "auto-approval (D3: verified + re-verified manifest-only fixes)"' in policies
     assert "auto-apply safe dependency fixes" in policies
     # Field help exists and rides every section (spot-pin one per section).
-    assert 'class: "field-help"' in source or "field-help" in policies
+    assert 'class: "field-help"' in policies
     assert "Empty = deny all network." in policies
     assert "the cost ceiling" in policies
 
     # C8: argv-safe editor — rows hold exact JSON arrays; the source never
     # whitespace-splits a command; the raw toggle exists.
-    editor = policies[: policies.index("async function viewPolicies")]
+    editor = policies[
+        policies.index("function buildShellCommandEditor") : policies.index("function knobInput")
+    ]
     assert "JSON.stringify(command)" in editor
     assert 'JSON.parse(input.value || "[]")' in editor
     assert ".split(/\\s+/)" not in policies  # never split argv on whitespace
