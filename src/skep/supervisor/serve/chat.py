@@ -1085,6 +1085,23 @@ _SKILL_INDEX_HEADER = (
     "here. When the user's ask matches a name, call view_skill for its full "
     "recipe instead of reasoning from scratch:"
 )
+# v126-F8: a short "when to use it" per skill, inside a bound. Measured with
+# the full shelf (85 seeds): 1,530 chars as names, ~5,600 more with
+# descriptions — past the 2,400 the shelf is pinned to — so seeds stay
+# names-only and the operator's own skills (any non-seed provenance) carry
+# descriptions until SKILL_INDEX_MAX_CHARS, then fall back to names too.
+# Every name is listed either way (v99-F2).
+SKILL_DESCRIPTION_CHARS = 50
+SKILL_INDEX_MAX_CHARS = 4_000
+
+
+def short_description(text: str, limit: int = SKILL_DESCRIPTION_CHARS) -> str:
+    """One line, at most ``limit`` chars plus an ellipsis, cut on a word."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[: limit + 1].rsplit(" ", 1)[0] if " " in text[: limit + 1] else text[:limit]
+    return cut.rstrip(" ,;:.—-") + "…"
 
 
 def skill_index_block(store: RunStore) -> str:
@@ -1105,7 +1122,23 @@ def skill_index_block(store: RunStore) -> str:
     # evicted this now decides reading order rather than survival.
     # Stable within each half: list_templates is name-ordered.
     templates = sorted(templates, key=lambda t: t.provenance == "seed")
-    return "\n".join([_SKILL_INDEX_HEADER, ", ".join(template.name for template in templates)])
+    # v126-F8: every name stays on the last line unless it earned a described
+    # line above it; the bound is checked against the whole block.
+    # A described line costs its length but frees its name from the last line.
+    budget = SKILL_INDEX_MAX_CHARS - len(_SKILL_INDEX_HEADER) - 1
+    budget -= len(", ".join(t.name for t in templates))
+    described: list[str] = []
+    names: list[str] = []
+    for template in templates:
+        description = short_description(template.description)
+        line = f"- {template.name}: {description}"
+        cost = len(line) + 1 - len(template.name) - 2
+        if template.provenance != "seed" and description and cost <= budget:
+            described.append(line)
+            budget -= cost
+        else:
+            names.append(template.name)
+    return "\n".join([_SKILL_INDEX_HEADER, *described, *([", ".join(names)] if names else [])])
 
 
 # v74-F5: ONE "what you can reach" roof — tools by category (F3), skills by

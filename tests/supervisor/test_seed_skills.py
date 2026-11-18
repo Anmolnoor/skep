@@ -122,10 +122,11 @@ def test_operator_skills_outrank_the_shelf_in_the_index(tmp_path: Path) -> None:
             )
         )
         block = skill_index_block(store)
-        # Alphabetically last, but provenance ranks it AHEAD of every seed.
+        # Alphabetically last, but provenance ranks it AHEAD of every seed
+        # (v126-F8: on its own described line, above the seed names).
+        assert block.splitlines()[1] == "- zz-operator-skill: the operator's own"
         listed = [name.strip() for name in block.splitlines()[-1].split(",")]
-        assert listed[0] == "zz-operator-skill"
-        assert len(listed) == 21  # every seed still listed, none evicted
+        assert len(listed) == 20  # every seed still listed, none evicted
     finally:
         store.close()
 

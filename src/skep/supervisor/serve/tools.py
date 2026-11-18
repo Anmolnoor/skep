@@ -418,8 +418,21 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         },
         ["subject"],
     ),
-    _tool("list_templates", "Saved workflow templates (hand-authored and learned).", {}),
-    _tool("list_skills", "Learned-skill candidates and skill-pack ladder states.", {}),
+    # v126-F8: say what each returns — the small model skims these.
+    _tool(
+        "list_templates",
+        "Every runnable skill/template, any provenance. Returns name, "
+        "description, caste, params and provenance (seed, external, chat, "
+        "user, learned, pack); view_skill opens one.",
+        {},
+    ),
+    _tool(
+        "list_skills",
+        "Skill drafts and packs, not runnable skills. Returns learned drafts "
+        "awaiting the human gate and script skill packs with their ladder "
+        "state; runnable skills are in list_templates.",
+        {},
+    ),
     _tool(
         "list_plugins",
         "Forged plugins — MCP tool servers skep authored for itself — with "
