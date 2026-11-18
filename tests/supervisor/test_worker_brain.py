@@ -184,3 +184,63 @@ def test_seeded_maintenance_text_points_at_the_pin() -> None:
     (template,) = get_policy_pack("trusted_local_dev").templates
     assert wanted in template.instructions
     assert "normal verification commands" not in template.instructions
+
+
+# ---------- F2: a missed edit teaches the replan ----------
+
+
+def _registry(workspace: Path) -> Any:
+    from skep.workers.capabilities import CapabilityRegistry
+
+    return CapabilityRegistry(workspace, emit=lambda *_args, **_kw: None)
+
+
+def test_a_missed_edit_shows_the_closest_window_redacted(repo: Path) -> None:
+    from skep.workers.capabilities import CapabilityDenied
+
+    lines = [f"line {n}" for n in range(200)]
+    lines[120] = "title: Skep is live!"
+    lines[121] = "API_TOKEN=sk-" + "abcdefghijklmnopqrstuvwx"
+    (repo / "post.mdx").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with pytest.raises(CapabilityDenied) as caught:
+        _registry(repo).invoke(
+            "filesystem.edit", {"path": "post.mdx", "old": "title: Skep is LIVE", "new": "t"}
+        )
+    message = str(caught.value)
+    assert message.startswith("old text not found in post.mdx")
+    assert "title: Skep is live!" in message
+    assert "API_TOKEN=***" in message
+    assert "sk-" + "abcdefghijklmnopqrstuvwx" not in message
+    assert "line 0\n" not in message  # the window, not the whole file
+    assert len(message.encode()) < 2_400
+
+
+def test_a_missed_edit_with_no_close_line_shows_the_file_head(repo: Path) -> None:
+    from skep.workers.capabilities import CapabilityDenied
+
+    (repo / "big.txt").write_text("alpha\n" + "z" * 5_000 + "\n", encoding="utf-8")
+    with pytest.raises(CapabilityDenied) as caught:
+        _registry(repo).invoke(
+            "filesystem.edit", {"path": "big.txt", "old": "0123456789", "new": "t"}
+        )
+    message = str(caught.value)
+    assert "file head" in message and "alpha" in message
+    assert len(message.encode()) < 2_400
+
+
+def test_a_file_named_in_the_task_reaches_the_snapshot_even_when_large(repo: Path) -> None:
+    from skep.workers.llm_plan import _repository_snapshot
+
+    from .conftest import git
+
+    (repo / "src").mkdir()
+    (repo / "src" / "named.mdx").write_text("N" * 20_000, encoding="utf-8")
+    (repo / "other.mdx").write_text("O" * 20_000, encoding="utf-8")
+    git(repo, "add", "src/named.mdx", "other.mdx")
+    snapshot = _repository_snapshot(repo, instructions="Fix the typo in src/named.mdx.")
+    assert "--- src/named.mdx" in snapshot
+    assert "N" * 8_000 in snapshot and "N" * 8_001 not in snapshot  # the head
+    assert "--- other.mdx" not in snapshot
+    named_at = snapshot.index("--- src/named.mdx")
+    assert named_at < snapshot.index("--- existing.py")  # named files go first
+    assert _repository_snapshot(repo).count("--- src/named.mdx") == 0

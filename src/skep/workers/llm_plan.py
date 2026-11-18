@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import urllib.parse
@@ -541,7 +542,7 @@ def _messages(
             "content": (
                 f"Task:\n{instructions}{_briefing_block(workspace)}"
                 f"\n\n{document_toolchain_block()}"
-                f"\n\nRepository snapshot:\n{_repository_snapshot(workspace)}"
+                f"\n\nRepository snapshot:\n{_repository_snapshot(workspace, instructions)}"
                 f"{_memory_block(memory)}"
             ),
         },
@@ -631,16 +632,43 @@ def _briefing_block(workspace: Path) -> str:
     return f"\n\nRepository briefing (SKEP.md):\n{text}"
 
 
-def _repository_snapshot(workspace: Path) -> str:
+_SNAPSHOT_FILE_BYTES = 8_000
+_NAMED_SNAPSHOT_BYTES = 24_000
+
+
+def _repository_snapshot(workspace: Path, instructions: str = "") -> str:
     files = _git_files(workspace)
     if not files:
         return "(no tracked files)"
     lines = ["Tracked files:", *[f"- {path}" for path in files[:120]]]
-    remaining = 18_000
-    for relative in files[:40]:
+    # v127-F2: a file the task names goes first, on its own budget, its head
+    # when over the per-file cap — the 8 KB skip once hid the very .mdx a
+    # run was asked to edit, and its edit missed.
+    named = [path for path in files if _names_path(instructions, path)]
+    remaining = _NAMED_SNAPSHOT_BYTES
+    for relative in named:
         path = workspace / relative
         try:
-            if not tracked_file_readable(workspace, path) or path.stat().st_size > 8_000:
+            if not tracked_file_readable(workspace, path):
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if len(text) > _SNAPSHOT_FILE_BYTES:
+            text = text[:_SNAPSHOT_FILE_BYTES] + "\n(file head only; read the rest)"
+        block = f"\n--- {relative} ---\n{text}"
+        if len(block) > remaining:
+            break
+        lines.append(block)
+        remaining -= len(block)
+    remaining = 18_000
+    for relative in [path for path in files if path not in named][:40]:
+        path = workspace / relative
+        try:
+            if (
+                not tracked_file_readable(workspace, path)
+                or path.stat().st_size > _SNAPSHOT_FILE_BYTES
+            ):
                 continue
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -651,6 +679,12 @@ def _repository_snapshot(workspace: Path) -> str:
         lines.append(block)
         remaining -= len(block)
     return "\n".join(lines)
+
+
+def _names_path(instructions: str, path: str) -> bool:
+    """The task text names ``path`` as a whole token (``src/a.py`` is not
+    named by ``src/data.py``); a trailing sentence period still counts."""
+    return re.search(rf"(?<![\w./-]){re.escape(path)}(?![\w/-])", instructions) is not None
 
 
 def _git_files(workspace: Path) -> list[str]:

@@ -493,6 +493,34 @@ def _child_process_env(
     return env
 
 
+_EDIT_HINT_BYTES = 2_000
+
+
+def _edit_miss_hint(content: str, old: str) -> str:
+    """v127-F2 (I9): a 0-match ``old`` shows the closest window of the file
+    as it is now (difflib on the first non-blank line of ``old``), or the
+    file head when nothing is close, so the replan copies real text instead
+    of guessing again. Shown only — never applied (no fuzzy edit). Redacted
+    like the worker's failure details (ES-F260): the text lands in audit."""
+    import difflib
+
+    from skep.supervisor.policy_v3 import redact
+
+    lines = content.splitlines()
+    anchor = next((line for line in old.splitlines() if line.strip()), old)
+    match = difflib.get_close_matches(anchor, lines, n=1, cutoff=0.6)
+    if match:
+        at = lines.index(match[0])
+        start = max(0, at - 3)
+        end = at + len(old.splitlines()) + 3
+        label = f"closest lines in the file now ({start + 1}-{min(end, len(lines))})"
+        window = "\n".join(lines[start:end])
+    else:
+        label, window = "file head", content
+    window = redact(window).encode()[:_EDIT_HINT_BYTES].decode(errors="ignore")
+    return f"; copy old exactly from the file. {label}:\n{window}"
+
+
 class CapabilityRegistry:
     """Small registry of worker actions that may have side effects."""
 
@@ -1121,7 +1149,9 @@ class CapabilityRegistry:
             raise CapabilityDenied(str(exc)) from exc
         count = content.count(old)
         if count == 0:
-            raise CapabilityDenied(f"old text not found in {relative}")
+            raise CapabilityDenied(
+                f"old text not found in {relative}{_edit_miss_hint(content, old)}"
+            )
         if count > 1 and not replace_all:
             raise CapabilityDenied(f"old text appears {count} times in {relative}")
         updated = content.replace(old, new, -1 if replace_all else 1)
