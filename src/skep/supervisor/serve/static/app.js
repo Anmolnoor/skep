@@ -1,5 +1,6 @@
 /* skep — the face (v5 Stage F). No build step: ES modules + fetch + EventSource. */
 import { renderContextPanel } from "./room.js";
+import { viewProjects, viewSettings, viewSetup } from "./settings.js";
 import { installSidebar, refreshSidebar, renderThreads, viewInbox } from "./sidebar.js";
 
 const TOKEN_KEY = "skep-token";
@@ -665,6 +666,8 @@ function setShellActiveRoute(hash) {
     if (ws === "chat") {
       active = nav === "new-chat" && hash === "#/chat";
     }
+    // Graphite round A: Projects and Setup are Settings tabs (settings.js).
+    if (ws === "settings") active = /^#\/(settings|projects|setup)\b/.test(hash);
     link.classList.toggle("active", active);
   }
 }
@@ -696,12 +699,10 @@ const RAIL_ICONS = {
   templates:
     '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/>' +
     '<rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
-  projects: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   schedules: '<circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/>',
   notes: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/>',
   memory: '<path d="M7 4h10a1 1 0 0 1 1 1v16l-6-4-6 4V5a1 1 0 0 1 1-1z"/>',
   policies: '<path d="M12 3l7 3v6c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/>',
-  setup: '<path d="M6 21V4M6 4h11l-2 4 2 4H6"/>',
   settings:
     '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6' +
     'M5.2 5.2l1.9 1.9M16.9 16.9l1.9 1.9M18.8 5.2l-1.9 1.9M7.1 16.9l-1.9 1.9"/>',
@@ -901,7 +902,7 @@ function updateShellChrome(hash) {
   const queenTile = document.getElementById("topbar-queen-status");
   if (queenTile) queenTile.hidden = page !== "home";
   viewControls()?.replaceChildren();
-  const hideDock = hash.startsWith("#/chat") || hash.startsWith("#/setup");
+  const hideDock = hash.startsWith("#/chat");
   const dock = document.getElementById("dock");
   if (dock) dock.classList.toggle("hidden", hideDock);
   // Reserve space so the sticky dock never hides the tail of long content.
@@ -982,8 +983,7 @@ async function route() {
   for (const [pattern, view] of routes) {
     const match = hash.match(pattern);
     if (match) {
-      const args = view === viewSetup ? [setup] : match.slice(1);
-      await view(main, ...args).catch(e => flash("bad", e.message));
+      await view(main, ...match.slice(1)).catch(e => flash("bad", e.message));
       // H1-G2: the list filter shows only on a view that has a list to filter.
       const filter = document.getElementById("app-search")?.closest(".topbar-search");
       if (filter) filter.hidden = !main.querySelector(".searchable");
@@ -1723,258 +1723,8 @@ async function viewHome(main) {
 
 // ---------- Setup ----------
 
-async function viewSetup(main, setup) {
-  header(main, "Setup", "Connect a model, bind a project, and choose the first-run policy.");
-  const missing = setupMissingLabels(setup);
-  main.append(el("div", { class: "card" },
-    el("h3", {}, setup.complete ? "Ready" : "Missing"),
-    setup.missing.length
-      ? el("p", { class: "note" }, missing.join(", "))
-      : el("p", { class: "note" }, "Setup is complete."),
-    setup.marked_complete && setup.completed_at
-      ? el("p", { class: "note" }, `completed ${fmtTs(setup.completed_at)}`)
-      : null));
-
-  main.append(await onboardCard());
-
-  const llm = await api("GET", "/api/llm/config");
-
-  const protocol = el("select", {},
-    el("option", { value: "ollama" }, "Ollama"),
-    el("option", { value: "openai-compat" }, "OpenAI-compatible"),
-    el("option", { value: "anthropic" }, "Anthropic"),
-    el("option", { value: "openai-responses" }, "OpenAI Responses"),
-    el("option", { value: "bedrock" }, "AWS Bedrock"));
-  protocol.value = llm.protocol || "ollama";
-  const baseUrl = el("input", {
-    value: llm.base_url || "",
-    placeholder: "https://ollama.com or http://localhost:11434",
-  });
-  const apiKey = el("input", {
-    type: "password",
-    autocomplete: "off",
-    placeholder: llm.api_key_set ? "key saved — paste to replace" : "API key",
-  });
-  const modelSelect = el("select", {},
-    llm.default_model
-      ? el("option", { value: llm.default_model }, llm.default_model)
-      : el("option", { value: "" }, "(test connection first)"));
-  modelSelect.disabled = !llm.default_model;
-  const modelStatus = el("p", { class: "note" },
-    llm.default_model ? `default model: ${llm.default_model}` : "No default model saved.");
-  const setModelOptions = (models) => {
-    const known = [...new Set([llm.default_model, ...models].filter(Boolean))];
-    modelSelect.replaceChildren(...(known.length
-      ? known.map(model => el("option", { value: model }, model))
-      : [el("option", { value: "" }, "(no models found)")]));
-    modelSelect.disabled = known.length === 0;
-    if (llm.default_model) modelSelect.value = llm.default_model;
-    modelStatus.textContent = `${models.length} model(s) available`;
-  };
-  const loadModels = async () => {
-    try {
-      const { models } = await api("GET", "/api/llm/models");
-      setModelOptions(models);
-    } catch (e) {
-      modelStatus.textContent = `cannot list models: ${e.message}`;
-    }
-  };
-  if (llm.configured) loadModels();
-  const testConnection = el("button", { class: "primary" }, "Test connection");
-  testConnection.addEventListener("click", async () => {
-    testConnection.disabled = true;
-    try {
-      const body = { base_url: baseUrl.value.trim(), protocol: protocol.value };
-      if (apiKey.value.trim()) body.api_key = apiKey.value.trim();
-      const verdict = await api("POST", "/api/llm/test", body);
-      if (!verdict.ok) throw new Error(verdict.detail || "connection failed");
-      await api("PUT", "/api/llm/config", body);
-      const { models } = await api("GET", "/api/llm/models");
-      setModelOptions(models);
-      flash("ok", `connected — ${verdict.models} model(s) available`);
-    } catch (e) { flash("bad", e.message); }
-    finally { testConnection.disabled = false; }
-  });
-  const saveModel = el("button", { class: "primary" }, "Save default model");
-  saveModel.addEventListener("click", async () => {
-    if (!modelSelect.value) return;
-    try {
-      await api("PUT", "/api/llm/config", { default_model: modelSelect.value });
-      flash("ok", `default model: ${modelSelect.value}`);
-      route();
-    } catch (e) { flash("bad", e.message); }
-  });
-  main.append(el("div", { class: "card" },
-    el("h3", {}, "LLM"),
-    el("div", { class: "row" },
-      el("div", { class: "field" }, el("label", {}, "preset"), buildPresetPicker(protocol, baseUrl)),
-      el("div", { class: "field" }, el("label", {}, "protocol"), protocol),
-      el("div", { class: "field grow" }, el("label", {}, "base URL"), baseUrl),
-      el("div", { class: "field grow" }, el("label", {}, "API key"), apiKey),
-      testConnection),
-    el("div", { class: "row" },
-      el("div", { class: "field grow" }, el("label", {}, "default model"), modelSelect),
-      saveModel),
-    modelStatus));
-
-  const applyWorkspace = el("input", { type: "checkbox" });
-  applyWorkspace.checked = !setup.workspace_project.ready;
-  const workspace = setup.default_workspace || {};
-  const saveWorkspace = el("button", { class: "primary" }, "Apply workspace");
-  saveWorkspace.addEventListener("click", async () => {
-    saveWorkspace.disabled = true;
-    try {
-      const result = await api("POST", "/api/setup/default-workspace", { apply: applyWorkspace.checked });
-      flash("ok", result.applied ? "workspace applied" : "workspace skipped");
-      route();
-    } catch (e) { flash("bad", e.message); saveWorkspace.disabled = false; }
-  });
-  main.append(el("div", { class: "card" },
-    el("h3", {}, "Workspace"),
-    el("p", { class: "note" },
-      `Default path: ${workspace.path || "~/workspace"}`),
-    el("p", { class: "note" },
-      "Predefined policy: trusted_local_dev, build phase, workspace execution."),
-    el("div", { class: "row" },
-      el("label", { class: "field" }, applyWorkspace, " Use default workspace"),
-      saveWorkspace)));
-
-  const finish = el("button", { class: "primary" }, "Finish setup");
-  finish.addEventListener("click", async () => {
-    finish.disabled = true;
-    try {
-      if (applyWorkspace.checked && !setup.workspace_project.ready) {
-        await api("POST", "/api/setup/default-workspace", { apply: true });
-      }
-      const done = await api("POST", "/api/setup/complete");
-      if (done.complete) {
-        flash("ok", "setup complete");
-        location.hash = "#/runs";
-      }
-    } catch (e) { flash("bad", e.message); finish.disabled = false; }
-  });
-  main.append(el("div", { class: "actions" }, finish));
-}
-
-// first-run O3 (ADR 0056 D7): `skep onboard`'s five steps as a thin form over
-// the same step functions (POST /api/onboard/<step>). The CLI resumes from the
-// records these write, and the other way round.
-async function onboardCard() {
-  const { steps, relock } = await api("GET", "/api/onboard");
-  const summaries = {
-    model: r => `${r.provider} ${r.model} — ${r.egress}`,
-    workdir: r => `${r.path} (project ${r.project_id})`,
-    sandbox: r => `${r.backend} — ${r.rings}`,
-    template: r => `${r.template} locked, sha256 ${String(r.sha256).slice(0, 12)}`,
-    role: r => r.role,
-  };
-  // O3-F1: a sandbox switch after the lock re-opens step 4 — say why.
-  const state = name => el("p", { class: "note" },
-    steps[name] ? `done: ${summaries[name](steps[name])}`
-      : name === "template" && relock
-        ? `re-lock needed: the locked baseline is not what ${relock} locks under this sandbox`
-        : "not done yet");
-  const field = (label, input) => el("div", { class: "field grow" }, el("label", {}, label), input);
-  const select = (values, value) => {
-    const node = el("select", {}, ...values.map(v => el("option", { value: v }, v)));
-    node.value = value;
-    return node;
-  };
-  const post = async (step, body, button) => {
-    button.disabled = true;
-    try {
-      await api("POST", `/api/onboard/${step}`, body);
-      flash("ok", `${step} recorded`);
-      route();
-    } catch (e) { flash("bad", e.message); button.disabled = false; }
-  };
-
-  const model = steps.model || {};
-  const provider = el("input", { value: model.provider || "ollama" });
-  const modelName = el("input", { value: model.model || "", placeholder: "e.g. qwen3:14b" });
-  const endpoint = el("input", { value: model.endpoint || "", placeholder: "http://localhost:11434" });
-  const keyEnv = el("input", { value: model.api_key_env || "", placeholder: "env var NAME, never the key" });
-  const saveModel = el("button", { class: "primary" }, "Test and save");
-  saveModel.addEventListener("click", () => post("model", {
-    provider: provider.value.trim(),
-    model: modelName.value.trim(),
-    endpoint: endpoint.value.trim() || null,
-    api_key_env: keyEnv.value.trim() || null,
-  }, saveModel));
-
-  const workdir = el("input", { value: (steps.workdir || {}).path || "", placeholder: "~/workspace" });
-  const saveWorkdir = el("button", { class: "primary" }, "Register");
-  saveWorkdir.addEventListener("click", () => post("workdir", { path: workdir.value.trim() }, saveWorkdir));
-
-  const backend = select(["auto", "podman", "none"], (steps.sandbox || {}).backend || "auto");
-  const detected = el("p", { class: "note" }, "");
-  const detect = el("button", { class: "ghost" }, "Detect");
-  detect.addEventListener("click", async () => {
-    try {
-      const found = await api("GET", "/api/onboard/sandboxes");
-      backend.value = found.recommended;
-      detected.textContent = Object.entries(found.backends)
-        .map(([name, v]) => `${name}: ${v.usable ? "usable" : "unusable"} (${v.detail})`)
-        .concat(`docker: ${found.docker.detail}`).join(" · ");
-    } catch (e) { flash("bad", e.message); }
-  });
-  const saveSandbox = el("button", { class: "primary" }, "Save");
-  saveSandbox.addEventListener("click", () => post("sandbox", { backend: backend.value }, saveSandbox));
-
-  const template = select(["assistant", "builder", "operator"], (steps.template || {}).template || relock || "assistant");
-  const table = el("pre", { class: "mono worker-command-output onboard-table" }, "");
-  const typed = el("input", { placeholder: "type yes to lock this as the policy baseline" });
-  const lock = el("button", { class: "primary" }, "Lock baseline");
-  lock.disabled = true;
-  let shown = null;
-  const preview = el("button", { class: "ghost" }, "Preview");
-  preview.addEventListener("click", async () => {
-    try {
-      shown = await api("GET", `/api/onboard/template?template=${encodeURIComponent(template.value)}`);
-      table.textContent = shown.locked
-        ? "this is already the locked baseline"
-        : [shown.table, ...(shown.tightened || []), ...(shown.diff || [])].join("\n");
-      lock.disabled = false;
-    } catch (e) { flash("bad", e.message); }
-  });
-  template.addEventListener("change", () => { shown = null; lock.disabled = true; table.textContent = ""; });
-  lock.addEventListener("click", () => {
-    if (!shown || typed.value.trim() !== "yes") { flash("bad", "preview, then type yes"); return; }
-    post("template", { template: template.value, expect_sha256: shown.sha256, approved_by: "web" }, lock);
-  });
-
-  const role = select(["assistant", "builder", "operator"],
-    (steps.role || {}).role || (steps.template || {}).template || "assistant");
-  const saveRole = el("button", { class: "primary" }, "Save");
-  saveRole.addEventListener("click", () => post("role", { role: role.value }, saveRole));
-
-  const report = el("pre", { class: "mono worker-command-output onboard-table" }, "");
-  const check = el("button", { class: "ghost" }, "Run onboard --check");
-  check.addEventListener("click", async () => {
-    try {
-      const result = await api("GET", "/api/onboard/check");
-      report.textContent = result.report;
-      flash(result.ready ? "ok" : "bad", result.ready ? "ready" : "not ready yet");
-    } catch (e) { flash("bad", e.message); }
-  });
-
-  return el("div", { class: "card" },
-    el("h3", {}, "First run (skep onboard)"),
-    el("p", { class: "note" }, "The same five steps as `skep onboard` in a terminal."),
-    el("h4", {}, "1 · Model"), state("model"),
-    el("div", { class: "row" }, field("provider", provider), field("model", modelName),
-      field("endpoint", endpoint), field("API key env var", keyEnv), saveModel),
-    el("h4", {}, "2 · Work directory"), state("workdir"),
-    el("div", { class: "row" }, field("path", workdir), saveWorkdir),
-    el("h4", {}, "3 · Sandbox"), state("sandbox"),
-    el("div", { class: "row" }, field("backend", backend), detect, saveSandbox), detected,
-    el("h4", {}, "4 · Policy template"), state("template"),
-    el("div", { class: "row" }, field("template", template), preview, field("approval", typed), lock),
-    table,
-    el("h4", {}, "5 · Role"), state("role"),
-    el("div", { class: "row" }, field("role", role), saveRole),
-    el("div", { class: "row" }, check), report);
-}
+// Graphite round A: Setup is the last tab of Settings — the first-run
+// checklist and the older setup flag live in settings.js.
 
 // ---------- Notes & Tasks (v76-F7: markdown notes + due-grouped tasks) ----------
 
@@ -4840,8 +4590,9 @@ async function renderSkillsTab(panel) {
 
 // ---------- Schedules ----------
 
-async function viewProjects(main) {
-  header(main, "Projects", "Trusted packs, bindings, and the schedules they seed.");
+// Graphite round A: the project cards and setup form, drawn into Settings →
+// Projects (settings.js) — no page header of their own any more.
+async function renderProjectList(main) {
   const [{ projects }, { packs }, { repos }, { templates }, { schedules }] = await Promise.all([
     api("GET", "/api/projects"),
     api("GET", "/api/projects/packs"),
@@ -5851,22 +5602,8 @@ async function viewPolicies(main) {
 
 // ---------- Settings (v75-F3: five tabs — one section's DOM at a time) ----------
 
-// Per-session tab memory (the openChatGroups pattern): route() re-renders
-// after a save land back on the tab the operator was using.
-let activeSettingsTab = "assistant";
-
-async function viewSettings(main) {
-  header(main, "Settings",
-    "The assistant the Queen chats with, the worker's provider, and the repos the hive may work on.");
-  const tabs = buildTabBar([
-    { key: "assistant", label: "Assistant", render: renderAssistantTab },
-    { key: "worker", label: "Worker", render: renderWorkerTab },
-    { key: "channels", label: "Channels", render: renderChannelsTab },
-    { key: "webhooks", label: "Webhooks", render: renderWebhooksTab },
-    { key: "repos", label: "Repos", render: renderReposTab },
-  ], { initial: activeSettingsTab, onActivate: (key) => { activeSettingsTab = key; } });
-  main.append(tabs.bar, tabs.content);
-}
+// Graphite round A: the page and its five tabs (Models, Workers, Projects,
+// Channels, Setup) are composed in settings.js; the forms below are its parts.
 
 // v108-F9: the preset picker — one catalog row (GET /api/provider-presets)
 // fills protocol + base URL; registry spelling maps to the wire spelling by
@@ -6093,12 +5830,14 @@ function renderWorkerRoster(panel, roster) {
       + "(ADR 0047). Patches still land only through a human approval.")));
 }
 
-async function renderWorkerTab(panel) {
-  const [settings, roster] = await Promise.all([
-    api("GET", "/api/settings"),
-    api("GET", "/api/workers"),
-  ]);
-  renderWorkerRoster(panel, roster);
+// Graphite round A: the roster is Settings → Workers; the override below is
+// the "Worker model" block of Settings → Models.
+async function renderWorkersTab(panel) {
+  renderWorkerRoster(panel, await api("GET", "/api/workers"));
+}
+
+async function renderWorkerModel(panel) {
+  const settings = await api("GET", "/api/settings");
   const provider = el("input", { value: settings.provider || "", placeholder: "anthropic" });
   const model = el("input", { value: settings.model || "", placeholder: "claude-fable-5" });
   const endpoint = el("input", { value: settings.endpoint || "", placeholder: "(provider default)" });
@@ -6114,10 +5853,9 @@ async function renderWorkerTab(panel) {
     } catch (e) { flash("bad", e.message); }
   });
   panel.append(el("div", { class: "card" },
-    el("h3", {}, "Worker LLM override"),
     settings.configured ? null
       : el("p", { class: "note" },
-        "Optional override — the default coding worker uses the assistant connection above."),
+        "Optional override — the default coding worker uses the chat model's connection above."),
     el("div", { class: "row" },
       el("div", { class: "field" }, el("label", {}, "provider"), provider),
       el("div", { class: "field grow" }, el("label", {}, "model"), model)),
@@ -6461,4 +6199,4 @@ schedulePoll(POLL_MIN_MS);
 
 // H1: the helpers sidebar.js and room.js import back (the cycle is safe: they
 // only declare at top level). After the boot marker, so tests/web never sees it.
-export { api, chatTitle, el, header, iconButton, relativeTime, route, shortTaskId, shortTitle, stateChip };
+export { api, buildTabBar, chatTitle, el, flash, fmtTs, header, iconButton, relativeTime, renderAssistantTab, renderChannelsTab, renderProjectList, renderReposTab, renderWebhooksTab, renderWorkerModel, renderWorkersTab, route, setupMissingLabels, setupStatus, shortTaskId, shortTitle, stateChip };

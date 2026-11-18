@@ -540,26 +540,30 @@ def test_settings_shell_renders_before_model_list_fetch() -> None:
 
 
 def test_settings_splits_into_tabs() -> None:
-    """v75-F3: Settings is five tabs (Assistant / Worker / Channels / Webhooks
-    / Repos) on the shared tab bar — one tab's DOM rendered at a time (lazy
-    render), with a channels status summary that reads only fields the API
-    returns (I8) and per-session tab memory."""
+    """v75-F3: Settings is five tabs on the shared tab bar — one tab's DOM
+    rendered at a time (lazy render), with a channels status summary that
+    reads only fields the API returns (I8) and per-session tab memory.
+    Graphite round A: the five tabs are plain questions (Models / Workers /
+    Projects / Channels / Setup), composed in settings.js; Webhooks rides the
+    Channels tab and Repos the Projects tab."""
     source = (STATIC_DIR / "app.js").read_text()
+    page = (STATIC_DIR / "settings.js").read_text()
     css = (STATIC_DIR / "style.css").read_text()
 
-    settings = source[source.index("async function viewSettings") :]
-    settings = settings[: settings.index("// ---------- health poll")]
+    settings = page[page.index("async function viewSettings") :]
     for tab in (
-        '{ key: "assistant", label: "Assistant", render: renderAssistantTab }',
-        '{ key: "worker", label: "Worker", render: renderWorkerTab }',
-        '{ key: "channels", label: "Channels", render: renderChannelsTab }',
-        '{ key: "webhooks", label: "Webhooks", render: renderWebhooksTab }',
-        '{ key: "repos", label: "Repos", render: renderReposTab }',
+        '{ key: "models", label: "Models", render: renderModelsTab }',
+        '{ key: "workers", label: "Workers", render: renderWorkersTab }',
+        '{ key: "projects", label: "Projects", render: renderProjectsTab }',
+        '{ key: "channels", label: "Channels", render: renderChannelsAndWebhooks }',
+        '{ key: "setup", label: "Setup", render:',
     ):
         assert tab in settings, tab
+    assert "await renderWebhooksTab(panel)" in page
+    assert "await renderReposTab(panel)" in page
     # Per-session tab memory: a save's route() lands back on the same tab.
-    assert "let activeSettingsTab" in source
-    assert "initial: activeSettingsTab" in source
+    assert "let activeSettingsTab" in page
+    assert "initial: activeSettingsTab" in page
 
     # The channels summary claims only enabled / live / secret_configured.
     channels = source[source.index("async function renderChannelsTab") :]
@@ -695,10 +699,11 @@ def test_projects_ui_exposes_pack_setup_flow() -> None:
     index = (STATIC_DIR / "index.html").read_text()
 
     assert "[/^#\\/projects$/, viewProjects]" in source
-    assert (
-        'header(main, "Projects", "Trusted packs, bindings, and the schedules they seed.")'
-        in source
-    )
+    # Graphite round A: Projects is a Settings tab; its line says what a
+    # project is, beside a repo, instead of a page header.
+    page = (STATIC_DIR / "settings.js").read_text()
+    assert "trusted packs, bindings, and the schedules they seed." in page
+    assert "export function viewProjects(main)" in page
     assert 'api("GET", "/api/projects")' in source
     assert 'api("POST", "/api/projects/setup", body)' in source
     assert "project_id: projectId.value.trim()" in source
@@ -738,17 +743,28 @@ def test_setup_ui_route_and_guard() -> None:
 def test_setup_ui_orchestrates_first_run_endpoints() -> None:
     source = (STATIC_DIR / "app.js").read_text()
 
-    assert "async function viewSetup" in source
-    setup = source[source.index("async function viewSetup") : source.index("// ---------- Notes")]
-    assert 'api("GET", "/api/llm/config")' in setup
-    assert 'api("POST", "/api/llm/test", body)' in setup
-    assert 'api("GET", "/api/llm/models")' in setup
-    assert 'api("PUT", "/api/llm/config"' in setup
+    # Graphite round A: #/setup is the Setup tab of Settings (settings.js).
+    # A fresh home finishes first run from Settings alone, each thing set in
+    # one place: the connection and default model in Models (app.js's chat
+    # model form), the workspace in Projects, the record on the Setup tab.
+    page = (STATIC_DIR / "settings.js").read_text()
+    assert "export function viewSetup(main)" in page
+    chat_model = source[source.index("async function renderAssistantTab") :]
+    chat_model = chat_model[: chat_model.index("// -- worker provider")]
+    assert 'api("GET", "/api/llm/config")' in chat_model
+    assert 'api("POST", "/api/llm/test", {})' in chat_model
+    assert 'api("GET", "/api/llm/models")' in chat_model
+    assert 'api("PUT", "/api/llm/config"' in chat_model
+    assert 'api("PUT", "/api/llm/config"' not in page  # not a second time
+    setup = page[page.index("function defaultWorkspaceCard") :]
     assert 'api("POST", "/api/setup/default-workspace", { apply:' in setup
     assert 'api("POST", "/api/setup/complete")' in setup
     assert "setup.default_workspace" in setup
     assert "Use default workspace" in setup
     assert "trusted_local_dev" in setup
+    # Each thing the older flag misses names the tab where it is set.
+    assert 'llm: ["models", "Models"]' in setup
+    assert 'workspace_project: ["projects", "Projects"]' in setup
     assert "project policy overrides" not in setup
     assert "trusted roots" not in setup
     assert "network allowlist" not in setup
@@ -1658,7 +1674,12 @@ def test_settings_worker_tab_shows_the_roster_above_the_provider_card() -> None:
 
     # The section it gained did not cost it the one it had.
     assert "Save provider" in worker and 'api("PUT", "/api/settings"' in worker
-    assert worker.index("Castes") < worker.index("Worker LLM override")
+    assert worker.index("Castes") < worker.index("async function renderWorkerModel")
+    # Graphite round A: the roster is Settings → Workers; the override is the
+    # "Worker model" block of Settings → Models (settings.js).
+    page = (STATIC_DIR / "settings.js").read_text()
+    assert '{ key: "workers", label: "Workers", render: renderWorkersTab }' in page
+    assert 'block("Worker model",' in page and "renderWorkerModel(worker)" in page
 
     # I12: the boundary is stated where the engine is chosen, not in a doc.
     assert "do NOT pass skep's capability layer" in worker
