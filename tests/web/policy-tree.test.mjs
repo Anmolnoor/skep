@@ -331,3 +331,15 @@ test("no project: a setting the locked baseline sets shows its value, enforced",
   await pick(tampered.main, "default_network");
   assert.doesNotMatch(detail(tampered.main).textContent, /Enforced/);
 });
+
+// v124 review (F2): an RSoP that did not resolve (200 with `error`) says so on
+// a settings leaf, never a quiet registry default.
+test("a failed RSoP shows its error on a settings leaf", async () => {
+  const { main } = await openTree(TAMPERED);
+  const error = TAMPERED[RSOP_ROUTE].error;
+  assert.ok(error);
+  const text = await pick(main, "default_max_actions");
+  assert.ok(text.includes(`policy did not resolve: ${error}`), text);
+  assert.doesNotMatch(text, /Default:/);
+  assert.ok(detail(main).querySelectorAll("a").some(a => a.getAttribute("href") === "#/policies/groups"));
+});

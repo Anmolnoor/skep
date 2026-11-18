@@ -1054,6 +1054,13 @@ function scopeLeafDetail(key, ctx) {
 }
 
 function keyLeafDetail(key, ctx) {
+  if (ctx.rsop?.error) {
+    return [
+      policyNote(`policy did not resolve: ${ctx.rsop.error}`),
+      fact("May be set at", (key.layers || []).join(", ") || "no layer: built into skep"),
+      editLink("#/policies/groups", "Change it in Projects & groups →"),
+    ];
+  }
   const entry = (ctx.rsop?.keys || []).find(k => k.key === key.name);
   // No project: what the locked baseline sets — unless it does not verify, when nothing of it is live.
   const baselineSets = !ctx.rsop && !ctx.guard && (ctx.explain.settings || []).find(s => s.key === key.name);
