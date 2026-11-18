@@ -1,4 +1,5 @@
-// Graphite round A: the Policies page (policies.js), executed — five pages,
+// Graphite round A: the Policies page (policies.js), executed — six pages
+// (v124 added the tree),
 // each answering one question, built from reads the server already serves.
 // graphite-nav: #/policies/<tab> renders the one page it names; the sidebar's
 // Settings surface is the list.
@@ -66,6 +67,8 @@ function withPolicies(routes = {}) {
     "GET /api/policy/rules": { rules: [], operator_rules: [] },
     "GET /api/policy/decisions": { rows: [], total: 0, summary: { allow: 0, deny: 0, require_approval: 0, observed: 0, forwarded: 0, delegated: 0 } },
     "GET /api/policy": POLICY,
+    "GET /api/schedules": { schedules: [] },
+    "GET /api/repos/": { keys: [], scopes: {} },
     ...routes,
   };
   app.api = async (method, path, body) => {
@@ -87,6 +90,7 @@ const PAGE_MARK = {
   grants: main => texts(main, "policy-section-header").includes("Standing grants"),
   groups: main => Boolean(main.querySelector(".policy-effective")),
   defaults: main => texts(main, "policy-section-header").includes("Limits"),
+  tree: main => Boolean(main.querySelector(".policy-tree")),
 };
 const shown = main => Object.keys(PAGE_MARK).filter(tab => PAGE_MARK[tab](main));
 

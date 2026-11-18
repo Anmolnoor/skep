@@ -45,6 +45,16 @@ def test_the_editor_tier_reads_the_registry_and_writes_through_existing_routes()
     assert '"cleared"' in text and "has no stored form yet" in text
 
 
+def test_the_policy_tree_is_a_sixth_policies_tab() -> None:
+    # v124-F2 (RUN.md decision 10): added beside the five, nothing removed.
+    index = (STATIC / "index.html").read_text()
+    for tab in ("now", "decisions", "grants", "groups", "defaults", "tree"):
+        assert f'href="#/policies/{tab}" data-ws="policies" data-tab="{tab}"' in index, tab
+    app = (STATIC / "app.js").read_text()
+    assert 'policies: ["now", "decisions", "grants", "groups", "defaults", "tree"],' in app
+    assert "tree: renderTreeTab," in (STATIC / "policies.js").read_text()
+
+
 def test_the_project_upsert_keeps_the_pack_it_was_given(
     config: SupervisorConfig, repo: Path
 ) -> None:
