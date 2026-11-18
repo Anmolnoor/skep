@@ -67,6 +67,7 @@ from .llm import (
     chat_stream,
     llm_config_view,
     resolve_active_api_key,
+    resolve_pinned_api_key,
     resolved_num_ctx,
     tool_delivery,
 )
@@ -1523,9 +1524,30 @@ class ChatEngine:
         return chat
 
     def resolved_llm(self, chat: Any) -> tuple[str, str | None, str, LLMProtocol]:
-        """(base_url, api_key, model, protocol) for this chat, or 409 if unconfigured."""
+        """(base_url, api_key, model, protocol) for this chat, or 409 if unconfigured.
+
+        hive-rooms H2 (ADR 0064 D1): the chat's role picks the model — an
+        explicit ``chats.model`` still wins (condition 4), then the role's
+        ``model``, then the default. A role naming a ``provider`` talks to that
+        profile alone (``_pinned_llm``); one naming neither runs exactly the
+        path below, as before."""
+        from ..roles import load_role  # local: roles validates voices against this module
+
+        name = getattr(chat, "role", None) or ROLE_LESS_CHAT_ROLE
+        try:
+            role = load_role(name, self.home)
+        except ValueError as exc:
+            # condition 2: a role that does not load may have pinned a provider,
+            # so its chat never falls back to the active one
+            raise HTTPException(
+                status_code=409,
+                detail=f"this chat's role {name!r} does not load ({exc}) — fix the file, or "
+                f"switch the chat: `skep role use <role> --chat {chat.chat_id}`",
+            ) from exc
+        if role.provider is not None:
+            return self._pinned_llm(chat, role)
         config = llm_config_view(self.store, self.home)
-        model = chat.model or config["default_model"]
+        model = chat.model or role.model or config["default_model"]
         if not config["configured"] or not model:
             raise HTTPException(
                 status_code=409,
@@ -1540,6 +1562,48 @@ class ChatEngine:
         except OllamaError as exc:  # v118-F1: the Codex login is unusable; say why
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return str(config["base_url"]), api_key, str(model), config["protocol"]
+
+    def _pinned_llm(self, chat: Any, role: Role) -> tuple[str, str | None, str, LLMProtocol]:
+        """H2: the role's shelf profile supplies base URL, wire protocol and
+        its OWN key (condition 1). Checked every turn (condition 2): a profile
+        removed or renamed since the role was written refuses the turn naming
+        the role, the profile and the fix — never the active profile instead."""
+        from .llm import REGISTRY_PROTOCOLS
+
+        profile = self.store.get_provider_profile(str(role.provider))
+        if profile is None:
+            known = ", ".join(p.provider_id for p in self.store.list_provider_profiles())
+            raise HTTPException(
+                status_code=409,
+                detail=f"role {role.name!r} talks to provider {role.provider!r}, which is no "
+                f"longer on the shelf (known: {known or 'none'}) — point it at one: "
+                f"`skep role edit {role.name} --provider <id>`, or --provider '' for the default",
+            )
+        protocol = REGISTRY_PROTOCOLS[profile.protocol]  # the shelf only holds these
+        try:
+            api_key = resolve_pinned_api_key(self.home, profile)
+        except OllamaError as exc:
+            raise HTTPException(status_code=409, detail=f"role {role.name!r}: {exc}") from exc
+        model = chat.model or role.model or profile.model
+        return profile.base_url, api_key, str(model), protocol
+
+    def answered_by(self, chat_id: str, base_url: str, model: str) -> str:
+        """ADR 0064 D1 condition 5: ``<model>@<profile>`` for the rows this
+        turn writes — the profile it dialled: the role's pin when that is the
+        endpoint, else the active profile there, else any shelf profile
+        there, else the bare host (a hand-set endpoint). Stored on the row."""
+        from ..providers import provider_host
+
+        want = base_url.rstrip("/")
+        here = [p for p in self.store.list_provider_profiles() if p.base_url.rstrip("/") == want]
+        from ..roles import load_role
+
+        name = getattr(self.store.get_chat(chat_id), "role", None) or ROLE_LESS_CHAT_ROLE
+        pin = load_role(name, self.home).provider  # resolved_llm just loaded it
+        pick = next((p for p in here if p.provider_id == pin), None) or next(
+            (p for p in here if p.active), here[0] if here else None
+        )
+        return f"{model}@{pick.provider_id if pick else provider_host(base_url) or base_url}"
 
     def _system_prompt(self, chat_id: str) -> str:
         """The operative prompt assembled in the pinned v53 order:
@@ -2020,6 +2084,7 @@ class ChatEngine:
             yield from self._turn_events(
                 chat_id, base_url=base_url, api_key=api_key, model=model,
                 protocol=protocol, read_only=read_only, unattended=unattended,
+                answered_by=self.answered_by(chat_id, base_url, model),
             )  # fmt: skip
         finally:
             marks.discard(chat_id)
@@ -2035,6 +2100,7 @@ class ChatEngine:
         protocol: LLMProtocol,
         read_only: bool = False,
         unattended: bool = False,
+        answered_by: str | None = None,
     ) -> Iterator[ChatEvent]:
         previous_read_tool: str | None = None
         # v59-F7: byte-identical read call returning a byte-identical result is
@@ -2132,6 +2198,7 @@ class ChatEngine:
                             role="assistant",
                             content="".join(parts),
                             thinking="".join(thinking_parts) or None,
+                            model=answered_by,
                         )
                     else:
                         # v62-F1: a turn must never end silently. With nothing
@@ -2178,6 +2245,7 @@ class ChatEngine:
                     content=content,
                     thinking=thinking_text or None,
                     tool_calls=tool_calls or None,
+                    model=answered_by,
                 )
             if not tool_calls:
                 if answered:
@@ -2267,7 +2335,9 @@ class ChatEngine:
                             formatted += "\n" + "\n".join(
                                 f"{index}. {choice}" for index, choice in enumerate(choices, 1)
                             )
-                        self.store.add_chat_message(chat_id, role="assistant", content=formatted)
+                        self.store.add_chat_message(
+                            chat_id, role="assistant", content=formatted, model=answered_by
+                        )
                         yield (None, {"content": formatted})
                         yield ("clarification", {"question": question, "choices": choices})
                         yield ("done", {"state": "complete"})
@@ -2752,6 +2822,7 @@ class ChatEngine:
                 break
         yield from self._final_no_tool_events(
             chat_id, base_url=base_url, api_key=api_key, model=model, protocol=protocol,
+            answered_by=answered_by,
         )  # fmt: skip
 
     def _final_no_tool_events(
@@ -2762,6 +2833,7 @@ class ChatEngine:
         api_key: str | None,
         model: str,
         protocol: LLMProtocol,
+        answered_by: str | None = None,
     ) -> Iterator[ChatEvent]:
         """After the read-tool cap, let the model summarize the last result once.
 
@@ -2828,6 +2900,7 @@ class ChatEngine:
                         role="assistant",
                         content="".join(parts),
                         thinking="".join(thinking_parts) or None,
+                        model=answered_by,
                     )
                 else:
                     # v62-F1: same silent-death branch as the main loop.
@@ -2861,11 +2934,14 @@ class ChatEngine:
             # ends with a persisted, honest line.
             content = _NO_SUMMARY_LINE
             yield (None, {"content": content})
+        # condition 5: skep's own stand-in lines are no model's answer (I8)
+        written = content not in (_NO_SUMMARY_LINE, _TEXT_TOOL_CALL_LINE)
         self.store.add_chat_message(
             chat_id,
             role="assistant",
             content=content,
             thinking=thinking_text or None,
+            model=answered_by if written else None,
         )
         yield ("done", {"state": "complete"})
 

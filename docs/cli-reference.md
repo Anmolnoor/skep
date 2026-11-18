@@ -371,6 +371,10 @@ ADR 0056 D1/D2).
 skep role list
 skep role show NAME
 skep role use  NAME [--chat ID]
+skep role create NAME [--template T] [--prompt TEXT] [--castes a,b] [--voice V]
+                      [--provider ID] [--model M]
+skep role edit   NAME [same flags; "" clears a field]
+skep role delete NAME
 ```
 
 A role (first-run R1, ADR 0055) is a record — `name`, `policy_layer`,
@@ -393,6 +397,29 @@ role decided, `why` adds a `role` block naming the layer, and the ledger row
 carries `role` (also `role` on `GET /api/policy/why`, `POST
 /api/policy/decide` and the chat `policy_why` tool; `GET /api/roles` and
 `role` on `POST /api/chats` behind the web picker).
+
+A queen is a role with a model (hive-rooms H2, ADR 0064 D1): a role may pin
+`provider` — a profile already on the shelf (`skep provider list`; any other
+name is refused with the known ones) — and `model`. A chat in that role talks
+to that provider with **that profile's own** key — its named env var or its
+key file (`skep provider key ID`), never the main `llm-secret`. A pinned
+profile with no key refuses the turn and nothing is dialled, unless there is
+no key to borrow (Bedrock signs from the AWS environment; a loopback server
+takes none) — and
+to the role's model, else the profile's; an explicit chat model still wins. A
+profile removed since the role named it refuses every turn naming the fix;
+it never falls back to the active one. A role that pins neither uses the
+Settings model exactly as before. `role create|edit|delete` are one verb with
+`POST /api/roles`, `PUT|DELETE /api/roles/<name>` and the chat's
+`create_role`/`edit_role`/`delete_role` cards (HIGH: a role is a policy
+ceiling and names where its chats' content goes). `edit` keeps every field it
+is not given; editing a shipped role writes an override, and `delete` on one
+removes only the override. A custom role in use by a chat, or the new-chat
+default, is refused naming who uses it. `role list` shows what each role talks
+to; the web UI's Hive page (`#/hive`) is the same roster — provider, model,
+template and how many chats run in each — with the create/edit form (it names
+the host a provider choice sends content to) and the agents running on this
+machine (`GET /api/agents`).
 
 Delegation is subset-only (first-run R2, ADR 0055 D4): `--delegated-by
 ACTOR@ROLE` (repeat, outermost first — e.g. `--delegated-by queen@operator`)

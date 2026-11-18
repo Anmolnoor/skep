@@ -269,6 +269,42 @@ def resolve_active_api_key(
     return resolve_provider_api_key(home, active)
 
 
+def resolve_pinned_api_key(home: Path, profile: ProviderProfile) -> str | None:
+    """hive-rooms H2 (ADR 0064 D1, condition 1): the key for a profile a role
+    pins — that profile's OWN credential and nothing else: its named env var,
+    then its own key file. Never the legacy single secret (``llm-secret`` /
+    ``SKEP_LLM_API_KEY``): ``use_provider`` repoints ``LLM_BASE_URL`` without
+    moving that secret, so no endpoint comparison can say whose it is (council
+    round 1). With no key the turn refuses (I9) and nothing is dialled —
+    except where there is no key to borrow: Bedrock signs from the AWS
+    environment, and a loopback server takes none, so those dial with None.
+    A role's chat is a Queen turn, so a chatgpt.com profile uses the Codex
+    login exactly as when it is active (v118-F4: the Queen's alone)."""
+    from ..codex_login import uses_codex_login
+    from ..providers import provider_host
+
+    if uses_codex_login(profile.base_url):
+        return _codex_login_key(profile.base_url)
+    env = profile.api_key_env
+    key = (os.environ.get(env, "").strip() if env else "") or None
+    path = provider_secret_path(home, profile.provider_id)
+    if key is None and path.is_file():
+        key = path.read_text(encoding="utf-8").strip() or None
+    if key is None and (profile.protocol == "bedrock" or _is_loopback(profile.base_url)):
+        return None
+    if key is None:
+        ways = f"`skep provider key {profile.provider_id}`" + (f" or set ${env}" if env else "")
+        raise OllamaError(
+            f"provider {profile.provider_id!r} has no key of its own — give it one with "
+            f"{ways}; a role's chats never borrow another provider's key"
+        )
+    if provider_host(profile.base_url) == "api.githubcopilot.com":
+        from .llm_copilot import resolve_copilot_bearer  # v108-F7, as for the active profile
+
+        return resolve_copilot_bearer(key)
+    return key
+
+
 def llm_config_view(store: RunStore, home: Path) -> dict[str, Any]:
     base_url = store.get_setting(LLM_BASE_URL)
     # v14: seed the provider registry from legacy config on first use (side

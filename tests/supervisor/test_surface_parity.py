@@ -179,6 +179,14 @@ TWO_FACE_READS: dict[str, str] = {
     "grant with its scope, matcher, lifetime and binding (W29)",
 }
 THREE_FACES: tuple[Path, ...] = (SUPERVISOR / "cli_cmds.py", SUPERVISOR / "serve/app.py", TOOLS)
+# hive-rooms H2 (ADR 0064 D1): a queen is a role with a model. The role verbs
+# CLI face is `skep role` in role_cmds.py, so they carry their own face list.
+ROLE_VERBS: dict[str, str] = {
+    "save_role": "`skep role create|edit`, `POST|PUT /api/roles` and the create_role / "
+    "edit_role cards write one role record through one verb",
+    "delete_role": "`skep role delete`, `DELETE /api/roles/<name>` and the delete_role card",
+}
+ROLE_FACES: tuple[Path, ...] = (SUPERVISOR / "role_cmds.py", SUPERVISOR / "serve/app.py", TOOLS)
 
 # first-run O3 (ADR 0056 D7, ADR 0050): `skep onboard`'s step functions. Two
 # faces, not three: onboarding writes the model, the work directory, the
@@ -438,3 +446,13 @@ def test_operator_only_verbs_have_operator_faces_and_no_model_face() -> None:
     assert not {name for name in MUTATING_TOOL_NAMES if "trust" in name}
     app_js = (SUPERVISOR / "serve/static/app.js").read_text()
     assert "/trust`" in app_js and "/api/chats/${activeChatId}/trust" in app_js
+
+
+def test_role_verbs_are_called_from_cli_rest_and_chat() -> None:
+    """hive-rooms H2: role create/edit/delete on all three faces (ADR 0050)."""
+    for function, why in ROLE_VERBS.items():
+        assert len(why.strip()) >= 20, function
+        for face in ROLE_FACES:
+            assert re.search(rf"(?<![\w]){re.escape(function)}\s*\(", face.read_text()), (
+                f"{function} ({why}) is not called from {face.relative_to(ROOT)}"
+            )

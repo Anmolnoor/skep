@@ -311,12 +311,13 @@ def test_a_default_role_whose_file_vanished_opens_no_chat_without_its_layer(
     assert client.post("/api/chats", json={"role": "operator"}).json()["role"] == "operator"
 
 
-def test_a_chat_whose_role_vanished_still_talks_but_its_lanes_fail_closed(
+def test_a_chat_whose_role_vanished_refuses_its_turn_and_its_lanes_fail_closed(
     config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    """The prompt drops a role that no longer loads (the turn still runs),
-    but every Queen lane refuses (role.deny.unloadable) — no lane ever runs
-    with the layer silently gone."""
+    """Every Queen lane refuses (role.deny.unloadable) — no lane ever runs
+    with the layer silently gone. Since hive-rooms H2 (ADR 0064 D1 condition
+    2) the turn refuses too: the vanished role may have pinned a provider, so
+    its chat must never fall back to the active one."""
     from skep.supervisor.roles import roles_dir
     from skep.supervisor.serve.settings import ConfigHolder
     from skep.supervisor.serve.tools import mutation_execution_decision
@@ -330,11 +331,9 @@ def test_a_chat_whose_role_vanished_still_talks_but_its_lanes_fail_closed(
     finally:
         store.close()
     (roles_dir(config.home) / "ops.json").unlink()
-    ollama.script_reply("hello.")
     sent = client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
-    assert sent.status_code == 200 and "hello." in sent.text
-    system = ollama.chat_bodies()[-1]["messages"][0]["content"]
-    assert "Role ops" not in system
+    assert sent.status_code == 409 and "this chat's role 'ops' does not load" in sent.text
+    assert ollama.chat_bodies() == []
     store = RunStore(config.db_path)
     try:
         holder = ConfigHolder(config, store)

@@ -169,3 +169,30 @@ def test_a_file_named_like_a_shipped_role_replaces_it_and_every_reader_sees_it(
     assert list(all_roles(home)) == ["builder", "operator", "assistant"]
     hit = role_decision(role, "coding", "edit", "workspace")
     assert hit is not None and hit.decided_by == "role:operator/coding-denied"
+
+
+def test_a_role_may_pin_a_shelf_provider_and_a_model(tmp_path: Path) -> None:
+    """H2 (ADR 0064 D1): both optional; a shipped role pins neither, and a
+    provider off the shelf refuses naming the known ones (I9)."""
+    from skep.supervisor.providers import ProviderProfile
+    from skep.supervisor.roles import check_role_provider
+
+    assert all(r.provider is None and r.model is None for r in SHIPPED_ROLES.values())
+    with pytest.raises(ValueError):
+        Role(name="x", provider="../etc")
+    with pytest.raises(ValueError):
+        Role(name="x", model="")
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        nova = Role(name="nova", provider="deepseek", model="deepseek-v4")
+        with pytest.raises(ValueError, match="'deepseek' is not on the shelf; known: none yet"):
+            check_role_provider(nova, store)
+        store.upsert_provider_profile(
+            ProviderProfile("ollama", "ollama", "http://127.0.0.1:11434", "glm-5.2")
+        )
+        with pytest.raises(ValueError, match="known: ollama — add it first"):
+            check_role_provider(nova, store)
+        check_role_provider(Role(name="ada", provider="ollama"), store)
+        check_role_provider(SHIPPED_ROLES["builder"], store)
+    finally:
+        store.close()

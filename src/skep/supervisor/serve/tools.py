@@ -746,6 +746,20 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     ),
 ]
 
+_ROLE_PROPS: dict[str, Any] = {
+    "name": {"type": "string", "description": "lowercase slug, e.g. nova"},
+    "provider": {"type": "string", "description": "a provider id from list_providers"},
+    "model": {"type": "string", "description": "the model its chats talk to"},
+    "policy_layer": {
+        "type": "string",
+        "description": "the template its policy layer binds: builder, operator or assistant",
+    },
+    "system_prompt": {"type": "string", "description": "instructions for its chats"},
+    "voice": {"type": "string", "description": "concise, technical, friendly or custom:<text>"},
+    "default_castes": {"type": "array", "items": {"type": "string"}},
+}
+
+
 MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "register_mcp_server",
@@ -2117,8 +2131,44 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "set_role",
         "PROPOSE switching THIS chat's role (requires user confirmation): its "
-        "prompt, voice and policy layer change together. A role only tightens "
-        "the approved baseline. builder, operator, assistant, or a custom role.",
+        "prompt, voice, policy layer and the provider/model it talks to change "
+        "together. A role only tightens the approved baseline. builder, "
+        "operator, assistant, or a custom role.",
+        {"name": {"type": "string"}},
+        ["name"],
+    ),
+    # H2 (ADR 0064 D1): a queen is a role with a model — three cards, the
+    # faces `skep role create|edit|delete` and /api/roles share (ADR 0050).
+    _tool(
+        "create_role",
+        "PROPOSE a new queen (requires user confirmation). A queen is a role: a "
+        "name, the policy template its layer binds (builder/operator/assistant), "
+        "instructions, and optionally the provider + model its chats talk to. "
+        "Use when the user wants a new kind of assistant or a chat on another "
+        "model without changing the default. Not for switching THIS chat "
+        "(set_role) or the default model (set_assistant_model). provider must "
+        "already be on the shelf (list_providers): a refusal lists the known "
+        "ones — add the provider first, never guess. A role only tightens the "
+        "approved baseline.",
+        _ROLE_PROPS,
+        ["name"],
+    ),
+    _tool(
+        "edit_role",
+        "PROPOSE an edit (requires user confirmation). Only "
+        "the fields you pass change; pass '' to clear provider, model, voice or "
+        "policy_layer. Editing builder/operator/assistant saves an override. "
+        "Chats in the role use it from their next turn. A refusal names the "
+        "known roles or providers — pick one of those.",
+        _ROLE_PROPS,
+        ["name"],
+    ),
+    _tool(
+        "delete_role",
+        "PROPOSE deleting a role (requires user confirmation). Shipped "
+        "roles cannot be deleted: for builder/operator/assistant this only "
+        "removes your override. Refused while a chat or the new-chat default "
+        "uses the role — the refusal names the chats; switch them first.",
         {"name": {"type": "string"}},
         ["name"],
     ),
@@ -2291,7 +2341,7 @@ _ALWAYS_CARD_GROUPS: dict[str, tuple[str, ...]] = {
         "allow_shell_command", "apply_policy_preset", "approve_policy_baseline",
         "attach_policy_group", "copy_project_policy", "delete_policy_group",
         "detach_policy_group", "revoke_policy_rule", "set_operator_policy", "set_policy",
-        "set_policy_group", "set_role",
+        "set_policy_group", "set_role", "create_role", "edit_role", "delete_role",
     ),
     "it acts on a run's approval or landing, which only a human decides": (
         "approve_review", "deny_review", "land_run", "resume_run", "diagnose_run",
@@ -2615,6 +2665,9 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "remove_provider",
         "set_personality",
         "set_role",
+        "create_role",
+        "edit_role",
+        "delete_role",
         "set_persona",
         "set_tts_provider",
     ),
@@ -5840,6 +5893,18 @@ def _execute_mutation(
         if chat_id is None:
             raise ValueError("set_role only makes sense inside a chat")
         return use_role(store, holder.current.home, str(args["name"]), chat_id=chat_id)
+    if name in ("create_role", "edit_role"):
+        # H2 (ADR 0064 D1): the record the card showed, written to the home.
+        from ..roles import ROLE_FIELDS, save_role
+
+        fields = {key: args[key] for key in ROLE_FIELDS if key in args}
+        return save_role(
+            store, holder.current.home, str(args["name"]), fields, create=name == "create_role"
+        )
+    if name == "delete_role":
+        from ..roles import delete_role
+
+        return delete_role(store, holder.current.home, str(args["name"]))
     if name == "set_persona":
         # v53-F4 (ADR 0028): profile-level identity, one capped file in the
         # personal home; 'default' clears. Oversize is a clean tool error.

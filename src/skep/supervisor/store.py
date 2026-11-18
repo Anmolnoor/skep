@@ -706,6 +706,11 @@ class ChatMessageRecord:
     # ``webhook:<name>``, ``channel:<platform>:<user>``, ``schedule:<name>``,
     # ``worker:<task>``. A row older than the column reads as its role's author.
     provenance: str = ""
+    # hive-rooms H2 (ADR 0064 D1 condition 5): what answered an assistant row,
+    # ``<model>@<provider profile>`` — stored, never recomputed from an
+    # editable role file. NULL: a row from before the column, or one no model
+    # wrote (a notice, a failure line).
+    model: str | None = None
 
     @property
     def trusted(self) -> bool:
@@ -1160,6 +1165,10 @@ class RunStore:
             # column reads as its role's own author (operator / queen / tool):
             # an old chat is never retroactively tainted.
             self._conn.execute("ALTER TABLE chat_messages ADD COLUMN provenance TEXT")
+        if "model" not in chat_message_columns:
+            # hive-rooms H2 (ADR 0064 D1 condition 5): what answered. Old rows
+            # stay NULL and render with no label.
+            self._conn.execute("ALTER TABLE chat_messages ADD COLUMN model TEXT")
         project_columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(project_policies)")
         }
@@ -4182,6 +4191,7 @@ class RunStore:
         attachments: list[str] | None = None,
         tool_call_id: str | None = None,
         provenance: str | None = None,
+        model: str | None = None,
     ) -> int:
         """Append one transcript row. ``provenance`` names its author when that
         is not the one its role implies (ADR 0059 D5): a row from outside —
@@ -4190,8 +4200,8 @@ class RunStore:
         now = _now()
         cursor = self._conn.execute(
             "INSERT INTO chat_messages (chat_id, role, content, thinking, tool_calls_json,"
-            " tool_name, tool_call_id, created_at, attachments_json, provenance)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " tool_name, tool_call_id, created_at, attachments_json, provenance, model)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 chat_id,
                 role,
@@ -4203,6 +4213,7 @@ class RunStore:
                 now,
                 None if not attachments else json.dumps(attachments),
                 provenance,
+                model,
             ),
         )
         message_id = int(cursor.lastrowid or 0)
@@ -4732,11 +4743,12 @@ class RunStore:
             attachments=None if row[8] is None else list(json.loads(str(row[8]))),
             tool_call_id=None if row[9] is None else str(row[9]),
             provenance=str(row[10]) if row[10] else _ROLE_AUTHOR.get(str(row[2]), "queen"),
+            model=None if row[11] is None else str(row[11]),
         )
 
     _CHAT_MESSAGE_COLS = (
         "id, chat_id, role, content, thinking, tool_calls_json, tool_name,"
-        " created_at, attachments_json, tool_call_id, provenance"
+        " created_at, attachments_json, tool_call_id, provenance, model"
     )
 
     @_locked

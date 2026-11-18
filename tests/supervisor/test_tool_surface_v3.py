@@ -780,6 +780,10 @@ HIDDEN_YET_CARDS = {
                  "dispatch_run@role-assistant", "quick_edit", "run_code"},
     "assistant": {"dispatch_run@gated"},
 }  # fmt: skip
+# Mutating tools born after the table froze have no pre-P3-6 answer to hold
+# them to; each is held to the always-card rule instead — from any chat in
+# any home a call cards or is refused, never runs in-turn (I6).
+AFTER_FREEZE = frozenset({"create_role", "edit_role", "delete_role"})  # hive-rooms H2
 SURFACE_FLIPS = {
     "web:assistant": {"hidden": 6, "b22:card->deny": 2},
     "web:builder": {"b22:role=": 1},
@@ -825,6 +829,9 @@ def test_hiding_and_role_defaults_only_tighten_against_the_frozen_surface(
     monkeypatch.setenv("HOME", str(tmp_path / "fakehome"))
     monkeypatch.chdir(tmp_path)
     new = dict(surface_rows(tmp_path / home, home))
+    late = {k: new.pop(k) for k in list(new) if k.split("|")[3].split("@")[0] in AFTER_FREEZE}
+    calls = {k: v for k, v in late.items() if k.split("|")[2] == "call"}
+    assert calls and all(v.split()[0] in ("card", "deny") for v in calls.values()), calls
     assert set(new) == {k for k in SURFACE_FROZEN if k.startswith(f"{home}|")}
     flips: dict[str, Counter[str]] = {}
     for key, shown in new.items():
@@ -974,14 +981,15 @@ def test_a_builder_chat_floor_is_pinned_too(config: SupervisorConfig, ollama: Fa
     the whole surface — until P3-6 made a fresh chat an assistant chat, which
     hides six tools (~20.8K). The widest shipped surface is pinned here at
     what it measured when that changed (25,470 at es-p3-6 ES-F48, 25,473 at
-    es-p4-2 — it was never under the fresh-chat pin): move it only on purpose."""
+    es-p4-2 — it was never under the fresh-chat pin): move it only on purpose.
+    hive-rooms H2 moved it for the three role verbs (ADR 0064 D1): 25,648."""
     client = configured_client(config, ollama)
     chat_id = client.post("/api/chats", json={"role": "builder"}).json()["chat_id"]
     ollama.script_reply("hello")
     client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
     body = ollama.chat_bodies()[0]
     floor = len(body["messages"][0]["content"]) + len(json.dumps(body["tools"]))
-    assert floor <= 25_470
+    assert floor <= 25_650
 
 
 def test_the_repo_pen_never_points_an_assistant_chat_at_a_hidden_tool(

@@ -1,4 +1,5 @@
 /* skep — the face (v5 Stage F). No build step: ES modules + fetch + EventSource. */
+import { viewHive } from "./hive.js";
 
 const TOKEN_KEY = "skep-token";
 
@@ -419,6 +420,22 @@ function authorLabel(message, fallback) {
   return author === "queen" ? "skep" : `from ${author}`;
 }
 
+// hive-rooms H2 (ADR 0064 D1 condition 5): an assistant row names what
+// answered it — the model@profile the server STORED on the row, never one
+// recomputed from the chat or a role file (both editable). Older rows: "skep".
+// hive-rooms H2 (council round 1): a role pinning a provider or model picks
+// the model, and chats.model would beat it — so a new chat in such a role
+// stores none unless the operator moved the select off the default.
+function newChatModel(selected, defaultModel, role) {
+  const pins = role && (role.provider || role.model);
+  return pins && selected === defaultModel ? null : (selected || null);
+}
+
+function messageLabel(message) {
+  if (message.role === "user") return authorLabel(message, "You");
+  return message.model || "skep";
+}
+
 // What a keep would allow (card.keep_covers): each command of a compound line
 // on its own, or a whole URL directory — said on the card, not only "always".
 function keepCovers(card) {
@@ -781,6 +798,7 @@ const RAIL_ICONS = {
   memory: '<path d="M7 4h10a1 1 0 0 1 1 1v16l-6-4-6 4V5a1 1 0 0 1 1-1z"/>',
   policies: '<path d="M12 3l7 3v6c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/>',
   setup: '<path d="M6 21V4M6 4h11l-2 4 2 4H6"/>',
+  hive: '<path d="M12 3l7 4v10l-7 4-7-4V7z"/>',
   settings:
     '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6' +
     'M5.2 5.2l1.9 1.9M16.9 16.9l1.9 1.9M18.8 5.2l-1.9 1.9M7.1 16.9l-1.9 1.9"/>',
@@ -854,6 +872,7 @@ const PALETTE_ACTIONS = [
   { label: "Notes & Tasks", hash: "#/notes", keywords: "todo capture due" },
   { label: "Memory", hash: "#/memory", keywords: "durable proposals forget" },
   { label: "Policies", hash: "#/policies", keywords: "autonomy scopes gates budget" },
+  { label: "Hive", hash: "#/hive", keywords: "queens roles models providers agents" },
   { label: "Setup", hash: "#/setup", keywords: "onboarding first run wizard" },
   { label: "Settings", hash: "#/settings", keywords: "llm model channels webhooks repos" },
 ];
@@ -1028,6 +1047,7 @@ const routes = [
   [/^#\/projects\/([^/]+)$/, viewProjectDetail],
   [/^#\/schedules$/, viewSchedules],
   [/^#\/policies$/, viewPolicies],
+  [/^#\/hive$/, viewHive],
   [/^#\/settings$/, viewSettings],
 ];
 
@@ -3613,7 +3633,7 @@ async function viewChat(main, chatId) {
     send.disabled = true;
     chatStreamActive = true;  // v60-F1: the poll must not route() mid-stream
     const replyOptions = {
-      label: activeChat?.model || llm.default_model || "skep",
+      label: "skep", // condition 5: the stored model@profile shows once the row exists
       scroll: scrollBottom,
     };
     let reply = null;
@@ -3758,8 +3778,7 @@ async function viewChat(main, chatId) {
       replayGroup = null;
       const own = message.role === "user" && authorLabel(message, null) === null;
       renderChatMessage(log, message.role, message.content, {
-        label: authorLabel(message,
-          message.role === "user" ? "You" : (activeChat?.model || llm.default_model || "skep")),
+        label: messageLabel(message),
         createdAt: message.created_at,
         thinking: message.thinking,
         onResend: own ? fillInput : null,
@@ -3776,7 +3795,9 @@ async function viewChat(main, chatId) {
   const ensureChat = async () => {
     if (activeChatId) return;
     activeChat = await api("POST", "/api/chats",
-      { model: modelSelect.value || null, role: roleSelect.hidden ? null : roleSelect.value });
+      { model: newChatModel(modelSelect.value, llm.default_model,
+          roleList.roles.find(r => r.name === roleSelect.value)),
+        role: roleSelect.hidden ? null : roleSelect.value });
     activeChatId = activeChat.chat_id;
     chats = [activeChat, ...chats.filter(chat => chat.chat_id !== activeChatId)];
     modelSelect.value = activeChat.model || llm.default_model || "";

@@ -37,6 +37,9 @@ chain is no constraint — exactly today.
 from __future__ import annotations
 
 import json
+import os
+import re
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -78,6 +81,13 @@ class Role(BaseModel):
     # The v44-F10 style preset a chat in this role speaks in when the chat
     # has no /personality of its own.
     voice: str | None = None
+    # H2 (ADR 0064 D1): a queen is a role with a model. ``provider`` names a
+    # profile on the shelf (ADR 0051) — checked where a role is written
+    # (``check_role_provider``) and again when a chat resolves it, since a
+    # profile can be removed after. Both unset: the active profile and the
+    # default model, exactly as before.
+    provider: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    model: str | None = Field(default=None, min_length=1, max_length=200)
 
     @field_validator("policy_layer")
     @classmethod
@@ -164,19 +174,42 @@ def all_roles(home: Path) -> dict[str, Role]:
     roles = dict(SHIPPED_ROLES)
     directory = roles_dir(home)
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
-        try:
-            role = Role.model_validate(json.loads(path.read_text(encoding="utf-8")))
-            if role.voice is not None:
-                # local: serve.chat imports the serve stack, which imports this module
-                from .serve.chat import validate_personality
-
-                validate_personality(role.voice)
-        except (OSError, ValueError, ValidationError) as exc:
-            raise ValueError(f"role file {path} does not load: {exc}") from exc
-        if role.name != path.stem:
-            raise ValueError(f"role file {path.name} names itself {role.name!r}")
+        role = _load_role_file(path)
         roles[role.name] = role
     return roles
+
+
+def _load_role_file(path: Path) -> Role:
+    try:
+        role = Role.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        if role.voice is not None:
+            # local: serve.chat imports the serve stack, which imports this module
+            from .serve.chat import validate_personality
+
+            validate_personality(role.voice)
+    except (OSError, ValueError, ValidationError) as exc:
+        raise ValueError(f"role file {path} does not load: {exc}") from exc
+    if role.name != path.stem:
+        raise ValueError(f"role file {path.name} names itself {role.name!r}")
+    return role
+
+
+_ROLE_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
+
+
+def load_role(name: str, home: Path) -> Role:
+    """H2 (ADR 0064 D1 condition 2): ONE role — its home file, else the
+    shipped record — read alone, so a broken sibling file can never change
+    where this role's chats go. Raises naming the file (I9); the caller
+    refuses the turn rather than falling back to the active provider."""
+    if not _ROLE_NAME.match(name):
+        raise ValueError(f"{name!r} is not a role name")
+    path = roles_dir(home) / f"{name}.json"
+    if path.is_file():
+        return _load_role_file(path)
+    if name in SHIPPED_ROLES:
+        return SHIPPED_ROLES[name]
+    raise ValueError(f"no role {name!r} (no file {path})")
 
 
 def resolve_role(name: str, home: Path) -> Role:
@@ -184,6 +217,23 @@ def resolve_role(name: str, home: Path) -> Role:
     if name not in roles:
         raise ValueError(f"no role {name!r}; known: {', '.join(roles)}")
     return roles[name]
+
+
+def unknown_provider(name: str, store: RunStore) -> str:
+    """H2 (I9): what a role naming a profile that is not on the shelf hears."""
+    known = ", ".join(p.provider_id for p in store.list_provider_profiles()) or "none yet"
+    return (
+        f"provider {name!r} is not on the shelf; known: {known} — add it first "
+        "(`skep provider add`) or name a known one"
+    )
+
+
+def check_role_provider(role: Role, store: RunStore) -> None:
+    """H2 (ADR 0064 D1): a role sends its chats' content to its provider's
+    host, so it may only name a profile the operator already put on the
+    shelf. Refuses with the list of known ones."""
+    if role.provider is not None and store.get_provider_profile(role.provider) is None:
+        raise ValueError(unknown_provider(role.provider, store))
 
 
 def default_role(store: RunStore, home: Path) -> str:
@@ -203,9 +253,15 @@ def default_role(store: RunStore, home: Path) -> str:
 
 
 def roles_view(store: RunStore, home: Path) -> dict[str, Any]:
-    """`skep role list` and ``GET /api/roles``: every role and the default."""
+    """`skep role list` and ``GET /api/roles``: every role and the default.
+    H2 (the Hive page, C11): each row says whether it ships with skep and how
+    many chats run in it (a NULL stored role counts as assistant, B55)."""
+    usage = Counter(chat.role or ROLE_LESS_CHAT_ROLE for chat in store.list_chats())
     return {
-        "roles": [role.view() for role in all_roles(home).values()],
+        "roles": [
+            {**role.view(), "shipped": role.name in SHIPPED_ROLES, "chats": usage[role.name]}
+            for role in all_roles(home).values()
+        ],
         "default": default_role(store, home),
     }
 
@@ -223,6 +279,83 @@ def use_role(
     if not store.set_chat_role(chat_id, role.name):
         raise ValueError(f"no chat {chat_id!r}")
     return {"chat_id": chat_id, "role": role.name, "layer": role.label}
+
+
+# H2 (ADR 0064 D1, ADR 0050): what create/edit may write. "" clears a
+# nullable field on every face — the chat model cannot send a null.
+ROLE_FIELDS = ("policy_layer", "system_prompt", "default_castes", "voice", "provider", "model")
+_NULLABLE = {"policy_layer", "voice", "provider", "model"}
+
+
+def save_role(
+    store: RunStore, home: Path, name: str, fields: dict[str, Any], *, create: bool
+) -> dict[str, Any]:
+    """`skep role create|edit`, ``POST|PUT /api/roles`` and the chat's
+    create_role / edit_role cards: one verb. Writes
+    ``<personal home>/roles/<name>.json``. Edit keeps every field it is not
+    given; editing a shipped role writes the home override that replaces it.
+    The record only names a template, so the role layer still tightens and
+    never loosens (ADR 0055 D2) whatever is written here."""
+    unknown = sorted(set(fields) - set(ROLE_FIELDS))
+    if unknown:
+        raise ValueError(f"unknown role field(s) {unknown}; known: {', '.join(ROLE_FIELDS)}")
+    roles = all_roles(home)
+    if create and name in roles:
+        raise ValueError(f"role {name!r} already exists — edit it (`skep role edit {name}`)")
+    if not create and name not in roles:
+        raise ValueError(f"no role {name!r}; known: {', '.join(roles)} — create it first")
+    record = {} if create else roles[name].model_dump()
+    for key, value in fields.items():
+        if key in _NULLABLE and value == "":
+            value = None
+        record[key] = value
+    record["name"] = name
+    if record.get("system_prompt") is None:
+        record["system_prompt"] = ""
+    record["default_castes"] = tuple(record.get("default_castes") or ())
+    role = Role.model_validate(record)
+    if role.voice is not None:
+        from .serve.chat import validate_personality  # local: serve imports this module
+
+        validate_personality(role.voice)
+    check_role_provider(role, store)
+    path = roles_dir(home) / f"{role.name}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # atomic: a turn reading the file mid-save sees the old record or the new
+    partial = path.with_name(f".{role.name}.json.partial")
+    partial.write_text(json.dumps(role.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8")
+    os.replace(partial, path)
+    return {"role": role.view(), "created": create, "path": str(path)}
+
+
+def delete_role(store: RunStore, home: Path, name: str) -> dict[str, Any]:
+    """`skep role delete`, ``DELETE /api/roles/<name>`` and the delete_role
+    card. A shipped role cannot be deleted — only its home override, which
+    reverts it. A custom role in use refuses naming who uses it (I9): a chat
+    whose role stops loading fails its tools closed."""
+    roles = all_roles(home)  # also validates ``name`` before it becomes a path
+    if name not in roles:
+        raise ValueError(f"no role {name!r}; known: {', '.join(roles)}")
+    path = roles_dir(home) / f"{name}.json"
+    shipped = name in SHIPPED_ROLES
+    if not path.is_file():
+        raise ValueError(
+            f"role {name!r} ships with skep and cannot be deleted; "
+            f"`skep role edit {name}` overrides it"
+        )
+    if not shipped:
+        users = [c.chat_id for c in store.list_chats() if c.role == name]
+        if users:
+            raise ValueError(
+                f"role {name!r} is in use by {len(users)} chat(s) ({', '.join(users[:5])}); "
+                f"switch each first: `skep role use <other> --chat <id>`"
+            )
+        if default_role(store, home) == name:
+            raise ValueError(
+                f"role {name!r} is the role new chats open in; `skep role use <other>` first"
+            )
+    path.unlink()
+    return {"deleted": name, "reverted_to_shipped": shipped}
 
 
 def _role_hits(role: Role, scope: str, action: str, value: str) -> list[PolicyDecision | None]:
