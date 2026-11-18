@@ -123,3 +123,41 @@ def test_memory_reject_records_reason_and_blocks_approval(
 def test_memory_list_empty(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert _run(tmp_path / "home", "memory", "list") == 0
     assert "no memory yet" in capsys.readouterr().out
+
+
+def test_v126_f10_memory_add_writes_a_durable_item_in_one_step(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The operator's own typed fact needs no proposal: one command, a
+    durable item, actor ``operator``, and the same audit event an approval
+    writes (memory_item created)."""
+    home = tmp_path / "home"
+    assert _run(home, "memory", "add", "deploys go out on tuesdays", "--class", "project_fact",
+                "--project", "p1") == 0  # fmt: skip
+    out = capsys.readouterr().out
+    store = _store(home)
+    try:
+        (item,) = store.list_memory_items()
+        events = [e for e in store.note_task_events() if e.item_id == item.memory_id]
+    finally:
+        store.close()
+    assert item.memory_id in out
+    assert (item.content, item.memory_class, item.project_id, item.provenance) == (
+        "deploys go out on tuesdays", "project_fact", "p1", None,
+    )  # fmt: skip
+    assert [(e.kind, e.action, e.actor) for e in events] == [("memory_item", "created", "operator")]
+
+
+def test_v126_f10_memory_add_refuses_empty_text_and_the_expiring_class(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    assert _run(home, "memory", "add", "   ", "--class", "todo") != 0
+    with pytest.raises(SystemExit):  # argparse: observation is not a durable class
+        _run(home, "memory", "add", "x", "--class", "observation")
+    capsys.readouterr()
+    store = _store(home)
+    try:
+        assert store.list_memory_items() == []
+    finally:
+        store.close()

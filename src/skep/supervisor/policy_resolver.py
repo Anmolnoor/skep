@@ -527,23 +527,34 @@ def resolve_injected_memory(
     ES-F181 (D15): a worker-written item (an earlier run's observation) is
     wrapped as outside content, as the Queen's prompt shows it — the worker
     prompt and the task envelope carry the wrapped text.
+
+    v126-F3: a worker-written item reaches only runs of its own project (an
+    unbound one belongs to no project and reaches no worker), and the list is
+    capped by the chat block's per-class caps and character bound.
     """
-    from .serve.chat import wrap_untrusted
+    from .serve.chat import select_memory
 
     if project_context is not None:
-        items = store.list_memory_items(project_id=project_context.project_id)
+        project_id = project_context.project_id
+        items = [
+            item
+            for item in store.list_memory_items(project_id=project_id)
+            if item.provenance is None or item.project_id == project_id
+        ]
     else:
-        items = [item for item in store.list_memory_items() if item.project_id is None]
+        items = [
+            item
+            for item in store.list_memory_items()
+            if item.project_id is None and item.provenance is None
+        ]
     return [
         MemoryContextEntry(
             memory_id=item.memory_id,
             memory_class=item.memory_class,
-            content=item.content
-            if item.provenance is None
-            else wrap_untrusted(item.provenance, item.content),
+            content=content,
             project_id=item.project_id,
         )
-        for item in items
+        for item, content in select_memory(items)
     ]
 
 

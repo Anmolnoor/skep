@@ -37,6 +37,7 @@ from skep.worker_contract import (
     CodingWorkerResult,
     CodingWorkerTask,
     EventType,
+    MemoryContextEntry,
     TaskState,
     Usage,
     Verification,
@@ -59,6 +60,7 @@ from .worker_runtime import (
 )
 from .worker_runtime import (
     manifest_fingerprint,
+    memory_block,
 )
 from .worker_runtime import (
     sha256_file as _sha256_file,
@@ -135,10 +137,16 @@ def read_workspace_files(workspace: Path, rel_paths: Sequence[str]) -> list[tupl
     return out
 
 
-def compose_messages(instructions: str, files: Sequence[tuple[str, str]]) -> list[dict[str, Any]]:
+def compose_messages(
+    instructions: str,
+    files: Sequence[tuple[str, str]],
+    memory: Sequence[MemoryContextEntry] = (),
+) -> list[dict[str, Any]]:
     parts = [instructions.strip()]
     for rel, text in files:
         parts.append(f"\n--- file: {rel} ---\n{text}")
+    if memory:  # v126-F5: the operator's memory, as context
+        parts.append(memory_block(memory))
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": "\n".join(parts)},
@@ -185,6 +193,7 @@ def _task_start_payload(task: CodingWorkerTask) -> dict[str, object]:
         payload["project_context"] = task.project_context.model_dump(mode="json")
     if task.dispatch_decision is not None:
         payload["dispatch_decision"] = task.dispatch_decision.model_dump(mode="json")
+    payload["memory_delivered"] = [entry.memory_id for entry in task.memory]  # v126-F5
     return payload
 
 
@@ -268,7 +277,7 @@ def _execute(
 
     must_include = parse_must_include(task.instructions)
     files = read_workspace_files(workspace, parse_files(task.instructions))
-    messages = compose_messages(task.instructions, files)
+    messages = compose_messages(task.instructions, files, task.memory)
     steps = ["compose the document"]
     if files:
         steps.insert(0, f"read {len(files)} workspace file(s)")

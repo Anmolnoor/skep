@@ -748,6 +748,18 @@ def _taint_json(taint: Sequence[str]) -> str | None:
     return json.dumps(sorted(set(taint))) if taint else None
 
 
+def _taint_bits(value: Any) -> set[str]:
+    """W21: the bits a stored taint value names. A value that does not read
+    counts as both bits; NULL is none."""
+    if value is None:
+        return set()
+    try:
+        raw = json.loads(str(value))
+    except ValueError:
+        return set(TAINT_BITS)
+    return set(raw) & set(TAINT_BITS) if isinstance(raw, list) else set(TAINT_BITS)
+
+
 # A taint bit set where no message id says which (an unreadable taint, a
 # missing chat): it still counts as set.
 UNKNOWN_TAINT_ORIGIN = 0
@@ -1259,6 +1271,16 @@ class RunStore:
             # D15: who wrote a memory item when not the operator (NULL = the
             # operator: nothing already stored is retroactively marked).
             self._conn.execute("ALTER TABLE memory_items ADD COLUMN provenance TEXT")
+        # v126-F3: run summaries harvested before ES-F101 carry no provenance
+        # and read as the operator's own words. Mark them the worker's
+        # (idempotent: a marked row no longer matches). The probe keeps a
+        # current store write-free, so a read-only open (W41) still succeeds.
+        legacy = (
+            " WHERE provenance IS NULL AND memory_class = 'observation'"
+            " AND content LIKE 'observation: run %'"
+        )
+        if self._conn.execute(f"SELECT EXISTS (SELECT 1 FROM memory_items{legacy})").fetchone()[0]:
+            self._conn.execute(f"UPDATE memory_items SET provenance = 'worker:legacy'{legacy}")
         for table in ("notes", "tasks", "memory_proposals"):
             columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
             if "taint" not in columns:
@@ -3162,13 +3184,8 @@ class RunStore:
         bits: set[str] = set()
         for item_id in ids:
             row = self._conn.execute(self._CONTENT_TAINT[kind], (item_id,)).fetchone()
-            if row is None or row[0] is None:
-                continue
-            try:
-                raw = json.loads(str(row[0]))
-                bits |= set(raw) & set(TAINT_BITS) if isinstance(raw, list) else set(TAINT_BITS)
-            except ValueError:
-                bits |= set(TAINT_BITS)
+            if row is not None:
+                bits |= _taint_bits(row[0])
         return bits
 
     @_locked
@@ -3263,11 +3280,12 @@ class RunStore:
             decided_by=None if row[10] is None else str(row[10]),
             decision_reason=None if row[11] is None else str(row[11]),
             sources=self._memory_proposal_sources(str(row[0])),
+            taint=tuple(sorted(_taint_bits(row[12]))),  # v126-F6
         )
 
     _MEMORY_PROPOSAL_COLS = (
         "proposal_id, memory_class, content, state, actor, rationale, project_id,"
-        " created_at, updated_at, decided_at, decided_by, decision_reason"
+        " created_at, updated_at, decided_at, decided_by, decision_reason, taint"
     )
 
     @_locked
@@ -3287,6 +3305,11 @@ class RunStore:
         validate_proposal_state(state)
         for source in sources:
             validate_source_kind(source.kind)
+        # v126-F6: a note's or task's bits ride the proposal filed from it,
+        # whichever face files it (W21)
+        taint = list(taint)
+        for kind in ("note", "task"):
+            taint += self.content_taint(kind, [s.source_id for s in sources if s.kind == kind])
         proposal_id = str(uuid.uuid4())
         now = _now()
         self._conn.execute(

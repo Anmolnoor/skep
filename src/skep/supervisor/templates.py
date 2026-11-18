@@ -336,11 +336,6 @@ def template_to_dict(template: WorkflowTemplate) -> dict[str, Any]:
 
 # -- v17 Step 4: deep research template --------------------------------------
 
-# Depth/format are constrained to a small set so a research run can't be steered
-# into arbitrary behaviour through a free-text param.
-RESEARCH_DEPTHS: tuple[str, ...] = ("shallow", "standard", "deep")
-RESEARCH_OUTPUT_FORMATS: tuple[str, ...] = ("markdown", "html")
-
 
 def deep_research_template(
     source_allowlist: Sequence[str], *, created_at: str = ""

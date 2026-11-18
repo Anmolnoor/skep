@@ -643,6 +643,14 @@ def card_summary(
     push = (recorded or {}).get("push")
     if tool == "open_pr" and push:  # L30: which remote and branch, as recorded
         danger = f"{push} — {danger}"
+    if tool == "approve_memory_proposal" and store is not None:
+        # v126-F6: the approver sees what the filing chat (or note) had read
+        from ..memory import taint_phrase
+
+        proposal = store.get_memory_proposal(str(safe_args.get("proposal_id") or ""))
+        filed = taint_phrase(proposal.taint) if proposal is not None else None
+        if filed:
+            danger = filed if danger is None else f"{danger}; {filed}"
     if danger is not None:
         summary["risk"] = danger
     if tool in _POLICY_TOOLS:

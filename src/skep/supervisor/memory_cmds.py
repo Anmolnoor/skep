@@ -4,6 +4,7 @@
     skep memory search "query" [--project P]
     skep memory show <memory_id>
     skep memory forget <memory_id>
+    skep memory add "<fact>" --class C [--project P]   (v126-F10, operator-only)
     skep memory proposals [--state pending_review]
     skep memory propose --from-note <id> | --from-task <id> [--class C] [--project P]
     skep memory approve <proposal_id>
@@ -22,10 +23,11 @@ import argparse
 from pathlib import Path
 
 from ..workers.curator import classify_memory_class
-from .memory import MemoryError, MemoryProposal, MemorySource
+from .memory import MEMORY_CLASSES, MemoryError, MemoryProposal, MemorySource, taint_phrase
 from .store import RunStore
 
 CLI_ACTOR = "cli-user"
+OPERATOR_ACTOR = "operator"  # v126-F10: the operator's own durable write
 
 
 def _open_store_or_empty(home: Path, *, readonly: bool = False) -> RunStore | None:
@@ -82,6 +84,10 @@ def cmd_memory_show(args: argparse.Namespace) -> int:
         return _err(f"no memory item {args.memory_id!r}.")
     try:
         item = store.get_memory_item(args.memory_id)
+        proposal = (
+            None if item is None or item.proposal_id is None
+            else store.get_memory_proposal(item.proposal_id)
+        )  # fmt: skip
     finally:
         store.close()
     if item is None:
@@ -93,6 +99,9 @@ def cmd_memory_show(args: argparse.Namespace) -> int:
     print(f"created: {item.created_at}")
     if item.proposal_id is not None:
         print(f"from:    proposal {item.proposal_id}")
+        filed = taint_phrase(proposal.taint) if proposal is not None else None
+        if filed:
+            print(f"         ({filed})")  # v126-F6
     if item.provenance is not None:
         print(f"written: by {item.provenance}")
     print(f"\n{item.content}")
@@ -115,6 +124,29 @@ def cmd_memory_forget(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_memory_add(args: argparse.Namespace) -> int:
+    """v126-F10: the operator teaches a fact in one step. Gating the
+    operator's own typed words adds no safety, so this writes the durable
+    item directly, with the event an approval writes (memory_item created,
+    actor ``operator``). An operator-only face: the model keeps ``remember``
+    → proposal, and no tool, channel or webhook reaches this."""
+    from .cli_cmds import _err, build_config
+
+    content = args.content.strip()
+    if not content:
+        return _err("memory add needs the fact as text.")
+    store = RunStore(build_config(args.home, None).db_path)
+    try:
+        item = store.add_memory_item(
+            memory_class=args.memory_class, content=content, actor=OPERATOR_ACTOR,
+            project_id=args.project,
+        )  # fmt: skip
+    finally:
+        store.close()
+    print(f"remembered {item.memory_id} [{item.memory_class}] ({item.project_id or 'global'})")
+    return 0
+
+
 def cmd_memory_proposals(args: argparse.Namespace) -> int:
     store = _open_store_or_empty(args.home, readonly=True)
     if store is None:
@@ -128,7 +160,10 @@ def cmd_memory_proposals(args: argparse.Namespace) -> int:
         print("no proposals")
         return 0
     for p in proposals:
+        filed = taint_phrase(p.taint)  # v126-F6
         print(f"{p.proposal_id}  [{p.memory_class}] {p.state}  {p.content}")
+        if filed:
+            print(f"    ({filed})")
     return 0
 
 
@@ -219,8 +254,10 @@ def _batch_targets(
 
 
 def cmd_memory_approve_batch(args: argparse.Namespace) -> int:
-    """v84-A5: batch review for imports — one decision per actor/class, every
-    item listed before it lands, each still individually rejectable first."""
+    """v84-A5: batch approval for imports — approves EVERY pending proposal
+    from one actor (and class) in one step, printing each as it lands. There
+    is no confirm step: review the queue first (``skep memory proposals``)
+    and reject what you don't want individually before running it."""
     from .cli_cmds import _err
 
     store = _open_store_or_empty(args.home)
@@ -290,6 +327,20 @@ def register_memory_commands(
     forget_p = memory_sub.add_parser("forget", help="forget (soft-delete) a memory item")
     forget_p.add_argument("memory_id")
     forget_p.set_defaults(func=cmd_memory_forget)
+
+    add_p = memory_sub.add_parser(
+        "add", help="remember a fact now: a durable item, no proposal (operator only)"
+    )
+    add_p.add_argument("content", help="the fact, as you want it remembered")
+    add_p.add_argument(
+        "--class",
+        dest="memory_class",
+        required=True,
+        choices=sorted(MEMORY_CLASSES - {"observation"}),
+        help="what kind of memory this is",
+    )
+    add_p.add_argument("--project", default=None, help="scope to a project (default: global)")
+    add_p.set_defaults(func=cmd_memory_add)
 
     proposals_p = memory_sub.add_parser("proposals", help="list memory proposals")
     proposals_p.add_argument("--state", default=None, help="filter by state (e.g. pending_review)")

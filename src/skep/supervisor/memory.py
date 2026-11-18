@@ -1,8 +1,12 @@
 """v13: curated-memory domain model.
 
-Raw inbox notes/tasks never become durable memory on their own. A curator worker
-proposes memory; a human/Queen decision promotes a proposal into a durable
-``memory_item`` with recorded evidence. This module is the pure domain model —
+Raw notes/tasks never become durable memory on their own. A proposal is filed
+by the Queen's ``remember`` tool, ``skep memory propose`` (from a note or task)
+or the notes API's propose route; a human decision (a card, the CLI or the
+memory page) promotes it into a durable ``memory_item`` with recorded evidence.
+The operator may also write a durable item directly (``skep memory add``,
+v126-F10). The observation harvest (``observe.py``) writes expiring
+``observation`` items without a proposal. This module is the pure domain model —
 the states, the classes, the records, and the legal state transitions. All
 persistence and audit recording lives in ``store.py``; all injection lives in
 ``policy_resolver.py``. Memory reuses the same trust engine — approval is a
@@ -17,11 +21,10 @@ from dataclasses import dataclass, field
 MEMORY_PROPOSAL_STATES: frozenset[str] = frozenset(
     {"draft", "pending_review", "approved", "rejected", "needs_clarification"}
 )
-TERMINAL_PROPOSAL_STATES: frozenset[str] = frozenset({"approved", "rejected"})
 
 # What a durable memory item *is*. Not a proposal state.
 # ``observation`` (v71-F5) is the one NON-durable class: the daily-companion
-# lane. Curator-written WITHOUT a proposal (it grants nothing and expires),
+# lane. Harvest-written WITHOUT a proposal (it grants nothing and expires),
 # swept after OBSERVATION_TTL_DAYS by the ticker, and promotable to a durable
 # class only through the ordinary proposal gate — the human gate stays where
 # permanence begins.
@@ -113,6 +116,19 @@ class MemoryProposal:
     decided_by: str | None = None
     decision_reason: str | None = None
     sources: tuple[MemorySource, ...] = field(default_factory=tuple)
+    # v126-F6: the taint bits of the chat (or note) it was filed from (W21)
+    taint: tuple[str, ...] = ()
+
+
+_TAINT_WORDS = {"private": "private data", "untrusted": "outside content"}
+
+
+def taint_phrase(taint: tuple[str, ...]) -> str | None:
+    """v126-F6: what an approver is told about a tainted proposal."""
+    if not taint:
+        return None
+    words = ", ".join(_TAINT_WORDS.get(bit, bit) for bit in sorted(taint))
+    return f"filed from a chat that read: {words}"
 
 
 @dataclass(frozen=True)

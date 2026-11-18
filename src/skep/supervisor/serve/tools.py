@@ -5798,6 +5798,9 @@ def _execute_mutation(
                 interval_seconds=interval,
                 chain=schedule_chain,
                 role=schedule_role,
+                # v126-F11: its time, its once, and the chat whose taint its ticks carry
+                once=bool(args.get("once") or False),
+                start_at=None if args.get("start_at") is None else str(args["start_at"]),
                 chat_id=chat_id,
             )
         else:

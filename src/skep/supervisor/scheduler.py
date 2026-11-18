@@ -20,7 +20,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -348,6 +348,7 @@ def make_template_schedule(
     enabled: bool = True,
     chain: str | None = None,
     role: str | None = None,
+    once: bool = False,
     chat_id: str | None = None,
 ) -> ScheduleRecord:
     """A schedule bound to a template (v3.5): "run template X with these params".
@@ -380,6 +381,7 @@ def make_template_schedule(
         params=dict(params),
         chain=chain,
         role=role,
+        once=once,  # v126-F11
         chat_id=chat_id,
     )
 
@@ -412,6 +414,21 @@ def _schedule_dispatch_decision(
         requested_execution_mode=None,
         explicit_run_overrides=False,
     )
+
+
+def _with_chat_taint(
+    store: RunStore, schedule: ScheduleRecord, decision: AutonomyDecision
+) -> AutonomyDecision:
+    """v126-F11: a tick of a schedule a chat created carries that chat's
+    CURRENT taint bits (``constraints.chat_taint``), as a live dispatch from
+    the chat does (ADR 0059 D5) — so the run card shows them on every tick,
+    not only on the card that created the schedule."""
+    if not schedule.chat_id or store.get_chat(schedule.chat_id) is None:
+        return decision
+    bits = store.get_chat_taint(schedule.chat_id).bits()
+    if not bits:
+        return decision
+    return replace(decision, constraints={**(decision.constraints or {}), "chat_taint": bits})
 
 
 def ops_schedule_is_conservative(capability: str, *, dry_run: bool) -> bool:
@@ -873,6 +890,7 @@ def run_due(
                         store, config, holder, schedule, repo, permissions, dispatch_decision
                     )
                 if blocked_state is None:
+                    dispatch_decision = _with_chat_taint(store, schedule, dispatch_decision)
                     outcome = dispatch(
                         repo,
                         instance.instructions
@@ -955,6 +973,7 @@ def run_due(
                         store, config, holder, schedule, repo, permissions, dispatch_decision
                     )
                 if blocked_state is None:
+                    dispatch_decision = _with_chat_taint(store, schedule, dispatch_decision)
                     outcome = dispatch(
                         repo,
                         schedule.instructions

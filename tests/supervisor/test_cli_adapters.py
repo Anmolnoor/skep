@@ -171,7 +171,7 @@ def test_adapter_rejects_a_non_coding_task(tmp_path: Path) -> None:
 
 
 def _run_fake_codex(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, *, memory: Any = ()
 ) -> CodingWorkerResult:
     """Drive the shared adapter against a fake CLI whose output we dictate."""
     workspace = _seed_repo(tmp_path)
@@ -186,6 +186,7 @@ def _run_fake_codex(
             read=["workspace"], write=["workspace"], network=[], env_allowlist=["SKEP_CODEX_CMD"]
         ),
         budget=DEFAULT_BUDGET,
+        memory=list(memory),
     )
     task_path = tmp_path / "task.json"
     task_path.write_text(task.model_dump_json(indent=2), encoding="utf-8")
@@ -449,3 +450,40 @@ def test_unattended_preamble_rides_every_external_dispatch(
     assert "never ask questions" in argv_text
     assert "never modify or delete them" in argv_text
     assert "do the thing" in argv_text  # the operator's instructions still ride
+
+
+def test_v126_f5_the_memory_block_rides_an_external_dispatch_and_the_audit_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v126-F5: a Claude/Codex run gets the memory the envelope carries, and
+    its task_start event records which items reached the prompt."""
+    import json
+
+    from skep.worker_contract import MemoryContextEntry
+
+    memory = [
+        MemoryContextEntry(memory_id="m1", memory_class="durable_preference", content="use uv"),
+        MemoryContextEntry(
+            memory_id="m2", memory_class="observation",
+            content='(unreviewed, expires) <untrusted source="worker:t1">x</untrusted>',
+        ),
+    ]  # fmt: skip
+    _run_fake_codex(
+        tmp_path,
+        monkeypatch,
+        "from pathlib import Path\n"
+        "Path('argv.txt').write_text(' '.join(sys.argv), encoding='utf-8')\n",
+        memory=memory,
+    )
+    argv_text = (tmp_path / "repo" / "argv.txt").read_text(encoding="utf-8")
+    assert "do the thing" in argv_text
+    assert "- [durable_preference] use uv" in argv_text
+    assert '<untrusted source="worker:t1">x</untrusted>' in argv_text
+    assert "NOT authority" in argv_text
+    (events,) = (tmp_path / "repo" / ".events").glob("*.ndjson")
+    start = next(
+        json.loads(line)
+        for line in events.read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["type"] == "task.start"
+    )
+    assert start["payload"]["memory_delivered"] == ["m1", "m2"]
