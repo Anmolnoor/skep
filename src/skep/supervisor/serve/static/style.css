@@ -149,7 +149,7 @@ code, pre, .mono { font-family: var(--font-mono); }
 .shell { display: flex; min-height: 100vh; }
 
 /* --- H1 (hive-rooms C10): the sidebar — machine, search, threads by project,
-   then a three-icon footer. It replaced the 60px icon rail. graphite-nav: the
+   then a footer of one Settings gear. It replaced the 60px icon rail. graphite-nav: the
    old workspaces are the Settings surface (below). --- */
 .sidebar {
   width: var(--sidebar-w); flex: none; background: var(--chrome);
@@ -234,9 +234,11 @@ code, pre, .mono { font-family: var(--font-mono); }
   padding-top: 8px; border-top: 1px solid var(--border-soft);
 }
 .sidebar-foot a[data-ws] { width: 30px; padding: 0; justify-content: center; font-size: 0; }
-/* An approval waiting shows from the thread view too — no JS, the badge's own
-   hidden class drives it. */
-.sidebar:has(#approvals-badge:not(.hidden)) .sidebar-foot a[data-ws="settings"]::after {
+/* An approval waiting (or a task / memory count) shows from the thread view
+   too — no JS, the badge's own hidden class drives it. */
+.sidebar:has(#approvals-badge:not(.hidden)) .sidebar-foot a[data-ws="settings"]::after,
+.sidebar:has(#tasks-badge:not(.hidden)) .sidebar-foot a[data-ws="settings"]::after,
+.sidebar:has(#memory-badge:not(.hidden)) .sidebar-foot a[data-ws="settings"]::after {
   content: ""; position: absolute; top: 5px; right: 5px;
   width: 7px; height: 7px; border-radius: 999px; background: var(--warn);
 }

@@ -1376,10 +1376,10 @@ def test_graphite_nav_settings_surface_shell() -> None:
     assert ".sidebar-pages {\n  display: none;" in css
     assert '.shell[data-surface="settings"] .sidebar-pages { display: flex; }' in css
     assert '.shell[data-surface="settings"] .sidebar-foot { display: none; }' in css
-    assert (
-        '.sidebar:has(#approvals-badge:not(.hidden)) .sidebar-foot a[data-ws="settings"]::after'
-        in css
-    )
+    for badge in ("approvals-badge", "tasks-badge", "memory-badge"):
+        assert (
+            f'.sidebar:has(#{badge}:not(.hidden)) .sidebar-foot a[data-ws="settings"]::after' in css
+        ), badge
     assert "details.rail-group" not in css
     assert ".sidebar-nav" not in css
 

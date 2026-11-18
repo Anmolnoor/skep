@@ -921,8 +921,8 @@ async function refreshDockModel() {
 }
 function updateShellChrome(hash) {
   // H1-G2: the header line is the view's own. + Assign shows where work is
-  // started from (Home, Runs); it is also in the sidebar under Runs and in
-  // ⌘K. The Queen tile (default model + liveness) belongs to Home; a thread
+  // started from (Home, Runs); it is also "New run" in the Settings
+  // surface and in ⌘K. The Queen tile (default model + liveness) belongs to Home; a thread
   // shows its own model in its header.
   const page = hash.split(/[/?]/)[1] || "home";
   const assign = document.querySelector(".topbar-assign");
@@ -1003,11 +1003,21 @@ const HASH_ALIASES = {
   "#/setup": "#/settings/setup",
   "#/policies": "#/policies/now",
 };
+// The sections behind #/settings/<tab> and #/policies/<tab>, first = fallback.
+// An unknown tab is rewritten to the first, so an item is always lit.
+const SECTIONS = {
+  settings: ["models", "workers", "projects", "channels", "setup"],
+  policies: ["now", "decisions", "grants", "groups", "defaults"],
+};
 
 async function route() {
   if (cleanup) { cleanup(); cleanup = null; }
   // replaceState fires no hashchange, so this route() call is the only one.
   if (HASH_ALIASES[location.hash]) history.replaceState(null, "", HASH_ALIASES[location.hash]);
+  const tabbed = location.hash.match(/^#\/(settings|policies)\/([\w-]+)$/);
+  if (tabbed && !SECTIONS[tabbed[1]].includes(tabbed[2])) {
+    history.replaceState(null, "", `#/${tabbed[1]}/${SECTIONS[tabbed[1]][0]}`);
+  }
   const hash = location.hash || "#/home";
   setShellActiveRoute(hash);
   updateShellChrome(hash);
@@ -1020,6 +1030,11 @@ async function route() {
   if (!setup.complete && !setupRouteAllowed(hash)) {
     location.hash = "#/setup";
     return;
+  }
+  // First run: there is nowhere to close to — the gate would bounce back here.
+  if (!setup.complete) {
+    const close = document.getElementById("surface-close");
+    if (close) close.hidden = true;
   }
   for (const [pattern, view] of routes) {
     const match = hash.match(pattern);

@@ -160,6 +160,28 @@ test("route(): every other old hash lands where it did, unrewritten; an unknown 
   assert.equal(app.location.hash, "#/home");
 });
 
+test("route(): an unknown section is rewritten to the page's first, so an item is always lit", async () => {
+  for (const [from, to, call] of [
+    ["#/settings/bogus", "#/settings/models", ["viewSettings", "models"]],
+    ["#/policies/bogus", "#/policies/now", ["viewPolicies", "now"]],
+  ]) {
+    const { app, pages, replaced, calls } = shellApp(from);
+    await app.routeImpl();
+    assert.deepEqual(replaced, [to], from);
+    assert.deepEqual(calls, [call], from);
+    assert.equal(lit(pages).length, 1, from);
+  }
+});
+
+test("first run: the close button is hidden — the gate would only bounce it back to Setup", async () => {
+  const { app, nodes } = shellApp("#/settings/setup", { complete: false, missing: ["llm"] });
+  await app.routeImpl();
+  assert.equal(nodes["surface-close"].hidden, true);
+  const done = shellApp("#/settings/setup");
+  await done.app.routeImpl();
+  assert.equal(done.nodes["surface-close"].hidden, false);
+});
+
 test("first run: an incomplete setup lands on Settings / Setup in the surface, with no redirect loop", async () => {
   const incomplete = { complete: false, missing: ["llm"] };
   const { app, nodes, pages, calls } = shellApp("#/home", incomplete);
