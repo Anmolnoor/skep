@@ -675,6 +675,11 @@ def verdict_why(
                 f"asked: researching {str(safe.get('question') or '')!r} is a sandboxed run "
                 f"that fetches from {hosts}, and a person starts every research run"
             )
+        if tool == "remember":  # v126-F12: it files in-turn; it never asks
+            return (
+                "allowed: remember files an inert proposal at once — nothing is "
+                "remembered until you approve that proposal"
+            )
         if tool in ALWAYS_CARDS:
             return f"asked: {tool} always asks — {ALWAYS_CARDS[tool]}"
         return "asked: no policy rule covers this tool, so it asks by default"

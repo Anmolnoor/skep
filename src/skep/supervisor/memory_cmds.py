@@ -254,8 +254,10 @@ def _batch_targets(
 
 
 def cmd_memory_approve_batch(args: argparse.Namespace) -> int:
-    """v84-A5: batch review for imports — one decision per actor/class, every
-    item listed before it lands, each still individually rejectable first."""
+    """v84-A5: batch approval for imports — approves EVERY pending proposal
+    from one actor (and class) in one step, printing each as it lands. There
+    is no confirm step: review the queue first (``skep memory proposals``)
+    and reject what you don't want individually before running it."""
     from .cli_cmds import _err
 
     store = _open_store_or_empty(args.home)

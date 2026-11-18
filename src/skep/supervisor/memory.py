@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 MEMORY_PROPOSAL_STATES: frozenset[str] = frozenset(
     {"draft", "pending_review", "approved", "rejected", "needs_clarification"}
 )
-TERMINAL_PROPOSAL_STATES: frozenset[str] = frozenset({"approved", "rejected"})
 
 # What a durable memory item *is*. Not a proposal state.
 # ``observation`` (v71-F5) is the one NON-durable class: the daily-companion
