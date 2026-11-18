@@ -21,6 +21,7 @@ import pytest
 
 from skep.cli import main
 from skep.supervisor import RunStore, SupervisorConfig
+from skep.supervisor import policy_baseline as pb
 from skep.supervisor.cli_cmds import build_config
 from skep.supervisor.policy_engine import resolve_stack
 from skep.supervisor.policy_golden import HOME_PLACEHOLDER, SEED_VERSION, freeze
@@ -40,15 +41,18 @@ from skep.supervisor.policy_templates import (
     TEMPLATE_ALIASES,
     TEMPLATE_LAYER,
     TEMPLATE_NAMES,
+    TEMPLATES_DIR,
+    PolicyTemplate,
     builtin_policy_templates,
     explain_view,
     floor_rows,
     golden_bytes,
+    layer_view,
     load_policy_template,
     render_policy_table,
     resolve_template_name,
 )
-from skep.supervisor.serve.actions import policy_decide
+from skep.supervisor.serve.actions import policy_decide, policy_why
 from skep.supervisor.serve.settings import ConfigHolder
 from skep.supervisor.serve.tools import execute_read_tool
 from skep.supervisor.shell_prefixes import dangerous_prefix_reason
@@ -524,3 +528,97 @@ def test_the_secret_floor_row_names_every_floored_path() -> None:
     [row] = [row for row in floor_rows() if row["rule_id"] == "floor.secret-reads"]
     named = set(row["pattern"].replace(",", " ").split())
     assert {f"~/{rel}" for rel in HOME_SECRETS} <= named
+
+
+# --- v124-F1: every shipped rule explains itself, outside the hashed layer ------
+
+# The baseline hash of each shipped template before descriptions existed
+# (origin/main 81017ff). A description must never move it: every locked
+# home would read as tampered and ask again (I13).
+_SHIPPED_SHA256 = {
+    "assistant": "77600da123ed276192354edb8590d0a5a302a7e91e02ea96c73f9f29f682e53c",
+    "builder": "01db10ac4fc3121a0563f9438de4edab984fadec2a4c65f8dc2b0dae29c95c78",
+    "operator": "2d1985feffe20e0539bbfde642527e55ad8fd8a2af3564f4e5e159ef57bfec2a",
+}
+
+
+def _texts() -> dict[str, dict[str, str]]:
+    texts: dict[str, dict[str, str]] = json.loads(
+        (TEMPLATES_DIR / "descriptions.json").read_text(encoding="utf-8")
+    )
+    return texts
+
+
+def test_every_shipped_rule_has_a_description_and_none_is_stale() -> None:
+    texts = _texts()
+    assert sorted(texts) == sorted(TEMPLATE_NAMES)
+    for name, template in builtin_policy_templates().items():
+        assert set(texts[name]) == {rule.rule_id for rule in template.rules}, name
+        assert all(isinstance(t, str) and t.strip() for t in texts[name].values()), name
+    assert sum(map(len, texts.values())) == 69
+
+
+def test_explain_rows_carry_the_shipped_description(config: SupervisorConfig) -> None:
+    texts = _texts()
+    for name in TEMPLATE_NAMES:
+        rows = explain_view(name)["rules"]
+        assert [row["description"] for row in rows] == [texts[name][r["rule_id"]] for r in rows]
+    role = explain_view("role:builder", config.home)
+    assert role["rules"] and all(row["description"] for row in role["rules"])
+    assert all("description" not in row for row in explain_view("builder")["floor"])
+
+
+def test_a_custom_rule_reusing_a_shipped_id_shows_no_shipped_description() -> None:
+    builder = load_policy_template("builder").model_dump(mode="json")
+    custom = PolicyTemplate.model_validate({**builder, "template": "mine"})
+    assert all("description" not in row for row in layer_view(custom)["rules"])
+    # Same name, same id, a different rule: the sentence would lie about it.
+    builder["rules"] = [
+        {**rule, "verdict": "allow"} if rule["rule_id"] == "net-fetch-gated" else rule
+        for rule in builder["rules"]
+    ]
+    rows = {row["rule_id"]: row for row in layer_view(PolicyTemplate(**builder))["rules"]}
+    assert "description" not in rows["net-fetch-gated"]
+    assert rows["net-gated"]["description"] == _texts()["builder"]["net-gated"]
+
+
+def test_why_names_the_deciding_shipped_rule_description(
+    config: SupervisorConfig, repo: Path
+) -> None:
+    store = RunStore(config.db_path)
+    try:
+        store.set_setting("policy_engine_v2_scopes", list(SCOPES))
+        store.set_setting("default_execution_mode", "workspace")
+        store.add_project_policy(
+            project_id="app", name="app", strategy="trusted_local_dev", phase="build", policy={}
+        )
+        store.add_project_binding(
+            project_id="app", binding_kind="repo_path", binding_value=str(repo)
+        )
+        pb.write_lock(config.home, load_policy_template("builder"), approved_by="op")
+        holder = ConfigHolder(config, store)
+        fetch = policy_why(holder, store, str(repo), "network", "fetch", "example.com")
+        status = policy_why(holder, store, str(repo), "shell", "run", "git status")
+    finally:
+        store.close()
+    assert fetch["operator"]["decided_by"] == "template:builder/net-fetch-gated"
+    assert fetch["operator"]["description"] == _texts()["builder"]["net-fetch-gated"]
+    assert "description" not in fetch["run"]  # default/unmatched: no rule decided
+    # The run lane's rule is compiled from the baseline's allowlist knob: it
+    # carries the layer label but is no shipped rule, so it explains nothing.
+    assert status["run"]["decided_by"] == "template:builder/shell:git status"
+    assert "description" not in status["run"]
+    assert status["run"]["considered"]
+    assert all("description" not in row for row in status["run"]["considered"])
+
+
+def test_descriptions_move_no_baseline_hash(tmp_path: Path) -> None:
+    for name, sha in _SHIPPED_SHA256.items():
+        template = load_policy_template(name)
+        assert pb.sha256_of(template) == sha, name
+        home = tmp_path / name
+        pb.write_lock(home, template, approved_by="op")
+        assert isinstance(pb.verify(home), pb.Ok)
+        assert all(row["description"] for row in explain_view("baseline", home)["rules"])
+        assert isinstance(pb.verify(home), pb.Ok)
+        assert json.loads(pb.lock_path(home).read_text())["sha256"] == sha
