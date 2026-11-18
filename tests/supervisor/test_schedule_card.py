@@ -278,3 +278,14 @@ def test_a_confirm_after_the_chat_role_changed_refuses(live: Any) -> None:
             assert resolved.result["ok"] is True, resolved.result
             stored = env.store.get_schedule("kept")
             assert stored is not None and stored.role == "operator"
+
+
+def test_propose_schedule_caste_help_names_the_worker_castes_and_the_role_rule() -> None:
+    from skep.supervisor.serve.tools import MUTATING_TOOL_SPECS
+
+    (spec,) = [s for s in MUTATING_TOOL_SPECS if s["function"]["name"] == "propose_schedule"]
+    help_text = spec["function"]["parameters"]["properties"]["caste"]["description"]
+    assert "None of these dispatch a worker" not in help_text
+    assert "these four dispatch no worker" in help_text
+    assert "'coding', 'audit', 'researcher' and 'document' dispatch a worker" in help_text
+    assert "in this chat's role" in help_text

@@ -1974,8 +1974,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                     "as a shell command on the supervisor host and posts its output; "
                     "'digest' posts a summary of pending approvals/runs/schedules "
                     "(no repo or instructions needed); 'prompt' runs the "
-                    "instructions as a read-only Queen turn in this chat. None of "
-                    "these dispatch a worker; all need the user's confirmation."
+                    "instructions as a read-only Queen turn in this chat; these four "
+                    "dispatch no worker. 'coding', 'audit', 'researcher' and 'document' "
+                    "dispatch a worker on the repo, in this chat's role. All need the "
+                    "user's confirmation."
                 ),
             },
             "network": {
