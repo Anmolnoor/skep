@@ -4837,7 +4837,8 @@ async function viewProjectDetail(main, projectId) {
         onclick: () => {
           sessionStorage.setItem("skep-group-edit",
             JSON.stringify({ group: name, project: projectId }));
-          location.hash = "#/policies";
+          // graphite-nav: name the section, so the lit item is the one shown.
+          location.hash = "#/policies/groups";
         },
       }, `${name} ✎`))));
   }

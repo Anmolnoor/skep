@@ -232,3 +232,24 @@ test("the thread list follows the route on hashchange, even while the surface hi
   listeners.hashchange();
   assert.ok(row().classList.contains("active"));
 });
+
+test("a project's group edit opens the Groups section by name, so the lit item is the one shown", async () => {
+  const { app } = shellApp("#/projects/acme");
+  const stored = {};
+  app.sessionStorage = { setItem: (k, v) => { stored[k] = v; } };
+  app.api = async (_method, path) => {
+    if (path === "/api/projects") {
+      return { projects: [{ project_id: "acme", phase: "maintain", strategy: "x", bindings: [], policy: { policy_groups: ["py"] } }] };
+    }
+    if (path === "/api/schedules") return { schedules: [] };
+    if (path === "/api/runs?limit=100") return { runs: [] };
+    return {};
+  };
+  app.header = () => {};
+  const main = app.el("main");
+  await app.viewProjectDetail(main, "acme").catch(() => {}); // later reads are not this test's
+  const edit = main.querySelectorAll(".project-group-edit")[0];
+  await edit.click();
+  assert.equal(app.location.hash, "#/policies/groups");
+  assert.deepEqual(JSON.parse(stored["skep-group-edit"]), { group: "py", project: "acme" });
+});
