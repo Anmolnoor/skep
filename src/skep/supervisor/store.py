@@ -2975,6 +2975,17 @@ class RunStore:
         )
 
     @_locked
+    def record_registry_event(
+        self, *, kind: str, item_id: str, action: str, actor: str, detail: dict[str, Any]
+    ) -> None:
+        """v126-F2: an audit row for a registry write outside a run (a skill
+        refreshed from its shelf), in the same table notes and memory use."""
+        self._record_note_task_event(
+            kind=kind, item_id=item_id, action=action, actor=actor, detail=detail
+        )
+        self._conn.commit()
+
+    @_locked
     def create_note(self, content: str, *, actor: str, taint: Sequence[str] = ()) -> NoteRecord:
         now = _now()
         note = NoteRecord(str(uuid.uuid4()), content, now, now)
