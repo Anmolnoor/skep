@@ -329,6 +329,18 @@ test("Now: Test an action shows each face's deciding-rule description under its 
   assert.ok(lines[1].startsWith("The Queen: "));
 });
 
+// v124 review nit 11: the schedules read only feeds Test an action's picker;
+// a failed one must not blank the page.
+test("Now: a failed schedules read leaves the page standing, with no schedule to pick", async () => {
+  const { main, app } = withPolicies({ "GET /api/schedules": () => { throw new Error("schedules unavailable"); } });
+  await app.viewPolicies(main);
+  await flush();
+  const now = panel(main);
+  assert.match(now.querySelector(".policy-status").textContent, /Baseline locked/);
+  const schedule = now.querySelector(".policy-test").querySelectorAll("select")[3];
+  assert.deepEqual(schedule.children.map(o => o.getAttribute("value")), [""]);
+});
+
 test("Decisions: summary counts, newest-first rows, a verdict filter, and an empty state", async () => {
   const rows = [
     { at: "2026-11-18T10:00:00Z", actor: "acp:claude", scope: "shell", action: "run", value: "rm -rf /", verdict: "deny", decided_by: "floor" },

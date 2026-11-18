@@ -172,7 +172,8 @@ async function renderNowTab(panel) {
     api("GET", "/api/roles"),
     scopeNames(),
     api("GET", "/api/projects"),
-    api("GET", "/api/schedules"),
+    // Only Test an action's schedule picker reads it: a failed read empties the picker, not the page.
+    api("GET", "/api/schedules").catch(() => ({ schedules: [] })),
   ]);
   const status = baselineStatus(baseline);
   const viewAs = el("select", { class: "policy-view-as", "aria-label": "view the policy as" },
