@@ -72,6 +72,10 @@ and is bound back for its own run) and that is deleted when it ends — the
 real `~/.codex/auth.json` stays masked and the refresh token never enters the
 sandbox ([`codex-chatgpt-login.md`](codex-chatgpt-login.md)).
 
+Everything else outside the workspace stays readable, including other runs'
+worktrees under the skep home: no profile masks them. Treat a sandboxed worker
+as able to read any file the lists above do not name.
+
 On Linux the worker also gets its own PID and IPC namespaces and an empty
 `/run` (no host D-Bus or systemd sockets).
 

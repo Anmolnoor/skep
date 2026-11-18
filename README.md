@@ -121,7 +121,11 @@ approval — landing IS the commit.
   switch branches; no permission grant overrides that.
   ([`docs/approvals.md`](docs/approvals.md))
 - **Audit.** Every run, event, shell command, approval, and decision is a
-  durable record you can inspect and replay later.
+  durable record you can inspect and replay later. For an external engine
+  (Claude Code, Codex, ...) skep keeps the evidence for every run (the command
+  it launched, the patch, the sandbox profile, the re-verify), not each
+  command the agent ran inside the sandbox
+  ([ADR 0047](docs/adr/0047-cli-agent-engines.md)).
 
 The non-negotiable rules behind all of this are written down in
 [`docs/invariants.md`](docs/invariants.md) — that file is the part of the

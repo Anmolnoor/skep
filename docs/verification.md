@@ -21,13 +21,22 @@ For a completed run, Skep:
 
 1. Creates a fresh worktree at the original repo baseline.
 2. Applies the worker's patch artifact.
-3. Reads the verification command list from the worker's `verify.result` event.
+3. Takes the project's pinned `verify_command` (v88-F4); only an unpinned
+   project falls back to the command list from the worker's `verify.result`
+   event. The record says which of the two it re-ran.
 4. Re-runs those commands from the clean worktree.
 5. Records the outcome, exit codes, and detail message.
 
 The replay uses only `PATH` and `HOME` from the supervisor environment. When the
 supervisor sandbox is available, the replay command is run with deny-all network
 and writes confined to the clean worktree.
+
+Because the replay has no network, Skep first installs the project's
+dependencies from the baseline's lockfile under a network-allowed profile, then
+again from the patched lockfile when the patch changes it: `uv` projects
+(`uv.lock`) and Node projects (`package-lock.json`, `pnpm-lock.yaml`,
+`yarn.lock`, lifecycle scripts off). Other ecosystems are not primed: their pin
+re-runs only with what the host already has.
 
 ## Outcomes
 
@@ -58,7 +67,8 @@ If replay disagrees with the worker, review marks it loudly:
   re-verify:    failed [NOT CONFIRMED - DO NOT TRUST] (G10): re-run exit codes [1]
 ```
 
-That disagreement blocks auto-approval. You can still inspect the evidence and
+That disagreement blocks auto-approval, and so does a confirmed replay of a
+known-vacuous check (below). You can still inspect the evidence and
 decide what to do manually, but Skep will not treat the run as safe to land by
 policy.
 
@@ -80,7 +90,14 @@ This catches common failures:
 ## Current Limits
 
 - Re-verification is only as strong as the recorded command. If a worker records
-  `true`, Skep can confirm only that `true` exits successfully.
+  `true`, Skep can confirm only that `true` exits successfully. Such a run is
+  never auto-landed: every auto-landing rule refuses a replay whose commands
+  are all known-vacuous (`true`, `:`, `exit 0`, `test`, `echo`, `printf`,
+  `ls`, `cat`, `git diff`/`status`/`log`, `sh -c` of those; empty), names it on
+  the run's `auto_apply_blocked` record, and leaves the patch for a human.
+  Known-vacuous is a list of shapes, not proof that any other command can fail.
+  Project setup turns the maintain phase's auto-apply default off on a missing
+  or known-vacuous pin, and refuses an explicit one.
 - Toolchain mismatch is reported as `unavailable`, not `failed`. For example, if
   the worker recorded `pytest` but the supervisor environment cannot find it,
   Skep cannot honestly confirm the run.

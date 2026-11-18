@@ -148,6 +148,12 @@ The serve Settings page also has `default_execution_mode`:
 
 Sandbox mode fails closed if the requested host backend cannot be applied.
 
+A project's own `default_execution_mode` (v127-F8, ADR 0066): project setup
+gives a NEW project `sandbox` when this host can sandbox, else `workspace` with
+the probe's reason. An existing project keeps its stored mode through
+re-setup and phase changes; `skep doctor` lists the ones still on `workspace`,
+and `skep project setup <repo> --execution-mode sandbox` moves one.
+
 ## Permission Defaults
 
 Per-run flags override defaults:
