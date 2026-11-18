@@ -145,7 +145,8 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         binary="aider",
         network_host=None,  # provider depends on the operator's aider config
         summary=(
-            "Aider, pinned --no-auto-commit. Confined by the sandbox, not the capability layer."
+            "Advanced (never recommended): Aider, pinned --no-auto-commit. Confined by the "
+            "sandbox, not the capability layer."
         ),
     ),
     "pi": CodingEngine(
@@ -160,7 +161,10 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         # makes only the workspace writable (v106-F1), and the redirect doubles
         # as evidence — the transcript survives with a kept worktree (v107-F1).
         toolchain_env=(("PI_CODING_AGENT_DIR", "pi"),),
-        summary=("pi, headless (-p). Confined by the sandbox, not the capability layer."),
+        summary=(
+            "Advanced (never recommended): pi, headless (-p). Confined by the sandbox, "
+            "not the capability layer."
+        ),
     ),
 }
 

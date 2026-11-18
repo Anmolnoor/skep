@@ -165,34 +165,76 @@ def test_build_config_installs_exactly_the_registry(tmp_path: Path) -> None:
     assert config.command_for("audit") == CASTES["audit"].argv
 
 
-def test_both_chat_caste_enums_offer_the_whole_roster() -> None:
-    """v101-F12: the enums hardcoded ["coding", "audit"] and ["coding", "audit",
-    "document"], so even after F2 and F3 the Queen could not ask for a verifier,
-    a reviewer, a researcher or a script run. CLAUDE.md's standing rule applies
-    — the Queen runs a small model and skims tool descriptions, so a schema
-    omitting half the roster trains it never to use them."""
+ADVANCED = {"audit", "curator", "document", "researcher", "reviewer"}
+
+
+def test_both_chat_caste_enums_offer_the_castes_that_run() -> None:
+    """v101-F12 made the enums read the registry instead of hardcoding two
+    names — one source of truth, kept. v127-F12 changes WHAT they offer: the
+    whole roster trained the Queen's small model to reach for castes that had
+    never run in the field (O9). The enums now offer the non-advanced castes;
+    advanced ones stay reachable from the CLI, templates and schedules."""
+    from skep.supervisor.castes import chat_caste_names
     from skep.supervisor.serve.tools import TOOL_SPECS
 
     def params(tool_name: str) -> dict[str, Any]:
         spec = next(s for s in TOOL_SPECS if s["function"]["name"] == tool_name)
         return cast("dict[str, Any]", spec["function"]["parameters"]["properties"])
 
-    assert params("dispatch_run")["caste"]["enum"] == caste_names()
+    assert {name for name, caste in CASTES.items() if caste.advanced} == ADVANCED
+    assert chat_caste_names() == sorted(set(CASTES) - ADVANCED) == ["coding", "script"]
+    assert params("dispatch_run")["caste"]["enum"] == chat_caste_names()
     batch = params("batch_dispatch")["tasks"]["items"]["properties"]
-    assert batch["caste"]["enum"] == caste_names()
+    assert batch["caste"]["enum"] == chat_caste_names()
+
+
+def test_an_advanced_caste_says_so_and_still_dispatches_from_the_cli(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.cli import main
+    from skep.supervisor import cli_cmds
+
+    for name in ADVANCED:
+        assert CASTES[name].summary.startswith("Advanced"), name
+        assert resolve_caste(name).name == name
+    seen: list[str] = []
+
+    def spy(*_args: Any, worker_kind: str, **_kwargs: Any) -> Any:
+        seen.append(worker_kind)
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(cli_cmds, "run_task", spy)
+    main(["--home", str(tmp_path / "home"), "run", str(repo), "Find X.", "--caste", "researcher",
+          "--quiet", "--execution-mode", "workspace"])  # fmt: skip
+    assert seen == ["researcher"]
+
+
+def test_aider_and_pi_are_marked_advanced() -> None:
+    from skep.supervisor.engines import CODING_ENGINES
+
+    for name in ("aider", "pi"):
+        assert "advanced" in CODING_ENGINES[name].summary.lower(), name
+    for name in ("builtin", "claude_code", "codex"):
+        assert "advanced" not in CODING_ENGINES[name].summary.lower(), name
 
 
 def test_the_dispatch_description_carries_each_summary_exactly_once() -> None:
     """Hand-written prose about castes is the F1 defect one layer up: a new
     caste ships and the description is silently stale. Generated from the same
-    `summary` the Settings roster and the Assign field help read, so the
-    operator and the model are told the same thing in the same words."""
+    `summary` the Settings roster and the Assign field help read. v127-F12: it
+    describes only what the enum offers, and names the advanced castes as not
+    offered — the small model skims it, so it must stay true."""
+    from skep.supervisor.castes import chat_caste_names
     from skep.supervisor.serve.tools import _caste_guidance
 
     guidance = _caste_guidance()
-    for name, caste in CASTES.items():
-        assert guidance.count(caste.summary) == 1, name
+    for name in chat_caste_names():
+        assert guidance.count(CASTES[name].summary) == 1, name
         assert f"{name}: " in guidance
+    for name in ADVANCED:
+        assert CASTES[name].summary not in guidance, name
+        assert name in guidance  # named as advanced, not described as offered
+    assert "skep run --caste" in guidance
 
 
 def test_the_schedules_enum_is_still_not_wired_to_the_registry() -> None:

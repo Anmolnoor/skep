@@ -33,7 +33,7 @@ from .autonomy import (
     resume_after_approval_decision,
     run_request_resolved_decision,
 )
-from .castes import caste_worker_commands
+from .castes import caste_names, caste_worker_commands
 from .config import SupervisorConfig
 from .contracts_io import DEFAULT_BUDGET
 from .dispatch import run_task
@@ -3404,7 +3404,7 @@ def register_supervisor_commands(
     run.add_argument(
         "--caste",
         default="coding",
-        help="worker caste (D2): 'coding' (default skep worker) or 'audit' (skep dep/audit bot)",
+        help=f"worker caste (D2): {', '.join(caste_names())}; default coding (the skep worker)",
     )
     run.add_argument("--resume-of", default=None, help="task_id this run supersedes (Q8)")
     run.add_argument(

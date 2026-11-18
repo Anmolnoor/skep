@@ -58,6 +58,10 @@ class Caste:
     # Does it fetch? Only the researcher does; everything else is offline by
     # construction, which is what makes those castes gate-safe on their own.
     needs_network: bool
+    # v127-F12: never run in the field (O9). Still routed — the CLI, templates
+    # and schedules reach it — but the chat enums leave it out, so the Queen's
+    # small model is not trained to reach for it. Its summary says so.
+    advanced: bool = False
 
 
 CASTES: dict[str, Caste] = {
@@ -73,53 +77,58 @@ CASTES: dict[str, Caste] = {
         name="audit",
         argv=(sys.executable, "-m", "skep.workers.audit"),
         summary=(
-            "Bumps unsafe dependency pins against an advisory set and re-runs the "
+            "Advanced: Bumps unsafe dependency pins against an advisory set and re-runs the "
             "suite. Deterministic, LLM-free, offline."
         ),
         lands=True,
         needs_provider=False,
         needs_network=False,
+        advanced=True,
     ),
     "curator": Caste(
         name="curator",
         argv=(sys.executable, "-m", "skep.workers.curator"),
         summary=(
-            "Turns an inbox of notes into memory PROPOSALS for review; never "
+            "Advanced: Turns an inbox of notes into memory PROPOSALS for review; never "
             "writes durable memory itself."
         ),
         lands=False,
         needs_provider=False,
         needs_network=False,
+        advanced=True,
     ),
     "document": Caste(
         name="document",
         argv=(sys.executable, "-m", "skep.workers.document"),
-        summary="Drafts and summaries as deliverables. No web, no code, nothing lands.",
+        summary="Advanced: Drafts and summaries as deliverables. No web, no code, nothing lands.",
         lands=False,
         needs_provider=True,
         needs_network=False,
+        advanced=True,
     ),
     "researcher": Caste(
         name="researcher",
         argv=(sys.executable, "-m", "skep.workers.researcher"),
         summary=(
-            "Answers a question from ALLOW-LISTED sources only, with evidence per "
+            "Advanced: Answers a question from ALLOW-LISTED sources only, with evidence per "
             "source and the ones it could not reach named."
         ),
         lands=False,
         needs_provider=False,
         needs_network=True,
+        advanced=True,
     ),
     "reviewer": Caste(
         name="reviewer",
         argv=(sys.executable, "-m", "skep.workers.reviewer"),
         summary=(
-            "Reads the diff against the startup baseline and reports findings "
+            "Advanced: Reads the diff against the startup baseline and reports findings "
             "with a verdict. Read-only; a review never lands."
         ),
         lands=False,
         needs_provider=True,
         needs_network=False,
+        advanced=True,
     ),
     "script": Caste(
         name="script",
@@ -152,6 +161,11 @@ RETIRED_CASTES: dict[str, str] = {
 
 def caste_names() -> list[str]:
     return sorted(CASTES)
+
+
+def chat_caste_names() -> list[str]:
+    """v127-F12: what the chat dispatch enums offer — the non-advanced castes."""
+    return [name for name in caste_names() if not CASTES[name].advanced]
 
 
 def resolve_caste(name: str | None) -> Caste:

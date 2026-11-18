@@ -23,7 +23,7 @@ from fastapi import HTTPException
 
 from ..apply import validate_landing_branch
 from ..autonomy import AutonomyDecision
-from ..castes import CASTES, caste_names
+from ..castes import CASTES, caste_names, chat_caste_names
 from ..contracts_io import DEFAULT_PERMISSIONS
 from ..engines import engine_names
 from ..memory import MEMORY_CLASSES, MemoryError
@@ -279,8 +279,15 @@ def _caste_guidance() -> str:
     read, so the operator and the model are told the same thing in the same
     words.
     """
-    return "which worker runs this. " + " ".join(
-        f"{name}: {CASTES[name].summary}" for name in caste_names()
+    # v127-F12: only what the enum offers is described; the advanced castes
+    # are named as not offered here, so the description stays true.
+    offered = chat_caste_names()
+    advanced = [name for name in caste_names() if name not in offered]
+    return (
+        "which worker runs this. "
+        + " ".join(f"{name}: {CASTES[name].summary}" for name in offered)
+        + f" Advanced castes ({', '.join(advanced)}) are not offered here; the "
+        "operator runs them with `skep run --caste`, templates or schedules."
     )
 
 
@@ -975,7 +982,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                     "properties": {
                         "repo": {"type": "string"},
                         "instructions": {"type": "string"},
-                        "caste": {"type": "string", "enum": caste_names()},
+                        "caste": {"type": "string", "enum": chat_caste_names()},
                         "role": {"type": "string"},
                         "execution_mode": {"type": "string", "enum": ["workspace", "sandbox"]},
                         "engine": {
@@ -1822,7 +1829,7 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "dispatch_run",
-        "Dispatch a coding/audit run on a repo. On trusted projects this may run "
+        "Dispatch a coding run (or a sandboxed script) on a repo. On trusted projects this may run "
         "immediately when project policy explicitly allows auto-dispatch and the "
         "request matches default policy; otherwise it becomes a confirmation card. "
         "Omit execution_mode to inherit a trusted project's default when it is clear. "
@@ -1845,15 +1852,10 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "never a mega-task — and its instructions state the acceptance check "
         "('verify by ...'): an improvised verify is where runs die. "
         # v101-F12: WHAT each caste is now comes from the registry, on the
-        # caste param itself. What stays here is what the registry cannot know:
-        # how to WRITE a brief for one. Only `document` needs that, and cutting
-        # it would regress the small model's ability to use the caste well —
-        # tool descriptions are load-bearing code (CLAUDE.md).
-        "For caste 'document', state acceptance with a LITERAL 'Must include: "
-        "a; b' line (prose is not checked) and name workspace files to ground "
-        "on with a 'Files: path path' line — EXAMPLE instructions: \"Draft the "
-        'intro.\\nMust include: install; sandbox\\nFiles: README.md". For '
-        "anything that must FETCH sources, use start_research instead.",
+        # caste param itself. v127-F12: `document` is advanced and left the
+        # enum, so its brief-writing example left too — teaching the small
+        # model a caste it cannot pick is a stale description (CLAUDE.md).
+        "For anything that must FETCH sources, use start_research instead.",
         {
             "repo": {"type": "string", "description": "registered repo slug or host path"},
             "instructions": {"type": "string"},
@@ -1862,7 +1864,11 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
                 "description": "branch or rev to baseline from; REQUIRED when extending "
                 "work that landed on a non-default branch",
             },
-            "caste": {"type": "string", "enum": caste_names(), "description": _caste_guidance()},
+            "caste": {
+                "type": "string",
+                "enum": chat_caste_names(),
+                "description": _caste_guidance(),
+            },
             "role": _WORKER_ROLE,
             "engine": {
                 "type": "string",
