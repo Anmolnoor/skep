@@ -139,7 +139,7 @@ def test_injection_ranks_observations_last(config: SupervisorConfig) -> None:
             memory_class="durable_preference", content="answers in English", actor="test"
         )
         block = memory_block(store)
-        assert "[observation] hums while debugging" in block
+        assert "[observation] (unreviewed, expires) hums while debugging" in block
         assert block.index("[durable_preference]") < block.index("[observation]")
     finally:
         store.close()

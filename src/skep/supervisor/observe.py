@@ -18,6 +18,7 @@ message-id cursor so each transcript row is examined once.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import PurePath
 
@@ -137,12 +138,28 @@ def _harvest_run_terminals(store: RunStore) -> list[str]:
         store.add_memory_item(
             memory_class="observation", content=content, actor="run-observer",
             provenance=f"worker:{run.task_id}",  # D15: the worker's words
+            project_id=_run_project_id(store, run.task_id),  # v126-F3: stays in its project
         )  # fmt: skip
         created.append(content[:80])
         cursor = max(cursor, run.updated_at)
     if cursor != raw_cursor:
         store.set_setting(OBSERVATION_RUN_CURSOR, cursor)
     return created
+
+
+def _run_project_id(store: RunStore, task_id: str) -> str | None:
+    """v126-F3: the project the run was dispatched under, from its ``created``
+    transition (the envelope's project_context); None for an unbound run."""
+    for state, detail, _at in store.transitions_for(task_id):
+        if state != "created" or not detail:
+            continue
+        try:
+            context = json.loads(detail).get("project_context") or {}
+        except (ValueError, AttributeError):
+            return None
+        project_id = context.get("project_id") if isinstance(context, dict) else None
+        return str(project_id) if project_id else None
+    return None
 
 
 def observe_conversations(store: RunStore) -> list[str]:

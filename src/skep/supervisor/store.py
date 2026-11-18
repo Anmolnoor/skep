@@ -1230,6 +1230,16 @@ class RunStore:
             # D15: who wrote a memory item when not the operator (NULL = the
             # operator: nothing already stored is retroactively marked).
             self._conn.execute("ALTER TABLE memory_items ADD COLUMN provenance TEXT")
+        # v126-F3: run summaries harvested before ES-F101 carry no provenance
+        # and read as the operator's own words. Mark them the worker's
+        # (idempotent: a marked row no longer matches). The probe keeps a
+        # current store write-free, so a read-only open (W41) still succeeds.
+        legacy = (
+            " WHERE provenance IS NULL AND memory_class = 'observation'"
+            " AND content LIKE 'observation: run %'"
+        )
+        if self._conn.execute(f"SELECT EXISTS (SELECT 1 FROM memory_items{legacy})").fetchone()[0]:
+            self._conn.execute(f"UPDATE memory_items SET provenance = 'worker:legacy'{legacy}")
         for table in ("notes", "tasks", "memory_proposals"):
             columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
             if "taint" not in columns:
