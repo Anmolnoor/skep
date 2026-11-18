@@ -136,8 +136,8 @@ def test_tick_dispatches_a_due_schedule_and_advances_it(
         assert advanced is not None
         assert advanced.last_task_id == results[0].task_id
         assert advanced.last_run_at == "2026-06-11T09:00:00Z"
-        # next run is one interval after this tick — no longer due now.
-        assert advanced.next_run_at == "2026-06-12T09:00:00Z"
+        # v122-F5: next run is the next slot (start_at + interval), not tick + interval.
+        assert advanced.next_run_at == "2026-06-12T00:00:00Z"
         assert store.due_schedules("2026-06-11T12:00:00Z") == []
     finally:
         store.close()
@@ -787,7 +787,7 @@ def test_tick_blocks_bound_schedule_when_project_disables_auto_dispatch(
             advanced.last_state
             == "policy_blocked: dispatch.require_approval.project_policy_disables_auto_dispatch"
         )
-        assert advanced.next_run_at == "2026-06-12T09:00:00Z"
+        assert advanced.next_run_at == "2026-06-12T00:00:00Z"
     finally:
         store.close()
 
