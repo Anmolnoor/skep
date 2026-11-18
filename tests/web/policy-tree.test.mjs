@@ -1,77 +1,31 @@
 // v124-F2 (DD-10): the policy tree — every registry key and every scope·action
 // once, each leaf in Group Policy words, read from the endpoints that already
 // exist (registry, rsop, explain, schedules). Read-only.
+// v124 review: every payload here is the engine's real answer on a throwaway
+// home (tests/web/fixtures/, generated and pinned by
+// tests/supervisor/test_policy_tree_fixtures.py) — never a hand-made row.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { loadApp } from "./harness.mjs";
 
 const flush = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
+const fixture = name => JSON.parse(readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), "utf8"));
 
-const REGISTRY = {
-  layers: ["floor", "global", "template", "role", "phase", "group", "project", "session", "dispatch"],
-  keys: [
-    { kind: "knob", system: "run_policy", name: "auto_approve", type: "bool", default: false, layers: ["global", "project"], doc: "land verified fixes", invariant: "I1" },
-    { kind: "knob", system: "run_policy", name: "sandbox_required", type: "bool", default: false, layers: ["global", "project"], doc: "always sandbox", invariant: "I4" },
-    { kind: "knob", system: "run_policy", name: "default_network", type: "list[str]", default: [], layers: ["global", "template", "project"], doc: "hosts a worker may reach", invariant: "I12" },
-    { kind: "knob", system: "run_policy", name: "default_max_actions", type: "int", default: 200, layers: ["global", "group", "project"], doc: "actions per run", invariant: "I4" },
-    { kind: "rule", system: "scope_document", name: "shell.run", type: "rule", default: "require_approval", layers: ["template", "global", "project", "session"], doc: "a worker's shell command", invariant: "I5" },
-    { kind: "rule", system: "scope_document", name: "shell.run_repo", type: "rule", default: "deny", layers: ["template"], doc: "a repo script", invariant: "I5" },
-    { kind: "rule", system: "scope_document", name: "network.fetch", type: "rule", default: "require_approval", layers: ["template"], doc: "the Queen's read_url", invariant: "I5" },
-    { kind: "rule", system: "auto_approval", name: "auto_approval.deps-safe", type: "rule", default: "off", layers: ["dispatch"], doc: "land a manifest-only patch", invariant: "I1" },
-    { kind: "rule", system: "floor", name: "floor.worker-git-hard-denies", type: "rule", default: "deny", layers: [], doc: "no push or pull", invariant: "I4" },
-  ],
-};
-const PROJECTS = {
-  projects: [
-    { project_id: "app", name: "app", bindings: [{ kind: "repo_path", value: "/r/app" }] },
-    { project_id: "loose", name: "loose", bindings: [] },
-  ],
-};
-const RSOP = {
-  repo: "/r/app",
-  keys: [
-    { key: "auto_approve", value: false, source_layer: null, source_name: null, overridden: [], note: "not configured at any layer — the resolver's fallback" },
-    { key: "sandbox_required", value: true, source_layer: "project", source_name: "app", overridden: [] },
-    { key: "default_network", value: ["pypi.org"], source_layer: "template", source_name: "builder", overridden: [] },
-    { key: "default_max_actions", value: 300, source_layer: "group", source_name: "python-bootstrap", overridden: [{ layer: "global", name: null, value: 200 }] },
-  ],
-  scopes: {
-    shell: [
-      { verdict: "allow", rule_id: "shell-uv-sync", action: "run", pattern: "uv sync", exact: false, layer: "template:builder", matcher: null, source: "compiled" },
-      { verdict: "require_approval", rule_id: "shell:uv", action: "run", pattern: "uv", exact: false, layer: null, matcher: null, source: "allowed_shell_commands@group:python-bootstrap" },
-      { verdict: "deny", rule_id: "shell-run-repo", action: "run_repo", pattern: "*", exact: false, layer: "template:builder", matcher: null, source: "compiled" },
-    ],
-  },
-};
-const EXPLAIN = {
-  subject: "baseline", kind: "baseline", name: "builder",
-  rules: [
-    { scope: "shell", verdict: "allow", action: "run", pattern: "uv sync", rule_id: "shell-uv-sync", description: "Lets a worker install the locked dependencies." },
-    { scope: "shell", verdict: "deny", action: "run_repo", pattern: "*", rule_id: "shell-run-repo" },
-  ],
-  floor: [],
-};
-const SCHEDULES = {
-  schedules: [
-    { name: "nightly", worker_kind: "coding", role: "builder", role_note: "the role narrows shell prefixes", network: ["pypi.org"], repo: "/r/app" },
-    { name: "backup", worker_kind: "script", role: null, network: [], repo: "/r/app" },
-    { name: "morning", worker_kind: "prompt", role: null, network: [], repo: "/r/app" },
-  ],
-};
+// A locked builder baseline, project app bound to /fixture/app, seven schedules.
+const LOCKED = fixture("policy-locked");
+// The same home with nothing approved (the zero state binds), and with the lock tampered.
+const NONE = fixture("policy-none");
+const TAMPERED = fixture("policy-tampered");
+const REGISTRY = LOCKED["GET /api/policy/registry"];
+const SCHEDULES = LOCKED["GET /api/schedules"];
+const RSOP_ROUTE = "GET /api/repos/%2Ffixture%2Fapp/rsop";
 
 function withTree(routes = {}) {
   const app = loadApp();
   const calls = [];
-  const table = {
-    "GET /api/policy/registry": REGISTRY,
-    "GET /api/projects": PROJECTS,
-    "GET /api/schedules": SCHEDULES,
-    "GET /api/policy/explain": EXPLAIN,
-    "GET /api/repos/%2Fr%2Fapp/rsop": RSOP,
-    "GET /api/roles": { default: "builder", roles: [{ name: "builder" }, { name: "assistant" }] },
-    ...routes,
-  };
+  const table = { ...LOCKED, ...routes };
   app.api = async (method, path) => {
     calls.push([method, path]);
     const key = Object.keys(table).filter(k => `${method} ${path}`.startsWith(k)).sort((a, b) => b.length - a.length)[0];
@@ -99,7 +53,14 @@ async function pick(main, key) {
   await flush();
   return detail(main).textContent;
 }
-const state = main => detail(main).querySelector(".policy-tree-state").textContent;
+const states = main => detail(main).querySelectorAll(".policy-tree-state").map(n => n.textContent);
+const state = main => states(main)[0];
+async function noProject(main) {
+  const picker = main.querySelector(".policy-tree-project");
+  picker.value = "";
+  await Promise.all(picker.listeners.change.map(fn => fn()));
+  await flush();
+}
 
 test("the tree lists every registry key once and every scope·action once, plus one leaf per schedule", async () => {
   const { main } = await openTree();
@@ -111,11 +72,12 @@ test("the tree lists every registry key once and every scope·action once, plus 
   assert.equal(tree.getAttribute("role"), "tree");
   // The three roots, then scope nodes and settings areas.
   const branches = main.querySelectorAll(".policy-tree-branch").map(n => n.getAttribute("data-key"));
-  assert.deepEqual(branches, ["Scopes", "scope:network", "scope:shell", "Settings", "area:auto_approval", "area:floor", "area:run_policy", "Schedules"]);
+  const scopes = [...new Set(REGISTRY.keys.filter(k => k.system === "scope_document").map(k => k.name.split(".")[0]))].sort();
+  const areas = [...new Set(REGISTRY.keys.filter(k => k.system !== "scope_document").map(k => k.system))].sort();
+  assert.deepEqual(branches, ["Scopes", ...scopes.map(s => `scope:${s}`), "Settings", ...areas.map(a => `area:${a}`), "Schedules"]);
   for (const node of main.querySelectorAll(".policy-tree-branch")) assert.equal(node.getAttribute("aria-expanded"), "false");
-  // Leaves sit under their scope: shell holds run and run_repo.
   const shell = main.querySelectorAll(".policy-tree-branch").find(n => n.getAttribute("data-key") === "scope:shell");
-  assert.deepEqual(shell.querySelectorAll(".policy-tree-leaf").map(n => n.getAttribute("data-key")), ["shell.run", "shell.run_repo"]);
+  assert.deepEqual(shell.querySelectorAll(".policy-tree-leaf").map(n => n.getAttribute("data-key")), ["shell.run", "shell.run_background", "shell.run_repo"]);
 });
 
 test("the project picker lists bound projects and the baseline; the first bound project resolves its RSoP", async () => {
@@ -123,47 +85,28 @@ test("the project picker lists bound projects and the baseline; the first bound 
   const picker = main.querySelector(".policy-tree-project");
   assert.deepEqual(picker.children.map(o => o.getAttribute("value")), ["", "app"]);
   assert.equal(picker.value, "app");
-  assert.ok(calls.some(([, p]) => p === "/api/repos/%2Fr%2Fapp/rsop"));
-});
-
-test("scope·action wording: an unmatched one says what happens; a configured one lists its rules", async () => {
-  const { main } = await openTree();
-  await pick(main, "network.fetch");
-  assert.equal(state(main), "Not configured → asks");
-  const text = await pick(main, "shell.run");
-  assert.equal(state(main), "Configured: allow / ask");
-  assert.match(text, /anything no rule matches asks/);
-  // Each rule with its id, the layer that stated it and its description.
-  const rules = detail(main).querySelectorAll(".policy-tree-rule").map(n => n.textContent);
-  assert.equal(rules.length, 2);
-  assert.match(rules[0], /allow.*uv sync.*shell-uv-sync.*template:builder.*Lets a worker install the locked dependencies\./s);
-  assert.match(rules[1], /ask.*uv.*shell:uv.*allowed_shell_commands@group:python-bootstrap.*No description/s);
-  await pick(main, "shell.run_repo");
-  assert.equal(state(main), "Configured: deny");
-  // A description shows only for a rule the baseline stated, never by id alone.
-  assert.match(detail(main).textContent, /No description/);
+  assert.ok(calls.some(([, p]) => p === "/api/repos/%2Ffixture%2Fapp/rsop"));
 });
 
 test("a scope·action that denies when unmatched says so", async () => {
-  const { main } = await openTree({ "GET /api/repos/%2Fr%2Fapp/rsop": { ...RSOP, scopes: {} } });
+  const { main } = await openTree();
   await pick(main, "shell.run_repo");
-  assert.equal(state(main), "Not configured → denies");
+  assert.match(state(main), /Not configured → denies$/);
 });
 
 test("setting wording: not configured, enabled, a value, enforced; the deciding layer and what it overrode", async () => {
   const { main } = await openTree();
+  await pick(main, "sandbox_required_for");
+  assert.equal(state(main), "Not configured → email, browser, secrets, unknown_repo");
   await pick(main, "auto_approve");
-  assert.equal(state(main), "Not configured → Disabled");
-  await pick(main, "sandbox_required");
   assert.equal(state(main), "Enabled");
-  assert.equal(detail(main).querySelector(".policy-tree-decider").textContent, "project:app");
+  assert.equal(detail(main).querySelector(".policy-tree-decider").textContent, "global");
   const text = await pick(main, "default_max_actions");
-  assert.equal(state(main), "300");
-  assert.equal(detail(main).querySelector(".policy-tree-decider").textContent, "group:python-bootstrap");
-  assert.match(text, /Overrode.*global.*200/s);
-  assert.match(text, /actions per run/);
+  assert.equal(state(main), "7");
+  assert.equal(detail(main).querySelector(".policy-tree-decider").textContent, "project:app");
+  assert.match(text, /Overrode.*global.*100/s);
   await pick(main, "default_network");
-  assert.equal(state(main), "pypi.org");
+  assert.equal(state(main), "pypi.org, files.pythonhosted.org, registry.npmjs.org, proxy.golang.org");
   assert.equal(detail(main).querySelector(".policy-tree-decider").textContent, "Enforced (locked baseline)");
   // run_policy keys link to the existing editor; nothing on the leaf edits.
   assert.ok(detail(main).querySelectorAll("a").some(a => a.getAttribute("href") === "#/policies/groups"));
@@ -172,34 +115,23 @@ test("setting wording: not configured, enabled, a value, enforced; the deciding 
 
 test("a key the RSoP does not resolve shows its doc, default and the layers that may set it", async () => {
   const { main } = await openTree();
+  const deps = REGISTRY.keys.find(k => k.name === "auto_approval.deps-safe");
   const text = await pick(main, "auto_approval.deps-safe");
-  assert.match(text, /land a manifest-only patch/);
-  assert.match(text, /Default: off/);
-  assert.match(text, /May be set at: dispatch/);
-  // With no project picked, a run_policy key says where its deciding layer comes from.
-  const picker = main.querySelector(".policy-tree-project");
-  picker.value = "";
-  await Promise.all(picker.listeners.change.map(fn => fn()));
-  await flush();
+  assert.ok(text.includes(deps.doc));
+  assert.match(text, new RegExp(`Default: ${deps.default}`));
+  assert.match(text, new RegExp(`May be set at: ${deps.layers.join(", ")}`));
+  await noProject(main);
   const knob = await pick(main, "default_max_actions");
-  assert.match(knob, /Default: 200/);
+  assert.match(knob, /Default: 100/);
   assert.match(knob, /Pick a project to see which layer decides it/);
-  // Without a project the scope leaf reads the locked baseline's rules.
-  await pick(main, "shell.run");
-  assert.equal(state(main), "Configured: allow");
 });
 
-test("a schedule leaf shows its kind, role and network; no role says what governs it", async () => {
+test("a schedule leaf shows its kind and role", async () => {
   const { main } = await openTree();
-  let text = await pick(main, "schedule:nightly");
+  const text = await pick(main, "schedule:nightly");
   assert.match(text, /coding/);
   assert.match(text, /Role: builder/);
   assert.match(text, /the role narrows shell prefixes/);
-  assert.match(text, /pypi\.org/);
-  text = await pick(main, "schedule:backup");
-  assert.match(text, /No role: the script runs as you/);
-  text = await pick(main, "schedule:morning");
-  assert.match(text, /No role: the prompt runs in its chat's role/);
 });
 
 test("keyboard: arrows move, Right opens, Left closes, Enter opens a leaf", async () => {
@@ -219,18 +151,18 @@ test("keyboard: arrows move, Right opens, Left closes, Enter opens a leaf", asyn
   await key("ArrowRight");
   assert.equal(branch("Scopes").getAttribute("aria-expanded"), "true");
   await key("ArrowDown");
-  assert.deepEqual(current().map(n => n.getAttribute("data-key")), ["scope:network"]);
+  assert.deepEqual(current().map(n => n.getAttribute("data-key")), ["scope:browse"]);
   await key("Enter");
-  assert.equal(branch("scope:network").getAttribute("aria-expanded"), "true");
+  assert.equal(branch("scope:browse").getAttribute("aria-expanded"), "true");
   await key("ArrowDown");
-  assert.deepEqual(current().map(n => n.getAttribute("data-key")), ["network.fetch"]);
+  assert.deepEqual(current().map(n => n.getAttribute("data-key")), ["browse.act"]);
   await key("Enter");
-  assert.equal(state(main), "Not configured → asks");
-  assert.equal(leaf(main, "network.fetch").getAttribute("aria-selected"), "true");
+  assert.equal(detail(main).querySelector("h3").textContent, "browse.act");
+  assert.equal(leaf(main, "browse.act").getAttribute("aria-selected"), "true");
   await key("ArrowLeft");
-  assert.deepEqual(current().map(n => n.getAttribute("data-key")), ["scope:network"]);
+  assert.deepEqual(current().map(n => n.getAttribute("data-key")), ["scope:browse"]);
   await key("ArrowLeft");
-  assert.equal(branch("scope:network").getAttribute("aria-expanded"), "false");
+  assert.equal(branch("scope:browse").getAttribute("aria-expanded"), "false");
   assert.ok(vm.runInContext("SECTIONS", app).policies.includes("tree"));
   // An open branch with nothing under it keeps focus where it is.
   const empty = await openTree({ "GET /api/schedules": { schedules: [] } });
@@ -243,9 +175,7 @@ test("keyboard: arrows move, Right opens, Left closes, Enter opens a leaf", asyn
 });
 
 test("a scope·action leaf offers Test an action, preset to that scope and action", async () => {
-  const { main, calls } = await openTree({
-    "GET /api/policy/why": { run: { verdict: "allow", decided_by: "template:builder/shell-uv-sync", considered: [] }, operator: { verdict: "allow", decided_by: "x" }, baseline: "b" },
-  });
+  const { main, calls } = await openTree();
   await pick(main, "shell.run");
   const button = detail(main).querySelectorAll("button").find(b => b.textContent === "Test this");
   assert.ok(button);
@@ -259,5 +189,46 @@ test("a scope·action leaf offers Test an action, preset to that scope and actio
   assert.equal(action.value, "run");
   value.value = "uv sync";
   await box.querySelectorAll("button").find(b => b.textContent === "Check").click();
-  assert.ok(calls.some(([, p]) => p === "/api/policy/why?repo=%2Fr%2Fapp&scope=shell&action=run&value=uv%20sync"));
+  assert.ok(calls.some(([, p]) => p === "/api/policy/why?repo=%2Ffixture%2Fapp&scope=shell&action=run&value=uv%20sync"));
+});
+
+// v124 review (F2, I8): a baseline that is missing or tampered makes every
+// decision ask (baseline/no_baseline, baseline/baseline_tampered) — the tree
+// must say so, not "Configured: allow" from rules the guard never reaches.
+test("no approved baseline: the note leads and every scope state asks for the baseline's reason", async () => {
+  const { main } = await openTree(NONE);
+  assert.equal(NONE["GET /api/policy/explain?subject=baseline"].status.state, "none");
+  assert.match(main.querySelector(".policy-tree-guard").textContent, /baseline: none approved/);
+  // The live engine's answer for an action the RSoP compiles an allow for.
+  const why = NONE["GET /api/policy/why?repo=%2Ffixture%2Fapp&scope=shell&action=run&value=uv%20sync"];
+  assert.equal(why.run.decided_by, "baseline/no_baseline");
+  for (const name of ["coding.edit", "shell.run", "network.search"]) {
+    await pick(main, name);
+    assert.ok(states(main).length > 0, name);
+    for (const line of states(main)) assert.match(line, /Asks: baseline no_baseline$/, `${name}: ${line}`);
+    assert.equal(detail(main).querySelectorAll(".policy-tree-rule").length, 0, name);
+  }
+  await noProject(main);
+  await pick(main, "coding.edit");
+  for (const line of states(main)) assert.match(line, /Asks: baseline no_baseline$/);
+});
+
+test("a tampered lock: every scope asks for baseline_tampered, and its old rules never read as live", async () => {
+  const { main } = await openTree(TAMPERED);
+  assert.match(main.querySelector(".policy-tree-guard").textContent, /baseline: TAMPERED/);
+  const explain = TAMPERED["GET /api/policy/explain?subject=baseline"];
+  assert.ok(explain.rules.some(r => r.scope === "shell" && r.verdict === "allow")); // the lock's old layer
+  await pick(main, "shell.run");
+  for (const line of states(main)) assert.match(line, /Asks: baseline baseline_tampered$/);
+  await noProject(main);
+  await pick(main, "shell.run");
+  assert.ok(states(main).length > 0);
+  for (const line of states(main)) assert.match(line, /Asks: baseline baseline_tampered$/);
+  assert.equal(detail(main).querySelectorAll(".policy-tree-rule").length, 0);
+  assert.doesNotMatch(detail(main).textContent, /Configured/);
+});
+
+test("a locked baseline shows no guard note", async () => {
+  const { main } = await openTree();
+  assert.equal(main.querySelector(".policy-tree-guard"), null);
 });

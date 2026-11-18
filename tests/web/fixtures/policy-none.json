@@ -1,0 +1,1605 @@
+{
+ "GET /api/policy/baseline": {
+  "diff": [],
+  "line": "baseline: none approved",
+  "relock": null,
+  "state": "none",
+  "tampered_since": null
+ },
+ "GET /api/policy/explain?subject=baseline": {
+  "deprecated_alias": null,
+  "floor": [
+   {
+    "action": "run",
+    "label": "always denied",
+    "pattern": "git push / pull / fetch / checkout / switch / add / commit",
+    "rule_id": "floor.worker-git-hard-denies",
+    "scope": "shell",
+    "verdict": "deny"
+   },
+   {
+    "action": "run",
+    "label": "always denied",
+    "pattern": "sudo, remote git, machine-wrecking rm, broad interpreters, posting prefixes",
+    "rule_id": "floor.never-grantable-prefixes",
+    "scope": "shell",
+    "verdict": "deny"
+   },
+   {
+    "action": "read",
+    "label": "always denied",
+    "pattern": "~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials ~/.docker/config.json ~/.kube ~/.secrets ~/.config/gcloud ~/.azure ~/.npmrc ~/.pypirc ~/.claude/.credentials.json ~/.codex/auth.json ~/Library/Keychains ~/.vault-token ~/.terraform.d/credentials.tfrc.json ~/.config/op ~/.cargo/credentials ~/.cargo/credentials.toml ~/.claude.json ~/.password-store ~/.bashrc ~/.bash_profile ~/.profile ~/.zshrc ~/.zshenv ~/.zprofile ~/.bash_history ~/.zsh_history ~/.python_history ~/.node_repl_history ~/.psql_history ~/.mysql_history ~/.sqlite_history, any .env / .env.* (any case), skep's own secrets \u2014 read, or named in a shell line",
+    "rule_id": "floor.secret-reads",
+    "scope": "filesystem",
+    "verdict": "deny"
+   },
+   {
+    "action": "*",
+    "label": "always asks",
+    "pattern": "a post, send or publish \u2014 the card shows the payload",
+    "rule_id": "floor.outbound-content",
+    "scope": "*",
+    "verdict": "ask"
+   }
+  ],
+  "kind": "baseline",
+  "layer": "template",
+  "name": null,
+  "note": "baseline: none approved",
+  "pack": null,
+  "rules": [],
+  "settings": [],
+  "status": {
+   "diff": [],
+   "relock": null,
+   "state": "none",
+   "tampered_since": null
+  },
+  "subject": "baseline",
+  "table": "policy baseline: (none)\nbaseline: none approved\n\n| scope      | verdict | action | pattern                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | rule                                           |\n|------------|---------|--------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------|\n| shell      | deny    | run    | git push / pull / fetch / checkout / switch / add / commit                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | floor.worker-git-hard-denies \u2014 always denied   |\n| shell      | deny    | run    | sudo, remote git, machine-wrecking rm, broad interpreters, posting prefixes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | floor.never-grantable-prefixes \u2014 always denied |\n| filesystem | deny    | read   | ~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials ~/.docker/config.json ~/.kube ~/.secrets ~/.config/gcloud ~/.azure ~/.npmrc ~/.pypirc ~/.claude/.credentials.json ~/.codex/auth.json ~/Library/Keychains ~/.vault-token ~/.terraform.d/credentials.tfrc.json ~/.config/op ~/.cargo/credentials ~/.cargo/credentials.toml ~/.claude.json ~/.password-store ~/.bashrc ~/.bash_profile ~/.profile ~/.zshrc ~/.zshenv ~/.zprofile ~/.bash_history ~/.zsh_history ~/.python_history ~/.node_repl_history ~/.psql_history ~/.mysql_history ~/.sqlite_history, any .env / .env.* (any case), skep's own secrets \u2014 read, or named in a shell line | floor.secret-reads \u2014 always denied             |\n| *          | ask     | *      | a post, send or publish \u2014 the card shows the payload                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | floor.outbound-content \u2014 always asks           |\n\nunlisted \u2192 asks (a card); the floor rows sit above every layer and cannot be lifted"
+ },
+ "GET /api/policy/registry": {
+  "keys": [
+   {
+    "default": [],
+    "doc": "hosts a worker may reach; [] denies all but the provider, ['*'] allows all; lists union across layers; enforced by the filtering proxy or the sandbox",
+    "enforced_at": null,
+    "invariant": "I12",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "template",
+     "phase",
+     "group",
+     "project",
+     "dispatch"
+    ],
+    "name": "default_network",
+    "scope": "network",
+    "system": "run_policy",
+    "type": "list[str]"
+   },
+   {
+    "default": [],
+    "doc": "environment variable NAMES passed to the worker; nothing else leaks (G2)",
+    "enforced_at": null,
+    "invariant": "G2",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "phase",
+     "group",
+     "project",
+     "dispatch"
+    ],
+    "name": "default_env_allowlist",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "list[str]"
+   },
+   {
+    "default": "ask",
+    "doc": "where a worker runs; external engines are coerced to sandbox (v94-F4)",
+    "enforced_at": null,
+    "invariant": "I12",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "phase",
+     "project",
+     "dispatch"
+    ],
+    "name": "default_execution_mode",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "enum[ask|workspace|sandbox]"
+   },
+   {
+    "default": 600,
+    "doc": "run budget: wall clock; also the worker's per-command cap (v115-F6)",
+    "enforced_at": null,
+    "invariant": "I8",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "phase",
+     "group",
+     "project",
+     "dispatch"
+    ],
+    "name": "default_wall_clock_seconds",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "int"
+   },
+   {
+    "default": 16,
+    "doc": "run budget: planning iterations",
+    "enforced_at": null,
+    "invariant": "I8",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "phase",
+     "group",
+     "project",
+     "dispatch"
+    ],
+    "name": "default_max_iterations",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "int"
+   },
+   {
+    "default": 100,
+    "doc": "run budget: tool actions",
+    "enforced_at": null,
+    "invariant": "I8",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "phase",
+     "group",
+     "project",
+     "dispatch"
+    ],
+    "name": "default_max_actions",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "int"
+   },
+   {
+    "default": 64,
+    "doc": "run budget: LLM provider calls",
+    "enforced_at": null,
+    "invariant": "I8",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "phase",
+     "group",
+     "project",
+     "dispatch"
+    ],
+    "name": "default_max_provider_calls",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "int"
+   },
+   {
+    "default": [],
+    "doc": "argv prefixes a worker may run without a card; remote-git and sudo prefixes are refused at every write (dangerous_prefix_reason) and filtered on every read",
+    "enforced_at": null,
+    "invariant": "I4",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "template",
+     "group",
+     "project"
+    ],
+    "name": "allowed_shell_commands",
+    "scope": "shell",
+    "system": "run_policy",
+    "type": "list[argv]"
+   },
+   {
+    "default": [],
+    "doc": "runtime plugin risk classes a worker may load",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "project"
+    ],
+    "name": "allowed_plugin_risks",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "list[str]"
+   },
+   {
+    "default": false,
+    "doc": "grants git.stage/git.commit in the disposable worktree; never push/pull/fetch",
+    "enforced_at": "project",
+    "invariant": "I4",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "phase",
+     "project"
+    ],
+    "name": "allow_git_mutation",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "bool"
+   },
+   {
+    "default": false,
+    "doc": "the maintain lane: land a worker patch that G10 confirmed, without a card",
+    "enforced_at": "project",
+    "invariant": "I1",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "phase",
+     "project"
+    ],
+    "name": "auto_apply_verified_patch",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "bool"
+   },
+   {
+    "default": null,
+    "doc": "the integration branch auto-applied patches accumulate on (skep/<slug>); main never advances",
+    "enforced_at": "project",
+    "invariant": "I1",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "phase",
+     "project"
+    ],
+    "name": "auto_apply_branch",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "str"
+   },
+   {
+    "default": false,
+    "doc": "a run matching the project policy exactly dispatches without a card",
+    "enforced_at": "project",
+    "invariant": "I6",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "phase",
+     "project"
+    ],
+    "name": "auto_dispatch_allowed",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "bool"
+   },
+   {
+    "default": false,
+    "doc": "zero-ask project (ADR 0061): decide() answers a sandboxed worker's default command asks (never a host no rule names, D42); dispatch and verified landing need no card",
+    "enforced_at": "project",
+    "invariant": "I6",
+    "kind": "knob",
+    "layers": [
+     "project"
+    ],
+    "name": "unlocked",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "bool"
+   },
+   {
+    "default": [],
+    "doc": "directories under which workspace mode is trusted; the repo and managed clones are added by construction",
+    "enforced_at": "project",
+    "invariant": "I12",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "project"
+    ],
+    "name": "trusted_workspace_roots",
+    "scope": "filesystem",
+    "system": "run_policy",
+    "type": "list[str]"
+   },
+   {
+    "default": "plan",
+    "doc": "how the builtin worker plans (ADR 0040); validated at resolve time",
+    "enforced_at": null,
+    "invariant": "I9",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "project",
+     "dispatch"
+    ],
+    "name": "worker_protocol",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "enum[plan|react]"
+   },
+   {
+    "default": "",
+    "doc": "the command G10 re-runs; unset falls back to the worker's own nomination (a claim) \u2014 the maintain lane refuses to land on an unpinned verify",
+    "enforced_at": null,
+    "invariant": "I2",
+    "kind": "knob",
+    "layers": [
+     "project"
+    ],
+    "name": "verify_command",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "str"
+   },
+   {
+    "default": "builtin",
+    "doc": "which agent runs coding tasks (ADR 0047); external engines are sandbox-only and need a pinned verify_command",
+    "enforced_at": null,
+    "invariant": "I12",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "group",
+     "project",
+     "dispatch"
+    ],
+    "name": "coding_engine",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "enum[builtin|claude_code|codex|aider|pi]"
+   },
+   {
+    "default": [],
+    "doc": "loopback ports this project's sandboxed workers may reach (D6); loopback is otherwise closed but for a local provider's own port; serve's port never opens",
+    "enforced_at": null,
+    "invariant": "I12",
+    "kind": "knob",
+    "layers": [
+     "project"
+    ],
+    "name": "loopback_ports",
+    "scope": "network",
+    "system": "run_policy",
+    "type": "list[int]"
+   },
+   {
+    "default": false,
+    "doc": "a codex run with no OPENAI_API_KEY uses the operator's ChatGPT plan login: an access-token-only, read-only copy only that run's sandbox can read, never the refresh token (docs/codex-chatgpt-login.md)",
+    "enforced_at": null,
+    "invariant": "I12",
+    "kind": "knob",
+    "layers": [
+     "project"
+    ],
+    "name": "codex_chatgpt_login",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "bool"
+   },
+   {
+    "default": [],
+    "doc": "names of attached policy groups, live-composed between phase and project (ADR 0048)",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "knob",
+    "layers": [
+     "project"
+    ],
+    "name": "policy_groups",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "list[str]"
+   },
+   {
+    "default": [],
+    "doc": "P1 kill switch (ADR 0053 D6): the scopes whose knobs and rules answer from policy engine v2; every other scope keeps the v1 path. Flips are recorded in <audit>/policy/engine-flips.jsonl. A fresh home is seeded with filesystem+shell (ADR 0054 A6); an existing home keeps its switch",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "knob",
+    "layers": [
+     "global"
+    ],
+    "name": "policy_engine_v2_scopes",
+    "scope": null,
+    "system": "run_policy",
+    "type": "list[str]"
+   },
+   {
+    "default": false,
+    "doc": "ADR 0062 kill switch: on, a builtin worker reaches its model through a token-checked relay on its run's proxy and never holds the provider key; off (default), the worker holds the key as before. External engines keep their own auth env either way",
+    "enforced_at": null,
+    "invariant": "I12",
+    "kind": "knob",
+    "layers": [
+     "global"
+    ],
+    "name": "provider_key_relay",
+    "scope": null,
+    "system": "run_policy",
+    "type": "bool"
+   },
+   {
+    "default": false,
+    "doc": "shown honestly, INERT: no rule is installed from it (v81-F14); the maintain phase is the only landing ramp",
+    "enforced_at": null,
+    "invariant": "I6",
+    "kind": "knob",
+    "layers": [
+     "global"
+    ],
+    "name": "auto_approve",
+    "scope": null,
+    "system": "run_policy",
+    "type": "bool"
+   },
+   {
+    "default": "",
+    "doc": "the builtin worker's argv prefix ($SKEP_WORKER_CMD / --worker-cmd)",
+    "enforced_at": null,
+    "invariant": "I3",
+    "kind": "knob",
+    "layers": [
+     "global",
+     "dispatch"
+    ],
+    "name": "worker_cmd",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "str"
+   },
+   {
+    "default": [
+     "email",
+     "browser",
+     "secrets",
+     "unknown_repo"
+    ],
+    "doc": "task classes that may never run outside the sandbox",
+    "enforced_at": null,
+    "invariant": "I12",
+    "kind": "knob",
+    "layers": [
+     "global"
+    ],
+    "name": "sandbox_required_for",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "list[str]"
+   },
+   {
+    "default": 30,
+    "doc": "the serve ticker's cadence (schedules, health probes, card sweeps)",
+    "enforced_at": null,
+    "invariant": "I8",
+    "kind": "knob",
+    "layers": [
+     "global"
+    ],
+    "name": "ticker_interval_seconds",
+    "scope": null,
+    "system": "run_policy",
+    "type": "int"
+   },
+   {
+    "default": 300,
+    "doc": "a pending card auto-DENIES after this long; 0 disables the sweep",
+    "enforced_at": null,
+    "invariant": "I6",
+    "kind": "knob",
+    "layers": [
+     "global"
+    ],
+    "name": "card_timeout_seconds",
+    "scope": null,
+    "system": "run_policy",
+    "type": "int"
+   },
+   {
+    "default": "auto",
+    "doc": "which backend wraps sandboxed workers; podman falls back to native, loudly (v44-F7); none: no sandbox ring is counted on (first-run O3)",
+    "enforced_at": null,
+    "invariant": "I12",
+    "kind": "knob",
+    "layers": [
+     "global"
+    ],
+    "name": "sandbox_backend",
+    "scope": "coding",
+    "system": "run_policy",
+    "type": "enum[auto|podman|none]"
+   },
+   {
+    "default": [],
+    "doc": "shell prefixes granted for this serve session only; never unioned into the standing allowlist by a remember (v86-F1)",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "knob",
+    "layers": [
+     "session"
+    ],
+    "name": "session_allowed_shell_commands",
+    "scope": "shell",
+    "system": "run_policy",
+    "type": "list[argv]"
+   },
+   {
+    "default": "require_approval",
+    "doc": "navigation, clicks, typing, JS \u2014 any page side effect \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "browse.act",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "page-state reads (snapshot, screenshot, console) \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "browse.read",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "the worker may edit the workspace \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "coding.edit",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "the worker may run its verify step (fast-path: the pinned verify_command) \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "coding.verify",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "an email-bound MCP server's read-shaped tools \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "email.read",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "any email side effect \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "email.send",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "Queen-side host read \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "filesystem.read",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "workspace / trusted-root write \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "filesystem.write",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "a registered MCP server's tool \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "mcp.call",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "worker egress to a host \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "network.connect",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "the Queen's read_url of one host (allow: in-turn; ask: a card) \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "network.fetch",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "the Queen's keyless web search \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "network.search",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "a one-off command from a non-repo cwd \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "shell.run",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "a daemon; never from a repo cwd \u2014 most specific pattern wins, deny wins ties, unmatched asks (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "shell.run_background",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "deny",
+    "doc": "a command from inside a registered repo (a file-write pen) \u2014 most specific pattern wins, deny wins ties, unmatched denies (ADR 0059: policy decide/why, the hook, acp govern); a run is granted only what a rule allows",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [
+     "template",
+     "global",
+     "project",
+     "session"
+    ],
+    "name": "shell.run_repo",
+    "scope": null,
+    "system": "scope_document",
+    "type": "rule"
+   },
+   {
+    "default": "off",
+    "doc": "land a verified, re-verified, risk-free manifest-only patch (--auto-approve)",
+    "enforced_at": null,
+    "invariant": "I1",
+    "kind": "rule",
+    "layers": [
+     "dispatch"
+    ],
+    "name": "auto_approval.deps-safe",
+    "scope": null,
+    "system": "auto_approval",
+    "type": "rule"
+   },
+   {
+    "default": "off",
+    "doc": "the maintain lane's rule: verified, re-verified by the PROJECT's pinned command, no risk flags; what auto_apply_verified_patch=true turns on",
+    "enforced_at": "project",
+    "invariant": "I1",
+    "kind": "rule",
+    "layers": [
+     "project"
+    ],
+    "name": "auto_approval.verified-patch",
+    "scope": null,
+    "system": "auto_approval",
+    "type": "rule"
+   },
+   {
+    "default": "deny",
+    "doc": "workers never push, pull, fetch or switch branches; add/commit only via the explicit git.stage/git.commit capability (v19-F3/F5, v22-F2)",
+    "enforced_at": null,
+    "invariant": "I4",
+    "kind": "rule",
+    "layers": [],
+    "name": "floor.worker-git-hard-denies",
+    "scope": null,
+    "system": "floor",
+    "type": "rule"
+   },
+   {
+    "default": "deny",
+    "doc": "remote git, sudo and friends are refused by dangerous_prefix_reason at every allowlist write and filtered on every read",
+    "enforced_at": null,
+    "invariant": "I4",
+    "kind": "rule",
+    "layers": [],
+    "name": "floor.never-grantable-prefixes",
+    "scope": null,
+    "system": "floor",
+    "type": "rule"
+   },
+   {
+    "default": "deny",
+    "doc": "credential files (~/.ssh, ~/.aws, .env, skep's own tokens \u2026) are never read by the Queen or a worker, by requested path or realpath (ES-F1)",
+    "enforced_at": null,
+    "invariant": "I5",
+    "kind": "rule",
+    "layers": [],
+    "name": "floor.secret-reads",
+    "scope": null,
+    "system": "floor",
+    "type": "rule"
+   },
+   {
+    "default": "require_approval",
+    "doc": "a post, send or publish always renders its content on a card; no grant covers it (ADR 0044)",
+    "enforced_at": null,
+    "invariant": "I6",
+    "kind": "rule",
+    "layers": [],
+    "name": "floor.outbound-content",
+    "scope": null,
+    "system": "floor",
+    "type": "rule"
+   }
+  ],
+  "layers": [
+   "floor",
+   "global",
+   "template",
+   "role",
+   "phase",
+   "group",
+   "project",
+   "session",
+   "dispatch"
+  ]
+ },
+ "GET /api/policy/why?repo=%2Ffixture%2Fapp&scope=shell&action=run&value=uv%20sync": {
+  "action": "run",
+  "baseline": "baseline: none approved \u2014 no_baseline: every decision asks until one is",
+  "operator": {
+   "decided_by": "baseline/no_baseline",
+   "rule_id": "no_baseline",
+   "verdict": "require_approval"
+  },
+  "project": {
+   "name": "app",
+   "phase": "build",
+   "project_id": "app",
+   "strategy": "trusted_local_dev"
+  },
+  "repo": "/fixture/app",
+  "run": {
+   "considered": [],
+   "decided_by": "baseline/no_baseline",
+   "rule_id": "no_baseline",
+   "verdict": "require_approval"
+  },
+  "scope": "shell",
+  "value": "uv sync"
+ },
+ "GET /api/projects": {
+  "projects": [
+   {
+    "bindings": [
+     {
+      "kind": "repo_path",
+      "value": "/fixture/app"
+     }
+    ],
+    "name": "app",
+    "phase": "build",
+    "policy": {
+     "default_max_actions": 7
+    },
+    "project_id": "app",
+    "strategy": "trusted_local_dev"
+   },
+   {
+    "bindings": [],
+    "name": "loose",
+    "phase": "build",
+    "policy": {},
+    "project_id": "loose",
+    "strategy": "trusted_local_dev"
+   }
+  ]
+ },
+ "GET /api/repos/%2Ffixture%2Fapp/rsop": {
+  "engine": {
+   "routed_keys": [
+    "default_network",
+    "default_env_allowlist",
+    "default_execution_mode",
+    "default_wall_clock_seconds",
+    "default_max_iterations",
+    "default_max_actions",
+    "default_max_provider_calls",
+    "allowed_shell_commands",
+    "allowed_plugin_risks",
+    "auto_apply_verified_patch",
+    "trusted_workspace_roots",
+    "worker_cmd",
+    "sandbox_required_for",
+    "sandbox_backend",
+    "session_allowed_shell_commands"
+   ],
+   "rule_refusals": [],
+   "v2_scopes": [
+    "browse",
+    "coding",
+    "email",
+    "filesystem",
+    "mcp",
+    "network",
+    "shell"
+   ]
+  },
+  "floor": [
+   "floor.worker-git-hard-denies",
+   "floor.never-grantable-prefixes",
+   "floor.secret-reads",
+   "floor.outbound-content"
+  ],
+  "keys": [
+   {
+    "key": "allow_git_mutation",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
+   },
+   {
+    "key": "allowed_plugin_risks",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": []
+   },
+   {
+    "key": "allowed_shell_commands",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": []
+   },
+   {
+    "key": "auto_apply_branch",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
+   },
+   {
+    "key": "auto_apply_verified_patch",
+    "overridden": [],
+    "source_layer": "phase",
+    "source_name": "build",
+    "value": false
+   },
+   {
+    "key": "auto_approve",
+    "overridden": [],
+    "source_layer": "global",
+    "source_name": null,
+    "value": true
+   },
+   {
+    "key": "auto_dispatch_allowed",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
+   },
+   {
+    "key": "card_timeout_seconds",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": 300
+   },
+   {
+    "key": "codex_chatgpt_login",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
+   },
+   {
+    "key": "coding_engine",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
+   },
+   {
+    "key": "default_env_allowlist",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": []
+   },
+   {
+    "key": "default_execution_mode",
+    "overridden": [],
+    "source_layer": "global",
+    "source_name": null,
+    "value": "workspace"
+   },
+   {
+    "key": "default_max_actions",
+    "overridden": [
+     {
+      "layer": "global",
+      "name": null,
+      "value": 100
+     }
+    ],
+    "source_layer": "project",
+    "source_name": "app",
+    "value": 7
+   },
+   {
+    "key": "default_max_iterations",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": 16
+   },
+   {
+    "key": "default_max_provider_calls",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": 64
+   },
+   {
+    "key": "default_network",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": []
+   },
+   {
+    "key": "default_wall_clock_seconds",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": 900
+   },
+   {
+    "key": "loopback_ports",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
+   },
+   {
+    "key": "policy_engine_v2_scopes",
+    "overridden": [],
+    "source_layer": "global",
+    "source_name": null,
+    "value": [
+     "browse",
+     "coding",
+     "email",
+     "filesystem",
+     "mcp",
+     "network",
+     "shell"
+    ]
+   },
+   {
+    "key": "policy_groups",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
+   },
+   {
+    "key": "provider_key_relay",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": false
+   },
+   {
+    "key": "sandbox_backend",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": "auto"
+   },
+   {
+    "key": "sandbox_required_for",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": [
+     "email",
+     "browser",
+     "secrets",
+     "unknown_repo"
+    ]
+   },
+   {
+    "key": "session_allowed_shell_commands",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": []
+   },
+   {
+    "key": "ticker_interval_seconds",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": 30
+   },
+   {
+    "key": "trusted_workspace_roots",
+    "overridden": [
+     {
+      "layer": "global",
+      "name": null,
+      "value": []
+     }
+    ],
+    "source_layer": "trusted-roots",
+    "source_name": null,
+    "value": [
+     "/fixture/app"
+    ]
+   },
+   {
+    "key": "unlocked",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
+   },
+   {
+    "key": "verify_command",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
+   },
+   {
+    "key": "worker_cmd",
+    "overridden": [],
+    "source_layer": "global",
+    "source_name": null,
+    "value": "python -m skep.workers.coding"
+   },
+   {
+    "key": "worker_protocol",
+    "note": "not configured at any layer \u2014 the resolver's fallback",
+    "overridden": [],
+    "source_layer": null,
+    "source_name": null,
+    "value": null
+   }
+  ],
+  "operator": {
+   "browse": [],
+   "coding": [],
+   "email": [],
+   "filesystem": [],
+   "mcp": [],
+   "network": [
+    {
+     "action": "search",
+     "exact": false,
+     "layer": null,
+     "matcher": null,
+     "pattern": "*",
+     "rule_id": "net:search",
+     "source": "operator_policy_document",
+     "verdict": "allow"
+    }
+   ],
+   "shell": []
+  },
+  "project": {
+   "name": "app",
+   "phase": "build",
+   "project_id": "app",
+   "strategy": "trusted_local_dev"
+  },
+  "repo": "/fixture/app",
+  "scopes": {
+   "browse": [],
+   "coding": [
+    {
+     "action": "edit",
+     "exact": false,
+     "layer": null,
+     "matcher": null,
+     "pattern": "workspace",
+     "rule_id": "coding:workspace-edit",
+     "source": "compiled",
+     "verdict": "allow"
+    },
+    {
+     "action": "verify",
+     "exact": false,
+     "layer": null,
+     "matcher": null,
+     "pattern": "workspace",
+     "rule_id": "coding:workspace-verify",
+     "source": "compiled",
+     "verdict": "allow"
+    }
+   ],
+   "email": [],
+   "filesystem": [
+    {
+     "action": "write",
+     "exact": false,
+     "layer": null,
+     "matcher": null,
+     "pattern": "workspace",
+     "rule_id": "fs:workspace",
+     "source": "compiled",
+     "verdict": "allow"
+    },
+    {
+     "action": "write",
+     "exact": false,
+     "layer": null,
+     "matcher": null,
+     "pattern": "/fixture/app/*",
+     "rule_id": "fs:root:/fixture/app",
+     "source": "trusted_workspace_roots@trusted-roots",
+     "verdict": "allow"
+    }
+   ],
+   "mcp": [],
+   "network": [
+    {
+     "action": "connect",
+     "exact": false,
+     "layer": null,
+     "matcher": null,
+     "pattern": "files.pythonhosted.org",
+     "rule_id": "net:files.pythonhosted.org",
+     "source": "default_network@global",
+     "verdict": "allow"
+    },
+    {
+     "action": "connect",
+     "exact": false,
+     "layer": null,
+     "matcher": null,
+     "pattern": "proxy.golang.org",
+     "rule_id": "net:proxy.golang.org",
+     "source": "default_network@global",
+     "verdict": "allow"
+    },
+    {
+     "action": "connect",
+     "exact": false,
+     "layer": null,
+     "matcher": null,
+     "pattern": "pypi.org",
+     "rule_id": "net:pypi.org",
+     "source": "default_network@global",
+     "verdict": "allow"
+    },
+    {
+     "action": "connect",
+     "exact": false,
+     "layer": null,
+     "matcher": null,
+     "pattern": "registry.npmjs.org",
+     "rule_id": "net:registry.npmjs.org",
+     "source": "default_network@global",
+     "verdict": "allow"
+    }
+   ],
+   "shell": []
+  }
+ },
+ "GET /api/roles": {
+  "default": "assistant",
+  "roles": [
+   {
+    "default_castes": [
+     "coding",
+     "reviewer",
+     "verifier"
+    ],
+    "layer": "role:builder",
+    "name": "builder",
+    "policy_layer": "builder",
+    "system_prompt": "You are working as a builder: coding work against registered repos. Prefer dispatching a coding run over describing a change; review and verify before proposing a landing.",
+    "voice": "technical"
+   },
+   {
+    "default_castes": [
+     "audit",
+     "researcher",
+     "verifier"
+    ],
+    "layer": "role:operator",
+    "name": "operator",
+    "policy_layer": "operator",
+    "system_prompt": "You are working as an operator: ops, research and scheduling. Inspect and report first; changes go through dispatched runs and cards.",
+    "voice": "concise"
+   },
+   {
+    "default_castes": [
+     "document",
+     "curator",
+     "researcher"
+    ],
+    "layer": "role:assistant",
+    "name": "assistant",
+    "policy_layer": "assistant",
+    "system_prompt": "You are working as an assistant: calendar, mail, notes and personal tasks. Repo work is out of scope for this role.",
+    "voice": "friendly"
+   }
+  ]
+ },
+ "GET /api/schedules": {
+  "schedules": [
+   {
+    "chain": null,
+    "chat_id": null,
+    "created_at": "2026-11-18T09:00:00Z",
+    "enabled": true,
+    "env_allowlist": [],
+    "instructions": "true",
+    "interval_seconds": 86400,
+    "last_output": null,
+    "last_run_at": null,
+    "last_state": null,
+    "last_task_id": null,
+    "name": "backup",
+    "network": [],
+    "next_run_at": "2026-11-19T09:00:00Z",
+    "once": false,
+    "params": {},
+    "project_context": {
+     "binding_kind": "repo_path",
+     "binding_value": "/fixture/app",
+     "name": "app",
+     "phase": "build",
+     "project_id": "app",
+     "strategy": "trusted_local_dev"
+    },
+    "ref": null,
+    "repo": "/fixture/app",
+    "role": null,
+    "template_name": null,
+    "worker_kind": "script"
+   },
+   {
+    "chain": null,
+    "chat_id": null,
+    "created_at": "2026-11-18T09:00:00Z",
+    "enabled": true,
+    "env_allowlist": [],
+    "instructions": "fix the bug",
+    "interval_seconds": 86400,
+    "last_output": null,
+    "last_run_at": null,
+    "last_state": null,
+    "last_task_id": null,
+    "name": "digest",
+    "network": [],
+    "next_run_at": "2026-11-19T09:00:00Z",
+    "once": false,
+    "params": {},
+    "project_context": {
+     "binding_kind": "repo_path",
+     "binding_value": "/fixture/app",
+     "name": "app",
+     "phase": "build",
+     "project_id": "app",
+     "strategy": "trusted_local_dev"
+    },
+    "ref": null,
+    "repo": "/fixture/app",
+    "role": null,
+    "template_name": null,
+    "worker_kind": "digest"
+   },
+   {
+    "chain": null,
+    "chat_id": null,
+    "created_at": "2026-11-18T09:00:00Z",
+    "enabled": true,
+    "env_allowlist": [],
+    "instructions": "fix the bug",
+    "interval_seconds": 86400,
+    "last_output": null,
+    "last_run_at": null,
+    "last_state": null,
+    "last_task_id": null,
+    "name": "extra",
+    "network": [
+     "example.com"
+    ],
+    "next_run_at": "2026-11-19T09:00:00Z",
+    "once": false,
+    "params": {},
+    "project_context": {
+     "binding_kind": "repo_path",
+     "binding_value": "/fixture/app",
+     "name": "app",
+     "phase": "build",
+     "project_id": "app",
+     "strategy": "trusted_local_dev"
+    },
+    "ref": null,
+    "repo": "/fixture/app",
+    "role": null,
+    "template_name": null,
+    "worker_kind": "coding"
+   },
+   {
+    "chain": null,
+    "chat_id": null,
+    "created_at": "2026-11-18T09:00:00Z",
+    "enabled": true,
+    "env_allowlist": [],
+    "instructions": "fix the bug",
+    "interval_seconds": 86400,
+    "last_output": null,
+    "last_run_at": null,
+    "last_state": null,
+    "last_task_id": null,
+    "name": "memo",
+    "network": [],
+    "next_run_at": "2026-11-19T09:00:00Z",
+    "once": false,
+    "params": {},
+    "project_context": {
+     "binding_kind": "repo_path",
+     "binding_value": "/fixture/app",
+     "name": "app",
+     "phase": "build",
+     "project_id": "app",
+     "strategy": "trusted_local_dev"
+    },
+    "ref": null,
+    "repo": "/fixture/app",
+    "role": null,
+    "template_name": null,
+    "worker_kind": "note"
+   },
+   {
+    "chain": null,
+    "chat_id": null,
+    "created_at": "2026-11-18T09:00:00Z",
+    "enabled": true,
+    "env_allowlist": [],
+    "instructions": "fix the bug",
+    "interval_seconds": 86400,
+    "last_output": null,
+    "last_run_at": null,
+    "last_state": null,
+    "last_task_id": null,
+    "name": "morning",
+    "network": [],
+    "next_run_at": "2026-11-19T09:00:00Z",
+    "once": false,
+    "params": {},
+    "project_context": {
+     "binding_kind": "repo_path",
+     "binding_value": "/fixture/app",
+     "name": "app",
+     "phase": "build",
+     "project_id": "app",
+     "strategy": "trusted_local_dev"
+    },
+    "ref": null,
+    "repo": "/fixture/app",
+    "role": null,
+    "template_name": null,
+    "worker_kind": "prompt"
+   },
+   {
+    "chain": null,
+    "chat_id": null,
+    "created_at": "2026-11-18T09:00:00Z",
+    "enabled": true,
+    "env_allowlist": [],
+    "instructions": "fix the bug",
+    "interval_seconds": 86400,
+    "last_output": null,
+    "last_run_at": null,
+    "last_state": null,
+    "last_task_id": null,
+    "name": "nightly",
+    "network": [],
+    "next_run_at": "2026-11-19T09:00:00Z",
+    "once": false,
+    "params": {},
+    "project_context": {
+     "binding_kind": "repo_path",
+     "binding_value": "/fixture/app",
+     "name": "app",
+     "phase": "build",
+     "project_id": "app",
+     "strategy": "trusted_local_dev"
+    },
+    "ref": null,
+    "repo": "/fixture/app",
+    "role": "builder",
+    "role_note": "the role narrows shell prefixes, network hosts and workspace writes, not env_allowlist, execution mode, auto-apply, the budget, allow_git_mutation, loopback_ports, allowed_tools or allowed_plugin_risks; what lies beyond the role is dropped from its grants: a host beyond it is denied, a command beyond it stops at a gate for you",
+    "template_name": null,
+    "worker_kind": "coding"
+   },
+   {
+    "chain": null,
+    "chat_id": null,
+    "created_at": "2026-11-18T09:00:00Z",
+    "enabled": true,
+    "env_allowlist": [],
+    "instructions": "fix the bug",
+    "interval_seconds": 86400,
+    "last_output": null,
+    "last_run_at": null,
+    "last_state": null,
+    "last_task_id": null,
+    "name": "stray",
+    "network": [],
+    "next_run_at": "2026-11-19T09:00:00Z",
+    "once": false,
+    "params": {},
+    "ref": null,
+    "repo": "/fixture/stray",
+    "role": null,
+    "template_name": null,
+    "worker_kind": "coding"
+   }
+  ]
+ }
+}

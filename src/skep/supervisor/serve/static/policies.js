@@ -877,6 +877,9 @@ async function renderDefaultsTab(panel) {
 // to the editor that already changes it.
 
 const RULE_WORD = { allow: "allow", require_approval: "ask", ask: "ask", deny: "deny" };
+// A baseline that does not verify fails every decision closed (policy_layers.
+// baseline_guard): the guard's reason by baseline state; ok and reapprove apply.
+const BASELINE_GUARD = { none: "no_baseline", tampered: "baseline_tampered" };
 // What a roleless schedule runs as (v123: only worker schedules take a role).
 const SCHEDULE_NO_ROLE = {
   script: "the script runs as you",
@@ -993,6 +996,8 @@ function treeRule(rule, layer, description) {
 function scopeLeafDetail(key, ctx) {
   const [scope, action] = [key.name.split(".")[0], key.name.slice(key.name.indexOf(".") + 1)];
   const unmatched = key.default === "deny" ? "denies" : "asks";
+  // The guard answers before any rule (I8): nothing below it is live, so no rule shows.
+  if (ctx.guard) return [el("p", { class: "policy-tree-state" }, `Asks: baseline ${ctx.guard}`)];
   if (ctx.rsop?.error) return [policyNote(`policy did not resolve: ${ctx.rsop.error}`)];
   // A description is the baseline's, so it shows only on a rule the baseline stated (I8).
   const baselineLayer = ctx.explain.name ? `template:${ctx.explain.name}` : null;
@@ -1078,6 +1083,8 @@ async function renderTreeTab(panel) {
     api("GET", "/api/roles"),
   ]);
   const scopes = [...new Set((registry.keys || []).filter(k => k.system === "scope_document").map(k => k.name.split(".")[0]))];
+  const baselineState = explain.status?.state;
+  const guard = ["ok", "reapprove"].includes(baselineState) ? null : BASELINE_GUARD[baselineState] || baselineState;
   const bound = projects.filter(projectRepoBinding);
   const picker = el("select", { class: "policy-tree-project", "aria-label": "project" },
     el("option", { value: "" }, "no project: the locked baseline"),
@@ -1088,7 +1095,7 @@ async function renderTreeTab(panel) {
   let shown = null;
   const show = leaf => {
     shown = leaf;
-    const ctx = { rsop, explain, scopes, projects, roles, schedules, project: picker.value };
+    const ctx = { rsop, explain, guard, scopes, projects, roles, schedules, project: picker.value };
     detail.replaceChildren(...treeLeafDetail(leaf, ctx).filter(Boolean));
   };
   const resolve = async () => {
@@ -1100,10 +1107,15 @@ async function renderTreeTab(panel) {
   };
   picker.addEventListener("change", resolve);
   await resolve();
-  panel.append(
+  panel.append(...[
     el("p", { class: "field-help" },
       "Every setting skep has, as a tree: what it does, its state in the picked project and "
       + "which layer decided it. Read-only; each setting links to where it changes."),
+    guard ? el("p", { class: "policy-tree-guard" },
+      el("span", { class: "policy-dot tone-bad", "aria-hidden": "true" }),
+      explain.note, ` — every decision asks (${guard}) until a baseline is locked and verifies. `,
+      el("a", { href: "#/setup" }, "Lock it in Setup →")) : null,
     policyField("project", picker, "The answer is per project; none = the locked baseline alone."),
-    el("div", { class: "policy-tree-layout" }, buildTree(treeModel(registry, schedules), show), detail));
+    el("div", { class: "policy-tree-layout" }, buildTree(treeModel(registry, schedules), show), detail),
+  ].filter(Boolean));  // append(null) would render the text "null"
 }
