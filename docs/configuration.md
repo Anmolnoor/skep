@@ -277,7 +277,9 @@ default in-repo coding worker when no explicit worker profile exists.
 - registry profiles (v108) each hold their own key in
   `<home>/supervisor/llm-secret-<provider_id>` (`skep provider set-key`);
   resolution is the profile's named env var, then its own file, then the
-  legacy `llm-secret`
+  legacy `llm-secret` — the last only for a profile on the endpoint it was
+  saved for (the saved base URL; v119-F1). A profile elsewhere with no key of
+  its own is called without one, and `skep doctor` names it
 
 ## Useful Environment Variables
 

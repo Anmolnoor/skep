@@ -42,6 +42,7 @@ def test_anthropic_registry_profile_probes_healthy(tmp_path: Path) -> None:
 
     fake = FakeAnthropic(models=["claude-sonnet-5"])
     fake.start()
+    store = RunStore(tmp_path / "supervisor.sqlite3")
     try:
         profile = _profile(
             provider_id="claude",
@@ -50,8 +51,11 @@ def test_anthropic_registry_profile_probes_healthy(tmp_path: Path) -> None:
             model="claude-sonnet-5",
             cost_class="paid",
         )
-        health = check_provider_health(profile, list_models=_probe_list_models(tmp_path), now=_NOW)
+        health = check_provider_health(
+            profile, list_models=_probe_list_models(tmp_path, store), now=_NOW
+        )
     finally:
+        store.close()
         fake.stop()
     assert health.reachable is True
     assert health.model_found is True
@@ -134,7 +138,7 @@ def test_ticker_probe_records_health_and_throttles(
     store = RunStore(config.db_path)
     calls: list[str] = []
 
-    def _fake_probe(_home: Path) -> object:
+    def _fake_probe(_home: Path, _store: RunStore) -> object:
         def _list(profile: ProviderProfile) -> list[str]:
             calls.append(profile.provider_id)
             return [profile.model]

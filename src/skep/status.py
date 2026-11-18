@@ -52,6 +52,7 @@ def build_status(
             + _repo_registry_advisories(home)
             + _stale_store_advisories(home)
             + _model_truth_advisories(home)
+            + _legacy_key_advisories(home)
             + _baseline_advisories(home)
             + _policy_v3_advisories(home)
             + _legacy_host_advisories(home)
@@ -90,6 +91,7 @@ def build_status(
         + _repo_registry_advisories(home)
         + _stale_store_advisories(home)
         + _model_truth_advisories(home)
+        + _legacy_key_advisories(home)
         + _baseline_advisories(home)
         + _policy_v3_advisories(home)
         + _legacy_host_advisories(home)
@@ -308,6 +310,30 @@ def _model_truth_advisories(home: Path) -> list[str]:
         "chats use the settings, routed runs the registry; save the model once in "
         "Settings (or `skep provider use <id>`) so both agree"
     ]
+
+
+def _legacy_key_advisories(home: Path) -> list[str]:
+    """v119-F1: a registry profile on another endpoint no longer borrows the
+    main key (llm-secret); name each one that now goes without, and the fix.
+    A loopback profile is left out — a local model server needs no key — and
+    so is one naming an env var, which may be set only in the daemon's env."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.serve.llm import _is_loopback, legacy_key_withheld
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path, readonly=True)
+    try:
+        return [
+            line
+            for profile in store.list_provider_profiles()
+            if not _is_loopback(profile.base_url)
+            and not profile.api_key_env
+            and (line := legacy_key_withheld(home / "supervisor", profile, store))
+        ]
+    finally:
+        store.close()
 
 
 def _stale_store_advisories(home: Path) -> list[str]:

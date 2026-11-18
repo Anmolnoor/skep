@@ -43,21 +43,29 @@ PROVIDER_HEALTH_INTERVAL_SECONDS = "provider_health_interval_seconds"
 DEFAULT_PROVIDER_HEALTH_INTERVAL = 300
 
 
-def _probe_list_models(home: Path) -> Callable[[ProviderProfile], list[str]]:
+def _probe_list_models(home: Path, store: RunStore) -> Callable[[ProviderProfile], list[str]]:
     """Production ``list_models`` for health checks: the profile's endpoint,
-    authenticated per profile (named env var → own key file → llm-secret)."""
+    authenticated per profile (named env var → own key file → llm-secret,
+    the last only on the endpoint it was saved for)."""
     # v108-F1: the bridge is the shared REGISTRY_PROTOCOLS map, not a local
     # two-entry dict — the old one omitted anthropic, so an anthropic profile
     # was recorded permanently unreachable and routing never picked it.
-    from .llm import REGISTRY_PROTOCOLS, list_models, resolve_provider_api_key
+    from .llm import REGISTRY_PROTOCOLS, legacy_key_withheld, list_models, resolve_provider_api_key
 
     def _list(profile: ProviderProfile) -> list[str]:
         protocol = REGISTRY_PROTOCOLS.get(profile.protocol)
         if protocol is None:
             raise RuntimeError(f"health probe not supported for protocol {profile.protocol!r}")
-        # v108-F4: named env var → the profile's own 0600 file → llm-secret.
-        api_key = resolve_provider_api_key(home, profile)
-        return list_models(profile.base_url, api_key, protocol=protocol)
+        # v108-F4: named env var → the profile's own 0600 file → llm-secret;
+        # v119-F1: llm-secret never leaves for another endpoint.
+        api_key = resolve_provider_api_key(home, profile, store)
+        try:
+            return list_models(profile.base_url, api_key, protocol=protocol)
+        except Exception as exc:
+            withheld = None if api_key else legacy_key_withheld(home, profile, store)
+            if withheld is None:
+                raise
+            raise RuntimeError(f"{exc} — {withheld}") from exc
 
     return _list
 
@@ -188,7 +196,9 @@ class Ticker(threading.Thread):
             return
         self._last_health_probe = now
         home = self._holder.current.home
-        for health in run_provider_health_checks(self._store, list_models=_probe_list_models(home)):
+        for health in run_provider_health_checks(
+            self._store, list_models=_probe_list_models(home, self._store)
+        ):
             ok = bool(health.reachable and health.model_found)
             if not ok:
                 logger.warning("provider %r unhealthy: %s", health.provider_id, health.error)

@@ -24,7 +24,8 @@ wire adapters. v108 adopts that shape under skep's own constraints.
 2. **Every profile can hold its own credential** (v108-F4): a 0600
    `llm-secret-<provider_id>` file beside `llm-secret` — the ADR 0019
    exception extended per profile. Resolution everywhere is the profile's
-   named env var → its own file → the legacy secret. Values arrive only
+   named env var → its own file → the legacy secret (v119-F1: the last
+   only for a profile on the saved base URL it belongs to). Values arrive only
    via stdin (`skep provider set-key`) or the write-only
    `PUT /api/providers/{id}/key`; never argv, never sqlite, never a GET,
    never chat.
