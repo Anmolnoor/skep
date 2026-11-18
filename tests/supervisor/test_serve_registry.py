@@ -557,7 +557,11 @@ def test_project_setup_applies_first_party_pack_defaults(
             "repo_path": str(repo),
             "repo_slug": "fixture",
             "template_names": ["audit-t"],
-            "policy_overrides": {"allowed_shell_commands": [["pytest"]]},
+            # v127-F5: maintain's auto-apply default needs a real pin to hold.
+            "policy_overrides": {
+                "allowed_shell_commands": [["pytest"]],
+                "verify_command": "uv run pytest",
+            },
         },
     )
     assert created.status_code == 201

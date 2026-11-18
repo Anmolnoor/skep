@@ -716,11 +716,17 @@ def resolve_run_policy(
     # verification means before an external agent may run at all.
     # ES-F280 (D41): the generic shell worker is no registered engine but
     # wraps any local CLI agent the same way, so ``wrapped`` binds it too.
-    if (chosen_engine.external or wrapped is not None) and not verify_command:
+    # v127-F5: a pin that is itself known-vacuous (`true`, `git diff --check`)
+    # buys nothing over the built-in, so it is refused the same way.
+    from .policy import known_vacuous_verify
+
+    vacuous = known_vacuous_verify(verify_command or "")
+    if (chosen_engine.external or wrapped is not None) and vacuous:
         raise PolicyResolutionError(
             f"coding_engine {wrapped or chosen_engine.name!r} is an external agent whose "
-            "built-in verification is `git diff --check` (whitespace only), so G10 would "
-            "re-run a check that cannot fail. Pin the command that actually proves the "
+            "built-in verification is `git diff --check` (whitespace only), so G10 needs "
+            f"a pinned check that is not known-vacuous ({vacuous}). Pin the command that "
+            "actually proves the "
             'work: `skep project setup <repo> --verify-command "<command>"` (chat: '
             "setup_project verify_command=...)."
         )

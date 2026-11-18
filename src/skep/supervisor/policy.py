@@ -15,6 +15,8 @@ auto:<rule>`), so the audit trail always names what granted the autonomy.
 
 from __future__ import annotations
 
+import os
+import shlex
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
@@ -77,6 +79,31 @@ SAFE_DEPENDENCY_RULE = AutoApprovalRule(
 VERIFIED_PATCH_RULE = AutoApprovalRule(name="verified-patch", require_pinned_verify=True)
 
 
+# v127-F5: commands that pass whatever the patch says. A list of shapes seen in
+# the field (store's `git diff --check`, a worker's `true`, npm's placeholder
+# `echo "Error: no test specified"`), not a proof — so the word is
+# "known-vacuous", never "cannot fail".
+_VACUOUS_ARGV0 = frozenset({"true", ":", "exit", "test", "echo", "printf", "ls", "cat"})
+_VACUOUS_GIT = frozenset({"diff", "status", "log"})
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+
+
+def known_vacuous_verify(command: str) -> str | None:
+    """Why ``command`` is a known-vacuous check, or None when it is not one."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    if not argv:
+        return "an empty verify command is known-vacuous"
+    name = os.path.basename(argv[0])
+    if name in _SHELLS and len(argv) >= 3 and argv[1] == "-c":
+        return known_vacuous_verify(argv[2])
+    if name in _VACUOUS_ARGV0 or (name == "git" and argv[1:2] and argv[1] in _VACUOUS_GIT):
+        return f"`{command.strip()}` is a known-vacuous check (it passes whatever the patch does)"
+    return None
+
+
 @dataclass(frozen=True)
 class AutoApprovalContext:
     verification_outcome: str | None
@@ -87,6 +114,8 @@ class AutoApprovalContext:
     # call site (run_task holds verify_command since v88-F4), so nothing has to
     # be persisted or parsed back out of the re-verification detail string.
     verify_pinned: bool = False
+    # v127-F5: the commands G10 actually re-ran (reverifications.commands_json).
+    reverify_commands: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,6 +141,19 @@ def rule_block_reason(rule: AutoApprovalRule, ctx: AutoApprovalContext) -> str |
             "command the worker chose for itself — set verify_command in the "
             "project policy to auto-land (v88-F4); the patch is still landable "
             "by hand"
+        )
+    # v127-F5 (I2): every rule, every face — `store` auto-landed on
+    # `git diff --check` and `--auto-approve` on a worker's `true`. A landing
+    # without a human needs at least one re-run that is not known-vacuous.
+    if not any(known_vacuous_verify(c) is None for c in ctx.reverify_commands):
+        why = (
+            "; ".join(filter(None, (known_vacuous_verify(c) for c in ctx.reverify_commands)))
+            or "re-verification re-ran no command"
+        )
+        return (
+            f"{why} — auto-landing needs a check that is not known-vacuous: pin one "
+            '(`skep project setup <repo> --verify-command "<command>"`); the patch is '
+            "still landable by hand"
         )
     if rule.forbid_risk_flags and ctx.risk_flags:
         return f"risk flags present: {list(ctx.risk_flags)}"
@@ -183,6 +225,7 @@ def maybe_auto_approve(
         risk_flags=risk_flags,
         changed_files=changed_files,
         verify_pinned=verify_pinned,
+        reverify_commands=tuple(reverify.commands) if reverify is not None else (),
     )
     matched = evaluate(rules, ctx)
     if matched is None:

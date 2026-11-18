@@ -264,6 +264,8 @@ def test_phase_endpoint_matches_cli_set_phase_semantics(
             "pack": "trusted_local_dev",
             "phase": "build",
             "repo_path": str(repo),
+            # v127-F5: maintain's auto-apply default needs a real pin to hold.
+            "policy_overrides": {"verify_command": "uv run pytest"},
         },
     )
     assert setup.status_code == 201

@@ -1584,7 +1584,8 @@ def test_list_projects_tool_reports_registered_projects(
             "policy": {
                 "default_execution_mode": "workspace",
                 "auto_dispatch_allowed": True,
-                "auto_apply_verified_patch": True,
+                # v127-F5: no pin, so the maintain default falls to approval.
+                "auto_apply_verified_patch": False,
                 # v30: maintain phase accumulates auto-applied patches here.
                 "auto_apply_branch": "skep/maintain",
             },
@@ -1616,7 +1617,8 @@ def test_confirmed_setup_project_uses_the_same_pack_setup_flow(
         store.close()
 
     assert result["project_id"] == "packed"
-    assert result["policy"]["auto_apply_verified_patch"] is True
+    # v127-F5: no pin, so the maintain default falls to approval.
+    assert result["policy"]["auto_apply_verified_patch"] is False
     assert [schedule["name"] for schedule in result["seeded_schedules"]] == [
         "packed-maintain-weekly"
     ]

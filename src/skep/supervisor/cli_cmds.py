@@ -586,6 +586,8 @@ def _print_project_setup_summary(result: dict[str, Any], *, preview: bool) -> No
     # D6: loopback is closed to workers unless the project lists the port.
     ports = ", ".join(str(p) for p in (policy or {}).get("loopback_ports") or [])
     print(f"  loopback ports: {ports or 'closed (--loopback-port PORT opens one)'}")
+    for note in result.get("notes") or []:
+        print(f"  note: {note}")
 
 
 def _status_autonomy_summary(task: CodingWorkerTask | None) -> str:
@@ -3313,7 +3315,7 @@ def cmd_project_set_phase(args: argparse.Namespace) -> int:
         return _err(f"no project named {args.project_id!r}.", next_command="skep project list")
     store = RunStore(config.db_path)
     try:
-        set_project_phase(store, args.project_id, args.phase)
+        moved = set_project_phase(store, args.project_id, args.phase)
     except HTTPException as exc:
         if exc.status_code == 404:
             return _err(str(exc.detail), next_command="skep project list")
@@ -3321,6 +3323,8 @@ def cmd_project_set_phase(args: argparse.Namespace) -> int:
     finally:
         store.close()
     print(f"phase updated: {args.project_id} -> {args.phase}")
+    for note in moved.get("notes") or []:
+        print(f"  note: {note}")
     return 0
 
 

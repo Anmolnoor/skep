@@ -615,7 +615,7 @@ def _chatgpt_login_project(
     _bind(
         config,
         repo,
-        {"coding_engine": engine, "verify_command": "true", "codex_chatgpt_login": True},
+        {"coding_engine": engine, "verify_command": "uv run pytest", "codex_chatgpt_login": True},
     )
 
 
@@ -741,7 +741,7 @@ def test_no_auth_env_names_the_chatgpt_login_when_one_exists(
     _usable_sandbox(monkeypatch)
     monkeypatch.setattr(engines_module, "engine_available", lambda e: (True, "/usr/bin/codex"))
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    _bind(config, repo, {"coding_engine": "codex", "verify_command": "true"})
+    _bind(config, repo, {"coding_engine": "codex", "verify_command": "uv run pytest"})
 
     def refusal() -> str:
         with pytest.raises(ValueError) as excinfo:
@@ -777,7 +777,7 @@ def test_the_no_auth_env_opt_in_command_works_as_printed(
     home = tmp_path / "home"
     setup = ["--home", str(home), "project", "setup", str(repo), "--project-id", "plan"]
     flags = ["--strategy", "trusted_local_dev", "--phase", "maintain", "--engine", "codex"]
-    assert main([*setup, *flags, "--verify-command", "true"]) == 0
+    assert main([*setup, *flags, "--verify-command", "uv run pytest"]) == 0
     _usable_sandbox(monkeypatch)
     monkeypatch.setattr(engines_module, "engine_available", lambda e: (True, "/usr/bin/codex"))
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -794,7 +794,7 @@ def test_the_no_auth_env_opt_in_command_works_as_printed(
     finally:
         store.close()
     assert plan is not None and plan.policy["codex_chatgpt_login"] is True
-    assert plan.phase == "maintain" and plan.policy["verify_command"] == "true"
+    assert plan.phase == "maintain" and plan.policy["verify_command"] == "uv run pytest"
 
 
 def test_a_codex_dispatch_with_the_sandbox_off_never_runs_codex(
@@ -824,7 +824,7 @@ def test_a_codex_dispatch_with_the_sandbox_off_never_runs_codex(
         config=dataclasses.replace(config, sandbox=False),
         execution_mode="sandbox",
         coding_engine="codex",
-        verify_command="true",
+        verify_command="uv run pytest",
     )
     assert outcome.record.state == "rejected"
     assert "outside skep's sandbox" in (outcome.record.summary or "")

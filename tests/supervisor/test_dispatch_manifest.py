@@ -977,7 +977,7 @@ def test_a_codex_card_on_the_chatgpt_login_says_so_and_a_change_is_stale(
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     write_fake_login(Path(os.environ["CODEX_HOME"]))
-    policy = {"coding_engine": "codex", "verify_command": "true"}
+    policy = {"coding_engine": "codex", "verify_command": "uv run pytest"}
 
     def manifest(**extra: Any) -> dict[str, Any]:
         desk.store.add_project_policy(

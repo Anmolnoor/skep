@@ -25,6 +25,7 @@ from ...profile import load_profile, profile_path, run_personal_setup
 from ..autonomy import project_policy_dispatch_decision, run_request_resolved_decision
 from ..dispatch import auto_apply_decision
 from ..packs import PolicyPack, builtin_policy_packs, get_policy_pack
+from ..policy import known_vacuous_verify
 from ..policy_layers import baseline_guard
 from ..projects import (
     ProjectBinding,
@@ -601,6 +602,13 @@ def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | 
             "human only after G10 re-runs the project's own check (I2). Pin one "
             "(--verify-command, or verify_command in policy_overrides)."
         )
+    vacuous = known_vacuous_verify(str(policy.get("verify_command")))
+    if vacuous is not None:
+        return (
+            f"unlocked=true needs a verify_command that is not known-vacuous: {vacuous}. "
+            "Pin the project's real check (--verify-command, or verify_command in "
+            "policy_overrides)."
+        )
     probe = sandbox_availability()
     if not probe.usable:
         return (
@@ -618,8 +626,44 @@ def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | 
     return None
 
 
+def auto_apply_block_reason(policy: dict[str, Any]) -> str | None:
+    """v127-F5: why an explicit ``auto_apply_verified_patch=true`` may not be
+    saved, or None. The landing gate refuses a known-vacuous re-run anyway;
+    refusing here says so at the moment the operator asks for it (I9)."""
+    if policy.get("auto_apply_verified_patch") is not True:
+        return None
+    pin = str(policy.get("verify_command") or "").strip()
+    vacuous = known_vacuous_verify(pin) if pin else None
+    if vacuous is None:
+        return None
+    return (
+        f"auto_apply_verified_patch=true needs a verify_command that is not known-vacuous: "
+        f"{vacuous}. Pin the project's real check (--verify-command, or verify_command in "
+        "policy_overrides), or leave auto-apply off — patches still land by approval."
+    )
+
+
+def _coerce_auto_apply_default(policy: dict[str, Any], notes: list[str]) -> None:
+    """v127-F5: the maintain phase's auto-apply DEFAULT falls to false on a
+    missing or known-vacuous pin, with the reason (an explicit override is
+    ``auto_apply_block_reason``'s). ``store`` keeps working, by approval."""
+    if policy.get("auto_apply_verified_patch") is not True:
+        return
+    pin = str(policy.get("verify_command") or "").strip()
+    why = known_vacuous_verify(pin) if pin else "the project pins no verify_command"
+    if why is None:
+        return
+    policy["auto_apply_verified_patch"] = False
+    notes.append(
+        f"auto-apply is off: {why}. Patches land by approval until a real check is "
+        'pinned (`skep project setup <repo> --verify-command "<command>"`).'
+    )
+
+
 def _persist_project(run_store: RunStore, project: Any) -> dict[str, Any]:
-    block = unlocked_block_reason(run_store, project.policy)
+    block = unlocked_block_reason(run_store, project.policy) or auto_apply_block_reason(
+        project.policy
+    )
     if block is not None:
         raise HTTPException(status_code=400, detail=block)
     run_store.add_project_policy(
@@ -1026,6 +1070,9 @@ def setup_project_record(
         seed_dir = _seed_repo_dir(root, repo_path, repo_slug)
         seeded_shell_commands = _merge_shell_seeds(base_policy, seed_dir)
         seeded_verify_command = _merge_verify_seed(base_policy, seed_dir)
+    notes: list[str] = []
+    if "auto_apply_verified_patch" not in (policy_overrides or {}):
+        _coerce_auto_apply_default(base_policy, notes)
     try:
         project = validate_project_definition(
             project_id=project_id,
@@ -1132,6 +1179,7 @@ def setup_project_record(
     result["seeded_shell_commands"] = seeded_shell_commands
     result["seeded_verify_command"] = seeded_verify_command
     result["seeds_skipped"] = seeds_skipped
+    result["notes"] = notes
     attached_groups = [str(n) for n in project.policy.get("policy_groups") or []]
     result["suggested_policy_groups"] = [
         suggestion
@@ -1167,6 +1215,8 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
     pinned_verify = str(project.policy.get("verify_command") or "").strip()
     if pinned_verify and not policy.get("verify_command"):
         policy["verify_command"] = pinned_verify
+    notes: list[str] = []
+    _coerce_auto_apply_default(policy, notes)
     try:
         updated = validate_project_definition(
             project_id=project.project_id,
@@ -1189,7 +1239,7 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
         pack_name=updated.pack_name,
         pack_version=updated.pack_version,
     )
-    return project_to_dict(updated)
+    return {**project_to_dict(updated), "notes": notes}
 
 
 def preview_project_setup(
@@ -1249,6 +1299,12 @@ def preview_project_setup(
         seed_dir = _seed_repo_dir(root, repo_path, repo_slug)
         seeded_shell_commands = _merge_shell_seeds(base_policy, seed_dir)
         seeded_verify_command = _merge_verify_seed(base_policy, seed_dir)
+    notes: list[str] = []
+    if "auto_apply_verified_patch" not in policy_overrides:
+        _coerce_auto_apply_default(base_policy, notes)
+    block = auto_apply_block_reason(base_policy)
+    if block is not None:
+        raise HTTPException(status_code=400, detail=block)
     try:
         project = validate_project_definition(
             project_id=project_id,
@@ -1290,6 +1346,7 @@ def preview_project_setup(
         "seeded_schedules": [] if pack is None else _pack_schedule_plan(project.project_id, pack),
         "sample_dispatch_decision": _dispatch_decision_payload(project.policy),
         "sample_landing_decision": _landing_decision_payload(project.policy),
+        "notes": notes,
     }
 
 

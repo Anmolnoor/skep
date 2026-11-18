@@ -23,6 +23,7 @@ _PASS = AutoApprovalContext(
     reverify_confirmed=True,
     risk_flags=(),
     changed_files=("toypkg/math_utils.py",),
+    reverify_commands=("uv run pytest",),
 )
 
 
@@ -281,6 +282,7 @@ def test_auto_landing_requires_a_project_pinned_verify_command() -> None:
             reverify_confirmed=True,
             changed_files=("a.py",),
             verify_pinned=verify_pinned,
+            reverify_commands=("uv run pytest",),
         )
 
     # Pinned: the rule fires exactly as before.
@@ -296,7 +298,8 @@ def test_auto_landing_requires_a_project_pinned_verify_command() -> None:
 def test_the_dependency_rule_is_deliberately_unaffected() -> None:
     """v90-F4: deps-safe keeps its behaviour — it needs an explicit
     --auto-approve, its diff scope is lockfiles only, and it caps at 10 files.
-    A stated choice, not an oversight."""
+    A stated choice, not an oversight. (v127-F5: it still needs a re-run
+    that is not known-vacuous — that rule binds every rule.)"""
     from skep.supervisor.policy import (
         SAFE_DEPENDENCY_RULE,
         AutoApprovalContext,
@@ -309,6 +312,7 @@ def test_the_dependency_rule_is_deliberately_unaffected() -> None:
         reverify_confirmed=True,
         changed_files=("uv.lock",),
         verify_pinned=False,
+        reverify_commands=("uv run pytest",),
     )
     assert rule_block_reason(SAFE_DEPENDENCY_RULE, ctx) is None
 
@@ -408,7 +412,7 @@ def test_es_f3_auto_apply_never_appends_past_the_verified_commit(repo: Path) -> 
             outcome="passed",
             worker_outcome="passed",
             confirmed=True,
-            commands=["true"],
+            commands=["uv run pytest"],
             exit_codes=[0],
             detail="re-ran clean",
             base_commit=verified,

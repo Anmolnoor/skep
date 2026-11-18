@@ -1891,13 +1891,16 @@ def test_project_cli_preview_setup_show_list_and_set_phase(
     assert _run_cli(home, "project", "set-phase", "free-project", "maintain") == 0
     phase_out = capsys.readouterr().out
     assert "phase updated: free-project -> maintain" in phase_out
+    # v127-F5: the toy repo pins no verify_command, so the maintain default
+    # falls to approval — and the CLI says why.
+    assert "auto-apply is off: the project pins no verify_command" in phase_out
 
     store = RunStore(config.db_path)
     try:
         updated = store.get_project_policy("free-project")
         assert updated is not None
         assert updated.phase == "maintain"
-        assert updated.policy["auto_apply_verified_patch"] is True
+        assert updated.policy["auto_apply_verified_patch"] is False
     finally:
         store.close()
 
@@ -1996,7 +1999,7 @@ def _pin_engine(home: Path, repo: Path, engine: str) -> None:
         "--engine",
         engine,
         "--verify-command",
-        "true",  # an external engine needs the pin (v90); the probe is what is under test
+        "uv run pytest",  # an external engine needs the pin (v90); the probe is what is under test
     )
     assert code == 0
 
@@ -2032,7 +2035,7 @@ def test_a_worker_cmd_that_runs_an_external_agent_is_named_not_blamed_on_a_pin(
     one. It names the real cause and the acceptable path instead."""
     home = tmp_path / "home"
     code = _run_cli(home, "project", "setup", str(repo), "--strategy", "trusted_local_dev",
-                    "--project-id", "plain", "--verify-command", "true")  # fmt: skip
+                    "--project-id", "plain", "--verify-command", "uv run pytest")  # fmt: skip
     assert code == 0
     capsys.readouterr()
     worker = shlex.join([sys.executable, "-m", "skep.workers.claude_code"])
