@@ -2637,11 +2637,16 @@ ROLELESS_SCHEDULE_KINDS = ("script", "prompt", "note", "digest")
 
 def check_schedule_role(holder: ConfigHolder, store: RunStore, schedule: Any) -> None:
     """v123-F1/F2: the one creation check every face runs (CLI, REST, chat)
-    before a schedule with a role is stored. ValueError: a kind no role
-    narrows, an unknown role (I9), or a role that denies the worker's
+    before a schedule with a role is stored. ValueError: a name with ``@``
+    or ``/``, a kind no role narrows, an unknown role (I9), or a role that denies the worker's
     workspace write (its tick could only refuse)."""
     if schedule.role is None:
         return
+    if "@" in schedule.name or "/" in schedule.name:  # v123 review: the hop's name stays exact
+        raise ValueError(
+            f"a schedule that runs as a role cannot have '@' or '/' in its name (got "
+            f"{schedule.name!r}): its receipts name it schedule:<name>@<role>; rename it"
+        )
     if schedule.worker_kind in ROLELESS_SCHEDULE_KINDS:
         raise ValueError(
             f"a {schedule.worker_kind} schedule takes no role: it dispatches no worker for "

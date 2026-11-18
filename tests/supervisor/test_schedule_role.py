@@ -489,3 +489,14 @@ def test_a_scheduled_run_writes_its_delegated_receipt(config: SupervisorConfig, 
     assert row["delegation_chain"] == ["schedule:nightly@builder"]
     assert row["value"] == "worker" and row["task_id"] in ("t-7", "t-8")
     assert row["repo"] == str(repo.resolve())
+
+
+@pytest.mark.parametrize("name", ["night@ops", "a/b"])
+def test_a_role_bound_schedule_name_holds_no_at_or_slash(
+    config: SupervisorConfig, repo: Path, name: str
+) -> None:
+    """v123-F1 review: ``schedule:<name>@<role>`` names the hop in every
+    receipt and ``decided_by`` — a name with ``@`` or ``/`` would blur it."""
+    with pytest.raises(ValueError, match="a schedule that runs as a role cannot have '@' or '/'"):
+        _check(config, name=name, repo=repo, instructions="x", role="builder")
+    _check(config, name=name, repo=repo, instructions="x", role=None)  # no role: no hop
