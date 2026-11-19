@@ -1152,12 +1152,6 @@ def setup_project_record(
         bindings.append(ProjectBinding(kind="repo_slug", value=repo_slug))
     for template_name in template_names or []:
         bindings.append(ProjectBinding(kind="template_name", value=template_name))
-    if not bindings:
-        raise HTTPException(
-            status_code=400,
-            detail="project setup requires at least one binding "
-            "(repo_path, repo_slug, or template_names)",
-        )
     strategy, pack, strategy_source = _choose_strategy(run_store, project_id, strategy, pack_name)
     base_policy = (
         dict(pack.phase_defaults[phase])
@@ -1177,6 +1171,14 @@ def setup_project_record(
     base_policy, bindings = _carry_forward_existing(
         run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
     )
+    # v128-F3: after the carry-forward, so an update that sends only
+    # policy_overrides keeps the stored bindings; a new project still needs one.
+    if not bindings:
+        raise HTTPException(
+            status_code=400,
+            detail="project setup requires at least one binding "
+            "(repo_path, repo_slug, or template_names)",
+        )
     _vet_group_attaches(run_store, base_policy)
     seeded_shell_commands: list[list[str]] = []
     seeded_verify_command = ""
@@ -1390,12 +1392,6 @@ def preview_project_setup(
         bindings.append(ProjectBinding(kind="repo_slug", value=repo_slug))
     for template_name in template_names:
         bindings.append(ProjectBinding(kind="template_name", value=template_name))
-    if not bindings:
-        raise HTTPException(
-            status_code=400,
-            detail="project preview requires at least one binding "
-            "(repo_path, repo_slug, or template_names)",
-        )
     base_policy = (
         dict(pack.phase_defaults[phase])
         if pack is not None
@@ -1416,6 +1412,14 @@ def preview_project_setup(
     base_policy, bindings = _carry_forward_existing(
         run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
     )
+    # v128-F3: after the carry-forward, so an update that sends only
+    # policy_overrides keeps the stored bindings; a new project still needs one.
+    if not bindings:
+        raise HTTPException(
+            status_code=400,
+            detail="project preview requires at least one binding "
+            "(repo_path, repo_slug, or template_names)",
+        )
     _vet_group_attaches(run_store, base_policy)
     seeded_shell_commands: list[list[str]] = []
     seeded_verify_command = ""
