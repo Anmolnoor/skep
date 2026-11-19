@@ -1,13 +1,669 @@
 ---
-// Stub from the foundation: the page agent that owns this file replaces the body.
+// Security: the threat model, the sandbox per platform, and every known limit.
+//
+// The transcripts were captured on 2026-11-18 (UTC stamps read 2026-11-19) on
+// Linux with the bubblewrap backend, under a throwaway home
+// (`export SKEP_HOME=$(mktemp -d -p ~/.cache)`), with no model and no API key.
+// The home held the builder baseline (`skep policy approve --template builder
+// --yes`) and one project (a copy of examples/skep-demo with a pinned verify
+// command); the run is the one shown on /how-it-works.html.
+//   - `sandboxArgv`: $SKEP_HOME/supervisor/audit/<task_id>/sandbox.profile.sb,
+//     the bubblewrap argument list skep wrote for that run.
+//   - `tamper`: baseline.json was edited by hand in the throwaway home (the
+//     catch-all shell rule changed from require_approval to allow), then the
+//     commands below were run.
+// Display edits, stated in each panel's `captured` line: the home directory is
+// shown as ~, the throwaway home as $SKEP_HOME, the repository as
+// ~/code/skep-demo; the argv is regrouped onto fewer lines and elisions are
+// marked with "…".
+//
+// This file and code-of-conduct.astro are the two site sources allowed to
+// carry the published contact address (scripts/release-hygiene-scan.sh).
 import Base from '../layouts/Base.astro';
+import Callout from '../components/Callout.astro';
+import Card from '../components/Card.astro';
+import Chip from '../components/Chip.astro';
+import Section from '../components/Section.astro';
+import Table from '../components/Table.astro';
+import Terminal from '../components/Terminal.astro';
+import { GH_URL } from '../lib/site-nav.mjs';
+
+const SECURITY_EMAIL = 'anmolnoor59@gmail.com';
+const SECURITY_TAG = '[skep security]';
+const CAPTURE = '2026-11-18, Linux (bubblewrap), throwaway SKEP_HOME';
+
+const sandboxArgv = `
+$ cat $SKEP_HOME/supervisor/audit/01a1f147-656d-7a10-81a4-4b42ba08e7bc/sandbox.profile.sb
+# bubblewrap argv
+"--ro-bind", "/", "/",
+"--dev", "/dev", "--unshare-pid", "--unshare-ipc", "--proc", "/proc",
+"--tmpfs", "/tmp", "--tmpfs", "/run", "--die-with-parent", "--new-session",
+…
+"--unshare-net",
+"--ro-bind", "~/code/skep-demo/.git", "~/code/skep-demo/.git",
+"--bind", "$SKEP_HOME/supervisor/worktrees/01a1f147-…", "$SKEP_HOME/supervisor/worktrees/01a1f147-…",
+"--bind", "$SKEP_HOME/supervisor/results/01a1f147-…", "$SKEP_HOME/supervisor/results/01a1f147-…",
+"--bind", "~/code/skep-demo/.git/worktrees/01a1f147-…", "~/code/skep-demo/.git/worktrees/01a1f147-…",
+"--bind", "~/code/skep-demo/.git/objects", "~/code/skep-demo/.git/objects",
+"--bind", "$SKEP_HOME/supervisor/cache/projects/skep-demo", "$SKEP_HOME/supervisor/cache/projects/skep-demo",
+"--ro-bind", "~/code/skep-demo/.git/skep-protocol-pin", "~/code/skep-demo/.git/skep-protocol-pin",
+"--tmpfs", "~/.ssh",
+"--tmpfs", "~/.config/gh",
+"--ro-bind", "/dev/null", "~/.docker/config.json",
+"--ro-bind", "/dev/null", "~/.claude/.credentials.json",
+"--ro-bind", "/dev/null", "~/.codex/auth.json",
+"--ro-bind", "/dev/null", "~/.claude.json",
+"--ro-bind", "/dev/null", "~/.bashrc",
+…
+"--ro-bind", "/dev/null", "~/.zsh_history",
+"--tmpfs", "~/.docker/desktop",
+"--tmpfs", "$SKEP_HOME/supervisor/audit",
+"--ro-bind", "/dev/null", "$SKEP_HOME/supervisor/relay-secret",
+…
+"-m", "skep.landlock", "--scope-abstract",
+"--unix-root", "$SKEP_HOME/supervisor/worktrees/01a1f147-…",
+…
+`;
+
+const tamper = `
+$ skep policy baseline status
+baseline: TAMPERED since now
+  ~ rule shell-learnable: shell: require_approval run * -> shell: allow run *
+# exit status 1
+$ skep policy decide --repo skep-demo shell run "npm i left-pad"
+{
+  "action": "run",
+  "actor": "cli",
+  "at": "2026-11-19T00:51:35Z",
+  "decided_by": "baseline/baseline_tampered",
+  "layer": "baseline",
+  "note": "baseline: TAMPERED since 2026-11-19T00:51:35Z",
+  "repo": "skep-demo",
+  "rule_id": "baseline_tampered",
+  "scope": "shell",
+  "source": "baseline",
+  "value": "npm i left-pad",
+  "verdict": "require_approval"
+}
+$ skep run ~/code/skep-demo "create a Python hello world script" --execution-mode sandbox
+error: baseline_tampered: the approved policy baseline no longer matches its lock — \`skep policy baseline diff\` shows what changed; \`skep policy approve --reapprove\` re-locks it
+`;
+
+const doctor = `
+$ skep doctor
+…
+- sandbox: ready - bubblewrap backend is usable. Landlock ABI 10: a worker connects only to unix sockets in its own roots or ones it made itself.
+`;
 ---
 
-<Base title="Security" description="Security: this page is being written." active="security">
-  <section class="section">
-    <div class="wrap narrow stack">
-      <h1 class="t-h2">Security</h1>
-      <p class="t-lead">This page is being written.</p>
+<Base
+  title="Security"
+  description="What skep defends against and what it does not: the threat model, the sandbox on macOS and Linux, what a worker can never do, re-verification, the policy baseline, secrets, every known limit, and how to report a vulnerability."
+  active="security"
+>
+  <Section eyebrow="Security" lead="skep assumes the coding agent is wrong, careless or steered by something it read. It confines the agent's process, checks its work without it, and keeps your default branch out of its reach. This page says exactly what that covers, and what it does not.">
+    <h1 slot="heading" class="t-h2">The threat model, and its limits</h1>
+    <div class="grid grid-2 top">
+      <div class="grid">
+        <h2 class="t-h3">What skep defends against</h2>
+        <Table
+          caption="Each control is described below with its limit"
+          head={['The agent tries to', 'What stops it']}
+          rows={[
+            ['Write outside its task', 'The OS sandbox: a read-only root filesystem with the worktree and a few named directories writable.'],
+            ['Reach a host you did not allow', 'The sandbox network list, enforced by the OS and a filtering proxy.'],
+            ['Read your credentials', 'The secret floor: credential paths are masked inside the sandbox and denied by policy.'],
+            ['Push, pull, fetch, or move your branch', 'Hard denies for the built-in worker; for an external engine, the sandbox, masked credentials and a git protocol pin.'],
+            ['Report tests passed when they do not', 'Re-verification: skep re-runs the project’s pinned command on a clean worktree.'],
+            ['Land its own work', 'The patch is applied only on approval, on a skep/* branch; the default branch is refused.'],
+            ['Widen its own permissions', 'A locked policy baseline with a hash check, read-only inside the sandbox.'],
+          ]}
+          rowHeaders
+        />
+      </div>
+      <div class="grid">
+        <h2 class="t-h3">What is out of scope</h2>
+        <ul class="plain-list">
+          <li>
+            <strong>Confidentiality of ordinary files.</strong> Inside the sandbox, reads outside the worktree are
+            mostly open. Only the listed credential paths are masked.
+          </li>
+          <li>
+            <strong>What the model provider sees.</strong> With a hosted model, prompts go to that provider, and they
+            include your code.
+          </li>
+          <li>
+            <strong>A policy you made permissive.</strong> If you allow <code>*</code> for the network, the engine
+            doing what you told it is working as designed.
+          </li>
+          <li>
+            <strong>A weak verify command.</strong> skep proves that your command passes. It cannot prove the command
+            proves the work.
+          </li>
+          <li>
+            <strong>Other processes running as you.</strong> skep's records and its baseline belong to your Unix user.
+            Malware or a compromised OS outside the sandbox is not something skep stops.
+          </li>
+          <li>
+            <strong>A flaw in the OS sandbox itself.</strong> skep relies on Seatbelt, bubblewrap, Landlock and user
+            namespaces as the kernel provides them.
+          </li>
+          <li>
+            <strong>Packages from registries you allowed.</strong> A dependency the run installs executes inside the
+            same sandbox, with the same network list.
+          </li>
+          <li><strong>More than one operator.</strong> skep supervises local processes for one person on one machine.</li>
+          <li><strong>Windows.</strong> There is no backend.</li>
+        </ul>
+      </div>
     </div>
-  </section>
+  </Section>
+
+  <Section id="sandbox" band eyebrow="The sandbox" title="An OS wall around the worker, when the run is in sandbox mode" lead="Workspace mode has no OS wall: the worker runs as you, in a separate worktree, and nothing confines the process. Everything in this section is about sandbox mode, which every external engine is forced into.">
+    <div class="grid">
+      <Table caption="Sandbox backends" rowHeaders>
+        <thead>
+          <tr><th scope="col">Platform</th><th scope="col">Backend</th><th scope="col">Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">macOS</th>
+            <td>Seatbelt (<code>sandbox-exec</code>)</td>
+            <td>Used when the host process may apply profiles. Leaves most reads open.</td>
+          </tr>
+          <tr>
+            <th scope="row">Linux</th>
+            <td>bubblewrap (<code>bwrap</code>) plus Landlock</td>
+            <td>
+              Used when <code>bwrap</code> is installed and its probe succeeds. Own PID and IPC namespaces, an empty
+              <code>/run</code> and <code>/tmp</code>. Landlock scopes unix sockets by the kernel's ABI.
+            </td>
+          </tr>
+          <tr>
+            <th scope="row">Linux, opt-in</th>
+            <td>podman (<code>sandbox_backend=podman</code>)</td>
+            <td>Runs the same Landlock step. The container runs with SELinux labelling disabled.</td>
+          </tr>
+          <tr>
+            <th scope="row">Windows, others</th>
+            <td>none</td>
+            <td>A sandbox run is refused.</td>
+          </tr>
+        </tbody>
+      </Table>
+
+      <div class="grid grid-3">
+        <Card title="Writable" icon="pencil" tone="yellow">
+          <ul class="plain-list">
+            <li>the worktree, with a private <code>TMPDIR</code> inside it</li>
+            <li>the run's own <code>results/&lt;task_id&gt;/</code></li>
+            <li>the worktree's git metadata and the repository's <code>objects/</code></li>
+            <li>the per-project cache</li>
+          </ul>
+          <p>
+            Shared <code>/tmp</code> and <code>/var/folders</code> are not writable. The repository's
+            <code>hooks/</code>, <code>config</code> and <code>refs/</code> stay read-only.
+          </p>
+        </Card>
+        <Card title="Masked: the secret floor" icon="eye-off" tone="red">
+          <ul class="plain-list">
+            <li>
+              credential stores: <code>~/.ssh</code>, <code>~/.aws</code>, <code>~/.gnupg</code>,
+              <code>~/.config/gh</code>, <code>~/.netrc</code>, <code>~/.git-credentials</code>, <code>~/.kube</code>,
+              <code>~/.config/gcloud</code>, <code>~/.azure</code>, <code>~/.docker/config.json</code> and more
+            </li>
+            <li>engine logins: the macOS keychains, <code>~/.claude/.credentials.json</code>, <code>~/.codex/auth.json</code></li>
+            <li>shell rc files and REPL histories</li>
+            <li>
+              skep's own secrets: <code>serve.env</code>, the serve token, every <code>*-secret</code> file, the audit
+              directory and chat attachments
+            </li>
+            <li>on Linux, agent sockets: ssh-agent, gpg-agent, D-Bus, Docker and podman</li>
+          </ul>
+        </Card>
+        <Card title="Still readable" icon="eye" tone="yellow">
+          <ul class="plain-list">
+            <li>the rest of the filesystem, so the toolchain works</li>
+            <li><code>~/.npmrc</code>, so <code>npm install</code> works (policy still refuses read tools on it)</li>
+            <li>skep's store, <code>supervisor.sqlite3</code></li>
+            <li>
+              for a built-in worker that calls the model: its own provider key, unless the provider key relay is on
+            </li>
+          </ul>
+        </Card>
+      </div>
+      <p class="prose-width t-small c-mut">
+        The full list of masked paths is in <a class="inline-link" href="/docs/sandboxing.html">the sandboxing reference</a>.
+      </p>
+
+      <div class="split">
+        <div class="grid">
+          <h3 class="t-h3">Network</h3>
+          <Table
+            caption="The three network modes"
+            head={['The run’s list', 'Means', 'Enforced by']}
+            rows={[
+              ['empty', 'No outbound network.', 'macOS: the Seatbelt profile. Linux: a private network namespace.'],
+              ['named hosts', 'Only those hosts.', 'The worker can reach nothing but the filtering proxy, and the proxy admits the listed hosts.'],
+              ['*', 'All outbound network.', 'Nothing. On Linux the run shares the host network namespace.'],
+            ]}
+            rowHeaders
+          />
+          <ul class="plain-list">
+            <li>
+              <strong>Defaults.</strong> With no list on the request, the policy's <code>default_network</code>
+              applies. The builder and operator baselines allow package registries (<code>pypi.org</code>,
+              <code>files.pythonhosted.org</code>, <code>registry.npmjs.org</code>, <code>proxy.golang.org</code>);
+              the assistant baseline and a bare home allow none.
+            </li>
+            <li>
+              <strong>The model provider.</strong> A worker that calls a model always reaches that provider's host,
+              whatever the list says.
+            </li>
+            <li>
+              <strong>Loopback</strong> is closed. A run reaches a port on this machine only when it is its own local
+              model provider's port or one the project lists in <code>loopback_ports</code>.
+              <code>skep serve</code>'s port is never opened.
+            </li>
+            <li>
+              <strong>Git transports.</strong> Every worker gets <code>GIT_ALLOW_PROTOCOL=file</code>, and task
+              worktrees carry the same rule as git config, read-only in the sandbox. A push, fetch or clone over
+              https, ssh or git fails with “transport not allowed”.
+            </li>
+          </ul>
+        </div>
+        <div class="grid">
+          <h3 class="t-h3">Fail-closed</h3>
+          <ul class="plain-list">
+            <li>
+              skep probes the backend before launch. If a sandbox run cannot be confined, the worker does not start:
+              the run records <code>sandbox_unavailable</code> and is never retried unconfined.
+            </li>
+            <li>
+              If the kernel reports a Landlock ABI but applying it fails, the run fails. It never runs unscoped while
+              <code>skep doctor</code> says scoped.
+            </li>
+            <li>A run whose skep home lies inside a writable root is refused.</li>
+            <li>
+              No sandbox nests inside skep's, so an engine's own sandbox is switched off and skep's is its only wall.
+              The Codex, Aider and pi workers refuse to start outside it.
+            </li>
+          </ul>
+          <Terminal code={doctor} title="skep doctor" captured={`${CAPTURE}; the sandbox line only`} />
+        </div>
+      </div>
+
+      <Terminal code={sandboxArgv} title="sandbox.profile.sb: the wall one run got" captured={`${CAPTURE}; an excerpt, regrouped onto fewer lines; home shown as ~, the repository as ~/code/skep-demo, task id shortened; only paths that exist on the host are masked`} />
+    </div>
+  </Section>
+
+  <Section id="worker-limits" eyebrow="Git and remotes" title="What a worker can never do, and what can be granted" lead="The answer is the same for every engine. The mechanism is not.">
+    <div class="grid">
+      <Table caption="Never, and grantable">
+        <thead>
+          <tr><th scope="col">Action</th><th scope="col">Verdict</th><th scope="col">Detail</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><code>git push</code>, <code>pull</code>, <code>fetch</code>, <code>clone</code>, <code>ls-remote</code>, remote edits</th>
+            <td><Chip kind="deny" /></td>
+            <td>Never. No allowlist entry, grant, role or approval overrides it, and it cannot be remembered.</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>git checkout</code>, <code>git switch</code></th>
+            <td><Chip kind="deny" /></td>
+            <td>Never: a worker does not move a branch.</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>sudo</code>, <code>doas</code>, <code>su</code>, <code>pkexec</code>, <code>run0</code></th>
+            <td><Chip kind="deny" /></td>
+            <td>Refused first, because every other deny reads the command's first word.</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>git add</code>, <code>git commit</code> through <code>shell.run</code></th>
+            <td><Chip kind="deny" /></td>
+            <td>Denied as shell commands.</td>
+          </tr>
+          <tr>
+            <th scope="row">The <code>git.stage</code> and <code>git.commit</code> capabilities</th>
+            <td><Chip kind="ask" /></td>
+            <td>
+              Grantable, with approval. The commit lives in the disposable worktree, the repository's refs stay
+              read-only, and the patch is still the diff against the starting commit.
+            </td>
+          </tr>
+        </tbody>
+      </Table>
+      <div class="grid grid-2">
+        <Card title="The built-in worker" icon="cpu">
+          <p>
+            Every side effect is a capability call that the policy engine decides: <code>shell.run</code>,
+            <code>filesystem.write</code>, <code>network.fetch</code>, <code>network.read</code>,
+            <code>network.connect</code>, <code>git.stage</code>, <code>git.commit</code>. The denies above are checked
+            before any allowlist or grant, and the same list binds the chat assistant's own tools.
+          </p>
+        </Card>
+        <Card title="An external engine" icon="terminal" tone="yellow">
+          <p>
+            Claude Code, Codex, Aider and pi run their own tools, and those calls do not pass the capability layer.
+            What stops a push is the sandbox: no route to a host outside the list, masked credentials, and the git
+            protocol pin. skep also switches the agent's own guard off (<code>bypassPermissions</code>,
+            <code>danger-full-access</code>): its sandbox replaces that layer.
+          </p>
+        </Card>
+      </div>
+      <Callout kind="limit" title="Limits">
+        <ul class="plain-list">
+          <li>
+            An external engine can switch branches inside its own disposable worktree. It cannot reach your checkout
+            or your refs.
+          </li>
+          <li>
+            The git protocol pin does not stop git told otherwise on its command line
+            (<code>git -c protocol.allow=always</code>) or a fresh clone in the worktree. The network list is the
+            wall; the pin is a second line.
+          </li>
+          <li>
+            In workspace mode none of the read-only mounts exist: the worker can edit <code>.git/config</code> and
+            hooks. skep's own git commands run with hooks off.
+          </li>
+          <li>
+            skep itself pushes a landing branch when you ask: <code>skep review --approve --pr</code>,
+            <code>skep pr open</code>, or a <code>push_branch</code> card.
+          </li>
+        </ul>
+      </Callout>
+    </div>
+  </Section>
+
+  <Section id="verification" band eyebrow="Re-verification and landing" tone="green" title="Two controls that do not depend on the agent" lead="The sandbox limits what the agent can touch. These two limit what its output can become.">
+    <div class="grid grid-2 top">
+      <div class="grid">
+        <h3 class="t-h3">Re-verification (G10)</h3>
+        <p>
+          skep applies the patch to a clean worktree at the pinned baseline commit and runs the project's pinned
+          <code>verify_command</code> there, in a sandbox with the network denied. Only the exit code is trusted. The
+          result is recorded apart from the worker's claim, with the command and where it came from.
+        </p>
+        <Callout kind="limit" title="Limits">
+          <ul class="plain-list">
+            <li>
+              With no pinned command (a project with no detectable entry point, or a run outside a project) skep
+              re-runs the command the worker chose. The record says so.
+            </li>
+            <li>A patch-less run is <code>not_applicable</code>, not confirmed.</li>
+            <li>
+              When the sandbox cannot be built the outcome is <code>unavailable</code>: the command is not run on the
+              bare host. But if you configured skep itself to run without a sandbox, the re-run is unconfined.
+            </li>
+            <li>
+              Dependency priming (<code>uv sync</code>) uses the network before the offline run, and again after the
+              patch when the patch changes the lockfile.
+            </li>
+          </ul>
+        </Callout>
+      </div>
+      <div class="grid">
+        <h3 class="t-h3">Landing</h3>
+        <p>
+          A finished run is a patch. It becomes a commit when it is approved, on <code>skep/&lt;task_id&gt;</code> or
+          a branch you name. The repository's default branch is refused as a landing target, and it moves only
+          through actions you confirm, such as merging a pull request. Approval is refused for a run with no
+          re-verification record.
+        </p>
+        <Callout kind="limit" title="Limits">
+          <ul class="plain-list">
+            <li>
+              Landing without a click exists, and it is opt-in: <code>--auto-approve</code> for dependency-only
+              diffs, and <code>auto_apply_verified_patch</code> (on in the maintain phase and for unlocked projects).
+              Both land only a re-verified patch, only on a <code>skep/*</code> branch, recorded as
+              <code>auto:&lt;rule&gt;</code>.
+            </li>
+            <li>The dependency-only lane does not require a pinned verify command.</li>
+            <li>An approval is a person's judgement. skep shows the evidence; it does not review the diff for you.</li>
+          </ul>
+        </Callout>
+      </div>
+    </div>
+    <p class="after-grid t-small c-mut">
+      <a class="inline-link" href="/how-it-works.html#reverify">The four outcomes and a captured run</a> are on the How it works page.
+    </p>
+  </Section>
+
+  <Section id="policy" eyebrow="The policy engine" title="A floor, a locked baseline, and layers that only narrow" lead="One function decides allow, ask or deny for the built-in worker, the chat assistant, the Claude Code hook and the ACP governor.">
+    <div class="split">
+      <div class="grid prose-width">
+        <ul class="plain-list">
+          <li>
+            <strong>The floor</strong> is above every layer: remote git and branch switching, privilege escalation
+            and credential reads are denied, and outbound posts always ask. No rule, grant, role or card lifts it.
+          </li>
+          <li>
+            <strong>The locked baseline.</strong> <code>skep policy approve</code> writes the approved template,
+            a lock holding its SHA-256, and a row in an approvals ledger. Before every outside decision and at serve
+            startup skep checks the file against the lock and the lock against the ledger. If they disagree, every
+            decision asks, the ACP governor's hard ring denies, and dispatch is refused.
+          </li>
+          <li>
+            <strong>A fresh home</strong> with no approved baseline asks for everything until one is approved.
+          </li>
+          <li>
+            <strong>Layers.</strong> Any deny binds across layers, an unmatched action asks, a role or a delegation
+            can only make an answer stricter, and taint turns an allow into an ask in a chat that has read private
+            data or outside content.
+          </li>
+        </ul>
+        <Callout kind="limit" title="Limits">
+          <ul class="plain-list">
+            <li>
+              The baseline file is set read-only, but that is a courtesy. The file, its lock and the ledger all
+              belong to your Unix user: the hash makes a change evident, it does not stop a process running as you
+              outside the sandbox from rewriting all three.
+            </li>
+            <li>
+              An external engine dispatched as a worker is not asked command by command. The hook and the ACP governor
+              decide and record, and neither is a sandbox.
+            </li>
+            <li>
+              An unlocked project (<code>skep project setup --unlocked</code>) answers a sandboxed worker's default
+              asks by itself on runs that <code>skep serve</code> dispatches. Denies, named asks and the floor still
+              hold.
+            </li>
+          </ul>
+        </Callout>
+        <p class="row">
+          <a class="link-arrow" href="/how-it-works.html#layers">Layers and precedence</a>
+          <a class="link-arrow" href="/docs/configuration.html">The policy baseline in the docs</a>
+        </p>
+      </div>
+      <Terminal code={tamper} title="a baseline edited by hand" captured={`${CAPTURE}; the repository shown as ~/code/skep-demo; the first line of the refused dispatch`} />
+    </div>
+  </Section>
+
+  <Section id="secrets" band eyebrow="Secrets" title="Where secrets are stored, and what a worker receives" lead="skep does store secret values. They are files with mode 0600 under the home, never rows in the database.">
+    <div class="grid grid-2 top">
+      <Table
+        caption="Paths are for the default home, ~/.skep"
+        head={['Secret', 'Stored']}
+        rows={[
+          ['Provider API key (web Settings)', '~/.skep/supervisor/llm-secret, mode 0600; one llm-secret-<id> per provider profile'],
+          ['Provider key (CLI setup)', 'Not stored: profile.json holds the name of the environment variable'],
+          ['Serve token', '~/.skep/supervisor/serve-token'],
+          ['Messenger channel secrets', '*-secret files beside the serve token, write-only through the API'],
+          ['Engine auth for the daemon', '~/.skep/serve.env, read by skep serve at startup'],
+        ]}
+        rowHeaders
+      />
+      <div class="grid">
+        <h3 class="t-h3">What a worker receives</h3>
+        <ul class="plain-list">
+          <li>
+            Environment variables are passed by name: the run's allowlist (<code>--env-allow</code>, or the
+            policy's <code>default_env_allowlist</code>), plus the toolchain variables skep sets itself.
+          </li>
+          <li>
+            An external engine gets its own auth env (<code>CLAUDE_CODE_OAUTH_TOKEN</code> or
+            <code>ANTHROPIC_API_KEY</code>; <code>OPENAI_API_KEY</code>). Its keychain and file logins are masked, and
+            it sees no model key of skep's.
+          </li>
+          <li>
+            A built-in worker that calls the model can read its own provider key. With
+            <code>provider_key_relay</code> on (off by default) the key stays masked and the run's proxy adds it to
+            the request.
+          </li>
+          <li>
+            A Codex run on a ChatGPT plan login, opt-in per project, gets a read-only copy holding the access token
+            and an empty refresh token, deleted when the run ends.
+            <a class="inline-link" href="/docs/codex-chatgpt-login.html">How that works</a>.
+          </li>
+        </ul>
+        <Callout kind="limit" title="Limits">
+          The worker does hold the credential it is given for the length of the run, and it can send it anywhere its
+          network list reaches. Values in the decision log are redacted for common credential shapes only.
+        </Callout>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="limits" eyebrow="Known limits" tone="yellow" title="What skep does not do" lead="The same list as above, in one place. If your threat model needs one of these, skep is not enough by itself.">
+    <div class="grid grid-2 top">
+      <div class="grid">
+        <h3 class="t-h3">The sandbox</h3>
+        <ul class="plain-list">
+          <li>Workspace mode has no OS sandbox. Neither does a home onboarded with <code>--sandbox none</code>.</li>
+          <li>Reads outside the worktree are mostly open. On macOS, Seatbelt leaves reads open apart from the secret floor.</li>
+          <li>The secret floor is a list. A secret at a path that is not on it is readable.</li>
+          <li>A secret file created while a run is in progress is not masked for that run.</li>
+          <li><code>~/.npmrc</code> stays readable inside the sandbox.</li>
+          <li>
+            A <code>*</code> network run on Linux shares the host network namespace: its loopback is the host's,
+            <code>skep serve</code>'s port included.
+          </li>
+          <li>
+            On a kernel below Landlock ABI 9, a unix socket at an unlisted path outside <code>/tmp</code> and
+            <code>/run</code> stays reachable. Below ABI 6, or with Landlock off, so does an abstract socket in a
+            bubblewrap run with <code>*</code> network.
+          </li>
+          <li>Neither the masks nor Landlock touch a descriptor the worker already holds when it starts.</li>
+          <li>The default network includes the model provider and, under the builder and operator baselines, package registries.</li>
+          <li>The podman backend runs with SELinux labelling disabled for the container.</li>
+          <li>There is no Windows backend.</li>
+        </ul>
+      </div>
+      <div class="grid">
+        <h3 class="t-h3">Everything else</h3>
+        <ul class="plain-list">
+          <li>
+            skep switches the agent's own guard off. Its sandbox replaces that layer; the two do not stack.
+          </li>
+          <li>
+            An external engine's tool calls do not pass the capability layer and are not logged one by one.
+          </li>
+          <li>
+            Re-verification is only as strong as the command. An unpinned project re-runs the worker's own choice.
+          </li>
+          <li>Two auto-landing lanes exist. Both are opt-in, and neither can land on the default branch.</li>
+          <li>
+            The records are not tamper-evident: no hash chain, files owned by your user. The decision log is rotated,
+            never deleted, and its readers show only the newest two files.
+          </li>
+          <li>The Claude Code hook and the ACP governor judge and record. Neither confines anything.</li>
+          <li>With a hosted model, your prompts and code go to that provider.</li>
+          <li>Agents still make logic mistakes that pass your tests. Approval is a person reading a diff.</li>
+          <li>A dependency a run installs from an allowed registry runs inside the sandbox with the run's network.</li>
+          <li>One operator, one machine, one maintainer: there is no multi-user separation.</li>
+        </ul>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="report" band eyebrow="Disclosure" title="Reporting a vulnerability" lead="A hole in any of these layers is a security bug even if no data was touched.">
+    <div class="grid grid-2 top">
+      <div class="grid prose-width">
+        <p>
+          Email <a class="inline-link" href={`mailto:${SECURITY_EMAIL}?subject=${encodeURIComponent(SECURITY_TAG)}`}>{SECURITY_EMAIL}</a>
+          with <code>{SECURITY_TAG}</code> in the subject. Please do not open a public issue for anything exploitable.
+        </p>
+        <p>Include what you can of:</p>
+        <ul class="plain-list">
+          <li>the skep version (<code>skep --version</code>) and the OS and sandbox backend (<code>skep doctor</code> output)</li>
+          <li>
+            the boundary affected: sandbox escape, network-allowlist bypass, worker git mutation, approval bypass,
+            landing without approval, secret leakage
+          </li>
+          <li>reproduction steps or a failing test</li>
+        </ul>
+        <p>
+          You will get an acknowledgment within a week. Fixes land as ordinary versioned fixes with a test that
+          proves the failure path stays closed.
+        </p>
+      </div>
+      <div class="grid">
+        <Callout kind="note" title="Not a vulnerability">
+          A report that a locally configured policy is permissive, for example an operator who allowed
+          <code>*</code> for the network, is configuration feedback. The engine doing what the operator told it to do
+          is working as designed.
+        </Callout>
+        <p class="row">
+          <a class="link-arrow" href={`${GH_URL}/blob/main/SECURITY.md`}>SECURITY.md</a>
+          <a class="link-arrow" href="/docs/sandboxing.html">Sandboxing reference</a>
+          <a class="link-arrow" href="/docs/invariants.html">The invariants</a>
+        </p>
+      </div>
+    </div>
+  </Section>
 </Base>
+
+<style>
+  /* Nested single-column grids keep their rows together when a sibling is taller. */
+  .grid {
+    align-content: start;
+  }
+  .top {
+    align-items: start;
+  }
+  .split {
+    display: grid;
+    gap: var(--s-6);
+    align-items: start;
+  }
+  .split > * {
+    min-width: 0;
+  }
+  @media (min-width: 1000px) {
+    .split {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  .after-grid {
+    margin-top: var(--s-5);
+  }
+  .plain-list {
+    display: grid;
+    gap: var(--s-3);
+    margin: 0;
+    padding-left: var(--s-5);
+  }
+  .plain-list li::marker {
+    color: var(--text-faint);
+  }
+  .plain-list strong {
+    color: var(--text-bright);
+  }
+  :global(.callout) .plain-list,
+  :global(.card) .plain-list {
+    gap: var(--s-2);
+    padding-left: var(--s-4);
+  }
+  .inline-link {
+    color: var(--green);
+    font-weight: 600;
+  }
+  .inline-link:hover {
+    color: var(--orange-soft);
+  }
+  code {
+    color: var(--text-soft);
+    overflow-wrap: anywhere;
+  }
+</style>
