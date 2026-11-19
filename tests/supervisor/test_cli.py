@@ -3139,3 +3139,34 @@ def test_run_summary_names_an_unavailable_re_verify(tmp_path: Path) -> None:
         "  verification: unavailable — re-verify (G10) could not run, NOT CONFIRMED"
         " — worker recorded no verification command"
     )
+
+
+def test_run_summary_never_claims_a_check_ran_when_the_install_failed(tmp_path: Path) -> None:
+    """v127 council round 7 (I8): a failed dependency install stores the
+    INSTALLER's exit code beside the verify command, which never ran — the
+    line must say what happened, never "re-ran npm test → exit 1"."""
+    from skep.supervisor.cli_cmds import _verification_lines, build_config
+
+    config = build_config(tmp_path / "home", None)
+    config.worktrees_root.mkdir(parents=True, exist_ok=True)
+    task = mint_task(workspace=config.worktrees_root / "task-1", instructions="Fix it.")
+    store = RunStore(config.db_path)
+    try:
+        store.create_run(task, repo=tmp_path / "repo", ref=None, execution_mode="workspace")
+        store.record_reverification(
+            task.task_id,
+            outcome="unavailable",
+            worker_outcome="passed",
+            confirmed=False,
+            commands=["npm test"],
+            exit_codes=[1],
+            detail="could not prime the baseline Node dependencies (yarn install exited 1); "
+            "the verification command was not run\n--- install output (tail) ---",
+        )
+        record = store.get_run(task.task_id)
+    finally:
+        store.close()
+    assert record is not None
+    line = _verification_lines(config, record)[0]
+    assert "re-ran" not in line
+    assert line.endswith("the verification command was not run")

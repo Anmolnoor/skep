@@ -1736,3 +1736,18 @@ def test_a_uv_pin_behind_env_is_primed(
         "sync",
         "run",
     ]
+
+
+def test_the_corepack_hint_matches_what_real_corepack_prints_offline() -> None:
+    """v127 council round 7: with a read-only COREPACK_HOME, real corepack
+    0.34.5 says "Failed to create cache directory" for an uncached version,
+    not the network message — the hint must fire on that text too."""
+    from skep.supervisor.reverify import _corepack_missing
+
+    real = "Internal Error: Failed to create cache directory (/home/u/.cache/node/corepack/v1)"
+    hint = _corepack_missing("yarn install --frozen-lockfile", real, "yarn@1.22.22")
+    assert hint == (
+        "yarn via corepack is not installed on this host "
+        "(run `corepack prepare yarn@1.22.22 --activate`)"
+    )
+    assert _corepack_missing("yarn install", "some other failure", None) == ""

@@ -1061,7 +1061,9 @@ def _verification_lines(config: SupervisorConfig, record: RunRecord) -> list[str
         verdict = "unavailable — re-verify (G10) could not run, NOT CONFIRMED"
     else:
         verdict = "NOT CONFIRMED by re-verify (G10)"
-    if rv.exit_codes:
+    # Round 7 (I8): only a passed/failed outcome means the pin itself ran; a
+    # failed install stores the INSTALLER's exit code beside it.
+    if rv.exit_codes and rv.outcome in ("passed", "failed"):
         how = f"re-ran {'; '.join(rv.commands)} → exit {', '.join(map(str, rv.exit_codes))}"
     else:
         how = rv.detail.splitlines()[0] if rv.detail else "no command re-ran"

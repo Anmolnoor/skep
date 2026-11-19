@@ -223,7 +223,11 @@ def _corepack_missing(install: str, output: str, package_manager: object) -> str
     """Why an install failed when corepack (offline) had no cached copy of the
     package manager to run, with the one command that fixes it; empty for
     any other failure."""
-    if "Network access disabled by the environment" not in output:
+    # Round 7: a read-only COREPACK_HOME makes real corepack (0.34) say it
+    # cannot create its cache dir for an uncached version; a writable one
+    # without network says the network line.
+    offline = ("Network access disabled by the environment", "Failed to create cache directory")
+    if not any(text in output for text in offline):
         return ""
     tool = install.split()[0]
     pinned = isinstance(package_manager, str) and package_manager.startswith(f"{tool}@")
