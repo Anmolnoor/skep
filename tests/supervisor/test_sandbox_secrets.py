@@ -842,3 +842,41 @@ def test_the_relay_secret_exists_before_any_mask_list_is_built(
         sandbox.write_profile(tmp_path / "p.sb", workspace=workspace, skep_home=skep_home)
     assert secret.resolve() in seen[0]
     assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+
+
+def test_seatbelt_denies_a_store_wal_that_does_not_exist_yet(
+    fake_homes: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v127-F6 review (I11): the mask list keeps only paths that exist, but
+    Seatbelt denies by literal path — so a masked profile names the live
+    store and its WAL/SHM even before serve creates them. The LLM worker's
+    profile still reads them."""
+    _home, skep_home = fake_homes
+    monkeypatch.setattr(
+        sandbox,
+        "require_usable",
+        lambda backend=None: sandbox.SandboxAvailability(True, backend="seatbelt"),
+    )
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    sup = (skep_home / "supervisor").resolve()
+    late = [
+        sup / n for n in ("supervisor.sqlite3", "supervisor.sqlite3-wal", "supervisor.sqlite3-shm")
+    ]
+    assert not any(p.exists() for p in late)
+    masked = sandbox.write_profile(tmp_path / "m.sb", workspace=workspace, skep_home=skep_home)
+    lines = masked.read_text(encoding="utf-8").splitlines()
+    for path in late:
+        assert f'(deny file-read* (literal "{path}"))' in lines
+    worker = sandbox.write_profile(
+        tmp_path / "w.sb", workspace=workspace, skep_home=skep_home, worker_llm_key=True
+    )
+    assert not any(str(p) in worker.read_text(encoding="utf-8") for p in late)
+
+
+def test_the_retired_store_names_have_one_home() -> None:
+    from skep import status
+    from skep.supervisor import store
+
+    assert "runs.db" in store.RETIRED_STORE_FILES
+    assert not hasattr(status, "_RETIRED_STORE_FILES")

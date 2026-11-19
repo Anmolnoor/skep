@@ -572,6 +572,17 @@ _SCHEDULE_HEALTH_WINDOW = 20
 # health failure event, but never counts toward auto-disable — fixing the key
 # must resume the schedule, not find it disabled.
 PROVIDER_BLOCKED_STATE = "provider_blocked"
+# v111-F5: store files from retired layouts, relative to the skep home. Each
+# migration left its sqlite behind silently; two independent investigations
+# (doctor's own memory check pre-F2, and the 2026-08-12 forensics session)
+# opened a dead store first. Doctor names them; every sandbox masks them.
+RETIRED_STORE_FILES = (
+    "runs.db",
+    "skep.db",
+    "store.sqlite3",
+    "supervisor.sqlite3",
+    "supervisor/runs.db",
+)
 
 
 def schedule_state_ok(state: str) -> bool:

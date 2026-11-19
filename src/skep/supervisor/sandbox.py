@@ -38,6 +38,7 @@ from urllib.parse import urlparse
 
 from .. import landlock
 from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, other_homes
+from .store import RETIRED_STORE_FILES
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 BUBBLEWRAP = "bwrap"
@@ -348,8 +349,10 @@ def available() -> bool:
 # and its WAL masked — it holds every chat and run instruction — and nobody
 # reads the backup dirs or a retired layout's store. Checked when the profile is
 # built, so a secret file created mid-run is not covered (relay-secret is
-# made before the list, ES-F264) — nor a store WAL/SHM that appears after it
-# (bwrap binds only paths that exist; serve normally holds them open).
+# made before the list, ES-F264) — nor, under bwrap/podman, a store WAL/SHM
+# that appears after it (they mask only paths that exist; serve normally
+# holds them open). Seatbelt denies by literal path, so write_profile names
+# the live store and its WAL/SHM whether or not they exist yet.
 # W33: the engine logins (~/Library/Keychains, ~/.claude/.credentials.json,
 # ~/.codex/auth.json) are masked too — each external engine's config dir is
 # redirected per run and a dispatch without its auth env is refused (NO AUTH
@@ -499,11 +502,9 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
             if p.name not in readable and any(fnmatch(p.name, pat) for pat in SKEP_SECRET_NAMES)
         )
     # v127-F6: the store, its backups and the retired layouts' stores
-    from ..status import _RETIRED_STORE_FILES
-
     live_store = set(_LIVE_STORE_FILES) if worker_llm_key else set()
     candidates += [skep_home / "backups", skep_home / "archive"]
-    candidates += [skep_home / rel for rel in _RETIRED_STORE_FILES]
+    candidates += [skep_home / rel for rel in RETIRED_STORE_FILES]
     for root in (skep_home, supervisor):
         if root.is_dir():
             candidates += sorted(
@@ -1072,6 +1073,9 @@ def write_profile(
     # SKEP_HOME placed under $TMPDIR. Each run's TMPDIR is already private,
     # inside its workspace (dispatch/reverify/diagnose/fast lane set it).
     writable_roots = [workspace, *extra_writable]
+    if not worker_llm_key:  # v127-F6: a literal deny holds before the file exists
+        live = [(skep_home / "supervisor" / name).resolve() for name in _LIVE_STORE_FILES]
+        read_denied = list(dict.fromkeys([*read_denied, *live]))
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(
         build_profile(

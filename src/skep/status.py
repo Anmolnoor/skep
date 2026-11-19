@@ -15,6 +15,7 @@ from typing import Any
 from .profile import PersonalProfile, load_profile, profile_path
 from .supervisor.sandbox import availability as sandbox_availability
 from .supervisor.sandbox import socket_gap
+from .supervisor.store import RETIRED_STORE_FILES
 
 _STALE_PENDING_DAYS = 7
 
@@ -354,18 +355,6 @@ def _phone_flow_advisories(home: Path) -> list[str]:
     return lines
 
 
-# v111-F5: store files from retired layouts. Each migration left its sqlite
-# behind silently; two independent investigations (doctor's own memory check
-# pre-F2, and the 2026-08-12 forensics session) opened a dead store first.
-_RETIRED_STORE_FILES = (
-    "runs.db",
-    "skep.db",
-    "store.sqlite3",
-    "supervisor.sqlite3",
-    "supervisor/runs.db",
-)
-
-
 def _model_truth_advisories(home: Path) -> list[str]:
     """v115-F5: the daemon's ``llm_default_model`` setting and the registry's
     active profile both say which model runs. The field had the registry a
@@ -423,7 +412,7 @@ def _legacy_key_advisories(home: Path) -> list[str]:
 
 def _stale_store_advisories(home: Path) -> list[str]:
     """v111-F5: name the retired store files no current code reads (I8)."""
-    stale = [rel for rel in _RETIRED_STORE_FILES if (home / rel).is_file()]
+    stale = [rel for rel in RETIRED_STORE_FILES if (home / rel).is_file()]
     if not stale:
         return []
     listed = ", ".join(str(home / rel) for rel in stale)
