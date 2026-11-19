@@ -149,12 +149,13 @@ def _write_patch(capabilities: CapabilityRegistry, patch_path: Path) -> bool:
     return bool((diff.output or "").strip())
 
 
-def _patch_file_count(capabilities: CapabilityRegistry) -> int:
-    """v127-F3 (I8): the files the patch changes — git.diff against the
-    startup baseline, not HEAD (a granted git.commit moves HEAD) — so a
-    shell-run edit such as a lockfile bump is counted, not just tool writes."""
-    diff = capabilities.invoke("git.diff", {}).output or ""
-    return sum(1 for line in diff.splitlines() if line.startswith("diff --git "))
+def _patch_file_count(patch_path: Path) -> int:
+    """v127-F3 (I8): the files the patch changes, counted from the patch
+    ``_write_patch`` wrote — git.diff against the startup baseline, not HEAD
+    (a granted git.commit moves HEAD) — so a shell-run edit such as a
+    lockfile bump is counted, not just tool writes."""
+    text = patch_path.read_text(encoding="utf-8")
+    return sum(1 for line in text.splitlines() if line.startswith("diff --git "))
 
 
 def _resume_checkpoint_artifact(
@@ -2186,7 +2187,9 @@ def _apply_llm_tool_plan(
     )
 
     patch_path = workspace / ".artifacts" / f"{task.task_id}.patch"
-    if verification_result is not None and _write_patch(capabilities, patch_path):
+    # Written even without a verify (a failed run command): the summary
+    # counts from it; only a verified run ships it as the patch artifact.
+    if _write_patch(capabilities, patch_path) and verification_result is not None:
         artifacts.append(
             Artifact(
                 kind="patch",
@@ -2207,7 +2210,7 @@ def _apply_llm_tool_plan(
         total=len(plan.steps),
         verify_word=verify_word,
         verification_command=verification_command,
-        changed=_patch_file_count(capabilities),
+        changed=_patch_file_count(patch_path),
         skipped=skipped,
     )
     if status is not TaskState.COMPLETED:

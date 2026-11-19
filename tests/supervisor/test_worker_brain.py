@@ -331,9 +331,20 @@ def _shell_write(name: str) -> dict[str, Any]:
 def test_a_shell_run_edit_is_counted(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from skep.workers.capabilities import CapabilityRegistry
+
+    diffs: list[int] = []
+    real_diff = CapabilityRegistry._git_diff
+
+    def counted(self: Any) -> Any:
+        diffs.append(1)
+        return real_diff(self)
+
+    monkeypatch.setattr(CapabilityRegistry, "_git_diff", counted)
     result = _run_tool_plan(repo, tmp_path, monkeypatch, [_shell_write("uv.lock")])
     assert "changed 1 file(s)" in result.summary, result.summary
     assert result.changed_files == []  # reverify's field stays the tool-write list
+    assert len(diffs) == 1  # counted from the patch already written, no second diff
 
 
 def test_a_granted_commit_does_not_hide_files(
