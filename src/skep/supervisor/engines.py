@@ -120,7 +120,11 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         # token. Names only (G2); unset vars are inert allowlist entries.
         env_vars=("USER", "LOGNAME", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
         auth_env=("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
-        toolchain_env=(("CLAUDE_CONFIG_DIR", "claude"),),
+        # v127-T1 (trial V02): Claude Code's Bash tool ignores TMPDIR and makes
+        # its per-session dir under /tmp/claude-<uid>, outside the wall (EPERM
+        # on every shell command); CLAUDE_CODE_TMPDIR moves it into the run's
+        # in-wall tmp, the same dir as TMPDIR.
+        toolchain_env=(("CLAUDE_CONFIG_DIR", "claude"), ("CLAUDE_CODE_TMPDIR", "tmp")),
         about=(
             "Claude Code, headless (--print). Confined by the sandbox, not the capability layer."
         ),

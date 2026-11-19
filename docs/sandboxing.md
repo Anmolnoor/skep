@@ -36,7 +36,8 @@ writable roots back as writable:
 Shared temp dirs (`/tmp`, `/var/folders`) are not writable, and a run whose
 skep home lies inside a writable root is refused. So every temp variable a
 run's tools read points inside the workspace: `TMPDIR`, zsh's `TMPPREFIX`,
-and on macOS `XDG_RUNTIME_DIR` (on Linux bubblewrap gives each run a private
+`CLAUDE_CODE_TMPDIR` for the `claude_code` engine (Claude Code's Bash tool
+ignores `TMPDIR`), and on macOS `XDG_RUNTIME_DIR` (on Linux bubblewrap gives each run a private
 `/tmp` instead).
 
 This blocks writes outside the workspace/results boundary. Reads are open so

@@ -474,11 +474,15 @@ def test_toolchain_env_resolves_engine_declarations(tmp_path: Path) -> None:
     # not $TMPDIR — a prefix inside the in-wall TMPDIR, not a directory.
     assert Path(env["TMPPREFIX"]) == Path(env["TMPDIR"]) / "zsh"
     assert not Path(env["TMPPREFIX"]).exists()
+    # v127-T1 (trial V02): Claude Code's Bash tool ignores TMPDIR and makes its
+    # per-session dir under /tmp/claude-<uid>, outside the wall.
+    assert env["CLAUDE_CODE_TMPDIR"] == env["TMPDIR"]
     # v127-A0 trial fix (V01): XDG_RUNTIME_DIR is the macOS wall's other /tmp door.
     assert env.get("XDG_RUNTIME_DIR") == in_wall_tmp_env(Path(env["TMPDIR"])).get("XDG_RUNTIME_DIR")
 
     builtin = _toolchain_env(workspace, resolve_engine(None), cache_root)
     assert "CLAUDE_CONFIG_DIR" not in builtin
+    assert "CLAUDE_CODE_TMPDIR" not in builtin
     assert set(builtin) == {
         "npm_config_cache",
         "UV_CACHE_DIR",
