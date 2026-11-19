@@ -37,6 +37,15 @@ document.addEventListener('click', async (event) => {
   }, 1400);
 });
 
+// ---- the small-screen menu (a native <details>): Escape closes it and hands focus back ----
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  const menu = document.querySelector('.mobile-menu[open]');
+  if (!menu) return;
+  menu.open = false;
+  menu.querySelector('summary').focus();
+});
+
 // ---- search: Pagefind's component UI, loaded on the first open ----
 let searchReady;
 function loadSearch() {

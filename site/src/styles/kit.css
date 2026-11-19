@@ -600,8 +600,14 @@ main > .section:first-child:has(> .wrap > .section-head > h1) {
   inset: 0;
   z-index: -1;
   background: rgba(7, 8, 10, 0.94);
-  backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
+}
+/* The unprefixed property sits in a rule of its own (`:where(*)` adds no
+   specificity): written next to the prefixed one, the build's CSS minifier keeps
+   only one of the pair, and Chromium and Firefox then compute no blur at all.
+   Check dist/_astro/*.css for both after a build. */
+.site-header:where(*)::before {
+  backdrop-filter: blur(18px);
 }
 .brand {
   display: flex;
@@ -622,8 +628,8 @@ main > .section:first-child:has(> .wrap > .section-head > h1) {
   color: var(--text-muted);
 }
 .site-nav a {
-  padding: 23px 0;
-  border-bottom: 2px solid transparent;
+  position: relative;
+  padding: var(--s-1) 0;
   white-space: nowrap;
   transition: color var(--dur-1) ease;
 }
@@ -631,9 +637,19 @@ main > .section:first-child:has(> .wrap > .section-head > h1) {
   color: var(--text-hi);
 }
 .site-nav a[aria-current='page'] {
-  border-bottom-color: var(--orange);
   font-weight: 600;
   color: var(--orange);
+}
+/* The current page's rule sits on the header's bottom edge. It is a pseudo-element,
+   so the link's own box (and its focus ring) is the size of its text, not of the header. */
+.site-nav a[aria-current='page']::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: calc((100% - var(--header-h)) / 2);
+  left: 0;
+  height: 2px;
+  background: var(--orange);
 }
 .header-actions {
   display: flex;
