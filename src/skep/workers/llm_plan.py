@@ -643,41 +643,31 @@ def _repository_snapshot(workspace: Path, instructions: str = "") -> str:
     lines = ["Tracked files:", *[f"- {path}" for path in files[:120]]]
     # v127-F2: a file the task names goes first, on its own budget, its head
     # when over the per-file cap — the 8 KB skip once hid the very .mdx a
-    # run was asked to edit, and its edit missed.
+    # run was asked to edit, and its edit missed. Other files over the cap
+    # are skipped whole.
     named = [path for path in files if _names_path(instructions, path)]
-    remaining = _NAMED_SNAPSHOT_BYTES
-    for relative in named:
-        path = workspace / relative
-        try:
-            if not tracked_file_readable(workspace, path):
+    rest = [path for path in files if path not in named][:40]
+    for group, remaining, heads in (
+        (named, _NAMED_SNAPSHOT_BYTES, True),
+        (rest, 18_000, False),
+    ):
+        for relative in group:
+            path = workspace / relative
+            try:
+                if not tracked_file_readable(workspace, path) or (
+                    not heads and path.stat().st_size > _SNAPSHOT_FILE_BYTES
+                ):
+                    continue
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
                 continue
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        if len(text) > _SNAPSHOT_FILE_BYTES:
-            text = text[:_SNAPSHOT_FILE_BYTES] + "\n(file head only; read the rest)"
-        block = f"\n--- {relative} ---\n{text}"
-        if len(block) > remaining:
-            break
-        lines.append(block)
-        remaining -= len(block)
-    remaining = 18_000
-    for relative in [path for path in files if path not in named][:40]:
-        path = workspace / relative
-        try:
-            if (
-                not tracked_file_readable(workspace, path)
-                or path.stat().st_size > _SNAPSHOT_FILE_BYTES
-            ):
-                continue
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        block = f"\n--- {relative} ---\n{text}"
-        if len(block) > remaining:
-            break
-        lines.append(block)
-        remaining -= len(block)
+            if len(text) > _SNAPSHOT_FILE_BYTES:
+                text = text[:_SNAPSHOT_FILE_BYTES] + "\n(file head only; read the rest)"
+            block = f"\n--- {relative} ---\n{text}"
+            if len(block) > remaining:
+                break
+            lines.append(block)
+            remaining -= len(block)
     return "\n".join(lines)
 
 
