@@ -1,0 +1,183 @@
+---
+// The design system on one page, for reviewers and page authors. noindex, not
+// in the nav. Sample text here is filler that describes the component; it is
+// not product copy and no page should quote it.
+import Base from '../layouts/Base.astro';
+import Button from '../components/Button.astro';
+import Callout from '../components/Callout.astro';
+import Card from '../components/Card.astro';
+import Chip from '../components/Chip.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Diff from '../components/Diff.astro';
+import Eyebrow from '../components/Eyebrow.astro';
+import Icon from '../components/Icon.astro';
+import Ledger from '../components/Ledger.astro';
+import Search from '../components/Search.astro';
+import Section from '../components/Section.astro';
+import Table from '../components/Table.astro';
+import Terminal from '../components/Terminal.astro';
+import BlurText from '../components/reactbits/BlurText.tsx';
+import CountUp from '../components/reactbits/CountUp.tsx';
+import DecryptedText from '../components/reactbits/DecryptedText.tsx';
+import RotatingText from '../components/reactbits/RotatingText.tsx';
+
+const transcript = `
+$ sample-command --flag value
+# a note line starts with "# "
+first line of output
+second line of output
+`;
+const patch = `
+@@ -1,4 +1,5 @@
+ def greet(name):
+-    return "hello " + name
++    greeting = "hello"
++    return f"{greeting} {name}"
+
+`;
+const rows = [
+  { when: '00:00:01', what: 'sample.read', detail: 'rule: sample layer', verdict: 'allow' as const },
+  { when: '00:00:02', what: 'sample.write', detail: 'rule: sample layer', verdict: 'ask' as const },
+  { when: '00:00:03', what: 'sample.push', detail: 'rule: floor', verdict: 'deny' as const },
+  { when: '00:00:04', what: 'sample.verify', verdict: 'ok' as const, label: 'confirmed' },
+];
+const swatches = [
+  '--bg', '--bg-alt', '--bg-card', '--bg-panel', '--bg-chip', '--bg-hover',
+  '--line-card', '--line-strong', '--line-hover',
+  '--orange', '--orange-soft', '--green', '--red', '--yellow',
+];
+const texts = ['--text-bright', '--text', '--text-mid', '--text-muted', '--text-dim', '--text-faint'];
+const spaces = [4, 8, 12, 16, 24, 32, 48, 64, 96];
+---
+
+<Base title="Kit" description="The skep site design system on one page." noindex>
+  <Section eyebrow="Design system" title="Kit" lead="Every token and component the pages are built from. See site/README.md for props.">
+    <div class="row">
+      <a class="link-arrow" href="#tokens">Tokens</a>
+      <a class="link-arrow" href="#type">Type</a>
+      <a class="link-arrow" href="#components">Components</a>
+      <a class="link-arrow" href="#panels">Panels</a>
+      <a class="link-arrow" href="#motion">Motion</a>
+    </div>
+  </Section>
+
+  <Section id="tokens" band eyebrow="Tokens" title="Colour, space, radius">
+    <div class="stack">
+      <div class="grid grid-4">
+        {
+          swatches.map((token) => (
+            <div class="card" style="padding: var(--s-3)">
+              <div style={`height: 48px; border: 1px solid var(--line-strong); border-radius: var(--r-chip); background: var(${token})`} />
+              <code class="t-small c-mut">{token}</code>
+            </div>
+          ))
+        }
+      </div>
+      <div class="card">
+        {texts.map((token) => <p style={`color: var(${token})`}><code>{token}</code>: text on a panel, AA or better</p>)}
+        <p class="c-mut"><code>--text-ghost</code> and <code>--text-void</code> are for borders and rules only, never text.</p>
+      </div>
+      <div class="row" style="align-items: flex-end">
+        {
+          spaces.map((px, index) => (
+            <div class="t-small c-mut" style="text-align: center">
+              <div style={`width: var(--s-${index + 1}); height: var(--s-${index + 1}); background: var(--orange); border-radius: 2px; margin: 0 auto var(--s-1)`} />
+              {px}
+            </div>
+          ))
+        }
+        <div class="chip" style="border-radius: var(--r-chip)">chip 6</div>
+        <div class="chip" style="border-radius: var(--r-card); padding: 8px 12px">card 10</div>
+        <div class="chip" style="border-radius: var(--r-panel); padding: 12px 16px">panel 12</div>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="type" eyebrow="Type" title="Seven sizes, no others">
+    <div class="stack">
+      <p class="t-display">Display</p>
+      <p class="t-h2">Heading two</p>
+      <p class="t-h3">Heading three</p>
+      <p class="t-lead">Lead: one per section, under the heading.</p>
+      <p class="t-body">Body: the default size for running text, at most 72 characters wide.</p>
+      <p class="t-small c-mut">Small: captions, table cells, metadata.</p>
+      <Eyebrow>Micro: eyebrow</Eyebrow>
+      <Eyebrow tone="green">Micro: green</Eyebrow>
+    </div>
+  </Section>
+
+  <Section id="components" band eyebrow="Components" title="Buttons, chips, cards, callouts">
+    <div class="stack">
+      <div class="row">
+        <Button href="#components" icon="arrow-right">Primary</Button>
+        <Button href="#components" variant="ghost">Ghost</Button>
+        <Button href="#components" size="sm">Primary small</Button>
+        <Button href="#components" variant="ghost" size="sm" icon="github">Ghost small</Button>
+        <Search />
+      </div>
+      <div class="row">
+        <Chip kind="allow" />
+        <Chip kind="ask" />
+        <Chip kind="deny" />
+        <Chip kind="ok">confirmed</Chip>
+        <Chip kind="risk">contradicted</Chip>
+        <Chip kind="limit">not sandboxed</Chip>
+      </div>
+      <div class="row c-mut">
+        <Icon name="shield-check" size={20} /><Icon name="terminal" size={20} /><Icon name="git-branch" size={20} />
+        <Icon name="github" size={20} /><Icon name="skep" size={20} label="skep mark" />
+      </div>
+      <div class="grid grid-3">
+        <Card title="Card with an icon" icon="box">A card holds one idea in a sentence or two.</Card>
+        <Card title="Green tone" icon="shield-check" tone="green">The tone colours the icon badge.</Card>
+        <Card title="Card as a link" icon="arrow-up-right" href="#components">With an href the whole card is one link.</Card>
+      </div>
+      <div class="grid grid-2">
+        <Callout kind="limit" title="Limit">A limit says what the thing above does not do.</Callout>
+        <Callout kind="risk" title="Risk">A risk callout marks something that can hurt.</Callout>
+        <Callout kind="ok" title="Verified">An ok callout marks something checked.</Callout>
+        <Callout kind="note">A note has no title and no colour.</Callout>
+      </div>
+      <Table
+        caption="Table with head and rows props"
+        head={['Kind', 'Colour', 'Used for']}
+        rows={[
+          ['allow / ok', 'green', 'a verdict that lets the action through, or a check that passed'],
+          ['ask / limit', 'yellow', 'a verdict that waits for a person, or a stated limit'],
+          ['deny / risk', 'red', 'a verdict that stops the action, or a risk'],
+        ]}
+        rowHeaders
+      />
+    </div>
+  </Section>
+
+  <Section id="panels" eyebrow="Panels" title="Terminal, diff, ledger, code">
+    <div class="grid grid-2">
+      <Terminal code={transcript} title="terminal" captured="sample text, not real output" caret />
+      <Diff code={patch} file="sample.py" landed="sample/branch ← patch" stage />
+      <Ledger rows={rows} title="sample records" captured="sample rows, not real output" stage />
+      <CodeBlock code={`$ sample-command install\n$ sample-command run --flag`} lang="sh" title="Install" step={1} />
+    </div>
+  </Section>
+
+  <Section id="motion" band eyebrow="Motion" title="The four text animations" lead="Each is a React island. The text below is in the server HTML in its final state; with JavaScript off or reduced motion on it never moves.">
+    <div class="grid grid-2">
+      <Card title="DecryptedText: a verdict resolving">
+        <p class="t-h3 mono c-green"><DecryptedText client:visible text="confirmed" animateOn="view" sequential speed={40} /></p>
+      </Card>
+      <Card title="CountUp: a number changing">
+        <p class="t-h3 mono"><CountUp client:visible to={1234} separator="," duration={1.2} /></p>
+      </Card>
+      <Card title="BlurText: a section h2 (never the h1)">
+        <BlurText client:visible text="A heading that resolves once" tag="h2" className="t-h3" animateBy="words" delay={80} />
+      </Card>
+      <Card title="RotatingText: engine names">
+        <p class="t-h3 mono"><RotatingText client:visible texts={['first', 'second', 'third']} rotationInterval={2200} /></p>
+        <p class="t-small">Visible twin of the list: first, second, third.</p>
+      </Card>
+    </div>
+    <div class="reveal card" style="margin-top: var(--s-4)">
+      <p><code>.reveal</code>: a CSS scroll reveal (opacity and 16px), where the browser has view timelines.</p>
+    </div>
+  </Section>
+</Base>

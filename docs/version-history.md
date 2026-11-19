@@ -2815,7 +2815,9 @@ claude-agent-acp replays the thread's history on it too — seven replayed
 calls, zero observed rows; then `git status` observed, `rm -rf build`
 forwarded to the human (allow once), `git push` floor-denied.
 
-## v1.2.0 — the ACP governor (2026-11-06)
+## v1.2.0 — the ACP governor (2026-11-09)
+
+Published 2026-11-09; the release commit is dated 2026-11-06.
 
 The `acp-governor` B0–B2 work above: `skep acp govern|doctor|install-hint`
 and `skep policy decisions`. Operator notes: a fresh home starts with
@@ -2916,7 +2918,9 @@ first — the governor answers from an approved baseline`; `onboard --check`'s
 engine v2 probe is ready only with every scope routed. The golden files
 re-froze with only the seeded switch list moving.
 
-## v1.2.1 — first-run: onboard onto a locked baseline (2026-11-09)
+## v1.2.1 — first-run: onboard onto a locked baseline (2026-11-09, never published; shipped in v1.4.1)
+
+Never tagged, released or uploaded: this work first shipped in v1.4.1 on 2026-11-16.
 
 The first-run O1, O2, O3 and O5 work above, as a patch release. What an
 operator sees:
@@ -3006,7 +3010,9 @@ run's remembered-approval resume keeps its narrowing and its chain. The
 operator's dependabot loop (Queen `operator` → worker `builder`) is pinned end
 to end with the fake worker; the live run is the operator's.
 
-## v1.3.0 — first-run: roles and delegation (2026-11-09)
+## v1.3.0 — first-run: roles and delegation (2026-11-09, never published; shipped in v1.4.1)
+
+Never tagged, released or uploaded: this work first shipped in v1.4.1 on 2026-11-16.
 
 The first-run O4, R1, R2 and R3 work above, as a minor release. What an
 operator sees:
@@ -3027,7 +3033,9 @@ operator sees:
 The four pre-1.2.1 template names are still accepted as aliases in 1.3.0
 (ADR 0056 open question 3 proposed retiring them here; not done in R3).
 
-## v1.4.0 — the edge sweep (2026-11-15)
+## v1.4.0 — the edge sweep (2026-11-15, never published; shipped in v1.4.1)
+
+Tagged 2026-11-15, but its release gate failed and nothing was published: this work shipped in v1.4.1 on 2026-11-16.
 
 1.3.0 was bumped but never tagged, so this is the first published release
 since 1.2.0 and carries both: the roles-and-delegation work above, and the
@@ -3059,7 +3067,9 @@ the landing path (#56–#90). What an operator sees:
 
 The four pre-1.2.1 template names are still accepted as aliases.
 
-## v1.4.1 — the release gate runs a real sandbox (2026-11-15)
+## v1.4.1 — the release gate runs a real sandbox (2026-11-16)
+
+Published 2026-11-16: the first release since 1.2.0, carrying the 1.2.1, 1.3.0 and 1.4.0 work above.
 
 The `v1.4.0` tag was pushed, but its release gate failed and nothing was
 published, so 1.4.1 is the published form of 1.4.0, with one fix to the gate.
