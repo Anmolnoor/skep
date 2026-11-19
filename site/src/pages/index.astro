@@ -254,7 +254,8 @@ const comparisons = [
         <Callout kind="limit" title="The check is as strong as the command you pin.">
           <p>
             If your tests do not prove the change, a confirmed run proves little. A project with no pin
-            falls back to the worker's own command (skep's own worker only; external agents are refused). If
+            falls back to the worker's own command (skep's own worker; a project run of an external agent is refused,
+            but a <code>--minimal</code> run skips that check and re-runs only <code>git diff --check</code>). If
             the sandbox cannot be built the outcome is unavailable: the command is not re-run unconfined. For
             a uv project, dependencies are installed with network access before the offline re-run.
           </p>

@@ -77,7 +77,10 @@ jobs:
       - id: source
         env:
           GH_TOKEN: ${{ github.token }}
-        run: echo "build_type=$(gh api "repos/${{ github.repository }}/pages" --jq .build_type || echo unknown)" >> "$GITHUB_OUTPUT"
+        # A 404 (Pages off) prints its error body to stdout: keep it out of the output.
+        run: |
+          bt=$(gh api "repos/${{ github.repository }}/pages" --jq .build_type 2>/dev/null) || bt=unknown
+          echo "build_type=$bt" >> "$GITHUB_OUTPUT"
 
   deploy:
     name: deploy
