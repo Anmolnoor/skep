@@ -16,6 +16,7 @@ auto:<rule>`), so the audit trail always names what granted the autonomy.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from dataclasses import dataclass
 from fnmatch import fnmatch
@@ -82,25 +83,79 @@ VERIFIED_PATCH_RULE = AutoApprovalRule(name="verified-patch", require_pinned_ver
 # v127-F5: commands that pass whatever the patch says. A list of shapes seen in
 # the field (store's `git diff --check`, a worker's `true`, npm's placeholder
 # `echo "Error: no test specified"`), not a proof — so the word is
-# "known-vacuous", never "cannot fail".
-_VACUOUS_ARGV0 = frozenset({"true", ":", "exit", "test", "echo", "printf", "ls", "cat"})
-_VACUOUS_GIT = frozenset({"diff", "status", "log"})
+# "known-vacuous", never "cannot fail". G10 runs the pin through `/bin/sh -c`,
+# so the predicate reads it the way the shell will (round 2): a rule, not a
+# parser — any operator that can hide the exit code is refused outright, and a
+# chain joined only by `&&` is vacuous iff every segment is.
+_VACUOUS_ARGV0 = frozenset({"true", ":", "test", "[", "echo", "printf", "ls", "cat"})
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_MASKING_TOKENS = frozenset({"|", "||", ";", "&", "|&", ";;", ";&"})
+_GIT_OPTS_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+
+
+def _tokens(command: str) -> list[str] | None:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _masked(command: str) -> bool:
+    """An operator that can hide the exit code — at the top level or inside a
+    quoted string (``sh -c 'pytest || true'``). Redirects (``2>&1``) are fine."""
+    tokens = _tokens(command) or []
+    return (
+        any(mark in command for mark in ("`", "$(", "\n"))
+        or any(t in _MASKING_TOKENS for t in tokens)
+        or any(" " in t and _masked(t) for t in tokens)
+    )
+
+
+def _segment_vacuous(argv: list[str]) -> bool:
+    while argv and (os.path.basename(argv[0]) == "env" or _ASSIGNMENT.match(argv[0])):
+        argv = argv[1:]
+    if not argv:
+        return True
+    name = os.path.basename(argv[0])
+    if name in _SHELLS and len(argv) >= 3 and argv[1] in ("-c", "-lc"):
+        return known_vacuous_verify(argv[2]) is not None
+    if name == "exit":
+        return argv[1:] in ([], ["0"])
+    if name == "git":
+        i = 1
+        while i < len(argv) and argv[i].startswith("-"):
+            i += 2 if argv[i] in _GIT_OPTS_WITH_VALUE else 1
+        sub, rest = argv[i : i + 1], argv[i + 1 :]
+        if sub == ["diff"]:
+            return {r for r in rest if r.startswith("-") and r != "--"} <= {"--check"}
+        return sub in (["status"], ["log"])
+    return name in _VACUOUS_ARGV0
 
 
 def known_vacuous_verify(command: str) -> str | None:
     """Why ``command`` is a known-vacuous check, or None when it is not one."""
-    try:
-        argv = shlex.split(command)
-    except ValueError:
+    shown = command.strip()
+    tokens = _tokens(command)
+    if tokens is None:
         return None
-    if not argv:
+    if not tokens:
         return "an empty verify command is known-vacuous"
-    name = os.path.basename(argv[0])
-    if name in _SHELLS and len(argv) >= 3 and argv[1] == "-c":
-        return known_vacuous_verify(argv[2])
-    if name in _VACUOUS_ARGV0 or (name == "git" and argv[1:2] and argv[1] in _VACUOUS_GIT):
-        return f"`{command.strip()}` is a known-vacuous check (it passes whatever the patch does)"
+    if _masked(command):
+        return (
+            f"`{shown}` is known-vacuous for auto-landing: a shell operator can mask the "
+            "check's exit code"
+        )
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token == "&&":
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    if "no test specified" in command or all(_segment_vacuous(s) for s in segments):
+        return f"`{shown}` is a known-vacuous check (it passes whatever the patch does)"
     return None
 
 

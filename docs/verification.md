@@ -115,9 +115,15 @@ This catches common failures:
 - Re-verification is only as strong as the recorded command. If a worker records
   `true`, Skep can confirm only that `true` exits successfully. Such a run is
   never auto-landed: every auto-landing rule refuses a replay whose commands
-  are all known-vacuous (`true`, `:`, `exit 0`, `test`, `echo`, `printf`,
-  `ls`, `cat`, `git diff`/`status`/`log`, `sh -c` of those; empty), names it on
-  the run's `auto_apply_blocked` record, and leaves the patch for a human.
+  are all known-vacuous (`true`, `:`, `exit 0`, `test`/`[`, `echo`, `printf`,
+  `ls`, `cat`, `git diff` with no flags or only `--check`, `git status`,
+  `git log`, npm's `no test specified` placeholder, `sh`/`bash`/`zsh -c` of
+  those, any of those behind `env` or `KEY=value`; empty), names it on the
+  run's `auto_apply_blocked` record, and leaves the patch for a human. The pin
+  runs through `/bin/sh -c`, so a chain joined by `&&` is vacuous only when
+  every part is (`true && pytest` is a real check), and a pin containing an
+  operator that can hide the exit code (`||`, `;`, `|`, a background `&`,
+  backticks, `$(`) is refused for auto-landing outright.
   Known-vacuous is a list of shapes, not proof that any other command can fail.
   Project setup turns the maintain phase's auto-apply default off on a missing
   or known-vacuous pin, and refuses an explicit one.

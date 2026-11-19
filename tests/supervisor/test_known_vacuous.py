@@ -54,6 +54,33 @@ _VACUOUS = [
     "bash -c 'git diff --check'",
     "sh -c 'exit 0'",
     'echo "Error: no test specified" && exit 1',
+    # round 2: G10 runs the pin via `/bin/sh -c`, so the predicate reads it
+    # the way the shell will — `&&` chains, env prefixes, nested shells.
+    "true && echo ok",
+    "env FOO=1 true",
+    "FOO=1 BAR=2 git status",
+    "env true",
+    "bash -lc 'git status'",
+    "zsh -c true",
+    "[ -f README.md ]",
+    "git -C sub --no-pager diff",
+    "git -c core.pager=cat diff --check",
+    "git diff HEAD~1 -- src",
+    "git --no-pager log --oneline",
+    "exit",
+]
+
+# A shell operator that can hide the check's exit code: known-vacuous for
+# auto-landing whatever the command around it is.
+_MASKED = [
+    "uv run pytest || true",
+    "pytest; true",
+    "pytest | tee log.txt",
+    "pytest &",
+    "echo `pytest`",
+    "echo $(pytest)",
+    "sh -c 'pytest || true'",
+    "pytest\ntrue",
 ]
 
 _REAL = [
@@ -63,6 +90,15 @@ _REAL = [
     'grep -q "value = 1" existing.py',
     "sh -c 'uv run pytest'",
     "make check",
+    "echo hi && npm test",
+    "true && pytest",
+    "env FOO=1 pytest",
+    "exit 1",
+    "git diff --exit-code",
+    "git diff --quiet",
+    "git -C sub diff --exit-code",
+    "pytest 2>&1",
+    "pytest > out.txt",
 ]
 
 
@@ -72,6 +108,14 @@ def test_known_vacuous_commands_are_named(command: str) -> None:
     assert reason is not None
     assert "known-vacuous" in reason
     assert "can fail" not in reason
+
+
+@pytest.mark.parametrize("command", _MASKED)
+def test_a_shell_operator_that_can_mask_the_exit_code_is_known_vacuous(command: str) -> None:
+    reason = known_vacuous_verify(command)
+    assert reason is not None
+    assert "known-vacuous" in reason
+    assert "shell operator can mask the check's exit code" in reason
 
 
 @pytest.mark.parametrize("command", _REAL)
