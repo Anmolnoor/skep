@@ -34,31 +34,46 @@ and writes confined to the clean worktree.
 Because the replay has no network, Skep first installs the project's
 dependencies from the baseline's lockfile, then again from the patched lockfile
 when the patch changes it: `uv` projects (`uv.lock`) and Node projects whose
-pin starts with `node`, `npm`, `npx`, `pnpm` or `yarn` (`package-lock.json`,
-`pnpm-lock.yaml`, `yarn.lock`). Other ecosystems are not primed: their pin
+pin runs `node`, `npm`, `npx`, `pnpm` or `yarn` (`package-lock.json`,
+`pnpm-lock.yaml`, `yarn.lock`), including after `VAR=value`, `env` or another
+command (`cd web && npm test`). Other ecosystems are not primed: their pin
 re-runs only with what the host already has.
 
 **A patched lockfile is installed before anyone approves the patch.** That
 install never gets open network: it reaches the package registries alone
 (`pypi.org` and `files.pythonhosted.org` for uv; `registry.npmjs.org` and
-`registry.yarnpkg.com` for Node; plus any registry host the baseline lockfile
-already resolves from) through Skep's filtering proxy. Node installs run with
-lifecycle scripts off and corepack offline, and the shared Node cache is
-read-only while the patch's code runs. Before a patched Node lockfile is
-installed, Skep checks it: every package must resolve from those hosts with an
-integrity hash (npm, pnpm); no git, `github:`, URL, `user/repo` or out-of-tree
-`file:`/`link:` dependency, no workspace outside the repository, no change to
-`packageManager`, and no change to any `.npmrc`, `.yarnrc`, `.yarnrc.yml`,
-`.pnpmfile.cjs`, `.pnpmfile.mjs`, `pnpm-workspace.yaml`, `.yarn/` or the
-baseline's `yarn-path` target. A patch that fails the check is not installed
-and the replay is `unavailable`, with the reason. uv still runs a package's
-build step when the lockfile pins a source distribution; its network is the
-same registry-only proxy.
+`registry.yarnpkg.com` for Node; plus any registry or git host the baseline
+lockfile already resolves from) through Skep's filtering proxy, so a patched
+lockfile that names any other host fails to install. Node installs run with
+lifecycle scripts off and corepack offline. A patch that changes the package
+manager itself is not installed and the replay is `unavailable`, with the
+reason: a new `packageManager`, or any change to `.npmrc`, `.yarnrc`,
+`.yarnrc.yml`, `.pnpmfile.cjs`, `.pnpmfile.mjs`, `pnpm-workspace.yaml`,
+`.yarn/` or the baseline's `yarn-path` target.
+
+Registry-only holds only when the supervisor sandbox is on. With the sandbox
+off, the installers are only *told* to use the proxy (through their proxy
+environment); nothing stops a tool that ignores it, and the replay itself runs
+unconfined on the host.
+
+Known residual: uv still builds source distributions, and the project itself,
+during the prime and the re-prime. A build step from a patched lockfile or
+`pyproject.toml` therefore runs before approval, with the same registry-only
+network and write access to re-verify's dependency cache.
+
+The dependency caches live under the project's cache root
+(`~/.skep/cache/projects/<project>/`). A sandboxed worker writes only its
+`worker/` half. Re-verify primes from its `reverify/` half, which no worker's
+sandbox mounts (a worker in `workspace` mode has no sandbox, so this does not
+hold for it).
+The replay of the patch's own commands cannot write either: it reads the Node
+cache, gets a throwaway uv cache, and its packages are copies, not links into
+the cache.
 
 A `node` pin in a repository that declares dependencies but has no lockfile runs
 unprimed, and the detail says so; an `npm`, `npx`, `pnpm` or `yarn` pin there is
 `unavailable` ("no lockfile to prime from"). A patch that adds the first
-dependencies with a lockfile is primed from it (after the same check); without
+dependencies with a lockfile is primed from it (same rules); without
 one it is `unavailable`, never `failed`.
 
 ## Outcomes
