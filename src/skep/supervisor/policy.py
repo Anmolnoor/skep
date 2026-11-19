@@ -160,25 +160,36 @@ def _and_or_vacuous(tokens: list[str]) -> bool:
     return bool(vacuous)
 
 
+# Round 3: what an operator reads names no internals (known-vacuous, G10).
+PIN_HINT = (
+    'Pin the command that runs your tests: skep project setup <repo> --verify-command "<command>"'
+)
+
+
+def cannot_land_on(reason: str) -> str:
+    """``reason`` (a known-vacuous verdict) as the refusal an operator reads."""
+    return f"{reason}, so skep can't land a patch on it by itself. {PIN_HINT}"
+
+
 def known_vacuous_verify(command: str) -> str | None:
-    """Why ``command`` is a known-vacuous check, or None when it is not one."""
+    """Why ``command`` is a known-vacuous check, in plain words, or None when
+    it is not one."""
     shown = command.strip()
     tokens = _tokens(shown)
     if tokens is None:
         return None
     if any(t in _MASKING_TOKENS for t in tokens) or "`" in shown or "$(" in shown:
         return (
-            f"`{shown}` is known-vacuous for auto-landing: a shell operator can mask the "
-            "check's exit code"
+            f"`{shown}` can hide a failing exit code, so it passes whether or not the patch works"
         )
     while tokens and tokens[-1] in (";", "\n"):
         tokens.pop()
     cut = max((i + 1 for i, t in enumerate(tokens) if t in (";", "\n")), default=0)
     last = tokens[cut:]
     if not last:
-        return "an empty verify command is known-vacuous"
+        return "an empty check passes whether or not the patch works"
     if "no test specified" in " ".join(last) or _and_or_vacuous(last):
-        return f"`{shown}` is a known-vacuous check (it passes whatever the patch does)"
+        return f"`{shown}` passes whether or not the patch works"
     return None
 
 
@@ -374,17 +385,13 @@ def rule_block_reason(rule: AutoApprovalRule, ctx: AutoApprovalContext) -> str |
     if not any(known_vacuous_verify(c) is None for c in ctx.reverify_commands):
         why = (
             "; ".join(filter(None, (known_vacuous_verify(c) for c in ctx.reverify_commands)))
-            or "re-verification re-ran no command"
+            or "no check was re-run"
         )
-        return (
-            f"{why} — auto-landing needs a check that is not known-vacuous: pin one "
-            '(`skep project setup <repo> --verify-command "<command>"`); the patch is '
-            "still landable by hand"
-        )
+        return f"{cannot_land_on(why)}. The patch is still landable by hand"
     if ctx.pin_control_files:
         return (
-            f"the patch changes what the pinned check runs ({', '.join(ctx.pin_control_files)})"
-            " — G10 confirmed it with the patch's own test config, so a human reviews it; "
+            "the patch changes files that decide what the pinned check runs "
+            f"({', '.join(ctx.pin_control_files)}), so skep can't land it by itself; "
             "the patch is still landable by hand"
         )
     if rule.forbid_risk_flags and ctx.risk_flags:

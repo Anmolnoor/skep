@@ -26,7 +26,7 @@ from ...profile import load_profile, profile_path, run_personal_setup
 from ..autonomy import project_policy_dispatch_decision, run_request_resolved_decision
 from ..dispatch import auto_apply_decision
 from ..packs import PolicyPack, builtin_policy_packs, get_policy_pack
-from ..policy import known_vacuous_verify
+from ..policy import PIN_HINT, cannot_land_on, known_vacuous_verify
 from ..policy_layers import baseline_guard
 from ..projects import (
     PROJECT_STRATEGIES,
@@ -601,16 +601,11 @@ def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | 
     if not str(policy.get("verify_command") or "").strip():
         return (
             "unlocked=true needs a pinned verify_command: a patch lands without a "
-            "human only after G10 re-runs the project's own check (I2). Pin one "
-            "(--verify-command, or verify_command in policy_overrides)."
+            f"human only after skep re-runs the project's own check. {PIN_HINT}."
         )
     vacuous = known_vacuous_verify(str(policy.get("verify_command")))
     if vacuous is not None:
-        return (
-            f"unlocked=true needs a verify_command that is not known-vacuous: {vacuous}. "
-            "Pin the project's real check (--verify-command, or verify_command in "
-            "policy_overrides)."
-        )
+        return f"unlocked=true needs a real check: {cannot_land_on(vacuous)}."
     probe = sandbox_availability()
     if not probe.usable:
         return (
@@ -628,43 +623,29 @@ def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | 
     return None
 
 
-_PIN_HINT = (
-    'pin the project\'s real check (`skep project setup <repo> --verify-command "<command>"`, '
-    "or verify_command in policy_overrides) — until then patches land by approval"
-)
-
-
-def _pin_problem(policy: dict[str, Any]) -> str | None:
-    """v127-F5: why the project's pin cannot carry an auto-landing — missing
-    or known-vacuous — or None."""
-    pin = str(policy.get("verify_command") or "").strip()
-    return known_vacuous_verify(pin) if pin else "the project pins no verify_command"
-
-
-def auto_apply_block_reason(policy: dict[str, Any]) -> str | None:
-    """v127-F5: why a request that itself turns ``auto_apply_verified_patch``
-    on may not be saved, or None (I9: refused when asked, not at landing)."""
-    problem = _pin_problem(policy) if policy.get("auto_apply_verified_patch") is True else None
-    return problem and f"auto_apply_verified_patch=true needs a real check: {problem}; {_PIN_HINT}."
-
-
-def _coerce_auto_apply_default(policy: dict[str, Any], notes: list[str]) -> None:
-    """v127-F5: auto-apply the request did not turn on (a phase default, a
-    stored value) falls to false on a missing or known-vacuous pin, with a
-    note — so a save of other keys on `store` still works, by approval."""
-    problem = _pin_problem(policy) if policy.get("auto_apply_verified_patch") is True else None
-    if problem is not None:
-        policy["auto_apply_verified_patch"] = False
-        notes.append(f"auto-apply is off: {problem}; {_PIN_HINT}.")
-
-
 def _gate_auto_apply(policy: dict[str, Any], *, requested: bool, notes: list[str]) -> None:
-    """The one save-face behaviour: refuse when the request turns auto-apply
-    on with a bad pin, coerce it off (with a note) otherwise."""
-    block = auto_apply_block_reason(policy) if requested else None
-    if block is not None:
-        raise HTTPException(status_code=400, detail=block)
-    _coerce_auto_apply_default(policy, notes)
+    """v127-F5: auto-apply needs a pinned check that is not known-vacuous. A
+    request that itself turns it on with a missing or vacuous pin is refused
+    (400 — I9: refused when asked, not at landing); auto-apply it did not ask
+    for (a phase default, a stored value) falls off with a note, so a save of
+    other keys on `store` still works, by approval."""
+    if policy.get("auto_apply_verified_patch") is not True:
+        return
+    pin = str(policy.get("verify_command") or "").strip()
+    vacuous = known_vacuous_verify(pin) if pin else None
+    if pin and vacuous is None:
+        return
+    why = (
+        cannot_land_on(vacuous)
+        if vacuous
+        else f"the project pins no verify_command, so skep can't land a patch by itself. {PIN_HINT}"
+    )
+    if requested:
+        raise HTTPException(
+            status_code=400, detail=f"auto_apply_verified_patch=true needs a real check: {why}."
+        )
+    policy["auto_apply_verified_patch"] = False
+    notes.append(f"auto-apply is off: {why}. Until then patches land by approval.")
 
 
 def _choose_strategy(
@@ -1359,7 +1340,7 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
     _default_execution_mode(
         run_store, project_id=project_id, policy=policy, overrides={}, notes=notes
     )
-    _coerce_auto_apply_default(policy, notes)
+    _gate_auto_apply(policy, requested=False, notes=notes)
     try:
         updated = validate_project_definition(
             project_id=project.project_id,

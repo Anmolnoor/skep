@@ -35,6 +35,16 @@ from skep.worker_contract import ApprovalVerdict
 
 from .conftest import FAKE_WORKER, git
 
+# round 3: what an operator reads — plain words, no internal names.
+PLAIN = "passes whether or not the patch works"
+HINT = 'Pin the command that runs your tests: skep project setup <repo> --verify-command "'
+
+
+def _plain(text: str) -> bool:
+    """The refusal says what is wrong in plain words and names no internals."""
+    internal = ("known-vacuous", "G10", "own test config", "cannot fail")
+    return PLAIN in text and not any(word in text for word in internal)
+
 _VACUOUS = [
     "",
     "   ",
@@ -128,14 +138,14 @@ _REAL = [
 def test_known_vacuous_commands_are_named(command: str) -> None:
     reason = known_vacuous_verify(command)
     assert reason is not None
-    assert "known-vacuous" in reason
+    assert _plain(reason)
 
 
 @pytest.mark.parametrize("command", _MASKED)
 def test_a_shell_operator_that_can_mask_the_exit_code_is_vacuous(command: str) -> None:
     reason = known_vacuous_verify(command)
     assert reason is not None
-    assert "shell operator can mask the check's exit code" in reason
+    assert "can hide a failing exit code" in reason and _plain(reason)
 
 
 @pytest.mark.parametrize("command", _REAL)
@@ -157,7 +167,8 @@ def _ctx(commands: tuple[str, ...], *, pinned: bool = True) -> AutoApprovalConte
 def test_every_rule_refuses_a_known_vacuous_reverify(rule: object) -> None:
     assert isinstance(rule, type(VERIFIED_PATCH_RULE))
     blocked = rule_block_reason(rule, _ctx(("git diff --check",)))
-    assert blocked is not None and "known-vacuous" in blocked
+    assert blocked is not None and _plain(blocked)
+    assert "so skep can't land a patch on it by itself" in blocked and HINT in blocked
     assert "landable by hand" in blocked
     assert rule_block_reason(rule, _ctx(("uv run pytest",))) is None
     # nothing re-ran at all is no check either
@@ -236,11 +247,11 @@ def test_scheduler_path_refuses_a_vacuous_pin(repo: Path, config: SupervisorConf
     assert result.state == "completed", result
     assert result.task_id is not None
     _assert_not_landed(repo, result.task_id)
-    assert "known-vacuous" in _blocked_reason(config, result.task_id)
+    assert _plain(_blocked_reason(config, result.task_id))
 
 
 @pytest.mark.parametrize(
-    ("pin", "reason"), [(None, "pins no verify_command"), ("true", "known-vacuous")]
+    ("pin", "reason"), [(None, "pins no verify_command"), ("true", PLAIN)]
 )
 def test_cli_auto_approve_path_refuses_a_worker_nominated_or_vacuous_check(
     repo: Path,
@@ -288,7 +299,7 @@ def test_resume_path_refuses_a_vacuous_pin(repo: Path, config: SupervisorConfig)
     )
     assert resumed.record.state == "completed"
     _assert_not_landed(repo, resumed.record.task_id)
-    assert "known-vacuous" in _blocked_reason(config, resumed.record.task_id)
+    assert _plain(_blocked_reason(config, resumed.record.task_id))
 
 
 def test_unlocked_path_refuses_a_vacuous_pin(repo: Path, config: SupervisorConfig) -> None:
@@ -311,7 +322,7 @@ def test_unlocked_path_refuses_a_vacuous_pin(repo: Path, config: SupervisorConfi
     )
     assert outcome.record.state == "completed"
     _assert_not_landed(repo, outcome.record.task_id)
-    assert "known-vacuous" in _blocked_reason(config, outcome.record.task_id)
+    assert _plain(_blocked_reason(config, outcome.record.task_id))
 
 
 # -- the save faces and the other refusals that share the predicate ------------
@@ -335,7 +346,7 @@ def test_the_maintain_default_is_coerced_off_on_a_vacuous_pin(
     body = response.json()
     policy = (body.get("project") or body)["policy"]
     assert policy["auto_apply_verified_patch"] is False
-    assert any("known-vacuous" in note for note in body["notes"]), body["notes"]
+    assert any(_plain(note) and HINT in note for note in body["notes"]), body["notes"]
 
 
 def test_the_maintain_default_is_coerced_off_without_a_pin(
@@ -360,7 +371,7 @@ def test_an_explicit_auto_apply_on_a_vacuous_pin_is_refused(
     response = _rest_setup(config, repo, route, phase="build", policy_overrides={
         "verify_command": "true", "auto_apply_verified_patch": True})  # fmt: skip
     assert response.status_code == 400
-    assert "known-vacuous" in response.json()["detail"]
+    assert _plain(response.json()["detail"]) and HINT in response.json()["detail"]
 
 
 def test_a_phase_change_into_maintain_coerces_on_a_vacuous_pin(
@@ -375,7 +386,7 @@ def test_a_phase_change_into_maintain_coerces_on_a_vacuous_pin(
     finally:
         store.close()
     assert moved["policy"]["auto_apply_verified_patch"] is False
-    assert any("known-vacuous" in note for note in moved["notes"])
+    assert any(_plain(note) for note in moved["notes"])
 
 
 def test_unlocked_refuses_a_vacuous_pin(config: SupervisorConfig) -> None:
@@ -386,7 +397,13 @@ def test_unlocked_refuses_a_vacuous_pin(config: SupervisorConfig) -> None:
         reason = unlocked_block_reason(store, {"unlocked": True, "verify_command": "true"})
     finally:
         store.close()
-    assert reason is not None and "known-vacuous" in reason
+    assert reason is not None and _plain(reason)
+    store = RunStore(config.db_path)
+    try:
+        missing = unlocked_block_reason(store, {"unlocked": True}) or ""
+    finally:
+        store.close()
+    assert "G10" not in missing and HINT in missing
 
 
 def test_an_external_engine_refuses_a_vacuous_pin(repo: Path, config: SupervisorConfig) -> None:
@@ -395,7 +412,7 @@ def test_an_external_engine_refuses_a_vacuous_pin(repo: Path, config: Supervisor
     _bind(config, repo, {"coding_engine": "codex", "verify_command": "git diff --check"})
     store = RunStore(config.db_path)
     try:
-        with pytest.raises(PolicyResolutionError, match="known-vacuous"):
+        with pytest.raises(PolicyResolutionError, match=PLAIN) as raised:
             resolve_run_policy(
                 store=store, config=config, repo=repo, caste="coding", network=None,
                 env_allowlist=None, wall_clock_seconds=None, max_iterations=None,
@@ -403,6 +420,7 @@ def test_an_external_engine_refuses_a_vacuous_pin(repo: Path, config: Supervisor
             )  # fmt: skip
     finally:
         store.close()
+    assert _plain(str(raised.value)) and HINT in str(raised.value)
 
 
 # -- round 2: one behaviour on every save face ----------------------------------
@@ -435,7 +453,7 @@ def test_the_web_editor_saves_other_keys_on_a_stored_vacuous_auto_apply(
     body = response.json()
     assert body["policy"]["auto_dispatch_allowed"] is False
     assert body["policy"]["auto_apply_verified_patch"] is False
-    assert any("auto-apply is off" in n and "known-vacuous" in n for n in body["notes"])
+    assert any("auto-apply is off" in n and _plain(n) for n in body["notes"])
 
 
 @pytest.mark.parametrize("pin", ["git diff --check", None])
@@ -488,5 +506,4 @@ def test_an_unpinned_external_engine_keeps_the_plain_message(
     finally:
         store.close()
     message = str(raised.value)
-    assert "known-vacuous" not in message
-    assert "a check that cannot fail" in message and "--verify-command" in message
+    assert _plain(message) and "Your pin" not in message and HINT in message

@@ -730,17 +730,16 @@ def resolve_run_policy(
     # v127-F5: a pin that is itself known-vacuous (`true`, `git diff --check`)
     # buys nothing over the built-in, so it is refused the same way — the
     # reason named only when there IS a pin (an empty one is the plain case).
-    from .policy import known_vacuous_verify
+    from .policy import PIN_HINT, known_vacuous_verify
 
     vacuous = known_vacuous_verify(verify_command or "")
     if (chosen_engine.external or wrapped is not None) and vacuous:
         why = f" Your pin is no better: {vacuous}." if (verify_command or "").strip() else ""
         raise PolicyResolutionError(
-            f"coding_engine {wrapped or chosen_engine.name!r} is an external agent whose "
-            "built-in verification is `git diff --check` (whitespace only), so G10 would "
-            f"re-run a check that cannot fail.{why} Pin the command that actually proves the "
-            'work: `skep project setup <repo> --verify-command "<command>"` (chat: '
-            "setup_project verify_command=...)."
+            f"coding_engine {wrapped or chosen_engine.name!r} is an external agent whose own "
+            "check is `git diff --check` (whitespace only), which passes whether or not the "
+            f"patch works, so skep won't run it without a real check.{why} {PIN_HINT} "
+            "(chat: setup_project verify_command=...)."
         )
     # v94-F4: an external agent bypasses the capability layer by design — the
     # sandbox IS its confinement (ADR 0047). No policy default or request flag

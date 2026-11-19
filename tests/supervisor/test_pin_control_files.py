@@ -215,6 +215,8 @@ def test_every_rule_refuses_a_patch_that_rewrites_the_check() -> None:
     blocked = rule_block_reason(VERIFIED_PATCH_RULE, ctx)
     assert blocked is not None and "conftest.py" in blocked
     assert "landable by hand" in blocked
+    assert "so skep can't land it by itself" in blocked
+    assert "G10" not in blocked and "own test config" not in blocked
 
 
 def test_a_maintain_run_that_edits_conftest_waits_for_a_human(
