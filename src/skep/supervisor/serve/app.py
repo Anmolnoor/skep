@@ -473,7 +473,21 @@ def create_app(
             # standard) — same rules, provenance "external".
             from ..seed_skills import sync_skill_shelves
 
-            for shelf_path, report in sync_skill_shelves(run_store).items():
+            shelf_reports = sync_skill_shelves(run_store)
+            # v126-F2 (review): one line naming what refreshed and what diverged.
+            refreshed = [*seeded["refreshed"]]
+            diverged = [*seeded["diverged"]]
+            for report in shelf_reports.values():
+                refreshed += report["refreshed"]
+                diverged += report["diverged"]
+            if refreshed or diverged:
+                logging.getLogger("skep.serve").info(
+                    "skills refreshed: %s; diverged: %s (your copy wins — "
+                    "`skep skill seed --refresh NAME` takes the shipped text)",
+                    ", ".join(refreshed) or "none",
+                    ", ".join(diverged) or "none",
+                )
+            for shelf_path, report in shelf_reports.items():
                 if report["loaded"]:
                     logging.getLogger("skep.serve").info(
                         "external skills loaded from %s: %s",
@@ -498,6 +512,17 @@ def create_app(
             for plugin_id in sync_seed_tools(run_store):
                 logging.getLogger("skep.serve").info(
                     "seed tool available (draft): %s — promote_tool to trial + activate",
+                    plugin_id,
+                )
+            # v126-F1: an ACTIVE seed whose shipped source changed — sync only
+            # adds unknown ids, so say which tool takes the update.
+            from ..forge import seed_tool_updates
+
+            for plugin_id in seed_tool_updates(run_store, holder.current):
+                logging.getLogger("skep.serve").info(
+                    "seed tool update waiting: %s (the installed copy differs from this "
+                    "build) — promote_tool %s trials and installs it",
+                    plugin_id,
                     plugin_id,
                 )
         except Exception:

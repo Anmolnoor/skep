@@ -29,6 +29,11 @@ who wins:
    for seeds exactly as for imports).
 2. **The operator wins.** An existing template under a seed's name —
    any provenance, including an edited seed — is never overwritten.
+   *Amended v126-F2:* an **unedited** seed or shelf copy (it still
+   matches the fingerprint recorded when it loaded) follows the shipped
+   text and leaves an event row; an edited one is kept and reported
+   ``diverged``. A pre-v126 row is refreshed only when it matches a text
+   that once shipped; otherwise ``skep skill seed --refresh NAME|--all``.
 3. **Deletes are durable.** Deleting a seed-provenance skill writes a
    tombstone the loader honors forever; a restart never resurrects
    what the operator removed (I8).

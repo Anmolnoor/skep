@@ -39,6 +39,7 @@ _UNTRUSTED_OUTPUT = frozenset({"read_url", "search_web", "call_mcp_tool"})
 _CHAT_READS = frozenset({"search_chats", "get_chat_messages", "get_chat_context"})
 # W21: a run read carries the worker's own words (its summary, its errors).
 _RUN_READS = frozenset({"get_run", "await_runs"})
+_MEMORY_READS = frozenset({"list_memory", "search_memory"})
 # W21: rows that carry the bits of the chat that wrote them — result key, id
 # field, ``RunStore.content_taint`` kind. Approved memory is not here: the
 # operator approved it (always a card, the CLI or the memory page), so it is
@@ -66,6 +67,8 @@ _SOURCES = {
     "get_run": "read a worker's report",
     "await_runs": "read a worker's report",
     "list_runs": "read a worker's report",
+    "list_memory": "read memory a worker wrote",
+    "search_memory": "read memory a worker wrote",
     "list_notes": "read a note a tainted chat wrote",
     "list_tasks": "read a task a tainted chat wrote",
     "list_memory_proposals": "read memory a tainted chat filed",
@@ -159,6 +162,10 @@ def record_tool_taint(
         untrusted = True
     elif name == "list_runs":  # W21 review: each run's summary is the worker's
         untrusted = bool(result.get("runs"))
+    elif name in _MEMORY_READS:  # v126-F3: a worker-written item is the worker's words
+        untrusted = any(
+            isinstance(item, dict) and item.get("provenance") for item in result.get("items") or []
+        )
     elif name in _STORE_READS:
         key, id_field, kind = _STORE_READS[name]
         rows = result.get(key) or []

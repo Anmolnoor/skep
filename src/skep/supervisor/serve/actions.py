@@ -57,7 +57,6 @@ from ..castes import resolve_caste
 from ..config import SupervisorConfig
 from ..contracts_io import read_event_log
 from ..ids import mint_uuid7
-from ..memory import MemoryError, MemoryProposal, MemorySource
 from ..netproxy import domain_allowed
 from ..policy_baseline import NO_BASELINE_REASON, NoBaseline
 from ..policy_baseline import current_layer as current_baseline_layer
@@ -86,13 +85,21 @@ from ..policy_schema import (
     SCOPE_ACTIONS,
     SCOPES,
     PolicyDocument,
+    ResolvedRule,
+    ResolvedScopePolicy,
     document_from_settings,
     logged_url,
     operator_document_from_settings,
     pattern_matches,
     shell_segments,
 )
-from ..policy_templates import PolicyTemplate, layer_view, load_policy_template
+from ..policy_templates import (
+    TEMPLATE_LAYER,
+    PolicyTemplate,
+    layer_view,
+    load_policy_template,
+    shipped_descriptions,
+)
 from ..policy_v3 import (
     Request,
     Stack,
@@ -2389,7 +2396,7 @@ def policy_why(
         "action": action,
         "value": value,
         "baseline": stack.baseline,
-        "operator": _face(operator),
+        "operator": {**_face(operator), **_deciding_text(operator, stack.operator, scope)},
     }
     if run is None:
         view["run"] = {"error": stack.run_note}
@@ -2401,14 +2408,18 @@ def policy_why(
             parts = (shell_segments(value) or []) if scope == "shell" else [value]
             scope_policy = stack.run.get(scope)
             considered = [
-                asdict(rule)
+                {**asdict(rule), **_shipped_text(scope, rule)}
                 for rule in (scope_policy.rules if scope_policy else ())
                 if rule.action == action
                 and any(
                     pattern_matches(scope, rule.pattern, part, exact=rule.exact) for part in parts
                 )
             ]
-        view["run"] = {**_face(run), "considered": considered}
+        view["run"] = {
+            **_face(run),
+            **_deciding_text(run, stack.run or {}, scope),
+            "considered": considered,
+        }
     if operator.source == "floor":
         view["floor"] = operator.note  # the floor binds workers AND the Queen (v83-F9)
     if (scope, action) == ("network", "fetch"):
@@ -2502,6 +2513,28 @@ def _why_faces(
 
 def _face(verdict: Verdict) -> dict[str, Any]:
     return {key: getattr(verdict, key) for key in ("verdict", "rule_id", "decided_by")}
+
+
+def _shipped_text(scope: str, rule: ResolvedRule) -> dict[str, str]:
+    """v124-F1: a rule the baseline layer states carries its shipped template's
+    sentence; every other rule (custom, learned, compiled from a knob) none."""
+    layer, _, name = (rule.layer or "").partition(":")
+    if layer != TEMPLATE_LAYER:
+        return {}
+    key = (scope, rule.verdict, rule.action, rule.pattern, rule.rule_id)
+    text = shipped_descriptions(name).get(key)
+    return {"description": text} if text else {}
+
+
+def _deciding_text(
+    verdict: Verdict, lane: dict[str, ResolvedScopePolicy], scope: str
+) -> dict[str, str]:
+    """The deciding rule's sentence, when a shipped template rule decided."""
+    policy = lane.get(scope)
+    for rule in policy.rules if policy else ():
+        if (rule.layer, rule.rule_id) == (verdict.layer, verdict.rule_id):
+            return _shipped_text(scope, rule)
+    return {}
 
 
 def effective_policy_view(holder: ConfigHolder, store: RunStore, repo: str) -> dict[str, Any]:
@@ -2970,69 +3003,6 @@ def patch_digest(store: RunStore, task_id: str) -> dict[str, Any] | None:
         # No silent caps (I8): the digest says what it left out.
         digest["note"] = f"{dropped} more changed file(s) not shown — the patch has it all"
     return digest
-
-
-def ingest_curator_proposals(
-    store: RunStore, task_id: str, *, actor: str = "curator"
-) -> list[MemoryProposal]:
-    """Turn a completed curator run's proposals.json artifact into pending_review
-    proposals (v13 Step 4). Explicit, governed ingestion — the curator produced a
-    file artifact, never durable memory; each proposal still needs approval. A
-    malformed proposal entry is skipped, not silently promoted."""
-    artifact_path: Path | None = None
-    for kind, path, _ in store.artifacts_for(task_id):
-        if kind == "file" and path.endswith("proposals.json"):
-            artifact_path = Path(path)
-            break
-    if artifact_path is None or not artifact_path.is_file():
-        return []
-    try:
-        raw = json.loads(artifact_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    entries = raw.get("proposals") if isinstance(raw, dict) else None
-    if not isinstance(entries, list):
-        return []
-    created: list[MemoryProposal] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("memory_class")) == "observation":
-            # v71-F5: the fluid lane — an observation grants nothing and the
-            # ticker expires it after OBSERVATION_TTL_DAYS, so it applies
-            # directly instead of queueing a proposal. Permanence still goes
-            # through the proposal gate (promote by proposing a durable class).
-            content = str(entry.get("content") or "").strip()
-            if content:
-                store.add_memory_item(
-                    memory_class="observation",
-                    content=content,
-                    actor=actor,
-                    project_id=(
-                        None if entry.get("project_id") is None else str(entry.get("project_id"))
-                    ),
-                    provenance=f"worker:{task_id}",  # D15: the curator worker wrote it
-                )
-            continue
-        sources = tuple(
-            MemorySource(kind=str(s.get("kind")), source_id=str(s.get("source_id")))
-            for s in entry.get("sources", [])
-            if isinstance(s, dict)
-        )
-        try:
-            proposal = store.create_memory_proposal(
-                memory_class=str(entry.get("memory_class")),
-                content=str(entry.get("content")),
-                actor=actor,
-                state="pending_review",
-                rationale=entry.get("rationale"),
-                project_id=entry.get("project_id"),
-                sources=sources,
-            )
-        except MemoryError:
-            continue
-        created.append(proposal)
-    return created
 
 
 def applied_branch_for(store: RunStore, task_id: str) -> str | None:

@@ -26,6 +26,7 @@ import dataclasses
 import getpass
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from skep.worker_contract import CodingWorkerTask, TaskState
 
@@ -141,6 +142,7 @@ def _evidence_note(candidate: SkillCandidate) -> str:
 def _record_decision(
     store: RunStore,
     *,
+    name: str,
     anchor_task_id: str | None,
     reason: str,
     approved: bool,
@@ -148,9 +150,16 @@ def _record_decision(
     note: str,
 ) -> None:
     """Mirror patch-approval: record the decision in the approval queue, anchored to
-    the evidence run. Skipped only when there is no run to anchor to (rejecting an
-    untested draft) — the candidate row is the durable record in that case."""
+    the evidence run. v126-F4: with no run to anchor to (a conversation draft, or
+    rejecting an untested draft) the decision still leaves an audit row."""
     if anchor_task_id is None:
+        store.record_registry_event(
+            kind="skill_candidate",
+            item_id=name,
+            action="approved" if approved else "rejected",
+            actor=actor,
+            detail={"reason": reason, "note": note},
+        )
         return
     review_id = store.enqueue_approval(anchor_task_id, action="promote_skill", reason=reason)
     store.resolve_approval(review_id, approved=approved, actor=actor, note=note)
@@ -224,6 +233,7 @@ def run_candidate_test(
         )
         _record_decision(
             store,
+            name=name,
             anchor_task_id=result.task_id,
             reason=f"skill {name!r} test gate: {detail}",
             approved=False,
@@ -278,11 +288,12 @@ def approve(
         )
     moment = now or now_ts()
     template = promote_to_template(candidate, name=target, created_at=moment)
-    store.add_template(template)
+    store.add_template(template, actor=actor)
 
     decision_note = note or f"approved into registry as {target!r}"
     _record_decision(
         store,
+        name=name,
         anchor_task_id=candidate.test_task_id,
         reason=f"promote learned skill {name!r}: {_evidence_note(candidate)}",
         approved=True,
@@ -325,6 +336,7 @@ def reject(
     decision_note = note or "rejected by human review"
     _record_decision(
         store,
+        name=name,
         anchor_task_id=candidate.test_task_id,
         reason=f"reject learned skill {name!r}",
         approved=False,
@@ -702,25 +714,68 @@ def cmd_skill_import_md(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_skill_seed(args: argparse.Namespace) -> int:
-    """v83-F12 (ADR 0043): sync the shipped seed shelf into the registry."""
-    from .cli_cmds import build_config
-    from .seed_skills import load_seed_skills
-
-    config = build_config(args.home, None)
-    store = RunStore(config.db_path)
-    try:
-        result = load_seed_skills(store)
-    finally:
-        store.close()
+def _print_sync(result: dict[str, Any]) -> None:
+    """v126-F2: one report for the seed and shelf syncs."""
     for name in result["loaded"]:
         print(f"loaded:  {name}")
+    for name in result["refreshed"]:
+        print(f"refreshed: {name} (the shipped text changed; your copy was unedited)")
+    for name in result["diverged"]:
+        base = name.removesuffix(" (legacy)")
+        why = (
+            "no record of what shipped, so it may hold your edits"
+            if name != base
+            else "you edited it"
+        )
+        print(
+            f"diverged: {name} — {why}; your copy wins. "
+            f"`skep skill seed --refresh {base}` takes the shipped text"
+        )
+    for name in result.get("drafted", ()):
+        print(f"drafted: {name} (ships scripts — promote it: skep skill promote {name})")
     for line in result["skipped"]:
         print(f"skipped: {line}")
     if result["existing"]:
-        print(f"kept:    {result['existing']} existing (the operator's copy wins)")
-    if not result["loaded"] and not result["skipped"] and not result["existing"]:
+        print(
+            f"kept:    {result['existing']} existing (unchanged, or another skill holds the name)"
+        )
+
+
+def cmd_skill_seed(args: argparse.Namespace) -> int:
+    """v83-F12 (ADR 0043): sync the shipped seed shelf into the registry.
+    v126-F2: ``--refresh NAME`` / ``--all`` take the shipped text over an
+    edited or legacy copy, on the seed shelf and every registered shelf."""
+    from .cli_cmds import build_config
+    from .seed_skills import load_seed_skills, sync_skill_shelves
+
+    refresh = tuple(getattr(args, "refresh", None) or ())
+    refresh_all = bool(getattr(args, "refresh_all", False))
+    config = build_config(args.home, None)
+    store = RunStore(config.db_path)
+    try:
+        result = load_seed_skills(store, refresh=refresh, refresh_all=refresh_all)
+        shelves = (
+            sync_skill_shelves(store, refresh=refresh, refresh_all=refresh_all)
+            if refresh or refresh_all
+            else {}
+        )
+    finally:
+        store.close()
+    _print_sync(result)
+    for shelf_path, report in shelves.items():
+        if report["refreshed"] or report["diverged"]:
+            print(f"shelf {shelf_path}:")
+            _print_sync({**report, "loaded": [], "skipped": [], "drafted": [], "existing": 0})
+    if not any(result[key] for key in ("loaded", "refreshed", "diverged", "skipped", "existing")):
         print("no seeds found")
+    # v126-F2 (review): a --refresh that changed nothing says so.
+    took = {*result["refreshed"], *(n for r in shelves.values() for n in r["refreshed"])}
+    for name in refresh:
+        if name not in took:
+            print(
+                f"nothing to refresh for {name} (unknown, deleted, held by another "
+                "skill or shelf, or already the shipped text)"
+            )
     return 0
 
 
@@ -742,6 +797,7 @@ def cmd_skill_promote(args: argparse.Namespace) -> int:
                 args.pack_id,
                 extra_grants=tuple(args.allow_script or ()),
                 human_action=True,
+                actor="cli-user",
             )
         except SkillPackError as exc:
             return _err(str(exc))
@@ -834,14 +890,7 @@ def cmd_skill_shelf(args: argparse.Namespace) -> int:
             return _err(str(exc))
         result = load_seed_skills(store, root=path, provenance=EXTERNAL_PROVENANCE)
         print(f"registered shelf: {path} (synced now and at every serve start)")
-        for name in result["loaded"]:
-            print(f"loaded:  {name}")
-        for name in result.get("drafted", ()):
-            print(f"drafted: {name} (ships scripts — promote it: skep skill promote {name})")
-        for line in result["skipped"]:
-            print(f"skipped: {line}")
-        if result["existing"]:
-            print(f"kept:    {result['existing']} existing (the operator's copy wins)")
+        _print_sync(result)
     finally:
         store.close()
     return 0
@@ -930,7 +979,21 @@ def register_skill_commands(
     seed_p = skill_sub.add_parser(
         "seed",
         help="load the shipped seed skills into the registry (zero-grant only; "
-        "existing names and operator deletes are honored)",
+        "unedited copies follow the shipped text, edited ones and operator "
+        "deletes are honored)",
+    )
+    refresh_group = seed_p.add_mutually_exclusive_group()
+    refresh_group.add_argument(
+        "--refresh",
+        action="append",
+        metavar="NAME",
+        help="v126-F2: take the shipped text over this skill's edited or legacy copy (repeatable)",
+    )
+    refresh_group.add_argument(
+        "--all",
+        dest="refresh_all",
+        action="store_true",
+        help="v126-F2: take the shipped text for every diverged seed and shelf skill",
     )
     seed_p.set_defaults(func=cmd_skill_seed)
 

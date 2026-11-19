@@ -1,0 +1,399 @@
+{
+ "GET /api/policy/baseline": {
+  "diff": [
+   "baseline.json no longer loads: 1 validation error for PolicyTemplate\n  Value error, template 'builder' sets 'default_max_actions', which the registry does not let the 'template' layer carry (layers: global, phase, group, project, dispatch) [type=value_error, input_value={'schema_version': 1, 'te...': 'browse-act-gated'}]}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error"
+  ],
+  "line": "baseline: TAMPERED since now",
+  "relock": null,
+  "state": "tampered",
+  "tampered_since": null
+ },
+ "GET /api/policy/explain?subject=baseline": {
+  "deprecated_alias": null,
+  "floor": [
+   {
+    "action": "run",
+    "label": "always denied",
+    "pattern": "git push / pull / fetch / checkout / switch / add / commit",
+    "rule_id": "floor.worker-git-hard-denies",
+    "scope": "shell",
+    "verdict": "deny"
+   },
+   {
+    "action": "run",
+    "label": "always denied",
+    "pattern": "sudo, remote git, machine-wrecking rm, broad interpreters, posting prefixes",
+    "rule_id": "floor.never-grantable-prefixes",
+    "scope": "shell",
+    "verdict": "deny"
+   },
+   {
+    "action": "read",
+    "label": "always denied",
+    "pattern": "~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials ~/.docker/config.json ~/.kube ~/.secrets ~/.config/gcloud ~/.azure ~/.npmrc ~/.pypirc ~/.claude/.credentials.json ~/.codex/auth.json ~/Library/Keychains ~/.vault-token ~/.terraform.d/credentials.tfrc.json ~/.config/op ~/.cargo/credentials ~/.cargo/credentials.toml ~/.claude.json ~/.password-store ~/.bashrc ~/.bash_profile ~/.profile ~/.zshrc ~/.zshenv ~/.zprofile ~/.bash_history ~/.zsh_history ~/.python_history ~/.node_repl_history ~/.psql_history ~/.mysql_history ~/.sqlite_history, any .env / .env.* (any case), skep's own secrets \u2014 read, or named in a shell line",
+    "rule_id": "floor.secret-reads",
+    "scope": "filesystem",
+    "verdict": "deny"
+   },
+   {
+    "action": "*",
+    "label": "always asks",
+    "pattern": "a post, send or publish \u2014 the card shows the payload",
+    "rule_id": "floor.outbound-content",
+    "scope": "*",
+    "verdict": "ask"
+   }
+  ],
+  "kind": "baseline",
+  "layer": "template",
+  "name": "builder",
+  "note": "baseline: TAMPERED since now",
+  "pack": "trusted_local_dev",
+  "rules": [
+   {
+    "action": "edit",
+    "description": "A worker may edit files in its own disposable worktree; nothing reaches your branch until you approve the patch.",
+    "pattern": "workspace",
+    "rule_id": "coding-workspace",
+    "scope": "coding",
+    "verdict": "allow"
+   },
+   {
+    "action": "verify",
+    "description": "A worker may run its verify step in its worktree; skep still re-verifies the patch itself before it can land.",
+    "pattern": "workspace",
+    "rule_id": "verify-workspace",
+    "scope": "coding",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run cargo test without a card to test its change; the Queen's own shell still asks.",
+    "pattern": "cargo test",
+    "rule_id": "shell-cargo-test",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run git diff without a card, since it only shows changes; the Queen's own shell still asks.",
+    "pattern": "git diff",
+    "rule_id": "shell-git-diff",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run git log without a card, since it only reads history; the Queen's own shell still asks.",
+    "pattern": "git log",
+    "rule_id": "shell-git-log",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run git status without a card, since it only reads the repository's state; the Queen's own shell still asks.",
+    "pattern": "git status",
+    "rule_id": "shell-git-status",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run go test without a card to test its change; the Queen's own shell still asks.",
+    "pattern": "go test",
+    "rule_id": "shell-go-test",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run npm install without a card to install the project's packages; the Queen's own shell still asks.",
+    "pattern": "npm install",
+    "rule_id": "shell-npm-install",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run npm test without a card to test its change; the Queen's own shell still asks.",
+    "pattern": "npm test",
+    "rule_id": "shell-npm-test",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run pnpm install without a card to install the project's packages; the Queen's own shell still asks.",
+    "pattern": "pnpm install",
+    "rule_id": "shell-pnpm-install",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run pnpm test without a card to test its change; the Queen's own shell still asks.",
+    "pattern": "pnpm test",
+    "rule_id": "shell-pnpm-test",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run pytest without a card to test its change; the Queen's own shell still asks.",
+    "pattern": "pytest",
+    "rule_id": "shell-pytest",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run uv run pytest without a card to test its change in the project's environment; the Queen's own shell still asks.",
+    "pattern": "uv run pytest",
+    "rule_id": "shell-uv-run-pytest",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "A worker may run uv sync without a card to install the project's Python dependencies; the Queen's own shell still asks.",
+    "pattern": "uv sync",
+    "rule_id": "shell-uv-sync",
+    "scope": "shell",
+    "verdict": "allow"
+   },
+   {
+    "action": "run",
+    "description": "Any other shell command asks first, and an approval can be remembered for that exact command line; the floor's denies still apply.",
+    "pattern": "*",
+    "rule_id": "shell-learnable",
+    "scope": "shell",
+    "verdict": "ask"
+   },
+   {
+    "action": "write",
+    "description": "Writes inside the run's workspace are allowed: it is a disposable copy, and changes reach your repo only as an approved patch.",
+    "pattern": "workspace",
+    "rule_id": "fs-workspace",
+    "scope": "filesystem",
+    "verdict": "allow"
+   },
+   {
+    "action": "write",
+    "description": "A write anywhere outside the workspace asks first, so nothing beyond the copy changes without you.",
+    "pattern": "*",
+    "rule_id": "fs-write-gated",
+    "scope": "filesystem",
+    "verdict": "ask"
+   },
+   {
+    "action": "connect",
+    "description": "Workers may connect to files.pythonhosted.org, where PyPI serves package files.",
+    "pattern": "files.pythonhosted.org",
+    "rule_id": "net-pythonhosted",
+    "scope": "network",
+    "verdict": "allow"
+   },
+   {
+    "action": "connect",
+    "description": "Workers may connect to proxy.golang.org to download Go modules.",
+    "pattern": "proxy.golang.org",
+    "rule_id": "net-go",
+    "scope": "network",
+    "verdict": "allow"
+   },
+   {
+    "action": "connect",
+    "description": "Workers may connect to pypi.org (that host only, not its subdomains) to install Python packages.",
+    "pattern": "pypi.org",
+    "rule_id": "net-pypi",
+    "scope": "network",
+    "verdict": "allow"
+   },
+   {
+    "action": "connect",
+    "description": "Workers may connect to registry.npmjs.org to install JavaScript packages.",
+    "pattern": "registry.npmjs.org",
+    "rule_id": "net-npm",
+    "scope": "network",
+    "verdict": "allow"
+   },
+   {
+    "action": "search",
+    "description": "The Queen's keyless web search runs without a card; no host pattern could cover the engines it rotates through.",
+    "pattern": "*",
+    "rule_id": "net-search",
+    "scope": "network",
+    "verdict": "allow"
+   },
+   {
+    "action": "connect",
+    "description": "A connection to any other host asks first.",
+    "pattern": "*",
+    "rule_id": "net-gated",
+    "scope": "network",
+    "verdict": "ask"
+   },
+   {
+    "action": "fetch",
+    "description": "Reading a web page with read_url asks first for every host, so you see where the Queen wants to go.",
+    "pattern": "*",
+    "rule_id": "net-fetch-gated",
+    "scope": "network",
+    "verdict": "ask"
+   },
+   {
+    "action": "call",
+    "description": "Every MCP tool asks first: coding work needs none by default.",
+    "pattern": "*",
+    "rule_id": "mcp-gated",
+    "scope": "mcp",
+    "verdict": "ask"
+   },
+   {
+    "action": "read",
+    "description": "Reading mail asks first: coding work has no reason to open your inbox.",
+    "pattern": "*",
+    "rule_id": "email-read-gated",
+    "scope": "email",
+    "verdict": "ask"
+   },
+   {
+    "action": "send",
+    "description": "Sending mail, or any other email side effect, asks first and the card shows what would go out.",
+    "pattern": "*",
+    "rule_id": "email-send-gated",
+    "scope": "email",
+    "verdict": "ask"
+   },
+   {
+    "action": "act",
+    "description": "Acting on a page (navigating, clicking, typing, running JavaScript) asks first.",
+    "pattern": "*",
+    "rule_id": "browse-act-gated",
+    "scope": "browse",
+    "verdict": "ask"
+   },
+   {
+    "action": "read",
+    "description": "Reading a browser page's state asks first: coding work does not browse by default.",
+    "pattern": "*",
+    "rule_id": "browse-read-gated",
+    "scope": "browse",
+    "verdict": "ask"
+   }
+  ],
+  "settings": [
+   {
+    "key": "allowed_shell_commands",
+    "layer": "template",
+    "scope": "shell",
+    "value": [
+     [
+      "git",
+      "status"
+     ],
+     [
+      "git",
+      "diff"
+     ],
+     [
+      "git",
+      "log"
+     ],
+     [
+      "pytest"
+     ],
+     [
+      "uv",
+      "run",
+      "pytest"
+     ],
+     [
+      "uv",
+      "sync"
+     ],
+     [
+      "npm",
+      "test"
+     ],
+     [
+      "npm",
+      "install"
+     ],
+     [
+      "pnpm",
+      "test"
+     ],
+     [
+      "pnpm",
+      "install"
+     ],
+     [
+      "cargo",
+      "test"
+     ],
+     [
+      "go",
+      "test"
+     ]
+    ]
+   },
+   {
+    "key": "default_network",
+    "layer": "template",
+    "scope": "network",
+    "value": [
+     "pypi.org",
+     "files.pythonhosted.org",
+     "registry.npmjs.org",
+     "proxy.golang.org"
+    ]
+   }
+  ],
+  "status": {
+   "diff": [
+    "baseline.json no longer loads: 1 validation error for PolicyTemplate\n  Value error, template 'builder' sets 'default_max_actions', which the registry does not let the 'template' layer carry (layers: global, phase, group, project, dispatch) [type=value_error, input_value={'schema_version': 1, 'te...': 'browse-act-gated'}]}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error"
+   ],
+   "relock": null,
+   "state": "tampered",
+   "tampered_since": null
+  },
+  "subject": "baseline",
+  "table": "policy baseline: builder\nbaseline: TAMPERED since now\n\n| scope      | verdict | action  | pattern                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | rule                                           |\n|------------|---------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------|\n| coding     | allow   | edit    | workspace                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | coding-workspace                               |\n| coding     | allow   | verify  | workspace                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | verify-workspace                               |\n| shell      | allow   | run     | cargo test                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | shell-cargo-test                               |\n| shell      | allow   | run     | git diff                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | shell-git-diff                                 |\n| shell      | allow   | run     | git log                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | shell-git-log                                  |\n| shell      | allow   | run     | git status                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | shell-git-status                               |\n| shell      | allow   | run     | go test                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | shell-go-test                                  |\n| shell      | allow   | run     | npm install                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | shell-npm-install                              |\n| shell      | allow   | run     | npm test                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | shell-npm-test                                 |\n| shell      | allow   | run     | pnpm install                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | shell-pnpm-install                             |\n| shell      | allow   | run     | pnpm test                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | shell-pnpm-test                                |\n| shell      | allow   | run     | pytest                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | shell-pytest                                   |\n| shell      | allow   | run     | uv run pytest                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | shell-uv-run-pytest                            |\n| shell      | allow   | run     | uv sync                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | shell-uv-sync                                  |\n| shell      | ask     | run     | *                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | shell-learnable                                |\n| filesystem | allow   | write   | workspace                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | fs-workspace                                   |\n| filesystem | ask     | write   | *                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | fs-write-gated                                 |\n| network    | allow   | connect | files.pythonhosted.org                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | net-pythonhosted                               |\n| network    | allow   | connect | proxy.golang.org                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | net-go                                         |\n| network    | allow   | connect | pypi.org                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | net-pypi                                       |\n| network    | allow   | connect | registry.npmjs.org                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | net-npm                                        |\n| network    | allow   | search  | *                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | net-search                                     |\n| network    | ask     | connect | *                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | net-gated                                      |\n| network    | ask     | fetch   | *                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | net-fetch-gated                                |\n| mcp        | ask     | call    | *                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | mcp-gated                                      |\n| email      | ask     | read    | *                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | email-read-gated                               |\n| email      | ask     | send    | *                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | email-send-gated                               |\n| browse     | ask     | act     | *                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | browse-act-gated                               |\n| browse     | ask     | read    | *                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | browse-read-gated                              |\n| shell      | deny    | run     | git push / pull / fetch / checkout / switch / add / commit                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | floor.worker-git-hard-denies \u2014 always denied   |\n| shell      | deny    | run     | sudo, remote git, machine-wrecking rm, broad interpreters, posting prefixes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | floor.never-grantable-prefixes \u2014 always denied |\n| filesystem | deny    | read    | ~/.ssh ~/.aws ~/.gnupg ~/.config/gh ~/.netrc ~/.git-credentials ~/.docker/config.json ~/.kube ~/.secrets ~/.config/gcloud ~/.azure ~/.npmrc ~/.pypirc ~/.claude/.credentials.json ~/.codex/auth.json ~/Library/Keychains ~/.vault-token ~/.terraform.d/credentials.tfrc.json ~/.config/op ~/.cargo/credentials ~/.cargo/credentials.toml ~/.claude.json ~/.password-store ~/.bashrc ~/.bash_profile ~/.profile ~/.zshrc ~/.zshenv ~/.zprofile ~/.bash_history ~/.zsh_history ~/.python_history ~/.node_repl_history ~/.psql_history ~/.mysql_history ~/.sqlite_history, any .env / .env.* (any case), skep's own secrets \u2014 read, or named in a shell line | floor.secret-reads \u2014 always denied             |\n| *          | ask     | *       | a post, send or publish \u2014 the card shows the payload                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | floor.outbound-content \u2014 always asks           |\n\nunlisted \u2192 asks (a card); the floor rows sit above every layer and cannot be lifted\n\nsettings:\n| scope   | setting                | value                                                                                                                              | layer    |\n|---------|------------------------|------------------------------------------------------------------------------------------------------------------------------------|----------|\n| shell   | allowed_shell_commands | git status, git diff, git log, pytest, uv run pytest, uv sync, npm test, npm install, pnpm test, pnpm install, cargo test, go test | template |\n| network | default_network        | pypi.org, files.pythonhosted.org, registry.npmjs.org, proxy.golang.org                                                             | template |"
+ },
+ "GET /api/policy/why?repo=%2Ffixture%2Fapp&scope=shell&action=run&value=uv%20sync": {
+  "action": "run",
+  "baseline": "baseline: TAMPERED since now",
+  "operator": {
+   "decided_by": "baseline/baseline_tampered",
+   "rule_id": "baseline_tampered",
+   "verdict": "require_approval"
+  },
+  "project": {
+   "name": "app",
+   "phase": "build",
+   "project_id": "app",
+   "strategy": "trusted_local_dev"
+  },
+  "repo": "/fixture/app",
+  "run": {
+   "considered": [],
+   "decided_by": "baseline/baseline_tampered",
+   "rule_id": "baseline_tampered",
+   "verdict": "require_approval"
+  },
+  "scope": "shell",
+  "value": "uv sync"
+ },
+ "GET /api/repos/%2Ffixture%2Fapp/rsop": {
+  "error": "baseline_tampered: the approved policy baseline no longer matches its lock \u2014 `skep policy baseline diff` shows what changed; `skep policy approve --reapprove` re-locks it",
+  "project": {
+   "name": "app",
+   "phase": "build",
+   "project_id": "app",
+   "strategy": "trusted_local_dev"
+  },
+  "repo": "/fixture/app"
+ }
+}
