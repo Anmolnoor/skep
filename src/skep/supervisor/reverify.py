@@ -20,14 +20,18 @@ the worker's nomination, and the outcome detail always says which was used (I8).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Any
+from urllib.parse import urlsplit
 
 from skep.worker_contract import Event, EventType
 
@@ -35,6 +39,7 @@ from . import sandbox
 from .apply import resolve_commit
 from .config import SupervisorConfig
 from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
+from .spawner import _proxy_env
 from .store import RunStore
 from .worktree import (
     TREE_LOCK,
@@ -76,18 +81,21 @@ def verification_commands_from_events(events: list[Event]) -> list[str]:
     return []
 
 
-_LOCKFILES = frozenset({"uv.lock", "pyproject.toml"})
+_UV_PRIME_INPUTS = frozenset({"uv.lock", "pyproject.toml"})
+# v127-A0 review (council round 2, I12): a prime has the network, so it
+# reaches the package indexes alone — these, plus the hosts the BASELINE
+# lockfile already resolves from — through the filtering proxy (D1).
+_PYPI_HOSTS = ("pypi.org", "files.pythonhosted.org")
+_NPM_HOSTS = ("registry.npmjs.org", "registry.yarnpkg.com")
 
 
-def _patch_touches_lockfile(worktree: Path) -> bool:
-    """v115-F13: did the applied patch change what `uv sync` would install?"""
-    changed = subprocess.run(
-        ["git", "-C", str(worktree), "diff", "--name-only"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return any(line.strip() in _LOCKFILES for line in changed.stdout.splitlines())
+def _lock_hosts(worktree: Path, lockfiles: Iterable[str], pattern: str) -> set[str]:
+    hosts: set[str] = set()
+    for lockfile in lockfiles:
+        with contextlib.suppress(OSError):
+            text = (worktree / lockfile).read_text(encoding="utf-8")
+            hosts |= {urlsplit(url).hostname or "" for url in re.findall(pattern, text)}
+    return hosts - {""}
 
 
 def _needs_uv_priming(worktree: Path, commands: list[str]) -> bool:
@@ -101,61 +109,231 @@ def _needs_uv_priming(worktree: Path, commands: list[str]) -> bool:
 
 
 # v127-A0 (O12): a Node pin needs node_modules, which a fresh worktree never
-# has. Which installer is decided by the BASELINE lockfile (first match wins);
-# every one installs exactly what the lockfile pins, lifecycle scripts off, so
-# no package's code runs while the network is open.
+# has. Which installer is decided by the lockfile (first match wins); every
+# one installs exactly what the lockfile pins, lifecycle scripts off, so no
+# package's code runs while the (registry-only) network is open.
 # ponytail: yarn 2+ (berry) rejects --frozen-lockfile/--ignore-scripts, so its
 # prime fails and re-verify says unavailable; add `--immutable --mode=skip-build`
 # when a berry repo is pinned.
+_NODE_PACKAGE_MANAGERS = frozenset({"npm", "npx", "pnpm", "yarn"})
 # `node` too: a `node --test` pin imports the same dependencies `npm test` does.
-_NODE_TOOLS = frozenset({"node", "npm", "npx", "pnpm", "yarn"})
+_NODE_TOOLS = _NODE_PACKAGE_MANAGERS | {"node"}
 _NODE_INSTALLS = (
     ("pnpm-lock.yaml", "pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile"),
     ("yarn.lock", "yarn install --frozen-lockfile --ignore-scripts"),
     ("package-lock.json", "npm ci --ignore-scripts"),
     ("npm-shrinkwrap.json", "npm ci --ignore-scripts"),
 )
-# What a patch must not change before an install that has the network:
-# `.npmrc` can re-enable scripts or reroute the registry, a yarnPath or a
-# pnpmfile is code the installer runs.
-_NODE_INSTALLER_CONFIG = frozenset({".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs"})
+_NODE_PRIME_INPUTS = frozenset({"package.json", *(lockfile for lockfile, _ in _NODE_INSTALLS)})
+# What a patch must not change before an install (by basename, anywhere in
+# the tree): `.npmrc` can re-enable scripts or reroute the registry, a
+# yarn-path, a pnpmfile or pnpm-workspace.yaml settings are code or config
+# the installer obeys. `.yarn/` (yarn's releases) is matched as a prefix.
+_NODE_INSTALLER_CONFIG = frozenset(
+    {".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", ".pnpmfile.mjs", "pnpm-workspace.yaml"}
+)
 _NODE_DEPENDENCY_KEYS = (
     "dependencies",
     "devDependencies",
     "optionalDependencies",
     "peerDependencies",
 )
+_TARBALL_URL = r"https://[^\s\"'#?,}]+\.tgz"
+_YARN_PATH = re.compile(r"""^\s*(?:yarn-path|yarnPath:)\s*["']?([^"'\s]+)""", re.MULTILINE)
 
 
-def _node_prime(worktree: Path, commands: list[str]) -> tuple[str, str] | None:
+def _pin_uses(commands: list[str], tools: frozenset[str]) -> bool:
+    return any(set(command.split()[:1]) & tools for command in commands)
+
+
+def _node_prime(worktree: Path, commands: list[str]) -> tuple[str, str] | str | None:
     """v127-A0: ``(lockfile, install command)`` when this re-verify runs a Node
-    pin in a repo whose package.json declares dependencies; ``("", "")`` when
-    it does but there is no lockfile to install from; None when nothing needs
+    pin in a repo whose package.json declares dependencies; the reason when it
+    does but there is no lockfile to install from; None when nothing needs
     priming (not a Node pin, no package.json, or no dependencies)."""
-    if not any(command.split()[:1] in ([tool] for tool in _NODE_TOOLS) for command in commands):
+    if not _pin_uses(commands, _NODE_TOOLS):
         return None
-    try:
-        manifest = json.loads((worktree / "package.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(manifest, dict) or not any(manifest.get(k) for k in _NODE_DEPENDENCY_KEYS):
+    manifest = _manifest(worktree)
+    if not any(manifest.get(k) for k in _NODE_DEPENDENCY_KEYS):
         return None
     for lockfile, install in _NODE_INSTALLS:
         if (worktree / lockfile).is_file():
             return lockfile, install
-    return "", ""
+    return (
+        "no lockfile to prime from — package.json declares dependencies but there is "
+        "no package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml or yarn.lock"
+    )
 
 
-def _node_cache_env(cache_dir: Path) -> dict[str, str]:
+def _manifest(worktree: Path) -> dict[str, Any]:
+    try:
+        manifest = json.loads((worktree / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def _node_env(cache_dir: Path, tmp_dir: Path) -> dict[str, str]:
     """Every installer's cache under one root outside the worktree (like the
-    uv cache), never the operator's ~/.npm, ~/.cache or ~/Library."""
+    uv cache), never the operator's ~/.npm, ~/.cache or ~/Library; npm's logs
+    in the re-verify tmp dir (the verify profile reads the cache only); and
+    corepack never downloads a package manager."""
     return {
         "npm_config_cache": str(cache_dir / "npm"),
         "npm_config_store_dir": str(cache_dir / "pnpm-store"),
+        "npm_config_logs_dir": str(tmp_dir / "npm-logs"),
         "YARN_CACHE_FOLDER": str(cache_dir / "yarn"),
         "XDG_CACHE_HOME": str(cache_dir / "xdg-cache"),
         "XDG_DATA_HOME": str(cache_dir / "xdg-data"),
+        "COREPACK_ENABLE_NETWORK": "0",
     }
+
+
+def _inside(path: str) -> bool:
+    """A relative path that stays in the repository (no `..`, `/`, `~`)."""
+    path = path.strip()
+    return bool(path) and path[0] not in "/~\\" and ".." not in re.split(r"[\\/]", path)
+
+
+def _foreign_spec(spec: str) -> bool:
+    """A dependency spec that is not a registry package: git, github:, URL,
+    `user/repo` shorthand, a path, or file:/link: leaving the repository."""
+    spec = spec.strip()
+    scheme, colon, rest = spec.partition(":")
+    if colon and scheme.lower() in ("file", "link", "portal"):
+        return not _inside(rest)
+    if colon and scheme.lower() in ("npm", "workspace"):
+        return False
+    return ":" in spec or "/" in spec
+
+
+def _registry_tarball(url: object, hosts: tuple[str, ...]) -> bool:
+    parts = urlsplit(str(url))
+    return parts.scheme == "https" and parts.hostname in hosts and parts.path.endswith(".tgz")
+
+
+def _manifest_refusal(manifest: dict[str, Any], package_manager: object) -> str:
+    if manifest.get("packageManager") != package_manager:
+        return (
+            f"it changes packageManager to {manifest.get('packageManager')!r} "
+            "(corepack would fetch and run it)"
+        )
+    pnpm = manifest.get("pnpm")
+    sections = [manifest.get(key) for key in (*_NODE_DEPENDENCY_KEYS, "overrides", "resolutions")]
+    stack = [*sections, pnpm.get("overrides") if isinstance(pnpm, dict) else None]
+    while stack:
+        section = stack.pop()
+        for name, spec in section.items() if isinstance(section, dict) else ():
+            if isinstance(spec, dict):
+                stack.append(spec)
+            elif isinstance(spec, str) and _foreign_spec(spec):
+                return f"package.json asks for {name}@{spec}, not a registry package"
+    workspaces = manifest.get("workspaces")
+    if isinstance(workspaces, dict):
+        workspaces = workspaces.get("packages")
+    for workspace in workspaces if isinstance(workspaces, list) else ():
+        if not _inside(str(workspace)):
+            return f"package.json adds the workspace {workspace}, outside the repository"
+    return ""
+
+
+def _npm_lock_refusal(text: str, hosts: tuple[str, ...]) -> str:
+    data = json.loads(text)
+    entries = [(name, e) for name, e in (data.get("packages") or {}).items() if name]
+    stack = [data.get("dependencies") or {}]  # lockfile v1: nested entries
+    while stack:
+        for name, entry in stack.pop().items():
+            if isinstance(entry, dict):
+                entries.append((name, entry))
+                stack.append(entry.get("dependencies") or {})
+    for name, entry in entries:
+        if not isinstance(entry, dict) or entry.get("inBundle") or entry.get("bundled"):
+            continue
+        resolved, version = entry.get("resolved"), entry.get("version")
+        if entry.get("link"):
+            if not _inside(str(resolved or "")):
+                return f"{name} links to {resolved}, outside the repository"
+        elif isinstance(version, str) and _foreign_spec(version):
+            return f"{name} is pinned to {version}, not a registry package"
+        elif resolved is not None and not _registry_tarball(resolved, hosts):
+            return f"{name} resolves to {resolved}"
+        elif resolved is not None and not entry.get("integrity"):
+            return f"{name} carries no integrity hash"
+    return ""
+
+
+def _yarn_lock_refusal(text: str, hosts: tuple[str, ...]) -> str:
+    for line in text.splitlines():
+        if line[:1] not in ("", "#", " ") and line.rstrip().endswith(":"):
+            for key in line.rstrip()[:-1].split(","):
+                key = key.strip().strip("\"'")
+                if "@" in key[1:] and _foreign_spec(spec := key[key.index("@", 1) + 1 :]):
+                    return f"{key} asks for {spec}, not a registry package"
+        elif (match := re.match(r"\s+resolved\s+\"?([^\"\s]+)", line)) and not _registry_tarball(
+            match.group(1), hosts
+        ):
+            return f"a package resolves to {match.group(1)}"
+    return ""
+
+
+def _pnpm_lock_refusal(text: str, hosts: tuple[str, ...]) -> str:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        key, _, value = line.strip().partition(":")
+        value = value.strip().strip("\"'")
+        if (key == "specifier" or value.startswith(("link:", "file:"))) and _foreign_spec(value):
+            return f"a package asks for {value}, not a registry package"
+        if key != "resolution":
+            continue
+        indent = len(line) - len(line.lstrip())
+        block = [value]
+        for follow in lines[index + 1 :]:
+            if len(follow) - len(follow.lstrip()) <= indent:
+                break
+            block.append(follow.strip())
+        resolution = " ".join(block)
+        if "integrity:" not in resolution:  # git, directory and bare tarballs
+            return f"a package resolves without an integrity hash ({resolution})"
+        for url in re.findall(r"tarball:\s*[\"']?([^,\"'}\s]+)", resolution):
+            if not _registry_tarball(url, hosts):
+                return f"a package resolves to {url}"
+    return ""
+
+
+_LOCK_REFUSALS = {
+    "pnpm-lock.yaml": _pnpm_lock_refusal,
+    "yarn.lock": _yarn_lock_refusal,
+    "package-lock.json": _npm_lock_refusal,
+    "npm-shrinkwrap.json": _npm_lock_refusal,
+}
+
+
+def _node_install_refusal(
+    worktree: Path,
+    lockfile: str,
+    touched: set[str],
+    *,
+    hosts: tuple[str, ...],
+    package_manager: object,
+    protected: set[str],
+) -> str:
+    """Why the PATCHED package.json/lockfile may not be installed, even with
+    the network limited to the registry hosts; empty when it may."""
+    config = sorted(
+        path
+        for path in touched
+        if PurePosixPath(path).name in _NODE_INSTALLER_CONFIG
+        or path.startswith(".yarn/")
+        or path in protected
+    )
+    if config:
+        return f"it changes the package manager's config ({', '.join(config)})"
+    if reason := _manifest_refusal(_manifest(worktree), package_manager):
+        return reason
+    try:
+        return _LOCK_REFUSALS[lockfile]((worktree / lockfile).read_text(encoding="utf-8"), hosts)
+    except (OSError, ValueError, AttributeError) as exc:
+        return f"{lockfile} could not be read ({exc})"
 
 
 def _patch_paths(worktree: Path, patch_path: Path) -> set[str]:
@@ -168,6 +346,76 @@ def _patch_paths(worktree: Path, patch_path: Path) -> set[str]:
         check=False,
     )
     return set(re.split(r"[\t\0]", listed.stdout))
+
+
+class _PrimeWall:
+    """The prime's sandbox: writable worktree and caches, network only to
+    ``hosts`` through a filtering proxy (D1) — never allow-all. Started on
+    the first install; the proxy env reaches the installers alone, never the
+    verify command."""
+
+    def __init__(
+        self,
+        hosts: tuple[str, ...],
+        *,
+        worktree: Path,
+        profile_path: Path | None,
+        writable: list[Path],
+        config: SupervisorConfig,
+    ) -> None:
+        self.hosts = hosts
+        self._worktree = worktree
+        self._profile_path = profile_path
+        self._writable = writable
+        self._config = config
+        self._proxy: FilteringProxy | None = None
+        self._socket_dir: str | None = None
+        self._profile: Path | None = None
+
+    def run(self, command: str, env: dict[str, str]) -> tuple[int, str]:
+        if self._proxy is None:
+            self._start()
+        assert self._proxy is not None
+        proxy = _proxy_env(self._proxy.port)
+        # npm/pnpm/yarn read their own proxy keys too; one that ignores both
+        # meets the wall (egress pinned to the proxy port) and fails closed.
+        proxy["npm_config_proxy"] = proxy["npm_config_https_proxy"] = proxy["HTTPS_PROXY"]
+        return _run_command(
+            command, cwd=self._worktree, env={**env, **proxy}, profile_path=self._profile
+        )
+
+    def _start(self) -> None:
+        bubblewrap = (
+            self._profile_path is not None and sandbox.availability().backend == "bubblewrap"
+        )
+        if bubblewrap:
+            from .dispatch import _proxy_socket_root  # runtime: dispatch imports us
+
+            self._socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
+        self._proxy = FilteringProxy(
+            self.hosts,
+            unix_socket_path=str(Path(self._socket_dir) / "p.sock") if self._socket_dir else None,
+            denied_loopback_ports=control_plane_ports(self._config.home),
+        ).start()
+        if self._profile_path is not None:
+            self._profile = sandbox.write_profile(
+                self._profile_path.with_suffix(".prime.sb"),
+                workspace=self._worktree,
+                extra_writable=[*git_metadata_writable_roots(self._worktree), *self._writable],
+                extra_readable=git_metadata_readable_roots(self._worktree),
+                network=sandbox.NetworkPolicy(allow=self.hosts),
+                proxy_port=self._proxy.port,
+                unix_socket_path=self._proxy.unix_socket_path,
+                skep_home=self._config.home.parent,
+            )
+
+    def close(self) -> None:
+        try:
+            if self._proxy is not None:
+                self._proxy.stop()
+        finally:
+            if self._socket_dir is not None:
+                shutil.rmtree(self._socket_dir, ignore_errors=True)
 
 
 def command_timeout_seconds(budget_seconds: float | None) -> float:
@@ -288,6 +536,7 @@ def reverify(
         worktree = create_worktree(repo, config.worktrees_root, f"reverify-{patch_path.stem}", ref)
     proxy: FilteringProxy | None = None
     proxy_socket_dir: str | None = None
+    wall: _PrimeWall | None = None
     try:
         env = dict(env)
         # v107-F3: TMPDIR inside the wall — unset, tools fall back to /tmp,
@@ -297,50 +546,65 @@ def reverify(
         reverify_tmp.mkdir(parents=True, exist_ok=True)
         env.update(sandbox.in_wall_tmp_env(reverify_tmp))  # v120-F1: + TMPPREFIX
         env["CLANG_MODULE_CACHE_PATH"] = str(reverify_tmp / "clang")  # ignores TMPDIR
-        # v109-F4: a shared cache sits outside the worktree, so both profiles
-        # below need it as an explicit writable root (the offline verify still
-        # takes locks in the cache; content-addressed artifacts, never patch
-        # material). The worktree-local throwaway needed nothing.
+        # v109-F4: a shared cache sits outside the worktree, so the prime
+        # profile needs it as an explicit writable root. The offline verify
+        # keeps the uv cache writable (uv takes locks there; content-addressed
+        # artifacts, never patch material) but only READS the Node cache:
+        # patch code runs there, and a never-landed patch must not leave
+        # anything a later verdict installs from (council round 2, I2).
+        node_cache = node_cache_dir or worktree / ".node-cache"
         cache_writable = [d for d in (uv_cache_dir, node_cache_dir) if d is not None]
+        verify_writable = [uv_cache_dir] if uv_cache_dir is not None else []
+        verify_readable = [node_cache_dir] if node_cache_dir is not None else []
         primed = ""
-        prime_profile: Path | None = None
+        node_pin = _pin_uses(commands, _NODE_TOOLS)
         node_prime = _node_prime(worktree, commands)
-        if node_prime == ("", ""):
-            return ReverifyOutcome(
-                "unavailable",
-                commands,
-                [],
-                "not confirmed: no lockfile to prime from — package.json declares "
-                "dependencies but the baseline has no package-lock.json, "
-                "npm-shrinkwrap.json, pnpm-lock.yaml or yarn.lock; the verification "
-                "command was not run",
-            )
+        if isinstance(node_prime, str):
+            if _pin_uses(commands, _NODE_PACKAGE_MANAGERS):
+                return ReverifyOutcome(
+                    "unavailable",
+                    commands,
+                    [],
+                    f"not confirmed: {node_prime}; the verification command was not run",
+                )
+            # A bare `node` pin may import nothing it lacks: it runs, unprimed,
+            # and the record says so (never unavailable forever).
+            primed = f"; ran unprimed: {node_prime}"
         uv_prime = _needs_uv_priming(worktree, commands)
-        if profile_path is not None and (uv_prime or node_prime):
-            prime_profile = profile_path.with_suffix(".prime.sb")
-            sandbox.write_profile(
-                prime_profile,
-                workspace=worktree,
-                extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
-                extra_readable=git_metadata_readable_roots(worktree),
-                network=sandbox.ALLOW_ALL_NETWORK,
-                skep_home=config.home.parent,
-            )
+        # The BASELINE decides who the prime may reach (read before the
+        # patch applies): the default indexes plus the hosts its lockfiles
+        # already resolve from, and the installer files a patch must not touch.
+        hosts: set[str] = set()
+        if uv_prime:
+            uv_index = r'(?:registry|url) = "([^"]+)"'
+            hosts |= {*_PYPI_HOSTS, *_lock_hosts(worktree, ["uv.lock"], uv_index)}
+        if node_pin:
+            node_lockfiles = [lockfile for lockfile, _ in _NODE_INSTALLS]
+            hosts |= {*_NPM_HOSTS, *_lock_hosts(worktree, node_lockfiles, f"({_TARBALL_URL})")}
+            env.update(_node_env(node_cache, reverify_tmp))
+        package_manager = _manifest(worktree).get("packageManager")
+        protected: set[str] = set()
+        for rc in (".yarnrc", ".yarnrc.yml"):
+            with contextlib.suppress(OSError):
+                text = (worktree / rc).read_text(encoding="utf-8")
+                protected |= {str(PurePosixPath(p)) for p in _YARN_PATH.findall(text)}
+        wall = _PrimeWall(
+            tuple(sorted(hosts)),
+            worktree=worktree,
+            profile_path=profile_path,
+            writable=cache_writable,
+            config=config,
+        )
         if uv_prime:
             # v94-F7: prime the BASELINE env before the patch is applied — only
             # code the operator's repo already contains at HEAD runs with the
-            # network; patch code stays offline under the deny-all profile
-            # below, and the operator's own ~/.cache/uv is never written.
+            # (index-only) network; patch code stays offline under the deny-all
+            # profile below, and the operator's own ~/.cache/uv is never written.
             # v109-F4: the cache is the per-project one dispatch primes too,
             # when the caller resolved it — a workspace-local cache dies with
             # the worktree, which made every re-verify resolve from zero.
             cache_dir = uv_cache_dir if uv_cache_dir is not None else worktree / ".uv-cache"
-            prime_code, _prime_tail = _run_command(
-                "uv sync",
-                cwd=worktree,
-                env={**env, "UV_CACHE_DIR": str(cache_dir)},
-                profile_path=prime_profile,
-            )
+            prime_code, _prime_tail = wall.run("uv sync", {**env, "UV_CACHE_DIR": str(cache_dir)})
             if prime_code != 0:
                 # A prime that cannot complete is a supervisor-side environment
                 # problem, not patch guilt — the honest shape is "unavailable"
@@ -355,15 +619,12 @@ def reverify(
                 )
             env["UV_CACHE_DIR"] = str(cache_dir)
             env["UV_NO_SYNC"] = "1"
-            primed = "; deps primed from the baseline (uv sync), verify ran offline"
-        if node_prime:
+            primed = f"{primed}; deps primed from the baseline (uv sync), verify ran offline"
+        if isinstance(node_prime, tuple):
             # v127-A0: the same shape for Node — the BASELINE lockfile installs
-            # under the prime profile; patch code stays offline below.
+            # under the prime wall; patch code stays offline below.
             node_install = node_prime[1]
-            env.update(_node_cache_env(node_cache_dir or worktree / ".node-cache"))
-            prime_code, prime_tail = _run_command(
-                node_install, cwd=worktree, env=env, profile_path=prime_profile
-            )
+            prime_code, prime_tail = wall.run(node_install, env)
             if prime_code != 0:
                 return ReverifyOutcome(
                     "unavailable",
@@ -400,8 +661,8 @@ def reverify(
                 sandbox.write_profile(
                     profile_path,
                     workspace=worktree,
-                    extra_writable=[*git_metadata_writable_roots(worktree), *cache_writable],
-                    extra_readable=git_metadata_readable_roots(worktree),
+                    extra_writable=[*git_metadata_writable_roots(worktree), *verify_writable],
+                    extra_readable=[*git_metadata_readable_roots(worktree), *verify_readable],
                     network=network,
                     proxy_port=proxy.port if proxy is not None else None,
                     unix_socket_path=proxy.unix_socket_path if proxy is not None else None,
@@ -432,18 +693,17 @@ def reverify(
                 f"patch did not apply to a clean worktree at {ref or 'HEAD'}: "
                 f"{applied.stderr.strip()}",
             )
-        if uv_prime and _patch_touches_lockfile(worktree):
+        touched = _patch_paths(worktree, patch_path) if uv_prime or node_pin else set()
+        if uv_prime and touched & _UV_PRIME_INPUTS:
             # v115-F13 (I2): the baseline prime installed the OLD dependencies;
             # a patch that changes the lockfile must be verified against the
             # NEW ones. Run 01a16157 bumped starlette 1.3.0 → 1.9.0 in uv.lock
             # and re-verification ran the suite on 1.3.0 — a breaking bump would
-            # have passed. Prime again, after the patch, from the same cache
-            # (network allowed, as for the baseline prime); the pinned command
-            # still runs offline afterwards.
+            # have passed. Prime again, after the patch, from the same cache,
+            # through the same wall (the baseline's index hosts alone); the
+            # pinned command still runs offline afterwards.
             resync_env = {key: value for key, value in env.items() if key != "UV_NO_SYNC"}
-            resync_code, resync_tail = _run_command(
-                "uv sync", cwd=worktree, env=resync_env, profile_path=prime_profile
-            )
+            resync_code, resync_tail = wall.run("uv sync", resync_env)
             if resync_code != 0:
                 return ReverifyOutcome(
                     "unavailable",
@@ -456,41 +716,56 @@ def reverify(
                     f"{resync_tail or '(no output)'}",
                 )
             primed = f"{primed}; re-primed against the patched lockfile"
-        touched = _patch_paths(worktree, patch_path) if node_prime else set()
-        if node_prime and touched & {node_prime[0], "package.json"}:
-            # v127-A0, the v115-F13 twin: a lockfile change is verified against
-            # the NEW packages. That install has the network, so a patch that
-            # also changes what the installer obeys is not installed at all.
-            config_changed = sorted(
-                path
-                for path in touched
-                if path in _NODE_INSTALLER_CONFIG or path.startswith(".yarn/")
+        patched_prime = _node_prime(worktree, commands) if touched & _NODE_PRIME_INPUTS else None
+        if isinstance(patched_prime, str) and not isinstance(node_prime, str):
+            # The patch takes the lockfile away, or adds the first dependencies
+            # without one: nothing to install them from, so no verdict either
+            # way — never confirmed against the old packages, never "failed".
+            return ReverifyOutcome(
+                "unavailable",
+                commands,
+                [],
+                f"not confirmed: the patch changes the Node dependencies and leaves "
+                f"{patched_prime}; the verification command was not run",
             )
-            if config_changed:
+        if isinstance(patched_prime, tuple):
+            # v127-A0, the v115-F13 twin: a lockfile change (or the first
+            # lockfile) is verified against the NEW packages. That install is
+            # patch data reaching the network before approval, so it runs only
+            # when every package comes from the baseline's registry hosts with
+            # an integrity hash and no installer config moved (I12, I11).
+            lockfile, install = patched_prime
+            refusal = _node_install_refusal(
+                worktree,
+                lockfile,
+                touched,
+                hosts=wall.hosts,
+                package_manager=package_manager,
+                protected=protected,
+            )
+            if refusal:
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
                     [],
-                    "the patch changes the lockfile and the package manager's config "
-                    f"({', '.join(config_changed)}), so its packages were not installed "
-                    "with the network; the verification command was not run — a "
-                    "dependency change is never confirmed against the old dependencies",
+                    "the patch changes the Node dependencies and was not installed: "
+                    f"{refusal}; the verification command was not run — a dependency "
+                    "change is never confirmed against the old dependencies",
                 )
-            reprime_code, reprime_tail = _run_command(
-                node_prime[1], cwd=worktree, env=env, profile_path=prime_profile
-            )
+            reprime_code, reprime_tail = wall.run(install, env)
             if reprime_code != 0:
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
                     [reprime_code],
                     "the patch changes the lockfile and its packages could not be "
-                    f"primed ({node_prime[1]} exited {reprime_code}); the verification "
+                    f"primed ({install} exited {reprime_code}); the verification "
                     "command was not run — a dependency change is never confirmed "
                     "against the old dependencies\n--- install output (tail) ---\n"
                     f"{reprime_tail or '(no output)'}",
                 )
-            primed = f"{primed}; re-primed against the patched lockfile"
+            again = "re-" if isinstance(node_prime, tuple) else ""
+            primed = f"{primed}; {again}primed against the patched lockfile ({install})"
         exit_codes: list[int] = []
         tails: list[str] = []
         command_timeout = command_timeout_seconds(timeout_seconds)
@@ -541,6 +816,8 @@ def reverify(
         try:
             if proxy is not None:
                 proxy.stop()
+            if wall is not None:
+                wall.close()
         finally:
             if proxy_socket_dir is not None:
                 shutil.rmtree(proxy_socket_dir, ignore_errors=True)
