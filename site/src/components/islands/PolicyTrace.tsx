@@ -206,7 +206,7 @@ export default function PolicyTrace() {
         : 'hover';
 
   return (
-    <figure className="panel pt" ref={root}>
+    <figure className="panel pt" ref={root} data-pagefind-ignore>
       <div className="panel-head">
         <div className="panel-title">
           <span>skep policy why</span>
