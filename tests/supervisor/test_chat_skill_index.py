@@ -129,6 +129,11 @@ def test_short_descriptions_cut_on_a_word() -> None:
     assert len(cut) <= chat_module.SKILL_DESCRIPTION_CHARS + 1
     assert short("x" * 80) == "x" * 50 + "…"  # no space to cut on
     assert short("  spread\n over   lines ") == "spread over lines"
+    # v126-F8 (review): the boilerplate lead goes, so 50 chars keep the meaning.
+    assert short("Use when the user asks to rebase a PR") == "the user asks to rebase a PR"
+    assert short("use this skill when debugging a crash") == "debugging a crash"
+    assert short("USE THIS WHEN a deploy fails") == "a deploy fails"
+    assert short("Usefulness first") == "Usefulness first"
 
 
 def test_the_index_stays_bounded_and_complete_with_many_operator_skills(tmp_path: Path) -> None:

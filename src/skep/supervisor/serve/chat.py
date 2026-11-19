@@ -1112,11 +1112,13 @@ _SKILL_INDEX_HEADER = (
 # Every name is listed either way (v99-F2).
 SKILL_DESCRIPTION_CHARS = 50
 SKILL_INDEX_MAX_CHARS = 4_000
+_USE_WHEN = re.compile(r"^use (?:this skill |this )?when\s+", re.IGNORECASE)
 
 
 def short_description(text: str, limit: int = SKILL_DESCRIPTION_CHARS) -> str:
     """One line, at most ``limit`` chars plus an ellipsis, cut on a word."""
-    text = " ".join(text.split())
+    # v126-F8 (review): drop the boilerplate lead before cutting.
+    text = _USE_WHEN.sub("", " ".join(text.split()), count=1)
     if len(text) <= limit:
         return text
     cut = text[: limit + 1].rsplit(" ", 1)[0] if " " in text[: limit + 1] else text[:limit]
