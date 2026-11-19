@@ -103,14 +103,15 @@ chmod 700 ~/bin/skep-nightly.sh
 ```text
 task 01a1f134-77b5-7815-954f-11c0d8686bb1
   state:        completed (1.6s)
-  verification: passed
-  summary:      created hello.py and verified it runs.
+  verification: confirmed by re-verify (G10) — re-ran <verify command> → exit 0
+  worker claim: passed — created hello.py and verified it runs.
   evidence:     /home/you/.skep/supervisor/audit/01a1f134-77b5-7815-954f-11c0d8686bb1
   next:         skep review 01a1f134-77b5-7815-954f-11c0d8686bb1
 ```
 
 <!-- captured from a builtin-worker run with --quiet; the summary block is printed by
-     src/skep/supervisor/cli_cmds.py:1014-1025 for every engine. -->
+     src/skep/supervisor/cli_cmds.py cmd_run for every engine. The verification and
+     worker-claim lines were rewritten to the v127-T3 format (_verification_lines). -->
 
 ## 3. Test it the way cron will run it
 

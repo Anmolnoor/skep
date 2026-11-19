@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import html
 import re
 from pathlib import Path
 
@@ -14,7 +13,6 @@ PUBLIC_DOCS = (
     ROOT / "docs" / "demo-gif.md",
     ROOT / "docs" / "how-it-works.md",
     ROOT / "docs" / "how-to-use-on-new-machine.md",
-    ROOT / "docs" / "index.html",
     ROOT / "docs" / "quickstart.md",
     ROOT / "docs" / "sandboxing.md",
     ROOT / "docs" / "workers.md",
@@ -23,8 +21,6 @@ PUBLIC_DOCS = (
 
 FENCED_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 INLINE_CODE_RE = re.compile(r"`([^`\n]*skep run[^`\n]*)`")
-HTML_COMMAND_RE = re.compile(r"<(?:pre|li)\b[^>]*>(.*?)</(?:pre|li)>", re.DOTALL)
-HTML_TAG_RE = re.compile(r"<[^>]+>")
 SUBCOMMAND_HOME_RE = re.compile(
     r"\b(?:uv run )?skep\s+"
     r"(?:setup|doctor|status|start|run|review|schedule|tick|template|skill|serve)\b"
@@ -36,10 +32,6 @@ def _copy_paste_run_examples(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
     snippets = FENCED_BLOCK_RE.findall(text)
     snippets.extend(INLINE_CODE_RE.findall(text))
-
-    if path.suffix == ".html":
-        for raw in HTML_COMMAND_RE.findall(text):
-            snippets.append(html.unescape(HTML_TAG_RE.sub(" ", raw)))
 
     examples = []
     for snippet in snippets:

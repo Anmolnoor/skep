@@ -37,8 +37,8 @@ def test_release_checklist_covers_landing_demo_assets() -> None:
 
     for relpath in (
         "docs/demo-gif.md",
-        "docs/site.css",
-        "docs/site.js",
+        "site/src/pages/index.astro",
+        "site/src/styles/tokens.css",
         "docs/assets/skep-demo.gif",
     ):
         assert relpath in checklist
@@ -199,12 +199,13 @@ def test_docs_toc_and_community_files_exist() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "docs/README.md" in readme
 
-    # LAUNCH-2: the landing links the docs hub; the hub links the curated
-    # markdown index, so every doc stays one hop from the front page.
-    landing = (ROOT / "docs" / "index.html").read_text(encoding="utf-8")
-    assert 'href="./docs.html"' in landing
-    hub = (ROOT / "docs" / "docs.html").read_text(encoding="utf-8")
-    assert 'href="./README.md"' in hub
+    # docs-site: the site's header links the docs hub on every page, and the
+    # hub is generated from the curated markdown index, so every doc stays one
+    # hop from the front page.
+    nav = (ROOT / "site" / "src" / "lib" / "site-nav.mjs").read_text(encoding="utf-8")
+    assert "/docs.html" in nav
+    hub = (ROOT / "site" / "src" / "pages" / "docs.astro").read_text(encoding="utf-8")
+    assert "parseDocsIndex" in hub
 
     assert (ROOT / "CONTRIBUTING.md").is_file()
     assert (ROOT / "SECURITY.md").is_file()
