@@ -253,13 +253,18 @@ function testAnAction(scopes, projects, roles, schedules, preset = {}) {
         + `&value=${encodeURIComponent(value.value.trim())}`
         + (role.value && !hop ? `&role=${encodeURIComponent(role.value)}` : "")
         + (hop ? `&delegation_chain=${encodeURIComponent(`schedule:${hop.name}@${hop.role}`)}` : ""));
-      const considered = why.run.considered || [];
+      // policy_v3.OPERATOR_LANES: search and fetch are decided on the Queen's
+      // lane even from a project, so the workers' answer is never used (I8).
+      const queenLane = QUEEN_LANES.includes(`${scope.value}.${action.value.trim()}`);
+      const considered = queenLane ? [] : why.run.considered || [];
       out.replaceChildren(...[
-        el("p", {}, `Workers in ${picked?.name || repo}: `, why.run.error
-          ? `could not decide — ${why.run.error}`
-          : [el("strong", {}, verdictWord(why.run.verdict)), " — decided by ", el("span", { class: "mono" }, why.run.decided_by)]),
+        queenLane
+          ? el("p", { class: "note" }, `${scope.value}.${action.value.trim()} is decided on the Queen's lane, even from a project: the line below is the answer.`)
+          : el("p", {}, `Workers in ${picked?.name || repo}: `, why.run.error
+            ? `could not decide — ${why.run.error}`
+            : [el("strong", {}, verdictWord(why.run.verdict)), " — decided by ", el("span", { class: "mono" }, why.run.decided_by)]),
         // The deciding rule's sentence, when a shipped baseline rule decided (_deciding_text).
-        why.run.description ? el("p", { class: "field-help" }, why.run.description) : null,
+        !queenLane && why.run.description ? el("p", { class: "field-help" }, why.run.description) : null,
         el("p", {}, "The Queen: ", el("strong", {}, verdictWord(why.operator.verdict)),
           " — decided by ", el("span", { class: "mono" }, why.operator.decided_by)),
         why.operator.description ? el("p", { class: "field-help" }, why.operator.description) : null,

@@ -247,6 +247,24 @@ test("Now: Test an action asks /api/policy/why and names both verdicts in words"
   assert.match(out, /template:builder\/shell-ask/);
 });
 
+test("Now: Test an action on network.fetch shows the Queen's lane only, never a workers' answer", async () => {
+  const { main, app } = withPolicies({
+    "GET /api/policy/why": { run: { verdict: "allow", decided_by: "net:example.com", considered: [{ verdict: "allow", pattern: "example.com", rule_id: "net:example.com" }] }, operator: { verdict: "require_approval", decided_by: "template:builder/net-fetch-gated" }, baseline: "b" },
+  });
+  await app.viewPolicies(main);
+  await flush();
+  const box = panel(main).querySelector(".policy-test");
+  const [project, scope] = box.querySelectorAll("select");
+  const [action, value] = box.querySelectorAll("input");
+  project.value = "app"; scope.value = "network"; action.value = "fetch"; value.value = "https://example.com/x";
+  await box.querySelector("button").click();
+  const out = box.querySelector(".policy-test-out").textContent;
+  assert.doesNotMatch(out, /Workers in/);
+  assert.match(out, /decided on the Queen's lane/);
+  assert.match(out, /The Queen: asks first — decided by template:builder\/net-fetch-gated/);
+  assert.equal(box.querySelectorAll(".policy-tree-rule").length, 0);
+});
+
 // v124-F3 + review: the request is what a live run sends — a chat's role, or
 // a schedule tick's hop (schedule:<name>@<role>, role=None, against the
 // schedule's repo: scheduler.run_due), never both. Real why answers.
