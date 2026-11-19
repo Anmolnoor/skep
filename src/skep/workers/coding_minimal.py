@@ -884,7 +884,11 @@ def _execute(
         )
 
     if not _is_python_hello_world(task):
-        summary = "minimal coding worker only supports Python hello-world tasks."
+        # v127-T5 (trial V15/V16): name the cause, not the fallback's limits.
+        summary = (
+            "no model provider is configured for the builtin worker — run `skep onboard` "
+            "or set one in Settings (without one it only handles Python hello-world tasks)."
+        )
         stream.emit(EventType.PLAN_CREATED, {"steps": [summary]})
         stream.emit(
             EventType.VERIFY_RESULT,

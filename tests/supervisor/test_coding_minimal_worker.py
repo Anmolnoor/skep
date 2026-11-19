@@ -162,6 +162,23 @@ def test_default_coding_worker_creates_python_hello_world(repo: Path, tmp_path: 
     _no_leftovers(repo, config.worktrees_root)
 
 
+def test_default_coding_worker_without_a_provider_names_the_missing_provider(
+    repo: Path, tmp_path: Path
+) -> None:
+    """v127-T5 (trial V15/V16): with no model provider the builtin worker
+    falls back to its hello-world path, and a real task failed with "minimal
+    coding worker only supports Python hello-world tasks" while doctor said
+    blocked. The summary names the cause and the way out (I8/I9)."""
+    config = build_config(tmp_path / "home", None)
+
+    outcome = run_task(repo, "Add a phone formatter test.", config=config)
+
+    assert outcome.record.state == "failed"
+    summary = outcome.record.summary or ""
+    assert "no model provider is configured for the builtin worker" in summary
+    assert "skep onboard" in summary and "Settings" in summary
+
+
 def test_default_coding_worker_commit_request_stops_for_approval(
     repo: Path, tmp_path: Path
 ) -> None:
