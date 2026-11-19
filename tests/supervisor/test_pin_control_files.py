@@ -89,6 +89,14 @@ def project_repo(repo: Path) -> Path:
         "vitest.config.ts",
         ".mocharc.yml",
         ".coveragerc",
+        # round 4: pytest 9's own config files win over pytest.ini/pyproject;
+        # vitest reads vite.config's `test` block when no vitest.config exists;
+        # setup.py is the project's build script (it runs during the re-prime)
+        "pytest.toml",
+        ".pytest.toml",
+        "vite.config.ts",
+        "vitest.workspace.ts",
+        "setup.py",
     ],
 )
 def test_a_test_control_file_blocks(project_repo: Path, name: str) -> None:
@@ -116,6 +124,9 @@ def test_hatch_test_envs_in_pyproject_block(project_repo: Path) -> None:
         '\n[project.entry-points.pytest11]\nrigged = "rigged_plugin"\n',
         '\n[tool.coverage.run]\nomit = ["*"]\n',
         '\n[tool.pytest_env]\nCI = "1"\n',
+        # round 4: a patch-chosen build backend runs during the re-prime and,
+        # once landed, during every baseline prime
+        '\n[build-system]\nrequires = []\nbuild-backend = "evil"\nbackend-path = ["."]\n',
     ],
 )
 def test_pytest_plugins_and_coverage_in_pyproject_block(project_repo: Path, extra: str) -> None:

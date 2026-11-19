@@ -149,15 +149,17 @@ This catches common failures:
   check). A pipe `|`, a background `&`, backticks or `$(` anywhere is refused
   for auto-landing outright. A patch that changes
   what the pin runs never auto-lands either. Any touch of a test-runner config
-  file blocks it: `conftest.py`, `pytest.ini`, `.pytest.ini`, `tox.ini`,
-  `setup.cfg`, `noxfile.py`, `Makefile`, `.coveragerc`, `.npmrc`, `.yarnrc*`,
-  `jest.config.*`, `vitest.config.*`, `.mocharc*` (in any directory); so does
+  file blocks it: `conftest.py`, `pytest.ini`, `.pytest.ini`, `pytest.toml`,
+  `.pytest.toml`, `tox.ini`, `setup.cfg`, `setup.py`, `noxfile.py`, `Makefile`,
+  `.coveragerc`, `.npmrc`, `.yarnrc*`, `jest.config.*`, `vitest.config.*`,
+  `vitest.workspace.*`, `vite.config.*`, `.mocharc*` (in any directory); so does
   any file a word of the pin names (`uv run python scripts/check.py` makes
   `scripts/check.py` a control file), and any file named by the `package.json`
   script the pin runs (`npm test` → `scripts.test` → `node test/run.js`).
   `pyproject.toml` blocks when its `[tool.pytest*]`, `[tool.coverage*]`,
   `[tool.tox]`, `[tool.nox]`, `[tool.poe]`, `[tool.hatch.envs]`,
-  `[tool.pdm.scripts]` or `[project.entry-points.pytest11]` change;
+  `[tool.pdm.scripts]`, `[project.entry-points.pytest11]` or `[build-system]`
+  change;
   `package.json` blocks on any change other than its dependency lists,
   `overrides`, `resolutions` or `version`, so a dependency bump still lands.
   Skep reads this from the patch, not the worker. This blocks global switches

@@ -217,6 +217,14 @@ _PIN_CONTROL_GLOBS = (
     "jest.config.*",
     "vitest.config.*",
     ".mocharc*",
+    # round 4: pytest 9's own config files (they win over pytest.ini and
+    # pyproject); vitest reads vite.config's `test` block when there is no
+    # vitest.config; setup.py is the build script the re-prime runs.
+    "pytest.toml",
+    ".pytest.toml",
+    "vite.config.*",
+    "vitest.workspace.*",
+    "setup.py",
 )
 # pyproject [tool.<prefix>*] tables that configure a test runner.
 _PYPROJECT_TOOL_PREFIXES = ("pytest", "coverage", "tox", "nox", "poe")
@@ -263,6 +271,9 @@ def _test_config(name: str, text: str | None) -> object:
         _dig(tool, "hatch", "envs"),
         _dig(tool, "pdm", "scripts"),
         _dig(doc, "project", "entry-points", "pytest11"),
+        # round 4: a patch-chosen build backend runs during the re-prime and,
+        # once landed on skep/maintain, during every later baseline prime.
+        doc.get("build-system"),
     )
 
 
