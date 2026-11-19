@@ -40,6 +40,10 @@ approval UX, release engineering, and product taste in a timely problem space.
 
 ## First 6 Months
 
+*Note, 2026-11-18: this list was written before the 2026-07-30 launch (the
+public repo opened at 1.0.1) and is kept as a record of that plan, not as the
+current roadmap.*
+
 1. Month 1: stabilize launch feedback, fix reproducible bugs, and improve docs
    where users got stuck.
 2. Month 2: finish the broader approval-to-template pipeline, including template

@@ -1,13 +1,239 @@
 ---
-// Stub from the foundation: the page agent that owns this file replaces the body.
+// Open source: the licence, how to contribute as CONTRIBUTING.md and the CI gates
+// really are, and the repository's live numbers through the shared script.
 import Base from '../layouts/Base.astro';
+import Button from '../components/Button.astro';
+import Callout from '../components/Callout.astro';
+import Card from '../components/Card.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Section from '../components/Section.astro';
+import { siteFacts } from '../lib/repo.mjs';
+import { GH_URL, ISSUES_URL, PYPI_URL } from '../lib/site-nav.mjs';
+
+const { version } = siteFacts();
+
+const setup = `$ git clone ${GH_URL}.git
+$ cd skep
+$ uv sync --frozen
+$ make all`;
+
+const gates = `$ TMPDIR=$HOME/.cache/skep-test-tmp uv run --with pytest-xdist --with pytest-cov pytest -q -n auto --cov=skep --cov-report=xml
+$ uvx diff-cover coverage.xml --compare-branch=origin/main --fail-under=90
+$ uv run ruff check .
+$ uv run ruff format --check src/skep tests scripts
+$ uv run mypy
+$ TMPDIR=$HOME/.cache/skep-test-tmp uv run python scripts/scorecard.py`;
 ---
 
-<Base title="Open Source" description="Open Source: this page is being written.">
+<Base
+  title="Open Source"
+  description="skep is MIT-licensed. How to set up a checkout, which gates a pull request has to pass, and where help is most useful."
+>
   <section class="section">
     <div class="wrap narrow stack">
-      <h1 class="t-h2">Open Source</h1>
-      <p class="t-lead">This page is being written.</p>
+      <p class="eyebrow t-micro">Open source</p>
+      <h1 class="t-h2">MIT-licensed, and readable end to end</h1>
+      <p class="t-lead prose-width">
+        A supervisor you cannot inspect is another thing to take on trust. The whole boundary is in
+        the repository: the sandbox profiles, the policy engine, the re-verification step and the
+        tests that pin them.
+      </p>
+      <div class="row">
+        <Button href={GH_URL} icon="github">Source on GitHub</Button>
+        <Button href={`${GH_URL}/blob/main/CONTRIBUTING.md`} variant="ghost" icon="arrow-up-right">
+          CONTRIBUTING.md
+        </Button>
+      </div>
     </div>
   </section>
+
+  <Section band narrow eyebrow="Licence" title="MIT">
+    <div class="stack prose-width">
+      <p>
+        Use it, change it and ship it, for personal or commercial work. The text is in
+        <a class="c-green" href={`${GH_URL}/blob/main/LICENSE`}>LICENSE</a>.
+      </p>
+      <p class="t-small c-mut">
+        One exception, and it concerns this website only: four text-animation components in the
+        site’s source come from React Bits under MIT with the Commons Clause. They are not part of
+        the skep package and are not covered by skep’s licence; see
+        <a class="c-green" href={`${GH_URL}/blob/main/NOTICE`}>NOTICE</a>.
+      </p>
+    </div>
+  </Section>
+
+  <Section
+    narrow
+    eyebrow="Contribute"
+    title="Set up a checkout"
+    lead="Python 3.12 or newer and uv. The default test suite needs no model, no credentials, no network and no Docker."
+  >
+    <div class="stack">
+      <CodeBlock code={setup} title="Development setup" step={1} />
+      <p class="prose-width">
+        <code>make all</code> runs lint, type checking and the default test suite. If
+        <code>make</code> is not installed, run the commands in step 2 directly.
+      </p>
+    </div>
+  </Section>
+
+  <Section
+    band
+    narrow
+    eyebrow="Gates"
+    tone="green"
+    title="What a pull request has to pass"
+    lead="CI runs these on Linux and macOS. Run them locally first: all six green."
+  >
+    <div class="stack">
+      <CodeBlock code={gates} title="The six gates" step={2} />
+      <div class="prose prose-width">
+        <ul>
+          <li>
+            <strong>The suite has no known failures.</strong> A red test is yours, not a
+            pre-existing one.
+          </li>
+          <li>
+            <strong>Diff coverage, 90%.</strong> The lines your change adds have to be run by a
+            test. <code>make all</code> does not check this; CI does.
+          </li>
+          <li>
+            <strong><code>TMPDIR</code> outside <code>/tmp</code> on Linux.</strong> The sandbox
+            tests hide <code>/tmp</code>, so tests that keep their files there fail.
+          </li>
+          <li>
+            <strong>A hygiene scan in CI.</strong> A secrets scanner (gitleaks) runs on the Linux
+            leg. A credential-shaped string in a test fixture turns the pull request red.
+          </li>
+          <li>
+            <strong>The macOS leg is narrower.</strong> It runs lint, types, unit tests and the
+            smoke test; coverage, the sandbox smoke and the hygiene scan run on Linux only.
+          </li>
+          <li>
+            <strong>The website has its own checks.</strong> A change under <code>site/</code> is
+            built and link-checked by a separate workflow; see
+            <a href={`${GH_URL}/blob/main/site/README.md`}>site/README.md</a>.
+          </li>
+        </ul>
+      </div>
+      <Callout kind="note" title="Not needed for a pull request">
+        <code>scripts/local-release-gates.sh</code> is the release gate. It adds container builds,
+        a wheel build and the scans, and needs <code>make</code>, Docker and gitleaks.
+      </Callout>
+    </div>
+  </Section>
+
+  <Section
+    narrow
+    eyebrow="What a change needs"
+    title="Keep the safety model intact"
+    lead="From CONTRIBUTING.md. A change to worker execution, approval, sandboxing or re-verification comes with a test that proves the failure path."
+  >
+    <div class="grid grid-2">
+      <Card title="Failure paths to prove" icon="shield-check" tone="green">
+        <ul class="plain">
+          <li>With no usable sandbox, a sandbox-mode worker does not start.</li>
+          <li>An unconfirmed re-verification blocks auto-landing.</li>
+          <li>A denied approval grants nothing.</li>
+          <li>A worker does not change your checkout or your default branch.</li>
+        </ul>
+      </Card>
+      <Card title="In the pull request" icon="git-pull-request">
+        <ul class="plain">
+          <li>What changed, and how you verified it.</li>
+          <li>Any safety boundary it touches.</li>
+          <li>Known limits and follow-up work.</li>
+          <li>Docs that say what is enforced, what is policy and what is planned.</li>
+        </ul>
+      </Card>
+    </div>
+  </Section>
+
+  <Section
+    band
+    narrow
+    eyebrow="Where to help"
+    title="The most useful contributions"
+    lead="skep has one maintainer and few outside contributors so far, so a careful report counts for a lot."
+  >
+    <div class="grid grid-3">
+      <Card title="Challenge the security model" icon="search" href="/security.html">
+        Read the invariants and the sandbox profiles and try to break a claim. A hole is the most
+        valuable issue you can file. Report anything exploitable privately.
+      </Card>
+      <Card title="Report what breaks on your machine" icon="laptop" href={ISSUES_URL}>
+        Another distribution, another kernel, another macOS release. Include
+        <code>skep --version</code> and the output of <code>skep doctor</code>.
+      </Card>
+      <Card title="Sandbox backends and hardening" icon="box" href="/docs/sandboxing.html">
+        bubblewrap, Landlock and Seatbelt hardening, and backends that do not exist yet: Docker,
+        micro-VMs.
+      </Card>
+      <Card title="Worker adapters" icon="plug" href="/docs/workers.html">
+        One documented contract lets another agent run under the same supervision. The adapter is
+        small because skep owns supervision, not code generation.
+      </Card>
+      <Card title="Correct the docs" icon="file-text" href="/docs.html">
+        If a page claims more than the code does, that is a bug. Every doc page links to its source
+        on GitHub.
+      </Card>
+      <Card title="Conduct" icon="heart-handshake" href="/code-of-conduct.html">
+        Critique code and ideas, not people. The code of conduct applies to issues and pull
+        requests.
+      </Card>
+    </div>
+  </Section>
+
+  <Section narrow eyebrow="Repository" title="Current state" lead="Read from GitHub and PyPI when the page loads.">
+    <dl class="facts">
+      <div>
+        <dt class="t-micro">Latest release</dt>
+        <dd><a href={PYPI_URL}><span data-version>v{version}</span></a> on PyPI</dd>
+      </div>
+      <div>
+        <dt class="t-micro">Last push</dt>
+        <dd><span data-stat="pushed">see GitHub</span></dd>
+      </div>
+      <div>
+        <dt class="t-micro">Open issues and pull requests</dt>
+        <dd><a href={ISSUES_URL}><span data-stat="issues">see GitHub</span></a></dd>
+      </div>
+      <div>
+        <dt class="t-micro">Licence</dt>
+        <dd>MIT</dd>
+      </div>
+    </dl>
+    <p class="t-small c-mut" style="margin-top: var(--s-4)">
+      GitHub counts open pull requests in that number. If the request fails, the values above are
+      the ones the page was built with.
+    </p>
+  </Section>
 </Base>
+
+<style>
+  .plain {
+    display: grid;
+    gap: var(--s-2);
+    margin: 0;
+    padding-left: var(--s-5);
+  }
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: var(--s-4);
+    margin: 0;
+  }
+  .facts div {
+    padding: var(--s-4) var(--s-5);
+    border: 1px solid var(--line-card);
+    border-radius: var(--r-card);
+    background: var(--bg-card);
+  }
+  .facts dt {
+    color: var(--text-muted);
+  }
+  .facts dd {
+    margin: var(--s-2) 0 0;
+    color: var(--text-bright);
+  }
+</style>

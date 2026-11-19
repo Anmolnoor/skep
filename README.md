@@ -1,6 +1,6 @@
 # skep
 
-**Govern your AI coding agent. Sandbox it, verify its work, approve before it lands.**
+**Unattended coding agents you don't have to trust. skep sandboxes the agent, re-runs your tests itself, and holds the patch for your approval.**
 
 [![PyPI](https://img.shields.io/pypi/v/skep)](https://pypi.org/project/skep/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://pypi.org/project/skep/)
@@ -13,11 +13,14 @@ pipx install skep   # or inside a venv: pip install skep
 ![skep — the supervisor for AI coding agents: sandbox, agent runs, verify, you approve, audit trail](docs/assets/skep-cover.png)
 
 skep is a local-first supervisor for AI coding agents — Claude Code, Codex,
-Aider, a local model via Ollama, or its own built-in worker. Every agent works
-behind a contract: sandboxed execution in a disposable worktree, independent
-re-verification of whatever the agent claims, and a patch that reaches your
-repository only when you approve it. It is v1, single-operator by design, and
-has been daily-driven in the field since mid-July 2026.
+Aider, pi, or its own built-in worker on a model you choose. Every agent works
+in a disposable worktree behind a contract. Claude Code, Codex, Aider and pi
+always run inside an OS sandbox; skep re-runs your project's pinned test
+command on a clean checkout whatever the agent claims; and the patch waits for
+your approval. Your default branch never moves without you: landing without
+an approval is opt-in, takes only a re-verified patch, and writes only a
+`skep/*` branch. It is single-operator by design, and has been daily-driven in
+the field since mid-July 2026.
 
 ![skep supervising a run: sandboxed worker, independent verify, patch approval](docs/assets/skep-demo.gif)
 
@@ -82,10 +85,22 @@ From a checkout, `bash scripts/install.sh` detects the source tree and runs
 
 **Requirements:** Python 3.12+, macOS or Linux. Linux sandboxing needs
 `bubblewrap` (`sudo dnf install bubblewrap` / `sudo apt install bubblewrap`);
-macOS uses Seatbelt out of the box. All state lives locally under `~/.skep` —
-no cloud, no account, no telemetry.
+macOS uses Seatbelt out of the box. All state lives locally under `~/.skep`:
+no skep account, no skep service, no telemetry. With a hosted model, prompts
+(including code) go to that provider.
 
 ## 60-second quickstart
+
+```sh
+pipx install skep
+skep onboard   # model, work directory, sandbox, policy baseline, role
+```
+
+`skep onboard` is the guided first run: five resumable steps that end with a
+locked policy baseline, then it starts the daemon and opens the chat
+([`docs/onboarding.md`](docs/onboarding.md)). A fresh home asks about
+everything until a baseline is approved, and a run with no model configured
+fails, so start here. Afterwards:
 
 ```sh
 skep serve   # daemon + web UI at http://127.0.0.1:8765
@@ -96,32 +111,40 @@ Tell the chat what repo to work on and what you want done — approvals,
 cards, and live run events arrive inline. Or skip the conversation:
 
 ```sh
-skep run /path/to/your-repo "fix the failing test" --execution-mode workspace
+skep run /path/to/your-repo "fix the failing test" --execution-mode sandbox
 skep review <task_id>             # inspect the patch + evidence
 skep review <task_id> --approve   # lands on branch skep/<task_id>, never main
 ```
 
-The complete first-run path, worker setup, and sandbox notes are in
+To hand the task to Claude Code or Codex instead of the built-in worker, the
+project needs the engine and a pinned verify command, and your shell needs the
+engine's auth environment variable: [`docs/guide-unattended-run.md`](docs/guide-unattended-run.md). The
+complete first-run path, worker setup, and sandbox notes are in
 [`docs/quickstart.md`](docs/quickstart.md).
 
 ## The security model
 
 The threat model is simple: **the agent is competent and untrusted.** It
-never touches your repository directly. It works in an isolated git worktree,
-produces a patch plus evidence, and the patch lands only through your
-approval — landing IS the commit.
+works in an isolated git worktree and produces a patch plus evidence. Landing
+the patch is the commit, and by default it takes your approval. Your default
+branch never moves without you.
 
-- **Sandbox.** macOS Seatbelt or Linux bubblewrap confines every worker;
-  filesystem and network access are policy, not habit.
+- **Sandbox.** macOS Seatbelt or Linux bubblewrap (with Landlock) confines
+  every sandbox-mode run, and a run is refused when no backend applies.
+  Claude Code, Codex, Aider and pi are always forced into it. The built-in
+  worker can also run in `workspace` mode, which has no OS wall.
   ([`docs/sandboxing.md`](docs/sandboxing.md))
 - **Verify.** skep re-runs the project's pinned verify command on a clean
-  copy before you review — the worker's own claim is never the evidence.
+  copy before you review. The worker's own command is used only when the
+  project pins nothing, and the record says which it was.
   ([`docs/verification.md`](docs/verification.md))
 - **Approve.** A patch, not a promise. Workers cannot push, pull, fetch, or
-  switch branches; no permission grant overrides that.
+  switch branches; no permission grant overrides that. Auto-landing is
+  opt-in, takes only a re-verified patch, and writes only `skep/*` branches.
   ([`docs/approvals.md`](docs/approvals.md))
-- **Audit.** Every run, event, shell command, approval, and decision is a
-  durable record you can inspect and replay later.
+- **Audit.** Runs, events, patches, re-verifications and approvals are
+  durable local records, and every policy decision goes to a decision log.
+  An external engine's individual tool calls are not logged one by one.
 
 The non-negotiable rules behind all of this are written down in
 [`docs/invariants.md`](docs/invariants.md) — that file is the part of the
@@ -135,16 +158,19 @@ policy never widens on its own.
 
 ## Workers
 
-| Worker | What it drives | Notes |
+| Engine | What it drives | Notes |
 |---|---|---|
-| Claude Code | Anthropic's CLI agent | adapter ships in the box |
-| Codex | OpenAI's CLI agent | adapter ships in the box |
-| Aider | Aider | adapter ships in the box |
-| Built-in | skep's own worker | no external CLI required |
-| Ollama | any local model | fully offline if your models are |
+| `claude_code` | Anthropic's CLI agent | adapter ships in the box |
+| `codex` | OpenAI's CLI agent | adapter ships in the box; an API key, or an opt-in ChatGPT plan login |
+| `aider` | Aider | adapter ships in the box |
+| `pi` | the pi coding agent, headless | adapter ships in the box |
+| `builtin` | skep's own worker | no external CLI required; uses the model provider you configure, a local Ollama model included |
 
-All workers run under the same contract — same sandbox, same verification,
-same approval gate. The adapter surface for bringing your own worker is in
+All engines run under the same contract: the same worktree, the same
+re-verification, the same approval gate. The four external engines always run
+in the sandbox and are refused until the project pins a verify command;
+Claude Code and Codex are also refused until their auth environment variable
+is set. The adapter surface for bringing your own worker is in
 [`docs/workers.md`](docs/workers.md).
 
 ## Local models and the brain dial
@@ -155,8 +181,10 @@ Ollama — and the model is a dial, not an identity. Five provider protocols
 are supported — native Ollama, OpenAI-compatible, Anthropic, the OpenAI
 Responses API, and AWS Bedrock — with a preset catalog (`skep provider
 presets`) covering ~30 named providers ([`docs/brain.md`](docs/brain.md)).
-The entire core loop — plan, dispatch, sandbox, verify, approve, audit —
-works without a cloud account.
+The core loop — plan, dispatch, sandbox, verify, approve, audit — needs no
+skep account and no skep service. Whether anything leaves your machine depends
+on the model: a model served by a local Ollama daemon stays local, while the
+default `glm-5.2` preset is served through ollama.com, a hosted provider.
 
 ## Beyond the patch
 
@@ -213,20 +241,31 @@ policy changes, and landings are never confirmable from a messenger. See
 
 ## Status
 
+As of 1.4.2:
+
 | Works today | Being wired up | Opinions pending code |
 |---|---|---|
-| Sandboxed runs, re-verification, patch approval, full audit trail | macOS CI matrix | Multi-operator / team use |
-| Chat Queen (web, terminal, Telegram/Slack/Discord) with carded mutations | Closing the remember→improve loop (usage signals, recurrence counting) | Hosted service |
-| Claude Code / Codex / Aider adapters + built-in and Ollama workers | Docker/Podman as selectable sandbox backends | Ambient/self-directed learning |
+| Sandbox-mode runs (Seatbelt, bubblewrap with Landlock, opt-in podman), re-verification with the pinned verify command, patch approval, local audit records | Nothing is tracked in public issues today; open work is in the [pull requests](https://github.com/Anmolnoor/skep/pulls) | Multi-operator / team use |
+| One policy engine (`skep policy why / explain / decisions`), the locked baseline, `skep onboard`, roles and delegation | | Hosted service |
+| Claude Code, Codex, Aider and pi as engines; the built-in worker on your model provider | | Ambient/self-directed learning |
+| The Claude Code policy hook and the ACP governor, for agents you run elsewhere | | |
+| Chat Queen (web, terminal, Telegram/Slack/Discord) with carded mutations | | |
 | Schedules, digests, MCP tools, Agent Skills shelves, memory + notes | | |
+
+CI runs on Linux and macOS. The macOS leg runs lint, types, unit tests and the
+smoke test; coverage, the sandbox smoke and the hygiene scan run on Linux only.
 
 ## Honest limits
 
 skep makes agents safer. It is not a silver bullet, and it is worth stating
 exactly where the boundary stops:
 
-- **Reads are not fully confined.** The environment allowlist is what closes
-  secret exposure, not the filesystem boundary alone.
+- **Reads are not fully confined.** Writes are confined to the run's
+  worktree. Reads outside it are mostly open; a list of credential paths (the
+  secret floor) is hidden, and workers get environment variables by an
+  allowlist of names.
+- **Workspace mode has no sandbox.** The built-in worker may run there; the
+  external engines never do.
 - **Verification is only as strong as the verify command.** If a project's
   checks are weak, skep can only confirm that weak checks exit zero.
 - **Sandboxes share the host kernel.** Seatbelt and bubblewrap confine a
@@ -242,14 +281,18 @@ Holes poked in it are the most valuable issues you can file.
 
 ## How skep compares
 
-Tools in this space usually do one of three things well: cloud sandboxes give
-strong isolation on someone else's infrastructure; container and micro-VM
-harnesses confine execution but take the agent's word for the result; agent
-orchestrators parallelize worktrees without an independent check. skep's bet
-is the combination, locally: OS-level sandboxing **and** independent
-re-verification on a clean copy **and** approval as the only path to a
-commit, with everything auditable on your own disk. A deeper writeup is in
-[`docs/competitive-analysis.md`](docs/competitive-analysis.md).
+Tools in this space tend to lead with one thing: cloud agents run the task on
+someone else's infrastructure and hand back a pull request; container and
+micro-VM harnesses confine execution; agent orchestrators parallelize
+worktrees. skep's bet is a combination, on your own machine: an OS sandbox
+for the agent, **and** skep's own re-run of your pinned test command on a
+clean copy, **and** a patch that waits on a `skep/*` branch for your approval,
+with the records on your own disk. It is not the strongest isolation (a VM
+is), and a cloud agent's pull request already runs your CI. The current
+comparison, with each claim's limit, is at
+[skep.anmolnoor.com/why-skep.html](https://skep.anmolnoor.com/why-skep.html);
+[`docs/competitive-analysis.md`](docs/competitive-analysis.md) is the
+pre-launch writeup, kept as history.
 
 If you know a project that already does all three locally, open an issue —
 genuinely, I want to compare notes.
@@ -283,7 +326,7 @@ verification semantics, chat surfaces — is now bigger than one engineer.
 
 Especially welcome: skeptical review of the security model and
 [`docs/invariants.md`](docs/invariants.md), bubblewrap/Seatbelt hardening,
-Docker/Podman/micro-VM sandbox backends, new worker adapters, and
+Docker and micro-VM sandbox backends, new worker adapters, and
 portability reports from machines unlike the ones it grew up on.
 Development setup and the PR guide are in
 [`CONTRIBUTING.md`](CONTRIBUTING.md); vulnerability reports via

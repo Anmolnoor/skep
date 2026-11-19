@@ -71,7 +71,9 @@ Quote a value with spaces. Scopes include `shell`, `filesystem` and
 `policy explain <subject>` prints a template, `baseline` or `role:<name>` as
 an allow / ask / deny table; its rule ids are the ones `why` prints.
 `skep policy baseline status` exits 1 if the locked baseline was tampered
-with. `skep policy decisions` is the ledger of every decision, newest first.
+with. `skep policy decisions` is the decision log, newest first: the verdicts
+the policy engine gave. An external engine's own tool calls inside the sandbox
+are not decisions and are not in it.
 
 ## Verbs and faces
 

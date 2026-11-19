@@ -1,13 +1,147 @@
 ---
-// Stub from the foundation: the page agent that owns this file replaces the body.
+// Guides: the task-shaped docs. Titles come from each markdown file's first
+// heading; the one line under each says what the reader has done at the end.
+import { getCollection } from 'astro:content';
 import Base from '../layouts/Base.astro';
+import Callout from '../components/Callout.astro';
+import Icon from '../components/Icon.astro';
+import Section from '../components/Section.astro';
+import { docTitle } from '../lib/nav.mjs';
+import { docUrl } from '../lib/slugs.mjs';
+
+const entries = await getCollection('docs');
+const byId = new Map(entries.map((entry) => [entry.id, entry]));
+
+function guides(rows: [id: string, done: string][]) {
+  return rows.map(([id, done]) => {
+    const entry = byId.get(id);
+    if (!entry) throw new Error(`guides page: docs/${id}.md is missing`);
+    // Drop the "Guide: " prefix and a trailing internal tag such as "(v72-F6)".
+    const title = docTitle(entry.body, id)
+      .replace(/^Guide: /, '')
+      .replace(/\s*\([^)]*\)\s*$/, '');
+    return { href: docUrl(id), title: title.charAt(0).toUpperCase() + title.slice(1), done };
+  });
+}
+
+const unattended = guides([
+  [
+    'guide-unattended-run',
+    'A Claude Code or Codex run that happened inside the sandbox, re-verified with your test command, with its patch on a skep/<task_id> branch after your approval.',
+  ],
+  [
+    'guide-dispatch-from-cron',
+    'A wrapper script cron can call, with the agent’s credential supplied where cron has none, and exit codes you can act on.',
+  ],
+  [
+    'guide-pin-verify-command',
+    'A project whose verify command is pinned, and the four re-verification results read from real output.',
+  ],
+  [
+    'guide-auto-landing',
+    'A project where a confirmed patch lands on a skep/* branch without your approval, and a list of what still stops it.',
+  ],
+]);
+
+const setup = guides([
+  [
+    'onboarding',
+    'A home with a model, a work directory, a sandbox choice, a locked policy baseline and a role, checked by skep onboard --check.',
+  ],
+  [
+    'codex-chatgpt-login',
+    'A project whose Codex runs use your ChatGPT plan login, with the worker holding an access token and no refresh token.',
+  ],
+  [
+    'policy-hook',
+    'Claude Code asking skep before it runs a shell command, writes a file or fetches a URL, with each verdict recorded.',
+  ],
+  [
+    'acp-governor',
+    'An ACP agent in another client whose permission requests skep answers from your policy.',
+  ],
+  [
+    'mobile',
+    'A messenger that can confirm the four low-risk action classes, and the knowledge of what stays in the web UI.',
+  ],
+  [
+    'daily-driver-setup',
+    'Telegram confirmations, research, video summaries and a daily mail summary set up, with skep doctor naming any step still undone.',
+  ],
+]);
 ---
 
-<Base title="Guides" description="Guides: this page is being written." active="guides">
+<Base
+  title="Guides"
+  description="Task-shaped skep guides: an unattended Claude Code or Codex run, dispatch from cron, pinning the verify command, auto-landing, and setup."
+  active="guides"
+>
   <section class="section">
     <div class="wrap narrow stack">
-      <h1 class="t-h2">Guides</h1>
-      <p class="t-lead">This page is being written.</p>
+      <p class="eyebrow t-micro">Guides</p>
+      <h1 class="t-h2">One task each, start to finish</h1>
+      <p class="t-lead prose-width">
+        Each guide names who it is for and what you need first, gives the commands in order, shows
+        what you should see, and lists what goes wrong and how to tell.
+      </p>
     </div>
   </section>
+
+  <Section
+    band
+    narrow
+    eyebrow="Unattended agents"
+    title="Hand over a task and walk away"
+    lead="Written against the current release. Every command was run under a throwaway home before it was written down."
+  >
+    <ul class="hub-list">
+      {
+        unattended.map((guide) => (
+          <li>
+            <a href={guide.href}>
+              <div>
+                <strong>{guide.title}</strong>
+                <span>At the end: {guide.done}</span>
+              </div>
+              <Icon name="chevron-right" size={16} />
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+    <div style="margin-top: var(--s-5)">
+      <Callout kind="limit" title="Where the transcripts stop">
+        The guides were written without an agent credential. Output up to the point an engine needs
+        one is captured, including the refusal you get without it. What comes after is described
+        from the code, and each guide says which is which.
+      </Callout>
+    </div>
+  </Section>
+
+  <Section
+    narrow
+    eyebrow="Set up and govern"
+    title="First run, logins, and agents you run elsewhere"
+    lead="Task-shaped pages from the documentation."
+  >
+    <ul class="hub-list">
+      {
+        setup.map((guide) => (
+          <li>
+            <a href={guide.href}>
+              <div>
+                <strong>{guide.title}</strong>
+                <span>At the end: {guide.done}</span>
+              </div>
+              <Icon name="chevron-right" size={16} />
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+    <p class="t-small c-mut" style="margin-top: var(--s-5)">
+      Concepts and reference are in <a class="c-green" href="/docs.html">the documentation</a>; every
+      command is on <a class="c-green" href="/cli.html">the CLI page</a>.
+    </p>
+  </Section>
 </Base>

@@ -19,7 +19,9 @@ skep run
 
 The important boundary is that the worker never edits your current checkout and
 never lands changes on `main`. It works in a disposable worktree and returns a
-patch artifact.
+patch artifact. Your default branch never moves without you: landing a patch
+needs your approval by default, and the opt-in auto-landing lanes (section 6)
+write only `skep/*` branches.
 
 ## 1. Isolated Worktree
 
@@ -46,22 +48,35 @@ speaks the local task/result contract:
 - event stream out: progress, commands, approvals, verification, and artifacts
 - result JSON out: final state, summary, patch path, and evidence paths
 
-The in-repo worker, Claude Code adapter, and future adapters all fit behind the
-same boundary. The adapter can be thin because Skep owns supervision, not code
-generation.
+Five engines fit behind that boundary: `builtin` (skep's own worker) and the
+CLI adapters `claude_code`, `codex`, `aider` and `pi`. Ollama is a model
+provider for the built-in worker, not an engine. The adapter can be thin
+because Skep owns supervision, not code generation.
+
+An external engine's own commands do not pass skep's capability layer, so the
+sandbox is its only wall. That is why an external engine always runs in
+sandbox mode (a `workspace` request is turned into `sandbox`) and is refused
+until the project pins a `verify_command`. Claude Code and Codex are also
+refused when their auth environment variable is missing (`NO AUTH ENV`). See
+[`guide-unattended-run.md`](guide-unattended-run.md).
 
 ## 3. Sandbox Boundary
 
 In sandbox mode, Skep asks the host OS to constrain the worker process:
 
 - macOS uses Seatbelt when the host allows `sandbox-exec`.
-- Linux uses bubblewrap when `bwrap` is installed and its probe succeeds.
+- Linux uses bubblewrap when `bwrap` is installed and its probe succeeds, with
+  Landlock on top where the kernel supports it. podman is an opt-in backend.
 - If sandbox mode is requested but no backend can be applied, the worker does
   not start unsandboxed.
 
 The sandbox is defense in depth. It blocks out-of-policy writes and, depending
-on platform and policy, network access. It does not replace review,
-re-verification, or the audit trail.
+on platform and policy, network access. Reads outside the workspace stay
+mostly open; a list of credential paths (the secret floor) is hidden. It does
+not replace review, re-verification, or the audit trail.
+
+Workspace mode has no OS sandbox: the built-in worker runs on the host, held
+only by the capability layer and policy.
 
 See [`sandboxing.md`](sandboxing.md) for backend details and current Linux
 domain-allowlist limits.
@@ -76,9 +91,11 @@ approval needed: shell.run
   [a] approve once  [b] approve + remember  [d] deny  [s] skip
 ```
 
-Approving once resumes only the current run. Approving with remember records the
-permission in the approval ledger, and a successful resumed run can save or
-update a learned template for similar future tasks.
+Approving once resumes only the current run. Approving with remember saves the
+shell command as a grant for the project (or the repo) straight away and prints
+`remembered: <command> → <tier>`; a learned template for similar future tasks
+is saved or updated only if the resumed run then completes. `[b]` is offered
+only when the request can be remembered.
 
 See [`approvals.md`](approvals.md) for the first-run, auto-match, and drift
 flows.
@@ -89,7 +106,9 @@ After a worker reports a completed patch, Skep checks the evidence independently
 
 1. Create a fresh worktree at the original baseline.
 2. Apply the worker's patch.
-3. Re-run the recorded verification command.
+3. Re-run the project's pinned `verify_command`. The command the worker
+   recorded is the fallback, used only for a project with no pin and for a run
+   outside any project; the record says which was used.
 4. Store whether the worker's claim was confirmed.
 
 This is the core safety property: Skep does not trust an agent saying "tests
@@ -98,8 +117,9 @@ passed" if the patch fails when replayed on a clean copy.
 If re-verification disagrees with the worker, Skep surfaces that in `status` and
 `review`, and auto-approval does not apply.
 
-See [`verification.md`](verification.md) for the exact outcomes and unavailable
-cases.
+See [`verification.md`](verification.md) for the four outcomes and the
+re-run's environment, and
+[`guide-pin-verify-command.md`](guide-pin-verify-command.md) to set the pin.
 
 ## 6. Patch Approval
 
@@ -115,24 +135,40 @@ Approval applies the patch to a new branch:
 skep review <task_id> --approve
 ```
 
-The branch is named `skep/<task_id>`. Skep does not push it. You keep the normal
-Git decision: inspect, merge, edit, or delete the branch.
+The branch is named `skep/<task_id>` unless you pass `--branch NAME`; the
+repository's default branch is always refused. The landing is a local commit.
+Skep pushes that branch only when you ask it to: `skep review <task_id>
+--approve --pr` and `skep pr open` push it and open a pull request with `gh`.
+A worker never pushes, pulls, fetches or switches branches. You keep the
+normal Git decision: inspect, merge, edit, or delete the branch.
 
-A project in the **maintain** phase auto-applies verified patches, and those
-land on ONE integration branch (`skep/maintain`) instead of a fresh branch per
-run — one place to review the accumulated maintenance work. `main` never
-advances automatically; you merge the integration branch when you choose. A
-patch that cannot cleanly append escalates to a normal human approval.
+Landing without your approval is opt-in, and has two lanes. A project in the
+**maintain** phase (or with `auto_apply_verified_patch` set, or set up with
+`--unlocked`) auto-applies a patch that the pinned verify command confirmed;
+in the maintain phase those land on ONE integration branch (`skep/maintain`)
+instead of a fresh branch per run. `--auto-approve` lands a confirmed patch
+that touches only dependency manifests and lockfiles. Both lanes land only a
+re-verified patch, only on a `skep/*` branch, and record the approval as
+`auto:<rule>`. `main` never advances automatically; you merge when you choose.
+See [`guide-auto-landing.md`](guide-auto-landing.md).
 
 ## What Skep Guarantees
 
 - The worker runs in a disposable worktree, not your active checkout.
-- A patch is reviewed before it lands.
-- Completed worker claims are re-checked on a clean worktree when verification
-  evidence exists.
+- Your default branch never moves without you. Landing a patch needs your
+  approval unless you switched an auto-landing lane on, and those lanes write
+  only `skep/*` branches.
+- A completed run that produced a patch is re-checked on a clean worktree with
+  the project's pinned verify command, or with the worker's own command when
+  nothing is pinned. A run that changed no files has nothing to re-check.
 - Approval decisions, events, artifacts, and re-verification results are stored
-  as durable run evidence.
+  as durable run evidence. The records are kept locally and are not
+  tamper-evident.
 - Sandbox mode fails closed when the requested host backend cannot be applied.
+- The built-in worker cannot push, pull, fetch or switch branches; no grant
+  lifts that. An external engine is kept from pushing by the sandbox instead
+  (hidden credentials, git remote protocols switched off for its worktree); a
+  branch switch inside its own disposable worktree reaches nothing of yours.
 
 ## Local Ops
 
@@ -180,8 +216,8 @@ gates, and audit trail as a terminal REPL (v38). Telegram, Slack, and Discord
 are live entrances (v26, Discord since v37): an
 allow-listed conversation routes into the exact same Queen chat →
 confirmation → audit flow as the web UI. Unknown identities fail closed. Only
-low-risk action classes (`dispatch_run`, `scheduled_result_ack`) are ever
-confirmable from a channel — shell commands, policy changes, and patch
+four low-risk action classes (`dispatch_run`, `scheduled_result_ack`,
+`read_url`, `start_research`) are ever confirmable from a channel — shell commands, policy changes, and patch
 landings always route to the web UI, whatever the channel config says.
 When the channel is confirm-enabled and the identity is allow-listed, Slack
 confirms via signed Block Kit buttons, Discord via embed buttons or ✅/❌
@@ -196,13 +232,22 @@ through the API.
 
 ## Current Limits
 
-- A worker can only be re-verified as well as its recorded verification command.
-- Sandbox strength depends on the host OS backend and host policy.
-- Linux bubblewrap enforces deny-all, allow-all, AND concrete per-domain
-  allowlists (v28: `--unshare-net` plus a bind-mounted filtering-proxy socket
-  bridged in by `skep.netshim`) — at parity with macOS Seatbelt.
-- Skep supervises local worker processes. Hosted multi-user execution is a
-  future architecture, not the current product.
+- Re-verification is only as strong as the command that is re-run. On a
+  project with no pinned `verify_command` that is the command the worker chose.
+- Workspace mode has no OS sandbox. External engines never run in it; the
+  built-in worker can.
+- In sandbox mode writes are confined; reads outside the workspace are mostly
+  open, apart from the secret floor.
+- Sandbox strength depends on the host OS backend and host policy. There is no
+  Windows backend.
+- Linux bubblewrap enforces deny-all and concrete per-domain allowlists
+  (`--unshare-net` plus a filtering-proxy socket bridged in by `skep.netshim`).
+  An allow-all (`*`) run shares the host network namespace, so its loopback is
+  the host's.
+- An external engine's individual tool calls are not policy decisions and are
+  not logged one by one. Its run, patch, re-verification and approval are.
+- Skep supervises local worker processes for one operator. There is no hosted
+  or multi-user mode.
 
 For command examples, see [`quickstart.md`](quickstart.md) and
 [`cli-reference.md`](cli-reference.md).
