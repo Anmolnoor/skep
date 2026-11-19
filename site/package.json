@@ -1,0 +1,30 @@
+{
+  "name": "skep-site",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "engines": {
+    "node": ">=22.23.4"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && pagefind --site dist",
+    "preview": "astro preview",
+    "test": "node --test src/lib/*.test.mjs",
+    "check": "node scripts/check-links.mjs && node scripts/check-js-budget.mjs"
+  },
+  "dependencies": {
+    "@astrojs/markdown-satteri": "0.4.10",
+    "@astrojs/react": "7.1.9",
+    "@lucide/astro": "1.75.0",
+    "astro": "7.4.13",
+    "motion": "14.14.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "pagefind": "1.6.0"
+  }
+}

@@ -7,7 +7,9 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SKIP_PARTS = {".git", ".venv", ".uv-cache"}
+# node_modules / dist / .astro: the docs site (site/) holds third-party and
+# generated markdown there once `npm ci` or a build has run.
+SKIP_PARTS = {".git", ".venv", ".uv-cache", "node_modules", "dist", ".astro"}
 LINK_PATTERNS = (
     re.compile(r"\[[^\]]+\]\(([^)#][^)]+)\)"),
     re.compile("h" r'ref="(\./[^"]+|[^:>#][^"]*)"'),

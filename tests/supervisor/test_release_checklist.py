@@ -82,7 +82,12 @@ def test_public_doc_relative_links_exist() -> None:
         if not any(part.startswith(".") for part in path.relative_to(ROOT).parts)
     )
     for path in docs:
-        if any(part in {".git", ".venv", ".uv-cache"} for part in path.parts):
+        # node_modules / dist: the docs site (site/) holds third-party and
+        # generated markdown there once `npm ci` or a build has run (site/.astro
+        # is already skipped as a dot-directory).
+        if any(
+            part in {".git", ".venv", ".uv-cache", "node_modules", "dist"} for part in path.parts
+        ):
             continue
         text = path.read_text(encoding="utf-8")
         for pattern in DOC_LINK_PATTERNS:

@@ -21,3 +21,8 @@ plans/
 .10x/
 .coverage
 coverage.xml
+
+# docs site (site/): the one place with npm. Dependencies, build output, Astro's cache.
+site/node_modules/
+site/dist/
+site/.astro/
