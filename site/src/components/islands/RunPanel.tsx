@@ -209,7 +209,7 @@ export default function RunPanel() {
     if (!playing) return;
     if (step === VERDICT) {
       const timer = setTimeout(() => {
-        animate('.rp-stamp', { scale: [1.4, 1] }, LAND);
+        animate('.rp-stamp', { scale: [1.15, 1] }, LAND);
         animate('.rp-ring', { opacity: [0.7, 0], scale: [0.6, 1.9] }, { duration: 0.6, ease: 'easeOut' });
       }, VERDICT_RESOLVE_MS);
       return () => clearTimeout(timer);
