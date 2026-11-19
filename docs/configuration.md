@@ -20,8 +20,10 @@ and dev docs):
   `assistant`; `skep policy explain NAME` renders it), diffable on switch.
   The ADR 0022 names `locked-down`, `personal-dev`, `homelab-ops` are
   accepted as aliases until 1.3.0.
-- **Audit** — always on: every decision records `decided_by`, the rule that
-  produced it.
+- **Audit** — always on: every decision skep makes records `decided_by`, the
+  rule that produced it. An external engine's own tool calls inside the
+  sandbox are not decisions and are not recorded one by one; its run, patch,
+  re-verification and approval are.
 
 ## Home Directory
 
