@@ -1,33 +1,49 @@
 ---
 // Table: a styled table that scrolls sideways inside its own box. Pass `head`
 // and `rows` for plain text cells, or put <thead>/<tbody> in the slot.
+// With `stack`, under 640px each row becomes a card and each cell sits under
+// its column label instead of the table scrolling sideways.
 interface Props {
   head?: string[];
   rows?: string[][];
   caption?: string;
   /** Render the first cell of each row as a row header. */
   rowHeaders?: boolean;
+  /**
+   * Under 640px, rows become labelled cards. With `head` + `rows` the labels and
+   * the table roles are written for you. With slotted markup, put
+   * `data-label="<column>"` on each cell and `role="row"` / `role="cell"` /
+   * `role="rowheader"` / `role="columnheader"` on the rows and cells yourself.
+   */
+  stack?: boolean;
 }
-const { head, rows, caption, rowHeaders = false } = Astro.props;
+const { head, rows, caption, rowHeaders = false, stack = false } = Astro.props;
+// `display: block` on rows and cells drops their table semantics in some
+// browsers; explicit roles keep the table a table for a screen reader.
+const role = (name: string) => (stack ? name : undefined);
 ---
 
-<div class="table-wrap" role="region" aria-label={caption ?? 'Table'} tabindex="0">
-  <table>
+<div class:list={['table-wrap', stack && 'stack']} role="region" aria-label={caption ?? 'Table'} tabindex="0">
+  <table role={role('table')}>
     {caption && <caption>{caption}</caption>}
     {
       head && (
-        <thead>
-          <tr>{head.map((cell) => <th scope="col">{cell}</th>)}</tr>
+        <thead role={role('rowgroup')}>
+          <tr role={role('row')}>{head.map((cell) => <th scope="col" role={role('columnheader')}>{cell}</th>)}</tr>
         </thead>
       )
     }
     {
       rows ? (
-        <tbody>
+        <tbody role={role('rowgroup')}>
           {rows.map((row) => (
-            <tr>
+            <tr role={role('row')}>
               {row.map((cell, index) =>
-                rowHeaders && index === 0 ? <th scope="row">{cell}</th> : <td>{cell}</td>,
+                rowHeaders && index === 0 ? (
+                  <th scope="row" role={role('rowheader')}>{cell}</th>
+                ) : (
+                  <td role={role('cell')} data-label={stack ? head?.[index] : undefined}>{cell}</td>
+                ),
               )}
             </tr>
           ))}

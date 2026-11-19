@@ -18,7 +18,7 @@ const lines = code.replace(/^\n+|\s+$/g, '').split('\n');
 const kind = (line: string) => (line.startsWith('$ ') ? 'cmd' : line.startsWith('# ') ? 'note' : undefined);
 ---
 
-<figure class:list={['panel', 'term', wrap && 'wrap']} data-copy-scope style="margin:0">
+<figure class:list={['panel', 'term', wrap && 'wrap']} data-copy-scope>
   <div class="panel-head">
     <div class="panel-title"><span class="term-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>{title}</span></div>
   </div>

@@ -24,7 +24,7 @@ interface Props {
 const { rows, title = 'decisions', captured, stage = false } = Astro.props;
 ---
 
-<figure class="panel ledger" style="margin:0">
+<figure class="panel ledger">
   <div class="panel-head"><div class="panel-title"><span>{title}</span></div></div>
   <ol class:list={['ledger-rows', stage && 'stage-rows']}>
     {

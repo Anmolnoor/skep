@@ -151,6 +151,11 @@ button {
 .section-head > * + * {
   margin-top: var(--s-4);
 }
+/* A heading island (BlurText in the `heading` slot) arrives inside an
+   <astro-island>, which is `display: contents`: space the heading itself. */
+.section-head > astro-island:not(:first-child) > * {
+  margin-top: var(--s-4);
+}
 .prose-width {
   max-width: var(--prose);
 }
@@ -233,9 +238,16 @@ html:not(.js) .no-js-hide {
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  /* `animation-timeline` and `animation-range` sit in a rule of their own, under
+     a selector the minifier cannot merge with the `animation` rule (`:where(*)`
+     adds no specificity). The build's CSS minifier otherwise folds the timeline
+     into the `animation` shorthand, which browsers reject: the whole declaration
+     is dropped and the reveal silently never runs. Keep the two rules apart. */
   @supports (animation-timeline: view()) {
     html.js .reveal {
       animation: skep-reveal linear both;
+    }
+    html.js .reveal:where(*) {
       animation-timeline: view();
       animation-range: entry 0% entry 55%;
     }
@@ -244,6 +256,8 @@ html:not(.js) .no-js-hide {
     html.js .stage-rows > * {
       --step: min(var(--i, 0), var(--stagger-max));
       animation: skep-row-in linear both;
+    }
+    html.js .stage-rows > *:where(*) {
       animation-timeline: view();
       animation-range: entry calc(10% + var(--step) * 5%) entry calc(40% + var(--step) * 5%);
     }

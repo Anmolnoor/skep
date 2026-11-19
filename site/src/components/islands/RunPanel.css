@@ -1,13 +1,31 @@
 /* RunPanel: the home hero island. Tokens only; the panel chrome is the kit's. */
 
-.runpanel {
-  margin: 0;
-}
 .runpanel .panel-head .chip,
 .runpanel .term-dots {
   flex: 0 0 auto;
 }
+/* On a phone the window dots give their room to the panel's title. */
+@media (max-width: 480px) {
+  .runpanel .term-dots {
+    display: none;
+  }
+}
+.rp-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+.rp-replay {
+  flex: 0 0 auto;
+}
+.rp-replay:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 .rp-body {
+  position: relative;
+  container-type: inline-size;
   display: grid;
   gap: var(--s-4);
   padding: var(--s-4);
@@ -35,10 +53,26 @@
 .rp-nb {
   white-space: nowrap;
 }
+/* The highlight's targets that are not cards carry their own breathing room. */
+.rp-dispatch {
+  margin: calc(-1 * var(--s-2));
+  padding: var(--s-2);
+  border-radius: var(--r-card);
+}
+.rp-rows > .rp-row {
+  margin: calc(-1 * var(--s-1)) calc(-1 * var(--s-2));
+  padding: var(--s-1) var(--s-2);
+}
+/* One column, or claim and re-verify side by side when the panel body has room.
+   A container query, so the progress links below turn with the columns. */
 .rp-cols {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 232px), 1fr));
-  gap: var(--s-3);
+  gap: var(--s-4);
+}
+@container (min-width: 480px) {
+  .rp-cols {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .rp-col,
 .rp-approval {
@@ -50,7 +84,77 @@
 }
 .rp-verify {
   --rp-key: 10ch;
+  position: relative;
   border-color: color-mix(in srgb, var(--green) 28%, transparent);
+}
+
+/* The progress line joining the numbered blocks: 1 to 2, then 2 to 3. Each link
+   spans the gap at the height (or the column) of the step badges, and fills as
+   the run passes it. Server HTML: both filled. */
+.rp-link {
+  --badge: calc(var(--s-4) + 10px); /* card padding + half a 22px badge, less half the line */
+  position: absolute;
+  width: 2px;
+  height: var(--s-4);
+  left: var(--badge);
+  background: var(--line-strong);
+}
+.rp-link > span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: 0 0;
+}
+.rp-link-claim {
+  bottom: calc(100% + 1px);
+}
+.rp-link-claim > span {
+  background: var(--green-dim);
+}
+.rp-link-approve {
+  top: calc(100% + 1px);
+}
+.rp-link-approve > span {
+  background: var(--orange);
+}
+@container (min-width: 480px) {
+  .rp-link-claim {
+    top: var(--badge);
+    right: calc(100% + 1px);
+    bottom: auto;
+    left: auto;
+    width: var(--s-4);
+    height: 2px;
+  }
+}
+
+.rp-glide {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  border-radius: var(--r-card);
+  background: color-mix(in srgb, var(--orange) 5%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--orange) 60%, transparent),
+    0 0 var(--s-5) calc(-1 * var(--s-2)) color-mix(in srgb, var(--orange) 55%, transparent);
+  opacity: 0;
+  pointer-events: none;
+}
+.rp-stamp {
+  position: relative;
+  display: inline-block;
+}
+.rp-ring {
+  position: absolute;
+  inset: -2px -6px;
+  border: 1px solid var(--green);
+  border-radius: var(--r-chip);
+  opacity: 0;
+  pointer-events: none;
+}
+.rp-label .chip {
+  transform-origin: 100% 50%;
 }
 .rp-approval {
   display: grid;
@@ -105,8 +209,13 @@
   color: var(--green);
 }
 
-/* M3: the cursor exists only under html.js and outside reduced motion. A block
-   that the cursor has not reached is dimmed; nothing is ever hidden or removed. */
+/* M3: the run plays only under html.js and outside reduced motion. A block the
+   highlight has not reached is dimmed; nothing is ever hidden or removed. */
+@media (prefers-reduced-motion: reduce) {
+  .rp-replay {
+    display: none;
+  }
+}
 @media (prefers-reduced-motion: no-preference) {
   html.js .rp-block {
     transition: opacity var(--dur-2) var(--ease-out);

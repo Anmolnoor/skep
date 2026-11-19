@@ -167,6 +167,11 @@ a.card:hover {
 }
 
 /* ---- panels shared by Terminal, Diff, Ledger, CodeBlock ---- */
+/* A panel is a <figure>: clear the browser's figure margin at zero specificity,
+   so `.stack > * + *` (and any page rule) still spaces a panel like any other child. */
+:where(.panel) {
+  margin: 0;
+}
 .panel {
   min-width: 0;
   border: 1px solid var(--line-card);
@@ -464,6 +469,113 @@ a.card:hover {
 }
 .table-wrap td {
   color: var(--text-mid);
+}
+
+/* `stack`: under 640px each row is a card and each cell a line under its label.
+   The <thead> is hidden from sight, not from the accessibility tree, and Table
+   writes the table roles out, because `display: block` on a row drops them in
+   some browsers. The label is the cell's `data-label`, with empty alt text so a
+   screen reader does not read the column name twice. */
+@media (max-width: 640px) {
+  .table-wrap.stack {
+    overflow-x: visible;
+  }
+  /* a flex column, so the caption can stay under the rows (`caption-side` needs a real table box) */
+  .table-wrap.stack table {
+    display: flex;
+    flex-direction: column;
+  }
+  .table-wrap.stack tbody {
+    display: block;
+  }
+  .table-wrap.stack caption {
+    display: block;
+    order: 1;
+  }
+  .table-wrap.stack thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  .table-wrap.stack tbody tr {
+    display: block;
+    padding: var(--s-3) var(--s-4);
+    border-bottom: 1px solid var(--line-inner);
+  }
+  .table-wrap.stack tbody tr > * {
+    display: block;
+    padding: 0;
+    border: 0;
+  }
+  .table-wrap.stack tbody tr > * + * {
+    margin-top: var(--s-2);
+  }
+  .table-wrap.stack tbody [data-label]::before {
+    content: attr(data-label);
+    content: attr(data-label) / '';
+    display: block;
+    margin-bottom: var(--s-1);
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+  .table-wrap.stack tbody tr:last-child {
+    border-bottom: 0;
+  }
+}
+
+/* ---- Atmosphere: the brand's fine grid under a radial mask, and one orange glow ----
+   CSS only, static, never cursor-reactive. Both layers are pseudo-elements, so
+   they are not in the accessibility tree and take no pointer events. `.atmos`
+   is the home hero's strength. An inner page gets a quieter one for free: the
+   rule below finds the page header every inner page shares (a first Section
+   whose heading slot holds the page's <h1>). */
+.atmos,
+main > .section:first-child:has(> .wrap > .section-head > h1) {
+  position: relative;
+  isolation: isolate;
+  overflow: clip;
+}
+.atmos::before,
+main > .section:first-child:has(> .wrap > .section-head > h1)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    linear-gradient(var(--atmos-line, var(--line-inner)) 1px, transparent 1px),
+    linear-gradient(90deg, var(--atmos-line, var(--line-inner)) 1px, transparent 1px);
+  background-size: var(--s-8) var(--s-8);
+  background-position: center top;
+  -webkit-mask-image: var(--atmos-mask);
+  mask-image: var(--atmos-mask);
+  pointer-events: none;
+}
+.atmos::after,
+main > .section:first-child:has(> .wrap > .section-head > h1)::after {
+  content: '';
+  position: absolute;
+  top: -180px;
+  left: -120px;
+  z-index: -1;
+  width: 620px;
+  height: 620px;
+  background: radial-gradient(circle, color-mix(in srgb, var(--orange) var(--atmos-glow), transparent), transparent 62%);
+  pointer-events: none;
+}
+.atmos {
+  --atmos-mask: radial-gradient(120% 90% at 78% 20%, #000 0%, transparent 72%);
+  --atmos-glow: 11%;
+}
+main > .section:first-child:has(> .wrap > .section-head > h1) {
+  --atmos-line: var(--line-hair);
+  --atmos-mask: radial-gradient(90% 100% at 82% 0%, #000 0%, transparent 70%);
+  --atmos-glow: 6%;
 }
 
 /* ---- Header ---- */

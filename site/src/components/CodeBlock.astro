@@ -16,7 +16,7 @@ interface Props {
 const { code, lang = 'sh', title, step, copy = true } = Astro.props;
 ---
 
-<figure class="panel codeblock" data-copy-scope style="margin:0">
+<figure class="panel codeblock" data-copy-scope>
   {
     (title || step || copy) && (
       <div class="panel-head">

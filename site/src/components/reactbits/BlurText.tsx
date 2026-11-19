@@ -2,7 +2,8 @@
 // Upstream: src/ts-default/TextAnimations/BlurText/BlurText.tsx at d01aa914dcbe.
 // skep changes: the 'use client' directive is dropped (Astro island); a `tag` prop
 // replaces the hard-coded <p>; the server renders the settled text; reduced
-// motion shows the settled text and never loops or replays.
+// motion shows the settled text and never loops or replays; `holdIfInView` keeps
+// text the reader is already looking at settled, so it never flashes.
 import { motion, MotionConfig, type Easing, type MotionStyle, type Transition } from 'motion/react';
 import {
   useEffect,
@@ -49,6 +50,9 @@ type BlurTextProps = {
   color?: string;
   fromColor?: string;
   focusOnHover?: boolean;
+  // skep: text that is already in the viewport when the component hydrates stays
+  // settled. Without it such text is shown by the server HTML, hidden, then blurred in.
+  holdIfInView?: boolean;
 };
 
 interface EffectConfig {
@@ -270,7 +274,8 @@ const BlurText = ({
   loopDelay = 2,
   color,
   fromColor,
-  focusOnHover = false
+  focusOnHover = false,
+  holdIfInView = false
 }: BlurTextProps) => {
   const ref = useRef<HTMLElement>(null);
   const Tag = tag as ElementType;
@@ -279,8 +284,13 @@ const BlurText = ({
   const [phase, setPhase] = useState<Phase>('rest');
   useIsoLayoutEffect(() => {
     if (prefersReducedMotion() || startPhase(trigger) === 'rest') return;
+    // skep: see `holdIfInView`. A layout effect runs before the first paint after hydration.
+    if (holdIfInView && ref.current) {
+      const box = ref.current.getBoundingClientRect();
+      if (box.bottom > 0 && box.top < window.innerHeight) return;
+    }
     setPhase('from');
-  }, [trigger]);
+  }, [trigger, holdIfInView]);
   const firstPhase = useRef(phase).current;
   const [focusWord, setFocusWord] = useState(-1);
   const settledRef = useRef(phase === 'rest');
@@ -468,6 +478,8 @@ const BlurText = ({
         {groups.map((indices, w) => (
           <span
             key={`word-${w}`}
+            // skep: the visually hidden twin above is the text site search indexes; not these pieces too.
+            data-pagefind-ignore
             style={wordStyle(w)}
             onPointerEnter={focusOnHover ? () => setFocusWord(w) : undefined}
             onPointerLeave={focusOnHover ? () => setFocusWord(-1) : undefined}

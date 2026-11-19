@@ -1,7 +1,8 @@
 // From React Bits (DavidHDev/react-bits), © David Haz, MIT + Commons Clause; modified. Not covered by this repository's MIT licence.
 // Upstream: src/ts-default/TextAnimations/RotatingText/RotatingText.tsx at d01aa914dcbe.
 // skep changes: the 'use client' directive is dropped (Astro island); reduced
-// motion holds the first text. Unchanged upstream behaviour relied on: the
+// motion holds the first text; a `cycles` prop stops the rotation after that many
+// full turns, back on the first text. Unchanged upstream behaviour relied on: the
 // server renders texts[0] settled (AnimatePresence initial={false}).
 import React, {
   forwardRef,
@@ -77,6 +78,9 @@ export interface RotatingTextProps
   pauseOnHover?: boolean;
   blur?: number;
   splitBy?: string;
+  // skep: rotate through the whole list this many times, then rest on texts[0]
+  // (M2: no endless loop). Leave it out for upstream's endless rotation.
+  cycles?: number;
   onNext?: (index: number) => void;
   mainClassName?: string;
   splitLevelClassName?: string;
@@ -170,6 +174,7 @@ const RotatingText = forwardRef<RotatingTextRef, RotatingTextProps>((props, ref)
     pauseOnHover = false,
     blur = 0,
     splitBy = 'characters',
+    cycles,
     onNext,
     onMouseEnter,
     onMouseLeave,
@@ -183,6 +188,7 @@ const RotatingText = forwardRef<RotatingTextRef, RotatingTextProps>((props, ref)
   const [currentTextIndex, setCurrentTextIndex] = useState<number>(0);
   const [hovered, setHovered] = useState(false);
   const indexRef = useRef(0);
+  const turnsRef = useRef(0);
   const onNextRef = useRef(onNext);
   onNextRef.current = onNext;
 
@@ -273,9 +279,14 @@ const RotatingText = forwardRef<RotatingTextRef, RotatingTextProps>((props, ref)
   useEffect(() => {
     // skep: reduced motion holds the first text instead of rotating.
     if (!auto || paused || reduceMotion) return;
-    const timeoutId = setTimeout(next, rotationInterval);
+    // skep: after `cycles` full turns the rotation rests, back on texts[0].
+    if (cycles !== undefined && turnsRef.current >= cycles) return;
+    const timeoutId = setTimeout(() => {
+      if (indexRef.current >= lastIndex) turnsRef.current += 1;
+      next();
+    }, rotationInterval);
     return () => clearTimeout(timeoutId);
-  }, [next, rotationInterval, auto, paused, reduceMotion, activeIndex]);
+  }, [next, rotationInterval, auto, paused, reduceMotion, activeIndex, cycles, lastIndex]);
 
   useIsomorphicLayoutEffect(() => {
     const content = contentRef.current;
