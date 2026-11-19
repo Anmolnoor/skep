@@ -61,6 +61,8 @@ MANIFEST_DIFF_SCOPE: tuple[str, ...] = (
 # worker verified it, the supervisor re-verified it (G10), there are no risk flags
 # (e.g. a major-version bump files for review instead), and the diff touches only
 # manifest/lockfiles. Opt in per dispatch with `skep run/tick --auto-approve`.
+# v127-F5 round 2 (I2): it needs the PROJECT's pin like every auto-landing rule
+# — a lockfile patch the worker "verified" with its own choice of command landed.
 SAFE_DEPENDENCY_RULE = AutoApprovalRule(
     name="deps-safe",
     require_verification_passed=True,
@@ -68,6 +70,7 @@ SAFE_DEPENDENCY_RULE = AutoApprovalRule(
     forbid_risk_flags=True,
     diff_scope=MANIFEST_DIFF_SCOPE,
     max_changed_files=10,
+    require_pinned_verify=True,
 )
 
 # The interactive serve/chat policy toggle means "land verified worker patches"

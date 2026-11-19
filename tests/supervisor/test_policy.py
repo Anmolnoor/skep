@@ -295,23 +295,23 @@ def test_auto_landing_requires_a_project_pinned_verify_command() -> None:
     assert "still landable by hand" in blocked
 
 
-def test_the_dependency_rule_is_deliberately_unaffected() -> None:
-    """v90-F4: deps-safe keeps its behaviour — it needs an explicit
-    --auto-approve, its diff scope is lockfiles only, and it caps at 10 files.
-    A stated choice, not an oversight. (v127-F5: it still needs a re-run
-    that is not known-vacuous — that rule binds every rule.)"""
+def test_the_dependency_rule_keeps_its_scope_but_needs_the_pin() -> None:
+    """v90-F4: deps-safe keeps its scope — an explicit --auto-approve,
+    lockfiles only, at most 10 files. v127-F5 round 2 (I2) reversed v90-F4's
+    exemption: it landed on the command the worker nominated for itself, so it
+    now needs the project's pin like every auto-landing rule."""
     from skep.supervisor.policy import (
         SAFE_DEPENDENCY_RULE,
         AutoApprovalContext,
         rule_block_reason,
     )
 
-    assert SAFE_DEPENDENCY_RULE.require_pinned_verify is False
+    assert SAFE_DEPENDENCY_RULE.require_pinned_verify is True
     ctx = AutoApprovalContext(
         verification_outcome="passed",
         reverify_confirmed=True,
         changed_files=("uv.lock",),
-        verify_pinned=False,
+        verify_pinned=True,
         reverify_commands=("uv run pytest",),
     )
     assert rule_block_reason(SAFE_DEPENDENCY_RULE, ctx) is None

@@ -63,6 +63,24 @@ def test_u1_nightly_dependency_bot(tmp_path: Path) -> None:
     store = RunStore(config.db_path)
     try:
         for name, repo in (("safe-nightly", safe_repo), ("risky-nightly", risky_repo)):
+            # v127-F5 round 2: deps-safe lands only on the PROJECT's pin — here
+            # the audit worker's own real check, declared by the supervisor. A
+            # bound project's phase decides whether anything auto-lands
+            # (maintain lands on its integration branch, skep/maintain).
+            store.add_project_policy(
+                project_id=name,
+                name=name,
+                strategy="trusted_local_dev",
+                phase="maintain",
+                policy={
+                    "auto_dispatch_allowed": True,
+                    "default_execution_mode": "workspace",
+                    "verify_command": f"{sys.executable} -m pytest -q",
+                },
+            )
+            store.add_project_binding(
+                project_id=name, binding_kind="repo_path", binding_value=str(repo)
+            )
             store.add_schedule(
                 make_schedule(
                     name=name,
@@ -93,7 +111,7 @@ def test_u1_nightly_dependency_bot(tmp_path: Path) -> None:
             a.status == "approved" and (a.resolved_by or "").startswith("auto:deps-safe")
             for a in safe_approvals
         ), safe_approvals
-        assert _branch_exists(safe_repo, f"skep/{safe_id}")
+        assert _branch_exists(safe_repo, "skep/maintain")
 
         # RISKY: filed for review. The risk flag blocked the rule — no auto-approval,
         # no branch; it waits for a human (`skep review`).
@@ -103,6 +121,7 @@ def test_u1_nightly_dependency_bot(tmp_path: Path) -> None:
             (a.resolved_by or "").startswith("auto:") for a in store.approvals_for(risky_id)
         ), "a major-version bump must never auto-land"
         assert not _branch_exists(risky_repo, f"skep/{risky_id}")
+        assert not _branch_exists(risky_repo, "skep/maintain")
         risky_result = json.loads((config.audit_dir / risky_id / "result.json").read_text())
         assert any("major-version-bump" in flag for flag in risky_result["risk_flags"])
     finally:

@@ -66,6 +66,10 @@ def test_scenario_1_dispatch_execute_verify_reverify_land(tmp_path: Path) -> Non
     config = _audit_config(tmp_path / "home")
     store = RunStore(config.db_path)
     try:
+        # v127-F5 round 2: --auto-approve (deps-safe) lands only on the
+        # PROJECT's pin, never the command the worker nominated — and a bound
+        # project's phase decides whether anything auto-lands, so maintain.
+        _bind_audit_project(store, repo, project_id="safe-proj", phase="maintain")
         store.add_schedule(
             make_schedule(
                 name="safe-nightly",
@@ -91,7 +95,7 @@ def test_scenario_1_dispatch_execute_verify_reverify_land(tmp_path: Path) -> Non
         assert any(
             a.status == "approved" and (a.resolved_by or "").startswith("auto:") for a in approvals
         ), approvals
-        assert _branch_exists(repo, f"skep/{result.task_id}")
+        assert _branch_exists(repo, "skep/maintain")
     finally:
         store.close()
 

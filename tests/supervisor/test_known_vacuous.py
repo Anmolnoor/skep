@@ -144,6 +144,16 @@ def test_every_rule_refuses_a_known_vacuous_reverify(rule: object) -> None:
     assert rule_block_reason(rule, _ctx(())) is not None
 
 
+@pytest.mark.parametrize("rule", [VERIFIED_PATCH_RULE, SAFE_DEPENDENCY_RULE])
+def test_every_rule_needs_a_project_pinned_verify(rule: object) -> None:
+    """Round 2 (I2): the `--auto-approve` lane landed on the command the
+    worker nominated for itself; every auto-landing rule now needs the
+    project's pin, the way VERIFIED_PATCH_RULE always did (v90-F4)."""
+    assert isinstance(rule, type(VERIFIED_PATCH_RULE))
+    blocked = rule_block_reason(rule, _ctx(("uv run pytest",), pinned=False))
+    assert blocked is not None and "pins no verify_command" in blocked
+
+
 # -- the landing paths, end to end --------------------------------------------
 
 
@@ -209,28 +219,39 @@ def test_scheduler_path_refuses_a_vacuous_pin(repo: Path, config: SupervisorConf
     assert "known-vacuous" in _blocked_reason(config, result.task_id)
 
 
-def test_cli_auto_approve_path_refuses_a_worker_nominated_true(
-    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("pin", "reason"), [(None, "pins no verify_command"), ("true", "known-vacuous")]
+)
+def test_cli_auto_approve_path_refuses_a_worker_nominated_or_vacuous_check(
+    repo: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    pin: str | None,
+    reason: str,
 ) -> None:
-    """`skep run --auto-approve` installs SAFE_DEPENDENCY_RULE, which needs no
-    pin: a lockfile patch the worker 'verified' with `true` landed."""
+    """`skep run --auto-approve` installs SAFE_DEPENDENCY_RULE: a lockfile
+    patch the worker 'verified' with `true` landed. Round 2: with no project
+    pin it is the worker's own nomination and never lands; a pinned `true`
+    is known-vacuous and never lands either."""
     (repo / "uv.lock").write_text("value = 0\n")
     git(repo, "add", "uv.lock")
     git(repo, "commit", "-qm", "lock")
     home = tmp_path / "home"
+    config = build_config(home, None)
+    if pin is not None:
+        _bind(config, repo, {"verify_command": pin})
     worker = shlex.join([sys.executable, str(FAKE_WORKER)])
     code = main(["--home", str(home), "run", str(repo), "Bump. MODE:vacuous FILE:uv.lock",
                  "--worker-cmd", worker, "--auto-approve", "--execution-mode", "workspace",
                  "--quiet"])  # fmt: skip
     assert code == 0, capsys.readouterr()
-    config = build_config(home, None)
     store = RunStore(config.db_path)
     try:
         (run,) = store.recent_runs(10)
     finally:
         store.close()
     _assert_not_landed(repo, run.task_id)
-    assert "known-vacuous" in _blocked_reason(config, run.task_id)
+    assert reason in _blocked_reason(config, run.task_id)
 
 
 def test_resume_path_refuses_a_vacuous_pin(repo: Path, config: SupervisorConfig) -> None:
