@@ -1,13 +1,409 @@
 ---
-// Stub from the foundation: the page agent that owns this file replaces the body.
+// Why skep (plan §5.4): compared by mechanism in four groups, each with what
+// skep adds and what it does not do. A product is named only beside a link to
+// its own documentation; every quoted phrase was read on that page on
+// 2026-11-18. No grades, and nothing about a vendor's internals or roadmap.
 import Base from '../layouts/Base.astro';
+import Button from '../components/Button.astro';
+import Callout from '../components/Callout.astro';
+import Card from '../components/Card.astro';
+import Icon from '../components/Icon.astro';
+import Section from '../components/Section.astro';
+import Table from '../components/Table.astro';
+
+const SOURCES = {
+  ccModes: 'https://code.claude.com/docs/en/permission-modes',
+  ccSandbox: 'https://code.claude.com/docs/en/sandboxing',
+  ccSettings: 'https://code.claude.com/docs/en/settings',
+  ccCloud: 'https://code.claude.com/docs/en/claude-code-on-the-web',
+  ccWorktrees: 'https://code.claude.com/docs/en/worktrees',
+  codexSandbox: 'https://learn.chatgpt.com/docs/sandboxing',
+  codexCloud: 'https://learn.chatgpt.com/docs/cloud',
+  copilotReview: 'https://docs.github.com/en/copilot/how-tos/use-copilot-agents/coding-agent/review-copilot-prs',
+};
+
+const groups = [
+  { href: '#permission-mode', title: "The agent's own permission mode", icon: 'message-circle-question' },
+  { href: '#vendor-sandbox', title: 'A vendor sandbox or managed settings', icon: 'box' },
+  { href: '#cloud-engineer', title: 'A cloud engineer that returns a pull request', icon: 'cloud' },
+  { href: '#worktree-orchestrator', title: 'A worktree orchestrator', icon: 'git-fork' },
+];
+
+// Each row is a differentiator the code supports, with where it holds and its limit.
+const claims = [
+  [
+    'The OS sandbox is up before the agent starts; with no usable backend the run is refused',
+    'Every sandbox-mode run. Claude Code, Codex, Aider and pi are always in sandbox mode.',
+    "skep's own worker can run in workspace mode, which has no OS wall. Reads are mostly open. No Windows backend.",
+  ],
+  [
+    "skep re-runs the project's pinned verify command on a clean worktree",
+    'Any project with a pin. An external agent cannot be dispatched without one.',
+    "As strong as the command. An unpinned project falls back to the worker's own command, and the record says so.",
+  ],
+  [
+    'Your default branch never moves without you',
+    'Always. It moves only through actions that raise a confirmation.',
+    'Landing a patch needs approval by default, not always: two opt-in lanes land a re-verified patch on a skep/* branch.',
+  ],
+  [
+    'A worker cannot push, pull, fetch or switch your branches',
+    "skep's own worker: hard denies that no grant lifts. External agents: the sandbox.",
+    'git add and git commit can be granted inside the disposable worktree. skep itself pushes a landing branch when you ask.',
+  ],
+  [
+    'Runs, decisions and approvals are recorded',
+    'Three records: the decision log, the run store and per-run audit files.',
+    "Plain local files, rotated and not tamper-evident. An external agent's individual tool calls are not recorded.",
+  ],
+  [
+    'No skep account, no skep service, no telemetry',
+    'Always. State lives in a directory on your machine.',
+    'Outbound calls go to what you configured or approved. With a hosted model, prompts and code go to that provider.',
+  ],
+  [
+    'Policy is layered: allow, ask or deny, under a floor that nothing lifts',
+    'One engine answers the CLI, the Claude Code hook and the ACP governor.',
+    'An unmatched action asks; it is not denied. A role only tightens. A session grant lasts until skep serve restarts.',
+  ],
+  [
+    'Codex can run on a ChatGPT plan login without the worker holding the refresh token',
+    'Opt-in per project, when no OPENAI_API_KEY is set.',
+    'The worker holds the access token for the length of the run. skep never refreshes it.',
+  ],
+];
+
+const wrongTool = [
+  {
+    icon: 'monitor-x',
+    title: 'You are on Windows',
+    body: 'There is no Windows sandbox backend. The backends are Seatbelt on macOS, bubblewrap with Landlock on Linux, and podman.',
+  },
+  {
+    icon: 'flask-conical-off',
+    title: 'No command proves the work',
+    body: 'Re-verification re-runs what you pin. With nothing meaningful to pin, a confirmed run tells you little, and an external agent will not dispatch at all.',
+  },
+  {
+    icon: 'eye',
+    title: 'You need reads confined',
+    body: 'The sandbox confines writes and masks a list of credential paths. What else your user can read, the agent can read.',
+  },
+  {
+    icon: 'users',
+    title: 'You want to pair and watch',
+    body: 'skep is built for handing a task over and coming back to a patch. For interactive work, run the agent directly.',
+  },
+  {
+    icon: 'message-circle-off',
+    title: 'Your ACP agent never asks',
+    body: 'The ACP governor answers permission requests. An agent in a mode that does not ask is only observed after the fact.',
+  },
+  {
+    icon: 'server',
+    title: 'You want a hosted fleet',
+    body: 'skep runs on the machine in front of you, and that machine has to be on. It has no cloud runner and no VM pool.',
+  },
+  {
+    icon: 'user',
+    title: 'More than one operator',
+    body: 'One home directory, one person approving. There are no accounts and no shared approval queue.',
+  },
+  {
+    icon: 'construction',
+    title: 'You need interfaces that have stopped moving',
+    body: 'One maintainer and a young project. Commands and policy keys still change between releases.',
+  },
+];
 ---
 
-<Base title="Why skep" description="Why skep: this page is being written." active="why-skep">
-  <section class="section">
-    <div class="wrap narrow stack">
-      <h1 class="t-h2">Why skep</h1>
-      <p class="t-lead">This page is being written.</p>
+<Base
+  title="Why skep"
+  description="What skep adds to a coding agent you already run, compared by mechanism with the agent's permission mode, a vendor sandbox, a cloud engineer and a worktree orchestrator, and when skep is the wrong tool."
+  active="why-skep"
+>
+  <Section
+    eyebrow="Why skep"
+    lead="skep is a local supervisor. It runs a coding agent inside an OS sandbox, re-runs your project's own verify command on the result, and holds the patch for your approval. Here is how that compares with four other ways to run an agent, by mechanism."
+  >
+    <h1 slot="heading" class="t-h2">What skep adds, and what it does not</h1>
+    <div class="grid grid-4">
+      {
+        groups.map((group, index) => (
+          <Card href={group.href} icon={group.icon} title={group.title} level="h2">
+            <span class="t-micro c-dim">Compared · {index + 1} of 4</span>
+          </Card>
+        ))
+      }
     </div>
-  </section>
+    <p class="sourcing t-small c-mut prose-width">
+      A statement about another product is quoted from that product's own documentation, read on 18 November
+      2026 and linked where it appears. Products change; the linked page is the authority, not this one.
+    </p>
+  </Section>
+
+  <Section
+    id="permission-mode"
+    band
+    eyebrow="Compared · 1 of 4"
+    title="The agent's own permission mode"
+    lead="The agent asks before it acts, or you put it in a mode that does not ask."
+  >
+    <div class="grid grid-3 compare">
+      <Card title="What it gives you" icon="hand">
+        <p>
+          In its default mode Claude Code "stops and asks you before most actions that edit files, run shell
+          commands, or reach the network" (<a href={SOURCES.ccModes} rel="noopener">Claude Code docs: permission modes</a>).
+          That works while you are there to answer.
+        </p>
+        <p>
+          For unattended work you choose a mode that does not ask. The same page says
+          <code>bypassPermissions</code> "disables permission prompts and safety checks", gives its use as
+          "Isolated containers and VMs only", and says <code>auto</code> mode "does not guarantee safety".
+          Codex's <code>danger-full-access</code> mode "runs without sandbox restrictions" (<a
+            href={SOURCES.codexSandbox}
+            rel="noopener">Codex docs: sandboxing</a
+          >).
+        </p>
+      </Card>
+      <Card title="What skep adds" icon="plus" tone="green">
+        <p>
+          The isolation those modes assume, on your own machine: an OS sandbox around the whole agent process,
+          started before the agent is, and a refused run when no backend works.
+        </p>
+        <p>
+          Then two things a permission mode has no opinion about: a re-run of your pinned verify command on a
+          clean worktree, and a patch that waits for your approval on a <code>skep/*</code> branch.
+        </p>
+      </Card>
+      <Callout kind="limit" title="What skep does not do">
+        <p>
+          It does not add a second layer. skep starts Claude Code with <code>bypassPermissions</code> and Codex
+          with <code>danger-full-access</code>, so inside a skep run its sandbox replaces the agent's prompts
+          and does not stack on them.
+        </p>
+        <p>
+          To keep the agent's own prompts and add your skep policy to them, there is the Claude Code hook. It
+          covers Bash, file writes, WebFetch and WebSearch, judges the command text, and is not a sandbox.
+        </p>
+      </Callout>
+    </div>
+  </Section>
+
+  <Section
+    id="vendor-sandbox"
+    eyebrow="Compared · 2 of 4"
+    title="A vendor sandbox or managed settings"
+    lead="The agent's vendor ships its own OS sandbox, and settings an organization can enforce."
+    reveal
+  >
+    <div class="grid grid-3 compare">
+      <Card title="What it gives you" icon="hand">
+        <p>
+          Claude Code's sandbox is "a boundary that the operating system enforces around the shell commands
+          Claude runs on your machine". Its documentation says the sandbox "covers shell commands only", and
+          that a sandboxed command has "read access to the entire computer, except certain denied directories"
+          by default (<a href={SOURCES.ccSandbox} rel="noopener">Claude Code docs: sandboxing</a>).
+        </p>
+        <p>
+          Codex has a <code>workspace-write</code> sandbox mode (<a href={SOURCES.codexSandbox} rel="noopener"
+            >Codex docs: sandboxing</a
+          >). For an organization, Claude Code has managed settings: "Nothing in your own settings files or
+          <code>--settings</code> overrides a managed key" (<a href={SOURCES.ccSettings} rel="noopener"
+            >Claude Code docs: settings</a
+          >).
+        </p>
+      </Card>
+      <Card title="What skep adds" icon="plus" tone="green">
+        <p>
+          The same kind of OS wall (Seatbelt on macOS, bubblewrap with Landlock on Linux) around the agent
+          process itself, with one configuration for Claude Code, Codex, Aider and pi.
+        </p>
+        <p>
+          A secret floor that masks credential paths and the engines' own logins inside the sandbox, a run
+          that is refused when the sandbox cannot be built, and the two steps a sandbox does not have:
+          re-verification and a held patch.
+        </p>
+      </Card>
+      <Callout kind="limit" title="What skep does not do">
+        <p>
+          It does not confine reads: most of what your user can read, the agent can read. It does not stack:
+          Codex's own sandbox is switched off under skep's.
+        </p>
+        <p>
+          It does not manage a fleet. skep is one operator's tool on one machine, with a policy baseline you
+          lock yourself; nothing in it pushes settings to other people's machines.
+        </p>
+      </Callout>
+    </div>
+  </Section>
+
+  <Section
+    id="cloud-engineer"
+    band
+    eyebrow="Compared · 3 of 4"
+    title="A cloud engineer that returns a pull request"
+    lead="The agent runs on someone else's machines and hands back a branch."
+    reveal
+  >
+    <div class="grid grid-3 compare">
+      <Card title="What it gives you" icon="hand">
+        <p>
+          In Claude Code's cloud sessions "each session runs in an isolated, Anthropic-managed VM", and "The
+          session keeps running after you close your laptop" (<a href={SOURCES.ccCloud} rel="noopener"
+            >Claude Code docs: cloud sessions</a
+          >). In Codex cloud a task "can keep working while your computer is asleep" (<a
+            href={SOURCES.codexCloud}
+            rel="noopener">Codex docs: cloud</a
+          >).
+        </p>
+        <p>
+          The work comes back as a pull request, which is where your CI runs. For Copilot's agent, GitHub
+          documents one more gate: "By default, GitHub Actions workflows will not run automatically when
+          Copilot pushes changes to a pull request" (<a href={SOURCES.copilotReview} rel="noopener"
+            >GitHub docs: reviewing Copilot's pull requests</a
+          >).
+        </p>
+      </Card>
+      <Card title="What skep adds" icon="plus" tone="green">
+        <p>
+          Not the verification. A cloud engineer's pull request already runs your CI, and skep re-runs one
+          pinned command.
+        </p>
+        <p>
+          What skep adds is where the run happens: on your machine, with your keys, inside a wall you
+          configure. The repository does not have to live on a code host, the agent is not handed a credential
+          for your remote, and the evidence stays in files on your disk.
+        </p>
+      </Card>
+      <Callout kind="limit" title="What skep does not do">
+        <p>
+          It does not run without your machine: no hosted VM, no fleet. It does not isolate like a separate
+          VM: it is an OS sandbox on the computer you work on, with reads mostly open.
+        </p>
+        <p>
+          It does not keep your code local when the model is hosted: prompts, code included, go to that
+          provider.
+        </p>
+      </Callout>
+    </div>
+  </Section>
+
+  <Section
+    id="worktree-orchestrator"
+    eyebrow="Compared · 4 of 4"
+    title="A worktree orchestrator"
+    lead="Several agents at once, each in its own git worktree, so their edits do not collide."
+    reveal
+  >
+    <div class="grid grid-3 compare">
+      <Card title="What it gives you" icon="hand">
+        <p>
+          Parallel sessions that do not overwrite each other. Claude Code's <code>--worktree</code> flag starts
+          a session in its own worktree, and its documentation says worktrees "isolate file edits" (<a
+            href={SOURCES.ccWorktrees}
+            rel="noopener">Claude Code docs: worktrees</a
+          >).
+        </p>
+        <p>
+          That is organisation, not confinement. The same page says of its isolation checks that "a command
+          that writes into the main checkout without running git there, such as <code>cp</code> or a shell
+          redirect, isn't refused by them", and leaves that to permissions and sandboxing.
+        </p>
+      </Card>
+      <Card title="What skep adds" icon="plus" tone="green">
+        <p>
+          Every skep task also gets a disposable worktree, and the sandbox confines the agent's writes to it
+          and a few paths the run owns.
+        </p>
+        <p>
+          The patch is taken against the commit the task started from, re-verified on a second clean worktree,
+          and lands only through approval.
+        </p>
+      </Card>
+      <Callout kind="limit" title="What skep does not do">
+        <p>
+          It does not give you a cockpit for many agents. skep is dispatch and review: you hand over a task
+          and come back to a patch. A team run is one manager dispatching one to three tasks.
+        </p>
+        <p>If you want to watch several agents side by side and steer them, an orchestrator is the better tool.</p>
+      </Callout>
+    </div>
+  </Section>
+
+  <Section
+    id="claims"
+    band
+    eyebrow="In one table"
+    title="What skep claims, and the limit of each"
+    lead="Each row is checked against the code. The middle column says where the claim holds; the last says where it stops."
+    reveal
+  >
+    <Table
+      caption="skep's claims with where each holds and its limit."
+      head={['Claim', 'Where it holds', 'Limit']}
+      rows={claims}
+      rowHeaders
+    />
+    <p class="after">
+      <a class="link-arrow" href="/security.html">The threat model <Icon name="arrow-right" size={14} /></a>
+    </p>
+  </Section>
+
+  <Section
+    id="wrong-tool"
+    eyebrow="Not for everyone"
+    tone="yellow"
+    title="When skep is the wrong tool"
+    lead="Eight cases where something else will serve you better."
+    reveal
+  >
+    <div class="grid grid-4">
+      {
+        wrongTool.map((item) => (
+          <Card title={item.title} icon={item.icon} tone="yellow">
+            {item.body}
+          </Card>
+        ))
+      }
+    </div>
+    <div class="row cta">
+      <Button href="/guides.html" icon="arrow-right">Run your first unattended task</Button>
+      <Button href="/security.html" variant="ghost">Read the threat model</Button>
+    </div>
+  </Section>
 </Base>
+
+<style>
+  .sourcing {
+    margin-top: var(--s-5);
+  }
+  .compare p {
+    color: var(--text-mid);
+  }
+  /* inline links and code in running text */
+  p a:not(.link-arrow) {
+    color: var(--green);
+    text-decoration: underline;
+    text-decoration-color: var(--green-dim);
+    text-underline-offset: 3px;
+  }
+  p a:not(.link-arrow):hover {
+    color: var(--orange-soft);
+  }
+  code {
+    padding: 1px var(--s-1);
+    border: 1px solid var(--line-inner);
+    border-radius: var(--r-chip);
+    background: var(--bg-chip);
+    font-size: var(--fs-small);
+    white-space: nowrap;
+    color: var(--text-soft);
+  }
+  .after {
+    margin-top: var(--s-5);
+  }
+  .cta {
+    margin-top: var(--s-6);
+  }
+</style>
