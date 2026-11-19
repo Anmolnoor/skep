@@ -142,7 +142,10 @@ Rules the tests and the design contract enforce:
 - **Contact address.** Only `security.astro` and `code-of-conduct.astro` may
   carry the published contact email (the release hygiene scan allows those two files).
 - **Search.** `Base` marks `<main>` with `data-pagefind-body`, so every page is
-  indexed. Add `data-pagefind-ignore` to an element that should not be searchable.
+  indexed. Add `data-pagefind-ignore` to an element that should not be searchable:
+  an illustration, a decorative island, a number badge set against a word (the
+  index glues them: "2skep"). `Diff` ignores its own lines, and the two page
+  islands (`RunPanel`, `PolicyTrace`) ignore themselves.
 - **Transcripts.** No invented output. Pass real captured text to `Terminal` and
   say where it came from in `captured`.
 
@@ -409,13 +412,13 @@ Rendered by the layouts; pages do not use them. Their links are `NAV` and `FOOTE
 
 ### Layouts
 
-`Base` is described under "Writing a page". `Doc` (sidebar, on-page contents, previous/next, edit on GitHub) is used by `src/pages/docs/[...id].astro` only.
+`Base` is described under "Writing a page". `Doc` (sidebar, on-page contents, previous/next, edit on GitHub) is used by `src/pages/docs/[...id].astro` only. On a doc page running text is 33rem wide, about 68 characters of real text; code blocks and tables keep the whole column (`docs.css`). `--prose` (72ch) measures the digit 0, which is wider than the average letter: it comes to about 93 characters.
 
 ## Motion
 
 - **M1** Text animates only when it is data changing state (a verdict, a number, a run step). Never body text, nav, the h1, buttons or legal text.
 - **M2** At most one animated text element per viewport; each plays once; no loops except the terminal cursor.
-- **M3** Server HTML is the final state. Animation styles apply only under `html.js` (set inline in `<head>` by `Base`) and outside `prefers-reduced-motion: reduce`.
+- **M3** Server HTML is the final state. Animation styles apply only under `html.js` (set inline in `<head>` by `Base`) and outside `prefers-reduced-motion: reduce`. **Nothing rewinds when an island hydrates**: what is on screen never goes from its final state back to an earlier one. An island that is in the viewport when it hydrates keeps its final state and does not play; it plays only when it scrolls into view later. An island that must play above the fold (the home hero) paints its pre-play state from the first frame with CSS, and lets go of it with CSS after a few seconds if the island never hydrates (`RunPanel.css` is the pattern).
 - **M4** Animate emphasis, never existence: nothing mounts or unmounts on animation; reserve height.
 - **M5** Section reveals are CSS: opacity and a transform of at most 16px, `animation-timeline: view()` where supported, never a blur on a large area. Use `class="reveal"` (or `<Section reveal>`) and `class="stage-rows"` with `style="--i: N"` on each child.
 - **M6** Islands: one React island per page by default; `client:visible` unless it is above the fold (`client:idle`). Focus order follows the DOM; a decorative split is `aria-hidden` and has a visible text twin. The home page is the exception: its hero panel, its section headings, its numbers and its engine line are islands, inside the JavaScript budget below.
@@ -434,6 +437,14 @@ Written in one rule, the build's CSS minifier folds the timeline into the
 `animation` shorthand, browsers reject that declaration, and the animation
 silently never runs in the built site while it works in `npm run dev`. Check a
 scroll animation in `npm run build` output, not only in dev.
+
+The same minifier keeps only one of a prefixed and an unprefixed declaration of
+one property written in one rule (`-webkit-backdrop-filter` and
+`backdrop-filter`): split them the same way. The header's blur was missing in
+every Chromium build until it was (`kit.css`, `.site-header::before`).
+
+A reveal is fully opaque once a quarter of the block is in, and never later
+than 80px in, so a block that rests low in the viewport is not half-faded.
 
 Page transitions are the CSS rule `@view-transition { navigation: auto; }` in
 `base.css`. No `<ClientRouter />`, no vanilla motion scripts. Do not use: aurora
@@ -454,8 +465,8 @@ their final text on the server and hold it under reduced motion.
 | Component | Use it for | Key props | Notes |
 |---|---|---|---|
 | `DecryptedText` | a verdict string resolving | `text`, `animateOn="view"`, `sequential`, `speed` (ms per step), `className` | no `motion` import; needs only React |
-| `CountUp` | PyPI and GitHub numbers | `to` (the build-time value), `separator`, `duration` (s), `format="compact"` | server renders `to`; counts from `from` (0) when it scrolls into view; change `to` later and it counts on from where it is |
-| `BlurText` | a section h2, never the h1 | `text`, `tag="h2"`, `className="t-h2"`, `animateBy="words"`, `delay` (ms between pieces), `blur` (px), `distance` (px), `holdIfInView` | pass it in a Section's `heading` slot |
+| `CountUp` | PyPI and GitHub numbers | `to` (the build-time value), `separator`, `duration` (s), `format="compact"`, `holdIfInView` (default true) | server renders `to`; counts from `from` (0) when it scrolls into view after it hydrated; change `to` later and it counts on from where it is |
+| `BlurText` | a section h2, never the h1 | `text`, `tag="h2"`, `className="t-h2"`, `animateBy="words"`, `delay` (ms between pieces), `blur` (px), `distance` (px), `holdIfInView` (default true) | pass it in a Section's `heading` slot |
 | `RotatingText` | engine names, on the home and agents pages | `texts`, `rotationInterval` (ms), `cycles` | under reduced motion and without JS only `texts[0]` shows: print the whole list as visible text next to it. Pass `cycles={1}`: it turns through the list once and rests on `texts[0]` (M2: no loops) |
 
 ```astro
@@ -470,21 +481,27 @@ import BlurText from '../components/reactbits/BlurText.tsx';
 </Section>
 ```
 
-`BlurText` arms itself when it hydrates: text that is already on screen is
-hidden and blurs in once, which reads as a flash of the server HTML. For a
-section heading, hydrate it just before it scrolls in and pass `holdIfInView`,
-so a heading the reader is already looking at (a tall window, an anchor link,
-a restored scroll position) stays as the server rendered it:
+`BlurText` and `CountUp` arm themselves when they hydrate: the heading is
+hidden, the number drops to `from`. Done to text the reader is already looking
+at, that reads as the page rewinding. So both hold by default
+(`holdIfInView`): text that is in the viewport when the component hydrates (a
+tall window, an anchor link, a restored scroll position, a slow device) stays as
+the server rendered it and never plays. Hydrate them just before they scroll in,
+so they arm off screen and play as they arrive:
 
 ```astro
 <BlurText slot="heading" client:visible={{ rootMargin: '200px' }} text="One decision point"
-  tag="h2" className="t-h2" delay={70} blur={6} distance={12} holdIfInView />
+  tag="h2" className="t-h2" delay={70} blur={6} distance={12} />
 ```
 
+Pass `holdIfInView={false}` only for upstream's behaviour. `DecryptedText` with
+`animateOn="view"` has no such hold: drive it from an island that decides when
+it plays, as `RunPanel` does.
+
 The heading text is in the server HTML twice: once visually hidden for screen
-readers, once as the `aria-hidden` words that animate. `CountUp` in its default
-`count` mode sets its number to `from` when it hydrates; hydrate it with the
-same `rootMargin` so that happens off screen. `RotatingText` changes width as
+readers, once as the `aria-hidden` words that animate. `RotatingText` starts its
+one turn from the name the server rendered, and clips to its own line box, so a
+word on its way out never shows outside the line. It changes width as
 it turns: give its wrapper `min-width` in `ch` for the longest text and keep it
 with its flag in a `white-space: nowrap` span, so the line never re-wraps.
 
@@ -504,7 +521,7 @@ an island. Measured on this toolchain, per page:
 
 `motion` is paid for once per page: its code lands in shared chunks, so after
 the first motion-based component each further one costs only its own code
-(3 to 5 KB). The home page loads all of it and measures **142 KB**:
+(3 to 5 KB). The home page loads all of it and measures **143 KB**:
 
 | The home page loads | gzip |
 |---|---|
