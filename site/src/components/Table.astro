@@ -1,0 +1,40 @@
+---
+// Table: a styled table that scrolls sideways inside its own box. Pass `head`
+// and `rows` for plain text cells, or put <thead>/<tbody> in the slot.
+interface Props {
+  head?: string[];
+  rows?: string[][];
+  caption?: string;
+  /** Render the first cell of each row as a row header. */
+  rowHeaders?: boolean;
+}
+const { head, rows, caption, rowHeaders = false } = Astro.props;
+---
+
+<div class="table-wrap" role="region" aria-label={caption ?? 'Table'} tabindex="0">
+  <table>
+    {caption && <caption>{caption}</caption>}
+    {
+      head && (
+        <thead>
+          <tr>{head.map((cell) => <th scope="col">{cell}</th>)}</tr>
+        </thead>
+      )
+    }
+    {
+      rows ? (
+        <tbody>
+          {rows.map((row) => (
+            <tr>
+              {row.map((cell, index) =>
+                rowHeaders && index === 0 ? <th scope="row">{cell}</th> : <td>{cell}</td>,
+              )}
+            </tr>
+          ))}
+        </tbody>
+      ) : (
+        <slot />
+      )
+    }
+  </table>
+</div>

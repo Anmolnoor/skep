@@ -1,0 +1,48 @@
+---
+// DocsSidebar: the docs navigation, generated from the sections of docs/README.md.
+// Used by the Doc layout and the docs hub. `current` is a collection id; a page
+// under adr/ highlights the ADR index.
+import { getCollection } from 'astro:content';
+import { docTitle, parseDocsIndex } from '../lib/nav.mjs';
+import { docUrl } from '../lib/slugs.mjs';
+
+interface Props {
+  current?: string;
+}
+const { current } = Astro.props;
+const entries = await getCollection('docs');
+const byId = new Map(entries.map((entry) => [entry.id, entry]));
+const readme = byId.get('readme');
+if (!readme?.body) throw new Error('docs/README.md is missing from the docs collection');
+const sections = parseDocsIndex(readme.body);
+const parent = current?.includes('/') ? `${current.split('/')[0]}/readme` : null;
+const isCurrent = (id: string | null) => id !== null && (id === current || id === parent);
+---
+
+<nav aria-label="Documentation">
+  <div class="nav-group">
+    <ul>
+      <li><a href="/docs.html" aria-current={current === undefined ? 'page' : undefined}>Overview</a></li>
+    </ul>
+  </div>
+  {
+    sections.map((section) => (
+      <div class="nav-group">
+        <div class="nav-group-title t-micro">{section.title}</div>
+        <ul>
+          {section.items.map((item) => {
+            const entry = item.id ? byId.get(item.id) : undefined;
+            if (item.id && !entry) throw new Error(`docs/README.md lists ${item.file}, which is not under docs/`);
+            return (
+              <li>
+                <a href={entry ? docUrl(entry.id) : item.href} aria-current={isCurrent(item.id) ? 'page' : undefined}>
+                  {entry ? docTitle(entry.body, item.file) : item.file.replace(/^(\.\.\/)+/, '')}
+                </a>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    ))
+  }
+</nav>

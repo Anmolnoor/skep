@@ -1,0 +1,36 @@
+---
+// CodeBlock: highlighted code with a copy button (the button needs JS and is
+// hidden without it). Copying strips a leading "$ " from each line.
+import { Code } from 'astro:components';
+import Icon from './Icon.astro';
+
+interface Props {
+  code: string;
+  /** Shiki language id: "sh", "toml", "json", "python", "diff", … */
+  lang?: string;
+  title?: string;
+  /** Step number shown before the title, for numbered install steps. */
+  step?: number;
+  copy?: boolean;
+}
+const { code, lang = 'sh', title, step, copy = true } = Astro.props;
+---
+
+<figure class="panel codeblock" data-copy-scope style="margin:0">
+  {
+    (title || step || copy) && (
+      <div class="panel-head">
+        <div class="panel-title">
+          {step && <span class="step-no">{step}</span>}
+          <span>{title ?? lang}</span>
+        </div>
+        {copy && (
+          <button type="button" class="copy-btn no-js-hide" data-copy aria-label="Copy to clipboard">
+            <Icon name="copy" size={14} />
+          </button>
+        )}
+      </div>
+    )
+  }
+  <Code code={code.replace(/^\n+|\s+$/g, '')} lang={lang as any} theme="github-dark-default" tabindex="0" />
+</figure>

@@ -1,0 +1,18 @@
+---
+// Search: the visible trigger. Pagefind's component UI (script, stylesheet and
+// index) loads on the first open, never on page load; ⌘K / Ctrl+K opens it too.
+// The modal itself is mounted once by the Base layout. Needs JS: hidden without it.
+import Icon from './Icon.astro';
+
+interface Props {
+  label?: string;
+  /** `wide` is the full-width box on the docs hub; the default fits the header. */
+  wide?: boolean;
+}
+const { label = 'Search', wide = false } = Astro.props;
+---
+
+<button type="button" class:list={['header-btn', 'search-btn', 'no-js-hide', wide && 'wide']} data-search-open aria-haspopup="dialog">
+  <span><Icon name="search" size={15} /><span class="search-label">{label}</span></span>
+  <kbd class="kbd" aria-hidden="true">⌘K</kbd>
+</button>

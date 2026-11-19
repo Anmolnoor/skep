@@ -1,0 +1,44 @@
+---
+// Ledger: rows from a decision log or a run record, each with an optional verdict chip.
+import Chip from './Chip.astro';
+
+export interface LedgerRow {
+  /** Timestamp or step label. */
+  when?: string;
+  /** What was decided or recorded (a command, a capability, an event). */
+  what: string;
+  /** Second line: the rule, layer or reason. */
+  detail?: string;
+  verdict?: 'allow' | 'ask' | 'deny' | 'ok' | 'risk' | 'limit';
+  /** Chip text when it differs from the verdict kind ("confirmed", "auto:deps"). */
+  label?: string;
+}
+interface Props {
+  rows: LedgerRow[];
+  title?: string;
+  /** Provenance, printed under the rows, as for Terminal. */
+  captured?: string;
+  /** Rows stage in as the block scrolls into view (CSS only). */
+  stage?: boolean;
+}
+const { rows, title = 'decisions', captured, stage = false } = Astro.props;
+---
+
+<figure class="panel ledger" style="margin:0">
+  <div class="panel-head"><div class="panel-title"><span>{title}</span></div></div>
+  <ol class:list={['ledger-rows', stage && 'stage-rows']}>
+    {
+      rows.map((row, index) => (
+        <li style={`--i:${index}`}>
+          <span class="ledger-when">{row.when}</span>
+          <span class="ledger-what">
+            {row.what}
+            {row.detail && <small>{row.detail}</small>}
+          </span>
+          {row.verdict ? <Chip kind={row.verdict}>{row.label ?? row.verdict}</Chip> : <span />}
+        </li>
+      ))
+    }
+  </ol>
+  {captured && <figcaption class="panel-foot">captured: {captured}</figcaption>}
+</figure>

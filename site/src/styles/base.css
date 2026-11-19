@@ -1,0 +1,269 @@
+/* Reset, type classes, layout and the motion rules M1-M6 (plan §3.3). */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+html {
+  color-scheme: dark;
+  scroll-padding-top: calc(var(--header-h) + var(--s-4));
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  -webkit-font-smoothing: antialiased;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+  text-wrap: pretty;
+}
+pre {
+  margin: 0;
+  font-family: var(--mono);
+}
+code,
+kbd,
+.mono {
+  font-family: var(--mono);
+}
+img,
+svg {
+  max-width: 100%;
+}
+svg {
+  display: block;
+  flex: 0 0 auto;
+}
+button {
+  font: inherit;
+}
+::selection {
+  background: rgba(255, 107, 31, 0.28);
+}
+:focus-visible {
+  outline: 2px solid var(--orange);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.skip-link {
+  position: absolute;
+  top: var(--s-2);
+  left: var(--s-2);
+  z-index: 100;
+  padding: var(--s-2) var(--s-4);
+  border-radius: var(--r-chip);
+  background: var(--orange);
+  color: var(--on-orange);
+  font-weight: 600;
+  transform: translateY(-200%);
+}
+.skip-link:focus {
+  transform: none;
+}
+
+/* ---- type: the seven sizes ---- */
+.t-display {
+  font-size: var(--fs-display);
+  font-weight: 700;
+  line-height: var(--lh-display);
+  letter-spacing: -0.035em;
+  color: var(--text-bright);
+}
+.t-h2 {
+  font-size: var(--fs-h2);
+  font-weight: 700;
+  line-height: var(--lh-h2);
+  letter-spacing: -0.025em;
+  color: var(--text-bright);
+}
+.t-h3 {
+  font-size: var(--fs-h3);
+  font-weight: 600;
+  line-height: var(--lh-h3);
+  color: var(--text-bright);
+}
+.t-lead {
+  font-size: var(--fs-lead);
+  line-height: var(--lh-lead);
+  color: var(--text-muted);
+}
+.t-body {
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+.t-small {
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+}
+.t-micro {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* ---- layout ---- */
+.wrap {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding-inline: var(--pad-x);
+}
+.wrap.narrow {
+  max-width: 920px;
+}
+.section {
+  padding-block: var(--pad-y);
+}
+.band {
+  border-block: 1px solid var(--line-hair);
+  background: var(--bg-alt);
+}
+.section-head {
+  max-width: var(--prose);
+  margin-bottom: var(--s-6);
+}
+.section-head > * + * {
+  margin-top: var(--s-4);
+}
+.prose-width {
+  max-width: var(--prose);
+}
+.grid {
+  display: grid;
+  gap: var(--s-4);
+}
+/* grid-N: at most N columns, fewer when a column would be narrower than its floor. */
+.grid-2 {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, max(300px, (100% - var(--s-4)) / 2)), 1fr));
+}
+.grid-3 {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, max(280px, (100% - 2 * var(--s-4)) / 3)), 1fr));
+}
+.grid-4 {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, max(220px, (100% - 3 * var(--s-4)) / 4)), 1fr));
+}
+.grid > * {
+  min-width: 0;
+}
+.stack > * + * {
+  margin-top: var(--s-4);
+}
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
+}
+/* controls that only work with JavaScript */
+html:not(.js) .no-js-hide {
+  display: none !important;
+}
+
+/* ---- colour helpers for transcripts ---- */
+.c-green {
+  color: var(--green);
+}
+.c-red {
+  color: var(--red);
+}
+.c-yellow {
+  color: var(--yellow);
+}
+.c-orange {
+  color: var(--orange-soft);
+}
+.c-dim {
+  color: var(--text-faint);
+}
+.c-mut {
+  color: var(--text-muted);
+}
+
+/* ---- motion ----
+   M3: server HTML is the final state. Every animation below is gated on html.js
+   (set by an inline script in <head>) and on prefers-reduced-motion: no-preference.
+   M5: section reveals are CSS only: opacity and a transform of at most 16px,
+   scroll-driven where the browser supports it, and no blur on large areas. */
+@view-transition {
+  navigation: auto;
+}
+
+@keyframes skep-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+}
+@keyframes skep-row-in {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+}
+@keyframes skep-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @supports (animation-timeline: view()) {
+    html.js .reveal {
+      animation: skep-reveal linear both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 55%;
+    }
+    /* Rows stage in one after another as the block scrolls into view (max 12 steps).
+       Each row needs style="--i: <index>"; Diff and Ledger set it. */
+    html.js .stage-rows > * {
+      --step: min(var(--i, 0), var(--stagger-max));
+      animation: skep-row-in linear both;
+      animation-timeline: view();
+      animation-range: entry calc(10% + var(--step) * 5%) entry calc(40% + var(--step) * 5%);
+    }
+  }
+  /* M2: the one permitted loop is the terminal cursor. */
+  html.js .caret::after {
+    animation: skep-caret 1.1s steps(1) infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  @view-transition {
+    navigation: none;
+  }
+}

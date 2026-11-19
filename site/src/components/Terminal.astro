@@ -1,0 +1,27 @@
+---
+// Terminal: a captured transcript. `captured` is required and is printed under
+// the transcript: no invented output (plan §5.1). Lines that start with "$ " are
+// commands, lines that start with "# " are notes; everything else is output.
+interface Props {
+  /** The transcript, as a string (keep it in a template literal in the frontmatter). */
+  code: string;
+  /** Where the output came from: "skep doctor, 1.4.x, throwaway SKEP_HOME" or a path:line. */
+  captured: string;
+  title?: string;
+  /** Blinking CSS cursor after the last line. The one loop the motion rules allow. */
+  caret?: boolean;
+}
+const { code, captured, title = 'terminal', caret = false } = Astro.props;
+const lines = code.replace(/^\n+|\s+$/g, '').split('\n');
+const kind = (line: string) => (line.startsWith('$ ') ? 'cmd' : line.startsWith('# ') ? 'note' : undefined);
+---
+
+<figure class="panel term" data-copy-scope style="margin:0">
+  <div class="panel-head">
+    <div class="panel-title"><span class="term-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>{title}</span></div>
+  </div>
+  <pre tabindex="0">{lines.map((line, index) => (
+    <span class:list={[kind(line), caret && index === lines.length - 1 && 'caret']}>{kind(line) === 'cmd' ? line.slice(2) : line}</span>
+  )).reduce((out: unknown[], node, index) => (index ? [...out, '\n', node] : [node]), [])}</pre>
+  <figcaption class="panel-foot">captured: {captured}</figcaption>
+</figure>
