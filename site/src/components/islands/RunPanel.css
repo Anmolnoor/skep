@@ -1,0 +1,120 @@
+/* RunPanel: the home hero island. Tokens only; the panel chrome is the kit's. */
+
+.runpanel {
+  margin: 0;
+}
+.runpanel .panel-head .chip,
+.runpanel .term-dots {
+  flex: 0 0 auto;
+}
+.rp-body {
+  display: grid;
+  gap: var(--s-4);
+  padding: var(--s-4);
+  font-family: var(--mono);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--text-mid);
+}
+.rp-body p,
+.rp-body dd,
+.rp-body dl {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.rp-cmd {
+  color: var(--text-bright);
+}
+.rp-cmd::before {
+  content: '$ ';
+  color: var(--orange);
+}
+.rp-dim {
+  color: var(--text-faint);
+}
+.rp-nb {
+  white-space: nowrap;
+}
+.rp-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 232px), 1fr));
+  gap: var(--s-3);
+}
+.rp-col,
+.rp-approval {
+  min-width: 0;
+  padding: var(--s-4);
+  border: 1px solid var(--line-inner);
+  border-radius: var(--r-card);
+  background: var(--bg-inset);
+}
+.rp-verify {
+  --rp-key: 10ch;
+  border-color: color-mix(in srgb, var(--green) 28%, transparent);
+}
+.rp-approval {
+  display: grid;
+  gap: var(--s-2);
+  border-color: color-mix(in srgb, var(--orange) 45%, transparent);
+  background: var(--bg-card);
+}
+.rp-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-3);
+  color: var(--text-muted);
+}
+.rp-approval .rp-label {
+  margin-bottom: 0;
+}
+.rp-label .chip {
+  margin-left: auto;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.rp-step-claim {
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+.rp-step-approve {
+  background: color-mix(in srgb, var(--orange) 16%, transparent);
+  color: var(--orange-soft);
+}
+.rp-rows {
+  display: grid;
+  gap: var(--s-2);
+}
+.rp-rows > div {
+  display: grid;
+  grid-template-columns: var(--rp-key, 13ch) minmax(0, 1fr);
+  gap: var(--s-2);
+}
+.rp-rows dt {
+  color: var(--text-faint);
+}
+.rp-rows dd {
+  color: var(--text-soft);
+}
+.rp-next {
+  color: var(--text-bright);
+}
+.rp-verdict {
+  font-weight: 600;
+  color: var(--green);
+}
+
+/* M3: the cursor exists only under html.js and outside reduced motion. A block
+   that the cursor has not reached is dimmed; nothing is ever hidden or removed. */
+@media (prefers-reduced-motion: no-preference) {
+  html.js .rp-block {
+    transition: opacity var(--dur-2) var(--ease-out);
+  }
+  html.js .rp-block[data-state='pending'] {
+    opacity: 0.3;
+  }
+  html.js .rp-verdict-pending {
+    color: var(--text-faint);
+  }
+}
