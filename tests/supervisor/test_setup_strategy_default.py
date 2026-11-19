@@ -111,3 +111,39 @@ def test_an_unknown_name_lists_the_valid_strategies_and_packs(
     assert response.status_code == 400
     detail = response.json()["detail"]
     assert "trusted_local_dev" in detail and "public_free" in detail and "packs:" in detail
+
+
+@pytest.mark.parametrize("route", ["setup", "preview"])
+def test_a_stored_draft_pack_is_re_set_up_without_naming_it(
+    repo: Path, config: SupervisorConfig, route: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2: a pack the project already pinned is honoured even when it is
+    draft-only (set-phase does the same); only a NEW pick must be supported."""
+    import dataclasses
+
+    from skep.supervisor import packs
+
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(project_id="fresh", name="fresh", strategy="trusted_local_dev",
+                                 phase="build", policy={}, pack_name="trusted_local_dev",
+                                 pack_version="1")  # fmt: skip
+    finally:
+        store.close()
+    real = packs.builtin_policy_packs
+    monkeypatch.setattr(packs, "builtin_policy_packs", lambda: {
+        name: dataclasses.replace(pack, status="draft") if name == "trusted_local_dev" else pack
+        for name, pack in real().items()
+    })  # fmt: skip
+    client = serve_client(config)
+    response = client.post(
+        f"/api/projects/{route}",
+        json={"project_id": "fresh", "name": "fresh", "repo_path": str(repo)},
+    )
+    assert response.status_code in (200, 201), response.text
+    named = client.post(
+        f"/api/projects/{route}",
+        json={"project_id": "other", "name": "other", "repo_path": str(repo),
+              "pack": "trusted_local_dev"},
+    )  # fmt: skip
+    assert named.status_code == 400 and "draft-only" in named.json()["detail"]

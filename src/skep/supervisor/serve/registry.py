@@ -669,7 +669,7 @@ def _gate_auto_apply(policy: dict[str, Any], *, requested: bool, notes: list[str
 
 def _choose_strategy(
     run_store: RunStore, project_id: str, strategy: str | None, pack_name: str | None
-) -> tuple[str, str | None, str]:
+) -> tuple[str, PolicyPack | None, str]:
     """v127-F10: the strategy (and pack) a setup uses, and where it came from.
     Neither given: the project's stored one, else ``trusted_local_dev`` for a
     new project — the quick start never names ``--strategy``. Unknown names
@@ -685,16 +685,20 @@ def _choose_strategy(
         f" — valid strategies: {', '.join(sorted(PROJECT_STRATEGIES))}; "
         f"packs: {', '.join(sorted(builtin_policy_packs()))}"
     )
+    pack = None
     if pack_name is not None:
         try:
-            strategy = get_policy_pack(pack_name).strategy
+            # a pack the project already pinned is honoured even when draft
+            # (set_project_phase does the same); a new pick must be supported
+            pack = get_policy_pack(pack_name, include_draft=source != "given")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"{exc}{choices}") from exc
+        strategy = pack.strategy
         source = f"pack {pack_name}" if source == "given" else source
     if strategy not in PROJECT_STRATEGIES:
         raise HTTPException(status_code=400, detail=f"unknown strategy {strategy!r}{choices}")
     assert strategy is not None
-    return strategy, pack_name, source
+    return strategy, pack, source
 
 
 def _strategy_note(strategy: str, source: str, policy: dict[str, Any]) -> str:
@@ -1160,10 +1164,7 @@ def setup_project_record(
             detail="project setup requires at least one binding "
             "(repo_path, repo_slug, or template_names)",
         )
-    strategy, pack_name, strategy_source = _choose_strategy(
-        run_store, project_id, strategy, pack_name
-    )
-    pack = None if pack_name is None else get_policy_pack(pack_name)
+    strategy, pack, strategy_source = _choose_strategy(run_store, project_id, strategy, pack_name)
     base_policy = (
         dict(pack.phase_defaults[phase])
         if pack is not None
@@ -1387,10 +1388,7 @@ def preview_project_setup(
     seed_shell_commands: bool = True,
     repo_path_may_be_missing: bool = False,
 ) -> dict[str, Any]:
-    strategy, pack_name, strategy_source = _choose_strategy(
-        run_store, project_id, strategy, pack_name
-    )
-    pack = None if pack_name is None else get_policy_pack(pack_name)
+    strategy, pack, strategy_source = _choose_strategy(run_store, project_id, strategy, pack_name)
     bindings: list[ProjectBinding] = []
     if repo_path:
         bindings.append(ProjectBinding(kind="repo_path", value=repo_path))
