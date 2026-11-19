@@ -135,16 +135,21 @@ def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
             }
         endpoint, protocol, api_key, model = provider_probe_target(provider)
     except LlmPlanError as exc:
-        return {"status": "blocked", "label": f"blocked: {exc}", "detail": str(exc)}
+        # v127-F4: ``kind`` says why — a config error no run could get past
+        # ("config"), a refused key ("auth": HTTP 401/403), or anything else
+        # ("unreachable": a timeout, 5xx, 429, reset). The scheduler skips a
+        # tick only on the first two.
+        return {
+            "status": "blocked",
+            "kind": "config",
+            "label": f"blocked: {exc}",
+            "detail": f"{exc}",
+        }
     target = f"{model} via {endpoint}"
     try:
         models = list_models(endpoint, api_key, protocol=protocol, timeout=timeout)
     except OllamaError as exc:
-        return {
-            "status": "blocked",
-            "label": f"blocked: provider probe failed ({exc})",
-            "detail": f"{target}: {exc}",
-        }
+        return _probe_failure(exc, target, "the provider {} the model list request")
     # v115-F5: a model list is public on ollama.com — the key that 401'd
     # every chat turn passed it, and doctor said "provider ready" (I8). One
     # authenticated completion is the probe a dead key cannot pass.
@@ -155,11 +160,7 @@ def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
             endpoint, api_key, model=model, protocol=protocol, timeout=max(timeout, 15.0)
         )
     except OllamaError as exc:
-        return {
-            "status": "blocked",
-            "label": f"blocked: the provider lists models but refused a completion ({exc})",
-            "detail": f"{target}: {exc}",
-        }
+        return _probe_failure(exc, target, "the provider lists models but {} a completion")
     if models and model not in models:
         return {
             "status": "ready",
@@ -167,6 +168,21 @@ def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
             "detail": target,
         }
     return {"status": "ready", "label": f"provider ready ({target})", "detail": target}
+
+
+def _probe_failure(exc: Exception, target: str, label: str) -> dict[str, Any]:
+    """A failed worker probe, labeled by its real cause (v127-F4): only an
+    HTTP 401/403 is a refused key."""
+    http_status = getattr(exc, "status", None)
+    auth = http_status in (401, 403)
+    label = label.format("refused" if auth else "failed on")
+    return {
+        "status": "blocked",
+        "kind": "auth" if auth else "unreachable",
+        "http_status": http_status,
+        "label": f"blocked: {label} ({exc})",
+        "detail": f"{target}: {exc}",
+    }
 
 
 def _pending_approvals(
@@ -832,8 +848,8 @@ def _repo_registry_advisories(home: Path) -> list[str]:
     if provider_blocked:
         advisories.append(
             f"{len(provider_blocked)} schedule(s) skipped their last tick because the worker "
-            f"provider refused the key: {', '.join(provider_blocked)}. Fix the key (see the "
-            "coding worker check); they resume on their next tick."
+            f"provider refused its key or its settings are broken: {', '.join(provider_blocked)}. "
+            "The coding worker check names which; they resume on their next tick."
         )
     return advisories
 

@@ -33,7 +33,7 @@ from .castes import CASTES, RETIRED_CASTES
 from .config import SupervisorConfig
 from .contracts_io import DEFAULT_BUDGET
 from .dispatch import run_task
-from .engines import resolve_engine
+from .engines import external_agent_for_command, resolve_engine
 from .ingest import IngestOutcome
 from .nodes import OPS_INSPECT_CAPABILITIES, OPS_MUTATING_CAPABILITIES
 from .policy_resolver import PolicyResolutionError, resolve_run_policy, run_policy_for_repo
@@ -684,6 +684,9 @@ def _held_to_role(
     return narrowed, delegated_decision(decision, delegation, note), None
 
 
+# The tick kinds run_due serves itself, before any template or caste.
+_TICK_LANES = frozenset({"note", "script", "prompt", "digest"})
+
 # v127-F4: the text the builtin worker writes when its provider refuses the
 # key (``llm_plan._chat_chunks``: "provider request failed: <OllamaError>",
 # an OllamaError reads "401 from <url>"). A text match is the signal until a
@@ -695,17 +698,30 @@ def _uses_worker_provider(
     store: RunStore, config: SupervisorConfig, schedule: ScheduleRecord
 ) -> bool:
     """v127-F4: does this schedule's run call skep's worker provider? Its
-    caste must need one, and a coding run on an external engine
-    authenticates on its own (ADR 0047) — skep's dead key is not its key."""
-    caste = CASTES.get(schedule.worker_kind)
+    caste must need one, and its worker must be skep's own: a worker command
+    running an external agent's module (--worker-cmd / SKEP_WORKER_CMD, the
+    resolver's ``wrapped``) or a coding run on an external engine
+    authenticates on its own (ADR 0047) — skep's dead key is not its key. A
+    template-bound tick runs the template as it is now, so its caste and repo
+    come from the live template, not the schedule row's snapshot."""
+    worker_kind, repo = schedule.worker_kind, schedule.repo
+    if schedule.template_name is not None and worker_kind not in _TICK_LANES:
+        template = store.get_template(schedule.template_name)
+        if template is None:
+            return False  # the tick itself reports the missing template
+        instance = instantiate(template, schedule.params, repo=schedule.repo, ref=schedule.ref)
+        worker_kind, repo = instance.worker_kind, instance.repo
+    caste = CASTES.get(worker_kind)
     if caste is None or not caste.needs_provider:
         return False
-    if schedule.worker_kind != "coding":
+    if external_agent_for_command(config.command_for(worker_kind)) is not None:
+        return False
+    if worker_kind != "coding":
         return True
     policy = run_policy_for_repo(
         store,
         config,
-        Path(schedule.repo).expanduser().resolve(),
+        Path(repo).expanduser().resolve(),
         binding_candidates=(
             [("template_name", schedule.template_name)] if schedule.template_name else []
         ),
@@ -716,7 +732,7 @@ def _uses_worker_provider(
 def _provider_blocked(reason: str) -> str:
     return (
         f"{PROVIDER_BLOCKED_STATE}: skipped without a run — {reason}. Fix the worker "
-        "provider key (`skep doctor` shows the coding worker check); the schedule "
+        "provider's key or settings (`skep doctor` shows the coding worker check); the schedule "
         "resumes on its next tick, and this skip never counts toward auto-disable"
     )
 
@@ -769,8 +785,11 @@ def run_due(
                     provider_probed = True
                     from .. import status
 
+                    # v127-F4 review: only a refused key or a config error no
+                    # run gets past skips; a timeout, 5xx, 429 or reset (a cold
+                    # local model) dispatches and the run reports itself.
                     probe = status._worker_provider_check(config.home.parent, 5.0)
-                    if probe.get("status") == "blocked":
+                    if probe.get("kind") in ("auth", "config"):
                         provider_block = _provider_blocked(
                             f"the worker provider probe failed ({probe.get('detail')})"
                         )
