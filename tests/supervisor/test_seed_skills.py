@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from skep.supervisor import SupervisorConfig
 from skep.supervisor.seed_skills import (
     EXTERNAL_PROVENANCE,
     SEED_PROVENANCE,
@@ -482,7 +483,7 @@ def test_a_legacy_row_refreshes_only_on_positive_evidence(
         assert result["diverged"] == ["old (legacy)"]
         assert result["refreshed"] == []
         # A legacy row equal to today's text is evidence: its hash is recorded.
-        assert seed_skills.shipped_hashes(store).keys() == {"current"}
+        assert seed_skills.shipped_hashes(store).keys() == {"seed::current"}
 
         # Positive evidence: the row hashes to a text that once shipped.
         monkeypatch.setitem(
@@ -570,7 +571,7 @@ def test_skill_seed_refresh_takes_the_shipped_text(
         sync_skill_shelves(store)
         _patch(store, "ext", "\nedit ext")
         hashes = seed_skills.shipped_hashes(store)
-        del hashes["two"]  # "two" predates v126: a legacy row
+        del hashes["seed::two"]  # "two" predates v126: a legacy row
         store.set_setting(seed_skills.SHIPPED_HASHES_KEY, hashes)
     finally:
         store.close()
@@ -602,6 +603,78 @@ def test_skill_seed_refresh_takes_the_shipped_text(
         ] * 3
     finally:
         store.close()
+
+
+def test_two_shelves_holding_one_name_stop_flipping(tmp_path: Path) -> None:
+    """v126-F2 (review): the hash was keyed by name only, so shelves a/foo
+    and b/foo each overwrote the other's record and every sync "refreshed".
+    Keyed per shelf, the shelf that loaded foo keeps it; the other never
+    recorded the name, so it is reported and left alone."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    _write_seed(a, "foo", body="From a.")
+    _write_seed(b, "foo", body="From b.")
+    store = RunStore(tmp_path / "s.sqlite3")
+    try:
+        add_skill_shelf(store, a)
+        add_skill_shelf(store, b)
+        for _ in range(3):
+            reports = sync_skill_shelves(store)
+            assert reports[str(a)]["refreshed"] == reports[str(b)]["refreshed"] == []
+        assert reports[str(b)]["diverged"] == ["foo (legacy)"]
+        row = store.get_template("foo")
+        assert row is not None and "From a." in row.instructions
+        # --refresh respects the same key: b never recorded foo, a did.
+        reports = sync_skill_shelves(store, refresh=["foo"])
+        assert reports[str(b)]["refreshed"] == []
+        row = store.get_template("foo")
+        assert row is not None and "From a." in row.instructions
+    finally:
+        store.close()
+
+
+def test_skill_seed_refresh_says_when_nothing_happened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import argparse
+
+    from skep.supervisor import seed_skills
+    from skep.supervisor.skill_cmds import cmd_skill_seed
+
+    shelf = tmp_path / "shelf"
+    _write_seed(shelf, "one")
+    monkeypatch.setattr(seed_skills, "seeds_root", lambda: shelf)
+    args = argparse.Namespace(home=tmp_path / "home", refresh=["nope", "one"], refresh_all=False)
+    assert cmd_skill_seed(args) == 0
+    out = capsys.readouterr().out
+    assert "nothing to refresh for nope" in out
+    assert "nothing to refresh for one" in out  # loaded fresh, already the shipped text
+
+
+def test_serve_start_logs_refreshed_and_diverged_skills(
+    config: SupervisorConfig, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    from skep.supervisor import seed_skills
+
+    from .conftest import serve_client
+
+    shelf = config.home / "seed-shelf"
+    _write_seed(shelf, "plain")
+    _write_seed(shelf, "edited")
+    monkeypatch.setattr(seed_skills, "seeds_root", lambda: shelf)
+    store = RunStore(config.db_path)
+    try:
+        load_seed_skills(store)
+        _patch(store, "edited", "\nmine")
+    finally:
+        store.close()
+    _rewrite(shelf, "plain", "New.")
+    _rewrite(shelf, "edited", "New.")
+    with caplog.at_level(logging.INFO, logger="skep.serve"), serve_client(config):
+        pass
+    (line,) = [r.getMessage() for r in caplog.records if "refreshed" in r.getMessage()]
+    assert "refreshed: plain" in line and "diverged: edited" in line
 
 
 # v126-F9: the shelf is credited, and every recipe can run where it is bound.

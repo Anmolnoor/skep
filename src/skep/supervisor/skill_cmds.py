@@ -768,6 +768,14 @@ def cmd_skill_seed(args: argparse.Namespace) -> int:
             _print_sync({**report, "loaded": [], "skipped": [], "drafted": [], "existing": 0})
     if not any(result[key] for key in ("loaded", "refreshed", "diverged", "skipped", "existing")):
         print("no seeds found")
+    # v126-F2 (review): a --refresh that changed nothing says so.
+    took = {*result["refreshed"], *(n for r in shelves.values() for n in r["refreshed"])}
+    for name in refresh:
+        if name not in took:
+            print(
+                f"nothing to refresh for {name} (unknown, deleted, held by another "
+                "skill or shelf, or already the shipped text)"
+            )
     return 0
 
 

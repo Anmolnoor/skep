@@ -45,8 +45,8 @@ SEED_TOMBSTONES_KEY = "seed_skill_tombstones"
 EXTERNAL_PROVENANCE = "external"
 SKILL_SHELVES_KEY = "skill_shelves"
 
-# v126-F2: {name: fingerprint of the skill as last shipped} — a settings
-# blob, no schema change.
+# v126-F2: {shipped_key: fingerprint of the skill as last shipped} — a
+# settings blob, no schema change.
 SHIPPED_HASHES_KEY = "skill_shipped_hashes"
 
 # v126-F2: positive evidence for pre-v126 rows. Fingerprints of every text a
@@ -75,6 +75,13 @@ def skill_fingerprint(template: WorkflowTemplate) -> str:
     for key in ("name", "created_at", "provenance"):
         fields.pop(key)
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
+
+
+def shipped_key(provenance: str, shelf: Path, name: str) -> str:
+    """v126-F2 (review): one record per shelf, so two shelves holding the same
+    name stop overwriting each other's. The in-package seed shelf is one shelf
+    wherever skep is installed, so its path is left out of the key."""
+    return f"{provenance}:{'' if provenance == SEED_PROVENANCE else shelf}:{name}"
 
 
 def shipped_hashes(store: RunStore) -> dict[str, str]:
@@ -209,32 +216,43 @@ def load_seed_skills(
             continue
         template = dataclasses.replace(template_from_skill_md(pack), provenance=provenance)
         shipped = skill_fingerprint(template)
+        key = shipped_key(provenance, shelf, pack.name)
         row = store.get_template(pack.name)
         if row is None:
             store.add_template(template, actor="shelf-sync")
-            hashes[pack.name] = shipped
+            hashes[key] = shipped
             loaded.append(pack.name)
             continue
         if row.provenance != provenance:
             existing += 1  # another skill holds the name; it wins, untouched
             continue
         current = skill_fingerprint(row)
-        recorded = recorded_before.get(pack.name)
+        recorded = recorded_before.get(key)
+        # Another shelf of this provenance recorded the name: the row is that
+        # shelf's, and neither a sync nor --refresh from here touches it.
+        owned_elsewhere = recorded is None and any(
+            k.startswith(f"{provenance}:") and k.endswith(f":{pack.name}") for k in recorded_before
+        )
         if current == shipped:
-            hashes[pack.name] = shipped
+            if not owned_elsewhere:
+                hashes[key] = shipped
             existing += 1
             continue
-        if refresh_all or pack.name in forced:
+        if (refresh_all or pack.name in forced) and not owned_elsewhere:
             reason, actor = "the operator's --refresh", "operator"
         elif recorded is not None and current == recorded:
             reason, actor = "unedited since it last shipped", "shelf-sync"
-        elif recorded is None and current in LEGACY_SHIPPED.get(pack.name, ()):
+        elif (
+            recorded is None
+            and not owned_elsewhere
+            and current in LEGACY_SHIPPED.get(pack.name, ())
+        ):
             reason, actor = "unedited: matches a text that shipped before v126", "shelf-sync"
         else:
             diverged.append(pack.name if recorded is not None else f"{pack.name} (legacy)")
             continue
         store.add_template(dataclasses.replace(template, created_at=row.created_at), actor=actor)
-        hashes[pack.name] = shipped
+        hashes[key] = shipped
         refreshed.append(pack.name)
         store.record_registry_event(
             kind="template",

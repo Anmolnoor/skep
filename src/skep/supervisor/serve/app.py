@@ -473,7 +473,21 @@ def create_app(
             # standard) — same rules, provenance "external".
             from ..seed_skills import sync_skill_shelves
 
-            for shelf_path, report in sync_skill_shelves(run_store).items():
+            shelf_reports = sync_skill_shelves(run_store)
+            # v126-F2 (review): one line naming what refreshed and what diverged.
+            refreshed = [*seeded["refreshed"]]
+            diverged = [*seeded["diverged"]]
+            for report in shelf_reports.values():
+                refreshed += report["refreshed"]
+                diverged += report["diverged"]
+            if refreshed or diverged:
+                logging.getLogger("skep.serve").info(
+                    "skills refreshed: %s; diverged: %s (your copy wins — "
+                    "`skep skill seed --refresh NAME` takes the shipped text)",
+                    ", ".join(refreshed) or "none",
+                    ", ".join(diverged) or "none",
+                )
+            for shelf_path, report in shelf_reports.items():
                 if report["loaded"]:
                     logging.getLogger("skep.serve").info(
                         "external skills loaded from %s: %s",
