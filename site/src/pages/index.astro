@@ -594,6 +594,10 @@ $ skep review <task_id> --approve --pr`}
   .hero-copy > * + * {
     margin-top: var(--s-5);
   }
+  /* the eyebrow is another component's element, so the scoped `* + *` above misses the h1 */
+  .hero-copy .t-display {
+    margin-top: var(--s-4);
+  }
   .hero-copy .t-lead {
     max-width: 58ch;
   }
@@ -720,6 +724,10 @@ $ skep review <task_id> --approve --pr`}
   @media (max-width: 640px) {
     .rail .step {
       padding-left: calc(var(--badge) + var(--s-3));
+    }
+    /* the rail takes a gutter; the callouts give some of it back */
+    .rail :global(.callout) {
+      padding-inline: var(--s-4);
     }
   }
   .rail .step-no {
