@@ -45,9 +45,9 @@ class Caste:
     # that away (the ``BUILTIN_ENGINE`` precedent, engines.py:47-51).
     argv: tuple[str, ...]
     # One operator-facing line. The Settings roster and the chat tool schema
-    # both read THIS string — a caste described in two places drifts in two
-    # places, which is the defect this module exists to end.
-    summary: str
+    # both read it (as ``summary``) — a caste described in two places drifts in
+    # two places, which is the defect this module exists to end.
+    about: str
     # Can this caste's output become a commit? False means the caste produces
     # artifacts only and has no path to a patch — the supervisor never offers
     # a landing for it, and saying so is how an operator knows what to expect.
@@ -60,15 +60,20 @@ class Caste:
     needs_network: bool
     # v127-F12: never run in the field (O9). Still routed — the CLI, templates
     # and schedules reach it — but the chat enums leave it out, so the Queen's
-    # small model is not trained to reach for it. Its summary says so.
+    # small model is not trained to reach for it. ``summary`` says so.
     advanced: bool = False
+
+    @property
+    def summary(self) -> str:
+        """``about``, prefixed from the ``advanced`` flag (recorded once)."""
+        return f"Advanced: {self.about}" if self.advanced else self.about
 
 
 CASTES: dict[str, Caste] = {
     DEFAULT_CASTE: Caste(
         name=DEFAULT_CASTE,
         argv=(),  # defers to config.command_for (SKEP_WORKER_CMD / --worker-cmd)
-        summary="Writes code against a repo and produces a patch for approval.",
+        about="Writes code against a repo and produces a patch for approval.",
         lands=True,
         needs_provider=True,
         needs_network=False,
@@ -76,8 +81,8 @@ CASTES: dict[str, Caste] = {
     "audit": Caste(
         name="audit",
         argv=(sys.executable, "-m", "skep.workers.audit"),
-        summary=(
-            "Advanced: Bumps unsafe dependency pins against an advisory set and re-runs the "
+        about=(
+            "Bumps unsafe dependency pins against an advisory set and re-runs the "
             "suite. Deterministic, LLM-free, offline."
         ),
         lands=True,
@@ -88,8 +93,8 @@ CASTES: dict[str, Caste] = {
     "curator": Caste(
         name="curator",
         argv=(sys.executable, "-m", "skep.workers.curator"),
-        summary=(
-            "Advanced: Turns an inbox of notes into memory PROPOSALS for review; never "
+        about=(
+            "Turns an inbox of notes into memory PROPOSALS for review; never "
             "writes durable memory itself."
         ),
         lands=False,
@@ -100,7 +105,7 @@ CASTES: dict[str, Caste] = {
     "document": Caste(
         name="document",
         argv=(sys.executable, "-m", "skep.workers.document"),
-        summary="Advanced: Drafts and summaries as deliverables. No web, no code, nothing lands.",
+        about="Drafts and summaries as deliverables. No web, no code, nothing lands.",
         lands=False,
         needs_provider=True,
         needs_network=False,
@@ -109,8 +114,8 @@ CASTES: dict[str, Caste] = {
     "researcher": Caste(
         name="researcher",
         argv=(sys.executable, "-m", "skep.workers.researcher"),
-        summary=(
-            "Advanced: Answers a question from ALLOW-LISTED sources only, with evidence per "
+        about=(
+            "Answers a question from ALLOW-LISTED sources only, with evidence per "
             "source and the ones it could not reach named."
         ),
         lands=False,
@@ -121,8 +126,8 @@ CASTES: dict[str, Caste] = {
     "reviewer": Caste(
         name="reviewer",
         argv=(sys.executable, "-m", "skep.workers.reviewer"),
-        summary=(
-            "Advanced: Reads the diff against the startup baseline and reports findings "
+        about=(
+            "Reads the diff against the startup baseline and reports findings "
             "with a verdict. Read-only; a review never lands."
         ),
         lands=False,
@@ -133,7 +138,7 @@ CASTES: dict[str, Caste] = {
     "script": Caste(
         name="script",
         argv=(sys.executable, "-m", "skep.workers.script_worker"),
-        summary=(
+        about=(
             "Runs one inline script in a sandboxed worktree with deny-all egress. "
             "Produces output, never a patch."
         ),

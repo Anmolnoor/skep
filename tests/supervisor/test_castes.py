@@ -218,6 +218,19 @@ def test_aider_and_pi_are_marked_advanced() -> None:
         assert "advanced" not in CODING_ENGINES[name].summary.lower(), name
 
 
+def test_advanced_is_recorded_once_on_the_flag() -> None:
+    """Round 2: the hand-written "Advanced:" prefix duplicated the flag; the
+    summary every surface reads now renders it from ``advanced``."""
+    from skep.supervisor.castes import Caste
+    from skep.supervisor.engines import CODING_ENGINES, CodingEngine
+
+    entries: list[Caste | CodingEngine] = [*CASTES.values(), *CODING_ENGINES.values()]
+    for entry in entries:
+        assert "advanced" not in entry.about.lower(), entry.name
+        assert entry.summary.startswith("Advanced") is entry.advanced, entry.name
+    assert {n for n, e in CODING_ENGINES.items() if e.advanced} == {"aider", "pi"}
+
+
 def test_the_dispatch_description_carries_each_summary_exactly_once() -> None:
     """Hand-written prose about castes is the F1 defect one layer up: a new
     caste ships and the description is silently stale. Generated from the same
