@@ -1377,6 +1377,14 @@ function unwrapToolResult(raw) {
 
 function shortTaskId(id) { return String(id || "").slice(0, 8); }
 
+// v128-F11: a confirmed /workon set up a project — the chat moves onto it.
+// The server binds only an EMPTY slot, and a new chat already sits on the
+// workspace project, so the operator's own command rebinds it here.
+function projectAfterCommand(tool, response) {
+  if (tool !== "workon" || !response?.ok) return null;
+  return unwrapToolResult(response)?.project?.project_id || null;
+}
+
 // v40-F1 (v35): consecutive Queen tool calls fold into ONE collapsed row with
 // a deterministic aggregate summary (computed from tool names + toolLine
 // output — the model writes none of it). Expanding shows the existing
@@ -3098,6 +3106,22 @@ async function viewChat(main, chatId) {
   const commandResult = (title, result) =>
     renderToolEvent(log, title, result, { summary: title, scroll: scrollBottom });
 
+  // v128-F11: bind the chat to the project a confirmed /workon made, then
+  // reload the picker and the sidebar so both show it.
+  const followProject = async (tool, result) => {
+    const projectId = projectAfterCommand(tool, result);
+    if (!projectId || !activeChatId) return;
+    try {
+      const res = await api("PUT", `/api/chats/${activeChatId}/project`, { project_id: projectId });
+      boundProject = res.project;
+      chatBoundRepo = boundProject?.repo || null;
+    } catch (exc) {
+      flash("error", `project binding failed: ${exc.message || exc}`);
+    }
+    await loadStripProjects();
+    refreshSidebar().catch(() => {});
+  };
+
   // A deck mutation: the same confirm-card, resolved on the commands endpoints
   // (actor operator-command) — the model is never in this loop.
   const commandCard = (d, notes = []) => {
@@ -3113,6 +3137,7 @@ async function viewChat(main, chatId) {
         const result = await api(
           "POST", `/api/chats/${activeChatId}/commands/${d.action_id}/${verb}`);
         commandResult(verb === "confirm" ? `${d.tool}: result` : `${d.tool}: canceled`, result);
+        await followProject(d.tool, result);
         resolveCardUI(card, verb === "confirm" ? "✓ Confirmed" : "✗ Canceled", verb);
         refreshStrip();  // v96-F3: a confirmed verb may have moved branch/policy
       } catch (e) {
@@ -3210,6 +3235,7 @@ async function viewChat(main, chatId) {
     if (resolvesOnCommands(card)) {
       const result = await api("POST", `/api/chats/${activeChatId}/commands/${id}/${verb}`);
       commandResult(verb === "confirm" ? `${card.tool}: result` : `${card.tool}: canceled`, result);
+      await followProject(card.tool, result);
       refreshContext(); // no turn follows, so nothing else redraws the panel
     } else {
       await runStream(`/api/chats/${activeChatId}/actions/${id}/${verb}`);

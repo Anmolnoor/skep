@@ -428,3 +428,17 @@ test("memory: a proposal filed from a tainted chat says what that chat read", as
   assert.doesNotMatch(subtitle, /nothing becomes durable without approval/);
   assert.match(subtitle, /skep memory add/);
 });
+
+// ---------- v128-F11: /workon moves the chat to the new project ----------
+
+test("projectAfterCommand: a confirmed workon names its project; nothing else does", () => {
+  const app = loadApp();
+  const confirmed = { action_id: "a1", tool: "workon", ok: true,
+    result: { path: "/tmp/deck", project: { project_id: "deck", name: "deck" } } };
+  assert.equal(app.projectAfterCommand("workon", confirmed), "deck");
+  // A canceled or failed workon, or any other verb, leaves the binding alone.
+  assert.equal(app.projectAfterCommand("workon", { ok: false, denied: true }), null);
+  assert.equal(app.projectAfterCommand("workon", { ok: false, error: "boom" }), null);
+  assert.equal(app.projectAfterCommand("land_run", { ok: true, result: { project: { project_id: "x" } } }), null);
+  assert.equal(app.projectAfterCommand("workon", null), null);
+});
