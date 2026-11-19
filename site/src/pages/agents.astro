@@ -173,14 +173,14 @@ $ skep policy decisions --actor 'acp:*'
           <tr>
             <th scope="row"><code>aider</code></th>
             <td data-label="What runs">Aider, with <code>--no-auto-commit</code></td>
-            <td data-label="Signs in from">Your Aider configuration; skep names no variable for it. It can reach only the model provider skep is configured with</td>
+            <td data-label="Signs in from">Your Aider configuration; skep names no variable for it. Its model calls go to the provider endpoints skep is configured with; it has no API host of its own</td>
             <td data-label="Execution mode">always sandbox</td>
             <td data-label="Actions pass the capability layer"><Chip kind="limit">no</Chip></td>
           </tr>
           <tr>
             <th scope="row"><code>pi</code></th>
             <td data-label="What runs">pi, headless (<code>-p</code>)</td>
-            <td data-label="Signs in from">Whichever of <code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code> its model needs. It can reach only the model provider skep is configured with</td>
+            <td data-label="Signs in from">Whichever of <code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code> its model needs. Its model calls go to the provider endpoints skep is configured with; it has no API host of its own</td>
             <td data-label="Execution mode">always sandbox</td>
             <td data-label="Actions pass the capability layer"><Chip kind="limit">no</Chip></td>
           </tr>
