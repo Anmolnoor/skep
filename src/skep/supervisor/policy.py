@@ -270,7 +270,12 @@ def _test_config(name: str, text: str | None) -> object:
         {k: v for k, v in tool.items() if k.startswith(_PYPROJECT_TOOL_PREFIXES)},
         _dig(tool, "hatch", "envs"),
         _dig(tool, "pdm", "scripts"),
-        _dig(doc, "project", "entry-points", "pytest11"),
+        # round 5: every entry point, not just pytest11 — a console script
+        # named like the pin's tool (`[project.scripts] pytest = …`) replaces
+        # the tool `uv run pytest` runs.
+        _dig(doc, "project", "entry-points"),
+        _dig(doc, "project", "scripts"),
+        _dig(doc, "project", "gui-scripts"),
         # round 4: a patch-chosen build backend runs during the re-prime and,
         # once landed on skep/maintain, during every later baseline prime.
         doc.get("build-system"),

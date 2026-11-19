@@ -127,6 +127,11 @@ def test_hatch_test_envs_in_pyproject_block(project_repo: Path) -> None:
         # round 4: a patch-chosen build backend runs during the re-prime and,
         # once landed, during every baseline prime
         '\n[build-system]\nrequires = []\nbuild-backend = "evil"\nbackend-path = ["."]\n',
+        # round 5: a console script named like the pin's tool replaces it
+        # (`[project.scripts] pytest = "victim:ok"` made `uv run pytest` pass red)
+        '\n[project.scripts]\npytest = "victim:ok"\n',
+        '\n[project.gui-scripts]\npytest = "victim:ok"\n',
+        '\n[project.entry-points.console_scripts]\npytest = "victim:ok"\n',
     ],
 )
 def test_pytest_plugins_and_coverage_in_pyproject_block(project_repo: Path, extra: str) -> None:

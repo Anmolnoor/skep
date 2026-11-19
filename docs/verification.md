@@ -158,8 +158,9 @@ This catches common failures:
   script the pin runs (`npm test` → `scripts.test` → `node test/run.js`).
   `pyproject.toml` blocks when its `[tool.pytest*]`, `[tool.coverage*]`,
   `[tool.tox]`, `[tool.nox]`, `[tool.poe]`, `[tool.hatch.envs]`,
-  `[tool.pdm.scripts]`, `[project.entry-points.pytest11]` or `[build-system]`
-  change;
+  `[tool.pdm.scripts]`, `[project.scripts]`, `[project.gui-scripts]`, any
+  `[project.entry-points.*]` table or `[build-system]` change (a console script
+  named `pytest` would replace the tool the pin runs);
   `package.json` blocks on any change other than its dependency lists,
   `overrides`, `resolutions` or `version`, so a dependency bump still lands.
   Skep reads this from the patch, not the worker. This blocks global switches
