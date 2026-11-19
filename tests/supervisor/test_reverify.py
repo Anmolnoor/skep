@@ -1008,6 +1008,115 @@ def test_a_node_lockfile_patch_that_cannot_be_primed_is_unavailable_not_passed(
     ]  # the pin never ran
 
 
+# --- v127-A0 trial fix (Fedora V17/V18): yarn behind a corepack launcher ---
+
+
+def _corepack_yarn(bin_dir: Path) -> None:
+    """A fake corepack launcher for `yarn`: it finds its home the way corepack
+    does (COREPACK_HOME, else $XDG_CACHE_HOME/node/corepack, else
+    ~/.cache/node/corepack) and runs only a yarn already cached there; with
+    COREPACK_ENABLE_NETWORK=0 a miss is corepack's own refusal."""
+    stub = bin_dir / "yarn"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'home="${COREPACK_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/node/corepack}"\n'
+        'if [ -e "$home/v1/yarn/1.22.22/.corepack" ]; then\n'
+        '  echo "yarn $* home=$home network=${COREPACK_ENABLE_NETWORK:-unset}'
+        ' latest=${COREPACK_DEFAULT_TO_LATEST:-unset}" >> "$NODE_LOG"; exit 0\n'
+        "fi\n"
+        'if [ "$COREPACK_ENABLE_NETWORK" = 0 ]; then\n'
+        "  echo \"Network access disabled by the environment; can't reach npm repository"
+        ' https://registry.npmjs.org" >&2; exit 1\n'
+        "fi\n"
+        'echo "corepack would download yarn" >&2; exit 3\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+
+def _cache_yarn(corepack_home: Path) -> None:
+    (corepack_home / "v1" / "yarn" / "1.22.22").mkdir(parents=True)
+    (corepack_home / "v1" / "yarn" / "1.22.22" / ".corepack").write_text("{}", encoding="utf-8")
+
+
+@pytest.mark.parametrize("located_by", ["COREPACK_HOME", "XDG_CACHE_HOME", "HOME"])
+def test_a_corepack_yarn_prime_uses_the_hosts_cached_yarn_offline(
+    repo: Path,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    located_by: str,
+) -> None:
+    """Fedora V17/V18: `yarn` is Node's corepack launcher there. The prime
+    pointed XDG_CACHE_HOME at skep's own cache, so corepack found no yarn and,
+    with its network off, could not fetch one — every yarn.lock patch read
+    UNAVAILABLE. The prime now hands corepack the host's own corepack home
+    (read-only through the wall), network still off: the yarn the host
+    already has runs; corepack never downloads one."""
+    monkeypatch.delenv("COREPACK_HOME", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    host = {
+        "COREPACK_HOME": tmp_path / "corepack-home",
+        "XDG_CACHE_HOME": tmp_path / "xdg" / "node" / "corepack",
+        "HOME": tmp_path / "home" / ".cache" / "node" / "corepack",
+    }[located_by]
+    monkeypatch.setenv(
+        located_by,
+        str(
+            {"COREPACK_HOME": host, "XDG_CACHE_HOME": tmp_path / "xdg"}.get(
+                located_by, tmp_path / "home"
+            )
+        ),
+    )
+    _cache_yarn(host)
+    _node_project(repo, "yarn.lock")
+    bin_dir, log = _node_stubs(tmp_path)
+    _corepack_yarn(bin_dir)
+    outcome = _node_reverify(
+        repo, config, _patch_adding_marker(tmp_path), bin_dir, log, "yarn test"
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("yarn install --frozen-lockfile --ignore-scripts ")
+    assert lines[1].startswith("yarn test ")
+    for line in lines:
+        assert f"home={host} " in line and "network=0" in line and "latest=0" in line
+
+
+@pytest.mark.parametrize(
+    ("package_manager", "named"), [(None, "yarn@<version>"), ("yarn@1.22.22", "yarn@1.22.22")]
+)
+def test_a_corepack_yarn_the_host_never_cached_is_unavailable_with_the_fix(
+    repo: Path,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    package_manager: str | None,
+    named: str,
+) -> None:
+    """No cached yarn on the host: still no download — the record names what
+    is missing and the one command that fixes it."""
+    monkeypatch.setenv("COREPACK_HOME", str(tmp_path / "empty-corepack-home"))
+    _node_project(repo, "yarn.lock")
+    if package_manager is not None:
+        manifest = json.loads((repo / "package.json").read_text(encoding="utf-8"))
+        manifest["packageManager"] = package_manager
+        (repo / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
+        git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "pin pm")
+    bin_dir, log = _node_stubs(tmp_path)
+    _corepack_yarn(bin_dir)
+    outcome = _node_reverify(
+        repo, config, _patch_adding_marker(tmp_path), bin_dir, log, "yarn test"
+    )
+    assert outcome.outcome == "unavailable"
+    assert (
+        "yarn via corepack is not installed on this host "
+        f"(run `corepack prepare {named} --activate`)"
+    ) in outcome.detail
+    assert "was not run" in outcome.detail
+    assert not log.exists()  # the pin never ran
+
+
 # --- v127-A0 review (council round 2): the prime's network is the registry ---
 
 

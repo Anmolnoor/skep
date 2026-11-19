@@ -45,7 +45,12 @@ install never gets open network: it reaches the package registries alone
 `registry.yarnpkg.com` for Node; plus any registry or git host the baseline
 lockfile already resolves from) through Skep's filtering proxy, so a patched
 lockfile that names any other host fails to install. Node installs run with
-lifecycle scripts off and corepack offline. A patch that changes the package
+lifecycle scripts off and corepack offline: where `yarn` or `pnpm` is a
+corepack launcher, corepack reads the host's own corepack cache
+(`$COREPACK_HOME`, else `~/.cache/node/corepack`) and never writes it, so
+only a package manager the host already has runs. With none cached the
+replay is `unavailable` and names the fix (`corepack prepare yarn@<version>
+--activate`). A patch that changes the package
 manager itself is not installed and the replay is `unavailable`, with the
 reason: a new `packageManager`, or any change to `.npmrc`, `.yarnrc`,
 `.yarnrc.yml`, `.pnpmfile.cjs`, `.pnpmfile.mjs`, `pnpm-workspace.yaml`,

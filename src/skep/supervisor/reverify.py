@@ -190,8 +190,17 @@ def _node_env(cache_dir: Path, tmp_dir: Path) -> dict[str, str]:
     in the re-verify tmp dir (the verify profile reads the cache only); pnpm
     copies out of its store (a hard link would let the verify step write the
     store through node_modules); and corepack never downloads a package
-    manager."""
+    manager.
+
+    v127-A0 trial fix (Fedora V17/V18): where `yarn`/`pnpm` are corepack
+    launchers (Node's default), corepack looked in skep's XDG cache, found
+    nothing and, offline, could not fetch — every yarn.lock patch read
+    UNAVAILABLE. It gets the host's own corepack home instead, readable but
+    never writable through the wall, with its network still off and no
+    "latest" lookup: only a package manager the host already has runs."""
     return {
+        "COREPACK_HOME": _host_corepack_home(),
+        "COREPACK_DEFAULT_TO_LATEST": "0",
         "npm_config_cache": str(cache_dir / "npm"),
         "npm_config_store_dir": str(cache_dir / "pnpm-store"),
         "npm_config_package_import_method": "copy",
@@ -201,6 +210,28 @@ def _node_env(cache_dir: Path, tmp_dir: Path) -> dict[str, str]:
         "XDG_DATA_HOME": str(cache_dir / "xdg-data"),
         "COREPACK_ENABLE_NETWORK": "0",
     }
+
+
+def _host_corepack_home() -> str:
+    """corepack's own lookup, on the supervisor: $COREPACK_HOME, else
+    $XDG_CACHE_HOME/node/corepack, else ~/.cache/node/corepack."""
+    cache = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return os.environ.get("COREPACK_HOME") or str(Path(cache) / "node" / "corepack")
+
+
+def _corepack_missing(install: str, output: str, package_manager: object) -> str:
+    """Why an install failed when corepack (offline) had no cached copy of the
+    package manager to run, with the one command that fixes it; empty for
+    any other failure."""
+    if "Network access disabled by the environment" not in output:
+        return ""
+    tool = install.split()[0]
+    pinned = isinstance(package_manager, str) and package_manager.startswith(f"{tool}@")
+    version = str(package_manager).split("@", 1)[1] if pinned else "<version>"
+    return (
+        f"{tool} via corepack is not installed on this host "
+        f"(run `corepack prepare {tool}@{version} --activate`)"
+    )
 
 
 def _node_install_refusal(
@@ -551,12 +582,14 @@ def reverify(
             node_install = node_prime[1]
             prime_code, prime_tail = wall.run(node_install, env)
             if prime_code != 0:
+                missing = _corepack_missing(node_install, prime_tail, package_manager)
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
                     [prime_code],
                     "could not prime the baseline Node dependencies for offline "
-                    f"re-verification ({node_install} exited {prime_code}); the "
+                    f"re-verification ({node_install} exited {prime_code})"
+                    f"{': ' + missing if missing else ''}; the "
                     "verification command was not run\n--- install output (tail) ---\n"
                     f"{prime_tail or '(no output)'}",
                 )
@@ -669,12 +702,14 @@ def reverify(
                 install, {**env, **_node_env(reverify_tmp / "node-patched", reverify_tmp)}
             )
             if reprime_code != 0:
+                missing = _corepack_missing(install, reprime_tail, package_manager)
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
                     [reprime_code],
                     "the patch changes the lockfile and its packages could not be "
-                    f"primed ({install} exited {reprime_code}); the verification "
+                    f"primed ({install} exited {reprime_code})"
+                    f"{': ' + missing if missing else ''}; the verification "
                     "command was not run — a dependency change is never confirmed "
                     "against the old dependencies\n--- install output (tail) ---\n"
                     f"{reprime_tail or '(no output)'}",
