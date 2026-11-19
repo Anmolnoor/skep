@@ -210,7 +210,7 @@ const groups: Group[] = [
     title: 'Schedules, templates, skills and memory',
     lead: 'Recurring runs, saved task shapes, and the two things skep can learn only with your approval.',
     rows: [
-      ['skep schedule add NAME REPO [INSTRUCTIONS] --every 1d [--template NAME] [--param KEY=VALUE] [--caste CASTE] [--ref REF] [--network DOMAIN] [--env-allow ENV] [--role NAME]', 'Add a recurring run, from instructions or a saved template. <code>--every</code> takes 30s, 5m, 2h or 1d.'],
+      ['skep schedule add NAME REPO [INSTRUCTIONS] --every 1d [--template NAME] [--param KEY=VALUE] [--caste CASTE] [--ref REF] [--network DOMAIN] [--env-allow ENV] [--role NAME] [--start-at TIME] [--once]', 'Add a recurring run, from instructions or a saved template. <code>--every</code> takes 30s, 5m, 2h or 1d. <code>--start-at</code> sets the first run (a time with no zone is UTC); <code>--once</code> fires once, then disables.'],
       ['skep schedule list', 'Every schedule.'],
       ['skep schedule remove NAME', 'Remove a schedule.'],
       ['skep schedule health', 'How each schedule has been doing.'],
@@ -223,7 +223,7 @@ const groups: Group[] = [
       ['skep template rename OLD_NAME NEW_NAME', 'Rename a template; schedules bound to it follow.'],
       ['skep skill …', 'The learned-skill lifecycle: propose, list, show, test, approve, reject, export, seed, shelf, promote, packs, import-md, import. Nothing is admitted without your approval.'],
       ['skep skill shelf [list|add|remove] [PATH]', 'Register a directory of Agent Skills, for example <code>~/.claude/skills</code>.'],
-      ['skep memory …', 'Durable memory, gated by proposals: list, search, show, forget, proposals, propose, approve, reject, approve-batch, reject-batch.'],
+      ['skep memory …', 'Durable memory, gated by proposals: list, search, show, forget, add (the operator records a fact directly, with no proposal), proposals, propose, approve, reject, approve-batch, reject-batch.'],
     ],
   },
   {
