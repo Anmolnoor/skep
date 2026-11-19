@@ -1,10 +1,13 @@
 /* From React Bits (DavidHDev/react-bits), © David Haz, MIT + Commons Clause; modified. Not covered by this repository's MIT licence. */
-/* Upstream: src/ts-default/TextAnimations/RotatingText/RotatingText.css at d01aa914dcbe. Unchanged below this header. */
+/* Upstream: src/ts-default/TextAnimations/RotatingText/RotatingText.css at d01aa914dcbe. */
+/* skep changes: the root clips its own line box, so a word on its way out or in never shows outside the line. */
 .text-rotate {
   display: flex;
   flex-wrap: wrap;
   white-space: pre-wrap;
   position: relative;
+  /* skep: `clip`, not `hidden`: no scroll container, and the baseline of an inline-block around it stays the text's. */
+  overflow: clip;
 }
 
 .text-rotate-sr-only {
