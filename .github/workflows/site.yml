@@ -12,8 +12,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # One deployment at a time, never cancelled half way. A pull request gets its
 # own group, where a superseded run is cancelled.
@@ -63,11 +61,33 @@ jobs:
           # A build that fails its own tests or checks is never uploaded.
           build-cmd: npm run build && npm test && npm run check
 
+  # Deploying needs Settings -> Pages -> Source set to "GitHub Actions". Until
+  # the owner switches it, the old branch deployment keeps serving and this
+  # workflow builds and checks but does not deploy (and does not turn main red).
+  pages-source:
+    name: pages source
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pages: read
+    outputs:
+      build_type: ${{ steps.source.outputs.build_type }}
+    steps:
+      - id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "build_type=$(gh api "repos/${{ github.repository }}/pages" --jq .build_type || echo unknown)" >> "$GITHUB_OUTPUT"
+
   deploy:
     name: deploy
-    needs: build
+    needs: [build, pages-source]
+    if: needs.pages-source.outputs.build_type == 'workflow'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

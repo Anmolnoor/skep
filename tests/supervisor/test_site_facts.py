@@ -68,6 +68,27 @@ def test_cli_page_names_only_real_commands() -> None:
     assert not unknown, f"site/src/pages/cli.astro names commands skep does not have: {unknown}"
 
 
+# Outside the CLI page a backtick or a quote is usually prose ("skep runs the
+# command"), so only a shell prompt or a <code> element counts as naming one.
+STRICT_COMMAND_RE = re.compile(
+    r"(?:\$ |<code>)skep (?!is\b)([a-z][a-z0-9-]*)(?: +([a-z][a-z0-9-]*))?"
+)
+
+
+def test_no_site_source_names_a_made_up_command() -> None:
+    surface = _surface()
+    unknown = []
+    for path in sorted((ROOT / "site" / "src").rglob("*")):
+        if path.suffix not in {".astro", ".tsx", ".jsx", ".ts", ".mjs"} or ".test." in path.name:
+            continue
+        for command, subcommand in STRICT_COMMAND_RE.findall(path.read_text(encoding="utf-8")):
+            if command not in surface:
+                unknown.append(f"{path.relative_to(ROOT)}: skep {command}")
+            elif surface[command] and subcommand and subcommand not in surface[command]:
+                unknown.append(f"{path.relative_to(ROOT)}: skep {command} {subcommand}")
+    assert not unknown, "site sources name commands skep does not have:\n" + "\n".join(unknown)
+
+
 def test_cli_page_covers_every_top_level_command() -> None:
     """The other direction: a command added to skep must reach the page. The
     page was written at 1.4.2 and main gained `memory add` the same day."""

@@ -25,8 +25,12 @@ echo "wheel: $WHEEL"
 
 # The docs site (site/, with its React Bits copies) must not be redistributed
 # on PyPI: pyproject.toml excludes it from the sdist, and this proves it.
-for sdist in "$ROOT"/dist/skep-*.tar.gz; do
-  [[ -f "$sdist" ]] || continue
+sdists=("$ROOT"/dist/skep-*.tar.gz)
+if [[ ! -f "${sdists[0]}" ]]; then
+  echo "No built sdist found under dist/. Run: UV_CACHE_DIR=.uv-cache uv build" >&2
+  exit 2
+fi
+for sdist in "${sdists[@]}"; do
   if tar -tzf "$sdist" | grep -E '^[^/]+/site/' >/dev/null; then
     echo "sdist carries site/: $sdist" >&2
     exit 1

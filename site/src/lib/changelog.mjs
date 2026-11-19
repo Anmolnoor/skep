@@ -11,6 +11,13 @@ export function parseReleases(history) {
   for (const line of history.split('\n')) {
     if (line.startsWith('## ')) {
       const match = HEADING.exec(line);
+      // A release heading that is not shaped right would drop its whole section
+      // from the changelog without a word. Notes from before the first major version are not releases.
+      if (!match && /^## v[1-9]\d*\.\d+\.\d+\b/.test(line)) {
+        throw new Error(
+          `version-history.md: release heading is not "## vX.Y.Z — title (YYYY-MM-DD[, note])": ${line}`,
+        );
+      }
       current = match
         ? {
             version: match[1],

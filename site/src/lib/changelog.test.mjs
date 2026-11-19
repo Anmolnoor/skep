@@ -76,3 +76,10 @@ test('a version folded into a release with no section fails the build', () => {
   const broken = '## v7.0.1 — orphan (2099-01-01, never published; shipped in v7.0.2)\n';
   assert.throws(() => publishedReleases(broken), /shipped in v7\.0\.2/);
 });
+
+test('a release heading with the wrong shape is an error, not a dropped section', () => {
+  assert.throws(() => parseReleases('## v1.5.0 - hyphen, not a dash (2026-12-01)\n\nbody\n'), /release heading/);
+  assert.throws(() => parseReleases('## v1.5.0 — no date\n\nbody\n'), /release heading/);
+  // pre-1.0 notes and round headings are not releases
+  assert.deepEqual(parseReleases('## v0.1.0 (first public release)\n\n## v106 (2026-07-29, F1–F12)\n'), []);
+});

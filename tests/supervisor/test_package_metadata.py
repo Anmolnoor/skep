@@ -61,5 +61,6 @@ def test_sdist_leaves_the_docs_site_out() -> None:
     assert targets["wheel"]["packages"] == ["src/skep"]
 
     smoke = (root / "scripts" / "package-install-smoke.sh").read_text(encoding="utf-8")
-    assert 'for sdist in "$ROOT"/dist/skep-*.tar.gz' in smoke
+    assert 'sdists=("$ROOT"/dist/skep-*.tar.gz)' in smoke
+    assert "No built sdist found" in smoke  # a wheel-only dist/ must not pass unchecked
     assert "sdist carries site/" in smoke

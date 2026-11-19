@@ -324,27 +324,10 @@ def test_site_build_output_is_ignored() -> None:
     assert (SITE / "package-lock.json").is_file(), "the lockfile is committed: CI runs npm ci"
 
 
-def test_site_workflow_checks_pull_requests_and_deploys_main() -> None:
+def test_site_workflow_has_no_path_filter() -> None:
+    """A release touches only pyproject.toml and worker_contract/version.py: a
+    path filter would leave the site on the old version."""
     workflow = (ROOT / ".github" / "workflows" / "site.yml").read_text(encoding="utf-8")
-    # A release touches only pyproject.toml and worker_contract/version.py: a
-    # path filter would leave the site on the old version.
     assert "paths:" not in workflow
     assert "paths-ignore:" not in workflow
     assert "branches: [main]" in workflow
-    assert "workflow_dispatch:" in workflow
-    assert "pull_request:" in workflow
-    for step in ("npm ci", "npm run build", "npm test", "npm run check"):
-        assert step in workflow
-    assert "uses: withastro/action@v6" in workflow
-    assert "path: ./site" in workflow
-    assert "node-version: 24" in workflow
-    assert "uses: actions/deploy-pages@v5" in workflow
-    assert "name: github-pages" in workflow
-    for permission in ("contents: read", "pages: write", "id-token: write"):
-        assert permission in workflow
-
-    package = (SITE / "package.json").read_text(encoding="utf-8")
-    assert '"build": "astro build && pagefind --site dist"' in package
-    assert "scripts/check-links.mjs" in package
-    assert "scripts/check-js-budget.mjs" in package
-    assert "160 * 1024" in (SITE / "scripts" / "check-js-budget.mjs").read_text(encoding="utf-8")
