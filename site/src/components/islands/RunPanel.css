@@ -96,11 +96,11 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s-2);
-  margin: 0 0 var(--s-3);
   font-family: var(--sans);
   font-weight: 600;
   color: var(--text-bright);
 }
+/* (`.rp-body p` clears every margin above, hence the extra class) */
 .rp-body .rp-label {
   margin-bottom: var(--s-3);
 }

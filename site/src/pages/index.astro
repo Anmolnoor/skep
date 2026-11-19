@@ -5,12 +5,12 @@ import Base from '../layouts/Base.astro';
 import Button from '../components/Button.astro';
 import Callout from '../components/Callout.astro';
 import Card from '../components/Card.astro';
+import Chip from '../components/Chip.astro';
 import CodeBlock from '../components/CodeBlock.astro';
 import Diff from '../components/Diff.astro';
 import Eyebrow from '../components/Eyebrow.astro';
 import Icon from '../components/Icon.astro';
 import Section from '../components/Section.astro';
-import Table from '../components/Table.astro';
 import Terminal from '../components/Terminal.astro';
 import RunPanel from '../components/islands/RunPanel.tsx';
 import BlurText from '../components/reactbits/BlurText.tsx';
@@ -43,29 +43,10 @@ const soon = { rootMargin: '200px' };
 
 // Captured 2026-11-18 from the real CLI under a throwaway SKEP_HOME, with an
 // environment that held no engine credentials (`env -i`). The home directory is
-// written as ~. The first refusal also prints a `next:` hint line, left out here.
+// written as ~. The refusal also prints a `next:` hint line, left out here.
 const refusalNoPin = `
 $ skep run ~/.cache/skep-site-demo/notes "add a line to notes.txt" --execution-mode sandbox
 error: coding_engine 'claude_code' is an external agent whose built-in verification is \`git diff --check\` (whitespace only), so G10 would re-run a check that cannot fail. Pin the command that actually proves the work: \`skep project setup <repo> --verify-command "<command>"\` (chat: setup_project verify_command=...).
-`;
-const refusalNoAuth = `
-$ skep run ~/.cache/skep-site-demo/skep-demo "add a /health route that returns 200 with {'status': 'ok'}" --execution-mode sandbox
-dispatching task against ~/.cache/skep-site-demo/skep-demo
-error: coding_engine 'claude_code': NO AUTH ENV — set one of CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY in the environment the worker inherits (the daemon reads <home>/serve.env at startup; \`skep run\` uses your shell) — the line \`skep doctor\` prints for this engine
-  next:     skep doctor  # engines, auth env, sandbox
-`;
-const setupOutput = `
-$ skep project setup ~/.cache/skep-site-demo/skep-demo --strategy trusted_local_dev --engine claude_code --verify-command "python -m unittest discover -s tests"
-saved: skep-demo (trusted_local_dev/build)
-  pack: -
-  bindings: repo_path=~/.cache/skep-site-demo/skep-demo
-  seeded templates: 0
-  seeded schedules: 1
-    skep-demo-maintain-weekly
-  seeded shell commands: 0
-  verify command: python -m unittest discover -s tests
-  coding engine: claude_code
-  loopback ports: closed (--loopback-port PORT opens one)
 `;
 
 // The app.py half of \`git diff\` for the /health change that
@@ -86,44 +67,19 @@ index 5cb88fa..79aea50 100644
      return 404, {"error": "not found"}
 `;
 
-// Engine ids are the `--engine` choices in the help text of `skep run`; auth comes from
-// src/skep/supervisor/engines.py:103-165 and the lines `skep doctor` prints.
+// Engine ids are the `--engine` choices in the help text of `skep run`. What each
+// one authenticates from and how it is confined is the table on /agents.html.
 const engines = [
-  [
-    'claude_code',
-    'Claude Code, headless',
-    'CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY',
-    'The sandbox, always. Needs a pinned verify command.',
-  ],
-  [
-    'codex',
-    'Codex CLI, headless',
-    'OPENAI_API_KEY, or an opt-in ChatGPT plan login',
-    'The sandbox, always. Needs a pinned verify command.',
-  ],
-  [
-    'aider',
-    'Aider, with its auto-commit switched off',
-    'The model provider skep is configured with; skep passes it no key variable',
-    'The sandbox, always. Needs a pinned verify command.',
-  ],
-  [
-    'pi',
-    'pi, headless',
-    'ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY; it can reach only the provider skep is configured with',
-    'The sandbox, always. Needs a pinned verify command.',
-  ],
-  [
-    'builtin',
-    "skep's own worker",
-    'The model provider you configure for skep',
-    "skep's capability layer on every action, in sandbox or workspace mode.",
-  ],
+  ['claude_code', 'Claude Code, headless'],
+  ['codex', 'Codex CLI, headless'],
+  ['aider', 'Aider, with its auto-commit switched off'],
+  ['pi', 'pi, headless'],
+  ['builtin', "skep's own worker"],
 ];
-// The table above is typed prose; its ids must be exactly the registry's.
+// The row above is typed prose; its ids must be exactly the registry's.
 const engineIds = engines.map((row) => row[0]);
 if ([...engineIds].sort().join() !== [...counted.engines].sort().join()) {
-  throw new Error(`index.astro: the engines table lists [${engineIds}] but engines.py registers [${counted.engines}]`);
+  throw new Error(`index.astro: the engines row lists [${engineIds}] but engines.py registers [${counted.engines}]`);
 }
 // One line whose engine name cycles once through the real ids, then rests on the first.
 const engineLine = 'skep run ~/code/your-app "fix the failing test" --execution-mode sandbox';
@@ -221,21 +177,18 @@ const comparisons = [
       </Card>
     </div>
     <p class="evidence-note t-small c-mut">
-      What a refusal looks like. Both were run for this page against a throwaway home with no engine
+      What a refusal looks like. It was run for this page against a throwaway home with no engine
       credentials in the environment.
     </p>
-    <div class="grid grid-2 wrap-term">
-      <Terminal
-        code={refusalNoPin}
-        title="no pinned verify command"
-        captured="skep run, throwaway SKEP_HOME, 2026-11-18; the trailing next: hint line is left out"
-      />
-      <Terminal
-        code={refusalNoAuth}
-        title="no auth in the environment"
-        captured="skep run, throwaway SKEP_HOME, 2026-11-18; home directory written as ~"
-      />
-    </div>
+    <Terminal
+      code={refusalNoPin}
+      title="no pinned verify command"
+      captured="skep run, throwaway SKEP_HOME, 2026-11-18; the trailing next: hint line is left out"
+      wrap
+    />
+    <p class="after">
+      <a class="link-arrow" href="/docs/guide-unattended-run.html#what-goes-wrong-and-how-to-tell">The refusal with no auth in the environment, and the others a first run can meet <Icon name="arrow-right" size={14} /></a>
+    </p>
   </Section>
 
   <Section
@@ -248,7 +201,7 @@ const comparisons = [
     <ol class="steps rail">
       <li class="step">
         <div class="stack">
-          <h3 class="t-h3 step-head"><span class="step-no">1</span>Sandbox</h3>
+          <h3 class="t-h3 step-head"><span class="step-no" data-pagefind-ignore>1</span>Sandbox</h3>
           <p>
             Before the agent starts, skep builds an OS sandbox around a disposable git worktree: bubblewrap
             with Landlock on Linux, Seatbelt on macOS, podman if you opt in. The agent process is started
@@ -270,7 +223,7 @@ const comparisons = [
       </li>
       <li class="step">
         <div class="stack">
-          <h3 class="t-h3 step-head"><span class="step-no">2</span>Run</h3>
+          <h3 class="t-h3 step-head"><span class="step-no" data-pagefind-ignore>2</span>Run</h3>
           <p>
             The agent works in the worktree with nobody to ask. It authenticates only from the environment
             variables its engine declares, because keychain and file logins are masked inside the sandbox. It
@@ -290,7 +243,7 @@ const comparisons = [
       </li>
       <li class="step" id="re-verify">
         <div class="stack">
-          <h3 class="t-h3 step-head"><span class="step-no">3</span>Re-verify</h3>
+          <h3 class="t-h3 step-head"><span class="step-no" data-pagefind-ignore>3</span>Re-verify</h3>
           <p>
             When the agent says it is done, skep applies its patch to a clean worktree and re-runs the
             project's pinned <code>verify_command</code> there; for a sandboxed run the re-run is sandboxed
@@ -309,7 +262,7 @@ const comparisons = [
       </li>
       <li class="step">
         <div class="stack">
-          <h3 class="t-h3 step-head"><span class="step-no">4</span>Approve</h3>
+          <h3 class="t-h3 step-head"><span class="step-no" data-pagefind-ignore>4</span>Approve</h3>
           <p>
             The patch waits. <code>skep review &lt;task_id&gt;</code> shows the evidence and the diff;
             <code>--approve</code> applies it on <code>skep/&lt;task_id&gt;</code> or a branch you name, and
@@ -338,7 +291,7 @@ const comparisons = [
     reveal
   >
     <BlurText slot="heading" client:visible={soon} text="Your agent, behind skep's wall" {...heading} />
-    <p class="engine-line">
+    <p class="engine-line" data-pagefind-ignore>
       <span class="engine-cmd">{engineLine}</span>{' '}
       <span class="engine-flag">
         --engine{' '}
@@ -347,13 +300,16 @@ const comparisons = [
         </span>
       </span>
     </p>
-    <Table
-      caption="The five engine ids skep run accepts."
-      head={['Engine', 'What runs', 'Authenticates from', 'Confined by']}
-      rows={engines}
-      rowHeaders
-      stack
-    />
+    <ul class="engines-row" aria-label="The five engine ids skep run accepts">
+      {
+        engines.map(([id, runs]) => (
+          <li>
+            <code>{id}</code>
+            <span>{runs}</span>
+          </li>
+        ))
+      }
+    </ul>
     <p class="after t-small c-mut">
       Ollama is a model provider for skep's own worker, not an engine. The Codex ChatGPT plan login hands the
       run a copy that holds the access token and no refresh token.
@@ -370,43 +326,19 @@ const comparisons = [
     <BlurText slot="heading" client:visible={soon} text="Approval lands a patch on a branch" {...heading} />
     <div class="grid grid-2 landing">
       <div class="stack">
-        <ol class="plain-steps">
-          <li>
-            <p>
-              <code>skep review &lt;task_id&gt;</code> prints the verification, the re-verification and the
-              patch.
-            </p>
-          </li>
-          <li>
-            <p>
-              <code>skep review &lt;task_id&gt; --approve</code> applies the patch on
-              <code>skep/&lt;task_id&gt;</code>, or on the branch you pass with <code>--branch</code>.
-            </p>
-          </li>
-          <li>
-            <p>
-              Add <code>--pr</code> and skep pushes that branch and opens a pull request with your
-              <code>gh</code> login. skep pushes a branch only when you ask for it.
-            </p>
-          </li>
-        </ol>
         <Callout kind="limit" title="A task lands on a skep branch, not on main.">
           Merging it is your move, in your usual review flow. skep's own merge and push actions always wait
           for your confirmation.
         </Callout>
-      </div>
-      <div>
-        <Diff
-          code={patch}
-          file="<task_id>.patch"
-          stage
-          landed="skep/<task_id> ← patch · main untouched"
-        />
-        <p class="diff-note t-small c-dim">
+        <p class="t-small c-dim">
           An example patch: the <code>app.py</code> half of a <code>git diff</code>, made by hand on a copy
           of <code>examples/skep-demo</code>. The other half adds its test. No agent wrote it.
         </p>
+        <p>
+          <a class="link-arrow" href="/how-it-works.html#landing">Approval and landing in detail <Icon name="arrow-right" size={14} /></a>
+        </p>
       </div>
+      <Diff code={patch} file="<task_id>.patch" stage landed="skep/<task_id> ← patch · main untouched" />
     </div>
   </Section>
 
@@ -419,28 +351,30 @@ const comparisons = [
   >
     <BlurText slot="heading" client:visible={soon} text="Governing an agent you run somewhere else" {...heading} />
     <div class="grid grid-2">
-      <div class="stack">
-        <Card title="The Claude Code hook" icon="webhook">
+      <Card title="The Claude Code hook" icon="webhook">
+        <p>
           <code>skep policy hook</code> is a PreToolUse hook for Claude Code. Claude Code asks skep before
           Bash, file writes, WebFetch and WebSearch, enforces the allow, ask or deny that comes back, and skep
           records each verdict.
-        </Card>
-        <Callout kind="limit" title="Limit">
+        </p>
+        <p class="card-limit t-small">
+          <Chip kind="limit">Limit</Chip>
           It judges the text of a command and does not confine what the command then does. Every other tool
           falls through to Claude Code's own permissions, and the hook runs only if you installed it.
-        </Callout>
-      </div>
-      <div class="stack">
-        <Card title="The ACP governor" icon="plug">
+        </p>
+      </Card>
+      <Card title="The ACP governor" icon="plug">
+        <p>
           <code>skep acp govern</code> sits between an ACP client, such as an editor, and the agent. It
           answers the agent's permission requests from your policy, forwards what it cannot decide to you, and
           records both.
-        </Card>
-        <Callout kind="limit" title="Limit">
+        </p>
+        <p class="card-limit t-small">
+          <Chip kind="limit">Limit</Chip>
           It does not sandbox the agent. An agent in a mode that never asks is only observed after the fact;
           <code>skep acp doctor</code> warns about those modes.
-        </Callout>
-      </div>
+        </p>
+      </Card>
     </div>
     <p class="after"><a class="link-arrow" href="/agents.html">The hook and the governor in detail <Icon name="arrow-right" size={14} /></a></p>
   </Section>
@@ -452,22 +386,19 @@ const comparisons = [
     reveal
   >
     <BlurText slot="heading" client:visible={soon} text="From install to a patch you can review" {...heading} />
-    <div class="grid grid-2">
+    <div class="grid grid-3">
       <CodeBlock step={1} title="Install" code="$ pipx install skep" />
       <CodeBlock
         step={2}
         title="Sandbox backend"
         code={`# Linux: bubblewrap. macOS: nothing to install.
 $ sudo apt install bubblewrap
-# Fedora: sudo dnf install bubblewrap
-$ skep doctor
-# read its sandbox and engine lines`}
+$ skep doctor`}
       />
       <CodeBlock
         step={3}
         title="Engine auth, from the environment"
-        code={`# prints a long-lived token
-$ claude setup-token
+        code={`$ claude setup-token
 $ export CLAUDE_CODE_OAUTH_TOKEN=<token>
 # Codex: export OPENAI_API_KEY=<key>`}
       />
@@ -492,31 +423,13 @@ $ export CLAUDE_CODE_OAUTH_TOKEN=<token>
 $ skep review <task_id> --approve --pr`}
       />
     </div>
-    <div class="grid grid-2 after wrap-term">
-      <Terminal
-        code={setupOutput}
-        title="what step 4 prints"
-        captured="skep project setup on a copy of examples/skep-demo, throwaway SKEP_HOME, 2026-11-18; home directory written as ~"
-      />
-      <div class="stack">
-        <Callout kind="note" title="Two things step 4 does that you might not expect">
-          <p>
-            A repository skep has not seen needs <code>--strategy</code> (or <code>--pack</code>) the first
-            time; without it setup stops with <code class="long">project setup requires a pack or strategy</code>. Setup
-            also seeds a weekly maintain schedule, which fires only under <code>skep serve</code> or
-            <code>skep tick</code>; pass <code>--no-seed-schedules</code> to skip it.
-          </p>
-        </Callout>
-        <Callout kind="note" title="The key lives in your shell">
-          <p>
-            <code>skep run</code> passes the worker the auth variable from the shell it was typed in. The
-            sandbox masks keychain and file logins, so a logged-in <code>claude</code> or
-            <code>codex</code> on your machine is not enough by itself.
-          </p>
-        </Callout>
-        <p><a class="link-arrow" href="/docs/guide-unattended-run.html">The full guide, with what fails first <Icon name="arrow-right" size={14} /></a></p>
-      </div>
-    </div>
+    <p class="after t-small c-mut">
+      Setup also seeds a weekly maintain schedule, which fires only under <code>skep serve</code> or
+      <code>skep tick</code>; pass <code>--no-seed-schedules</code> to skip it. The sandbox masks keychain and
+      file logins, so a logged-in <code>claude</code> or <code>codex</code> on your machine is not enough by
+      itself.
+    </p>
+    <p class="after"><a class="link-arrow" href="/docs/guide-unattended-run.html">The full guide, with what fails first <Icon name="arrow-right" size={14} /></a></p>
   </Section>
 
   <Section
@@ -693,17 +606,11 @@ $ skep review <task_id> --approve --pr`}
   .evidence-note {
     margin-block: var(--s-6) var(--s-3);
   }
-  /* A refusal is one long line: wrap it instead of scrolling sideways. */
-  .wrap-term :global(pre) {
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
   .after {
     margin-top: var(--s-5);
   }
 
-  .steps,
-  .plain-steps {
+  .steps {
     margin: 0;
     padding: 0;
     list-style: none;
@@ -836,31 +743,92 @@ $ skep review <task_id> --approve --pr`}
     color: var(--green);
   }
 
+  /* The five engine ids in one row; what each signs in from is on /agents.html. */
+  .engines-row {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--line-card);
+    border-radius: var(--r-card);
+    background: var(--bg-card);
+    list-style: none;
+  }
+  .engines-row li {
+    display: grid;
+    align-content: start;
+    gap: var(--s-1);
+    padding: var(--s-3) var(--s-4);
+    font-size: var(--fs-small);
+    line-height: var(--lh-small);
+    color: var(--text-muted);
+  }
+  .engines-row li + li {
+    border-left: 1px solid var(--line-inner);
+  }
+  .engines-row code {
+    justify-self: start;
+    color: var(--text-bright);
+  }
+  @media (max-width: 860px) {
+    .engines-row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .engines-row li {
+      grid-template-columns: 13ch minmax(0, 1fr);
+      align-items: baseline;
+      gap: var(--s-3);
+    }
+    .engines-row li + li {
+      border-top: 1px solid var(--line-inner);
+      border-left: 0;
+    }
+  }
+
+  /* A limit set inside its card: the chip names it, the text is the limit. */
+  .card-limit {
+    padding-top: var(--s-3);
+    border-top: 1px solid var(--line-inner);
+    color: var(--text-mid);
+  }
+  .card-limit :global(.chip) {
+    margin-right: var(--s-1);
+  }
+
   .landing {
     align-items: start;
   }
-  .plain-steps {
-    display: grid;
-    gap: var(--s-3);
-    counter-reset: plain;
-    color: var(--text-mid);
-  }
-  .plain-steps li {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: var(--s-3);
-    counter-increment: plain;
-  }
-  .plain-steps li::before {
-    content: counter(plain);
-    font-family: var(--mono);
-    font-size: var(--fs-small);
-    color: var(--text-faint);
-  }
-  .diff-note {
-    margin-top: var(--s-3);
-  }
   .cta {
     margin-top: var(--s-6);
+  }
+
+  /* A phone reads this page as one long column. Two layout changes take height
+     out of it without taking a word out: a card's icon sits beside its title
+     instead of above it, and a callout's icon floats in its first line, so the
+     text under it runs the full width. */
+  @media (max-width: 640px) {
+    /* `.hero ~ .section`: the sections are another component's elements, so the
+       selectors are global and anchored on this page's hero. */
+    :global(.hero ~ .section .card) {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      column-gap: var(--s-3);
+    }
+    :global(.hero ~ .section .card-icon),
+    :global(.hero ~ .section .card-title) {
+      margin: 0;
+    }
+    :global(.hero ~ .section .card-body) {
+      grid-column: 1 / -1;
+    }
+    :global(.hero ~ .section .callout) {
+      display: block;
+      padding-inline: var(--s-4);
+    }
+    :global(.hero ~ .section .callout > svg) {
+      float: left;
+      margin: 2px var(--s-2) 0 0;
+    }
   }
 </style>
