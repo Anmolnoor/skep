@@ -393,4 +393,5 @@ def test_the_advised_command_opens_a_port_on_an_existing_project(
         assert (record.strategy, record.phase) == ("trusted_local_dev", "maintain")
     finally:
         store.close()
-    assert main(["--home", str(tmp_path / "fresh"), "project", "setup", str(repo)]) != 0
+    # v127-F10: a NEW project with no strategy takes trusted_local_dev.
+    assert main(["--home", str(tmp_path / "fresh"), "project", "setup", str(repo)]) == 0

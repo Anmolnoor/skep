@@ -45,9 +45,9 @@ class Caste:
     # that away (the ``BUILTIN_ENGINE`` precedent, engines.py:47-51).
     argv: tuple[str, ...]
     # One operator-facing line. The Settings roster and the chat tool schema
-    # both read THIS string — a caste described in two places drifts in two
-    # places, which is the defect this module exists to end.
-    summary: str
+    # both read it (as ``summary``) — a caste described in two places drifts in
+    # two places, which is the defect this module exists to end.
+    about: str
     # Can this caste's output become a commit? False means the caste produces
     # artifacts only and has no path to a patch — the supervisor never offers
     # a landing for it, and saying so is how an operator knows what to expect.
@@ -58,13 +58,22 @@ class Caste:
     # Does it fetch? Only the researcher does; everything else is offline by
     # construction, which is what makes those castes gate-safe on their own.
     needs_network: bool
+    # v127-F12: never run in the field (O9). Still routed — the CLI, templates
+    # and schedules reach it — but the chat enums leave it out, so the Queen's
+    # small model is not trained to reach for it. ``summary`` says so.
+    advanced: bool = False
+
+    @property
+    def summary(self) -> str:
+        """``about``, prefixed from the ``advanced`` flag (recorded once)."""
+        return f"Advanced: {self.about}" if self.advanced else self.about
 
 
 CASTES: dict[str, Caste] = {
     DEFAULT_CASTE: Caste(
         name=DEFAULT_CASTE,
         argv=(),  # defers to config.command_for (SKEP_WORKER_CMD / --worker-cmd)
-        summary="Writes code against a repo and produces a patch for approval.",
+        about="Writes code against a repo and produces a patch for approval.",
         lands=True,
         needs_provider=True,
         needs_network=False,
@@ -72,69 +81,63 @@ CASTES: dict[str, Caste] = {
     "audit": Caste(
         name="audit",
         argv=(sys.executable, "-m", "skep.workers.audit"),
-        summary=(
+        about=(
             "Bumps unsafe dependency pins against an advisory set and re-runs the "
             "suite. Deterministic, LLM-free, offline."
         ),
         lands=True,
         needs_provider=False,
         needs_network=False,
+        advanced=True,
     ),
     "curator": Caste(
         name="curator",
         argv=(sys.executable, "-m", "skep.workers.curator"),
-        summary=(
+        about=(
             "Turns an inbox of notes into a proposals.json file; nothing files those as memory."
         ),
         lands=False,
         needs_provider=False,
         needs_network=False,
+        advanced=True,
     ),
     "document": Caste(
         name="document",
         argv=(sys.executable, "-m", "skep.workers.document"),
-        summary="Drafts and summaries as deliverables. No web, no code, nothing lands.",
+        about="Drafts and summaries as deliverables. No web, no code, nothing lands.",
         lands=False,
         needs_provider=True,
         needs_network=False,
+        advanced=True,
     ),
     "researcher": Caste(
         name="researcher",
         argv=(sys.executable, "-m", "skep.workers.researcher"),
-        summary=(
+        about=(
             "Answers a question from ALLOW-LISTED sources only, with evidence per "
             "source and the ones it could not reach named."
         ),
         lands=False,
         needs_provider=False,
         needs_network=True,
-    ),
-    "verifier": Caste(
-        name="verifier",
-        argv=(sys.executable, "-m", "skep.workers.verifier"),
-        summary=(
-            "Runs the project's PINNED verify_command and reports the verdict. "
-            "Never nominates its own check; nothing lands."
-        ),
-        lands=False,
-        needs_provider=False,
-        needs_network=False,
+        advanced=True,
     ),
     "reviewer": Caste(
         name="reviewer",
         argv=(sys.executable, "-m", "skep.workers.reviewer"),
-        summary=(
+        about=(
             "Reads the diff against the startup baseline and reports findings "
             "with a verdict. Read-only; a review never lands."
         ),
         lands=False,
         needs_provider=True,
         needs_network=False,
+        advanced=True,
     ),
     "script": Caste(
         name="script",
         argv=(sys.executable, "-m", "skep.workers.script_worker"),
-        summary=(
+        about=(
             "Runs one inline script in a sandboxed worktree with deny-all egress. "
             "Produces output, never a patch."
         ),
@@ -146,14 +149,27 @@ CASTES: dict[str, Caste] = {
 
 # v101-F1 declared one hole here — ``verifier``, in KNOWN_WORKER_KINDS since v17
 # and never written. v101-F2 wrote the worker and registered it, so the set is
-# empty and the parity test is now a plain equality. It stays as a named concept
-# because the NEXT caste added to the contract without a worker needs somewhere
-# honest to sit for one commit (I8).
+# empty. It stays as a named concept because the NEXT caste added to the
+# contract without a worker needs somewhere honest to sit for one commit (I8).
 UNIMPLEMENTED_CASTES: frozenset[str] = frozenset()
+
+# v127-F11: contract names with no worker ON PURPOSE, each with the reason a
+# refusal gives. The contract is additive, so a retired name stays in
+# KNOWN_WORKER_KINDS; this is where the supervisor says why it won't run it.
+# ``verifier`` re-ran the pin G10 already re-runs on every patch, and never
+# ran in the field (I2: the supervisor re-verifies, not a caste).
+RETIRED_CASTES: dict[str, str] = {
+    "verifier": "skep re-runs the project's pinned verify_command on every patch (G10)",
+}
 
 
 def caste_names() -> list[str]:
     return sorted(CASTES)
+
+
+def chat_caste_names() -> list[str]:
+    """v127-F12: what the chat dispatch enums offer — the non-advanced castes."""
+    return [name for name in caste_names() if not CASTES[name].advanced]
 
 
 def resolve_caste(name: str | None) -> Caste:
@@ -166,6 +182,8 @@ def resolve_caste(name: str | None) -> Caste:
     """
     if not name:
         return CASTES[DEFAULT_CASTE]
+    if name in RETIRED_CASTES:
+        raise ValueError(f"caste {name!r} is retired: {RETIRED_CASTES[name]}")
     caste = CASTES.get(name)
     if caste is None:
         raise ValueError(f"unknown caste {name!r}; known: {', '.join(caste_names())}")

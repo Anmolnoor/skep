@@ -465,7 +465,9 @@ def list_bedrock_models(base_url: str, api_key: str | None, *, timeout: float) -
         response.raise_for_status()
         payload = response.json()
     except httpx.HTTPStatusError as exc:
-        raise OllamaError(f"{exc.response.status_code} from {control}") from exc
+        raise OllamaError(
+            f"{exc.response.status_code} from {control}", status=exc.response.status_code
+        ) from exc
     except (httpx.HTTPError, json.JSONDecodeError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
     names = [entry.get("modelId") for entry in payload.get("modelSummaries", [])]

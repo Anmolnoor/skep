@@ -149,6 +149,15 @@ def _write_patch(capabilities: CapabilityRegistry, patch_path: Path) -> bool:
     return bool((diff.output or "").strip())
 
 
+def _patch_file_count(patch_path: Path) -> int:
+    """v127-F3 (I8): the files the patch changes, counted from the patch
+    ``_write_patch`` wrote — git.diff against the startup baseline, not HEAD
+    (a granted git.commit moves HEAD) — so a shell-run edit such as a
+    lockfile bump is counted, not just tool writes."""
+    text = patch_path.read_text(encoding="utf-8")
+    return sum(1 for line in text.splitlines() if line.startswith("diff --git "))
+
+
 def _resume_checkpoint_artifact(
     workspace: Path, plan: LlmEditPlan | LlmToolPlan, cursor: ResumeCursor | None = None
 ) -> Artifact:
@@ -203,12 +212,19 @@ class _PlanRecoverable(Exception):
     """
 
     def __init__(
-        self, *, command: str, exit_code: int | None, stderr_tail: str, completed_steps: int
+        self,
+        *,
+        command: str,
+        exit_code: int | None,
+        stderr_tail: str,
+        completed_steps: int,
+        hint: str | None = None,
     ) -> None:
         self.command = command
         self.exit_code = exit_code
         self.stderr_tail = stderr_tail
         self.completed_steps = completed_steps
+        self.hint = hint  # v127-F2: a denied edit's file window, shown once
         super().__init__(command)
 
 
@@ -271,7 +287,7 @@ def _recovery_repair_context(
         f"{completed} failed:\n"
         f"command: {rec.command}\n"
         f"exit code: {exit_desc}\n"
-        f"stderr: {rec.stderr_tail[:2000]}\n"
+        f"stderr: {rec.stderr_tail[:2000]}{rec.hint or ''}\n"
         "Produce a corrected plan that continues from the current workspace state. "
         "Do not repeat already-completed write steps." + sandbox_teach
     )
@@ -868,7 +884,12 @@ def _execute(
         )
 
     if not _is_python_hello_world(task):
-        summary = "minimal coding worker only supports Python hello-world tasks."
+        # v127-T5 (trial V15/V16): name the cause, not the fallback's limits.
+        summary = (
+            "no real model provider is configured for the builtin worker (mock or unset) — "
+            "run `skep onboard` with a provider or set one in Settings (without one it only "
+            "handles Python hello-world tasks)."
+        )
         stream.emit(EventType.PLAN_CREATED, {"steps": [summary]})
         stream.emit(
             EventType.VERIFY_RESULT,
@@ -1061,6 +1082,8 @@ def _execute_llm_plan(
                     repair_context=repair_context,
                     memory=task.memory,
                     usage_tally=tokens,
+                    verify_command=task.verify_command,
+                    shell_allowlist=task.permissions.shell_allowlist,
                 )
         except LlmPlanError as exc:
             raw_content = exc.raw_content
@@ -1525,6 +1548,8 @@ def _execute_react(
             instructions=task.instructions,
             tool_manifest=capabilities.tool_manifest(),
             memory=task.memory,
+            verify_command=task.verify_command,
+            shell_allowlist=task.permissions.shell_allowlist,
         )
         changed_files = []
         commands = []
@@ -1661,6 +1686,8 @@ def _execute_react(
                 # The deny teaches (v67-F4); the loop continues — a refused
                 # action is information, not a terminal event.
                 observation = {"error": str(exc)}
+                if hint := getattr(exc, "hint", None):
+                    observation["hint"] = hint
             else:
                 changed_files.extend(result.changed_files)
                 mutated = mutated or bool(result.changed_files)
@@ -2114,6 +2141,7 @@ def _apply_llm_tool_plan(
                 exit_code=None,
                 stderr_tail=str(exc)[-2000:],
                 completed_steps=completed_steps,
+                hint=exc.hint,
             ) from exc
         return _failure_result(
             task=task,
@@ -2164,7 +2192,9 @@ def _apply_llm_tool_plan(
     )
 
     patch_path = workspace / ".artifacts" / f"{task.task_id}.patch"
-    if verification_result is not None and _write_patch(capabilities, patch_path):
+    # Written even without a verify (a failed run command): the summary
+    # counts from it; only a verified run ships it as the patch artifact.
+    if _write_patch(capabilities, patch_path) and verification_result is not None:
         artifacts.append(
             Artifact(
                 kind="patch",
@@ -2185,7 +2215,7 @@ def _apply_llm_tool_plan(
         total=len(plan.steps),
         verify_word=verify_word,
         verification_command=verification_command,
-        changed=len(changed_files),
+        changed=_patch_file_count(patch_path),
         skipped=skipped,
     )
     if status is not TaskState.COMPLETED:

@@ -21,6 +21,9 @@ from skep.supervisor.sandbox import SandboxAvailability
 
 from .conftest import serve_client
 
+# v127-F5: a pin that is not known-vacuous — `true` no longer unlocks a project.
+PIN = "grep -rq --include=*.py value ."
+
 
 def _sandbox(usable: bool) -> Any:
     def probe(backend: str | None = None) -> SandboxAvailability:
@@ -94,7 +97,7 @@ def test_setup_refuses_unlocked_without_a_usable_sandbox(
     import skep.supervisor.serve.registry as registry
 
     monkeypatch.setattr(registry, "sandbox_availability", _sandbox(False))
-    refused = _setup(serve_client(unlockable), repo, {"unlocked": True, "verify_command": "true"})
+    refused = _setup(serve_client(unlockable), repo, {"unlocked": True, "verify_command": PIN})
     assert refused.status_code == 400
     assert "sandbox" in refused.json()["detail"]
     assert "forced off by test" in refused.json()["detail"]  # the evidence (I9)
@@ -106,7 +109,7 @@ def test_setup_refuses_unlocked_on_a_home_with_no_approved_baseline(
     import skep.supervisor.serve.registry as registry
 
     monkeypatch.setattr(registry, "sandbox_availability", _sandbox(True))
-    refused = _setup(serve_client(config), repo, {"unlocked": True, "verify_command": "true"})
+    refused = _setup(serve_client(config), repo, {"unlocked": True, "verify_command": PIN})
     assert refused.status_code == 400
     assert "skep policy approve" in refused.json()["detail"]
 
@@ -115,7 +118,7 @@ def test_setup_saves_unlocked_and_turns_it_back_off(
     repo: Path, unlockable: SupervisorConfig
 ) -> None:
     client = serve_client(unlockable)
-    saved = _setup(client, repo, {"unlocked": True, "verify_command": "true"})
+    saved = _setup(client, repo, {"unlocked": True, "verify_command": PIN})
     assert saved.status_code == 201, saved.text
     assert saved.json()["policy"]["unlocked"] is True
     preview = client.post(
@@ -139,7 +142,7 @@ def test_the_cli_switches_unlocked_on_and_off(
     cli.home.mkdir(parents=True)
     lock_baseline(cli.home)
     base = ["--home", str(root), "project", "setup", str(repo), "--strategy", "trusted_local_dev"]
-    base += ["--project-id", "unlockable", "--verify-command", "true", "--no-seed-schedules"]
+    base += ["--project-id", "unlockable", "--verify-command", PIN, "--no-seed-schedules"]
     assert main([*base, "--unlocked"]) == 0
     store = RunStore(cli.db_path)
     try:
@@ -158,7 +161,7 @@ def test_copy_project_policy_never_copies_unlocked(
     from skep.supervisor.serve.actions import copy_project_policy
 
     client = serve_client(unlockable)
-    assert _setup(client, repo, {"unlocked": True, "verify_command": "true"}).status_code == 201
+    assert _setup(client, repo, {"unlocked": True, "verify_command": PIN}).status_code == 201
     other = tmp_path / "other"
     other.mkdir()
     (other / ".git").mkdir()
@@ -186,7 +189,7 @@ def test_copy_project_policy_never_copies_codex_chatgpt_login(
     from skep.supervisor.serve.actions import copy_project_policy
 
     client = serve_client(unlockable)
-    policy = {"codex_chatgpt_login": True, "loopback_ports": [5432], "verify_command": "true"}
+    policy = {"codex_chatgpt_login": True, "loopback_ports": [5432], "verify_command": PIN}
     assert _setup(client, repo, policy).status_code == 201
     other = tmp_path / "other"
     other.mkdir()
@@ -235,7 +238,7 @@ def _bound(config: SupervisorConfig, repo: Path, policy: dict[str, Any]) -> RunS
     return store
 
 
-UNLOCKED = {"unlocked": True, "verify_command": "true"}
+UNLOCKED = {"unlocked": True, "verify_command": PIN}
 
 
 @pytest.mark.parametrize("v2", [False, True], ids=["engine-v1", "engine-v2"])
@@ -301,7 +304,7 @@ def test_a_phase_change_drops_unlocked(repo: Path, config: SupervisorConfig) -> 
     try:
         moved = set_project_phase(store, "unlockable", "maintain")
         assert "unlocked" not in moved["policy"]
-        assert moved["policy"]["verify_command"] == "true"
+        assert moved["policy"]["verify_command"] == PIN
     finally:
         store.close()
 
@@ -701,7 +704,7 @@ def test_the_chat_face_sets_unlocked_through_the_same_write(
     store = RunStore(unlockable.db_path)
     try:
         args = {"project_id": "unlockable", "name": "Unlockable", "strategy": "trusted_local_dev",
-                "repo_path": str(repo), "policy_overrides": {"verify_command": "true"},
+                "repo_path": str(repo), "policy_overrides": {"verify_command": PIN},
                 "unlocked": True, "seed_default_schedules": False}  # fmt: skip
         holder = ConfigHolder(unlockable, store)
         saved = _execute_mutation("setup_project", args, store=store, holder=holder,
@@ -722,7 +725,7 @@ def test_the_chat_face_refuses_an_unlocked_that_is_not_a_boolean(
     from skep.supervisor.serve.settings import ConfigHolder
     from skep.supervisor.serve.tools import _execute_mutation
 
-    assert _setup(serve_client(unlockable), repo, {"verify_command": "true"}).status_code == 201
+    assert _setup(serve_client(unlockable), repo, {"verify_command": PIN}).status_code == 201
     args = {"project_id": "unlockable", "name": "Unlockable", "strategy": "trusted_local_dev",
             "repo_path": str(repo), "unlocked": value, "seed_default_schedules": False}  # fmt: skip
     assert high_tier("setup_project", args) is None  # so it must never save as on

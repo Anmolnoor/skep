@@ -242,3 +242,10 @@ Codex runs `exec --sandbox danger-full-access`, Claude Code gets
 `--settings '{"sandbox": {"enabled": false}}'`. Aider and pi start none.
 External engines always run in sandbox mode (v94-F4), and the codex, aider
 and pi workers refuse to start outside skep's sandbox. See `sandboxing.md`, Landlock.
+
+What skep records for an external engine: the evidence for every run — the
+command it launched, the patch, the sandbox profile and the G10 re-verify of
+the project's pinned check. Not each decision: the agent's own commands never
+reach skep's capability layer, so they write no decision-log rows (ADR 0047).
+Inside the sandbox, reads outside the workspace are open except the masked
+paths `sandboxing.md` lists; other runs' worktrees are readable.

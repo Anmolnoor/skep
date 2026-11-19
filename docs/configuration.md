@@ -148,6 +148,12 @@ The serve Settings page also has `default_execution_mode`:
 
 Sandbox mode fails closed if the requested host backend cannot be applied.
 
+A project's own `default_execution_mode` (v127-F8, ADR 0066): project setup
+gives a NEW project `sandbox` when this host can sandbox, else `workspace` with
+the probe's reason. An existing project keeps its stored mode through
+re-setup and phase changes; `skep doctor` lists the ones still on `workspace`,
+and `skep project setup <repo> --execution-mode sandbox` moves one.
+
 ## Permission Defaults
 
 Per-run flags override defaults:
@@ -258,10 +264,16 @@ but large enough for the expected task.
 
 ## Auto-Approval
 
-`--auto-approve` and the serve Settings auto-approve toggle enable Skep's safe
-verified-patch policy. Auto-approval still requires successful worker
-verification, successful supervisor re-verification, and the configured policy
-conditions.
+A patch lands without a click only when the project turns on
+`auto_apply_verified_patch` (the maintain phase and unlocked mode turn it on)
+and pins a real check. Auto-approval still requires successful
+worker verification, successful supervisor re-verification, and the project's
+policy conditions. Every auto-landing rule needs the re-verification to have
+re-run the project's pinned `verify_command` (never the command the worker
+chose for itself) and that pin must not be known-vacuous (see
+[`verification.md`](verification.md)). `--auto-approve` on `skep run`, `tick`
+and `serve` is retired: it is still accepted for one release, prints a note,
+and has no effect. The serve Settings auto-approve toggle is inert too.
 
 If re-verification is missing or disagrees with the worker, auto-approval does
 not apply.

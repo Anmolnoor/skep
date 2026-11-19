@@ -42,7 +42,8 @@ that repo and task pattern:
 ```text
 resumed: original-task -> resumed-task
   state:        completed
-  verification: passed
+  verification: confirmed by re-verify (G10) — re-ran python -m pytest → exit 0
+  worker claim: passed — tests pass.
   saved template: add-login-page
 ```
 

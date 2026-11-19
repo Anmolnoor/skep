@@ -216,7 +216,8 @@ def test_run_status_review_approve_full_loop(
     out = capsys.readouterr().out
     assert code == 0
     assert "state:        completed" in out
-    assert "verification: passed" in out
+    assert "verification: confirmed by re-verify (G10)" in out
+    assert "worker claim: passed" in out
 
     task_id = _only_task_id(home)
 
@@ -1579,7 +1580,7 @@ def test_run_inherits_bound_project_auto_apply_policy(
                 "default_execution_mode": "workspace",
                 "auto_apply_verified_patch": True,
                 # v90-F4: maintain auto-lands only on a pinned verify command.
-                "verify_command": 'grep -q "value = 1" existing.py',
+                "verify_command": 'grep -rqx --include=*.py "value = 1" .',
             },
         )
         store.add_project_binding(
@@ -1625,7 +1626,7 @@ def test_run_inherits_bound_project_phase_auto_apply_default(
             policy={
                 "default_execution_mode": "workspace",
                 # v90-F4: maintain auto-lands only on a pinned verify command.
-                "verify_command": 'grep -q "value = 1" existing.py',
+                "verify_command": 'grep -rqx --include=*.py "value = 1" .',
             },
         )
         store.add_project_binding(
@@ -1891,13 +1892,16 @@ def test_project_cli_preview_setup_show_list_and_set_phase(
     assert _run_cli(home, "project", "set-phase", "free-project", "maintain") == 0
     phase_out = capsys.readouterr().out
     assert "phase updated: free-project -> maintain" in phase_out
+    # v127-F5: the toy repo pins no verify_command, so the maintain default
+    # falls to approval — and the CLI says why.
+    assert "auto-apply is off: the project pins no verify_command" in phase_out
 
     store = RunStore(config.db_path)
     try:
         updated = store.get_project_policy("free-project")
         assert updated is not None
         assert updated.phase == "maintain"
-        assert updated.policy["auto_apply_verified_patch"] is True
+        assert updated.policy["auto_apply_verified_patch"] is False
     finally:
         store.close()
 
@@ -1996,7 +2000,7 @@ def _pin_engine(home: Path, repo: Path, engine: str) -> None:
         "--engine",
         engine,
         "--verify-command",
-        "true",  # an external engine needs the pin (v90); the probe is what is under test
+        "uv run pytest",  # an external engine needs the pin (v90); the probe is what is under test
     )
     assert code == 0
 
@@ -2032,7 +2036,7 @@ def test_a_worker_cmd_that_runs_an_external_agent_is_named_not_blamed_on_a_pin(
     one. It names the real cause and the acceptable path instead."""
     home = tmp_path / "home"
     code = _run_cli(home, "project", "setup", str(repo), "--strategy", "trusted_local_dev",
-                    "--project-id", "plain", "--verify-command", "true")  # fmt: skip
+                    "--project-id", "plain", "--verify-command", "uv run pytest")  # fmt: skip
     assert code == 0
     capsys.readouterr()
     worker = shlex.join([sys.executable, "-m", "skep.workers.claude_code"])
@@ -3077,3 +3081,92 @@ def test_es_f4_cli_refuses_a_second_landing(
     assert _run_cli(home, "review", task_id, "--approve", "--branch", "other") != 0
     assert "already landed on" in capsys.readouterr().err
     assert not git(repo, "branch", "--list", "other").stdout.strip()
+
+
+def test_run_summary_reports_g10_not_the_workers_own_check(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v127-T3 (trial V01/V13): `skep run` printed "verification: passed"
+    from the worker's own check while G10 had NOT CONFIRMED the patch; only
+    `skep review` told the truth. The summary leads with G10's verdict and
+    labels the worker's check as its claim (I8)."""
+    home = tmp_path / "home"
+    args = ("--execution-mode", "workspace", "--worker-cmd", _worker_cmd(), "--quiet")
+    assert _run_cli(home, "run", str(repo), "Fix the bug. MODE:happy", *args) == 0
+    out = capsys.readouterr().out
+    assert "verification: confirmed by re-verify (G10)" in out, out
+    assert "worker claim: passed" in out
+
+    code = _run_cli(
+        home, "project", "setup", str(repo), "--strategy", "trusted_local_dev",
+        "--project-id", "pinned", "--verify-command", "false",
+    )  # fmt: skip
+    assert code == 0
+    capsys.readouterr()
+    _run_cli(home, "run", str(repo), "Fix the bug. MODE:happy", *args)
+    out = capsys.readouterr().out
+    assert "verification: NOT CONFIRMED by re-verify (G10)" in out, out
+    assert "re-ran false → exit 1" in out
+    assert "worker claim: passed" in out
+    assert "verification: passed" not in out
+
+
+def test_run_summary_names_an_unavailable_re_verify(tmp_path: Path) -> None:
+    """v127-T3: a re-verify that could not run is no verdict either way —
+    the line says unavailable and why, and still not confirmed."""
+    from skep.supervisor.cli_cmds import _verification_lines, build_config
+
+    config = build_config(tmp_path / "home", None)
+    config.worktrees_root.mkdir(parents=True, exist_ok=True)
+    task = mint_task(workspace=config.worktrees_root / "task-1", instructions="Fix it.")
+    store = RunStore(config.db_path)
+    try:
+        store.create_run(task, repo=tmp_path / "repo", ref=None, execution_mode="workspace")
+        store.record_reverification(
+            task.task_id,
+            outcome="unavailable",
+            worker_outcome="passed",
+            confirmed=False,
+            commands=[],
+            exit_codes=[],
+            detail="worker recorded no verification command\nmore",
+        )
+        record = store.get_run(task.task_id)
+    finally:
+        store.close()
+    assert record is not None
+    assert _verification_lines(config, record)[0] == (
+        "  verification: unavailable — re-verify (G10) could not run, NOT CONFIRMED"
+        " — worker recorded no verification command"
+    )
+
+
+def test_run_summary_never_claims_a_check_ran_when_the_install_failed(tmp_path: Path) -> None:
+    """v127 council round 7 (I8): a failed dependency install stores the
+    INSTALLER's exit code beside the verify command, which never ran — the
+    line must say what happened, never "re-ran npm test → exit 1"."""
+    from skep.supervisor.cli_cmds import _verification_lines, build_config
+
+    config = build_config(tmp_path / "home", None)
+    config.worktrees_root.mkdir(parents=True, exist_ok=True)
+    task = mint_task(workspace=config.worktrees_root / "task-1", instructions="Fix it.")
+    store = RunStore(config.db_path)
+    try:
+        store.create_run(task, repo=tmp_path / "repo", ref=None, execution_mode="workspace")
+        store.record_reverification(
+            task.task_id,
+            outcome="unavailable",
+            worker_outcome="passed",
+            confirmed=False,
+            commands=["npm test"],
+            exit_codes=[1],
+            detail="could not prime the baseline Node dependencies (yarn install exited 1); "
+            "the verification command was not run\n--- install output (tail) ---",
+        )
+        record = store.get_run(task.task_id)
+    finally:
+        store.close()
+    assert record is not None
+    line = _verification_lines(config, record)[0]
+    assert "re-ran" not in line
+    assert line.endswith("the verification command was not run")

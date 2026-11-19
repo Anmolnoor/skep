@@ -23,6 +23,8 @@ _PASS = AutoApprovalContext(
     reverify_confirmed=True,
     risk_flags=(),
     changed_files=("toypkg/math_utils.py",),
+    verify_pinned=True,
+    reverify_commands=("uv run pytest",),
 )
 
 
@@ -66,6 +68,15 @@ def test_rule_matches_a_clean_confirmed_run() -> None:
     assert rule_block_reason(rule, _PASS) is None
     matched = evaluate((rule,), _PASS)
     assert matched is not None and matched[0] is rule
+
+
+def test_a_custom_rule_needs_the_projects_pin_by_default() -> None:
+    """v127-F5 round 3 (I2): a library caller's own rule cannot skip the pin
+    by leaving the field out — opting out is explicit."""
+    rule = AutoApprovalRule(name="custom")
+    assert rule.require_pinned_verify is True
+    reason = rule_block_reason(rule, dataclasses.replace(_PASS, verify_pinned=False))
+    assert reason is not None and "pins no verify_command" in reason
 
 
 def test_rule_blocks_when_reverification_unconfirmed() -> None:
@@ -114,13 +125,47 @@ def _branch_exists(repo: Path, task_id: str) -> bool:
     return bool(git(repo, "branch", "--list", f"skep/{task_id}").stdout.strip())
 
 
+# v127-F5 round 3: a pin that checks the patch without naming the file it
+# edits — a pin word that names a changed file makes it a control file.
+_PIN = 'grep -rqx --include=*.py "value = 1" .'
+
+
+def _landed(repo: Path) -> bool:
+    """The maintain phase lands on its integration branch (v30)."""
+    return bool(git(repo, "branch", "--list", "skep/maintain").stdout.strip())
+
+
+def _pin_maintain_project(config: SupervisorConfig, repo: Path) -> None:
+    """Every auto-landing rule needs the project's pin, and a bound project's
+    phase decides whether anything auto-lands — so maintain, pinned."""
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="pinned",
+            name="pinned",
+            strategy="trusted_local_dev",
+            phase="maintain",
+            policy={
+                "default_execution_mode": "workspace",
+                "auto_apply_verified_patch": True,
+                "verify_command": _PIN,
+            },
+        )
+        store.add_project_binding(
+            project_id="pinned", binding_kind="repo_path", binding_value=str(repo)
+        )
+    finally:
+        store.close()
+
+
 def test_matching_rule_auto_applies_the_patch(repo: Path, config: SupervisorConfig) -> None:
     cfg = dataclasses.replace(
         config, auto_approval_rules=(AutoApprovalRule("autofix", diff_scope=("*.py",)),)
     )
-    outcome = run_task(repo, "Fix the bug. MODE:happy", config=cfg)
+    _pin_maintain_project(cfg, repo)
+    outcome = run_task(repo, "Fix the bug. MODE:happy", config=cfg, auto_apply_verified_patch=True)
     assert outcome.record.state == "completed"
-    assert _branch_exists(repo, outcome.record.task_id), "the patch was not auto-applied"
+    assert _landed(repo), "the patch was not auto-applied"
 
     store = RunStore(cfg.db_path)
     try:
@@ -135,7 +180,7 @@ def test_matching_rule_auto_applies_the_patch(repo: Path, config: SupervisorConf
     assert approval.decided_by == "auto/autofix"
     assert "autofix" in (approval.resolution_note or "")
     # The applied commit carries the rule as the approver.
-    log = git(repo, "log", "-1", "--format=%B", f"skep/{outcome.record.task_id}").stdout
+    log = git(repo, "log", "-1", "--format=%B", "skep/maintain").stdout
     assert "Approved-by: auto:autofix" in log
 
 
@@ -149,11 +194,12 @@ def test_the_lane_judges_the_patch_not_the_workers_claim(
     cfg = dataclasses.replace(
         config, auto_approval_rules=(AutoApprovalRule("autofix", diff_scope=("*.py",)),)
     )
-    outcome = run_task(repo, "Fix the bug. MODE:unclaimed", config=cfg)
-    assert outcome.record.state == "completed"
-    assert _branch_exists(repo, outcome.record.task_id), (
-        "a confirmed patch was blocked on the worker's empty changed_files claim"
+    _pin_maintain_project(cfg, repo)
+    outcome = run_task(
+        repo, "Fix the bug. MODE:unclaimed", config=cfg, auto_apply_verified_patch=True
     )
+    assert outcome.record.state == "completed"
+    assert _landed(repo), "a confirmed patch was blocked on the worker's empty changed_files claim"
 
 
 def test_patch_paths_reads_every_patch_shape(tmp_path: Path) -> None:
@@ -204,7 +250,7 @@ def test_every_face_lands_a_maintain_patch_on_the_projects_branch(
                 "default_execution_mode": "workspace",
                 "auto_apply_verified_patch": True,
                 "auto_apply_branch": "skep/maintain",
-                "verify_command": 'grep -q "value = 1" existing.py',
+                "verify_command": _PIN,
             },
         )
         store.add_project_binding(
@@ -281,6 +327,7 @@ def test_auto_landing_requires_a_project_pinned_verify_command() -> None:
             reverify_confirmed=True,
             changed_files=("a.py",),
             verify_pinned=verify_pinned,
+            reverify_commands=("uv run pytest",),
         )
 
     # Pinned: the rule fires exactly as before.
@@ -293,22 +340,24 @@ def test_auto_landing_requires_a_project_pinned_verify_command() -> None:
     assert "still landable by hand" in blocked
 
 
-def test_the_dependency_rule_is_deliberately_unaffected() -> None:
-    """v90-F4: deps-safe keeps its behaviour — it needs an explicit
-    --auto-approve, its diff scope is lockfiles only, and it caps at 10 files.
-    A stated choice, not an oversight."""
+def test_the_dependency_rule_keeps_its_scope_but_needs_the_pin() -> None:
+    """v90-F4: deps-safe keeps its scope — an explicit --auto-approve,
+    lockfiles only, at most 10 files. v127-F5 round 2 (I2) reversed v90-F4's
+    exemption: it landed on the command the worker nominated for itself, so it
+    now needs the project's pin like every auto-landing rule."""
     from skep.supervisor.policy import (
         SAFE_DEPENDENCY_RULE,
         AutoApprovalContext,
         rule_block_reason,
     )
 
-    assert SAFE_DEPENDENCY_RULE.require_pinned_verify is False
+    assert SAFE_DEPENDENCY_RULE.require_pinned_verify is True
     ctx = AutoApprovalContext(
         verification_outcome="passed",
         reverify_confirmed=True,
         changed_files=("uv.lock",),
-        verify_pinned=False,
+        verify_pinned=True,
+        reverify_commands=("uv run pytest",),
     )
     assert rule_block_reason(SAFE_DEPENDENCY_RULE, ctx) is None
 
@@ -408,7 +457,7 @@ def test_es_f3_auto_apply_never_appends_past_the_verified_commit(repo: Path) -> 
             outcome="passed",
             worker_outcome="passed",
             confirmed=True,
-            commands=["true"],
+            commands=["uv run pytest"],
             exit_codes=[0],
             detail="re-ran clean",
             base_commit=verified,

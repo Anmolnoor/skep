@@ -17,6 +17,7 @@ import pytest
 from skep.supervisor.castes import (
     CASTES,
     DEFAULT_CASTE,
+    RETIRED_CASTES,
     UNIMPLEMENTED_CASTES,
     caste_names,
     caste_worker_commands,
@@ -28,12 +29,90 @@ from skep.worker_contract.task import KNOWN_WORKER_KINDS
 def test_the_registry_covers_the_contract() -> None:
     """The contract is authoritative for WHICH names exist; the registry routes
     them. v101-F1 landed with `verifier` as a declared hole; v101-F2 wrote the
-    worker, so the sets are equal and declaring a caste without registering it
-    now fails the gates instead of failing a field run."""
-    assert set(CASTES) | UNIMPLEMENTED_CASTES == set(KNOWN_WORKER_KINDS)
+    worker; v127-F11 retired it (G10 already re-runs the pin on every patch)
+    without removing it from the additive contract — so every contract name is
+    routed, unimplemented or retired, and never two of those."""
+    assert set(CASTES) | UNIMPLEMENTED_CASTES | set(RETIRED_CASTES) == set(KNOWN_WORKER_KINDS)
     assert set(CASTES).isdisjoint(UNIMPLEMENTED_CASTES)
+    assert set(CASTES).isdisjoint(RETIRED_CASTES)
     assert not UNIMPLEMENTED_CASTES  # v101-F2 emptied it
-    assert set(CASTES) == set(KNOWN_WORKER_KINDS)
+    assert set(RETIRED_CASTES) == {"verifier"}
+
+
+def test_a_retired_caste_is_refused_with_its_reason() -> None:
+    """v127-F11 (I2): the verifier duplicated G10 and never ran in the field.
+    Naming it is refused with the reason, never routed to the coding worker
+    (the v42 fallback) and never run."""
+    with pytest.raises(ValueError) as excinfo:
+        resolve_caste("verifier")
+    message = str(excinfo.value)
+    assert "retired" in message
+    assert "skep re-runs the project's pinned verify_command on every patch (G10)" in message
+    assert "verifier" not in caste_worker_commands()
+
+
+def test_a_retired_caste_never_reaches_a_worker(repo: Path, config: Any) -> None:
+    """Every face that dispatches without submit_run (CLI run, scheduler tick,
+    resume, batch) funnels through run_task; it refuses before any run row
+    exists, and the scheduler records the refusal as the tick's state."""
+    from skep.supervisor import RunStore, run_task
+
+    with pytest.raises(ValueError, match="retired"):
+        run_task(repo, "Verify.", config=config, worker_kind="verifier")
+    store = RunStore(config.db_path)
+    try:
+        assert store.recent_runs() == []
+    finally:
+        store.close()
+
+
+def test_a_stored_verifier_schedule_tick_records_the_refusal(repo: Path, config: Any) -> None:
+    """A schedule stored before v127 still names `verifier`: its tick refuses
+    and the schedule's state says why (I8), instead of running a coding worker."""
+    from dataclasses import replace
+
+    from skep.supervisor import RunStore
+    from skep.supervisor.scheduler import make_schedule, run_due
+
+    store = RunStore(config.db_path)
+    try:
+        stale = make_schedule(name="old-verify", repo=repo, instructions="x", interval_seconds=60)
+        store.add_schedule(replace(stale, worker_kind="verifier"))
+        results = run_due(store=store, config=config)
+        assert [r.name for r in results] == ["old-verify"]
+        assert results[0].task_id is None
+        assert "retired" in results[0].state
+        assert store.recent_runs() == []
+    finally:
+        store.close()
+
+
+def test_a_retired_caste_is_refused_by_templates_and_schedules(tmp_path: Path) -> None:
+    from skep.supervisor.scheduler import make_schedule
+    from skep.supervisor.templates import TemplateError, WorkflowTemplate, validate_template
+
+    with pytest.raises(TemplateError, match="retired"):
+        validate_template(WorkflowTemplate(name="v", instructions="x", worker_kind="verifier"))
+    with pytest.raises(ValueError, match="retired"):
+        make_schedule(
+            name="v", repo=tmp_path, instructions="x", interval_seconds=60, worker_kind="verifier"
+        )
+
+
+def test_the_envelope_verify_command_field_is_additive(tmp_path: Path) -> None:
+    """Contract 0.3.4 (kept from the retired verifier's tests): `verify_command`
+    is optional, so a 0.3.3 task without it parses unchanged."""
+    import json
+
+    from skep.supervisor.contracts_io import mint_task
+    from skep.worker_contract import CodingWorkerTask
+
+    task = mint_task(workspace=tmp_path, instructions="x", verify_command="uv run pytest")
+    assert task.verify_command == "uv run pytest"
+    raw = json.loads(task.model_dump_json())
+    del raw["verify_command"]
+    raw["contract_version"] = "0.3.3"
+    assert CodingWorkerTask.model_validate(raw).verify_command == ""
 
 
 def test_every_registered_caste_routes_somewhere_importable() -> None:
@@ -86,34 +165,89 @@ def test_build_config_installs_exactly_the_registry(tmp_path: Path) -> None:
     assert config.command_for("audit") == CASTES["audit"].argv
 
 
-def test_both_chat_caste_enums_offer_the_whole_roster() -> None:
-    """v101-F12: the enums hardcoded ["coding", "audit"] and ["coding", "audit",
-    "document"], so even after F2 and F3 the Queen could not ask for a verifier,
-    a reviewer, a researcher or a script run. CLAUDE.md's standing rule applies
-    — the Queen runs a small model and skims tool descriptions, so a schema
-    omitting half the roster trains it never to use them."""
+ADVANCED = {"audit", "curator", "document", "researcher", "reviewer"}
+
+
+def test_both_chat_caste_enums_offer_the_castes_that_run() -> None:
+    """v101-F12 made the enums read the registry instead of hardcoding two
+    names — one source of truth, kept. v127-F12 changes WHAT they offer: the
+    whole roster trained the Queen's small model to reach for castes that had
+    never run in the field (O9). The enums now offer the non-advanced castes;
+    advanced ones stay reachable from the CLI, templates and schedules."""
+    from skep.supervisor.castes import chat_caste_names
     from skep.supervisor.serve.tools import TOOL_SPECS
 
     def params(tool_name: str) -> dict[str, Any]:
         spec = next(s for s in TOOL_SPECS if s["function"]["name"] == tool_name)
         return cast("dict[str, Any]", spec["function"]["parameters"]["properties"])
 
-    assert params("dispatch_run")["caste"]["enum"] == caste_names()
+    assert {name for name, caste in CASTES.items() if caste.advanced} == ADVANCED
+    assert chat_caste_names() == sorted(set(CASTES) - ADVANCED) == ["coding", "script"]
+    assert params("dispatch_run")["caste"]["enum"] == chat_caste_names()
     batch = params("batch_dispatch")["tasks"]["items"]["properties"]
-    assert batch["caste"]["enum"] == caste_names()
+    assert batch["caste"]["enum"] == chat_caste_names()
+
+
+def test_an_advanced_caste_says_so_and_still_dispatches_from_the_cli(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skep.cli import main
+    from skep.supervisor import cli_cmds
+
+    for name in ADVANCED:
+        assert CASTES[name].summary.startswith("Advanced"), name
+        assert resolve_caste(name).name == name
+    seen: list[str] = []
+
+    def spy(*_args: Any, worker_kind: str, **_kwargs: Any) -> Any:
+        seen.append(worker_kind)
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(cli_cmds, "run_task", spy)
+    main(["--home", str(tmp_path / "home"), "run", str(repo), "Find X.", "--caste", "researcher",
+          "--quiet", "--execution-mode", "workspace"])  # fmt: skip
+    assert seen == ["researcher"]
+
+
+def test_aider_and_pi_are_marked_advanced() -> None:
+    from skep.supervisor.engines import CODING_ENGINES
+
+    for name in ("aider", "pi"):
+        assert "advanced" in CODING_ENGINES[name].summary.lower(), name
+    for name in ("builtin", "claude_code", "codex"):
+        assert "advanced" not in CODING_ENGINES[name].summary.lower(), name
+
+
+def test_advanced_is_recorded_once_on_the_flag() -> None:
+    """Round 2: the hand-written "Advanced:" prefix duplicated the flag; the
+    summary every surface reads now renders it from ``advanced``."""
+    from skep.supervisor.castes import Caste
+    from skep.supervisor.engines import CODING_ENGINES, CodingEngine
+
+    entries: list[Caste | CodingEngine] = [*CASTES.values(), *CODING_ENGINES.values()]
+    for entry in entries:
+        assert "advanced" not in entry.about.lower(), entry.name
+        assert entry.summary.startswith("Advanced") is entry.advanced, entry.name
+    assert {n for n, e in CODING_ENGINES.items() if e.advanced} == {"aider", "pi"}
 
 
 def test_the_dispatch_description_carries_each_summary_exactly_once() -> None:
     """Hand-written prose about castes is the F1 defect one layer up: a new
     caste ships and the description is silently stale. Generated from the same
-    `summary` the Settings roster and the Assign field help read, so the
-    operator and the model are told the same thing in the same words."""
+    `summary` the Settings roster and the Assign field help read. v127-F12: it
+    describes only what the enum offers, and names the advanced castes as not
+    offered — the small model skims it, so it must stay true."""
+    from skep.supervisor.castes import chat_caste_names
     from skep.supervisor.serve.tools import _caste_guidance
 
     guidance = _caste_guidance()
-    for name, caste in CASTES.items():
-        assert guidance.count(caste.summary) == 1, name
+    for name in chat_caste_names():
+        assert guidance.count(CASTES[name].summary) == 1, name
         assert f"{name}: " in guidance
+    for name in ADVANCED:
+        assert CASTES[name].summary not in guidance, name
+        assert name in guidance  # named as advanced, not described as offered
+    assert "skep run --caste" in guidance
 
 
 def test_the_schedules_enum_is_still_not_wired_to_the_registry() -> None:
@@ -129,3 +263,17 @@ def test_the_schedules_enum_is_still_not_wired_to_the_registry() -> None:
     assert kinds != caste_names()
     assert "note" in kinds and "digest" in kinds  # schedule kinds, not castes
     assert "reviewer" not in kinds
+
+
+def test_the_cli_faces_refuse_a_retired_caste_with_its_reason(
+    tmp_path: Path, repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from skep.cli import main
+
+    home = ["--home", str(tmp_path / "home")]
+    assert main([*home, "schedule", "add", "v", str(repo), "x", "--every", "1d",
+                 "--caste", "verifier"]) != 0  # fmt: skip
+    assert "pinned verify_command on every patch (G10)" in capsys.readouterr().err
+    assert main([*home, "run", str(repo), "Verify.", "--caste", "verifier", "--quiet",
+                 "--execution-mode", "workspace"]) != 0  # fmt: skip
+    assert "pinned verify_command on every patch (G10)" in capsys.readouterr().err

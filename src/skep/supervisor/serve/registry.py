@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -25,8 +26,10 @@ from ...profile import load_profile, profile_path, run_personal_setup
 from ..autonomy import project_policy_dispatch_decision, run_request_resolved_decision
 from ..dispatch import auto_apply_decision
 from ..packs import PolicyPack, builtin_policy_packs, get_policy_pack
+from ..policy import PIN_HINT, cannot_land_on, known_vacuous_verify
 from ..policy_layers import baseline_guard
 from ..projects import (
+    PROJECT_STRATEGIES,
     ProjectBinding,
     first_party_project_policy,
     first_party_schedule_seeds,
@@ -598,9 +601,11 @@ def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | 
     if not str(policy.get("verify_command") or "").strip():
         return (
             "unlocked=true needs a pinned verify_command: a patch lands without a "
-            "human only after G10 re-runs the project's own check (I2). Pin one "
-            "(--verify-command, or verify_command in policy_overrides)."
+            f"human only after skep re-runs the project's own check. {PIN_HINT}."
         )
+    vacuous = known_vacuous_verify(str(policy.get("verify_command")))
+    if vacuous is not None:
+        return f"unlocked=true needs a real check: {cannot_land_on(vacuous)}."
     probe = sandbox_availability()
     if not probe.usable:
         return (
@@ -616,6 +621,156 @@ def unlocked_block_reason(run_store: RunStore, policy: dict[str, Any]) -> str | 
             "(`skep policy approve`)."
         )
     return None
+
+
+def _gate_auto_apply(policy: dict[str, Any], *, requested: bool, notes: list[str]) -> None:
+    """v127-F5: auto-apply needs a pinned check that is not known-vacuous. A
+    request that itself turns it on with a missing or vacuous pin is refused
+    (400 — I9: refused when asked, not at landing); auto-apply it did not ask
+    for (a phase default, a stored value) falls off with a note, so a save of
+    other keys on `store` still works, by approval."""
+    if policy.get("auto_apply_verified_patch") is not True:
+        return
+    pin = str(policy.get("verify_command") or "").strip()
+    vacuous = known_vacuous_verify(pin) if pin else None
+    if pin and vacuous is None:
+        return
+    why = (
+        cannot_land_on(vacuous)
+        if vacuous
+        else f"the project pins no verify_command, so skep can't land a patch by itself. {PIN_HINT}"
+    )
+    if requested:
+        raise HTTPException(
+            status_code=400, detail=f"auto_apply_verified_patch=true needs a real check: {why}."
+        )
+    policy["auto_apply_verified_patch"] = False
+    notes.append(f"auto-apply is off: {why}. Until then patches land by approval.")
+
+
+def _choose_strategy(
+    run_store: RunStore, project_id: str, strategy: str | None, pack_name: str | None
+) -> tuple[str, PolicyPack | None, str]:
+    """v127-F10: the strategy (and pack) a setup uses, and where it came from.
+    Neither given: the project's stored one, else ``trusted_local_dev`` for a
+    new project — the quick start never names ``--strategy``. Unknown names
+    refuse listing the valid strategies and packs (I9)."""
+    source = "given"
+    if strategy is None and pack_name is None:
+        stored = run_store.get_project_policy(project_id)
+        if stored is not None:
+            strategy, pack_name, source = stored.strategy, stored.pack_name, "the project's own"
+        else:
+            strategy, source = "trusted_local_dev", "the default for a new project"
+    choices = (
+        f" — valid strategies: {', '.join(sorted(PROJECT_STRATEGIES))}; "
+        f"packs: {', '.join(sorted(builtin_policy_packs()))}"
+    )
+    pack = None
+    if pack_name is not None:
+        try:
+            # a pack the project already pinned is honoured even when draft
+            # (set_project_phase does the same); a new pick must be supported
+            pack = get_policy_pack(pack_name, include_draft=source != "given")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"{exc}{choices}") from exc
+        strategy = pack.strategy
+        source = f"pack {pack_name}" if source == "given" else source
+    if strategy not in PROJECT_STRATEGIES:
+        raise HTTPException(status_code=400, detail=f"unknown strategy {strategy!r}{choices}")
+    assert strategy is not None
+    return strategy, pack, source
+
+
+def _strategy_note(strategy: str, source: str, policy: dict[str, Any]) -> str:
+    dispatch = policy.get("auto_dispatch_allowed") is True
+    return f"strategy {strategy} ({source}): auto_dispatch_allowed={dispatch} — " + (
+        "schedules and chat dispatches run without a card" if dispatch else "every dispatch asks"
+    )
+
+
+# v127-F8: the probe behind a new project's default mode (and F9's engine
+# hint), by its own name so the suite can pin it (tests/conftest.py) without
+# touching the unlocked guard.
+new_project_sandbox_probe = sandbox_availability
+
+
+def _engine_hints(home: Path, policy: dict[str, Any], *, from_shell: bool) -> list[str]:
+    """v127-F9: which CLI engine this host could run for the project — a hint
+    after a setup that named none; never writes ``coding_engine`` (I2, I5).
+    "Ready" = binary on PATH, auth the daemon loads (``<home>/serve.env``, or
+    codex's opted-in ChatGPT login), a usable sandbox, a pin that is not
+    known-vacuous. A key only in this process's environment is named for
+    what it is: the operator's shell on the CLI, the daemon's on REST/chat.
+    aider and pi are never recommended."""
+    from .. import engines
+    from ..codex_login import POLICY_KEY, login_status
+    from .serve_cmds import SERVE_ENV_FILE, load_serve_env
+
+    pin = str(policy.get("verify_command") or "").strip()
+    if known_vacuous_verify(pin) is not None or not new_project_sandbox_probe().usable:
+        return []
+    serve_env: dict[str, str] = {}  # names checked; this process's env untouched
+    load_serve_env(home / SERVE_ENV_FILE, serve_env)
+    wall = "Its commands bypass skep's capability layer; the sandbox is its only wall (ADR 0047)."
+    hints: list[str] = []
+    for name in ("codex", "claude_code"):
+        engine = engines.CODING_ENGINES[name]
+        if not engines.engine_available(engine)[0]:
+            continue
+        auth = next((f"{v} in serve.env" for v in engine.auth_env if serve_env.get(v)), None)
+        if auth is None and engine.login_host is not None and policy.get(POLICY_KEY) is True:
+            auth = "your ChatGPT plan login" if login_status().problem is None else None
+        local = next((v for v in engine.auth_env if os.environ.get(v)), None)
+        if auth is not None:
+            hints.append(
+                f"{name} is ready here ({auth}, sandbox usable): add `--engine {name}`. {wall}"
+            )
+        elif local is not None and from_shell:
+            hints.append(
+                f"{name} works for `skep run` from this shell ({local} is set here); "
+                f"scheduled runs need it in serve.env. Add `--engine {name}` to use it. {wall}"
+            )
+        elif local is not None:
+            hints.append(
+                f"{name}: {local} is in the daemon's environment but not in serve.env, so "
+                f"runs after a restart lack it — put it in serve.env, then add "
+                f"`--engine {name}`. {wall}"
+            )
+    return hints
+
+
+def _default_execution_mode(
+    run_store: RunStore,
+    *,
+    project_id: str,
+    policy: dict[str, Any],
+    overrides: dict[str, Any],
+    notes: list[str],
+) -> None:
+    """v127-F8 (ADR 0066): a NEW project runs sandboxed when the host can
+    sandbox. An explicit mode wins; an existing project keeps its stored mode
+    (a re-setup or phase change would otherwise re-derive the strategy
+    default over it). Never downgrades a pack's own ``sandbox``."""
+    key = "default_execution_mode"
+    if key in overrides:
+        return
+    stored = run_store.get_project_policy(project_id)
+    if stored is not None:
+        if key in stored.policy:
+            policy[key] = stored.policy[key]
+        return
+    if policy.get(key, "workspace") != "workspace":
+        return
+    probe = new_project_sandbox_probe()
+    if probe.usable:
+        policy[key] = "sandbox"
+        return
+    notes.append(
+        "workers run unsandboxed (workspace): this host has no usable sandbox "
+        f"({probe.reason or 'unavailable'}: {probe.detail or 'no detail'}). Fix it "
+        "(`skep doctor`), then `skep project setup <repo> --execution-mode sandbox`."
+    )
 
 
 def _persist_project(run_store: RunStore, project: Any) -> dict[str, Any]:
@@ -986,7 +1141,10 @@ def setup_project_record(
     policy_overrides: dict[str, Any] | None = None,
     seed_default_schedules: bool = True,
     seed_shell_commands: bool = True,
+    from_shell: bool = False,
 ) -> dict[str, Any]:
+    """``from_shell``: the CLI face, whose environment is the operator's
+    shell (F9's engine hint words a key found there for `skep run`)."""
     bindings: list[ProjectBinding] = []
     if repo_path:
         bindings.append(ProjectBinding(kind="repo_path", value=repo_path))
@@ -1000,15 +1158,7 @@ def setup_project_record(
             detail="project setup requires at least one binding "
             "(repo_path, repo_slug, or template_names)",
         )
-    pack: PolicyPack | None = None
-    if pack_name is not None:
-        try:
-            pack = get_policy_pack(pack_name)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        strategy = pack.strategy
-    if strategy is None:
-        raise HTTPException(status_code=400, detail="project setup requires a pack or strategy")
+    strategy, pack, strategy_source = _choose_strategy(run_store, project_id, strategy, pack_name)
     base_policy = (
         dict(pack.phase_defaults[phase])
         if pack is not None
@@ -1016,6 +1166,14 @@ def setup_project_record(
     )
     base_policy.update(policy_overrides or {})
     supplied = list(bindings)
+    notes: list[str] = []
+    _default_execution_mode(
+        run_store,
+        project_id=project_id,
+        policy=base_policy,
+        overrides=policy_overrides or {},
+        notes=notes,
+    )
     base_policy, bindings = _carry_forward_existing(
         run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
     )
@@ -1026,6 +1184,11 @@ def setup_project_record(
         seed_dir = _seed_repo_dir(root, repo_path, repo_slug)
         seeded_shell_commands = _merge_shell_seeds(base_policy, seed_dir)
         seeded_verify_command = _merge_verify_seed(base_policy, seed_dir)
+    _gate_auto_apply(
+        base_policy,
+        requested="auto_apply_verified_patch" in (policy_overrides or {}),
+        notes=notes,
+    )
     try:
         project = validate_project_definition(
             project_id=project_id,
@@ -1132,6 +1295,12 @@ def setup_project_record(
     result["seeded_shell_commands"] = seeded_shell_commands
     result["seeded_verify_command"] = seeded_verify_command
     result["seeds_skipped"] = seeds_skipped
+    result["notes"] = [_strategy_note(strategy, strategy_source, project.policy), *notes]
+    if (
+        "coding_engine" not in (policy_overrides or {})
+        and project.policy.get("coding_engine", "builtin") == "builtin"
+    ):
+        result["notes"] += _engine_hints(root.parent, project.policy, from_shell=from_shell)
     attached_groups = [str(n) for n in project.policy.get("policy_groups") or []]
     result["suggested_policy_groups"] = [
         suggestion
@@ -1167,6 +1336,11 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
     pinned_verify = str(project.policy.get("verify_command") or "").strip()
     if pinned_verify and not policy.get("verify_command"):
         policy["verify_command"] = pinned_verify
+    notes: list[str] = []
+    _default_execution_mode(
+        run_store, project_id=project_id, policy=policy, overrides={}, notes=notes
+    )
+    _gate_auto_apply(policy, requested=False, notes=notes)
     try:
         updated = validate_project_definition(
             project_id=project.project_id,
@@ -1189,7 +1363,7 @@ def set_project_phase(run_store: RunStore, project_id: str, phase: str) -> dict[
         pack_name=updated.pack_name,
         pack_version=updated.pack_version,
     )
-    return project_to_dict(updated)
+    return {**project_to_dict(updated), "notes": notes}
 
 
 def preview_project_setup(
@@ -1208,15 +1382,7 @@ def preview_project_setup(
     seed_shell_commands: bool = True,
     repo_path_may_be_missing: bool = False,
 ) -> dict[str, Any]:
-    pack: PolicyPack | None = None
-    if pack_name is not None:
-        try:
-            pack = get_policy_pack(pack_name)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        strategy = pack.strategy
-    if strategy is None:
-        raise HTTPException(status_code=400, detail="project preview requires a pack or strategy")
+    strategy, pack, strategy_source = _choose_strategy(run_store, project_id, strategy, pack_name)
     bindings: list[ProjectBinding] = []
     if repo_path:
         bindings.append(ProjectBinding(kind="repo_path", value=repo_path))
@@ -1239,6 +1405,14 @@ def preview_project_setup(
     # The preview must show what setup will actually write, carry-forward and
     # all — v94-F6's lesson, where the preview said "none detected" for the very
     # pin it had just inferred.
+    notes: list[str] = []
+    _default_execution_mode(
+        run_store,
+        project_id=project_id,
+        policy=base_policy,
+        overrides=policy_overrides,
+        notes=notes,
+    )
     base_policy, bindings = _carry_forward_existing(
         run_store, project_id=project_id, base_policy=base_policy, bindings=bindings
     )
@@ -1249,6 +1423,9 @@ def preview_project_setup(
         seed_dir = _seed_repo_dir(root, repo_path, repo_slug)
         seeded_shell_commands = _merge_shell_seeds(base_policy, seed_dir)
         seeded_verify_command = _merge_verify_seed(base_policy, seed_dir)
+    _gate_auto_apply(
+        base_policy, requested="auto_apply_verified_patch" in policy_overrides, notes=notes
+    )
     try:
         project = validate_project_definition(
             project_id=project_id,
@@ -1290,6 +1467,7 @@ def preview_project_setup(
         "seeded_schedules": [] if pack is None else _pack_schedule_plan(project.project_id, pack),
         "sample_dispatch_decision": _dispatch_decision_payload(project.policy),
         "sample_landing_decision": _landing_decision_payload(project.policy),
+        "notes": [_strategy_note(strategy, strategy_source, project.policy), *notes],
     }
 
 
@@ -1750,6 +1928,15 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.post("/api/projects", status_code=201)
     def put_project(body: ProjectRequest) -> dict[str, Any]:
+        # v127-F5: the editor re-POSTs the whole policy, so "the request turns
+        # auto-apply on" means the stored row did not already have it on.
+        stored = run_store.get_project_policy(body.project_id)
+        notes: list[str] = []
+        _gate_auto_apply(
+            body.policy,
+            requested=stored is None or stored.policy.get("auto_apply_verified_patch") is not True,
+            notes=notes,
+        )
         try:
             project = validate_project_definition(
                 project_id=body.project_id,
@@ -1773,7 +1960,7 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                 kind=binding.kind,
                 value=binding.value,
             )
-        return _vetted_persist(run_store, project, project.bindings)
+        return {**_vetted_persist(run_store, project, project.bindings), "notes": notes}
 
     @app.delete("/api/projects/{project_id}")
     def delete_project(project_id: str) -> dict[str, Any]:

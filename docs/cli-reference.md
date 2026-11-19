@@ -45,7 +45,8 @@ skep status [--personal] [--json]
 - `onboard --quiet | --verbose` (first-run O4) turns the first-session
   `why:` line under every chat verdict card, and the per-turn tally, off or
   back on (`~/.skep/first_run.json` `dismissed`; REST:
-  `POST /api/onboard/transparency {"verbose": bool}`).
+  `POST /api/onboard/transparency {"verbose": bool}`). Beside any other
+  onboard flag they only set the why-lines: every step still runs (v127-T2).
   Exits 0 only when every check is ready.
 - `setup --personal` creates or updates the personal profile.
 - `doctor` reports readiness and exits non-zero when the profile is not ready.
@@ -86,7 +87,10 @@ Important options:
   outbound unless policy or a matched template grants more.
 - `--env-allow ENV` passes one environment variable; repeatable.
 - `--caste CASTE` selects the worker kind. The common launch path is `coding`.
-- `--auto-approve` enables configured safe auto-approval rules.
+- `--auto-approve` has no effect (retired; still accepted on `run`, `tick` and
+  `serve` for one release, with a note): a patch lands without a click only
+  when the project turns on `auto_apply_verified_patch` (the maintain phase and
+  unlocked mode turn it on) and pins a real check.
 - `--role NAME` gives the worker a role: its layer narrows the worker's grants
   (see Roles).
 - `--delegated-by ACTOR@ROLE` dispatches as that delegator (repeat, outermost
@@ -167,7 +171,7 @@ skep schedule add NAME REPO "instructions" --every 1d [options]
 skep schedule add NAME REPO --template TEMPLATE --every 1d [--param KEY=VALUE]
 skep schedule list
 skep schedule remove NAME
-skep tick [--worker-cmd COMMAND] [--auto-approve]
+skep tick [--worker-cmd COMMAND]
 ```
 
 - `schedule add` creates a recurring direct run or template-bound run.
@@ -214,7 +218,7 @@ exist because a *model* proposed the action, not a human.
 ## Serve
 
 ```sh
-skep serve [--host HOST] [--port PORT] [--worker-cmd COMMAND] [--auto-approve] [--no-readopt]
+skep serve [--host HOST] [--port PORT] [--worker-cmd COMMAND] [--no-readopt]
 ```
 
 `serve` starts the local HTTP API and browser dashboard. It prints the URL and

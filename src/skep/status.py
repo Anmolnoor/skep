@@ -15,6 +15,7 @@ from typing import Any
 from .profile import PersonalProfile, load_profile, profile_path
 from .supervisor.sandbox import availability as sandbox_availability
 from .supervisor.sandbox import socket_gap
+from .supervisor.store import RETIRED_STORE_FILES
 
 _STALE_PENDING_DAYS = 7
 
@@ -42,13 +43,14 @@ def build_status(
             None,
             required,
             sandbox=_sandbox_check(),
-            coding_worker=_worker_provider_check(home, provider_timeout),
+            coding_worker=worker_provider_check(home, provider_timeout),
         )
         payload["advisories"] = (
             _provider_advisories(home, provider_ready=False)
             + _auto_approve_advisories(home)
             + _browse_advisories(home)
             + _verify_pin_advisories(home)
+            + _workspace_mode_advisories(home)
             + _repo_registry_advisories(home)
             + _stale_store_advisories(home)
             + _model_truth_advisories(home)
@@ -82,13 +84,14 @@ def build_status(
         profile,
         required,
         sandbox=_sandbox_check(),
-        coding_worker=_worker_provider_check(home, provider_timeout),
+        coding_worker=worker_provider_check(home, provider_timeout),
     )
     payload["advisories"] = (
         _provider_advisories(home, provider_ready=required["provider"].get("status") == "ready")
         + _auto_approve_advisories(home)
         + _browse_advisories(home)
         + _verify_pin_advisories(home)
+        + _workspace_mode_advisories(home)
         + _repo_registry_advisories(home)
         + _stale_store_advisories(home)
         + _model_truth_advisories(home)
@@ -108,7 +111,7 @@ def build_status(
     return payload
 
 
-def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
+def worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
     """v49-F1: the WORKER's provider path, resolved exactly like a run would
     (profile.json rules incl. the api_key_env trap and the llm-secret
     fallback, else the daemon store settings), then probed with the worker's
@@ -132,16 +135,21 @@ def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
             }
         endpoint, protocol, api_key, model = provider_probe_target(provider)
     except LlmPlanError as exc:
-        return {"status": "blocked", "label": f"blocked: {exc}", "detail": str(exc)}
+        # v127-F4: ``kind`` says why — a config error no run could get past
+        # ("config"), a refused key ("auth": HTTP 401/403), or anything else
+        # ("unreachable": a timeout, 5xx, 429, reset). The scheduler skips a
+        # tick only on the first two.
+        return {
+            "status": "blocked",
+            "kind": "config",
+            "label": f"blocked: {exc}",
+            "detail": f"{exc}",
+        }
     target = f"{model} via {endpoint}"
     try:
         models = list_models(endpoint, api_key, protocol=protocol, timeout=timeout)
     except OllamaError as exc:
-        return {
-            "status": "blocked",
-            "label": f"blocked: provider probe failed ({exc})",
-            "detail": f"{target}: {exc}",
-        }
+        return _probe_failure(exc, target, "the provider {} the model list request")
     # v115-F5: a model list is public on ollama.com — the key that 401'd
     # every chat turn passed it, and doctor said "provider ready" (I8). One
     # authenticated completion is the probe a dead key cannot pass.
@@ -152,11 +160,7 @@ def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
             endpoint, api_key, model=model, protocol=protocol, timeout=max(timeout, 15.0)
         )
     except OllamaError as exc:
-        return {
-            "status": "blocked",
-            "label": f"blocked: the provider lists models but refused a completion ({exc})",
-            "detail": f"{target}: {exc}",
-        }
+        return _probe_failure(exc, target, "the provider lists models but {} a completion")
     if models and model not in models:
         return {
             "status": "ready",
@@ -164,6 +168,21 @@ def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
             "detail": target,
         }
     return {"status": "ready", "label": f"provider ready ({target})", "detail": target}
+
+
+def _probe_failure(exc: Exception, target: str, label: str) -> dict[str, Any]:
+    """A failed worker probe, labeled by its real cause (v127-F4): only an
+    HTTP 401/403 is a refused key."""
+    http_status = getattr(exc, "status", None)
+    auth = http_status in (401, 403)
+    label = label.format("refused" if auth else "failed on")
+    return {
+        "status": "blocked",
+        "kind": "auth" if auth else "unreachable",
+        "http_status": http_status,
+        "label": f"blocked: {label} ({exc})",
+        "detail": f"{target}: {exc}",
+    }
 
 
 def _pending_approvals(
@@ -352,18 +371,6 @@ def _phone_flow_advisories(home: Path) -> list[str]:
     return lines
 
 
-# v111-F5: store files from retired layouts. Each migration left its sqlite
-# behind silently; two independent investigations (doctor's own memory check
-# pre-F2, and the 2026-08-12 forensics session) opened a dead store first.
-_RETIRED_STORE_FILES = (
-    "runs.db",
-    "skep.db",
-    "store.sqlite3",
-    "supervisor.sqlite3",
-    "supervisor/runs.db",
-)
-
-
 def _model_truth_advisories(home: Path) -> list[str]:
     """v115-F5: the daemon's ``llm_default_model`` setting and the registry's
     active profile both say which model runs. The field had the registry a
@@ -421,7 +428,7 @@ def _legacy_key_advisories(home: Path) -> list[str]:
 
 def _stale_store_advisories(home: Path) -> list[str]:
     """v111-F5: name the retired store files no current code reads (I8)."""
-    stale = [rel for rel in _RETIRED_STORE_FILES if (home / rel).is_file()]
+    stale = [rel for rel in RETIRED_STORE_FILES if (home / rel).is_file()]
     if not stale:
         return []
     listed = ", ".join(str(home / rel) for rel in stale)
@@ -733,6 +740,32 @@ def _verify_pin_advisories(home: Path) -> list[str]:
     return advisories
 
 
+def _workspace_mode_advisories(home: Path) -> list[str]:
+    """v127-F8 (ADR 0066): new projects default to the sandbox; existing ones
+    keep their stored mode, so name the ones still running unsandboxed."""
+    db_path = home / "supervisor" / "supervisor.sqlite3"
+    if not db_path.is_file():
+        return []
+    from .supervisor.store import RunStore
+
+    store = RunStore(db_path, readonly=True)
+    try:
+        workspace = sorted(
+            record.project_id
+            for record in store.list_project_policies()
+            if record.policy.get("default_execution_mode") == "workspace"
+        )
+    finally:
+        store.close()
+    if not workspace:
+        return []
+    return [
+        f"{len(workspace)} project(s) run workers unsandboxed (workspace): "
+        f"{', '.join(workspace)}. Move one into the sandbox: `skep project setup <repo> "
+        f"--project-id {workspace[0]} --execution-mode sandbox`."
+    ]
+
+
 def _repo_registry_advisories(home: Path) -> list[str]:
     """v106-F8: name the registry shapes that quietly poison daily use.
 
@@ -750,7 +783,7 @@ def _repo_registry_advisories(home: Path) -> list[str]:
     if not db_path.is_file():
         return []
     from .supervisor.projects import list_projects
-    from .supervisor.store import RunStore
+    from .supervisor.store import PROVIDER_BLOCKED_STATE, RunStore
 
     store = RunStore(db_path, readonly=True)
     try:
@@ -783,6 +816,12 @@ def _repo_registry_advisories(home: Path) -> list[str]:
             for health in store.list_schedule_health()
             if health.disabled_reason
         ]
+        # v127-F4: skipped on a dead worker-provider key, never auto-disabled
+        provider_blocked = sorted(
+            schedule.name
+            for schedule in store.list_schedules()
+            if schedule.enabled and (schedule.last_state or "").startswith(PROVIDER_BLOCKED_STATE)
+        )
     finally:
         store.close()
     advisories: list[str] = []
@@ -805,6 +844,12 @@ def _repo_registry_advisories(home: Path) -> list[str]:
         advisories.append(
             f"{len(disabled)} schedule(s) are auto-disabled after repeated failures: "
             f"{', '.join(sorted(disabled))}. Fix the cause and re-enable, or delete them."
+        )
+    if provider_blocked:
+        advisories.append(
+            f"{len(provider_blocked)} schedule(s) skipped their last tick because the worker "
+            f"provider refused its key or its settings are broken: {', '.join(provider_blocked)}. "
+            "The coding worker check names which; they resume on their next tick."
         )
     return advisories
 

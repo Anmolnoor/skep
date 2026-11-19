@@ -16,7 +16,7 @@ it removed exactly the asks the walls contain.
 | Ask | Under unlocked (August) |
 |---|---|
 | Dispatch cards (dispatch_run, run_code, quick_edit, batch members) | ran in-turn, reason `dispatch.auto_allowed.unlocked` |
-| Worker escalations (shell, capability, network host) | answered themselves through the click path, actor `auto:unlocked`, once (never the session tier) |
+| Worker escalations (shell, capability, network host) | answered themselves through the click path, actor `auto:unlocked`, once (never the session tier). The network-host half never bought egress to any host and is withdrawn (D42, below): with egress, only a host the run lists in `network_ask` escalates to a card, any other is refused; unlocked answers none |
 | Patch landing | zero clicks: unlocked implied `auto_apply_verified_patch` (G10 with the pinned verify, `skep/*` only) |
 | Outbound content (open_pr, merge_pr, pushes, messenger sends) | still carded |
 | Policy and trust changes | still carded |

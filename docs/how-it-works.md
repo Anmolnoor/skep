@@ -96,7 +96,9 @@ This is the core safety property: Skep does not trust an agent saying "tests
 passed" if the patch fails when replayed on a clean copy.
 
 If re-verification disagrees with the worker, Skep surfaces that in `status` and
-`review`, and auto-approval does not apply.
+`review`, and auto-approval does not apply. Nor does it when every command the
+replay ran is known-vacuous (`true`, `git diff --check`, ...): see
+[`verification.md`](verification.md).
 
 See [`verification.md`](verification.md) for the exact outcomes and unavailable
 cases.

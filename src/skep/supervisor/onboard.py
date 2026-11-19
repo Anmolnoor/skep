@@ -151,7 +151,7 @@ def onboard_model(
     make a test call, and say where prompts go. ``mock`` is the stub for
     tests and dry runs: profile only, no call."""
     from ..profile import run_personal_setup
-    from ..status import _worker_provider_check
+    from ..status import worker_provider_check
 
     home = _personal_home(holder)
     provider = provider.strip()
@@ -212,7 +212,7 @@ def onboard_model(
         run_personal_setup(
             home, provider=used["protocol"], model=model, endpoint=base_url, api_key_env=key_env
         )
-        check = _worker_provider_check(home, 5.0)
+        check = worker_provider_check(home, 5.0)
         if check.get("status") != "ready":
             raise ValueError(f"test call failed: {check.get('label')}")
     except BaseException as exc:  # an interrupt mid-probe rolls back too
@@ -258,12 +258,12 @@ def onboard_keep_model(holder: ConfigHolder) -> dict[str, Any]:
     and, when it works, record it as the model step — onboard never replaces
     a working provider with one it merely detected. Raises ``ValueError``
     when there is nothing working to keep."""
-    from ..status import _worker_provider_check
+    from ..status import worker_provider_check
     from ..workers.llm_plan import worker_provider_from_home
     from .providers import provider_host
 
     home = _personal_home(holder)
-    check = _worker_provider_check(home, 5.0)
+    check = worker_provider_check(home, 5.0)
     provider = worker_provider_from_home(home) if check.get("status") == "ready" else None
     if provider is None:
         raise ValueError(f"no working provider to keep ({check.get('label')})")
