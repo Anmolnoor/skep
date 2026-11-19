@@ -87,6 +87,9 @@ def _task_start_payload(task: CodingWorkerTask) -> dict[str, object]:
         payload["dispatch_decision"] = task.dispatch_decision.model_dump(mode="json")
     if task.landing_decision is not None:
         payload["landing_decision"] = task.landing_decision.model_dump(mode="json")
+    payload["memory_delivered"] = (
+        "not delivered: the verifier runs no model prompt"  # v126-F5 (review)
+    )
     return payload
 
 

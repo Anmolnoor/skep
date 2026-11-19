@@ -243,6 +243,9 @@ def _task_start_payload(task: CodingWorkerTask) -> dict[str, object]:
         payload["project_context"] = task.project_context.model_dump(mode="json")
     if task.dispatch_decision is not None:
         payload["dispatch_decision"] = task.dispatch_decision.model_dump(mode="json")
+    payload["memory_delivered"] = (
+        "not delivered: the reviewer's prompt carries no memory"  # v126-F5 (review)
+    )
     return payload
 
 

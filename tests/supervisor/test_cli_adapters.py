@@ -487,3 +487,32 @@ def test_v126_f5_the_memory_block_rides_an_external_dispatch_and_the_audit_says_
         if json.loads(line)["type"] == "task.start"
     )
     assert start["payload"]["memory_delivered"] == ["m1", "m2"]
+    # v126-F5 (review): the recorded command keeps no copy of the memory —
+    # `skep memory forget` can't reach an event log.
+    commands = [
+        json.loads(line)["payload"]["command"]
+        for line in events.read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["type"] in ("command.start", "command.result")
+    ]
+    agent = [c for c in commands if "do the thing" in c]
+    assert len(agent) == 2
+    assert all("[memory: 2 items]" in c and "use uv" not in c for c in agent)
+    result = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    assert "use uv" not in json.dumps(result)
+
+
+def test_v126_f5_castes_without_memory_in_their_prompt_say_not_delivered() -> None:
+    """v126-F5 (review): the reviewer has a prompt that carries no memory, and
+    the audit, verifier and script workers run no model prompt — each audit
+    says "not delivered" instead of leaving the question open."""
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from skep.workers import audit, reviewer, script_worker, verifier
+
+    task = cast(
+        Any, SimpleNamespace(project_context=None, dispatch_decision=None, landing_decision=None)
+    )
+    for module in (reviewer, audit, verifier, script_worker):
+        payload = module._task_start_payload(task)
+        assert str(payload["memory_delivered"]).startswith("not delivered"), module.__name__
