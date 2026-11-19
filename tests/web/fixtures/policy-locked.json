@@ -2152,8 +2152,7 @@
    {
     "default_castes": [
      "coding",
-     "reviewer",
-     "verifier"
+     "reviewer"
     ],
     "layer": "role:builder",
     "name": "builder",
@@ -2164,8 +2163,7 @@
    {
     "default_castes": [
      "audit",
-     "researcher",
-     "verifier"
+     "researcher"
     ],
     "layer": "role:operator",
     "name": "operator",
