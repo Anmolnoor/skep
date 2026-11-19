@@ -101,7 +101,7 @@ def build_worker_env(
 WORKER_GIT_ENV = {"GIT_ALLOW_PROTOCOL": "file"}
 
 
-def _proxy_env(port: int) -> dict[str, str]:
+def proxy_env(port: int) -> dict[str, str]:
     """Env that routes the worker's HTTP(S) tooling through the D1 filtering proxy.
 
     pip / git / curl / requests all honour these. Combined with the Seatbelt pin
@@ -297,7 +297,7 @@ def spawn_worker(
         # endpoint/model) — same class as SKEP_HOME and the proxy env below.
         env.update(extra_env)
     if proxy_port is not None:
-        env.update(_proxy_env(proxy_port))
+        env.update(proxy_env(proxy_port))
     # ES-F220: the codex worker (its own sandbox off) starts only with this
     # set — so only a sandboxed launch carries it, never a host value.
     env.pop(SANDBOX_MARKER_ENV, None)

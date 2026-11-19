@@ -358,9 +358,9 @@ def test_proxy_env_sends_loopback_through_the_proxy_on_every_backend() -> None:
     exemption: loopback HTTP goes through the proxy on every backend, so a
     closed loopback port answers with a 403 naming the port and the command
     that opens it, not a bare "Operation not permitted"."""
-    from skep.supervisor.spawner import _proxy_env
+    from skep.supervisor.spawner import proxy_env
 
-    env = _proxy_env(8080)
+    env = proxy_env(8080)
     assert "NO_PROXY" not in env and "no_proxy" not in env
     assert env["HTTP_PROXY"] == env["https_proxy"] == "http://127.0.0.1:8080"
 

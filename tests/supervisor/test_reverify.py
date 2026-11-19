@@ -360,7 +360,7 @@ def test_reverify_removes_its_proxy_socket_dir_whatever_the_proxy_did(
     reverify_module = importlib.import_module("skep.supervisor.reverify")
     root = tmp_path / "runtime"
     root.mkdir()
-    monkeypatch.setattr(dispatch, "_proxy_socket_root", lambda: str(root))
+    monkeypatch.setattr(dispatch, "proxy_socket_root", lambda: str(root))
     bwrap = sandbox.SandboxAvailability(True, backend="bubblewrap")
     monkeypatch.setattr(sandbox, "availability", lambda backend=None: bwrap)
     monkeypatch.setattr(sandbox, "write_profile", lambda path, **_kw: path)
@@ -726,11 +726,13 @@ def _node_stubs(tmp_path: Path) -> tuple[Path, Path]:
     return bin_dir, log
 
 
-def _npm_lock(version: str, *, host: str = "registry.npmjs.org", integrity: bool = True) -> str:
+def _npm_lock(version: str, *, host: str = "registry.npmjs.org") -> str:
     """A one-line npm v3 lockfile pinning jest@version (resolved + integrity)."""
-    entry = {"version": version, "resolved": f"https://{host}/jest/-/jest-{version}.tgz"}
-    if integrity:
-        entry["integrity"] = "sha512-abc"
+    entry = {
+        "version": version,
+        "resolved": f"https://{host}/jest/-/jest-{version}.tgz",
+        "integrity": "sha512-abc",
+    }
     return json.dumps(
         {
             "lockfileVersion": 3,
@@ -1013,10 +1015,12 @@ def test_the_node_prime_reaches_only_the_baseline_registry_hosts(
     git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "own registry")
     wall = _RecordingWall(monkeypatch)
     bin_dir, log = _node_stubs(tmp_path)
+    # The patch names a new host: the wall is still the BASELINE's hosts,
+    # so that fetch meets the proxy's 403 — no lockfile parsing needed.
     patch = _node_lock_bump_patch(
         tmp_path,
         old=_npm_lock("1.0.0", host="npm.example.com"),
-        lock=_npm_lock("2.0.0", host="npm.example.com"),
+        lock=_npm_lock("2.0.0", host="evil.example.com"),
     )
     outcome = reverify(
         repo=repo,
@@ -1147,33 +1151,23 @@ def test_the_verify_step_never_writes_a_uv_cache_a_later_prime_reads(
 
 
 @pytest.mark.parametrize(
-    ("lock", "extra", "reason"),
+    ("extra", "reason"),
     [
-        (_npm_lock("2.0.0", host="evil.example.com"), "", "evil.example.com"),
-        (_npm_lock("2.0.0", integrity=False), "", "integrity"),
-        (
-            _npm_lock("2.0.0").replace(
-                "https://registry.npmjs.org/jest/-/jest-2.0.0.tgz",
-                "git+ssh://git@github.com/x/jest.git#abc",
-            ),
-            "",
-            "git+ssh://",
-        ),
-        ("", _new_file_diff("pnpm-workspace.yaml", "packages: ['../*']"), "pnpm-workspace.yaml"),
-        ("", _new_file_diff("sub/.yarnrc", 'yarn-path "../x.js"'), "sub/.yarnrc"),
-        ("", _new_file_diff(".pnpmfile.mjs", "export default {}"), ".pnpmfile.mjs"),
+        (_new_file_diff("pnpm-workspace.yaml", "packages: ['../*']"), "pnpm-workspace.yaml"),
+        (_new_file_diff("sub/.yarnrc", 'yarn-path "../x.js"'), "sub/.yarnrc"),
+        (_new_file_diff(".pnpmfile.mjs", "export default {}"), ".pnpmfile.mjs"),
     ],
 )
-def test_a_patched_lockfile_off_the_registry_is_never_installed(
-    repo: Path, config: SupervisorConfig, tmp_path: Path, lock: str, extra: str, reason: str
+def test_a_patch_that_moves_installer_config_is_never_installed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, extra: str, reason: str
 ) -> None:
-    """Council round 2 (HIGH): before the re-prime, the patched lockfile must
-    resolve every package from the baseline's registry hosts with an integrity
-    hash, and the patch must leave every installer config alone — otherwise
-    nothing is installed and the verdict is unavailable (with the reason)."""
+    """Council round 2 (HIGH): the re-prime installs the patched lockfile, so
+    the patch must leave every installer config alone — otherwise nothing is
+    installed and the verdict is unavailable (with the reason). Where the
+    packages come from is the registry-only proxy's job, not a parser's."""
     _node_project(repo)
     bin_dir, log = _node_stubs(tmp_path)
-    patch = _node_lock_bump_patch(tmp_path, lock=lock, extra=extra)
+    patch = _node_lock_bump_patch(tmp_path, extra=extra)
     outcome = _node_reverify(repo, config, patch, bin_dir, log, "npm test")
     assert outcome.outcome == "unavailable", outcome.detail
     assert reason in outcome.detail and "was not run" in outcome.detail
@@ -1181,32 +1175,13 @@ def test_a_patched_lockfile_off_the_registry_is_never_installed(
     assert len(lines) == 1 and "patched=no" in lines[0]  # the baseline prime only
 
 
-@pytest.mark.parametrize(
-    ("manifest", "reason"),
-    [
-        ('{"name": "x", "devDependencies": {"jest": "github:evil/jest"}}', "github:evil/jest"),
-        ('{"name": "x", "devDependencies": {"jest": "evil/jest#main"}}', "evil/jest#main"),
-        ('{"name": "x", "devDependencies": {"jest": "file:../outside"}}', "file:../outside"),
-        (
-            '{"name": "x", "devDependencies": {"jest": "1.0.0"}, '
-            '"overrides": {"jest": {"dep": "https://evil.example.com/d.tgz"}}}',
-            "https://evil.example.com/d.tgz",
-        ),
-        (
-            '{"name": "x", "devDependencies": {"jest": "1.0.0"}, "workspaces": ["../up"]}',
-            "../up",
-        ),
-        (
-            '{"name": "x", "devDependencies": {"jest": "1.0.0"}, "packageManager": "yarn@4.0.0"}',
-            "packageManager",
-        ),
-    ],
-)
-def test_a_patched_manifest_off_the_registry_is_never_installed(
-    repo: Path, config: SupervisorConfig, tmp_path: Path, manifest: str, reason: str
+def test_a_patch_that_changes_package_manager_is_never_installed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
 ) -> None:
-    """git/github:/file:/URL specs, a workspace outside the tree and a changed
-    `packageManager` (corepack would fetch and run it) all refuse the re-prime."""
+    """A changed `packageManager` is a different installer (corepack would
+    fetch and run it), so the re-prime refuses it."""
+    manifest = '{"name": "x", "devDependencies": {"jest": "1.0.0"}, "packageManager": "yarn@4.0.0"}'
+    reason = "packageManager"
     _node_project(repo)
     bin_dir, log = _node_stubs(tmp_path)
     patch = tmp_path / "manifest.patch"
@@ -1350,122 +1325,6 @@ def test_a_patch_adding_a_new_uv_lock_is_primed_against_it(
     assert [line.split()[0] for line in lines] == ["sync", "sync", "run"]
 
 
-_PNPM_OK = """lockfileVersion: '9.0'
-importers:
-  .:
-    devDependencies:
-      jest:
-        specifier: ^1.0.0
-        version: 1.0.0
-      local:
-        specifier: link:packages/local
-        version: link:packages/local
-packages:
-  jest@1.0.0:
-    resolution: {integrity: sha512-abc}
-  other@1.0.0:
-    resolution:
-      integrity: sha512-def
-      tarball: https://registry.npmjs.org/other/-/other-1.0.0.tgz
-"""
-_YARN_OK = """# yarn lockfile v1
-
-
-"@scope/jest@^1.0.0", "@scope/jest@^1.1.0":
-  version "1.1.0"
-  resolved "https://registry.yarnpkg.com/@scope/jest/-/jest-1.1.0.tgz#abc"
-  integrity sha512-abc
-"""
-
-
-@pytest.mark.parametrize(
-    ("lockfile", "text", "reason"),
-    [
-        ("pnpm-lock.yaml", _PNPM_OK, ""),
-        (
-            "pnpm-lock.yaml",
-            _PNPM_OK.replace(
-                "{integrity: sha512-abc}", "{commit: a, repo: https://github.com/x/y, type: git}"
-            ),
-            "integrity",
-        ),
-        (
-            "pnpm-lock.yaml",
-            _PNPM_OK.replace("https://registry.npmjs.org/other", "https://evil.example.com/other"),
-            "evil.example.com",
-        ),
-        (
-            "pnpm-lock.yaml",
-            _PNPM_OK.replace("version: link:packages/local", "version: link:../outside"),
-            "link:../outside",
-        ),
-        (
-            "pnpm-lock.yaml",
-            _PNPM_OK.replace("specifier: ^1.0.0", "specifier: github:evil/jest"),
-            "github:evil/jest",
-        ),
-        ("yarn.lock", _YARN_OK, ""),
-        (
-            "yarn.lock",
-            _YARN_OK.replace('"@scope/jest@^1.1.0"', '"@scope/jest@github:evil/jest"'),
-            "github:evil/jest",
-        ),
-        (
-            "yarn.lock",
-            _YARN_OK.replace("registry.yarnpkg.com", "evil.example.com"),
-            "evil.example.com",
-        ),
-        (
-            "package-lock.json",
-            json.dumps(
-                {
-                    "lockfileVersion": 1,
-                    "dependencies": {
-                        "a": {
-                            "version": "1.0.0",
-                            "dependencies": {"b": {"version": "git+https://github.com/x/b.git"}},
-                        }
-                    },
-                }
-            ),
-            "git+https://github.com/x/b.git",
-        ),
-        (
-            "package-lock.json",
-            json.dumps(
-                {
-                    "packages": {
-                        "node_modules/w": {"resolved": "packages/w", "link": True},
-                        "node_modules/z": {"inBundle": True},
-                    }
-                }
-            ),
-            "",
-        ),
-        (
-            "package-lock.json",
-            json.dumps({"packages": {"node_modules/w": {"resolved": "../outside", "link": True}}}),
-            "../outside",
-        ),
-        ("package-lock.json", "not json", "could not be read"),
-    ],
-)
-def test_the_patched_lockfile_check_reads_every_format(
-    tmp_path: Path, lockfile: str, text: str, reason: str
-) -> None:
-    from skep.supervisor.reverify import _NPM_HOSTS, _node_install_refusal
-
-    (tmp_path / lockfile).write_text(text, encoding="utf-8")
-    (tmp_path / "package.json").write_text(
-        '{"workspaces": {"packages": ["packages/*"]}, "devDependencies": {"jest": "^1.0.0"}}',
-        encoding="utf-8",
-    )
-    refusal = _node_install_refusal(
-        tmp_path, lockfile, {lockfile}, hosts=_NPM_HOSTS, package_manager=None, protected=set()
-    )
-    assert (reason in refusal) if reason else refusal == "", refusal
-
-
 def test_the_prime_wall_bridges_and_cleans_up_on_bubblewrap(
     repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1479,7 +1338,7 @@ def test_the_prime_wall_bridges_and_cleans_up_on_bubblewrap(
     monkeypatch.setattr(sandbox, "availability", lambda backend=None: bwrap)
     root = tmp_path / "runtime"
     root.mkdir()
-    monkeypatch.setattr(dispatch, "_proxy_socket_root", lambda: str(root))
+    monkeypatch.setattr(dispatch, "proxy_socket_root", lambda: str(root))
     bin_dir, log = _node_stubs(tmp_path)
     outcome = reverify(
         repo=repo,
@@ -1494,3 +1353,117 @@ def test_the_prime_wall_bridges_and_cleans_up_on_bubblewrap(
     socket = wall.profiles["reverify.profile.prime.sb"]["unix_socket_path"]
     assert isinstance(socket, str) and socket.startswith(str(root))
     assert list(root.iterdir()) == []
+
+
+# --- v127-A0 review (council round 3) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["proxy", "sandbox_unavailable", "allowlist_unsupported"],
+)
+def test_a_prime_wall_that_cannot_start_is_unavailable_not_a_crash(
+    repo: Path,
+    config: SupervisorConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Council round 3 (N3): an OSError from the prime's proxy or a refused
+    prime profile escaped reverify() — G10 crashed instead of saying it could
+    not prime. Now it is "unavailable", nothing ran, and the reason rides."""
+    import importlib
+
+    from skep.supervisor import sandbox
+
+    _node_project(repo)
+    wall = _RecordingWall(monkeypatch)
+    module = importlib.import_module("skep.supervisor.reverify")
+    errors = {
+        "proxy": OSError("cannot bind the prime proxy"),
+        "sandbox_unavailable": sandbox.SandboxUnavailableError("no prime wall"),
+        "allowlist_unsupported": sandbox.SandboxAllowlistUnsupported("no domain list here"),
+    }
+    if failure == "proxy":
+
+        class Broken:
+            def __init__(self, *_a: object, **_kw: object) -> None:
+                raise errors["proxy"]
+
+        monkeypatch.setattr(module, "FilteringProxy", Broken)
+    else:
+        recorded = sandbox.write_profile
+
+        def refuse(path: Path, **kwargs: object) -> Path:
+            if path.name.endswith(".prime.sb"):
+                raise errors[failure]
+            return recorded(path, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(sandbox, "write_profile", refuse)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["npm test"],
+        config=config,
+        profile_path=tmp_path / "reverify.profile.sb",
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+    )
+    assert outcome.outcome == "unavailable", outcome.detail
+    assert outcome.exit_codes == []
+    assert str(errors[failure]) in outcome.detail and "was not run" in outcome.detail
+    assert not log.exists()
+    assert wall.profiles.get("reverify.profile.sb") is None
+    _no_leftovers(repo, config)
+
+
+def test_a_proxy_that_fails_to_stop_never_skips_the_rest_of_the_cleanup(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Council round 3 (N4): the finally stopped the loopback proxy, then
+    closed the prime wall — a stop() that raised skipped the wall, leaving
+    its proxy running and its bridge socket dir behind. Every cleanup runs."""
+    import importlib
+
+    from skep.supervisor import dispatch, sandbox
+
+    _node_project(repo)
+    _RecordingWall(monkeypatch)
+    module = importlib.import_module("skep.supervisor.reverify")
+    bwrap = sandbox.SandboxAvailability(True, backend="bubblewrap")
+    monkeypatch.setattr(sandbox, "availability", lambda backend=None: bwrap)
+    root = tmp_path / "runtime"
+    root.mkdir()
+    monkeypatch.setattr(dispatch, "proxy_socket_root", lambda: str(root))
+    stops: list[str] = []
+
+    class Proxy:
+        port = 40000
+
+        def __init__(self, _allow: object, *, unix_socket_path: str, **_kw: object) -> None:
+            self.unix_socket_path = unix_socket_path
+
+        def start(self) -> Proxy:
+            return self
+
+        def stop(self) -> None:
+            stops.append(self.unix_socket_path)
+            raise RuntimeError("stop failed")
+
+    monkeypatch.setattr(module, "FilteringProxy", Proxy)
+    bin_dir, log = _node_stubs(tmp_path)
+    with pytest.raises(RuntimeError):
+        reverify(
+            repo=repo,
+            ref=None,
+            patch_path=_patch_adding_marker(tmp_path),
+            commands=["npm test"],
+            config=config,
+            profile_path=tmp_path / "reverify.profile.sb",
+            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "NODE_LOG": str(log)},
+            loopback_ports=(5432,),
+        )
+    assert len(stops) == 2  # the loopback proxy AND the prime wall's
+    assert list(root.iterdir()) == []
+    _no_leftovers(repo, config)

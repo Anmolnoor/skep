@@ -36,10 +36,10 @@ from urllib.parse import urlsplit
 from skep.worker_contract import Event, EventType
 
 from . import sandbox
-from .apply import resolve_commit
+from .apply import patch_paths, resolve_commit
 from .config import SupervisorConfig
 from .netproxy import FilteringProxy, control_plane_ports, run_loopback_ports
-from .spawner import _proxy_env
+from .spawner import proxy_env
 from .store import RunStore
 from .worktree import (
     TREE_LOCK,
@@ -192,136 +192,14 @@ def _node_env(cache_dir: Path, tmp_dir: Path) -> dict[str, str]:
     }
 
 
-def _inside(path: str) -> bool:
-    """A relative path that stays in the repository (no `..`, `/`, `~`)."""
-    path = path.strip()
-    return bool(path) and path[0] not in "/~\\" and ".." not in re.split(r"[\\/]", path)
-
-
-def _foreign_spec(spec: str) -> bool:
-    """A dependency spec that is not a registry package: git, github:, URL,
-    `user/repo` shorthand, a path, or file:/link: leaving the repository."""
-    spec = spec.strip()
-    scheme, colon, rest = spec.partition(":")
-    if colon and scheme.lower() in ("file", "link", "portal"):
-        return not _inside(rest)
-    if colon and scheme.lower() in ("npm", "workspace"):
-        return False
-    return ":" in spec or "/" in spec
-
-
-def _registry_tarball(url: object, hosts: tuple[str, ...]) -> bool:
-    parts = urlsplit(str(url))
-    return parts.scheme == "https" and parts.hostname in hosts and parts.path.endswith(".tgz")
-
-
-def _manifest_refusal(manifest: dict[str, Any], package_manager: object) -> str:
-    if manifest.get("packageManager") != package_manager:
-        return (
-            f"it changes packageManager to {manifest.get('packageManager')!r} "
-            "(corepack would fetch and run it)"
-        )
-    pnpm = manifest.get("pnpm")
-    sections = [manifest.get(key) for key in (*_NODE_DEPENDENCY_KEYS, "overrides", "resolutions")]
-    stack = [*sections, pnpm.get("overrides") if isinstance(pnpm, dict) else None]
-    while stack:
-        section = stack.pop()
-        for name, spec in section.items() if isinstance(section, dict) else ():
-            if isinstance(spec, dict):
-                stack.append(spec)
-            elif isinstance(spec, str) and _foreign_spec(spec):
-                return f"package.json asks for {name}@{spec}, not a registry package"
-    workspaces = manifest.get("workspaces")
-    if isinstance(workspaces, dict):
-        workspaces = workspaces.get("packages")
-    for workspace in workspaces if isinstance(workspaces, list) else ():
-        if not _inside(str(workspace)):
-            return f"package.json adds the workspace {workspace}, outside the repository"
-    return ""
-
-
-def _npm_lock_refusal(text: str, hosts: tuple[str, ...]) -> str:
-    data = json.loads(text)
-    entries = [(name, e) for name, e in (data.get("packages") or {}).items() if name]
-    stack = [data.get("dependencies") or {}]  # lockfile v1: nested entries
-    while stack:
-        for name, entry in stack.pop().items():
-            if isinstance(entry, dict):
-                entries.append((name, entry))
-                stack.append(entry.get("dependencies") or {})
-    for name, entry in entries:
-        if not isinstance(entry, dict) or entry.get("inBundle") or entry.get("bundled"):
-            continue
-        resolved, version = entry.get("resolved"), entry.get("version")
-        if entry.get("link"):
-            if not _inside(str(resolved or "")):
-                return f"{name} links to {resolved}, outside the repository"
-        elif isinstance(version, str) and _foreign_spec(version):
-            return f"{name} is pinned to {version}, not a registry package"
-        elif resolved is not None and not _registry_tarball(resolved, hosts):
-            return f"{name} resolves to {resolved}"
-        elif resolved is not None and not entry.get("integrity"):
-            return f"{name} carries no integrity hash"
-    return ""
-
-
-def _yarn_lock_refusal(text: str, hosts: tuple[str, ...]) -> str:
-    for line in text.splitlines():
-        if line[:1] not in ("", "#", " ") and line.rstrip().endswith(":"):
-            for key in line.rstrip()[:-1].split(","):
-                key = key.strip().strip("\"'")
-                if "@" in key[1:] and _foreign_spec(spec := key[key.index("@", 1) + 1 :]):
-                    return f"{key} asks for {spec}, not a registry package"
-        elif (match := re.match(r"\s+resolved\s+\"?([^\"\s]+)", line)) and not _registry_tarball(
-            match.group(1), hosts
-        ):
-            return f"a package resolves to {match.group(1)}"
-    return ""
-
-
-def _pnpm_lock_refusal(text: str, hosts: tuple[str, ...]) -> str:
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        key, _, value = line.strip().partition(":")
-        value = value.strip().strip("\"'")
-        if (key == "specifier" or value.startswith(("link:", "file:"))) and _foreign_spec(value):
-            return f"a package asks for {value}, not a registry package"
-        if key != "resolution":
-            continue
-        indent = len(line) - len(line.lstrip())
-        block = [value]
-        for follow in lines[index + 1 :]:
-            if len(follow) - len(follow.lstrip()) <= indent:
-                break
-            block.append(follow.strip())
-        resolution = " ".join(block)
-        if "integrity:" not in resolution:  # git, directory and bare tarballs
-            return f"a package resolves without an integrity hash ({resolution})"
-        for url in re.findall(r"tarball:\s*[\"']?([^,\"'}\s]+)", resolution):
-            if not _registry_tarball(url, hosts):
-                return f"a package resolves to {url}"
-    return ""
-
-
-_LOCK_REFUSALS = {
-    "pnpm-lock.yaml": _pnpm_lock_refusal,
-    "yarn.lock": _yarn_lock_refusal,
-    "package-lock.json": _npm_lock_refusal,
-    "npm-shrinkwrap.json": _npm_lock_refusal,
-}
-
-
 def _node_install_refusal(
-    worktree: Path,
-    lockfile: str,
-    touched: set[str],
-    *,
-    hosts: tuple[str, ...],
-    package_manager: object,
-    protected: set[str],
+    worktree: Path, touched: set[str], *, package_manager: object, protected: set[str]
 ) -> str:
-    """Why the PATCHED package.json/lockfile may not be installed, even with
-    the network limited to the registry hosts; empty when it may."""
+    """Why the PATCHED package.json/lockfile may not be installed; empty when
+    it may. Where packages come from is the registry-only proxy's job (with
+    scripts off and corepack offline); what stays here is what would change
+    the installer itself: its config files, a yarn-path target, or
+    ``packageManager`` (corepack would fetch and run it)."""
     config = sorted(
         path
         for path in touched
@@ -331,34 +209,53 @@ def _node_install_refusal(
     )
     if config:
         return f"it changes the package manager's config ({', '.join(config)})"
-    if reason := _manifest_refusal(_manifest(worktree), package_manager):
-        return reason
-    try:
-        return _LOCK_REFUSALS[lockfile]((worktree / lockfile).read_text(encoding="utf-8"), hosts)
-    except (OSError, ValueError, AttributeError) as exc:
-        return f"{lockfile} could not be read ({exc})"
+    if (changed := _manifest(worktree).get("packageManager")) != package_manager:
+        return f"it changes packageManager to {changed!r} (corepack would fetch and run it)"
+    return ""
 
 
-def _patch_paths(worktree: Path, patch_path: Path) -> set[str]:
-    """Every path the patch names, new and untracked files included (``git
-    diff`` would miss those)."""
-    listed = subprocess.run(
-        ["git", "-C", str(worktree), "apply", "--numstat", "-z", str(patch_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return set(re.split(r"[\t\0]", listed.stdout))
+class _PrimeUnavailable(Exception):
+    """The prime's proxy or sandbox could not be started."""
+
+
+def _start_proxy(
+    stack: contextlib.ExitStack,
+    hosts: tuple[str, ...],
+    *,
+    config: SupervisorConfig,
+    bridge: bool,
+    loopback_ports: tuple[int, ...] = (),
+) -> FilteringProxy:
+    """A filtering proxy (D1) admitting ``hosts`` (and ``loopback_ports``),
+    stopped by ``stack``. ``bridge`` (bubblewrap) adds the unix socket the
+    netns reaches through netshim; its directory is ``stack``'s to remove
+    even when the proxy never starts (its sockets bind in __init__, ES-F257)."""
+    socket_path = None
+    if bridge:
+        from .dispatch import proxy_socket_root  # runtime: dispatch imports us
+
+        socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=proxy_socket_root())
+        stack.callback(shutil.rmtree, socket_dir, ignore_errors=True)
+        socket_path = str(Path(socket_dir) / "p.sock")
+    proxy = FilteringProxy(
+        hosts,
+        unix_socket_path=socket_path,
+        denied_loopback_ports=control_plane_ports(config.home),
+        loopback_ports=loopback_ports,
+    ).start()
+    stack.callback(proxy.stop)
+    return proxy
 
 
 class _PrimeWall:
     """The prime's sandbox: writable worktree and caches, network only to
     ``hosts`` through a filtering proxy (D1) — never allow-all. Started on
-    the first install; the proxy env reaches the installers alone, never the
-    verify command."""
+    the first install (and stopped by ``stack``); the proxy env reaches the
+    installers alone, never the verify command."""
 
     def __init__(
         self,
+        stack: contextlib.ExitStack,
         hosts: tuple[str, ...],
         *,
         worktree: Path,
@@ -367,19 +264,26 @@ class _PrimeWall:
         config: SupervisorConfig,
     ) -> None:
         self.hosts = hosts
+        self._stack = stack
         self._worktree = worktree
         self._profile_path = profile_path
         self._writable = writable
         self._config = config
         self._proxy: FilteringProxy | None = None
-        self._socket_dir: str | None = None
         self._profile: Path | None = None
 
     def run(self, command: str, env: dict[str, str]) -> tuple[int, str]:
         if self._proxy is None:
-            self._start()
+            try:
+                self._start()
+            except (
+                OSError,
+                sandbox.SandboxUnavailableError,
+                sandbox.SandboxAllowlistUnsupported,
+            ) as exc:
+                raise _PrimeUnavailable(str(exc)) from exc
         assert self._proxy is not None
-        proxy = _proxy_env(self._proxy.port)
+        proxy = proxy_env(self._proxy.port)
         # npm/pnpm/yarn read their own proxy keys too; one that ignores both
         # meets the wall (egress pinned to the proxy port) and fails closed.
         proxy["npm_config_proxy"] = proxy["npm_config_https_proxy"] = proxy["HTTPS_PROXY"]
@@ -388,18 +292,8 @@ class _PrimeWall:
         )
 
     def _start(self) -> None:
-        bubblewrap = (
-            self._profile_path is not None and sandbox.availability().backend == "bubblewrap"
-        )
-        if bubblewrap:
-            from .dispatch import _proxy_socket_root  # runtime: dispatch imports us
-
-            self._socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
-        self._proxy = FilteringProxy(
-            self.hosts,
-            unix_socket_path=str(Path(self._socket_dir) / "p.sock") if self._socket_dir else None,
-            denied_loopback_ports=control_plane_ports(self._config.home),
-        ).start()
+        bridge = self._profile_path is not None and sandbox.availability().backend == "bubblewrap"
+        proxy = _start_proxy(self._stack, self.hosts, config=self._config, bridge=bridge)
         if self._profile_path is not None:
             self._profile = sandbox.write_profile(
                 self._profile_path.with_suffix(".prime.sb"),
@@ -407,18 +301,11 @@ class _PrimeWall:
                 extra_writable=[*git_metadata_writable_roots(self._worktree), *self._writable],
                 extra_readable=git_metadata_readable_roots(self._worktree),
                 network=sandbox.NetworkPolicy(allow=self.hosts),
-                proxy_port=self._proxy.port,
-                unix_socket_path=self._proxy.unix_socket_path,
+                proxy_port=proxy.port,
+                unix_socket_path=proxy.unix_socket_path,
                 skep_home=self._config.home.parent,
             )
-
-    def close(self) -> None:
-        try:
-            if self._proxy is not None:
-                self._proxy.stop()
-        finally:
-            if self._socket_dir is not None:
-                shutil.rmtree(self._socket_dir, ignore_errors=True)
+        self._proxy = proxy
 
 
 def command_timeout_seconds(budget_seconds: float | None) -> float:
@@ -539,9 +426,10 @@ def reverify(
     # skips the lock is the shape of the bug, not a special case.
     with TREE_LOCK:
         worktree = create_worktree(repo, config.worktrees_root, f"reverify-{patch_path.stem}", ref)
-    proxy: FilteringProxy | None = None
-    proxy_socket_dir: str | None = None
-    wall: _PrimeWall | None = None
+    # Council round 3 (N4): one stack holds every cleanup — proxies, bridge
+    # socket dirs, the worktree — and runs each even when another raises.
+    stack = contextlib.ExitStack()
+    stack.callback(remove_worktree, repo, worktree)
     try:
         env = dict(env)
         # v107-F3: TMPDIR inside the wall — unset, tools fall back to /tmp,
@@ -594,6 +482,7 @@ def reverify(
                 text = (worktree / rc).read_text(encoding="utf-8")
                 protected |= {str(PurePosixPath(p)) for p in _YARN_PATH.findall(text)}
         wall = _PrimeWall(
+            stack,
             tuple(sorted(hosts)),
             worktree=worktree,
             profile_path=profile_path,
@@ -647,22 +536,13 @@ def reverify(
                 f"{primed}; node deps primed from the baseline ({node_install}), verify ran offline"
             )
         network = sandbox.DENY_ALL_NETWORK
+        proxy: FilteringProxy | None = None
         ports = run_loopback_ports(loopback_ports, (), config.home)
         if profile_path is not None and ports and sandbox.availability().backend == "bubblewrap":
             # D6 + I2: bubblewrap's deny-all netns has no host loopback, so the
             # project's ports come in over the netshim bridge, through a proxy
             # that admits those ports alone (empty allowlist: still offline).
-            from .dispatch import _proxy_socket_root  # runtime: dispatch imports us
-
-            # ES-F257: kept apart from the proxy, so the finally removes it
-            # even when the proxy never started (its sockets bind in __init__).
-            proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
-            proxy = FilteringProxy(
-                (),
-                unix_socket_path=str(Path(proxy_socket_dir) / "p.sock"),
-                denied_loopback_ports=control_plane_ports(config.home),
-                loopback_ports=ports,
-            ).start()
+            proxy = _start_proxy(stack, (), config=config, bridge=True, loopback_ports=ports)
             network = sandbox.NetworkPolicy(allow=("localhost",))
         if profile_path is not None:
             try:
@@ -701,7 +581,7 @@ def reverify(
                 f"patch did not apply to a clean worktree at {ref or 'HEAD'}: "
                 f"{applied.stderr.strip()}",
             )
-        touched = _patch_paths(worktree, patch_path) if uv_prime or node_pin else set()
+        touched = set(patch_paths(worktree, patch_path)) if uv_prime or node_pin else set()
         if uv_prime and touched & _UV_PRIME_INPUTS:
             # v115-F13 (I2): the baseline prime installed the OLD dependencies;
             # a patch that changes the lockfile must be verified against the
@@ -738,17 +618,12 @@ def reverify(
         if isinstance(patched_prime, tuple):
             # v127-A0, the v115-F13 twin: a lockfile change (or the first
             # lockfile) is verified against the NEW packages. That install is
-            # patch data reaching the network before approval, so it runs only
-            # when every package comes from the baseline's registry hosts with
-            # an integrity hash and no installer config moved (I12, I11).
-            lockfile, install = patched_prime
+            # patch data reaching the network before approval: through the
+            # baseline's registry hosts alone, scripts off, and only when the
+            # installer itself is unchanged (I12, I11).
+            _lockfile, install = patched_prime
             refusal = _node_install_refusal(
-                worktree,
-                lockfile,
-                touched,
-                hosts=wall.hosts,
-                package_manager=package_manager,
-                protected=protected,
+                worktree, touched, package_manager=package_manager, protected=protected
             )
             if refusal:
                 return ReverifyOutcome(
@@ -819,16 +694,18 @@ def reverify(
             f"re-run exit codes {exit_codes} (expected all 0){primed}{evidence}\n"
             f"--- re-run output (tail) ---\n{failed_tail or '(no output)'}",
         )
+    except _PrimeUnavailable as exc:
+        # N3: a prime that cannot start is a supervisor-side problem — the
+        # same honest "unavailable" as a failed install, never a crash.
+        return ReverifyOutcome(
+            "unavailable",
+            commands,
+            [],
+            f"could not prime: the prime's proxy or sandbox could not be started ({exc}); "
+            "the verification command was not run",
+        )
     finally:
-        try:
-            if proxy is not None:
-                proxy.stop()
-            if wall is not None:
-                wall.close()
-        finally:
-            if proxy_socket_dir is not None:
-                shutil.rmtree(proxy_socket_dir, ignore_errors=True)
-            remove_worktree(repo, worktree)
+        stack.close()
 
 
 def reverify_run(

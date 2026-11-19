@@ -37,7 +37,7 @@ def _no_real_codex_login(
 @pytest.fixture(autouse=True)
 def _private_proxy_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """ES-F257 follow-up: proxy socket dirs (skep-nx-*) land under
-    XDG_RUNTIME_DIR, else /tmp (dispatch._proxy_socket_root). A test whose
+    XDG_RUNTIME_DIR, else /tmp (dispatch.proxy_socket_root). A test whose
     daemon thread or simulated crash skips the proxy's finally left them in
     the operator's real runtime dir. Each test gets its own dir beside the
     real one — short (AF_UNIX's 108-char cap) and never under the

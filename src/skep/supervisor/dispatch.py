@@ -114,7 +114,7 @@ def sandbox_backend() -> str | None:
     return sandbox_availability().backend
 
 
-def _proxy_socket_root() -> str:
+def proxy_socket_root() -> str:
     """A short dir for the proxy's AF_UNIX socket (108-char path limit).
 
     NEVER the test-redirected TMPDIR (bwrap tmpfs-masks it and it can be long);
@@ -846,7 +846,7 @@ def run_task(
                 and domains != ("*",)
             ):
                 # AF_UNIX 108-char limit: a short host dir, cleaned in finally.
-                proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=_proxy_socket_root())
+                proxy_socket_dir = tempfile.mkdtemp(prefix="skep-nx-", dir=proxy_socket_root())
                 proxy_unix_path = str(Path(proxy_socket_dir) / "p.sock")
             try:
                 # D6: loopback only on the run's ports; ES-F6 (B05): never on
@@ -1403,7 +1403,7 @@ def recover_interrupted_runs(
         worker = _recorded_worker(run_store, task_id)
         if worker is not None and worker[4]:
             held.add(Path(worker[4]).parent)
-    for stale in Path(_proxy_socket_root()).glob("skep-nx-*"):
+    for stale in Path(proxy_socket_root()).glob("skep-nx-*"):
         with suppress(OSError):
             if (
                 stale not in held
