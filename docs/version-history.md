@@ -2519,6 +2519,12 @@ once per run, mutations card instead of executing (the pinned test
 proves a scripted dispatch_run becomes a CARD). `continue_chat_after_run`
 opts out.
 
+## v1.0.1 — the public launch (2026-07-30)
+
+The first public release: the repository opens here (see the top of this
+file), published to PyPI and as a GitHub release on 2026-07-30. Everything
+above this line is the internal history that led to it.
+
 ## v106 (2026-07-29, F1–F12)
 
 The audit round — seeded not by a field test but by a nine-agent
@@ -2541,6 +2547,12 @@ undocumented command groups on first run. F11 implements v90's unkept
 visibility clauses (grant tier + time on the receipt, blocked
 auto-apply reasons on the audit trail, the ADR 0046 amendment). F12 is
 this file catching up.
+
+## v1.0.2 — the v106 audit round (2026-08-03)
+
+The published form of the v106 round above (its release notes count the
+fixes as F1–F13), plus parallel CI. Published to PyPI and as a GitHub
+release on 2026-08-03.
 
 ## v107 — the kept worktree (2026-08-03)
 

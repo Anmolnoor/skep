@@ -3,8 +3,10 @@
 skep is a security-posture project: workers run in OS sandboxes
 (Seatbelt/bubblewrap) with deny-by-default writes and network, every side
 effect passes a policy/capability engine, completed work is independently
-re-verified, and nothing lands without a human approval. A hole in any of
-those layers is a security bug even if no data was touched.
+re-verified, and your default branch never moves without a human approval
+(landing a patch on a `skep/*` branch needs one too, unless you opt in to
+auto-landing). A hole in any of those layers is a security bug even if no
+data was touched.
 
 ## Reporting a vulnerability
 
