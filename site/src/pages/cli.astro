@@ -1,13 +1,451 @@
 ---
-// Stub from the foundation: the page agent that owns this file replaces the body.
+// CLI: the command surface, grouped by what a person is trying to do. Every
+// synopsis was read from `skep <command> --help` under a throwaway home.
+// tests/supervisor/test_site_facts.py holds each `skep <command> [<subcommand>]`
+// named here against the argparse surface. The slash deck is not typed: it is
+// read at build from the web app's own COMMANDS table.
 import Base from '../layouts/Base.astro';
+import Callout from '../components/Callout.astro';
+import Chip from '../components/Chip.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Section from '../components/Section.astro';
+import Table from '../components/Table.astro';
+import Terminal from '../components/Terminal.astro';
+import { readRepoFile, siteFacts } from '../lib/repo.mjs';
+
+const { version, contract } = siteFacts();
+
+// Captured: `skep --version`. The two numbers are the build-time values.
+const versionOut = `
+$ skep --version
+skep ${version} (worker contract ${contract})
+`;
+
+// ---- the slash deck, from the code ----
+const appJs = readRepoFile('src/skep/supervisor/serve/static/app.js');
+const deckSource = /const COMMANDS = \{\n([\s\S]*?)\n\};/.exec(appJs)?.[1];
+if (!deckSource) throw new Error('app.js: the COMMANDS table was not found');
+// The table is a plain object literal of strings in this repository's own file.
+const DECK: Record<string, { usage: string; desc: string }> = new Function(`return {${deckSource}}`)();
+const CARD = ' (confirm card)';
+// src/skep/cli_chat.py: /trust and /steer act at once; /btw is a read-only model turn.
+const AT_ONCE = new Set(['trust', 'steer']);
+const effects = {
+  card: { kind: 'ask', label: 'confirm card' },
+  'at once': { kind: 'limit', label: 'acts at once' },
+  'model turn': { kind: 'ok', label: 'read-only turn' },
+  read: { kind: 'ok', label: 'read' },
+} as const;
+const effectOf = (name: string, desc: string): keyof typeof effects =>
+  desc.includes(CARD) ? 'card' : AT_ONCE.has(name) ? 'at once' : name === 'btw' ? 'model turn' : 'read';
+const deck = Object.entries(DECK).map(([name, { usage, desc }]) => ({
+  usage,
+  desc: desc.replace(CARD, ''),
+  effect: effects[effectOf(name, desc)],
+}));
+
+// The four commands that exist only in the terminal (usage from src/skep/cli_chat.py COMMANDS).
+const terminalOnly = [
+  ['/status', 'Print the startup line again: assistant readiness, approvals and cards waiting.'],
+  ['/model [name] [--scope chat|default]', 'Show the model this chat uses. With a name, propose a change of model on a card.'],
+  ['/replay', 'Print the last messages of this chat.'],
+  ['/exit', 'Leave the chat. A bare exit or quit also works.'],
+];
+const cliOnly = /CLI_ONLY = frozenset\(\{([^}]*)\}\)/.exec(readRepoFile('src/skep/cli_chat.py'))?.[1];
+const cliOnlyNames = (cliOnly?.match(/[a-z]+/g) ?? []).sort().join(' ');
+if (cliOnlyNames !== 'exit model replay status') {
+  throw new Error(`cli_chat.py CLI_ONLY is now "${cliOnlyNames}": update terminalOnly in cli.astro`);
+}
+
+// ---- the commands ----
+type Row = [command: string, what: string];
+interface Group {
+  id: string;
+  eyebrow: string;
+  title: string;
+  lead: string;
+  rows: Row[];
+  options?: { caption: string; rows: Row[] };
+  note?: string;
+}
+
+const groups: Group[] = [
+  {
+    id: 'setup',
+    eyebrow: 'Set up and check',
+    title: 'Get a machine ready',
+    lead: 'The guided first run, the manual profile commands it replaces, the health checks and the model provider registry.',
+    rows: [
+      ['skep onboard [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV] [--workdir DIR] [--sandbox auto|podman|none] [--template NAME] [--role NAME] [--yes] [--no-chat]', 'The guided first run: model, work directory, sandbox, policy baseline, role. Run it again and it resumes at the first step that is not done.'],
+      ['skep onboard --check', 'Read-only: <code>skep doctor</code> plus the baseline, engine, sandbox, work directory and egress checks. Exits 0 only when all are ready.'],
+      ['skep onboard --quiet | --verbose', 'Turn the first-session <code>why:</code> lines and the per-turn tally off, or back on.'],
+      ['skep setup --personal [--provider NAME] [--model MODEL] [--endpoint URL] [--api-key-env ENV]', 'Create or update the local profile without the guided steps.'],
+      ['skep setup --template NAME [--dry-run] [--apply]', 'Apply a policy template (builder, operator, assistant). <code>--dry-run</code> prints the resolved table and writes nothing; <code>--apply</code> confirms switching an existing policy document.'],
+      ['skep doctor', 'Check configuration and runtime readiness: profile, provider, each engine and its sign-in, the sandbox. Exits non-zero when the profile is not ready.'],
+      ['skep status [--personal] [--json]', 'Setup, provider, sandbox and approval status. <code>--personal</code> adds recent runs with their re-verification state.'],
+      ['skep provider list', 'Registered model providers.'],
+      ['skep provider health', 'The latest health probe of each provider.'],
+      ['skep provider presets', 'The built-in catalog. Each row says where prompts go.'],
+      ['skep provider add [ID] [--preset PRESET] [--protocol P] [--base-url URL] [--model M] [--api-key-env ENV] [--cost-class C] [--order N] [--host H] [--activate]', 'Register a provider profile, from a preset or by protocol (anthropic, bedrock, ollama, openai_compat, openai_responses). <code>--api-key-env</code> takes the name of a variable, never a key.'],
+      ['skep provider use ID', 'Make a profile the active one. The assistant uses it from its next turn.'],
+      ['skep provider set-key ID [--clear]', 'Store a profile\'s API key. The value is read from standard input and kept in a 0600 file.'],
+      ['skep provider login ID --client-id CID [--device-url URL] [--token-url URL] [--scope S]', 'OAuth device-code login with your own client id; the token is stored as the key.'],
+      ['skep provider remove ID', 'Delete a provider profile.'],
+    ],
+  },
+  {
+    id: 'run',
+    eyebrow: 'Run a task',
+    title: 'Dispatch work',
+    lead: 'One task against one repository, a small team of tasks, and a view of the agents running on this machine.',
+    rows: [
+      ['skep run [repo] [instructions] --execution-mode sandbox|workspace [options]', 'Run one coding task. skep makes a disposable worktree, starts the worker, records what it does, captures the patch and re-verifies the result.'],
+      ['skep team --manager ROLE --task REPO INSTRUCTIONS [--task …] [--role ROLE] [--delegated-by ACTOR@ROLE] [--execution-mode sandbox|workspace] [--answer-host HOST] [--worker-cmd COMMAND]', 'A team run: a manager in a role dispatches one to three tasks, recorded as one thread in the decision log.'],
+      ['skep agents [--json]', 'Coding agents running on this machine, each working, idle or blocked, and whether skep governs it.'],
+    ],
+    options: {
+      caption: 'Options of skep run',
+      rows: [
+        ['--execution-mode sandbox|workspace', '<code>sandbox</code> runs the worker behind the OS sandbox. <code>workspace</code> has no OS sandbox and is for skep\'s own worker only. An external engine always runs in <code>sandbox</code>.'],
+        ['--engine aider|builtin|claude_code|codex|pi', 'The coding engine for this run, over the project\'s pinned engine.'],
+        ['--worker-cmd COMMAND', 'A worker command for this run (default: <code>$SKEP_WORKER_CMD</code>, else skep\'s own worker). A project pinned to an external engine refuses it unless <code>--engine builtin</code> is passed.'],
+        ['--network DOMAIN', 'A domain the worker may reach; repeatable; added to the project\'s hosts. Omitted, the policy\'s default network applies: the builder and operator baselines allow their package registries, the assistant baseline and a bare home allow none. A worker that calls the model always reaches its configured provider.'],
+        ['--minimal', 'Start with deny-all grants and learn through approvals. A worker that calls the model still reaches its provider. Cannot be combined with <code>--template</code>, <code>--network</code> or <code>--env-allow</code>.'],
+        ['--env-allow ENV', 'Pass one environment variable to the worker, by name; repeatable.'],
+        ['--template NAME, --param KEY=VALUE, --no-template', 'Run a saved workflow template and fill its parameters, or skip the automatic match against learned templates.'],
+        ['--ref REF', 'The git ref the worktree is based on.'],
+        ['--role ROLE, --delegated-by ACTOR@ROLE', 'Give the worker a role, whose layer narrows its grants, and dispatch as a delegator: the worker holds no more than the delegator does.'],
+        ['--answer-host HOST', 'On a home with no approved baseline, answer a host the run would ask about, for this run only; repeatable. Required when there is no terminal to ask on.'],
+        ['--auto-approve', 'Opt in to landing a re-verified fix that changes only dependency manifests, without a click. It lands on a <code>skep/*</code> branch, never the default branch.'],
+        ['--planning-protocol plan|react', 'One plan up front (the default) or a bounded act-and-observe loop.'],
+        ['--budget-wall-clock, --budget-max-iterations, --budget-max-actions, --budget-max-provider-calls', 'Limits for this run.'],
+        ['--caste CASTE', 'The worker kind: <code>coding</code> (the default) or <code>audit</code>.'],
+        ['--resume-of TASK_ID', 'The task this run supersedes.'],
+        ['--quiet', 'Do not print the live phase lines.'],
+      ],
+    },
+  },
+  {
+    id: 'review',
+    eyebrow: 'Review and land',
+    title: 'Read the evidence, then decide',
+    lead: 'Approving a completed run applies its patch on a branch. The branch, pull-request and repository commands are your half of git: they run on your own credentials.',
+    rows: [
+      ['skep review <task_id>', 'The run\'s evidence, re-verification result, approval state and diff. A unique prefix of the id is enough.'],
+      ['skep review <task_id> --approve [--branch NAME] [--pr] [--pr-base BRANCH] [--note TEXT] [--actor NAME]', 'On a completed run, apply the patch on <code>skep/&lt;task_id&gt;</code> or the branch you name; the default branch is refused. On a run waiting at a gate, resume it. <code>--pr</code> then pushes that branch and opens a pull request with the GitHub CLI.'],
+      ['skep review <task_id> --deny', 'Reject the pending approval.'],
+      ['skep review <task_id> --allow-command', 'Approve and remember a pending shell command, then resume the run.'],
+      ['skep review <task_id> --reverify', 'Re-verify a completed run that was never re-verified, with the project\'s pinned verify command. A run with no re-verification record cannot be approved.'],
+      ['skep branch list REPO', 'Branches and how they track origin.'],
+      ['skep branch create REPO NAME [--from REF]', 'Create a branch off a base ref.'],
+      ['skep branch merge REPO --source REF --into BRANCH', 'Merge one ref into a branch. Refuses to merge into the default branch.'],
+      ['skep branch push REPO NAME', 'Push a branch that is not the default branch to origin.'],
+      ['skep branch delete REPO NAME [--remote]', 'Delete a branch; refuses unmerged work.'],
+      ['skep pr list REPO [--state open|closed|merged|all]', 'Pull requests.'],
+      ['skep pr open REPO --branch NAME [--base BRANCH] [--title TITLE]', 'Open a pull request for an existing local branch.'],
+      ['skep pr merge REPO NUMBER [--method merge|squash|rebase]', 'Merge an open pull request. This is the one command that moves the base branch.'],
+      ['skep pr close REPO NUMBER [--delete-branch]', 'Close a pull request without merging.'],
+      ['skep repo list', 'Every repository skep can reach.'],
+      ['skep repo refresh REPO', 'Fetch origin and fast-forward the default branch.'],
+      ['skep repo push-baseline REPO [--base BRANCH]', 'Create the missing default branch on an empty origin.'],
+    ],
+    note: 'A worker can never push, pull, fetch or switch branches. skep itself pushes only when you ask: with <code>--pr</code> on an approval, <code>skep pr open</code> or <code>skep branch push</code>.',
+  },
+  {
+    id: 'policy',
+    eyebrow: 'Projects, policy and roles',
+    title: 'Say what is allowed',
+    lead: 'A project binds a repository to its policy. The policy commands read the rules, answer for one action, and lock the baseline.',
+    rows: [
+      ['skep project preview REPO [--pack PACK] [--strategy STRATEGY] [--phase PHASE] [--engine ENGINE] [--verify-command CMD]', 'Show what a setup would save, and save nothing.'],
+      ['skep project setup REPO [--pack PACK] [--strategy STRATEGY] [--phase PHASE] [--engine ENGINE] [--verify-command CMD] [--group NAME] [--loopback-port PORT] [--codex-chatgpt-login | --no-codex-chatgpt-login] [--unlocked | --no-unlocked]', 'Save a project. It infers the verify command from the repository\'s own entry point; <code>--verify-command</code> pins one. A repository that is not a project yet needs <code>--pack</code> or <code>--strategy</code>. Also takes <code>--project-id</code>, <code>--name</code>, <code>--no-seed-schedules</code> and <code>--no-seed-commands</code>.'],
+      ['skep project list', 'Every project.'],
+      ['skep project show [PROJECT_ID] [--effective REPO]', 'One project\'s policy, or what a run against a repository would actually get.'],
+      ['skep project set-phase PROJECT_ID PHASE', 'Move a project between phases (bootstrap, build, maintain).'],
+      ['skep project remove PROJECT_ID', 'Unregister a project. skep forgets it; the folder is untouched.'],
+      ['skep policy registry', 'Every policy setting skep has.'],
+      ['skep policy rsop REPO', 'The resultant policy for a repository: each key, the layer that decided it, what it overrode.'],
+      ['skep policy why REPO SCOPE ACTION VALUE [--role NAME] [--delegated-by ACTOR@ROLE]', 'Would this one action be allowed here, and which rule decides? Nothing is dispatched or recorded.'],
+      ['skep policy explain SUBJECT', 'A template, <code>baseline</code> or <code>role:&lt;name&gt;</code> as an allow / ask / deny table.'],
+      ['skep policy approve [--template NAME | --file PATH] [--reapprove] [--yes] [--diff]', 'Lock a template or a layer file as the policy baseline. <code>--diff</code> first replays recent decisions under the new layer and shows what flips.'],
+      ['skep policy baseline [status|diff]', 'The approved baseline. <code>status</code> exits 1 when the file no longer matches its lock.'],
+      ['skep policy migrate --dry-run', 'Replay the decision log under today\'s policy and list every verdict that changes. Writes nothing.'],
+      ['skep policy decide SCOPE ACTION VALUE [--repo REPO] [--actor NAME] [--role NAME] [--delegated-by ACTOR@ROLE] [--read-only]', 'Decide one action for an agent outside skep, and record the decision.'],
+      ['skep policy hook [--actor NAME]', 'The same decision as a Claude Code PreToolUse hook: payload on standard input, verdict as hook JSON.'],
+      ['skep policy grants', 'Every learned grant: its id, what it matches, its lifetime, what it is bound to.'],
+      ['skep policy revoke RULE_ID', 'Remove one learned grant. What it allowed asks again.'],
+      ['skep policy decisions [--actor GLOB] [--since TIME] [--limit N] [--team ID]', 'The decision log, newest first, with counts per verdict.'],
+      ['skep role list', 'Every role; <code>*</code> marks the one new chats open in.'],
+      ['skep role show NAME', 'One role\'s record and its policy layer as a table.'],
+      ['skep role use NAME [--chat ID]', 'Set the role new chats open in, or switch one chat.'],
+      ['skep trust CHAT_ID [--bit private|untrusted]', 'Trust a chat again by clearing its taint bits. The chat deck\'s <code>/trust</code> is the same action.'],
+    ],
+  },
+  {
+    id: 'serve',
+    eyebrow: 'The daemon and the chat',
+    title: 'Talk to the assistant',
+    lead: 'skep serve is the local daemon: the HTTP API, the web interface, the chat and the schedule ticker. skep chat is the same chat in a terminal.',
+    rows: [
+      ['skep serve [--host HOST] [--port PORT] [--worker-cmd COMMAND] [--auto-approve] [--no-readopt]', 'Run the daemon. It prints its address and an access token at startup. Workers still running from a previous serve are picked up again unless <code>--no-readopt</code>.'],
+      ['skep chat [--url URL] [--chat ID] [--continue] [--thinking] [--role ROLE] [--oneshot MESSAGE] [--yes]', 'Talk to the assistant in the terminal. It needs a running <code>skep serve</code>.'],
+      ['skep start [--host HOST] [--port PORT]', 'The older status dashboard. <code>skep serve</code> is the full daemon and is what you normally want.'],
+      ['skep channel status', 'One line for each messenger channel: configuration, secret present or not, last delivery.'],
+    ],
+    options: {
+      caption: 'Options of skep chat',
+      rows: [
+        ['--continue, --chat ID', 'Resume the most recent chat, or one by id.'],
+        ['--role ROLE', 'Open the new chat in this role. The default is the one <code>skep role list</code> marks with <code>*</code>.'],
+        ['--oneshot MESSAGE', 'Send one message to a new chat, print the reply as it streams, and exit. No prompts: cards the turn proposes are skipped and reported by id.'],
+        ['--yes', 'With <code>--oneshot</code>: confirm every card this turn proposes, once. Never a policy card; those stay pending.'],
+        ['--thinking', 'Show the model\'s thinking, dimmed.'],
+        ['--url URL', 'The daemon\'s address. Default: <code>$SKEP_SERVE_URL</code>, else the port this home\'s serve recorded, else port 8765 on this machine.'],
+      ],
+    },
+  },
+  {
+    id: 'schedule',
+    eyebrow: 'Repeat and reuse',
+    title: 'Schedules, templates, skills and memory',
+    lead: 'Recurring runs, saved task shapes, and the two things skep can learn only with your approval.',
+    rows: [
+      ['skep schedule add NAME REPO [INSTRUCTIONS] --every 1d [--template NAME] [--param KEY=VALUE] [--caste CASTE] [--ref REF] [--network DOMAIN] [--env-allow ENV] [--role NAME]', 'Add a recurring run, from instructions or a saved template. <code>--every</code> takes 30s, 5m, 2h or 1d.'],
+      ['skep schedule list', 'Every schedule.'],
+      ['skep schedule remove NAME', 'Remove a schedule.'],
+      ['skep schedule health', 'How each schedule has been doing.'],
+      ['skep tick [--worker-cmd COMMAND] [--auto-approve]', 'Dispatch every due schedule once, for cron. A running <code>skep serve</code> does this itself.'],
+      ['skep template add [NAME] [--instructions TEXT] [--from FILE] [options]', 'Author a workflow template, from flags or a .toml or .json file.'],
+      ['skep template list', 'Every template.'],
+      ['skep template show NAME', 'One template in full.'],
+      ['skep template suggest NAME REPO INSTRUCTIONS [--save]', 'Suggest a template from remembered approvals; <code>--save</code> keeps it.'],
+      ['skep template remove NAME', 'Remove a template. <code>skep template delete</code> is the same command.'],
+      ['skep template rename OLD_NAME NEW_NAME', 'Rename a template; schedules bound to it follow.'],
+      ['skep skill …', 'The learned-skill lifecycle: propose, list, show, test, approve, reject, export, seed, shelf, promote, packs, import-md, import. Nothing is admitted without your approval.'],
+      ['skep skill shelf [list|add|remove] [PATH]', 'Register a directory of Agent Skills, for example <code>~/.claude/skills</code>.'],
+      ['skep memory …', 'Durable memory, gated by proposals: list, search, show, forget, proposals, propose, approve, reject, approve-batch, reject-batch.'],
+    ],
+  },
+  {
+    id: 'govern',
+    eyebrow: 'Agents you run elsewhere',
+    title: 'Govern an agent skep did not start',
+    lead: 'Two ways to put skep\'s policy in front of an agent running in another tool. Both decide from the same policy and record the decision; neither is a sandbox.',
+    rows: [
+      ['skep acp govern [--repo PATH] [--actor NAME] -- AGENT_ARGV…', 'The process an ACP client starts in place of the agent. It answers the agent\'s permission requests from policy and records them.'],
+      ['skep acp doctor -- AGENT_ARGV…', 'Start the agent, open a dry session and print what skep can govern in it. Sends no prompt.'],
+      ['skep acp install-hint', 'Print the rows to paste into T3 Code\'s Local ACP command dialog.'],
+      ['skep policy hook', 'The Claude Code PreToolUse hook (listed above with the policy commands).'],
+    ],
+    note: 'What each one covers and does not cover is on <a class="c-green" href="/agents.html#hook">the agents page</a>.',
+  },
+  {
+    id: 'ops',
+    eyebrow: 'Ops and imports',
+    title: 'Nodes, ops checks and imports',
+    lead: 'A smaller surface: governed operations checks against registered machines, and a one-way import from Hermes.',
+    rows: [
+      ['skep node add NODE_ID [--name NAME] [--host HOST] [--kind local|ssh|container] [--trust LEVEL] [--cap CAP]', 'Register a node and the ops capabilities it allows.'],
+      ['skep node list', 'Registered nodes.'],
+      ['skep ops run CHECK --node NODE [--approve] [--arg KEY=VALUE]', 'Resolve an ops check against a node. Without <code>--approve</code> it is a dry-run plan.'],
+      ['skep ops schedule add …', 'Add a conservative ops schedule.'],
+      ['skep hermes import [--hermes-home PATH] [--dry-run]', 'Stage Hermes memory, skills and sessions behind skep\'s existing gates: they arrive as proposals and drafts.'],
+    ],
+  },
+];
+
 ---
 
-<Base title="CLI" description="CLI: this page is being written." active="cli">
-  <section class="section">
-    <div class="wrap narrow stack">
-      <h1 class="t-h2">CLI</h1>
-      <p class="t-lead">This page is being written.</p>
+<Base
+  title="CLI"
+  description="Every skep command, grouped by what you are trying to do: set up, run a task, review and land, policy, the daemon and chat, schedules, and the chat's slash commands."
+  active="cli"
+>
+  <Section eyebrow="CLI" lead="Every top-level command, grouped by what you are trying to do. For the exact parser output, add --help to any command.">
+    <h1 slot="heading" class="t-h2">CLI reference</h1>
+    <div class="grid grid-2" style="align-items: start">
+      <div class="grid">
+        <CodeBlock code="skep [--home HOME] [--version] <command>" lang="text" title="shape of a command" copy={false} />
+        <div class="prose">
+          <ul>
+            <li><code>--home HOME</code> selects the state directory. It goes before the command. Default: <code>$SKEP_HOME</code>, else <code>~/.skep</code>.</li>
+            <li><code>--version</code> prints the package version and the worker contract version.</li>
+          </ul>
+        </div>
+      </div>
+      <Terminal code={versionOut} title="skep --version" captured="skep --version; the two numbers are filled in from this release's sources" />
     </div>
-  </section>
+    <nav class="row jump" aria-label="Sections of this page">
+      {groups.map((group) => <a class="link-arrow" href={`#${group.id}`}>{group.eyebrow}</a>)}
+      <a class="link-arrow" href="#deck">Slash commands</a>
+    </nav>
+  </Section>
+
+  {
+    groups.map((group, index) => (
+      <Section id={group.id} band={index % 2 === 0} eyebrow={group.eyebrow} title={group.title} lead={group.lead}>
+        <div class="grid">
+          <Table caption={`Commands: ${group.eyebrow.toLowerCase()}`}>
+            <thead>
+              <tr><th scope="col">Command</th><th scope="col">What it does</th></tr>
+            </thead>
+            <tbody>
+              {group.rows.map(([command, what]) => (
+                <tr>
+                  <th scope="row" class="cmd"><code>{command.split(' ').map((token) => (<><span class="tok">{token}</span>{' '}</>))}</code></th>
+                  <td set:html={what} />
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+          {group.id === 'run' && (
+            <div class="grid grid-2" style="align-items: start">
+              <CodeBlock
+                code={`$ skep run /path/to/repo "fix the failing test" --execution-mode sandbox\n$ skep run /path/to/repo "fix the failing test" --engine codex --execution-mode sandbox`}
+                title="examples"
+              />
+              <Callout kind="limit" title="Choose the mode on every run">
+                <p>
+                  Only <code>--execution-mode sandbox</code> puts the worker behind the OS sandbox.
+                  A run with no model configured fails: skep's own worker then falls back to a fixed
+                  routine that handles one Python hello-world task.
+                </p>
+              </Callout>
+            </div>
+          )}
+          {group.options && (
+            <Table caption={group.options.caption}>
+              <thead>
+                <tr><th scope="col">Option</th><th scope="col">What it does</th></tr>
+              </thead>
+              <tbody>
+                {group.options.rows.map(([option, what]) => (
+                  <tr>
+                    <th scope="row" class="cmd"><code>{option.split(' ').map((token) => (<><span class="tok">{token}</span>{' '}</>))}</code></th>
+                    <td set:html={what} />
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+          )}
+          {group.note && <p class="prose-width t-small c-mut" set:html={group.note} />}
+        </div>
+      </Section>
+    ))
+  }
+
+  <Section id="deck" band={groups.length % 2 === 0} eyebrow="Slash commands" title="The command deck" lead="In the web chat and in skep chat, a message that starts with / is a command of yours. The model never sees it.">
+    <div class="grid">
+      <Table caption="The deck, read at build from the web app's COMMANDS table">
+        <thead>
+          <tr><th scope="col">Command</th><th scope="col">What it does</th><th scope="col">Effect</th></tr>
+        </thead>
+        <tbody>
+          {deck.map((row) => (
+            <tr>
+              <th scope="row" class="cmd"><code>{row.usage.split(' ').map((token) => (<><span class="tok">{token}</span>{' '}</>))}</code></th>
+              <td>{row.desc}</td>
+              <td><Chip kind={row.effect.kind}>{row.effect.label}</Chip></td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+      <div class="grid grid-2" style="align-items: start">
+        <div class="prose">
+          <ul>
+            <li>A command marked <strong>confirm card</strong> changes something, so it shows a card and waits for your yes.</li>
+            <li><code>/trust</code> and <code>/steer</code> act at once, with no card. In the terminal, a typed <code>/approve</code> or <code>/deny</code> is the decision itself and is not asked twice.</li>
+            <li><code>/approve</code> and <code>/deny</code> take a review id or a card id. <code>/land</code> takes a task id. Approving a completed run's review already applies its patch; <code>/land</code> lands a completed run directly.</li>
+            <li><code>/workon</code> is not a selector: it makes a directory a workspace, with a git baseline and a project.</li>
+            <li>There is no command that starts a run. Ask for the work in a plain message and confirm the card the assistant proposes, or use <code>skep run</code>.</li>
+          </ul>
+        </div>
+        <Table caption="Terminal only: these four exist in skep chat, not in the web chat">
+          <thead>
+            <tr><th scope="col">Command</th><th scope="col">What it does</th></tr>
+          </thead>
+          <tbody>
+            {terminalOnly.map(([usage, what]) => (
+              <tr>
+                <th scope="row" class="cmd"><code>{usage.split(' ').map((token) => (<><span class="tok">{token}</span>{' '}</>))}</code></th>
+                <td>{what}</td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      </div>
+      <p class="prose-width t-small c-mut">
+        The same reference as one markdown file, with more detail on roles and delegation:
+        <a class="c-green" href="/docs/cli-reference.html">CLI reference doc</a>.
+      </p>
+    </div>
+  </Section>
 </Base>
+
+<style>
+  .jump {
+    margin-top: var(--s-5);
+    gap: var(--s-2) var(--s-5);
+  }
+  /* The command column keeps a readable share of the table and wraps inside it. */
+  .cmd {
+    width: 44%;
+    min-width: 220px;
+  }
+  .cmd code {
+    font-size: var(--fs-small);
+    color: var(--text-hi);
+  }
+  /* One word of a synopsis: the line wraps between words, and a word breaks
+     only when it is wider than the column. */
+  .tok {
+    display: inline-block;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+  td :global(code) {
+    color: var(--text-soft);
+    white-space: nowrap;
+  }
+
+  /* On a phone a table becomes a list: each row is a block, each cell a line
+     under its label. The kit's Table would otherwise squeeze every column. */
+  @media (max-width: 640px) {
+    thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+    tbody tr {
+      display: block;
+      padding: var(--s-3) var(--s-4);
+      border-bottom: 1px solid var(--line-inner);
+    }
+    tbody tr:last-child {
+      border-bottom: 0;
+    }
+    tbody tr > th,
+    tbody tr > td {
+      display: block;
+      width: auto;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+    }
+    tbody tr > td {
+      margin-top: var(--s-2);
+    }
+    tbody td[data-label]::before {
+      content: attr(data-label);
+      display: block;
+      margin-bottom: var(--s-1);
+      font-family: var(--mono);
+      font-size: var(--fs-micro);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--text-faint);
+    }
+  }
+</style>

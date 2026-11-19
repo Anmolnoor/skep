@@ -1,13 +1,373 @@
 ---
-// Stub from the foundation: the page agent that owns this file replaces the body.
+// First run: skep onboard, the locked baseline, the check, and the shortest
+// path to a governed run. The transcripts were captured on 2026-11-18 (Fedora)
+// under a throwaway HOME, shown as ~, with the mock provider: no model, no key.
 import Base from '../layouts/Base.astro';
+import Button from '../components/Button.astro';
+import Callout from '../components/Callout.astro';
+import Chip from '../components/Chip.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Section from '../components/Section.astro';
+import Table from '../components/Table.astro';
+import Terminal from '../components/Terminal.astro';
+
+// Captured: the five steps. The explain table that step 4 prints is cut, and
+// the note line says so.
+const onboard = `
+$ skep onboard --provider mock --workdir ~/workspace --sandbox auto --template builder --role builder --yes --no-chat
+① model
+  test: mock provider: no call made
+  egress: mock — no call leaves this machine
+② work directory
+  created ~/workspace
+  registered as project workspace
+  verify_command: none inferred (no entry point) — re-verify falls back
+  to the worker's own command until one is pinned
+③ sandbox
+  auto: rings live: floor, locked baseline, capability layer, sandbox (bubblewrap)
+④ template
+policy baseline: builder
+# cut here: the allow / ask / deny table (39 rows) and its settings
+  baseline locked: builder sha256 01db10ac4fc3
+⑤ role
+  role: builder (recorded in ~/.skep/first_run.json)
+onboarded — check any time: skep onboard --check
+`;
+
+// Captured: the same command before and after onboarding.
+const baseline = `
+# on a fresh home
+$ skep policy baseline status
+baseline: none approved
+# after skep onboard
+$ skep policy baseline status
+baseline: builder approved 2026-11-19T00:23:26Z sha256 01db10ac4fc3
+`;
+
+// Captured: the end of `skep onboard --check`. The doctor sections come first.
+const check = `
+$ skep onboard --check
+# cut here: the skep doctor sections
+Onboard checks:
+- baseline: ready - builder locked, sha256 01db10ac4fc3
+- policy scopes: ready - 7/7 scopes — the baseline governs these
+- sandbox: ready - rings live: floor, locked baseline, capability layer, sandbox (bubblewrap)
+- workdir: ready - ~/workspace is writable
+- model: ready - Mock provider is ready for local V1 verification.
+- steps: ready - all five complete
+
+Egress truth:
+model: mock — no call leaves this machine
+workers: pypi.org, files.pythonhosted.org, registry.npmjs.org, proxy.golang.org allowed by the baseline; every other host asks
+telemetry: none
+`;
+
+// Captured: one sandbox-mode run, then its approval. With no model configured
+// the built-in worker is a fixed fallback that handles this one task.
+const run = `
+$ skep run ~/workspace "create a python hello world script" --execution-mode sandbox
+dispatching task against ~/workspace
+  → worker started (vcoding-minimal-0.1.0)  project: workspace (trusted_local_dev/build)  dispatch: allow dispatch.allow.run_request_resolved  landing: require_approval landing.require_approval.project_policy_disabled_auto_apply
+  → plan: create hello.py
+  → run: …/bin/python hello.py  policy: allow capability.allow.shell_verify (…/bin/python hello.py)
+  → exit 0: …/bin/python hello.py  policy: allow capability.allow.shell_verify (…/bin/python hello.py)
+  → verification: passed
+  → terminal: completed
+  → re-verify: passed [confirmed]  worker passed  re-ran clean: all exit 0 [command from the worker's own verify step]  re-ran …/bin/python hello.py  -> exit 0
+task 01a1f130-6433-71f7-80b5-c4c122f6022d
+  state:        completed (1.6s)
+  verification: passed
+  summary:      created hello.py and verified it runs.
+  evidence:     ~/.skep/supervisor/audit/01a1f130-6433-71f7-80b5-c4c122f6022d
+  next:         skep review 01a1f130-6433-71f7-80b5-c4c122f6022d
+$ skep review 01a1f130-6433-71f7-80b5-c4c122f6022d --approve
+approved: task 01a1f130-6433-71f7-80b5-c4c122f6022d (by you)
+  patch applied on branch skep/01a1f130-6433-71f7-80b5-c4c122f6022d in ~/workspace
+  next: git -C ~/workspace switch skep/01a1f130-6433-71f7-80b5-c4c122f6022d
+`;
+
+const shortest = `
+$ skep run ~/workspace "fix the failing test" --execution-mode sandbox
+# evidence, re-verification, the diff
+$ skep review <task_id>
+# applies the patch on skep/<task_id>
+$ skep review <task_id> --approve
+`;
+const pin = `
+$ skep project setup ~/workspace --verify-command "uv run pytest"
+`;
+const engine = `
+# the token is printed by: claude setup-token
+$ export CLAUDE_CODE_OAUTH_TOKEN=...
+$ skep project setup ~/workspace --engine claude_code --verify-command "uv run pytest"
+$ skep run ~/workspace "fix the failing test" --execution-mode sandbox
+`;
 ---
 
-<Base title="First run" description="First run: this page is being written.">
-  <section class="section">
-    <div class="wrap narrow stack">
-      <h1 class="t-h2">First run</h1>
-      <p class="t-lead">This page is being written.</p>
+<Base
+  title="First run"
+  description="skep onboard step by step: model, work directory, sandbox, the locked policy baseline and role. Then the shortest path to a first governed run."
+>
+  <Section eyebrow="First run" lead="skep onboard takes a new machine to a governed chat in five steps. Until you approve a policy baseline, a fresh home asks you before every governed action.">
+    <h1 slot="heading" class="t-h2">First run</h1>
+    <div class="grid">
+      <div class="prose-width">
+        <CodeBlock code="$ pipx install skep && skep onboard" title="Install and first run" />
+      </div>
+      <p class="prose-width t-small c-mut">
+        Not installed yet, or no sandbox backend? Start at <a class="c-green" href="/install.html">Install</a>.
+      </p>
     </div>
-  </section>
+  </Section>
+
+  <Section id="onboard" band eyebrow="skep onboard" title="The five steps" lead="Plain prompts, no full-screen interface, so it works over SSH. Each step writes a record, and running it again resumes at the first step that is not done.">
+    <div class="grid">
+      <Table caption="What skep onboard asks and writes">
+        <thead>
+          <tr><th scope="col">Step</th><th scope="col">What it asks</th><th scope="col">What it does</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">① model</th>
+            <td data-label="It asks">Provider, model, endpoint, and the name of the environment variable that holds the API key. Never the key itself.</td>
+            <td data-label="It does">Tests the provider already configured and keeps it if it works; otherwise looks for a local Ollama. Makes one test call and prints where prompts will go: this machine, or a named host.</td>
+          </tr>
+          <tr>
+            <th scope="row">② work directory</th>
+            <td data-label="It asks">A path. The default is <code>~/workspace</code>, created if missing.</td>
+            <td data-label="It does">Registers it as a project and infers its verify command from the repository's own entry point, when it has one.</td>
+          </tr>
+          <tr>
+            <th scope="row">③ sandbox</th>
+            <td data-label="It asks"><code>auto</code>, <code>podman</code> or <code>none</code>.</td>
+            <td data-label="It does">Records the backend. <code>auto</code> is bubblewrap on Linux and Seatbelt on macOS.</td>
+          </tr>
+          <tr>
+            <th scope="row">④ template</th>
+            <td data-label="It asks"><code>builder</code>, <code>operator</code> or <code>assistant</code> (the default), each shown as an allow / ask / deny table.</td>
+            <td data-label="It does">Locks the one you choose as the policy baseline, after you type <code>yes</code>.</td>
+          </tr>
+          <tr>
+            <th scope="row">⑤ role</th>
+            <td data-label="It asks">One of the same three names.</td>
+            <td data-label="It does">Records the role new chats open in.</td>
+          </tr>
+        </tbody>
+      </Table>
+      <div class="prose">
+        <p>
+          After step ⑤ it connects to <code>skep serve</code>, or starts it, and opens
+          <code>skep chat</code>. Pass <code>--no-chat</code> to stop before that.
+        </p>
+        <p>
+          Every prompt has a flag, so the whole run can be scripted. <code>--yes</code> takes the
+          default for any step you gave no flag for and skips the typed <code>yes</code>.
+          <code>--provider</code> takes <code>mock</code>, <code>ollama</code>,
+          <code>openai-compatible</code>, or a preset id from <code>skep provider presets</code>.
+        </p>
+      </div>
+      <Terminal code={onboard} title="skep onboard, scripted" captured="skep onboard with the mock provider (no model call, no key), throwaway HOME shown as ~, Fedora, 2026-11-18" />
+    </div>
+  </Section>
+
+  <Section id="baseline" eyebrow="Policy baseline" title="A fresh home asks until a baseline is locked" lead="Step ④ is the one that changes how skep decides. Before it, nothing is allowed by rule.">
+    <div class="grid grid-2" style="align-items: start">
+      <div class="prose">
+        <ul>
+          <li>
+            With no baseline approved, every governed action in the policy engine's scopes gets the
+            verdict <code>ask</code>, reason <code>no_baseline</code>. The floor still denies first:
+            a worker's <code>git push</code> is refused whatever you answer.
+          </li>
+          <li>
+            A template is a starting set of rules. <code>skep policy explain builder</code> prints
+            one as a table before you lock anything.
+          </li>
+          <li>
+            Locking writes the baseline and a lock for it. A hand edit afterwards is reported as
+            <code>baseline_tampered</code>: every action asks until you run
+            <code>skep policy approve --reapprove</code>, which shows the difference first.
+          </li>
+          <li>
+            Without the guided run, <code>skep policy approve --template builder</code> locks a
+            baseline on its own.
+          </li>
+          <li>
+            If you answered <code>none</code> at the sandbox step, the baseline is locked with every
+            allowed write turned into a question.
+          </li>
+        </ul>
+      </div>
+      <Terminal code={baseline} title="skep policy baseline status" captured="skep policy baseline status, before and after onboarding, throwaway home, 2026-11-18" />
+    </div>
+  </Section>
+
+  <Section id="check" band eyebrow="skep onboard --check" title="Check the setup at any time" lead="A read-only check: skep doctor, then the onboarding checks, then where your data goes. It exits 0 only when every check is ready.">
+    <div class="grid grid-2" style="align-items: start">
+      <div class="prose">
+        <p>On top of what <code>skep doctor</code> reports, it checks that:</p>
+        <ul>
+          <li>the baseline still matches its lock;</li>
+          <li>the locked baseline is the one your template locks under the current sandbox;</li>
+          <li>the policy engine is on for every scope;</li>
+          <li>the chosen sandbox backend is present;</li>
+          <li>the work directory is writable, and the model is reachable;</li>
+          <li>all five steps are done.</li>
+        </ul>
+        <p>
+          <code>skep doctor</code> itself reports each engine's binary and sign-in state, the
+          Codex ChatGPT login, the provider key relay, and on Linux the Landlock level.
+          There is a captured example on the <a href="/install.html#sandbox">install page</a>.
+        </p>
+      </div>
+      <Terminal code={check} title="skep onboard --check" captured="the end of skep onboard --check after the scripted run above, 2026-11-18" />
+    </div>
+  </Section>
+
+  <Section id="first-run" eyebrow="First governed run" title="Run, review, approve" lead="Three commands. The flag on the first one decides whether the worker is behind an OS sandbox.">
+    <div class="grid">
+      <Table caption="The two execution modes">
+        <thead>
+          <tr><th scope="col">Flag</th><th scope="col">OS sandbox</th><th scope="col">What that means</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><code>--execution-mode sandbox</code></th>
+            <td data-label="OS sandbox"><Chip kind="ok">yes</Chip></td>
+            <td data-label="What that means">The worker runs under bubblewrap, Seatbelt or podman. Writes are confined to the run's own worktree and results. If no backend can be applied, the run does not start. Claude Code, Codex, Aider and pi always run this way.</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>--execution-mode workspace</code></th>
+            <td data-label="OS sandbox"><Chip kind="limit">no</Chip></td>
+            <td data-label="What that means">No OS wall around the worker. It still works in a disposable worktree, its actions still pass skep's capability layer, and re-verification and approval still apply. Only skep's own worker can run this way.</td>
+          </tr>
+        </tbody>
+      </Table>
+      <div class="grid grid-2" style="align-items: start">
+        <div class="grid">
+          <CodeBlock code={shortest} title="the shortest path" />
+          <div class="prose">
+            <ul>
+              <li>The run needs the model from step ①. With no model configured, skep's own worker falls back to a fixed routine that handles one Python hello-world task and fails anything else.</li>
+              <li>After the worker finishes, skep re-runs the verify command itself on a clean checkout. The outcome is <code>confirmed</code>, <code>contradicted</code>, <code>unavailable</code> or <code>not_applicable</code>.</li>
+              <li>Approving applies the patch on a new branch, <code>skep/&lt;task_id&gt;</code>. Your default branch does not move: review, merge or delete that branch as you would any other.</li>
+              <li>From the chat that onboarding opened, a plain message asking for the work does the same thing: the assistant proposes the run on a card and you confirm it.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="grid">
+          <Callout kind="limit" title="Pin the command that proves the work">
+            <p>
+              Re-verification uses the project's pinned verify command. When the project has none,
+              as in the capture below, it falls back to the command the worker chose for itself and
+              the record says so. Pin one:
+            </p>
+          </Callout>
+          <CodeBlock code={pin} title="pin a verify command" />
+          <Callout kind="note">
+            <p>
+              If a run stops at a shell command that needs approval, the terminal offers
+              <code>[a] approve once</code>, <code>[b] approve + remember</code>, <code>[d] deny</code> and
+              <code>[s] skip</code>. <code>b</code> saves the command as a grant at once; it is offered
+              only when the command can be remembered. <code>skep policy grants</code> lists what was
+              saved and <code>skep policy revoke</code> removes one.
+            </p>
+          </Callout>
+        </div>
+      </div>
+      <Terminal code={run} title="a sandbox-mode run, then its approval" captured="skep run and skep review --approve, sandbox mode on bubblewrap, no model configured (the fallback worker), throwaway HOME shown as ~, 2026-11-18" />
+    </div>
+  </Section>
+
+  <Section id="engine" band eyebrow="Your own agent" title="Hand the task to Claude Code or Codex" lead="An external agent needs two things the built-in worker does not: its sign-in in the environment, and a pinned verify command.">
+    <div class="grid grid-2" style="align-items: start">
+      <div class="grid">
+        <CodeBlock code={engine} title="Claude Code as the engine" />
+        <p class="t-small c-mut">
+          <a class="link-arrow" href="/agents.html">All five engines and how each signs in</a>
+        </p>
+      </div>
+      <div class="prose">
+        <ul>
+          <li>The sandbox hides the keychain and the agent's login files, so Claude Code signs in from <code>CLAUDE_CODE_OAUTH_TOKEN</code> or <code>ANTHROPIC_API_KEY</code>, and Codex from <code>OPENAI_API_KEY</code> or an opt-in ChatGPT-plan login. Without one the run is refused with <code>NO AUTH ENV</code>.</li>
+          <li>skep refuses to dispatch an external agent until the project pins a verify command.</li>
+          <li>The work directory from step ② is already a project. For any other repository, add <code>--strategy trusted_local_dev</code> the first time: a repository that is not a project yet is refused with <code>project setup requires a pack or strategy</code>.</li>
+        </ul>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="storage" eyebrow="Storage" title="Where skep keeps things" lead="Everything is under one home directory: ~/.skep, unless SKEP_HOME names another. Secrets are files with owner-only permissions, never rows in the database.">
+    <div class="grid">
+      <Table caption="Files under the skep home">
+        <thead>
+          <tr><th scope="col">Path</th><th scope="col">What it holds</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row"><code>supervisor/supervisor.sqlite3</code></th><td>Runs, events, approvals, projects and settings. No secret values.</td></tr>
+          <tr><th scope="row"><code>supervisor/llm-secret</code>, <code>llm-secret-&lt;id&gt;</code></th><td>Model provider keys saved from the web Settings page or <code>skep provider set-key</code>. Mode 0600.</td></tr>
+          <tr><th scope="row"><code>supervisor/serve-token</code></th><td>The access token <code>skep serve</code> prints at startup. Mode 0600.</td></tr>
+          <tr><th scope="row"><code>supervisor/*-secret</code></th><td>Messenger channel secrets. Mode 0600.</td></tr>
+          <tr><th scope="row"><code>serve.env</code></th><td>Optional, written by you: <code>KEY=VALUE</code> lines the daemon loads at startup, such as an agent's sign-in token.</td></tr>
+          <tr><th scope="row"><code>supervisor/audit/</code></th><td>Evidence for every run, and the policy decision log (<code>audit/policy/decisions.jsonl</code>).</td></tr>
+          <tr><th scope="row"><code>profile.json</code>, <code>first_run.json</code></th><td>The profile and the onboarding record. A key given as <code>--api-key-env</code> is stored as the variable's name.</td></tr>
+        </tbody>
+      </Table>
+      <div class="prose">
+        <p>
+          A worker receives environment variables only by name, from an allowlist. Inside the
+          sandbox the files above, your SSH and cloud credentials and your shell history are hidden
+          from the worker; the full list is in <a href="/docs/sandboxing.html">the sandboxing doc</a>.
+        </p>
+      </div>
+      <div class="row">
+        <Button href="/agents.html" icon="arrow-right">Agents and engines</Button>
+        <Button href="/cli.html" variant="ghost">CLI reference</Button>
+        <Button href="/docs/quickstart.html" variant="ghost">Quickstart doc</Button>
+      </div>
+    </div>
+  </Section>
 </Base>
+
+<style>
+  /* On a phone a table becomes a list: each row is a block, each cell a line
+     under its label. The kit's Table would otherwise squeeze every column. */
+  @media (max-width: 640px) {
+    thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+    tbody tr {
+      display: block;
+      padding: var(--s-3) var(--s-4);
+      border-bottom: 1px solid var(--line-inner);
+    }
+    tbody tr:last-child {
+      border-bottom: 0;
+    }
+    tbody tr > th,
+    tbody tr > td {
+      display: block;
+      width: auto;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+    }
+    tbody tr > td {
+      margin-top: var(--s-2);
+    }
+    tbody td[data-label]::before {
+      content: attr(data-label);
+      display: block;
+      margin-bottom: var(--s-1);
+      font-family: var(--mono);
+      font-size: var(--fs-micro);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--text-faint);
+    }
+  }
+</style>
