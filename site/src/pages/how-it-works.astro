@@ -1,13 +1,789 @@
 ---
-// Stub from the foundation: the page agent that owns this file replaces the body.
+// How it works: one run from dispatch to landing, then the policy engine.
+//
+// Every transcript on this page was captured on 2026-11-18 (the UTC stamps in
+// the output read 2026-11-19) on Linux with the bubblewrap backend, under a
+// throwaway home (`export SKEP_HOME=$(mktemp -d -p ~/.cache)`), with no model,
+// no API key and no engine login: the run is skep's built-in deterministic
+// worker, which needs no provider (src/skep/workers/coding_minimal.py:870).
+// Setup, in order:
+//   cp -r examples/skep-demo $SKEP_HOME/skep-demo; git init; one commit
+//   skep policy approve --template builder --yes
+//   skep project setup $SKEP_HOME/skep-demo --pack trusted_local_dev --no-seed-schedules \
+//     --verify-command "python3 -m unittest discover -s tests"
+// Display edits, all stated in each panel's `captured` line: the repository
+// path is shown as ~/code/skep-demo, the throwaway home as $SKEP_HOME, and the
+// interpreter of the checkout skep ran from as .venv/bin/python.
 import Base from '../layouts/Base.astro';
+import Callout from '../components/Callout.astro';
+import Card from '../components/Card.astro';
+import Chip from '../components/Chip.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Diff from '../components/Diff.astro';
+import Ledger from '../components/Ledger.astro';
+import Section from '../components/Section.astro';
+import Table from '../components/Table.astro';
+import Terminal from '../components/Terminal.astro';
+import PolicyTrace from '../components/islands/PolicyTrace.tsx';
+import { siteFacts } from '../lib/repo.mjs';
+
+const { contract } = siteFacts();
+const CAPTURE = '2026-11-18, Linux (bubblewrap), throwaway SKEP_HOME, no model';
+const PATHS = 'repository shown as ~/code/skep-demo, the home as $SKEP_HOME';
+
+const steps = [
+  { href: '#dispatch', name: 'Dispatch', text: 'a project, an engine and a pinned verify command' },
+  { href: '#isolation', name: 'Isolation', text: 'a disposable worktree inside an OS sandbox' },
+  { href: '#isolation', name: 'Work', text: 'the agent edits; skep records' },
+  { href: '#evidence', name: 'Evidence', text: 'a patch and a directory of records' },
+  { href: '#reverify', name: 'Re-verification', text: 'your command, re-run on a clean worktree' },
+  { href: '#landing', name: 'Approval', text: 'you read the patch and the verdict' },
+  { href: '#landing', name: 'Landing', text: 'a commit on a skep/* branch' },
+];
+
+const setup = `
+$ skep project setup ~/code/skep-demo --pack trusted_local_dev --no-seed-schedules --verify-command "python3 -m unittest discover -s tests"
+saved: skep-demo (trusted_local_dev/build)
+  pack: trusted_local_dev@1
+  bindings: repo_path=~/code/skep-demo
+  seeded templates: 1
+    skep-demo-trusted-maintenance
+  seeded schedules: 0
+  seeded shell commands: 0
+  verify command: python3 -m unittest discover -s tests
+  loopback ports: closed (--loopback-port PORT opens one)
+`;
+
+const run = `
+$ skep run ~/code/skep-demo "create a Python hello world script" --execution-mode sandbox
+dispatching task against ~/code/skep-demo
+  → worker started (vcoding-minimal-0.1.0)  project: skep-demo (trusted_local_dev/build)  dispatch: allow dispatch.allow.run_request_resolved  landing: require_approval landing.require_approval.project_policy_disabled_auto_apply
+  → plan: create hello.py
+  → run: .venv/bin/python hello.py  policy: allow capability.allow.shell_verify (.venv/bin/python hello.py)
+  → exit 0: .venv/bin/python hello.py  policy: allow capability.allow.shell_verify (.venv/bin/python hello.py)
+  → verification: passed
+  → terminal: completed
+  → re-verify: passed [confirmed]  worker passed  re-ran clean: all exit 0 [command from the project's pinned verify_command]  re-ran python3 -m unittest discover -s tests  -> exit 0
+task 01a1f147-656d-7a10-81a4-4b42ba08e7bc
+  state:        completed (1.6s)
+  verification: passed
+  summary:      created hello.py and verified it runs.
+  evidence:     $SKEP_HOME/supervisor/audit/01a1f147-656d-7a10-81a4-4b42ba08e7bc
+  next:         skep review 01a1f147-656d-7a10-81a4-4b42ba08e7bc
+`;
+
+const evidence = `
+$ ls -1 $SKEP_HOME/supervisor/audit/01a1f147-656d-7a10-81a4-4b42ba08e7bc
+01a1f147-656d-7a10-81a4-4b42ba08e7bc.ndjson
+01a1f147-656d-7a10-81a4-4b42ba08e7bc.patch
+events.ndjson
+result.json
+reverify.profile.sb
+sandbox.profile.sb
+task.json
+worker.log
+`;
+
+const review = `
+$ skep review 01a1f147-656d-7a10-81a4-4b42ba08e7bc
+task 01a1f147-656d-7a10-81a4-4b42ba08e7bc
+  state:        completed
+  verification: passed (hello.py printed expected output)
+  project:      skep-demo (trusted_local_dev/build)
+  binding:      repo_path: ~/code/skep-demo
+  dispatch:     allow dispatch.allow.run_request_resolved
+  landing:      require_approval landing.require_approval.project_policy_disabled_auto_apply
+  re-verify:    passed [confirmed] (G10): re-ran clean: all exit 0 [command from the project's pinned verify_command]
+                re-ran ['python3 -m unittest discover -s tests'] → exit [0]
+  usage:        0 provider calls (G8)
+  worker:       coding-minimal-0.1.0 manifest 8ab5562abbb9…
+  summary:      created hello.py and verified it runs.
+  evidence:     $SKEP_HOME/supervisor/audit/01a1f147-656d-7a10-81a4-4b42ba08e7bc
+  changed:      hello.py
+  commands:
+    [0] .venv/bin/python hello.py  # verify
+`;
+
+// The one hunk of the patch `skep review` printed under the summary above
+// (a new file: `--- /dev/null`, `+++ b/hello.py`).
+const patch = `
+@@ -0,0 +1 @@
++print("Hello, world!")
+`;
+
+const landing = `
+$ skep review 01a1f147-656d-7a10-81a4-4b42ba08e7bc --approve --actor demo
+approved: task 01a1f147-656d-7a10-81a4-4b42ba08e7bc (by demo)
+  patch applied on branch skep/01a1f147-656d-7a10-81a4-4b42ba08e7bc in ~/code/skep-demo
+  next: git -C ~/code/skep-demo switch skep/01a1f147-656d-7a10-81a4-4b42ba08e7bc
+$ git -C ~/code/skep-demo branch -vv
+* main                                      389b911 skep-demo
+  skep/01a1f147-656d-7a10-81a4-4b42ba08e7bc efa4344 Apply skep task 01a1f147-656d-7a10-81a4-4b42ba08e7bc
+$ skep review 01a1f147-656d-7a10-81a4-4b42ba08e7bc --approve --actor demo
+error: this task already landed on skep/01a1f147-656d-7a10-81a4-4b42ba08e7bc; a task lands once — dispatch a follow-up
+$ skep review 01a1f147-656d-7a10-81a4-4b42ba08e7bc --approve --branch main --actor demo
+error: refusing to land on the default branch 'main'; choose another name
+`;
+
+const delegation = `
+$ skep policy why skep-demo shell run "npm test" --role builder --delegated-by queen@operator
+  "delegation": {
+    "chain": ["queen@operator"],
+    "delegator": "queen@operator",
+    "held": {
+      "run": { "decided_by": "role:operator/shell-gated", "verdict": "require_approval" }
+    },
+    "note": "delegated by queen@operator: the delegatee holds no more than queen@operator does — the stricter verdict stands; beyond it is exceeds_delegator"
+  },
+  "role": {
+    "decided_by": "role:builder/shell-npm-test",
+    "layer": "role:builder",
+    "verdict": "allow"
+  },
+  "run": {
+    "decided_by": "delegation:queen@operator/role:operator/shell-gated",
+    "rule_id": "exceeds_delegator",
+    "verdict": "require_approval"
+  }
+`;
+
+const policyCommands = `
+$ skep policy why <repo> shell run "npm test"
+$ skep policy explain builder
+$ skep policy rsop <repo>
+$ skep policy decisions --since 2026-11-18
+`;
+
+// Rows of $SKEP_HOME/supervisor/audit/policy/decisions.jsonl after three
+// `skep policy decide --repo demo-repo shell run "<command>"` calls.
+const decisions = [
+  {
+    when: '00:48:14Z',
+    what: 'shell.run  git push origin main',
+    detail: 'actor cli · repo demo-repo · decided_by floor/floor.worker-git-hard-denies · v 1',
+    verdict: 'deny' as const,
+  },
+  {
+    when: '00:48:14Z',
+    what: 'shell.run  npm i left-pad',
+    detail: 'actor cli · repo demo-repo · decided_by default/unmatched · verdict require_approval · v 1',
+    verdict: 'ask' as const,
+  },
+  {
+    when: '00:48:15Z',
+    what: 'shell.run  cat ~/.ssh/id_ed25519',
+    detail: 'actor cli · repo demo-repo · decided_by floor/floor.secret-reads · v 1',
+    verdict: 'deny' as const,
+  },
+];
 ---
 
-<Base title="How it works" description="How it works: this page is being written." active="how-it-works">
-  <section class="section">
-    <div class="wrap narrow stack">
-      <h1 class="t-h2">How it works</h1>
-      <p class="t-lead">This page is being written.</p>
+<Base
+  title="How it works"
+  description="One skep run from dispatch to landing: the worktree, the OS sandbox, re-verification with your pinned command, approval, and the policy engine behind every decision."
+  active="how-it-works"
+>
+  <Section eyebrow="How it works" lead="You hand Claude Code or Codex a task and walk away. skep decides where the agent runs, re-runs your project's own test command on a clean checkout, and holds the patch until you approve it. This page follows one run, then the policy engine that answers every side effect.">
+    <h1 slot="heading" class="t-h2">One run, from dispatch to a branch you approve</h1>
+    <ol class="run-steps">
+      {
+        steps.map((step, index) => (
+          <li>
+            <a href={step.href}>
+              <span class="step-no">{index + 1}</span>
+              <span class="run-step-name">{step.name}</span>
+              <span class="t-small run-step-text">{step.text}</span>
+            </a>
+          </li>
+        ))
+      }
+    </ol>
+  </Section>
+
+  <Section id="dispatch" band eyebrow="Step 1 · Dispatch" title="A project, an engine and a pinned command" lead="A run is one task against a registered project. The project says which agent does the work and which command proves it.">
+    <div class="split">
+      <div class="grid prose-width">
+        <p>
+          <code>skep project setup</code> registers a repository and pins its <code>verify_command</code>. By default
+          it infers the command from the repository's own entry point; <code>--verify-command</code> sets it by hand. A
+          repository with no entry point skep can detect is pinned to nothing on purpose.
+        </p>
+        <p>
+          The engine is <code>builtin</code> (skep's own worker, the default) or an external agent:
+          <code>claude_code</code>, <code>codex</code>, <code>aider</code> or <code>pi</code>. Set it for the project
+          with <code>skep project setup &lt;repo&gt; --engine claude_code</code>, or for one run with
+          <code>--engine</code>.
+        </p>
+        <p>An external engine is dispatched only when three things hold:</p>
+        <ul class="plain-list">
+          <li>
+            The project pins a verify command. The engine's built-in check is <code>git diff --check</code>, and
+            re-running a whitespace check proves nothing.
+          </li>
+          <li>
+            Its auth env is set: <code>CLAUDE_CODE_OAUTH_TOKEN</code> or <code>ANTHROPIC_API_KEY</code> for Claude
+            Code, <code>OPENAI_API_KEY</code> for Codex. Its keychain and file logins are masked, so without the
+            variable the dispatch stops with <code>NO AUTH ENV</code>.
+          </li>
+          <li>A sandbox backend works. An external engine always runs in sandbox mode, whatever the request says.</li>
+        </ul>
+        <p>
+          Every run names its execution mode. <code>sandbox</code> puts the worker behind the OS wall.
+          <code>workspace</code> is for the built-in worker only: the same worktree and the same pipeline, with no OS
+          wall. With no mode on the request and none in policy, the dispatch is refused until one is chosen.
+        </p>
+        <Callout kind="note" title="About the transcripts">
+          They are captured from one real run of the built-in worker with no model configured, so the task is a
+          trivial one. A run with Claude Code or Codex goes through the same steps and prints the same record, but
+          needs that engine's credentials.
+        </Callout>
+      </div>
+      <div class="grid">
+        <Terminal code={setup} title="skep project setup" captured={`${CAPTURE}; ${PATHS}`} />
+        <Terminal code={run} title="skep run" captured={`${CAPTURE}; ${PATHS}, the interpreter as .venv/bin/python`} />
+      </div>
     </div>
-  </section>
+  </Section>
+
+  <Section id="isolation" eyebrow="Steps 2 and 3 · Isolation and work" title="A disposable worktree inside an OS sandbox" lead="The agent never edits your checkout. It works in a git worktree of its own, and in sandbox mode the operating system confines the process that runs there.">
+    <div class="grid">
+      <div class="grid grid-3">
+        <Card title="The worktree" icon="git-branch">
+          <p>
+            Created at <code>~/.skep/supervisor/worktrees/&lt;task_id&gt;</code> from the baseline ref
+            (<code>--ref</code>, else the current commit), and removed when the run ends. Your checkout, your branch
+            and your index are not touched.
+          </p>
+        </Card>
+        <Card title="The sandbox" icon="shield">
+          <p>
+            Seatbelt on macOS, bubblewrap with Landlock on Linux, podman if you opt in. The root filesystem is
+            read-only; the worktree, the run's result directory, its git metadata and a per-project cache are
+            writable. If no backend can be applied, the worker does not start.
+          </p>
+        </Card>
+        <Card title="The contract" icon="file-json">
+          <p>
+            skep is not the coding agent. It starts a worker that speaks one contract (version
+            <code>{contract}</code>): a task as JSON in, a stream of NDJSON events out, a result as JSON out. The
+            built-in worker and every adapter sit behind the same boundary.
+          </p>
+        </Card>
+      </div>
+      <div class="grid grid-2">
+        <Callout kind="limit" title="What the wall does not do">
+          <p>
+            Workspace mode has no OS wall at all. In sandbox mode writes are confined, but reads outside the worktree
+            are mostly open: skep masks a list of credential paths (the secret floor), not your home directory. The
+            default network includes the model provider and the project's package registries.
+          </p>
+          <p>
+            skep also switches the agent's own guard off (Claude Code runs with <code>bypassPermissions</code>, Codex
+            with <code>danger-full-access</code>), so skep's sandbox replaces that layer. It does not stack on it.
+            <a class="inline-link" href="/security.html#sandbox">The sandbox in detail</a>.
+          </p>
+        </Callout>
+        <Callout kind="note" title="What decides each action while the agent works">
+          <p>
+            The built-in worker asks the policy engine before every side effect: <code>shell.run</code>,
+            <code>filesystem.write</code>, <code>network.fetch</code> and the rest. An <code>ask</code> stops the run
+            at a prompt: approve once, approve and remember, deny, or skip. Remembering saves the exact command as a
+            grant for the project at once.
+          </p>
+          <p>
+            An external engine's own tool calls do not pass that layer. The sandbox is what confines it, which is why
+            it is never run outside one.
+          </p>
+        </Callout>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="evidence" band eyebrow="Step 4 · Evidence" title="A patch and a directory of records" lead="A finished run leaves a patch, not a commit. Everything skep recorded about the run is in one directory under the home.">
+    <div class="split">
+      <div class="grid">
+        <Terminal code={evidence} title="the run's audit directory" captured={`${CAPTURE}; the home shown as $SKEP_HOME (default ~/.skep)`} />
+        <p class="prose-width">
+          With the default home the directory is <code>~/.skep/supervisor/audit/&lt;task_id&gt;/</code>. Task ids are
+          UUIDv7, so they sort by time. Inside a worker's sandbox the whole audit directory is masked.
+        </p>
+      </div>
+      <Table
+        caption="What each file is"
+        head={['File', 'Holds']}
+        rows={[
+          ['task.json', 'The task as dispatched: instructions, permissions, budget, the pinned verify command, and the dispatch and landing decisions.'],
+          ['events.ndjson', "The worker's event stream, one JSON object per line. A copy is kept under the task id."],
+          ['result.json', 'Final status, summary, changed files, the commands that ran, the verification claim, usage and risk flags.'],
+          ['<task_id>.patch', 'The git patch against the baseline. This is the thing you approve.'],
+          ['sandbox.profile.sb', 'The sandbox the worker ran under. On Linux it is the bubblewrap argument list.'],
+          ['reverify.profile.sb', 'The sandbox the re-verification ran under.'],
+          ['worker.log', 'The worker process’s log, with skep’s own notes about starting and stopping it.'],
+        ]}
+        rowHeaders
+      />
+    </div>
+  </Section>
+
+  <Section id="reverify" eyebrow="Step 5 · Re-verification (G10)" tone="green" title="skep re-runs your command on a clean worktree" lead="The agent's own “tests passed” is a claim. skep checks it without the agent, with the command the project pinned.">
+    <div class="split">
+      <div class="grid prose-width">
+        <ol class="plain-list numbered">
+          <li>skep pins the baseline commit and creates a fresh worktree there.</li>
+          <li>
+            In a uv project it primes the dependencies with <code>uv sync</code> from the baseline, with the network,
+            before the patch is applied. If the patch changes the lockfile it primes again afterwards.
+          </li>
+          <li>It applies the patch.</li>
+          <li>
+            It runs the project's pinned <code>verify_command</code> inside the sandbox with the network denied. The
+            command gets only <code>PATH</code> and <code>HOME</code> from skep's environment, and the project's
+            loopback ports.
+          </li>
+          <li>It records the outcome, the exit codes and which command it ran.</li>
+        </ol>
+        <Terminal code={review} title="skep review" captured={`${CAPTURE}; ${PATHS}; the manifest fingerprint is cut short`} />
+      </div>
+      <div class="grid">
+        <Table caption="The four outcomes of a re-verification">
+          <thead>
+            <tr><th scope="col">Outcome</th><th scope="col">Means</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row"><Chip kind="ok">passed</Chip></th>
+              <td>
+                The patch applied and every command exited 0. Printed as <code>[confirmed]</code> when the worker also
+                reported that verification passed.
+              </td>
+            </tr>
+            <tr>
+              <th scope="row"><Chip kind="risk">failed</Chip></th>
+              <td>
+                The patch did not apply to the clean worktree, or a command exited non-zero or timed out. Printed as
+                <code>NOT CONFIRMED — DO NOT TRUST</code>. Auto-landing does not apply.
+              </td>
+            </tr>
+            <tr>
+              <th scope="row"><Chip kind="limit">unavailable</Chip></th>
+              <td>
+                skep could not honestly re-run the check: the sandbox could not be built (the command is never run
+                unconfined instead), the worker claimed changed files but left no patch, the <code>uv sync</code> prime
+                failed, or the command is not installed where skep runs. Never counted as confirmed.
+              </td>
+            </tr>
+            <tr>
+              <th scope="row"><Chip kind="limit">not_applicable</Chip></th>
+              <td>
+                The run changed no files or produced no patch, so there is nothing to re-verify. Printed as
+                <code>nothing to re-verify</code>, not as an alarm.
+              </td>
+            </tr>
+          </tbody>
+        </Table>
+        <Callout kind="limit" title="The fallback, and the limits">
+          <p>
+            A project with no pinned command, and any run outside a project, falls back to re-running the command the
+            worker nominated. The record says which was used:
+            <code>[command from the worker's own verify step]</code>. That is the weaker guarantee, and
+            <code>skep doctor</code> names the projects still on it.
+          </p>
+          <p>
+            The check is only as strong as the command. And if skep itself is configured to run without the sandbox,
+            the re-run happens on the host.
+          </p>
+        </Callout>
+        <p class="prose-width t-small c-mut">
+          <code>skep review --approve</code> is refused for a run that has no re-verification record;
+          <code>skep review --reverify</code> runs the check for a run that never got one.
+        </p>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="landing" band eyebrow="Steps 6 and 7 · Approval and landing" title="Approval turns the patch into a commit on a skep/* branch" lead="Your default branch never moves by itself. Landing puts one commit on a separate branch, and what happens to that branch is your normal git decision.">
+    <div class="split">
+      <div class="grid">
+        <Diff code={patch} file="hello.py (new file)" stage landed="skep/01a1f147-656d-7a10-81a4-4b42ba08e7bc ← patch · main untouched" />
+        <Terminal code={landing} title="skep review --approve" captured={`${CAPTURE}; ${PATHS}; the first line of each refusal`} />
+      </div>
+      <div class="grid prose-width">
+        <ul class="plain-list">
+          <li>
+            <code>skep review &lt;task_id&gt;</code> shows the patch and the evidence.
+            <code>--approve</code> applies the patch as one commit on <code>skep/&lt;task_id&gt;</code>;
+            <code>--deny</code> rejects it. The web UI's Inbox and the chat do the same thing through a card.
+          </li>
+          <li>
+            <code>--branch &lt;name&gt;</code> lands on another branch. An existing branch gets the commit appended.
+            The repository's default branch is refused, whatever its capitalisation, and so is a name that starts with
+            a ref namespace or a remote.
+          </li>
+          <li>
+            <code>--pr</code> also pushes that landing branch and opens a GitHub pull request with <code>gh</code>.
+            The base branch moves only when the pull request is merged.
+          </li>
+          <li>A task lands once. More work on it is a follow-up run.</li>
+        </ul>
+        <Callout kind="limit" title="A worker cannot push; skep pushes only when you ask">
+          A worker can never push, pull, fetch or switch branches. skep itself pushes a landing branch in three cases,
+          all yours: <code>skep review --approve --pr</code>, <code>skep pr open</code>, and a
+          <code>push_branch</code> card in chat. It never updates an existing default branch.
+        </Callout>
+      </div>
+    </div>
+    <div class="grid after-split">
+      <h3 class="t-h3">Two opt-in lanes land without a click</h3>
+      <p class="prose-width">
+        Landing needs your approval by default. Two lanes land by themselves once you switch them on. Both land only a
+        patch that re-verification confirmed, both refuse to append past the commit that was re-verified, and both
+        record the approval with the actor <code>auto:&lt;rule&gt;</code>.
+      </p>
+      <div class="grid grid-2">
+        <Card title="deps-safe" icon="package-check" level="h4">
+          <dl class="facts">
+            <dt>Switched on by</dt>
+            <dd><code>--auto-approve</code> on <code>skep run</code>, <code>skep tick</code> or <code>skep serve</code></dd>
+            <dt>Lands when</dt>
+            <dd>
+              The worker verified, re-verification confirmed, there are no risk flags, at most 10 files changed, and
+              every one is a manifest or a lockfile.
+            </dd>
+            <dt>Branch</dt>
+            <dd><code>skep/&lt;task_id&gt;</code></dd>
+          </dl>
+        </Card>
+        <Card title="verified-patch" icon="git-merge" level="h4">
+          <dl class="facts">
+            <dt>Switched on by</dt>
+            <dd>
+              Project policy <code>auto_apply_verified_patch</code>: on by default in the <code>maintain</code> phase,
+              and for a project set up with <code>--unlocked</code>.
+            </dd>
+            <dt>Lands when</dt>
+            <dd>
+              The worker verified, re-verification confirmed with the pinned command, and there are no risk flags.
+              Any diff.
+            </dd>
+            <dt>Branch</dt>
+            <dd>
+              <code>skep/maintain</code> in the maintain phase: one integration branch, always under
+              <code>skep/</code>. Otherwise <code>skep/&lt;task_id&gt;</code>.
+            </dd>
+          </dl>
+        </Card>
+      </div>
+      <p class="prose-width"><strong class="hi">Neither lane can land on the default branch.</strong></p>
+      <p class="prose-width t-small c-mut">
+        A patch that cannot append cleanly to the integration branch goes back to a normal approval. From a messenger
+        only four low-risk action classes can be confirmed (<code>dispatch_run</code>,
+        <code>scheduled_result_ack</code>, <code>read_url</code>, <code>start_research</code>): shell commands, policy
+        changes and landings are confirmed in the web UI or the terminal.
+      </p>
+    </div>
+  </Section>
+
+  <Section id="policy" eyebrow="The policy engine" title="One decision point: allow, ask or deny" lead="Every side effect skep governs is one question: a scope, an action and a value. skep policy why answers it without running anything, and names the layer that decided.">
+    <div class="trace-layout">
+      <PolicyTrace client:visible />
+      <div class="grid">
+        <h3 class="t-h3">How to read a trace</h3>
+        <ul class="plain-list">
+          <li><code>floor</code> is printed only when a floor rule decided. The floor is read before any layer.</li>
+          <li><code>baseline</code> is the state of the locked baseline the layers sit on.</li>
+          <li><code>run</code> is the answer a worker dispatched in that repository gets.</li>
+          <li><code>operator</code> is the answer the Queen (the chat assistant) gets for its own tools.</li>
+          <li>
+            The engine's word for ask is <code>require_approval</code>; the tables and the cards print it as
+            <code>ask</code>.
+          </li>
+        </ul>
+        <CodeBlock code={policyCommands} title="Ask it yourself" />
+        <Callout kind="limit" title="Who is asked, and who is not">
+          The built-in worker, the Queen's tools, the Claude Code hook and the ACP governor all decide here. An
+          external engine dispatched as a worker is not asked command by command: the sandbox confines it instead.
+        </Callout>
+      </div>
+    </div>
+    <div class="grid after-split">
+      <h3 class="t-h3">The same engine, for an agent you run elsewhere</h3>
+      <div class="grid grid-2">
+        <Card title="The Claude Code hook" icon="webhook" href="/docs/policy-hook.html" level="h4">
+          <p>
+            <code>skep policy hook</code> is a PreToolUse hook. Claude Code enforces its verdict for Bash, file writes,
+            WebFetch and WebSearch, and every decision is recorded.
+          </p>
+          <p>
+            Limits: every other tool falls through to Claude Code's own permissions. It judges the command text, it is
+            not a sandbox, and it runs only if you installed it.
+          </p>
+        </Card>
+        <Card title="The ACP governor" icon="route" href="/docs/acp-governor.html" level="h4">
+          <p>
+            <code>skep acp govern</code> sits between an ACP client and its agent, answers the agent's permission
+            requests from policy and records them.
+          </p>
+          <p>
+            Limits: it does not sandbox, and an agent in a mode that never asks is only observed, after the fact.
+          </p>
+        </Card>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="layers" band eyebrow="Layers and precedence" title="Deny binds, unmatched asks, a role only tightens" lead="Policy is layered, and every verdict names the layer and the rule that produced it.">
+    <div class="split">
+      <Table
+        caption="The order of one decision, first to last"
+        head={['Step', 'What it does']}
+        rows={[
+          ['1. Floor', 'Hard denies that nothing lifts: remote git and branch switching, privilege escalation, credential reads. Outbound posts always ask.'],
+          ['2. Baseline guard', 'On a fresh home with no approved baseline, or when the baseline no longer matches its lock, every decision asks and dispatch is refused.'],
+          ['3. The lane’s rules', 'Inside a repository, the run policy: global, template, phase, group, project, session grants, dispatch. Elsewhere, the operator document.'],
+          ['4. Operator roots', 'Only where the operator document matched nothing: the folders you registered answer allow. They never outrank a rule.'],
+          ['5. Unmatched', 'No rule matched: ask. The one exception is a shell opened in a repository’s working directory, which is denied.'],
+          ['6. Role', 'The role layer can make the answer stricter. It never grants.'],
+          ['7. Delegation', 'A dispatched worker holds no more than whoever dispatched it.'],
+          ['8. Taint', 'Last: in a chat that has read private data or taken in outside content, an allow becomes an ask.'],
+        ]}
+        rowHeaders
+      />
+      <div class="grid prose-width">
+        <ul class="plain-list">
+          <li>
+            <strong>Deny binds across layers.</strong> Inside one layer the most specific rule wins and deny wins
+            ties. Across layers any deny binds, then any named ask, then the most specific of the rest. A catch-all
+            <code>*</code> ask is a default: a more specific allow answers it.
+          </li>
+          <li>
+            <strong>Unmatched is ask.</strong> What nobody wrote a rule for goes to a person. It is not denied and it
+            is not allowed.
+          </li>
+          <li>
+            <strong>The locked baseline.</strong> <code>skep policy approve --template builder</code> (or
+            <code>operator</code>, <code>assistant</code>) locks one template with a SHA-256. Every setting it sets is
+            enforced: a project, a group or a dispatch that tries to change it is refused by name, and
+            <code>skep policy rsop</code> shows the refusal.
+          </li>
+          <li>
+            <strong>A role only tightens.</strong> The stricter of the role and the baseline stands. One documented
+            exception: a role's catch-all ask is a default, so a command you approved with “keep for this session” or
+            “always” runs again in that role without a card. Its denies and named asks still bind.
+          </li>
+          <li>
+            <strong>Session grants</strong> last until <code>skep serve</code> restarts.
+            <code>skep policy grants</code> lists every learned grant; <code>skep policy revoke</code> removes one.
+          </li>
+          <li>
+            <strong>Taint</strong> never turns a deny into an ask and never grants. <code>/trust</code> clears a
+            chat's taint.
+          </li>
+        </ul>
+        <p class="t-small c-mut">
+          A verdict's <code>decided_by</code> starts with one of: <code>floor/</code>, <code>baseline/</code>,
+          <code>global/</code>, <code>template:&lt;name&gt;/</code>, <code>role:&lt;name&gt;/</code>,
+          <code>phase:&lt;p&gt;/</code>, <code>group:&lt;name&gt;/</code>, <code>project:&lt;id&gt;/</code>,
+          <code>grant:session/</code>, <code>grant:global/</code>, <code>dispatch/</code>,
+          <code>delegation:&lt;who&gt;/</code>, <code>default/unmatched</code>, <code>taint/</code>.
+        </p>
+        <Callout kind="limit" title="Not yet one path for everything">
+          The compile of a run's policy and the bounds on local ops still take their own code paths rather than this
+          one decision function.
+        </Callout>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="roles" eyebrow="Roles and delegation" title="Authority only shrinks as it is handed down" lead="A role is a prompt, a voice and a policy layer under the baseline. Delegation holds a dispatched worker to what its dispatcher holds.">
+    <div class="split">
+      <div class="grid prose-width">
+        <p>
+          Three roles ship: <code>builder</code>, <code>operator</code> and <code>assistant</code>, each bound to the
+          template of the same name. <code>skep role list</code> shows them, <code>skep role show &lt;name&gt;</code>
+          prints one as an allow, ask and deny table, and <code>skep role use &lt;name&gt;</code> sets the role new
+          chats open in.
+        </p>
+        <p>
+          A worker can take a role of its own (the <code>--role</code> flag of <code>skep run</code>), and
+          <code>skep team --manager &lt;role&gt;</code> fans one task list out to at most three member runs. When one
+          agent dispatches another, the dispatched one holds the intersection: its own role and what its delegator
+          holds. A rule the delegator does not have counts as not granted. Anything beyond is
+          <code>exceeds_delegator</code>, and the floor sits above every chain.
+        </p>
+        <p>
+          In the capture, the <code>builder</code> role allows <code>npm test</code>, but
+          <code>queen@operator</code> would itself have to ask, so the worker asks too.
+        </p>
+        <p class="row">
+          <a class="link-arrow" href="/docs/cli-reference.html">Roles in the CLI reference</a>
+          <a class="link-arrow" href="/docs/agent-guide.html">Roles and delegation, explained</a>
+        </p>
+      </div>
+      <Terminal code={delegation} title="skep policy why --delegated-by" captured="2026-11-18, throwaway SKEP_HOME, builder baseline; an excerpt: three of the keys of the JSON it printed, reflowed" />
+    </div>
+  </Section>
+
+  <Section id="records" band eyebrow="The record" title="Three records, not one ledger" lead="What skep decided, what a run did and what you approved are kept in three places under the home.">
+    <div class="grid grid-3 records">
+      <Card title="The decision log" icon="list-checks">
+        <p><code>~/.skep/supervisor/audit/policy/decisions.jsonl</code></p>
+        <p>
+          One row per decision made by the CLI, REST, the Claude Code hook, the ACP governor, the Queen's own tools
+          and dispatch. Read it with <code>skep policy decisions</code>.
+        </p>
+      </Card>
+      <Card title="The store" icon="database">
+        <p><code>~/.skep/supervisor/supervisor.sqlite3</code></p>
+        <p>
+          Runs, their events (the built-in worker's capability verdicts are here), re-verification results and
+          approvals.
+        </p>
+      </Card>
+      <Card title="The audit files" icon="folder-open">
+        <p><code>~/.skep/supervisor/audit/&lt;task_id&gt;/</code></p>
+        <p>Per run: the task, the event stream, the result, the patch and the sandbox profiles.</p>
+      </Card>
+    </div>
+    <div class="split after-cards">
+      <div class="grid">
+        <Ledger title="decisions.jsonl" rows={decisions} captured="skep policy decide --repo demo-repo shell run '<command>', three times, 2026-11-18 (UTC 2026-11-19), throwaway SKEP_HOME; fields of each row, home directory shown as ~" />
+      </div>
+      <Callout kind="limit" title="Limits of the record">
+        <ul class="plain-list">
+          <li>
+            The decision log rotates at 10 MB and no generation is deleted, but
+            <code>skep policy decisions</code> and the API read only the live file and the newest rotated one.
+          </li>
+          <li>Rows carry a row-format version, not the skep version and not a hash of the baseline.</li>
+          <li>
+            There is no hash chain. Rows are plain JSON lines in files owned by the Unix user that runs skep: the
+            log is not tamper-evident.
+          </li>
+          <li>Values are redacted for common credential shapes, not for every secret.</li>
+          <li>
+            An external engine's individual tool calls are not decisions and are not logged one by one. Its dispatch,
+            events, patch, re-verification and approval are.
+          </li>
+        </ul>
+      </Callout>
+    </div>
+  </Section>
+
+  <Section id="next" eyebrow="Next" title="Where to go next">
+    <div class="grid grid-4">
+      <Card title="Guides" icon="map" href="/guides.html">One task each: an unattended run, dispatch from cron, pinning the verify command, auto-landing.</Card>
+      <Card title="Security" icon="shield-check" href="/security.html">The threat model, the sandbox on each platform, and the full list of limits.</Card>
+      <Card title="Agents" icon="bot" href="/agents.html">Each engine, how it authenticates, and governing an agent you run elsewhere.</Card>
+      <Card title="Docs" icon="book-open" href="/docs.html">The reference: sandboxing, verification, approvals, configuration and the CLI.</Card>
+    </div>
+  </Section>
 </Base>
+
+<style>
+  /* Nested single-column grids keep their rows together when a sibling is taller. */
+  .grid {
+    align-content: start;
+  }
+  .top {
+    align-items: start;
+  }
+  /* The seven steps: a numbered list that wraps. */
+  .run-steps {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 168px), 1fr));
+    gap: var(--s-3);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .run-steps a {
+    display: grid;
+    gap: var(--s-2);
+    height: 100%;
+    padding: var(--s-4);
+    border: 1px solid var(--line-card);
+    border-radius: var(--r-card);
+    background: var(--bg-card);
+    transition: border-color var(--dur-1) ease;
+  }
+  .run-steps a:hover {
+    border-color: var(--line-hover);
+  }
+  .run-step-name {
+    font-weight: 600;
+    color: var(--text-bright);
+  }
+  .run-step-text {
+    color: var(--text-muted);
+  }
+
+  /* Two columns that become one on a narrow screen. */
+  .split,
+  .trace-layout {
+    display: grid;
+    gap: var(--s-6);
+    align-items: start;
+  }
+  .split > *,
+  .trace-layout > * {
+    min-width: 0;
+  }
+  @media (min-width: 1000px) {
+    .split {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .trace-layout {
+      grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    }
+  }
+  .after-split {
+    margin-top: var(--s-7);
+  }
+  .after-cards {
+    margin-top: var(--s-4);
+  }
+  .facts {
+    display: grid;
+    gap: var(--s-1);
+    margin: 0;
+  }
+  .facts dt {
+    margin-top: var(--s-2);
+    font-size: var(--fs-small);
+    color: var(--text-faint);
+  }
+  .facts dd {
+    margin: 0;
+    color: var(--text-mid);
+  }
+  .hi {
+    color: var(--text-bright);
+  }
+
+  .plain-list {
+    display: grid;
+    gap: var(--s-3);
+    margin: 0;
+    padding-left: var(--s-5);
+  }
+  .plain-list li::marker {
+    color: var(--text-faint);
+  }
+  .plain-list strong {
+    color: var(--text-bright);
+  }
+  .inline-link {
+    color: var(--green);
+    font-weight: 600;
+  }
+  .inline-link:hover {
+    color: var(--orange-soft);
+  }
+  :global(.callout) .plain-list {
+    padding-left: var(--s-4);
+  }
+  code {
+    color: var(--text-soft);
+    overflow-wrap: anywhere;
+  }
+</style>
