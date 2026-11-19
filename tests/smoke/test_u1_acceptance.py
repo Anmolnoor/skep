@@ -5,7 +5,7 @@ provider, no network, no external worker). It exercises every v3 piece at once:
 
   scheduled (Stage E) → audit caste (D2) → contract lifecycle (v0.2) →
   G10 re-verification → auto-landing by the maintain phase (v127-F5: the
-  one unattended ramp is a maintain-phase project with a pinned check).
+  one unattended ramp is the project's auto_apply_verified_patch with a pinned check).
 
 Two repos run on one tick:
   • SAFE  — a minor-version bump (requests 2.28 → 2.31). Verified, re-verified,

@@ -252,8 +252,9 @@ def test_scheduler_path_refuses_a_vacuous_pin(repo: Path, config: SupervisorConf
 
 
 RETIRED = (
-    "--auto-approve has no effect: a patch lands without a click only in a maintain-phase "
-    "project with a pinned check (auto_apply_verified_patch)"
+    "--auto-approve has no effect: a patch lands without a click only when the project "
+    "turns on auto_apply_verified_patch (maintain phase or unlocked turn it on) and pins "
+    "a real check"
 )
 
 

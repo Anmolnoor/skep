@@ -806,7 +806,7 @@ def run_due(
                     # v127-F4 review: only a refused key or a config error no
                     # run gets past skips; a timeout, 5xx, 429 or reset (a cold
                     # local model) dispatches and the run reports itself.
-                    probe = status._worker_provider_check(config.home.parent, 5.0)
+                    probe = status.worker_provider_check(config.home.parent, 5.0)
                     if probe.get("kind") in ("auth", "config"):
                         provider_block = _provider_blocked(
                             f"the worker provider probe failed ({probe.get('detail')})"

@@ -87,8 +87,9 @@ Important options:
 - `--env-allow ENV` passes one environment variable; repeatable.
 - `--caste CASTE` selects the worker kind. The common launch path is `coding`.
 - `--auto-approve` has no effect (retired; still accepted on `run`, `tick` and
-  `serve` for one release, with a note): a patch lands without a click only in
-  a maintain-phase project with a pinned check (`auto_apply_verified_patch`).
+  `serve` for one release, with a note): a patch lands without a click only
+  when the project turns on `auto_apply_verified_patch` (the maintain phase and
+  unlocked mode turn it on) and pins a real check.
 - `--role NAME` gives the worker a role: its layer narrows the worker's grants
   (see Roles).
 - `--delegated-by ACTOR@ROLE` dispatches as that delegator (repeat, outermost

@@ -167,13 +167,17 @@ def _usage_summary(usage: UsageRecord) -> str:
 
 
 # v127-F5 round 3: `--auto-approve` installed deps-safe, which needs the
-# project's pin since round 2 — so it could only land where a pinned
-# maintain-phase project lands anyway. Accepted for one release, then removed.
+# project's pin since round 2 — so it could only land where the project's own
+# auto_apply_verified_patch lands anyway. Accepted for one release, then removed.
 AUTO_APPROVE_RETIRED = (
-    "--auto-approve has no effect: a patch lands without a click only in a maintain-phase "
-    "project with a pinned check (auto_apply_verified_patch)"
+    "--auto-approve has no effect: a patch lands without a click only when the project "
+    "turns on auto_apply_verified_patch (maintain phase or unlocked turn it on) and pins "
+    "a real check"
 )
-AUTO_APPROVE_HELP = "no effect (retired): " + AUTO_APPROVE_RETIRED.split(": ", 1)[1]
+AUTO_APPROVE_HELP = (
+    "no effect (retired): a patch lands without a click only when the project turns on "
+    "auto_apply_verified_patch and pins a real check"
+)
 
 
 def note_retired_auto_approve(args: argparse.Namespace) -> None:

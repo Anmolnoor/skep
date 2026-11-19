@@ -43,7 +43,7 @@ def build_status(
             None,
             required,
             sandbox=_sandbox_check(),
-            coding_worker=_worker_provider_check(home, provider_timeout),
+            coding_worker=worker_provider_check(home, provider_timeout),
         )
         payload["advisories"] = (
             _provider_advisories(home, provider_ready=False)
@@ -84,7 +84,7 @@ def build_status(
         profile,
         required,
         sandbox=_sandbox_check(),
-        coding_worker=_worker_provider_check(home, provider_timeout),
+        coding_worker=worker_provider_check(home, provider_timeout),
     )
     payload["advisories"] = (
         _provider_advisories(home, provider_ready=required["provider"].get("status") == "ready")
@@ -111,7 +111,7 @@ def build_status(
     return payload
 
 
-def _worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
+def worker_provider_check(home: Path, timeout: float) -> dict[str, Any]:
     """v49-F1: the WORKER's provider path, resolved exactly like a run would
     (profile.json rules incl. the api_key_env trap and the llm-secret
     fallback, else the daemon store settings), then probed with the worker's

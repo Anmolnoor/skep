@@ -396,10 +396,12 @@ def rule_block_reason(rule: AutoApprovalRule, ctx: AutoApprovalContext) -> str |
     # `git diff --check` and `--auto-approve` on a worker's `true`. A landing
     # without a human needs at least one re-run that is not known-vacuous.
     if not any(known_vacuous_verify(c) is None for c in ctx.reverify_commands):
-        why = (
-            "; ".join(filter(None, (known_vacuous_verify(c) for c in ctx.reverify_commands)))
-            or "no check was re-run"
-        )
+        why = "; ".join(filter(None, (known_vacuous_verify(c) for c in ctx.reverify_commands)))
+        if not why:
+            return (
+                f"no check was re-run, so skep can't land the patch by itself. {PIN_HINT}. "
+                "The patch is still landable by hand"
+            )
         return f"{cannot_land_on(why)}. The patch is still landable by hand"
     if ctx.pin_control_files:
         return (

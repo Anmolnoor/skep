@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -640,9 +641,9 @@ def test_a_patched_install_never_writes_the_shared_reverify_cache(
     walls: list[list[Path]] = []
     real_init = rv._PrimeWall.__init__
 
-    def recording_init(self: object, *args: object, **kwargs: object) -> None:
-        walls.append(list(kwargs["writable"]))  # type: ignore[arg-type]
-        real_init(self, *args, **kwargs)  # type: ignore[arg-type]
+    def recording_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        walls.append(list(kwargs["writable"]))
+        real_init(self, *args, **kwargs)
 
     monkeypatch.setattr(rv._PrimeWall, "__init__", recording_init)
     _uv_project(repo)

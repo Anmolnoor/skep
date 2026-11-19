@@ -828,7 +828,7 @@ def test_a_new_provider_that_fails_its_test_leaves_the_old_one_active(tmp_path: 
                 raise KeyboardInterrupt
 
             with pytest.MonkeyPatch.context() as patch:
-                patch.setattr(skep.status, "_worker_provider_check", interrupted)
+                patch.setattr(skep.status, "worker_provider_check", interrupted)
                 with pytest.raises(KeyboardInterrupt):
                     onboard_model(
                         holder, store, provider="ollama", model="m", endpoint=broken.base_url

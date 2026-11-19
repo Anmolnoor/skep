@@ -58,7 +58,7 @@ def _probe(monkeypatch: pytest.MonkeyPatch, result: dict[str, Any]) -> list[Path
         calls.append(home)
         return result
 
-    monkeypatch.setattr(status, "_worker_provider_check", fake)
+    monkeypatch.setattr(status, "worker_provider_check", fake)
     return calls
 
 
@@ -310,11 +310,11 @@ def test_doctor_does_not_call_a_slow_provider_a_refusal(
 ) -> None:
     _provider_home(config)
     _http(monkeypatch, _timeout())
-    check = status._worker_provider_check(config.home.parent, 5.0)
+    check = status.worker_provider_check(config.home.parent, 5.0)
     assert check["status"] == "blocked" and check["kind"] == "unreachable"
     assert "refused" not in check["label"]
     _http(monkeypatch, 401)
-    check = status._worker_provider_check(config.home.parent, 5.0)
+    check = status.worker_provider_check(config.home.parent, 5.0)
     assert (check["kind"], check["http_status"]) == ("auth", 401)
     assert "refused" in check["label"]
 

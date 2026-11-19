@@ -264,8 +264,9 @@ but large enough for the expected task.
 
 ## Auto-Approval
 
-A patch lands without a click only in a maintain-phase project with a pinned
-check (`auto_apply_verified_patch`). Auto-approval still requires successful
+A patch lands without a click only when the project turns on
+`auto_apply_verified_patch` (the maintain phase and unlocked mode turn it on)
+and pins a real check. Auto-approval still requires successful
 worker verification, successful supervisor re-verification, and the project's
 policy conditions. Every auto-landing rule needs the re-verification to have
 re-run the project's pinned `verify_command` (never the command the worker
