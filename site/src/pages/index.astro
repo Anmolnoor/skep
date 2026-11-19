@@ -400,13 +400,16 @@ const comparisons = [
         step={2}
         title="Sandbox backend"
         code={`# Linux: bubblewrap. macOS: nothing to install.
-$ sudo apt install bubblewrap   # Fedora: sudo dnf install bubblewrap
-$ skep doctor                   # read the sandbox and engine lines`}
+$ sudo apt install bubblewrap
+# Fedora: sudo dnf install bubblewrap
+$ skep doctor
+# read its sandbox and engine lines`}
       />
       <CodeBlock
         step={3}
         title="Engine auth, from the environment"
-        code={`$ claude setup-token            # prints a long-lived token
+        code={`# prints a long-lived token
+$ claude setup-token
 $ export CLAUDE_CODE_OAUTH_TOKEN=<token>
 # Codex: export OPENAI_API_KEY=<key>`}
       />
