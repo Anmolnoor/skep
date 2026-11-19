@@ -557,6 +557,27 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _template_grants(template: WorkflowTemplate) -> dict[str, Any]:
+    """v126-F4: what a template lets a run do, for its audit rows."""
+    return {
+        "network": list(template.network),
+        "env_allowlist": list(template.env_allowlist),
+        "shell_allowlist": [list(command) for command in template.shell_allowlist],
+        "allow_git_mutation": template.allow_git_mutation,
+    }
+
+
+def _template_write_detail(old: WorkflowTemplate | None, new: WorkflowTemplate) -> dict[str, Any]:
+    old_grants = None if old is None else _template_grants(old)
+    new_grants = _template_grants(new)
+    return {
+        "provenance": new.provenance,
+        "old": old_grants,
+        "new": new_grants,
+        "grants_changed": old_grants != new_grants,
+    }
+
+
 # v14: a schedule tick "succeeds" only when its run completed. Everything else —
 # failed, rejected, worker crash/timeout, policy_blocked, dispatch_error — is a
 # health failure that increments the consecutive-failure count. A 'note'
@@ -740,6 +761,18 @@ TAINT_BITS = ("private", "untrusted")
 
 def _taint_json(taint: Sequence[str]) -> str | None:
     return json.dumps(sorted(set(taint))) if taint else None
+
+
+def _taint_bits(value: Any) -> set[str]:
+    """W21: the bits a stored taint value names. A value that does not read
+    counts as both bits; NULL is none."""
+    if value is None:
+        return set()
+    try:
+        raw = json.loads(str(value))
+    except ValueError:
+        return set(TAINT_BITS)
+    return set(raw) & set(TAINT_BITS) if isinstance(raw, list) else set(TAINT_BITS)
 
 
 # A taint bit set where no message id says which (an unreadable taint, a
@@ -1253,6 +1286,16 @@ class RunStore:
             # D15: who wrote a memory item when not the operator (NULL = the
             # operator: nothing already stored is retroactively marked).
             self._conn.execute("ALTER TABLE memory_items ADD COLUMN provenance TEXT")
+        # v126-F3: run summaries harvested before ES-F101 carry no provenance
+        # and read as the operator's own words. Mark them the worker's
+        # (idempotent: a marked row no longer matches). The probe keeps a
+        # current store write-free, so a read-only open (W41) still succeeds.
+        legacy = (
+            " WHERE provenance IS NULL AND memory_class = 'observation'"
+            " AND content LIKE 'observation: run %'"
+        )
+        if self._conn.execute(f"SELECT EXISTS (SELECT 1 FROM memory_items{legacy})").fetchone()[0]:
+            self._conn.execute(f"UPDATE memory_items SET provenance = 'worker:legacy'{legacy}")
         for table in ("notes", "tasks", "memory_proposals"):
             columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
             if "taint" not in columns:
@@ -2576,8 +2619,16 @@ class RunStore:
         )
 
     @_locked
-    def add_template(self, template: WorkflowTemplate) -> None:
-        """Insert or replace a template by name (single writer, G4)."""
+    def add_template(self, template: WorkflowTemplate, *, actor: str = "system") -> None:
+        """Insert or replace a template by name (single writer, G4).
+
+        v126-F4: every write leaves a row with the old and new grants — a
+        schedule re-reads its template at each tick, so a silent overwrite
+        was a silent grant change."""
+        old_row = self._conn.execute(
+            f"SELECT {self._TEMPLATE_COLS} FROM templates WHERE name = ?", (template.name,)
+        ).fetchone()
+        old = self._row_to_template(old_row) if old_row is not None else None
         params_json = json.dumps(
             [
                 {"name": p.name, "description": p.description, "default": p.default}
@@ -2607,6 +2658,13 @@ class RunStore:
                 template.provenance,
             ),
         )
+        self._record_note_task_event(
+            kind="template",
+            item_id=template.name,
+            action="added" if old is None else "replaced",
+            actor=actor,
+            detail=_template_write_detail(old, template),
+        )
         self._conn.commit()
 
     @_locked
@@ -2624,10 +2682,41 @@ class RunStore:
         return [self._row_to_template(row) for row in rows]
 
     @_locked
-    def remove_template(self, name: str) -> bool:
+    def remove_template(self, name: str, *, actor: str = "system") -> bool:
+        row = self._conn.execute(
+            f"SELECT {self._TEMPLATE_COLS} FROM templates WHERE name = ?", (name,)
+        ).fetchone()
         cursor = self._conn.execute("DELETE FROM templates WHERE name = ?", (name,))
+        if cursor.rowcount and row is not None:  # v126-F4: the removal is recorded too
+            old = self._row_to_template(row)
+            self._record_note_task_event(
+                kind="template",
+                item_id=name,
+                action="removed",
+                actor=actor,
+                detail={"provenance": old.provenance, "old": _template_grants(old), "new": None},
+            )
         self._conn.commit()
         return cursor.rowcount > 0
+
+    @_locked
+    def schedules_for_template(self, name: str) -> list[str]:
+        """v126-F12: the schedules bound to a template, which a delete would break."""
+        rows = self._conn.execute(
+            "SELECT name FROM schedules WHERE template_name = ? ORDER BY name", (name,)
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def template_in_use_error(self, name: str) -> str | None:
+        """v126-F12: the refusal every delete face gives while schedules depend
+        on the template, or None when nothing does."""
+        users = self.schedules_for_template(name)
+        if not users:
+            return None
+        return (
+            f"skill/template {name!r} is used by schedule(s) {', '.join(users)} — "
+            "remove those schedules or rebind them to another template first, then delete"
+        )
 
     @_locked
     def rename_template(self, old_name: str, new_name: str) -> bool:
@@ -3000,6 +3089,18 @@ class RunStore:
         )
 
     @_locked
+    def record_registry_event(
+        self, *, kind: str, item_id: str, action: str, actor: str, detail: dict[str, Any]
+    ) -> None:
+        """v126-F2/F4: an audit row for a registry write outside a run (a skill
+        refreshed from its shelf, a skill-pack step, a conversation-draft
+        decision), in the same table notes and memory use."""
+        self._record_note_task_event(
+            kind=kind, item_id=item_id, action=action, actor=actor, detail=detail
+        )
+        self._conn.commit()
+
+    @_locked
     def create_note(self, content: str, *, actor: str, taint: Sequence[str] = ()) -> NoteRecord:
         now = _now()
         note = NoteRecord(str(uuid.uuid4()), content, now, now)
@@ -3098,13 +3199,8 @@ class RunStore:
         bits: set[str] = set()
         for item_id in ids:
             row = self._conn.execute(self._CONTENT_TAINT[kind], (item_id,)).fetchone()
-            if row is None or row[0] is None:
-                continue
-            try:
-                raw = json.loads(str(row[0]))
-                bits |= set(raw) & set(TAINT_BITS) if isinstance(raw, list) else set(TAINT_BITS)
-            except ValueError:
-                bits |= set(TAINT_BITS)
+            if row is not None:
+                bits |= _taint_bits(row[0])
         return bits
 
     @_locked
@@ -3199,11 +3295,12 @@ class RunStore:
             decided_by=None if row[10] is None else str(row[10]),
             decision_reason=None if row[11] is None else str(row[11]),
             sources=self._memory_proposal_sources(str(row[0])),
+            taint=tuple(sorted(_taint_bits(row[12]))),  # v126-F6
         )
 
     _MEMORY_PROPOSAL_COLS = (
         "proposal_id, memory_class, content, state, actor, rationale, project_id,"
-        " created_at, updated_at, decided_at, decided_by, decision_reason"
+        " created_at, updated_at, decided_at, decided_by, decision_reason, taint"
     )
 
     @_locked
@@ -3223,6 +3320,11 @@ class RunStore:
         validate_proposal_state(state)
         for source in sources:
             validate_source_kind(source.kind)
+        # v126-F6: a note's or task's bits ride the proposal filed from it,
+        # whichever face files it (W21)
+        taint = list(taint)
+        for kind in ("note", "task"):
+            taint += self.content_taint(kind, [s.source_id for s in sources if s.kind == kind])
         proposal_id = str(uuid.uuid4())
         now = _now()
         self._conn.execute(

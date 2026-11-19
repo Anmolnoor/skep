@@ -36,6 +36,7 @@ packs own (strategy, schedules, provider defaults).
 
 from __future__ import annotations
 
+import functools
 import json
 import shlex
 from pathlib import Path
@@ -318,17 +319,38 @@ def floor_rows() -> list[dict[str, str]]:
     return rows
 
 
+@functools.cache  # shipped files: read once per process, not per why row (v124 review)
+def shipped_descriptions(name: str) -> dict[tuple[str, str, str, str, str], str]:
+    """v124-F1: a shipped template's one-sentence explanations, keyed by the
+    whole rule (scope, verdict, action, pattern, rule_id) — never by id alone,
+    so a custom or learned rule that reuses a shipped id, or a lock approved
+    before a rule changed, borrows no explanation (I8). They live in
+    ``descriptions.json``, outside the layer: the baseline hash is over the
+    layer, and a dumped field would make every lock read as tampered (I13)."""
+    if name not in TEMPLATE_NAMES:
+        return {}
+    texts = json.loads((TEMPLATES_DIR / "descriptions.json").read_text(encoding="utf-8"))[name]
+    return {
+        (rule.scope, rule.verdict, rule.action, rule.pattern, rule.rule_id): texts[rule.rule_id]
+        for rule in load_policy_template(name).rules
+    }
+
+
 def _rule_rows(template: PolicyTemplate) -> list[dict[str, str]]:
-    rows = [
-        {
+    texts = shipped_descriptions(template.template)
+    rows = []
+    for rule in template.rules:
+        row = {
             "scope": rule.scope,
             "verdict": _VERDICT_WORD[rule.verdict],
             "action": rule.action,
             "pattern": rule.pattern,
             "rule_id": rule.rule_id,
         }
-        for rule in template.rules
-    ]
+        text = texts.get((rule.scope, rule.verdict, rule.action, rule.pattern, rule.rule_id))
+        if text:
+            row["description"] = text
+        rows.append(row)
     # Deterministic: scope in the engine's order, allow → ask → deny, by
     # action, the catch-all last. Authoring order never shows.
     rows.sort(

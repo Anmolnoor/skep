@@ -105,7 +105,7 @@ description, and every operator surface reads it rather than keeping a copy.
 |---|---|---|---|---|
 | `coding` | yes | yes | no | Writes code against a repo and produces a patch for approval. |
 | `audit` | yes | no | no | Bumps unsafe dependency pins and re-runs the suite. Deterministic. |
-| `curator` | no | no | no | Turns an inbox of notes into memory *proposals* for review. |
+| `curator` | no | no | no | Turns an inbox of notes into a `proposals.json` artifact. Nothing ingests it (v126-F7); kept because the contract names the caste. |
 | `document` | no | yes | no | Drafts and summaries. No web, no code, nothing lands. |
 | `researcher` | no | no | yes | Answers from allow-listed sources only, with evidence per source. |
 | `script` | no | no | no | One inline script, sandboxed, deny-all egress. Output, never a patch. |

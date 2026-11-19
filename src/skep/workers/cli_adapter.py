@@ -42,6 +42,7 @@ from skep.worker_contract import (
     VerificationOutcome,
     check_supported,
 )
+from skep.workers.worker_runtime import memory_block
 
 EXIT_COMPLETED = 0
 EXIT_INVOCATION_ERROR = 2
@@ -131,6 +132,8 @@ def _task_start_payload(task: CodingWorkerTask, spec: AdapterSpec) -> dict[str, 
         payload["dispatch_decision"] = task.dispatch_decision.model_dump(mode="json")
     if task.landing_decision is not None:
         payload["landing_decision"] = task.landing_decision.model_dump(mode="json")
+    # v126-F5: the audit names the memory that reached the agent's prompt
+    payload["memory_delivered"] = [entry.memory_id for entry in task.memory]
     return payload
 
 
@@ -163,8 +166,11 @@ def _run(
     stream: _EventStream,
     purpose: str,
     heartbeat_seconds: float = _HEARTBEAT_SECONDS,
+    shown: list[str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], CommandRecord]:
-    command = shlex.join(argv)
+    # v126-F5 (review): ``shown`` is the argv as recorded, when the real one
+    # carries text the record must not keep (the memory block).
+    command = shlex.join(argv if shown is None else shown)
     stream.emit(EventType.COMMAND_START, {"command": command, "purpose": purpose})
     started = time.monotonic()
     done = threading.Event()
@@ -297,9 +303,20 @@ def _execute(
     stream.emit(EventType.PLAN_CREATED, {"steps": list(spec.plan_steps)})
 
     timeout = task.budget.wall_clock_seconds
-    agent_argv = spec.build_argv(spec.command_from_env(), UNATTENDED_PREAMBLE + task.instructions)
+    # v126-F5: a Claude/Codex run knows what the Queen knows — the same block
+    # the builtin worker gets (worker-written lines already wrapped).
+    prompt = UNATTENDED_PREAMBLE + task.instructions
+    agent_argv = spec.build_argv(spec.command_from_env(), prompt + memory_block(task.memory))
+    # v126-F5 (review): the event log records the command with the memory
+    # block as a count — a durable copy `skep memory forget` could not reach.
+    marker = f"\n\n[memory: {len(task.memory)} items]" if task.memory else ""
     agent_proc, agent_record = _run(
-        agent_argv, cwd=workspace, timeout=timeout, stream=stream, purpose="agent"
+        agent_argv,
+        cwd=workspace,
+        timeout=timeout,
+        stream=stream,
+        purpose="agent",
+        shown=spec.build_argv(spec.command_from_env(), prompt + marker),
     )
     changed_files = _changed_files(workspace, timeout=timeout)
 

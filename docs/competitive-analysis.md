@@ -94,7 +94,7 @@ Ranked by grade impact per unit of work:
 
 3. **Resume/checkpoint (R8).** Same-worktree crash resume and "continue from step N" are table stakes for long autonomous runs; Devin and OpenHands both survive interruption better than skep today.
 
-4. **Memory automation friction (Mem B+ -> A).** The proposal gate is the right posture for grants, but Devin's Knowledge (auto-suggested, review-to-keep) and Claude Code's auto-memory show the convenience bar. v71-F5's observation class (expiring, grant-free, no proposal needed) is exactly the right lane — widen it: more automatic observation capture from runs/chats, keep the human gate only for durable/grant-bearing memory.
+4. **Memory automation friction (Mem B+ -> A).** The proposal gate is the right posture for grants, but Devin's Knowledge (auto-suggested, review-to-keep) and Claude Code's auto-memory show the convenience bar. v71-F5's observation class (expiring, grant-free, no proposal needed) is exactly the right lane — widen it: more automatic observation capture from runs/chats, keep the human gate only for durable/grant-bearing memory. (v126-F3: a run's own summary is the worker's words, so run observations stay in their project and never ride the Queen's always-on memory block; the Queen reads run outcomes through `get_run`/`await_runs`, which taint the chat.)
 
 5. **Push-don't-poll sweep (R5).** Partial. OpenClaw's heartbeats and Devin's auto-triage set the proactive bar; skep has the ticker and delivery plumbing — finish the sweep so no state transition waits to be asked about.
 

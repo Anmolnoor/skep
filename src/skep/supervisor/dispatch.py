@@ -685,10 +685,15 @@ def run_task(
 
         # Mint identity first so the worktree is named by task id (orphans stay
         # searchable, Q7), then point the envelope at the created worktree.
-        # v13 Step 8: inject approved curated memory as context. Project-bound
-        # runs see project + global memory; unbound runs see only global memory.
+        # v13 Step 8: inject curated memory as context. Project-bound runs see
+        # project + global memory; unbound runs see only global memory.
         # The injected IDs ride in the task envelope, which is copied to the audit
-        # dir below — so the audit records exactly what memory each run saw.
+        # dir below — so the audit records what memory each run was OFFERED.
+        # v126-F5: what reached a prompt is the worker's to say. The builtin
+        # coding worker renders it into its model prompt; the CLI engines and
+        # the document worker render it and name the delivered ids in their
+        # task_start event (memory_delivered); the researcher records "not
+        # delivered" there (it has no prompt).
         from .policy_resolver import resolve_injected_memory
 
         injected_memory = resolve_injected_memory(run_store, project_context)

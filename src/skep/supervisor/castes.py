@@ -94,8 +94,7 @@ CASTES: dict[str, Caste] = {
         name="curator",
         argv=(sys.executable, "-m", "skep.workers.curator"),
         about=(
-            "Turns an inbox of notes into memory PROPOSALS for review; never "
-            "writes durable memory itself."
+            "Turns an inbox of notes into a proposals.json file; nothing files those as memory."
         ),
         lands=False,
         needs_provider=False,

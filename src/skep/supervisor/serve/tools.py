@@ -426,8 +426,22 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
         },
         ["subject"],
     ),
-    _tool("list_templates", "Saved workflow templates (hand-authored and learned).", {}),
-    _tool("list_skills", "Learned-skill candidates and skill-pack ladder states.", {}),
+    # v126-F8: say what each returns — the small model skims these.
+    _tool(
+        "list_templates",
+        "Every skill/template, any provenance. Returns name, description, "
+        "caste, params and provenance (seed, external, chat, user, learned, "
+        "pack). Seeds are chat recipes: view_skill one and follow it yourself; "
+        "the rest run as worker tasks.",
+        {},
+    ),
+    _tool(
+        "list_skills",
+        "Skill drafts and packs, not runnable skills. Returns learned drafts "
+        "awaiting the human gate and script skill packs with their ladder "
+        "state; runnable skills are in list_templates.",
+        {},
+    ),
     _tool(
         "list_plugins",
         "Forged plugins — MCP tool servers skep authored for itself — with "
@@ -587,12 +601,14 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
     ),
     _tool(
         "list_memory",
-        "Durable curated memory items (optionally scoped to a project).",
+        "Memory items the operator approved or taught, plus unreviewed "
+        "observations (optionally scoped to a project). Worker-written items "
+        "are left out: read run outcomes with get_run / await_runs.",
         {"project": {"type": "string", "description": "optional project id"}},
     ),
     _tool(
         "search_memory",
-        "Full-text search durable curated memory.",
+        "Full-text search the same memory list_memory returns (worker-written items left out).",
         {
             "query": {"type": "string"},
             "project": {"type": "string", "description": "optional project id"},
@@ -1061,8 +1077,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
     _tool(
         "delete_skill",
         "PROPOSE deleting one skill/template from the registry (requires "
-        "user confirmation — deletes destroy data). Schedules that reference "
-        "it will fail at their next tick, so check list_schedules first.",
+        "user confirmation — deletes destroy data). Refused while a schedule "
+        "uses it; the error names those schedules.",
         {"name": {"type": "string"}},
         ["name"],
     ),
@@ -1189,7 +1205,8 @@ MUTATING_TOOL_SPECS: list[dict[str, Any]] = [
         "the server's tools and pass its zero-argument self_test; only then "
         "is the source installed and registered as a stdio MCP server "
         "whose tools call_mcp_tool can reach (every call runs sandboxed). A "
-        "suspended plugin reactivates the same way. Fails honestly (and stays "
+        "suspended plugin reactivates the same way, and an active seed tool "
+        "takes a shipped update the same way. Fails honestly (and stays "
         "demoted) if a forged plugin's authoring run has not landed or the "
         "trial fails.",
         {"plugin_id": {"type": "string", "description": "from list_plugins"}},
@@ -4087,14 +4104,17 @@ def execute_read_tool(
             action="reopened",
         )
         return {"task": None if updated_task is None else asdict(updated_task)}
+    # v126-F3 (review): worker-written items stay out — nearly every live
+    # item is one, so returning them tainted almost every read. Run outcomes
+    # reach the Queen through get_run / await_runs, which taint.
     if name == "list_memory":
         project = None if args.get("project") is None else str(args["project"])
         items = store.list_memory_items(project_id=project)
-        return {"items": [_memory_payload(item) for item in items]}
+        return {"items": [_memory_payload(i) for i in items if i.provenance is None]}
     if name == "search_memory":
         project = None if args.get("project") is None else str(args["project"])
         hits = store.search_memory(str(args["query"]), project_id=project)
-        return {"items": [_memory_payload(item) for item in hits]}
+        return {"items": [_memory_payload(i) for i in hits if i.provenance is None]}
     if name == "search_chats":
         limit = min(int(args.get("limit") or 20), 50)
         scope = None if args.get("chat_id") is None else str(args["chat_id"])
@@ -4895,7 +4915,7 @@ def _execute_mutation(
                 f"a skill named {skill_name!r} already exists; "
                 "pick another name (no silent overwrite)"
             )
-        store.add_template(template)
+        store.add_template(template, actor=actor)
         return {"created": skill_name, "provenance": "chat"}
     if name == "patch_skill":
         import dataclasses
@@ -4917,12 +4937,15 @@ def _execute_mutation(
             validate_template(patched)
         except TemplateError as exc:
             raise ValueError(str(exc)) from exc
-        store.add_template(patched)
+        store.add_template(patched, actor=actor)
         return {"patched": skill_name}
     if name == "delete_skill":
         skill_name = str(args["name"])
         removed_template = store.get_template(skill_name)
-        if not store.remove_template(skill_name):
+        in_use = store.template_in_use_error(skill_name)
+        if in_use:
+            raise ValueError(in_use)
+        if not store.remove_template(skill_name, actor=actor):
             raise ValueError(f"no skill/template named {skill_name!r}")
         # v83-F12: deleting a seed leaves a tombstone — the startup sync
         # honors it forever, so a restart never resurrects the delete (I8).
@@ -5117,7 +5140,12 @@ def _execute_mutation(
         if record is None:
             known = ", ".join(sorted(plugins)) or "none yet — forge_tool creates one"
             raise ValueError(f"no forged plugin {plugin_id!r}; known: {known}")
-        if record.state == "active":
+        # v126-F1: an ACTIVE seed whose installed copy differs from the
+        # shipped source takes the update through the same trial + card.
+        reinstall = record.state == "active" and plugin_id in forge.seed_tool_updates(
+            store, holder.current
+        )
+        if record.state == "active" and not reinstall:
             return {"plugin_id": plugin_id, "state": "active", "note": "already active"}
         if record.state == "rolled_back":
             raise ValueError(
@@ -5146,33 +5174,39 @@ def _execute_mutation(
                     "source to promote"
                 )
             source = forge.landed_source(Path(record.repo), branch, record.rel_path)
-        if record.state == "suspended":
-            # Reactivation: the pause ends on this confirmed card; the source
-            # was already trialed and approved, so only the registration returns.
-            require_transition("suspended", "active")
-        else:
-            if record.state == "draft":
-                require_transition("draft", "sandboxed")
-                record = dataclasses.replace(record, state="sandboxed")
-                forge.save_plugin(store, record)
-            trial_result = _forge_trial(
-                store,
-                holder,
-                runner,
-                source=source,
-                repo=trial_repo,
-                decision=decision,
-                delegation_chain=_queen_chain(store, holder, chat_id, actor),
-            )
-            ok, reason, evidence = forge.trial_verdict(trial_result)
-            record = dataclasses.replace(record, trial=evidence)
+        if record.state == "draft":
+            require_transition("draft", "sandboxed")
+            record = dataclasses.replace(record, state="sandboxed")
             forge.save_plugin(store, record)
-            if not ok:
-                raise ValueError(
-                    f"the sandboxed trial did not pass: {reason} — the plugin stays "
-                    "'sandboxed'. Fix the tool in the forge repo (forge_tool again "
-                    "re-briefs a worker), land the fix, then promote_tool again."
-                )
+        # v126-F1: every install is trialed — reactivation and a seed update
+        # write fresh source too, so they pass the same sandboxed trial.
+        trial_result = _forge_trial(
+            store,
+            holder,
+            runner,
+            source=source,
+            repo=trial_repo,
+            decision=decision,
+            delegation_chain=_queen_chain(store, holder, chat_id, actor),
+        )
+        ok, reason, evidence = forge.trial_verdict(trial_result)
+        record = dataclasses.replace(record, trial=evidence)
+        forge.save_plugin(store, record)
+        if not ok:
+            kept = (
+                "the installed copy keeps running unchanged"
+                if reinstall
+                else f"the plugin stays {record.state!r}"
+            )
+            raise ValueError(
+                f"the sandboxed trial did not pass: {reason} — {kept}. Fix the tool "
+                "in the forge repo (forge_tool again re-briefs a worker), land the "
+                "fix, then promote_tool again."
+            )
+        if record.state == "suspended":
+            # Reactivation: the pause ends on this confirmed card.
+            require_transition("suspended", "active")
+        elif not reinstall:
             require_transition("sandboxed", "tested", verifier_passed=True)
             require_transition("tested", "reviewed")
             # The card the operator just confirmed IS the human action (I6/I7
@@ -5193,9 +5227,18 @@ def _execute_mutation(
             raise ValueError(str(exc)) from exc
         record = dataclasses.replace(record, state="active")
         forge.save_plugin(store, record)
+        if reinstall:
+            store.record_registry_event(
+                kind="plugin",
+                item_id=plugin_id,
+                action="reinstalled",
+                actor=actor,
+                detail={"provenance": "seed", "why": "the shipped source changed"},
+            )
         return {
             "plugin_id": plugin_id,
             "state": "active",
+            "reinstalled": reinstall,
             "server_id": record.server_id,
             "landed_branch": branch,
             "installed": str(installed),
@@ -5241,7 +5284,12 @@ def _execute_mutation(
         extra = tuple(str(g) for g in (args.get("allow_scripts") or ()))
         try:
             pack_record, pack_template = promote_pack(
-                store, holder.current, pack_id, extra_grants=extra, human_action=True
+                store,
+                holder.current,
+                pack_id,
+                extra_grants=extra,
+                human_action=True,
+                actor=actor,
             )
         except (SkillPackError, PluginLifecycleError) as exc:
             raise ValueError(str(exc)) from exc
@@ -5262,7 +5310,7 @@ def _execute_mutation(
 
         try:
             pack_record = suspend_pack(
-                store, str(args["pack_id"]), rollback=bool(args.get("rollback"))
+                store, str(args["pack_id"]), rollback=bool(args.get("rollback")), actor=actor
             )
         except (SkillPackError, PluginLifecycleError) as exc:
             raise ValueError(
@@ -5785,6 +5833,9 @@ def _execute_mutation(
                 interval_seconds=interval,
                 chain=schedule_chain,
                 role=schedule_role,
+                # v126-F11: its time, its once, and the chat whose taint its ticks carry
+                once=bool(args.get("once") or False),
+                start_at=None if args.get("start_at") is None else str(args["start_at"]),
                 chat_id=chat_id,
             )
         else:

@@ -146,15 +146,18 @@ def test_harvested_observations_expire_like_any_other(store: RunStore) -> None:
     assert _observations(store) == []
 
 
-def test_d15_a_harvested_run_summary_is_marked_wrapped_and_taints_nothing(
+def test_d15_a_harvested_run_summary_is_marked_and_kept_out_of_the_chat_block(
     store: RunStore,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """D15 (ES-F101): the worker's summary harvested into memory carries
-    ``worker:<task>``; the chat prompt wraps it as outside content (inner tags
-    neutralised) and sets no bit; an operator-written item (NULL) is as before."""
+    ``worker:<task>``. v126-F3: it never rides the always-on chat block (the
+    Queen reaches run outcomes through get_run / await_runs, which taint), so
+    no chat is steered by it untainted; an operator-written observation rides
+    labelled unreviewed and expiring, under a header that no longer calls it
+    approved."""
     from skep.supervisor import memory_cmds
     from skep.supervisor.serve.chat import memory_block
 
@@ -168,17 +171,15 @@ def test_d15_a_harvested_run_summary_is_marked_wrapped_and_taints_nothing(
     )
     store._conn.commit()
     store.add_memory_item(memory_class="observation", content="likes tea", actor="op")
-    chat = store.create_chat(title="t", model=None).chat_id
     harvest_observations(store)
     by_content = {i.content: i.provenance for i in store.list_memory_items()}
     assert by_content["likes tea"] is None
     (harvested,) = [p for c, p in by_content.items() if c != "likes tea"]
     assert harvested == f"worker:{task.task_id}"
     block = memory_block(store)
-    assert "- [observation] likes tea" in block
-    assert f'<untrusted source="worker:{task.task_id}">observation: run' in block
-    assert "&lt;/untrusted> now</untrusted>" in block
-    assert store.get_chat_taint(chat).bits() == []
+    assert "- [observation] (unreviewed, expires) likes tea" in block
+    assert "observation: run" not in block and "ignore the rules" not in block
+    assert "approved curated memory" not in block
 
     monkeypatch.setattr(
         memory_cmds, "_open_store_or_empty", lambda _home, **_kw: RunStore(store.db_path)
@@ -187,6 +188,61 @@ def test_d15_a_harvested_run_summary_is_marked_wrapped_and_taints_nothing(
     out = capsys.readouterr().out
     assert f"from worker:{task.task_id}" in out
     assert "likes tea" in out and out.count("from ") == 1
+
+
+def test_v126_f3_a_run_observation_carries_the_runs_project(
+    store: RunStore, tmp_path: Path
+) -> None:
+    from skep.worker_contract import ProjectContextPayload
+
+    _prime(store)
+    context = ProjectContextPayload(
+        project_id="proj-x", name="x", strategy="trusted_local_dev", phase="maintain",
+        binding_kind="repo_path", binding_value=str(tmp_path / "myrepo"),
+    )  # fmt: skip
+    bound = mint_task(
+        workspace=tmp_path / "ws", instructions="x", budget=DEFAULT_BUDGET,
+        project_context=context,
+    )  # fmt: skip
+    unbound = mint_task(workspace=tmp_path / "ws2", instructions="x", budget=DEFAULT_BUDGET)
+    for task in (bound, unbound):
+        store.create_run(task, repo=tmp_path / "myrepo", ref=None, execution_mode="sandbox")
+        store.transition(task.task_id, "completed")
+    harvest_observations(store)
+    projects = {i.provenance: i.project_id for i in store.list_memory_items()}
+    assert projects == {f"worker:{bound.task_id}": "proj-x", f"worker:{unbound.task_id}": None}
+
+
+def test_v126_f3_legacy_run_observations_are_backfilled_once(tmp_path: Path) -> None:
+    """The 108 pre-ES-F101 run summaries in the operator's store carry no
+    provenance; opening the store marks them ``worker:legacy`` — and only
+    them — and a second open changes nothing."""
+    db = tmp_path / "legacy.sqlite3"
+    store = RunStore(db)
+    legacy = store.add_memory_item(
+        memory_class="observation", content="observation: run abcd1234 on r failed: x", actor="o"
+    )
+    mine = store.add_memory_item(memory_class="observation", content="noticed tea", actor="o")
+    durable = store.add_memory_item(
+        memory_class="project_fact", content="observation: run tags are useful", actor="o"
+    )
+    marked = store.add_memory_item(
+        memory_class="observation", content="observation: run 1 ok", actor="o",
+        provenance="worker:t1",
+    )  # fmt: skip
+    store.close()
+    for _ in range(2):
+        reopened = RunStore(db)
+        try:
+            got = {i.memory_id: i.provenance for i in reopened.list_memory_items()}
+        finally:
+            reopened.close()
+        assert got == {
+            legacy.memory_id: "worker:legacy",
+            mine.memory_id: None,
+            durable.memory_id: None,
+            marked.memory_id: "worker:t1",
+        }
 
 
 def test_d15_an_old_store_gains_memory_provenance_and_reads_operator_written(

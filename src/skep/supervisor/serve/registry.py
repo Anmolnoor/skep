@@ -1508,17 +1508,30 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
 
     @app.post("/api/templates", status_code=201)
     def put_template(body: dict[str, Any]) -> dict[str, Any]:
+        # v126-F4 (review): only the JSON boolean true — bool("false") is True.
+        replace = body.pop("replace", False) is True
         try:
             template = template_from_dict(body)
             validate_template(template)
         except (TemplateError, ValueError, KeyError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        run_store.add_template(template)
+        # v126-F4: no silent overwrite — a grant change takes replace: true.
+        if not replace and run_store.get_template(template.name) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"a template named {template.name!r} already exists — pick another "
+                "name, or delete the old one first and save again. (API callers: send "
+                "replace: true to overwrite; the old and new grants are recorded.)",
+            )
+        run_store.add_template(template, actor="api-user")
         return template_to_dict(template)
 
     @app.delete("/api/templates/{name}")
     def delete_template(name: str) -> dict[str, bool]:
-        if not run_store.remove_template(name):
+        in_use = run_store.template_in_use_error(name)
+        if in_use:
+            raise HTTPException(status_code=409, detail=in_use)
+        if not run_store.remove_template(name, actor="api-user"):
             raise HTTPException(status_code=404, detail=f"no template named {name!r}")
         return {"removed": True}
 
@@ -1828,6 +1841,8 @@ def add_registry_routes(app: FastAPI, *, holder: ConfigHolder, run_store: RunSto
                     ref=body.ref,
                     chain=body.chain,
                     role=body.role,
+                    once=body.once,  # v126-F11: accepted, no longer thrown away
+                    start_at=body.start_at,
                 )
             else:
                 if body.instructions is None:
