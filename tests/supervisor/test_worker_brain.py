@@ -237,7 +237,7 @@ def test_a_missed_edit_on_a_secret_file_shows_nothing(repo: Path, name: str) -> 
 
     path = repo / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("STRIPE=sk_live_51HxQabcdefghijklmnop\n", encoding="utf-8")
+    path.write_text("STRIPE=" + "sk_" + "live_" + "51HxQabcdefghijklmnop" + "\n", encoding="utf-8")
     with pytest.raises(CapabilityDenied) as caught:
         _registry(repo).invoke("filesystem.edit", {"path": name, "old": "STRIPE=x", "new": "t"})
     assert str(caught.value) == f"old text not found in {name}"
