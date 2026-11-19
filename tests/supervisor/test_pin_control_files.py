@@ -34,7 +34,12 @@ dependencies = ["requests==2.31.0"]
 addopts = "-q"
 """
 
-_PACKAGE = {"name": "toy", "version": "1.0.0", "scripts": {"test": "jest"}}
+_PACKAGE = {
+    "name": "toy",
+    "version": "1.0.0",
+    "scripts": {"test": "node test/run.js", "check": "node tools/check.js --ci"},
+    "devDependencies": {"jest": "29.0.0"},
+}
 
 
 def _changes(repo: Path, edits: dict[str, str], pin: str = "uv run pytest") -> tuple[str, ...]:
@@ -73,6 +78,17 @@ def project_repo(repo: Path) -> Path:
         "setup.cfg",
         "noxfile.py",
         "Makefile",
+        # round 3: runner config the blocklist missed (`.pytest.ini` wins over
+        # pytest.ini; `.npmrc` `script-shell=true` makes `npm test` exit 0)
+        ".pytest.ini",
+        ".npmrc",
+        "web/.npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
+        "jest.config.js",
+        "vitest.config.ts",
+        ".mocharc.yml",
+        ".coveragerc",
     ],
 )
 def test_a_test_control_file_blocks(project_repo: Path, name: str) -> None:
@@ -94,23 +110,97 @@ def test_hatch_test_envs_in_pyproject_block(project_repo: Path) -> None:
     assert _changes(project_repo, {"pyproject.toml": rigged}) == ("pyproject.toml",)
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        '\n[project.entry-points.pytest11]\nrigged = "rigged_plugin"\n',
+        '\n[tool.coverage.run]\nomit = ["*"]\n',
+        '\n[tool.pytest_env]\nCI = "1"\n',
+    ],
+)
+def test_pytest_plugins_and_coverage_in_pyproject_block(project_repo: Path, extra: str) -> None:
+    assert _changes(project_repo, {"pyproject.toml": _PYPROJECT + extra}) == ("pyproject.toml",)
+
+
 def test_unparseable_pyproject_blocks(project_repo: Path) -> None:
     assert _changes(project_repo, {"pyproject.toml": "[tool\n"}) == ("pyproject.toml",)
 
 
-def test_package_json_blocks_only_when_scripts_change(project_repo: Path) -> None:
-    bumped = json.dumps({**_PACKAGE, "version": "1.0.1"}, indent=2) + "\n"
-    assert _changes(project_repo, {"package.json": bumped}) == ()
-    rigged = json.dumps({**_PACKAGE, "scripts": {"test": "true"}}, indent=2) + "\n"
-    assert _changes(project_repo, {"package.json": rigged}) == ("package.json",)
+def _package(**changes: object) -> str:
+    return json.dumps({**_PACKAGE, **changes}, indent=2) + "\n"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"version": "1.0.1"},
+        {"devDependencies": {"jest": "29.7.0"}},
+        {"dependencies": {"left-pad": "1.3.0"}},
+        {"overrides": {"semver": "7.5.4"}},
+    ],
+)
+def test_a_package_json_dependency_bump_still_lands(
+    project_repo: Path, changes: dict[str, object]
+) -> None:
+    assert _changes(project_repo, {"package.json": _package(**changes)}) == ()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"scripts": {"test": "true"}},
+        {"jest": {"testMatch": ["nothing"]}},
+        {"mocha": {"spec": "none"}},
+        {"ava": {"files": []}},
+        {"type": "module"},
+    ],
+)
+def test_any_other_package_json_change_blocks(
+    project_repo: Path, changes: dict[str, object]
+) -> None:
+    assert _changes(project_repo, {"package.json": _package(**changes)}) == ("package.json",)
 
 
 def test_the_pinned_script_itself_blocks(project_repo: Path) -> None:
     edits = {"scripts/check.py": "raise SystemExit(0)\n"}
     assert _changes(project_repo, edits, pin="python scripts/check.py") == ("scripts/check.py",)
     assert _changes(project_repo, edits, pin="./scripts/check.py") == ("scripts/check.py",)
+    # round 3: every word of the pin, not the first two
+    assert _changes(project_repo, edits, pin="uv run python scripts/check.py") == (
+        "scripts/check.py",
+    )
+    # ... and inside an `sh -c` program
+    assert _changes(project_repo, edits, pin="sh -c 'python scripts/check.py'") == (
+        "scripts/check.py",
+    )
+    # a pin that reads a file the patch edits: G10's answer is the patch's to give
+    pin = 'grep -q "value = 1" existing.py'
+    assert _changes(project_repo, {"existing.py": "value = 1\n"}, pin=pin) == ("existing.py",)
     # an ordinary source edit under a pin that names no path is fine
     assert _changes(project_repo, {"existing.py": "value = 2\n"}) == ()
+
+
+@pytest.mark.parametrize(
+    ("pin", "script"),
+    [
+        ("npm test", "test/run.js"),
+        ("npm run test", "test/run.js"),
+        ("cd . && yarn test", "test/run.js"),
+        ("pnpm run check", "tools/check.js"),
+        ("npm run-script check -- --x", "tools/check.js"),
+    ],
+)
+def test_the_file_a_package_script_runs_blocks(project_repo: Path, pin: str, script: str) -> None:
+    """`npm test` → scripts.test → `node test/run.js`: that file is the check."""
+    assert _changes(project_repo, {script: "process.exit(0)\n"}, pin=pin) == (script,)
+
+
+def test_a_patch_that_edits_test_files_still_lands(project_repo: Path) -> None:
+    """Only global switches block: G10 proves the pin passes on the patched
+    tree, and a patch's own tests are what a pin like `uv run pytest` runs."""
+    edits = {"tests/test_toy.py": "def test_ok():\n    assert True\n"}
+    assert _changes(project_repo, edits) == ()
+    assert _changes(project_repo, {"test/unit.js": "ok\n"}, pin="npm test") == ()
 
 
 def test_every_rule_refuses_a_patch_that_rewrites_the_check() -> None:

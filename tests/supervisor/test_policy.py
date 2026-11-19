@@ -115,13 +115,47 @@ def _branch_exists(repo: Path, task_id: str) -> bool:
     return bool(git(repo, "branch", "--list", f"skep/{task_id}").stdout.strip())
 
 
+# v127-F5 round 3: a pin that checks the patch without naming the file it
+# edits — a pin word that names a changed file makes it a control file.
+_PIN = 'grep -rqx --include=*.py "value = 1" .'
+
+
+def _landed(repo: Path) -> bool:
+    """The maintain phase lands on its integration branch (v30)."""
+    return bool(git(repo, "branch", "--list", "skep/maintain").stdout.strip())
+
+
+def _pin_maintain_project(config: SupervisorConfig, repo: Path) -> None:
+    """Every auto-landing rule needs the project's pin, and a bound project's
+    phase decides whether anything auto-lands — so maintain, pinned."""
+    store = RunStore(config.db_path)
+    try:
+        store.add_project_policy(
+            project_id="pinned",
+            name="pinned",
+            strategy="trusted_local_dev",
+            phase="maintain",
+            policy={
+                "default_execution_mode": "workspace",
+                "auto_apply_verified_patch": True,
+                "verify_command": _PIN,
+            },
+        )
+        store.add_project_binding(
+            project_id="pinned", binding_kind="repo_path", binding_value=str(repo)
+        )
+    finally:
+        store.close()
+
+
 def test_matching_rule_auto_applies_the_patch(repo: Path, config: SupervisorConfig) -> None:
     cfg = dataclasses.replace(
         config, auto_approval_rules=(AutoApprovalRule("autofix", diff_scope=("*.py",)),)
     )
-    outcome = run_task(repo, "Fix the bug. MODE:happy", config=cfg)
+    _pin_maintain_project(cfg, repo)
+    outcome = run_task(repo, "Fix the bug. MODE:happy", config=cfg, auto_apply_verified_patch=True)
     assert outcome.record.state == "completed"
-    assert _branch_exists(repo, outcome.record.task_id), "the patch was not auto-applied"
+    assert _landed(repo), "the patch was not auto-applied"
 
     store = RunStore(cfg.db_path)
     try:
@@ -136,7 +170,7 @@ def test_matching_rule_auto_applies_the_patch(repo: Path, config: SupervisorConf
     assert approval.decided_by == "auto/autofix"
     assert "autofix" in (approval.resolution_note or "")
     # The applied commit carries the rule as the approver.
-    log = git(repo, "log", "-1", "--format=%B", f"skep/{outcome.record.task_id}").stdout
+    log = git(repo, "log", "-1", "--format=%B", "skep/maintain").stdout
     assert "Approved-by: auto:autofix" in log
 
 
@@ -150,11 +184,12 @@ def test_the_lane_judges_the_patch_not_the_workers_claim(
     cfg = dataclasses.replace(
         config, auto_approval_rules=(AutoApprovalRule("autofix", diff_scope=("*.py",)),)
     )
-    outcome = run_task(repo, "Fix the bug. MODE:unclaimed", config=cfg)
-    assert outcome.record.state == "completed"
-    assert _branch_exists(repo, outcome.record.task_id), (
-        "a confirmed patch was blocked on the worker's empty changed_files claim"
+    _pin_maintain_project(cfg, repo)
+    outcome = run_task(
+        repo, "Fix the bug. MODE:unclaimed", config=cfg, auto_apply_verified_patch=True
     )
+    assert outcome.record.state == "completed"
+    assert _landed(repo), "a confirmed patch was blocked on the worker's empty changed_files claim"
 
 
 def test_patch_paths_reads_every_patch_shape(tmp_path: Path) -> None:
@@ -205,7 +240,7 @@ def test_every_face_lands_a_maintain_patch_on_the_projects_branch(
                 "default_execution_mode": "workspace",
                 "auto_apply_verified_patch": True,
                 "auto_apply_branch": "skep/maintain",
-                "verify_command": 'grep -q "value = 1" existing.py',
+                "verify_command": _PIN,
             },
         )
         store.add_project_binding(

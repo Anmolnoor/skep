@@ -22,7 +22,7 @@ from skep.supervisor.sandbox import SandboxAvailability
 from .conftest import serve_client
 
 # v127-F5: a pin that is not known-vacuous — `true` no longer unlocks a project.
-PIN = "grep -q value existing.py"
+PIN = "grep -rq --include=*.py value ."
 
 
 def _sandbox(usable: bool) -> Any:

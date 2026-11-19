@@ -184,21 +184,49 @@ def known_vacuous_verify(command: str) -> str | None:
 # v127-F5 round 2 (I2): files that decide what the pinned check runs. G10
 # re-runs the pin on the PATCHED tree, so a patch that edits these gets the
 # check it wrote. Any touch blocks, except pyproject.toml and package.json,
-# whose test sections are compared so dependency bumps still land.
-_PIN_CONTROL_NAMES = frozenset(
-    {"conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "noxfile.py", "Makefile"}
+# whose test sections are compared so dependency bumps still land. Round 3:
+# the runner-config names the first list missed (`.pytest.ini` beats
+# pytest.ini; `.npmrc` `script-shell=true` makes `npm test` exit 0).
+# ponytail: a blocklist of the runners seen in the wild — a runner configured
+# by a file not named here is not seen; add its name.
+_PIN_CONTROL_GLOBS = (
+    "conftest.py",
+    "pytest.ini",
+    ".pytest.ini",
+    "tox.ini",
+    "setup.cfg",
+    "noxfile.py",
+    "Makefile",
+    ".coveragerc",
+    ".npmrc",
+    ".yarnrc*",
+    "jest.config.*",
+    "vitest.config.*",
+    ".mocharc*",
 )
-# ponytail: the test-runner tables seen in the wild; a runner configured
-# elsewhere in pyproject.toml is not seen — add its table here.
-_PYPROJECT_TEST_TABLES = (
-    ("tool", "pytest"),
-    ("tool", "hatch", "envs"),
-    ("tool", "tox"),
-    ("tool", "nox"),
-    ("tool", "poe"),
-    ("tool", "pdm", "scripts"),
-    ("tool", "coverage"),
+# pyproject [tool.<prefix>*] tables that configure a test runner.
+_PYPROJECT_TOOL_PREFIXES = ("pytest", "coverage", "tox", "nox", "poe")
+# package.json keys a dependency bump writes; every other key is compared.
+# `overrides`/`resolutions` pin transitive versions (npm/yarn) — the same trust
+# as `dependencies`, and what dependabot/renovate edit on security bumps.
+_PACKAGE_DEPENDENCY_KEYS = frozenset(
+    {
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+        "overrides",
+        "resolutions",
+        "version",
+    }
 )
+_PACKAGE_RUNNERS = frozenset({"npm", "pnpm", "yarn"})
+
+
+def _dig(node: object, *keys: str) -> object:
+    for key in keys:
+        node = node.get(key) if isinstance(node, dict) else None
+    return node
 
 
 def _test_config(name: str, text: str | None) -> object:
@@ -207,19 +235,21 @@ def _test_config(name: str, text: str | None) -> object:
     if text is None:
         return None
     try:
-        if name == "package.json":
-            doc = json.loads(text)
-            return doc.get("scripts") if isinstance(doc, dict) else object()
-        doc = tomllib.loads(text)
+        doc = json.loads(text) if name == "package.json" else tomllib.loads(text)
     except ValueError:
         return object()
-    tables = []
-    for keys in _PYPROJECT_TEST_TABLES:
-        node: object = doc
-        for key in keys:
-            node = node.get(key) if isinstance(node, dict) else None
-        tables.append(node)
-    return tables
+    if not isinstance(doc, dict):
+        return object()
+    if name == "package.json":
+        return {k: v for k, v in doc.items() if k not in _PACKAGE_DEPENDENCY_KEYS}
+    tool = doc.get("tool")
+    tool = tool if isinstance(tool, dict) else {}
+    return (
+        {k: v for k, v in tool.items() if k.startswith(_PYPROJECT_TOOL_PREFIXES)},
+        _dig(tool, "hatch", "envs"),
+        _dig(tool, "pdm", "scripts"),
+        _dig(doc, "project", "entry-points", "pytest11"),
+    )
 
 
 def _git_text(repo: Path, *args: str, env: dict[str, str] | None = None) -> str | None:
@@ -227,6 +257,33 @@ def _git_text(repo: Path, *args: str, env: dict[str, str] | None = None) -> str 
         ["git", "-C", str(repo), *args], capture_output=True, text=True, env=env, check=False
     )
     return proc.stdout if proc.returncode == 0 else None
+
+
+def _words(command: str) -> list[str]:
+    """Every word of ``command``, and of any quoted word inside it (an
+    ``sh -c '...'`` program), so a path cannot hide in a nested string."""
+    words = _tokens(command) or []
+    return [*words, *(n for w in words if any(c.isspace() for c in w) for n in _words(w))]
+
+
+def _package_scripts(tokens: list[str], scripts: object) -> list[str]:
+    """The package.json scripts a pin runs: ``npm|pnpm|yarn test`` or
+    ``... run|run-script <name>``. ponytail: the root package.json, one level
+    (a script that runs another script is not followed)."""
+    if not isinstance(scripts, dict):
+        return []
+    found = []
+    for i, token in enumerate(tokens):
+        if os.path.basename(token) not in _PACKAGE_RUNNERS:
+            continue
+        rest = tokens[i + 1 : i + 3]
+        name = rest[0] if rest[:1] in (["test"], ["t"]) else None
+        if rest[:1] in (["run"], ["run-script"]) and len(rest) == 2:
+            name = rest[1]
+        name = "test" if name == "t" else name
+        if isinstance(scripts.get(name), str):
+            found.append(scripts[name])
+    return found
 
 
 def pin_control_changes(
@@ -238,12 +295,20 @@ def pin_control_changes(
 ) -> tuple[str, ...]:
     """The changed files that steer the pinned check — read by the supervisor
     from the patch artifact applied to ``base`` in a scratch index, never from
-    the worker. Includes the pin's own script (its first two words as paths)."""
-    pin_paths = {os.path.normpath(t) for c in pin_commands for t in (_tokens(c) or [])[:2] if t}
+    the worker. Every word of the pin (and of the package.json script it runs)
+    that names a changed file counts: that file is the check."""
+    words = [t for c in pin_commands for t in _words(c)]
+    try:
+        scripts = _dig(json.loads(_git_text(repo, "show", f"{base}:package.json") or ""), "scripts")
+    except ValueError:
+        scripts = None
+    words += [t for script in _package_scripts(words, scripts) for t in _words(script)]
+    pin_paths = {os.path.normpath(t) for t in words if t}
     hits = [
         path
         for path in changed_files
-        if os.path.basename(path) in _PIN_CONTROL_NAMES or os.path.normpath(path) in pin_paths
+        if any(fnmatch(os.path.basename(path), g) for g in _PIN_CONTROL_GLOBS)
+        or os.path.normpath(path) in pin_paths
     ]
     parsed = [p for p in changed_files if os.path.basename(p) in ("pyproject.toml", "package.json")]
     if not parsed:

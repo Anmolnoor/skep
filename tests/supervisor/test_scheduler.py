@@ -626,7 +626,7 @@ def test_tick_inherits_project_auto_apply_policy(repo: Path, config: SupervisorC
                 "default_execution_mode": "workspace",
                 "auto_apply_verified_patch": True,
                 # v90-F4: maintain auto-lands only on a pinned verify command.
-                "verify_command": 'grep -q "value = 1" existing.py',
+                "verify_command": 'grep -rqx --include=*.py "value = 1" .',
             },
         )
         store.add_project_binding(
@@ -674,7 +674,7 @@ def test_tick_inherits_project_phase_auto_apply_default(
                 "auto_dispatch_allowed": True,
                 "default_execution_mode": "workspace",
                 # v90-F4: maintain auto-lands only on a pinned verify command.
-                "verify_command": 'grep -q "value = 1" existing.py',
+                "verify_command": 'grep -rqx --include=*.py "value = 1" .',
             },
         )
         store.add_project_binding(

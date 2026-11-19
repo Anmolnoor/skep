@@ -793,7 +793,7 @@ def test_project_policy_can_auto_apply_verified_patch_to_branch(
                 "auto_apply_verified_patch": True,
                 # v90-F4: the auto-landing lane only fires on a project-pinned
                 # verify command — a worker-nominated one no longer satisfies it.
-                "verify_command": 'grep -q "value = 1" existing.py',
+                "verify_command": 'grep -rqx --include=*.py "value = 1" .',
             },
         )
         seeded.add_project_binding(
@@ -865,7 +865,7 @@ def test_project_phase_maintain_auto_applies_verified_patch_by_default(
             # v90-F4: maintain auto-lands only with a pinned verify command.
             policy={
                 "default_execution_mode": "workspace",
-                "verify_command": 'grep -q "value = 1" existing.py',
+                "verify_command": 'grep -rqx --include=*.py "value = 1" .',
             },
         )
         seeded.add_project_binding(
@@ -1007,7 +1007,7 @@ def test_maintain_phase_lands_on_one_integration_branch_and_freezes_main(
             # v90-F4: maintain auto-lands only with a pinned verify command.
             policy={
                 "default_execution_mode": "workspace",
-                "verify_command": 'grep -q "value = 1" existing.py',
+                "verify_command": 'grep -rqx --include=*.py "value = 1" .',
             },
         )
         seeded.add_project_binding(
@@ -1783,7 +1783,7 @@ def test_es_f6_maintain_workers_start_from_the_integration_branch(
             phase="maintain",
             policy={
                 "default_execution_mode": "workspace",
-                "verify_command": 'grep -q "value = 1" existing.py',
+                "verify_command": 'grep -rqx --include=*.py "value = 1" .',
             },
         )
         seeded.add_project_binding(
