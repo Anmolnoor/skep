@@ -1,0 +1,77 @@
+name: Site
+
+# The docs site (site/, Astro) builds from the markdown under docs/ and from two
+# Python sources: the version in pyproject.toml and the worker contract version.
+on:
+  pull_request:
+  # No path filter: a release touches only pyproject.toml and
+  # src/skep/worker_contract/version.py, and the site must rebuild then.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, never cancelled half way. A pull request gets its
+# own group, where a superseded run is cancelled.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('site-pr-{0}', github.event.pull_request.number) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: build and check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Node tests
+        run: npm test
+      - name: Link check and JS budget
+        run: npm run check
+
+  build:
+    name: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install, build, check and upload the site
+        uses: withastro/action@v6
+        with:
+          path: ./site
+          node-version: 24
+          # A build that fails its own tests or checks is never uploaded.
+          build-cmd: npm run build && npm test && npm run check
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
