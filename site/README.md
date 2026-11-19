@@ -13,6 +13,11 @@ Content comes from the repository around it, at build time:
 | Docs sidebar and the hub `/docs.html` | the sections of `../docs/README.md` |
 | Every `/docs/<id>.html` page | every `../docs/**/*.md` file; the title is its first `# ` heading |
 | `/changelog.html` | the `## vX.Y.Z — title (date)` sections of `../docs/version-history.md` |
+| The numbers strip on the home page | counted at build by `homeNumbers()` in `src/lib/facts.mjs`: the keys of `CODING_ENGINES` in `../src/skep/supervisor/engines.py`, the outcomes passed to `ReverifyOutcome(` in `reverify.py`, the backends `sandbox.py` can report as available, the `**I<n>.` paragraphs of `../docs/invariants.md`, the `NNNN-*.md` files of `../docs/adr/` |
+
+A reader that cannot parse its source throws, so the build fails instead of
+printing a wrong number. The home page also fails the build when its engines
+table lists different ids from the registry.
 
 To add a doc, add the markdown file under `docs/` and list it in
 `docs/README.md`. Nothing in `site/` changes.
@@ -163,10 +168,10 @@ All in `src/styles/tokens.css`. Use the variables, never the raw values.
 
 Layout classes (`src/styles/base.css`): `wrap` (page gutter, 1400px), `wrap narrow`
 (920px), `section`, `band`, `grid` with `grid-2` / `grid-3` / `grid-4` (at most
-that many columns, fewer on small screens), `stack` (16px between children),
-`row` (wrapping flex row), `prose-width` (72ch), `sr-only`, `no-js-hide`,
-`reveal`, `stage-rows`, `link-arrow`, and the transcript colours `c-green`,
-`c-red`, `c-yellow`, `c-orange`, `c-dim`, `c-mut`.
+that many columns, fewer on small screens), `stack` (16px between children,
+panels included), `row` (wrapping flex row), `prose-width` (72ch), `sr-only`, `no-js-hide`,
+`reveal`, `stage-rows`, `link-arrow`, `atmos` (see Atmosphere), and the
+transcript colours `c-green`, `c-red`, `c-yellow`, `c-orange`, `c-dim`, `c-mut`.
 
 ## Kit
 
@@ -188,7 +193,8 @@ One band of a page with its head.
 | `narrow` | boolean | false | 920px measure |
 | `reveal` | boolean | false | CSS scroll reveal of the body; never on a page's first section |
 
-Slots: default (the body); `heading` replaces the `<h2>` (for a `BlurText` island).
+Slots: default (the body); `heading` replaces the `<h2>` (for a `BlurText` island,
+or the page's `<h1 class="t-h2">` in the first Section of an inner page).
 
 ```astro
 <Section id="limits" band eyebrow="Limits" tone="yellow" title="What it does not do" lead="…" reveal>
@@ -334,9 +340,49 @@ Scrolls sideways inside its own box. Either `head` + `rows` (plain text cells) o
 | `rows` | string[][] | | |
 | `caption` | string | | shown under the table; also the region's accessible name |
 | `rowHeaders` | boolean | false | first cell of each row is a row header |
+| `stack` | boolean | false | under 640px each row is a card and each cell sits under its column label, instead of the table scrolling sideways |
 
 ```astro
-<Table caption="Engines" head={['Engine', 'Auth']} rows={[['codex', 'OPENAI_API_KEY']]} rowHeaders />
+<Table caption="Engines" head={['Engine', 'Auth']} rows={[['codex', 'OPENAI_API_KEY']]} rowHeaders stack />
+```
+
+`stack` keeps the table a table for a screen reader: the `<thead>` is hidden
+from sight only, and the table roles are written out because `display: block`
+on a row drops them in some browsers. With `head` + `rows` the labels and roles
+are written for you. With slotted markup, write them yourself:
+
+```astro
+<Table caption="Engines" stack>
+  <thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">Engine</th><th scope="col" role="columnheader">Auth</th></tr></thead>
+  <tbody role="rowgroup">
+    <tr role="row"><th scope="row" role="rowheader">codex</th><td role="cell" data-label="Auth"><code>OPENAI_API_KEY</code></td></tr>
+  </tbody>
+</Table>
+```
+
+Use `stack` instead of a page-local copy of this CSS.
+
+### Panels in a stack
+
+`Terminal`, `Diff`, `Ledger` and `CodeBlock` are `<figure class="panel">`. The
+figure margin is cleared at zero specificity, so a panel inside a `.stack` (or
+under any page rule) is spaced like any other child. Do not wrap a panel in a
+`<div>` to get its spacing back.
+
+### Atmosphere
+
+The brand's fine grid under a radial mask, with one soft orange glow: CSS only,
+static, never cursor-reactive. Both layers are pseudo-elements, so they are not
+in the accessibility tree.
+
+- `class="atmos"` on a section is the home hero's strength.
+- **The page header gets a quieter one for free.** Every inner page starts with a
+  Section whose `heading` slot holds the page's `<h1 class="t-h2">`; `kit.css`
+  finds that pattern (`main > .section:first-child` with an h1 in its head) and
+  draws the grid and glow behind it. A page does nothing to opt in.
+
+```astro
+<section class="hero atmos">…</section>
 ```
 
 ### Search
@@ -372,7 +418,22 @@ Rendered by the layouts; pages do not use them. Their links are `NAV` and `FOOTE
 - **M3** Server HTML is the final state. Animation styles apply only under `html.js` (set inline in `<head>` by `Base`) and outside `prefers-reduced-motion: reduce`.
 - **M4** Animate emphasis, never existence: nothing mounts or unmounts on animation; reserve height.
 - **M5** Section reveals are CSS: opacity and a transform of at most 16px, `animation-timeline: view()` where supported, never a blur on a large area. Use `class="reveal"` (or `<Section reveal>`) and `class="stage-rows"` with `style="--i: N"` on each child.
-- **M6** Islands: one React island per page by default; `client:visible` unless it is above the fold (`client:idle`). Focus order follows the DOM; a decorative split is `aria-hidden` and has a visible text twin.
+- **M6** Islands: one React island per page by default; `client:visible` unless it is above the fold (`client:idle`). Focus order follows the DOM; a decorative split is `aria-hidden` and has a visible text twin. The home page is the exception: its hero panel, its section headings, its numbers and its engine line are islands, inside the JavaScript budget below.
+
+**Writing a scroll-driven animation of your own.** Put `animation-timeline` and
+`animation-range` in a rule of their own, under a selector the minifier cannot
+merge with the rule that sets `animation` (append `:where(*)`, which adds no
+specificity):
+
+```css
+html.js .thing { animation: thing-in linear both; }
+html.js .thing:where(*) { animation-timeline: view(); animation-range: entry 0% entry 55%; }
+```
+
+Written in one rule, the build's CSS minifier folds the timeline into the
+`animation` shorthand, browsers reject that declaration, and the animation
+silently never runs in the built site while it works in `npm run dev`. Check a
+scroll animation in `npm run build` output, not only in dev.
 
 Page transitions are the CSS rule `@view-transition { navigation: auto; }` in
 `base.css`. No `<ClientRouter />`, no vanilla motion scripts. Do not use: aurora
@@ -394,8 +455,8 @@ their final text on the server and hold it under reduced motion.
 |---|---|---|---|
 | `DecryptedText` | a verdict string resolving | `text`, `animateOn="view"`, `sequential`, `speed` (ms per step), `className` | no `motion` import; needs only React |
 | `CountUp` | PyPI and GitHub numbers | `to` (the build-time value), `separator`, `duration` (s), `format="compact"` | server renders `to`; counts from `from` (0) when it scrolls into view; change `to` later and it counts on from where it is |
-| `BlurText` | a section h2, never the h1 | `text`, `tag="h2"`, `className="t-h2"`, `animateBy="words"`, `delay` (ms between pieces) | pass it in a Section's `heading` slot |
-| `RotatingText` | engine names, agents page only | `texts`, `rotationInterval` (ms) | under reduced motion and without JS only `texts[0]` shows: print the whole list as visible text next to it |
+| `BlurText` | a section h2, never the h1 | `text`, `tag="h2"`, `className="t-h2"`, `animateBy="words"`, `delay` (ms between pieces), `blur` (px), `distance` (px), `holdIfInView` | pass it in a Section's `heading` slot |
+| `RotatingText` | engine names, on the home and agents pages | `texts`, `rotationInterval` (ms), `cycles` | under reduced motion and without JS only `texts[0]` shows: print the whole list as visible text next to it. Pass `cycles={1}`: it turns through the list once and rests on `texts[0]` (M2: no loops) |
 
 ```astro
 ---
@@ -409,9 +470,23 @@ import BlurText from '../components/reactbits/BlurText.tsx';
 </Section>
 ```
 
-`BlurText` arms itself when it hydrates: text that is already on screen blurs
-and resolves once. For a heading below the fold, hydrate it just before it
-scrolls in with `client:visible={{ rootMargin: '200px' }}`.
+`BlurText` arms itself when it hydrates: text that is already on screen is
+hidden and blurs in once, which reads as a flash of the server HTML. For a
+section heading, hydrate it just before it scrolls in and pass `holdIfInView`,
+so a heading the reader is already looking at (a tall window, an anchor link,
+a restored scroll position) stays as the server rendered it:
+
+```astro
+<BlurText slot="heading" client:visible={{ rootMargin: '200px' }} text="One decision point"
+  tag="h2" className="t-h2" delay={70} blur={6} distance={12} holdIfInView />
+```
+
+The heading text is in the server HTML twice: once visually hidden for screen
+readers, once as the `aria-hidden` words that animate. `CountUp` in its default
+`count` mode sets its number to `from` when it hydrates; hydrate it with the
+same `rootMargin` so that happens off screen. `RotatingText` changes width as
+it turns: give its wrapper `min-width` in `ch` for the longest text and keep it
+with its flag in a `white-space: nowrap` span, so the line never re-wraps.
 
 ### JavaScript budget
 
@@ -427,11 +502,19 @@ an island. Measured on this toolchain, per page:
 | `CountUp` (pulls motion's `animate` and `useInView`) | + 31 KB |
 | anything that imports the `motion` component from `motion/react` (`BlurText`, `RotatingText`, your own `motion.div`) | + 47 KB or more |
 
-So on the home page a hero island may import the `motion` component from
-`motion/react` (about 120 KB with the React runtime) and still has about 40 KB
-for its own code and `DecryptedText`. Do not add a second motion-based text
-component to the home page on top of that. The server HTML is the final state
-(M3), so none of this JavaScript blocks reading.
+`motion` is paid for once per page: its code lands in shared chunks, so after
+the first motion-based component each further one costs only its own code
+(3 to 5 KB). The home page loads all of it and measures **142 KB**:
+
+| The home page loads | gzip |
+|---|---|
+| React runtime and hydration | 68 KB |
+| `motion` (shared by every component below) | 54 KB |
+| `RunPanel`, `DecryptedText`, `BlurText`, `CountUp`, `RotatingText` | 18 KB |
+| inline scripts (island hydration and props) | 3 KB |
+
+That leaves about 17 KB. The server HTML is the final state (M3), so none of
+this JavaScript blocks reading.
 
 ## Markdown
 

@@ -51,13 +51,17 @@ const spaces = [4, 8, 12, 16, 24, 32, 48, 64, 96];
 ---
 
 <Base title="Kit" description="The skep site design system on one page." noindex>
-  <Section eyebrow="Design system" title="Kit" lead="Every token and component the pages are built from. See site/README.md for props.">
+  <!-- An h1 in the heading slot of the first Section is the page header every inner
+       page shares; kit.css gives that pattern the quiet grid atmosphere behind this one. -->
+  <Section eyebrow="Design system" lead="Every token and component the pages are built from. See site/README.md for props.">
+    <h1 slot="heading" class="t-h2">Kit</h1>
     <div class="row">
       <a class="link-arrow" href="#tokens">Tokens</a>
       <a class="link-arrow" href="#type">Type</a>
       <a class="link-arrow" href="#components">Components</a>
       <a class="link-arrow" href="#panels">Panels</a>
       <a class="link-arrow" href="#motion">Motion</a>
+      <a class="link-arrow" href="#atmosphere">Atmosphere</a>
     </div>
   </Section>
 
@@ -148,6 +152,17 @@ const spaces = [4, 8, 12, 16, 24, 32, 48, 64, 96];
         ]}
         rowHeaders
       />
+      <Table
+        caption="The same table with stack: under 640px each row is a card and each cell sits under its column label"
+        head={['Kind', 'Colour', 'Used for']}
+        rows={[
+          ['allow / ok', 'green', 'a verdict that lets the action through, or a check that passed'],
+          ['ask / limit', 'yellow', 'a verdict that waits for a person, or a stated limit'],
+          ['deny / risk', 'red', 'a verdict that stops the action, or a risk'],
+        ]}
+        rowHeaders
+        stack
+      />
     </div>
   </Section>
 
@@ -157,6 +172,11 @@ const spaces = [4, 8, 12, 16, 24, 32, 48, 64, 96];
       <Diff code={patch} file="sample.py" landed="sample/branch ← patch" stage />
       <Ledger rows={rows} title="sample records" captured="sample rows, not real output" stage />
       <CodeBlock code={`$ sample-command install\n$ sample-command run --flag`} lang="sh" title="Install" step={1} />
+    </div>
+    <div class="stack" style="margin-top: var(--s-6)">
+      <p class="t-small c-mut">A panel inside a <code>.stack</code> is spaced like any other child: 16px above this code block, and 16px below it.</p>
+      <CodeBlock code="$ sample-command status" lang="sh" title="in a stack" copy={false} />
+      <p class="t-small c-mut">The paragraph after the panel.</p>
     </div>
   </Section>
 
@@ -172,12 +192,25 @@ const spaces = [4, 8, 12, 16, 24, 32, 48, 64, 96];
         <BlurText client:visible text="A heading that resolves once" tag="h2" className="t-h3" animateBy="words" delay={80} />
       </Card>
       <Card title="RotatingText: engine names">
-        <p class="t-h3 mono"><RotatingText client:visible texts={['first', 'second', 'third']} rotationInterval={2200} /></p>
-        <p class="t-small">Visible twin of the list: first, second, third.</p>
+        <p class="t-h3 mono"><RotatingText client:visible texts={['first', 'second', 'third']} rotationInterval={2200} cycles={1} /></p>
+        <p class="t-small">Visible twin of the list: first, second, third. With <code>cycles={'{1}'}</code> it turns through the list once and rests on the first.</p>
       </Card>
     </div>
     <div class="reveal card" style="margin-top: var(--s-4)">
       <p><code>.reveal</code>: a CSS scroll reveal (opacity and 16px), where the browser has view timelines.</p>
+    </div>
+  </Section>
+
+  <Section id="atmosphere" eyebrow="Atmosphere" title="The grid and the glow" lead="The brand's fine grid under a radial mask, with one soft orange glow. CSS only, static, and never cursor-reactive.">
+    <div class="grid grid-2">
+      <div class="atmos card" style="min-height: 240px">
+        <p class="t-h3">.atmos</p>
+        <p class="c-mut">The home hero's strength. Put the class on a section; its content needs no wrapper.</p>
+      </div>
+      <Card title="The page header gets it for free">
+        The first Section of a page, with the page's h1 in its heading slot, gets a quieter grid and glow from
+        kit.css. The top of this page is one. A page does nothing to opt in.
+      </Card>
     </div>
   </Section>
 </Base>
