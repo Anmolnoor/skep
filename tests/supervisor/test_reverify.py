@@ -529,6 +529,52 @@ def test_reverify_run_primes_against_the_shared_project_cache(
     assert not (root / "uv").exists()
 
 
+def test_a_failed_rerun_keeps_its_full_output_as_evidence(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v127-A0 trial fix (V01): `reverify.output.txt` was named the full output
+    but held the 2000-char tail from pytest's short summary on — the traceback
+    that said WHY (PermissionError on /tmp) was gone. The file keeps the whole
+    output, bounded to its last 200 KB; the record keeps the short tail."""
+    pin = (
+        "python3 -c \"import sys; print('TRACEBACK-HEAD PermissionError'); "
+        "print('x' * 300_000); print('short test summary info'); "
+        "print('ERROR test_a'); sys.exit(1)\""
+    )
+    evidence = tmp_path / "evidence"
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=[pin],
+        config=config,
+        profile_path=None,
+        env={"PATH": "/usr/bin:/bin"},
+        evidence_dir=evidence,
+    )
+    assert outcome.outcome == "failed", outcome.detail
+    tail = outcome.detail.split("--- re-run output (tail) ---\n", 1)[1]
+    assert tail.startswith("short test summary info") and "ERROR test_a" in tail
+    text = (evidence / "reverify.output.txt").read_text(encoding="utf-8")
+    assert "ERROR test_a" in text and "x" * 1000 in text
+    output = text.split("(exit 1)\n", 1)[1]
+    assert len(output) == 200_000 and "TRACEBACK-HEAD" not in output  # bounded
+
+    small = tmp_path / "small"
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["python3 -c \"print('TRACEBACK-HEAD'); print('y' * 3000); exit(1)\""],
+        config=config,
+        profile_path=None,
+        env={"PATH": "/usr/bin:/bin"},
+        evidence_dir=small,
+    )
+    text = (small / "reverify.output.txt").read_text(encoding="utf-8")
+    assert "TRACEBACK-HEAD" in text and "y" * 3000 in text
+
+
 def test_reverify_timeout_is_the_budget_floored_at_the_default() -> None:
     """The flat 300s cap timed out a healthy 10-minute pinned suite (dogfood
     019fc72c, exit -1) — the re-run is afforded the run's own budget, and a

@@ -91,6 +91,10 @@ one it is `unavailable`, never `failed`.
 | `failed` | Patch did not apply, a command timed out, or at least one command exited non-zero. |
 | `unavailable` | Skep could not honestly re-run the check, usually because there was no patch, no recorded verification command, or the command was not installed. |
 
+A `failed` replay records the tail of the command's output (from pytest's
+short summary on, when there is one); the whole output, up to its last 200 KB,
+is kept in `reverify.output.txt` in the run's audit dir.
+
 A run is `confirmed` only when the worker reported verification `passed` and
 Skep's replay outcome is also `passed`.
 

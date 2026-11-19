@@ -382,18 +382,21 @@ def _run_command(
         )
     except subprocess.TimeoutExpired:
         return -1, f"timed out after {timeout:.0f}s"
-    return proc.returncode, _output_tail(proc.stdout, proc.stderr)
+    combined = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
+    return proc.returncode, combined.strip()[-_OUTPUT_EVIDENCE_CHARS:]
 
 
 _OUTPUT_TAIL_CHARS = 2000
+# v127-A0 trial fix (V01): what the evidence file keeps — the whole output up
+# to its last 200 KB, so the traceback above pytest's summary survives.
+_OUTPUT_EVIDENCE_CHARS = 200_000
 
 
-def _output_tail(stdout: str, stderr: str) -> str:
+def _output_tail(combined: str) -> str:
     """v115-F12: what a failed re-run SAID. The first skep-maintains-skep run
     to reach G10 failed re-verification and the record held only "exit 1" —
     the pytest output had been captured and discarded (I8, I9). pytest's own
     short summary is the most useful slice; otherwise the last 2000 chars."""
-    combined = (stdout or "") + (("\n" + stderr) if stderr else "")
     marker = combined.rfind("short test summary info")
     if marker != -1:
         line_start = combined.rfind("\n", 0, marker) + 1
@@ -580,9 +583,9 @@ def reverify(
             # v127-A0: the same shape for Node — the BASELINE lockfile installs
             # under the prime wall; patch code stays offline below.
             node_install = node_prime[1]
-            prime_code, prime_tail = wall.run(node_install, env)
+            prime_code, prime_output = wall.run(node_install, env)
             if prime_code != 0:
-                missing = _corepack_missing(node_install, prime_tail, package_manager)
+                missing = _corepack_missing(node_install, prime_output, package_manager)
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
@@ -591,7 +594,7 @@ def reverify(
                     f"re-verification ({node_install} exited {prime_code})"
                     f"{': ' + missing if missing else ''}; the "
                     "verification command was not run\n--- install output (tail) ---\n"
-                    f"{prime_tail or '(no output)'}",
+                    f"{_output_tail(prime_output) or '(no output)'}",
                 )
             primed = (
                 f"{primed}; node deps primed from the baseline ({node_install}), verify ran offline"
@@ -654,7 +657,7 @@ def reverify(
             patched_env = {**uv_prime_env, "UV_CACHE_DIR": str(reverify_tmp / "uv-patched")}
             if node_pin:  # its XDG/npm caches point at the shared Node cache too
                 patched_env.update(_node_env(reverify_tmp / "node-patched", reverify_tmp))
-            resync_code, resync_tail = patched_wall.run("uv sync", patched_env)
+            resync_code, resync_output = patched_wall.run("uv sync", patched_env)
             if resync_code != 0:
                 return ReverifyOutcome(
                     "unavailable",
@@ -664,7 +667,7 @@ def reverify(
                     f"primed (uv sync exited {resync_code}); the verification command "
                     "was not run — a dependency change is never confirmed against the "
                     "old dependencies\n--- uv sync output (tail) ---\n"
-                    f"{resync_tail or '(no output)'}",
+                    f"{_output_tail(resync_output) or '(no output)'}",
                 )
             primed = f"{primed}; re-primed against the patched lockfile"
         patched_prime = _node_prime(worktree, commands) if touched & _NODE_PRIME_INPUTS else None
@@ -698,11 +701,11 @@ def reverify(
                     f"{refusal}; the verification command was not run — a dependency "
                     "change is never confirmed against the old dependencies",
                 )
-            reprime_code, reprime_tail = patched_wall.run(
+            reprime_code, reprime_output = patched_wall.run(
                 install, {**env, **_node_env(reverify_tmp / "node-patched", reverify_tmp)}
             )
             if reprime_code != 0:
-                missing = _corepack_missing(install, reprime_tail, package_manager)
+                missing = _corepack_missing(install, reprime_output, package_manager)
                 return ReverifyOutcome(
                     "unavailable",
                     commands,
@@ -712,15 +715,15 @@ def reverify(
                     f"{': ' + missing if missing else ''}; the verification "
                     "command was not run — a dependency change is never confirmed "
                     "against the old dependencies\n--- install output (tail) ---\n"
-                    f"{reprime_tail or '(no output)'}",
+                    f"{_output_tail(reprime_output) or '(no output)'}",
                 )
             again = "re-" if isinstance(node_prime, tuple) else ""
             primed = f"{primed}; {again}primed against the patched lockfile ({install})"
         exit_codes: list[int] = []
-        tails: list[str] = []
+        outputs: list[str] = []
         command_timeout = command_timeout_seconds(timeout_seconds)
         for command in commands:
-            code, tail = _run_command(
+            code, output = _run_command(
                 command,
                 cwd=worktree,
                 env=env,
@@ -728,7 +731,7 @@ def reverify(
                 timeout=command_timeout,
             )
             exit_codes.append(code)
-            tails.append(tail)
+            outputs.append(output)
         if any(code == _COMMAND_NOT_FOUND for code in exit_codes):
             return ReverifyOutcome(
                 "unavailable",
@@ -748,13 +751,14 @@ def reverify(
             output_path = evidence_dir / "reverify.output.txt"
             output_path.write_text(
                 "\n\n".join(
-                    f"$ {command}\n(exit {code})\n{tail}"
-                    for command, code, tail in zip(commands, exit_codes, tails, strict=True)
+                    f"$ {command}\n(exit {code})\n{output}"
+                    for command, code, output in zip(commands, exit_codes, outputs, strict=True)
                 ),
                 encoding="utf-8",
             )
             evidence = f"; full output: {output_path}"
-        failed_tail = next((t for c, t in zip(exit_codes, tails, strict=True) if c != 0), "")
+        failed = next((o for c, o in zip(exit_codes, outputs, strict=True) if c != 0), "")
+        failed_tail = _output_tail(failed)
         return ReverifyOutcome(
             "failed",
             commands,
