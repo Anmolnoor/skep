@@ -618,9 +618,10 @@ def reverify(
             # have passed. Prime again, after the patch, through the baseline's
             # index hosts alone and a throwaway cache (patched_wall above); the
             # pinned command still runs offline afterwards.
-            resync_code, resync_tail = patched_wall.run(
-                "uv sync", {**uv_prime_env, "UV_CACHE_DIR": str(reverify_tmp / "uv-patched")}
-            )
+            patched_env = {**uv_prime_env, "UV_CACHE_DIR": str(reverify_tmp / "uv-patched")}
+            if node_pin:  # its XDG/npm caches point at the shared Node cache too
+                patched_env.update(_node_env(reverify_tmp / "node-patched", reverify_tmp))
+            resync_code, resync_tail = patched_wall.run("uv sync", patched_env)
             if resync_code != 0:
                 return ReverifyOutcome(
                     "unavailable",
