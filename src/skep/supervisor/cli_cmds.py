@@ -2584,17 +2584,17 @@ def cmd_project_setup(args: argparse.Namespace) -> int:
     store = RunStore(config.db_path)
     try:
         # A re-run that names no pack or strategy (`--loopback-port N` alone)
-        # updates the project as it stands, never resets its phase to build.
+        # updates the project as it stands, never resets its phase to build;
+        # setup_project_record takes its stored strategy and pack (v127-F10).
         stored = store.get_project_policy(project_id)
-        keep = stored is not None and args.pack is None and args.strategy is None
         result = setup_project_record(
             run_store=store,
             root=_project_root(config),
             project_id=project_id,
             name=name,
-            strategy=stored.strategy if keep and stored else args.strategy,
+            strategy=args.strategy,
             phase=args.phase or (stored.phase if stored else "build"),
-            pack_name=stored.pack_name if keep and stored else args.pack,
+            pack_name=args.pack,
             repo_path=str(repo),
             repo_slug=_managed_repo_slug(repo, config),
             template_names=[],

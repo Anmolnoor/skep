@@ -113,16 +113,34 @@ def test_an_unknown_name_lists_the_valid_strategies_and_packs(
     assert "trusted_local_dev" in detail and "public_free" in detail and "packs:" in detail
 
 
+def _draft_trusted_local_dev(monkeypatch: pytest.MonkeyPatch) -> None:
+    import dataclasses
+
+    from skep.supervisor import packs
+
+    real = packs.builtin_policy_packs
+    monkeypatch.setattr(packs, "builtin_policy_packs", lambda: {
+        name: dataclasses.replace(pack, status="draft") if name == "trusted_local_dev" else pack
+        for name, pack in real().items()
+    })  # fmt: skip
+
+
+def test_the_cli_re_sets_up_a_stored_draft_pack(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    argv = ["--home", str(home), "project", "setup", str(repo), "--project-id", "fresh"]
+    assert main([*argv, "--pack", "trusted_local_dev"]) == 0, capsys.readouterr().err
+    _draft_trusted_local_dev(monkeypatch)
+    assert main(argv) == 0, capsys.readouterr().err
+
+
 @pytest.mark.parametrize("route", ["setup", "preview"])
 def test_a_stored_draft_pack_is_re_set_up_without_naming_it(
     repo: Path, config: SupervisorConfig, route: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Round 2: a pack the project already pinned is honoured even when it is
     draft-only (set-phase does the same); only a NEW pick must be supported."""
-    import dataclasses
-
-    from skep.supervisor import packs
-
     store = RunStore(config.db_path)
     try:
         store.add_project_policy(project_id="fresh", name="fresh", strategy="trusted_local_dev",
@@ -130,11 +148,7 @@ def test_a_stored_draft_pack_is_re_set_up_without_naming_it(
                                  pack_version="1")  # fmt: skip
     finally:
         store.close()
-    real = packs.builtin_policy_packs
-    monkeypatch.setattr(packs, "builtin_policy_packs", lambda: {
-        name: dataclasses.replace(pack, status="draft") if name == "trusted_local_dev" else pack
-        for name, pack in real().items()
-    })  # fmt: skip
+    _draft_trusted_local_dev(monkeypatch)
     client = serve_client(config)
     response = client.post(
         f"/api/projects/{route}",
