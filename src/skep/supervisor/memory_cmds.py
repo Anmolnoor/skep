@@ -137,6 +137,13 @@ def cmd_memory_add(args: argparse.Namespace) -> int:
         return _err("memory add needs the fact as text.")
     store = RunStore(build_config(args.home, None).db_path)
     try:
+        # v126-F10 (review): a typo'd project files a fact nothing ever reads.
+        if args.project is not None and store.get_project_policy(args.project) is None:
+            return _err(
+                f"no project named {args.project!r} — a fact scoped to it would reach "
+                "no chat or worker; use a project id, or drop --project for global.",
+                next_command="skep project list",
+            )
         item = store.add_memory_item(
             memory_class=args.memory_class, content=content, actor=OPERATOR_ACTOR,
             project_id=args.project,

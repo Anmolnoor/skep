@@ -132,6 +132,13 @@ def test_v126_f10_memory_add_writes_a_durable_item_in_one_step(
     durable item, actor ``operator``, and the same audit event an approval
     writes (memory_item created)."""
     home = tmp_path / "home"
+    store = _store(home)
+    try:
+        store.add_project_policy(
+            project_id="p1", name="p1", strategy="trusted_local_dev", phase="build", policy={}
+        )
+    finally:
+        store.close()
     assert _run(home, "memory", "add", "deploys go out on tuesdays", "--class", "project_fact",
                 "--project", "p1") == 0  # fmt: skip
     out = capsys.readouterr().out
@@ -156,6 +163,22 @@ def test_v126_f10_memory_add_refuses_empty_text_and_the_expiring_class(
     with pytest.raises(SystemExit):  # argparse: observation is not a durable class
         _run(home, "memory", "add", "x", "--class", "observation")
     capsys.readouterr()
+    store = _store(home)
+    try:
+        assert store.list_memory_items() == []
+    finally:
+        store.close()
+
+
+def test_v126_f10_memory_add_refuses_a_project_that_does_not_exist(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v126-F10 (review): a typo'd --project would file a fact no chat or
+    worker ever sees; the CLI refuses and names where projects are listed."""
+    home = tmp_path / "home"
+    assert _run(home, "memory", "add", "x", "--class", "project_fact", "--project", "nope") != 0
+    err = capsys.readouterr().err
+    assert "no project named 'nope'" in err and "skep project list" in err
     store = _store(home)
     try:
         assert store.list_memory_items() == []
