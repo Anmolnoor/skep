@@ -68,6 +68,14 @@ def test_cli_page_names_only_real_commands() -> None:
     assert not unknown, f"site/src/pages/cli.astro names commands skep does not have: {unknown}"
 
 
+def test_cli_page_covers_every_top_level_command() -> None:
+    """The other direction: a command added to skep must reach the page. The
+    page was written at 1.4.2 and main gained `memory add` the same day."""
+    page = CLI_PAGE.read_text(encoding="utf-8")
+    missing = sorted(name for name in _surface() if f"skep {name}" not in page)
+    assert not missing, f"site/src/pages/cli.astro does not mention: {missing}"
+
+
 def test_current_version_has_a_release_section() -> None:
     """The changelog is generated: a release with no section is a release the
     site does not show."""
