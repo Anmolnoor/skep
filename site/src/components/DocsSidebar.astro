@@ -14,7 +14,11 @@ const entries = await getCollection('docs');
 const byId = new Map(entries.map((entry) => [entry.id, entry]));
 const readme = byId.get('readme');
 if (!readme?.body) throw new Error('docs/README.md is missing from the docs collection');
-const sections = parseDocsIndex(readme.body);
+// The sidebar lists site pages only. Links that leave the site (maintainer records,
+// ../CONTRIBUTING.md) stay on the hub, where they are marked as GitHub links.
+const sections = parseDocsIndex(readme.body)
+  .map((section) => ({ ...section, items: section.items.filter((item) => item.id !== null) }))
+  .filter((section) => section.items.length > 0);
 const parent = current?.includes('/') ? `${current.split('/')[0]}/readme` : null;
 const isCurrent = (id: string | null) => id !== null && (id === current || id === parent);
 ---
