@@ -143,8 +143,8 @@ dispatching task against /home/you/code/notes
   → re-verify: passed [confirmed]  worker passed  re-ran clean: all exit 0 [command from the project's pinned verify_command]  re-ran pytest  -> exit 0
 task 01a1f131-513d-7650-873b-16247605c45b
   state:        completed (1.6s)
-  verification: passed
-  summary:      created hello.py and verified it runs.
+  verification: confirmed by re-verify (G10) — re-ran pytest → exit 0
+  worker claim: passed — created hello.py and verified it runs.
   evidence:     /home/you/.skep/supervisor/audit/01a1f131-513d-7650-873b-16247605c45b
   next:         skep review 01a1f131-513d-7650-873b-16247605c45b
 ```

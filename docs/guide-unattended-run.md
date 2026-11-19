@@ -205,8 +205,8 @@ author could go without a credential. What follows is what the code prints
 once the credential is there.
 
 <!-- from code, not run. Live tail and summary: src/skep/supervisor/cli_cmds.py:377-388
-     (the re-verify line), :1014-1025 (task / state / verification / summary / evidence /
-     next, and the exit code). The same code path printed the real builtin-worker
+     (the re-verify line), _verification_lines (task / state / verification / worker claim /
+     evidence / next, and the exit code; v127-T3). The same code path printed the real builtin-worker
      transcripts in guide-pin-verify-command.md. -->
 
 While the agent works, skep prints one line per phase: the worker starting
@@ -222,8 +222,8 @@ and finally a summary block:
 ```text
 task <task_id>
   state:        completed (<seconds>s)
-  verification: passed
-  summary:      <the agent's summary>
+  verification: confirmed by re-verify (G10) — re-ran python -m pytest -q → exit 0
+  worker claim: passed — <the agent's summary>
   evidence:     /home/you/.skep/supervisor/audit/<task_id>
   next:         skep review <task_id>
 ```

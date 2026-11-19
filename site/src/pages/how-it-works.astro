@@ -66,8 +66,8 @@ dispatching task against ~/code/skep-demo
   → re-verify: passed [confirmed]  worker passed  re-ran clean: all exit 0 [command from the project's pinned verify_command]  re-ran python3 -m unittest discover -s tests  -> exit 0
 task 01a1f147-656d-7a10-81a4-4b42ba08e7bc
   state:        completed (1.6s)
-  verification: passed
-  summary:      created hello.py and verified it runs.
+  verification: confirmed by re-verify (G10) — re-ran python3 -m unittest discover -s tests → exit 0
+  worker claim: passed — created hello.py and verified it runs.
   evidence:     $SKEP_HOME/supervisor/audit/01a1f147-656d-7a10-81a4-4b42ba08e7bc
   next:         skep review 01a1f147-656d-7a10-81a4-4b42ba08e7bc
 `;
@@ -240,7 +240,7 @@ const decisions = [
       </div>
       <div class="grid">
         <Terminal code={setup} title="skep project setup" captured={`${CAPTURE}; ${PATHS}`} />
-        <Terminal code={run} title="skep run" captured={`${CAPTURE}; ${PATHS}, the interpreter as .venv/bin/python`} />
+        <Terminal code={run} title="skep run" captured={`${CAPTURE}; ${PATHS}, the interpreter as .venv/bin/python; the last verification and worker-claim lines in the format skep prints since v127`} />
       </div>
     </div>
   </Section>

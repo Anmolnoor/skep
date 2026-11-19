@@ -76,8 +76,8 @@ dispatching task against ~/workspace
   → re-verify: passed [confirmed]  worker passed  re-ran clean: all exit 0 [command from the worker's own verify step]  re-ran …/bin/python hello.py  -> exit 0
 task 01a1f130-6433-71f7-80b5-c4c122f6022d
   state:        completed (1.6s)
-  verification: passed
-  summary:      created hello.py and verified it runs.
+  verification: confirmed by re-verify (G10) — re-ran …/bin/python hello.py → exit 0
+  worker claim: passed — created hello.py and verified it runs.
   evidence:     ~/.skep/supervisor/audit/01a1f130-6433-71f7-80b5-c4c122f6022d
   next:         skep review 01a1f130-6433-71f7-80b5-c4c122f6022d
 $ skep review 01a1f130-6433-71f7-80b5-c4c122f6022d --approve
@@ -275,7 +275,7 @@ $ skep run ~/workspace "fix the failing test" --execution-mode sandbox
           </Callout>
         </div>
       </div>
-      <Terminal code={run} title="a sandbox-mode run, then its approval" captured="skep run and skep review --approve, sandbox mode on bubblewrap, no model configured (the fallback worker), throwaway HOME shown as ~, 2026-11-18" />
+      <Terminal code={run} title="a sandbox-mode run, then its approval" captured="skep run and skep review --approve, sandbox mode on bubblewrap, no model configured (the fallback worker), throwaway HOME shown as ~, 2026-11-18; the summary's verification and worker-claim lines in the format skep prints since v127" />
     </div>
   </Section>
 
