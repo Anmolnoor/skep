@@ -104,8 +104,7 @@ def _needs_uv_priming(worktree: Path, commands: list[str]) -> bool:
     uv can neither init its cache (`~/.cache/uv` is not writable) nor sync,
     so the default pin (`uv run pytest`, v91-F1) exited 2 for every good
     patch on a sandboxed supervisor (field run 019f9ea0)."""
-    wants_uv = any(command.split()[:1] == ["uv"] for command in commands)
-    return wants_uv and (worktree / "pyproject.toml").is_file()
+    return _pin_uses(commands, frozenset({"uv"})) and (worktree / "pyproject.toml").is_file()
 
 
 # v127-A0 (O12): a Node pin needs node_modules, which a fresh worktree never
@@ -140,10 +139,22 @@ _NODE_DEPENDENCY_KEYS = (
 )
 _TARBALL_URL = r"https://[^\s\"'#?,}]+\.tgz"
 _YARN_PATH = re.compile(r"""^\s*(?:yarn-path|yarnPath:)\s*["']?([^"'\s]+)""", re.MULTILINE)
+_SHELL_SEPARATORS = re.compile(r"&&|\|\||[;|]")
+_ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
 
 def _pin_uses(commands: list[str], tools: frozenset[str]) -> bool:
-    return any(set(command.split()[:1]) & tools for command in commands)
+    """Does any command run one of ``tools``? Council round 3 (N6): each
+    `&&`/`||`/`;`/`|` segment's first word after `env` and `VAR=val`, so
+    `CI=1 npm test` and `cd web && npm test` count."""
+    for command in commands:
+        for segment in _SHELL_SEPARATORS.split(command):
+            words = segment.split()
+            while words and (words[0] == "env" or _ENV_ASSIGNMENT.match(words[0])):
+                words.pop(0)
+            if words[:1] and words[0] in tools:
+                return True
+    return False
 
 
 def _node_prime(worktree: Path, commands: list[str]) -> tuple[str, str] | str | None:
@@ -469,7 +480,7 @@ def reverify(
         # already resolve from, and the installer files a patch must not touch.
         hosts: set[str] = set()
         if uv_prime:
-            uv_index = r'(?:registry|url) = "([^"]+)"'
+            uv_index = r'(?:registry|url|git) = "([^"]+)"'
             hosts |= {*_PYPI_HOSTS, *_lock_hosts(worktree, ["uv.lock"], uv_index)}
         if node_pin:
             node_lockfiles = [lockfile for lockfile, _ in _NODE_INSTALLS]

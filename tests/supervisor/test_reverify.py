@@ -1049,13 +1049,17 @@ def test_the_uv_prime_reaches_only_the_baseline_index_hosts(
     repo: Path, config: SupervisorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The uv twin: pypi.org, files.pythonhosted.org and the indexes the
-    baseline uv.lock names — never allow-all."""
+    baseline uv.lock names — never allow-all. Council round 3 (N2): a
+    baseline `source = { git = ... }` host counts too (host only), or every
+    repo with a git dependency could never prime."""
     from skep.supervisor import sandbox
 
     (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
     (repo / "uv.lock").write_text(
         'version = 1\n[[package]]\nname = "dep"\nversion = "1.0"\n'
-        'source = { registry = "https://pypi.example.org/simple" }\n',
+        'source = { registry = "https://pypi.example.org/simple" }\n'
+        '[[package]]\nname = "gitdep"\nversion = "0.1"\n'
+        'source = { git = "https://git.example.com/x/gitdep?rev=main#abc123" }\n',
         encoding="utf-8",
     )
     git(repo, "add", "pyproject.toml", "uv.lock")
@@ -1072,7 +1076,7 @@ def test_the_uv_prime_reaches_only_the_baseline_index_hosts(
         env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
     )
     assert outcome.outcome == "passed", outcome.detail
-    hosts = ("files.pythonhosted.org", "pypi.example.org", "pypi.org")
+    hosts = ("files.pythonhosted.org", "git.example.com", "pypi.example.org", "pypi.org")
     assert wall.proxies == [hosts]
     assert wall.profiles["reverify.profile.prime.sb"]["network"] == sandbox.NetworkPolicy(
         allow=hosts
@@ -1467,3 +1471,42 @@ def test_a_proxy_that_fails_to_stop_never_skips_the_rest_of_the_cleanup(
     assert len(stops) == 2  # the loopback proxy AND the prime wall's
     assert list(root.iterdir()) == []
     _no_leftovers(repo, config)
+
+
+@pytest.mark.parametrize(
+    "pin",
+    ["CI=1 npm test", "cd . && npm test", "env FORCE_COLOR=0 npm test", "true; npm test | cat"],
+)
+def test_a_node_pin_behind_env_or_another_command_is_primed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path, pin: str
+) -> None:
+    """Council round 3 (N6): pin detection read only the first word, so
+    `CI=1 npm test` and `cd web && npm test` ran with no node_modules."""
+    _node_project(repo)
+    bin_dir, log = _node_stubs(tmp_path)
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, pin)
+    assert outcome.outcome == "passed", outcome.detail
+    assert log.read_text(encoding="utf-8").splitlines()[0].startswith("npm ci --ignore-scripts ")
+
+
+def test_a_uv_pin_behind_env_is_primed(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n", encoding="utf-8")
+    git(repo, "add", "pyproject.toml")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "pyproject")
+    bin_dir, log = _uv_stub(tmp_path)
+    outcome = reverify(
+        repo=repo,
+        ref=None,
+        patch_path=_patch_adding_marker(tmp_path),
+        commands=["PYTHONHASHSEED=0 uv run pytest"],
+        config=config,
+        profile_path=None,
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "UV_LOG": str(log)},
+    )
+    assert outcome.outcome == "passed", outcome.detail
+    assert [line.split()[0] for line in log.read_text(encoding="utf-8").splitlines()] == [
+        "sync",
+        "run",
+    ]
