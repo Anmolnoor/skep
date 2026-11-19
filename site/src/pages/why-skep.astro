@@ -38,12 +38,12 @@ const claims = [
   ],
   [
     "skep re-runs the project's pinned verify command on a clean worktree",
-    'Any project with a pin. An external agent cannot be dispatched without one.',
+    'Any project with a pin. A project run of an external agent is refused without one.',
     "As strong as the command. An unpinned project falls back to the worker's own command, and the record says so.",
   ],
   [
     'Your default branch never moves without you',
-    'Always. It moves only through actions that raise a confirmation.',
+    'In your own checkout, always: it moves only through actions that raise a confirmation. A clone skep manages for you is fast-forwarded to origin before a run; skep never commits to it.',
     'Landing a patch needs approval by default, not always: two opt-in lanes land a re-verified patch on a skep/* branch.',
   ],
   [
@@ -272,8 +272,7 @@ const wrongTool = [
         </p>
         <p>
           What skep adds is where the run happens: on your machine, with your keys, inside a wall you
-          configure. The repository does not have to live on a code host, the agent is not handed a credential
-          for your remote, and the evidence stays in files on your disk.
+          configure. The repository does not have to live on a code host, and the evidence stays in files on your disk.
         </p>
       </Card>
       <Callout kind="limit" title="What skep does not do">

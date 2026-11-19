@@ -275,7 +275,8 @@ const decisions = [
           <p>
             Workspace mode has no OS wall at all. In sandbox mode writes are confined, but reads outside the worktree
             are mostly open: skep masks a list of credential paths (the secret floor), not your home directory. The
-            default network includes the model provider and the project's package registries.
+            default network includes the model provider and, for a trusted local project, four package registry hosts
+            (PyPI's two, npm and the Go proxy).
           </p>
           <p>
             skep also switches the agent's own guard off (Claude Code runs with <code>bypassPermissions</code>, Codex
@@ -389,8 +390,8 @@ const decisions = [
             <code>skep doctor</code> names the projects still on it.
           </p>
           <p>
-            The check is only as strong as the command. And if skep itself is configured to run without the sandbox,
-            the re-run happens on the host.
+            The check is only as strong as the command. A workspace-mode run has no OS wall, and neither does its
+            re-run.
           </p>
         </Callout>
         <p class="prose-width t-small c-mut">
@@ -450,7 +451,7 @@ const decisions = [
               every one is a manifest or a lockfile.
             </dd>
             <dt>Branch</dt>
-            <dd><code>skep/&lt;task_id&gt;</code></dd>
+            <dd>The project's <code>auto_apply_branch</code> if it sets one, otherwise <code>skep/&lt;task_id&gt;</code></dd>
           </dl>
         </Card>
         <Card title="verified-patch" icon="git-merge" level="h4">

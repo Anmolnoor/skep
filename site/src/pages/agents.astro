@@ -193,7 +193,7 @@ $ skep policy decisions --actor 'acp:*'
         </div>
         <div class="prose">
           <ul>
-            <li>An external engine needs a pinned verify command. Its own check is <code>git diff --check</code>, which looks for whitespace errors and says nothing about whether the work is right. Without a pin the run is refused.</li>
+            <li>An external engine needs a pinned verify command. Its own check is <code>git diff --check</code>, which looks for whitespace errors and says nothing about whether the work is right. Without a pin a project run is refused. A <code>--minimal</code> run, or a template with no project, skips project policy and this check with it: there re-verification can only re-run <code>git diff --check</code>.</li>
             <li><code>skep doctor</code> looks for each agent's binary on your PATH and says whether its sign-in variable is set.</li>
             <li>A worker command that names an external agent's module (<code>--worker-cmd</code> or <code>SKEP_WORKER_CMD</code>) is treated as that engine: sandbox, sign-in and pinned verify command included. A project pinned to an external engine refuses <code>--worker-cmd</code> unless you also pass <code>--engine builtin</code>.</li>
             <li>The generic shell worker, which wraps any other command-line agent, gets the same treatment as an external engine.</li>
@@ -241,7 +241,7 @@ $ skep policy decisions --actor 'acp:*'
         <ul>
           <li><strong>Always in the sandbox.</strong> The run is forced into sandbox mode whatever the flag says, the adapters refuse to start outside it, and when no backend can be applied the run does not start.</li>
           <li><strong>The patch still waits for you.</strong> skep captures the agent's changes as a diff, re-runs the pinned verify command on a clean checkout, and holds the patch for approval.</li>
-          <li><strong>Landing.</strong> Approval is needed by default. Two opt-in lanes land a re-verified patch without a click, and only on a <code>skep/*</code> branch: <code>--auto-approve</code> for fixes that change only dependency manifests, and a project set <code>--unlocked</code>. Your default branch moves only through actions you confirm.</li>
+          <li><strong>Landing.</strong> Approval is needed by default. Two opt-in lanes land a re-verified patch without a click, and only on a <code>skep/*</code> branch: <code>--auto-approve</code> for fixes that change only dependency manifests, and the verified-patch lane, which is on for a project in the maintain phase or set <code>--unlocked</code>. Your default branch moves only through actions you confirm.</li>
         </ul>
       </div>
       <div class="grid">
@@ -256,7 +256,8 @@ $ skep policy decisions --actor 'acp:*'
           <p>
             Writes are confined to the run's worktree and results. Reads outside the workspace are
             mostly open, apart from a list of credential paths that is hidden. The default network
-            includes the agent's model provider and the project's package registries.
+            includes the agent's model provider and, for a trusted local project, four package registry hosts
+            (PyPI's two, npm and the Go proxy).
           </p>
         </Callout>
         <Callout kind="limit" title="Tool calls are not logged one by one">

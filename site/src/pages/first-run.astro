@@ -249,7 +249,7 @@ $ skep run ~/workspace "fix the failing test" --execution-mode sandbox
           <div class="prose">
             <ul>
               <li>The run needs the model from step ①. With no model configured, skep's own worker falls back to a fixed routine that handles one Python hello-world task and fails anything else.</li>
-              <li>After the worker finishes, skep re-runs the verify command itself on a clean checkout. The outcome is <code>confirmed</code>, <code>contradicted</code>, <code>unavailable</code> or <code>not_applicable</code>.</li>
+              <li>After the worker finishes, skep re-runs the verify command itself on a clean checkout. The outcome is <code>passed</code>, <code>failed</code>, <code>unavailable</code> or <code>not_applicable</code>; the run is printed <code>[confirmed]</code> only when the worker also reported passed.</li>
               <li>Approving applies the patch on a new branch, <code>skep/&lt;task_id&gt;</code>. Your default branch does not move: review, merge or delete that branch as you would any other.</li>
               <li>From the chat that onboarding opened, a plain message asking for the work does the same thing: the assistant proposes the run on a card and you confirm it.</li>
             </ul>
@@ -290,7 +290,7 @@ $ skep run ~/workspace "fix the failing test" --execution-mode sandbox
       <div class="prose">
         <ul>
           <li>The sandbox hides the keychain and the agent's login files, so Claude Code signs in from <code>CLAUDE_CODE_OAUTH_TOKEN</code> or <code>ANTHROPIC_API_KEY</code>, and Codex from <code>OPENAI_API_KEY</code> or an opt-in ChatGPT-plan login. Without one the run is refused with <code>NO AUTH ENV</code>.</li>
-          <li>skep refuses to dispatch an external agent until the project pins a verify command.</li>
+          <li>A project run of an external agent is refused until the project pins a verify command. A <code>--minimal</code> run skips project policy, and that check with it.</li>
           <li>The work directory from step ② is already a project. For any other repository, add <code>--strategy trusted_local_dev</code> the first time: a repository that is not a project yet is refused with <code>project setup requires a pack or strategy</code>.</li>
         </ul>
       </div>
@@ -316,8 +316,9 @@ $ skep run ~/workspace "fix the failing test" --execution-mode sandbox
       <div class="prose">
         <p>
           A worker receives environment variables only by name, from an allowlist. Inside the
-          sandbox the files above, your SSH and cloud credentials and your shell history are hidden
-          from the worker; the full list is in <a href="/docs/sandboxing.html">the sandboxing doc</a>.
+          sandbox <code>serve.env</code>, the serve token, the <code>*-secret</code> files, the audit directory,
+          your SSH and cloud credentials and your shell history are hidden from the worker. The store
+          stays readable, and so does the provider key skep's own worker needs when the key relay is off; the full list is in <a href="/docs/sandboxing.html">the sandboxing doc</a>.
         </p>
       </div>
       <div class="row">

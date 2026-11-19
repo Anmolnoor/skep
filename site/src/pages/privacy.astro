@@ -14,7 +14,7 @@ const outbound = [
   ['Telegram, Slack, Discord', 'Only for a messenger channel you configured.'],
   ['Web search and page fetches', 'When the assistant uses its search or read-a-URL tools; each is decided by policy.'],
   ['Remote MCP servers', 'Only for an HTTP MCP server you registered.'],
-  ['Your git remote and GitHub (git fetch, git push, gh)', 'Only through actions you confirm: refreshing a repo, pushing a landing branch, opening or merging a pull request.'],
+  ['Your git remote and GitHub (git fetch, git push, gh)', 'Pushing a landing branch and opening or merging a pull request happen only through actions you confirm. A clone skep manages for you (under its own repos directory) is fetched, and its default branch fast-forwarded to origin, before each run; a directory of your own is never fetched for you.'],
   ['The package index (uv sync)', 'Before re-verifying a uv project, to install its dependencies. The verify command itself then runs offline.'],
   ['A cloud text-to-speech provider', 'Only if you choose one. The default is none.'],
   ['Your mail server and calendar feed', 'Only if you configure the bundled mail or calendar MCP servers.'],

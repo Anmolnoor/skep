@@ -115,7 +115,7 @@ $ skep doctor
             ['Read your credentials', 'The secret floor: credential paths are masked inside the sandbox and denied by policy.'],
             ['Push, pull, fetch, or move your branch', 'Hard denies for the built-in worker; for an external engine, the sandbox, masked credentials and a git protocol pin.'],
             ['Report tests passed when they do not', 'Re-verification: skep re-runs the project’s pinned command on a clean worktree.'],
-            ['Land its own work', 'The patch is applied only on approval, on a skep/* branch; the default branch is refused.'],
+            ['Land its own work', 'The patch is applied only on approval, on skep/<task_id> or a branch you name; the default branch is refused.'],
             ['Widen its own permissions', 'A locked policy baseline with a hash check, read-only inside the sandbox.'],
           ]}
           rowHeaders
@@ -394,7 +394,7 @@ $ skep doctor
             <li>A patch-less run is <code>not_applicable</code>, not confirmed.</li>
             <li>
               When the sandbox cannot be built the outcome is <code>unavailable</code>: the command is not run on the
-              bare host. But if you configured skep itself to run without a sandbox, the re-run is unconfined.
+              bare host. A workspace-mode run has no wall, and neither does its re-run.
             </li>
             <li>
               Dependency priming (<code>uv sync</code>) uses the network before the offline run, and again after the
@@ -530,7 +530,7 @@ $ skep doctor
       <div class="grid">
         <h3 class="t-h3">The sandbox</h3>
         <ul class="plain-list">
-          <li>Workspace mode has no OS sandbox. Neither does a home onboarded with <code>--sandbox none</code>.</li>
+          <li>Workspace mode has no OS sandbox. Onboarding with <code>--sandbox none</code> does not switch the sandbox off for a run that asks for it; it tells the locked baseline not to count on one, so writes it would have allowed become asks.</li>
           <li>Reads outside the worktree are mostly open. On macOS, Seatbelt leaves reads open apart from the secret floor.</li>
           <li>The secret floor is a list. A secret at a path that is not on it is readable.</li>
           <li>A secret file created while a run is in progress is not masked for that run.</li>

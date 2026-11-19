@@ -104,13 +104,13 @@ const engines = [
   [
     'aider',
     'Aider, with its auto-commit switched off',
-    'The provider your Aider configuration names',
+    'The model provider skep is configured with; skep passes it no key variable',
     'The sandbox, always. Needs a pinned verify command.',
   ],
   [
     'pi',
     'pi, headless',
-    'ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY, whichever its model uses',
+    'ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY; it can reach only the provider skep is configured with',
     'The sandbox, always. Needs a pinned verify command.',
   ],
   [
@@ -211,9 +211,9 @@ const comparisons = [
       <Card title="Always inside the sandbox" icon="box">
         Claude Code and Codex always run inside skep's sandbox. If no backend works, the run does not start.
       </Card>
-      <Card title="No pinned command, no dispatch" icon="shield-check" tone="green">
-        skep refuses to dispatch an external agent until the project pins the command that proves the work,
-        then re-runs that command itself.
+      <Card title="Your command, re-run by skep" icon="shield-check" tone="green">
+        When the project pins the command that proves the work, skep re-runs that command itself on a clean
+        checkout. It is never the command the agent chose.
       </Card>
       <Card title="main moves when you confirm" icon="git-branch">
         main moves only through actions you confirm. Auto-landing is off by default, and when it is on it
@@ -262,7 +262,8 @@ const comparisons = [
             Outside the worktree the agent can still read most of your disk. A secret floor masks a list of
             credential paths, among them <code>~/.ssh</code>, <code>~/.aws</code>, <code>~/.config/gh</code>
             and the engines' own logins; macOS Seatbelt leaves other reads open. The default network includes
-            the model provider and your project's package registries. There is no Windows backend, and skep's
+            the model provider and, for a trusted local project, four package registry hosts (PyPI's two, npm and
+            the Go proxy). There is no Windows backend, and skep's
             own worker can run in <code>workspace</code> mode, which has no OS wall.
           </p>
         </Callout>
@@ -293,7 +294,7 @@ const comparisons = [
           <p>
             When the agent says it is done, skep applies its patch to a clean worktree and re-runs the
             project's pinned <code>verify_command</code> there; for a sandboxed run the re-run is sandboxed
-            too. The result is one of four outcomes: confirmed, contradicted, unavailable or not_applicable.
+            too. The result is one of four outcomes: passed, failed, unavailable or not_applicable. A run is printed <code>[confirmed]</code> only when the worker reported passed and skep's re-run passed too.
             The record names the command that ran and where it came from.
           </p>
         </div>
