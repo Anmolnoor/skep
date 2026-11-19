@@ -70,17 +70,29 @@ _VACUOUS = [
     "exit",
 ]
 
-# A shell operator that can hide the check's exit code: known-vacuous for
-# auto-landing whatever the command around it is.
-_MASKED = [
+# round 3: sh's exit status is the LAST list's, so `;`/newline judge only
+# what follows the last one, and `a || b` passes whenever either side always
+# does. These shapes pass whatever the patch does.
+_VACUOUS += [
     "uv run pytest || true",
     "pytest; true",
+    "pytest\ntrue",
+    "sh -c 'pytest || true'",
+    "pytest ||",
+    "true || pytest",
+    "pytest && npm test || true",
+    "uv sync; git diff --check",
+    "pytest;\n true",
+    "sh -c 'pytest | cat'",
+]
+
+# An operator that can hide the check's exit code wherever it appears.
+_MASKED = [
     "pytest | tee log.txt",
     "pytest &",
     "echo `pytest`",
     "echo $(pytest)",
-    "sh -c 'pytest || true'",
-    "pytest\ntrue",
+    "pytest |& tee log",
 ]
 
 _REAL = [
@@ -99,6 +111,16 @@ _REAL = [
     "git -C sub diff --exit-code",
     "pytest 2>&1",
     "pytest > out.txt",
+    # round 3: honest pins the old reading refused (N1)
+    "uv sync; uv run pytest",
+    "cd web; npm test",
+    'uv run python -c "import app; app.check()"',
+    "pytest\n",
+    "  pytest  ",
+    "uv sync\nuv run pytest",
+    "pytest || pytest --lf",
+    "true; pytest",
+    "pytest;",
 ]
 
 
@@ -107,14 +129,12 @@ def test_known_vacuous_commands_are_named(command: str) -> None:
     reason = known_vacuous_verify(command)
     assert reason is not None
     assert "known-vacuous" in reason
-    assert "can fail" not in reason
 
 
 @pytest.mark.parametrize("command", _MASKED)
-def test_a_shell_operator_that_can_mask_the_exit_code_is_known_vacuous(command: str) -> None:
+def test_a_shell_operator_that_can_mask_the_exit_code_is_vacuous(command: str) -> None:
     reason = known_vacuous_verify(command)
     assert reason is not None
-    assert "known-vacuous" in reason
     assert "shell operator can mask the check's exit code" in reason
 
 

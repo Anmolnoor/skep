@@ -91,34 +91,33 @@ VERIFIED_PATCH_RULE = AutoApprovalRule(name="verified-patch", require_pinned_ver
 # the field (store's `git diff --check`, a worker's `true`, npm's placeholder
 # `echo "Error: no test specified"`), not a proof — so the word is
 # "known-vacuous", never "cannot fail". G10 runs the pin through `/bin/sh -c`,
-# so the predicate reads it the way the shell will (round 2): a rule, not a
-# parser — any operator that can hide the exit code is refused outright, and a
-# chain joined only by `&&` is vacuous iff every segment is.
+# so the predicate reads it the way the shell will — a rule, not a parser
+# (round 3): the exit status is the LAST list's after `;`/newline; in an
+# and-or list `&&` needs every side vacuous and `||` any side; a pipe, a
+# background `&` or a command substitution can hide the code anywhere.
 _VACUOUS_ARGV0 = frozenset({"true", ":", "test", "[", "echo", "printf", "ls", "cat"})
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-_MASKING_TOKENS = frozenset({"|", "||", ";", "&", "|&", ";;", ";&"})
+_MASKING_TOKENS = frozenset({"|", "&", "|&", ";;", ";&"})
 _GIT_OPTS_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+# shlex glues a run of punctuation into one token (`;\n`, `&&\n`); split it back
+# into sh operators, longest first.
+_OPERATOR = re.compile(r"&&|\|\||\|&|;;|;&|&>|>&|<&|>>|<<|<>|>\||[;&|\n()<>]")
 
 
 def _tokens(command: str) -> list[str] | None:
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+    lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     try:
-        return list(lexer)
+        raw = list(lexer)
     except ValueError:
         return None
-
-
-def _masked(command: str) -> bool:
-    """An operator that can hide the exit code — at the top level or inside a
-    quoted string (``sh -c 'pytest || true'``). Redirects (``2>&1``) are fine."""
-    tokens = _tokens(command) or []
-    return (
-        any(mark in command for mark in ("`", "$(", "\n"))
-        or any(t in _MASKING_TOKENS for t in tokens)
-        or any(" " in t and _masked(t) for t in tokens)
-    )
+    tokens: list[str] = []
+    for token in raw:
+        ops = _OPERATOR.findall(token)
+        tokens.extend(ops if ops and "".join(ops) == token else [token])
+    return tokens
 
 
 def _segment_vacuous(argv: list[str]) -> bool:
@@ -142,26 +141,42 @@ def _segment_vacuous(argv: list[str]) -> bool:
     return name in _VACUOUS_ARGV0
 
 
+def _and_or_vacuous(tokens: list[str]) -> bool:
+    """sh's and-or list, left to right at equal precedence: ``a && b`` always
+    passes iff both do, ``a || b`` iff either does (an empty side counts)."""
+    vacuous: bool | None = None
+    joiner, segment = "&&", []
+    for token in [*tokens, "&&"]:
+        if token not in ("&&", "||"):
+            segment.append(token)
+            continue
+        this = _segment_vacuous(segment)
+        if vacuous is None:
+            vacuous = this
+        else:
+            vacuous = (vacuous and this) if joiner == "&&" else (vacuous or this)
+        joiner, segment = token, []
+    return bool(vacuous)
+
+
 def known_vacuous_verify(command: str) -> str | None:
     """Why ``command`` is a known-vacuous check, or None when it is not one."""
     shown = command.strip()
-    tokens = _tokens(command)
+    tokens = _tokens(shown)
     if tokens is None:
         return None
-    if not tokens:
-        return "an empty verify command is known-vacuous"
-    if _masked(command):
+    if any(t in _MASKING_TOKENS for t in tokens) or "`" in shown or "$(" in shown:
         return (
             f"`{shown}` is known-vacuous for auto-landing: a shell operator can mask the "
             "check's exit code"
         )
-    segments: list[list[str]] = [[]]
-    for token in tokens:
-        if token == "&&":
-            segments.append([])
-        else:
-            segments[-1].append(token)
-    if "no test specified" in command or all(_segment_vacuous(s) for s in segments):
+    while tokens and tokens[-1] in (";", "\n"):
+        tokens.pop()
+    cut = max((i + 1 for i, t in enumerate(tokens) if t in (";", "\n")), default=0)
+    last = tokens[cut:]
+    if not last:
+        return "an empty verify command is known-vacuous"
+    if "no test specified" in " ".join(last) or _and_or_vacuous(last):
         return f"`{shown}` is a known-vacuous check (it passes whatever the patch does)"
     return None
 

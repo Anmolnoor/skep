@@ -137,10 +137,15 @@ This catches common failures:
   `git log`, npm's `no test specified` placeholder, `sh`/`bash`/`zsh -c` of
   those, any of those behind `env` or `KEY=value`; empty), names it on the
   run's `auto_apply_blocked` record, and leaves the patch for a human. The pin
-  runs through `/bin/sh -c`, so a chain joined by `&&` is vacuous only when
-  every part is (`true && pytest` is a real check), and a pin containing an
-  operator that can hide the exit code (`||`, `;`, `|`, a background `&`,
-  backticks, `$(`) is refused for auto-landing outright. A patch that changes
+  runs through `/bin/sh -c`, and Skep reads it the way the shell does: after
+  `;` or a newline only the last command decides the exit code
+  (`uv sync; uv run pytest` and `cd web; npm test` are real checks,
+  `pytest; true` is not); a chain joined by `&&` is vacuous only when every
+  part is (`true && pytest` is a real check) and one joined by `||` when any
+  part is (`pytest || true`); only the `-c` argument of `sh`/`bash`/`zsh` is
+  read as a nested command (`python -c "import app; app.check()"` is a real
+  check). A pipe `|`, a background `&`, backticks or `$(` anywhere is refused
+  for auto-landing outright. A patch that changes
   what the pin runs never auto-lands either: `conftest.py` (any directory),
   `pytest.ini`, `tox.ini`, `setup.cfg`, `noxfile.py`, `Makefile`, the pinned
   script itself, the test-runner tables of `pyproject.toml` (`[tool.pytest*]`,
