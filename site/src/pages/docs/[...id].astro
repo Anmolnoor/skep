@@ -1,0 +1,41 @@
+---
+// One page per markdown file under docs/ (incl. adr/ and releases/):
+// /docs/<id>.html. Order for previous / next: the README index, then the ADRs.
+import { getCollection, render } from 'astro:content';
+import Doc from '../../layouts/Doc.astro';
+import { docTitle, neighbours, parseDocsIndex } from '../../lib/nav.mjs';
+import { docUrl, isMaintainerDoc } from '../../lib/slugs.mjs';
+
+export async function getStaticPaths() {
+  const entries = (await getCollection('docs')).filter((entry) => !isMaintainerDoc(entry.id));
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const title = (id: string) => docTitle(byId.get(id)?.body, id);
+  const indexed = parseDocsIndex(byId.get('readme')?.body ?? '')
+    .flatMap((section) => section.items)
+    .map((item) => item.id)
+    .filter((id): id is string => id !== null && byId.has(id));
+  const adrs = entries
+    .map((entry) => entry.id)
+    .filter((id) => id.startsWith('adr/') && id !== 'adr/readme')
+    .sort();
+  const link = (id: string | null) => (id ? { href: docUrl(id), title: title(id) } : null);
+
+  return entries.map((entry) => {
+    const sequence = adrs.includes(entry.id) ? ['adr/readme', ...adrs] : indexed;
+    const { prev, next } = neighbours(sequence, entry.id);
+    return {
+      params: { id: entry.id },
+      props: { entry, title: title(entry.id), prev: link(prev), next: link(next) },
+    };
+  });
+}
+
+const { entry, title, prev, next } = Astro.props;
+const { Content, headings } = await render(entry);
+// filePath is relative to the site root: "../docs/adr/0001-….md".
+const file = entry.filePath!.replace(/^(\.\.\/)?docs\//, '');
+---
+
+<Doc id={entry.id} file={file} title={title} headings={headings} prev={prev} next={next}>
+  <Content />
+</Doc>

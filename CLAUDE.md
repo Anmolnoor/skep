@@ -93,6 +93,9 @@ gitignored on the public tree: plans stay local, only the fix commits push
   truthful (a stale preset description once caused repeated "hallucinations").
 - The UI is a NO-BUILD static app (`src/skep/supervisor/serve/static/`) — no
   bundler, no npm; plain ES modules + CSS tokens; fonts vendored.
+- The docs site in `site/` (Astro) is the ONE place with npm: `cd site && npm ci
+  && npm run build && npm test && npm run check`; the app UI stays no-build and
+  pytest never needs `site/node_modules` or `site/dist` (see `site/README.md`).
 - Skills (v85): `skep skill shelf add <dir>` registers external Agent Skills
   shelves (`~/.claude/skills` convention) — instruction packs load zero-grant;
   script-shipping packs draft onto the v17 ladder (`skill_packs.py`, ADR 0045)

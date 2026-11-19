@@ -14,6 +14,22 @@ that), so if you can't find it below, it doesn't exist yet.
 - [`agent-guide.md`](agent-guide.md) — for agents: explaining skep to a
   human (the operating half is [`../SKILL.md`](../SKILL.md))
 
+## Guides
+
+One task each: what you need first, the commands, what you should see, and
+what goes wrong.
+
+- [`guide-unattended-run.md`](guide-unattended-run.md) — hand Claude Code or
+  Codex a task and walk away: sandbox, auth env, pinned verify command, run,
+  evidence, approve, pull request
+- [`guide-dispatch-from-cron.md`](guide-dispatch-from-cron.md) — start a run
+  from cron or a script: the missing environment, exit codes, `skep schedule`,
+  `skep tick`, and what `skep serve` does itself
+- [`guide-pin-verify-command.md`](guide-pin-verify-command.md) — pin the
+  command that proves the work, and read the four re-verification results
+- [`guide-auto-landing.md`](guide-auto-landing.md) — let confirmed runs land
+  on a `skep/*` branch by themselves, and what that still refuses
+
 ## Concepts
 
 - [`how-it-works.md`](how-it-works.md) — the Queen/worker split, the

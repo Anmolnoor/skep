@@ -27,6 +27,7 @@ from skep.worker_contract import (
     ProjectContextPayload,
 )
 
+from .castes import CASTES
 from .config import SupervisorConfig
 from .policy_registry import registry_keys
 from .policy_schema import (
@@ -78,7 +79,12 @@ TRUSTED_DEV_REGISTRY_HOSTS: tuple[str, ...] = (
 
 
 class PolicyResolutionError(ValueError):
-    """The resolved policy cannot support the requested run."""
+    """The resolved policy cannot support the requested run. ``next_command``
+    is the operator's next step when the refusal has one (v127-T4)."""
+
+    def __init__(self, message: str, *, next_command: str | None = None) -> None:
+        super().__init__(message)
+        self.next_command = next_command
 
 
 @dataclass(frozen=True)
@@ -726,13 +732,23 @@ def resolve_run_policy(
     # verification means before an external agent may run at all.
     # ES-F280 (D41): the generic shell worker is no registered engine but
     # wraps any local CLI agent the same way, so ``wrapped`` binds it too.
-    if (chosen_engine.external or wrapped is not None) and not verify_command:
+    # v127-F5: a pin that is itself known-vacuous (`true`, `git diff --check`)
+    # buys nothing over the built-in, so it is refused the same way — the
+    # reason named only when there IS a pin (an empty one is the plain case).
+    from .policy import PIN_HINT, known_vacuous_verify
+
+    vacuous = known_vacuous_verify(verify_command or "")
+    if (chosen_engine.external or wrapped is not None) and vacuous:
+        why = f" Your pin is no better: {vacuous}." if (verify_command or "").strip() else ""
         raise PolicyResolutionError(
-            f"coding_engine {wrapped or chosen_engine.name!r} is an external agent whose "
-            "built-in verification is `git diff --check` (whitespace only), so G10 would "
-            "re-run a check that cannot fail. Pin the command that actually proves the "
-            'work: `skep project setup <repo> --verify-command "<command>"` (chat: '
-            "setup_project verify_command=...)."
+            f"coding_engine {wrapped or chosen_engine.name!r} is an external agent whose own "
+            "check is `git diff --check` (whitespace only), which passes whether or not the "
+            f"patch works, so skep won't run it without a real check.{why} {PIN_HINT} "
+            "(chat: setup_project verify_command=...).",
+            # v127-T4 (trial V14): never workspace mode — that is the naked host.
+            next_command=(
+                f'skep project setup {shlex.quote(str(repo))} --verify-command "<command>"'
+            ),
         )
     # v94-F4: an external agent bypasses the capability layer by design — the
     # sandbox IS its confinement (ADR 0047). No policy default or request flag
@@ -744,7 +760,14 @@ def resolve_run_policy(
     # D36 (ES-F255): keyed on what actually runs — a worker command that is
     # an external agent's module (--worker-cmd / SKEP_WORKER_CMD) is coerced
     # as its engine id would be.
-    if chosen_engine.external or policy.get("unlocked") is True or wrapped is not None:
+    # v127-F7: the same for a caste that fetches (the researcher, its own
+    # urllib): the sandbox's egress pin is its only wall.
+    if (
+        chosen_engine.external
+        or policy.get("unlocked") is True
+        or wrapped is not None
+        or getattr(CASTES.get(caste), "needs_network", False)
+    ):
         resolved_execution_mode = "sandbox"
     # L10: what the run gets with no explicit network — the project's default,
     # its registries and remembered hosts. D5 (operator decision 2026-11-13):
@@ -894,7 +917,8 @@ def _resolve_execution_mode(policy: dict[str, Any], repo: Path, requested: str |
         if default == "ask":
             raise PolicyResolutionError(
                 "execution_mode required by policy: choose 'workspace' for trusted "
-                "local project work or 'sandbox' for isolated work"
+                "local project work or 'sandbox' for isolated work",
+                next_command='skep run <repo> "<instructions>" --execution-mode sandbox',
             )
         if default not in RUN_EXECUTION_MODES:
             raise PolicyResolutionError("configured execution policy is invalid")

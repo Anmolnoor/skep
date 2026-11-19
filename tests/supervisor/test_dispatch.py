@@ -434,8 +434,10 @@ def test_toolchain_state_gets_a_writable_workspace_home(
     uv_cache = child_env.get("UV_CACHE_DIR", "")
     assert uv_cache.startswith(cache_prefix)
     assert uv_cache.endswith(f"{os.sep}uv")
-    # One per-project root: uv/ and npm/ are siblings under the same key.
+    # One per-project root: uv/ and npm/ are siblings under its worker/ half
+    # (v127-A0 review: re-verify's half is a sibling the worker never sees).
     assert Path(npm_cache).parent == Path(uv_cache).parent
+    assert Path(uv_cache).parent.name == "worker"
     # v107-F3: TMPDIR rides inside the wall too — unset, tools fell back to
     # /tmp, which any nested bwrap tmpfs-masks (the "~184 blocked tests").
     tmpdir = child_env.get("TMPDIR", "")
@@ -450,6 +452,7 @@ def test_toolchain_env_resolves_engine_declarations(tmp_path: Path) -> None:
     per-project root instead."""
     from skep.supervisor.dispatch import _toolchain_env
     from skep.supervisor.engines import resolve_engine
+    from skep.supervisor.sandbox import in_wall_tmp_env
 
     workspace = tmp_path / "workspace"
     cache_root = tmp_path / "cache-root"
@@ -471,16 +474,37 @@ def test_toolchain_env_resolves_engine_declarations(tmp_path: Path) -> None:
     # not $TMPDIR — a prefix inside the in-wall TMPDIR, not a directory.
     assert Path(env["TMPPREFIX"]) == Path(env["TMPDIR"]) / "zsh"
     assert not Path(env["TMPPREFIX"]).exists()
+    # v127-T1 (trial V02): Claude Code's Bash tool ignores TMPDIR and makes its
+    # per-session dir under /tmp/claude-<uid>, outside the wall.
+    assert env["CLAUDE_CODE_TMPDIR"] == env["TMPDIR"]
+    # v127-A0 trial fix (V01): XDG_RUNTIME_DIR is the macOS wall's other /tmp door.
+    assert env.get("XDG_RUNTIME_DIR") == in_wall_tmp_env(Path(env["TMPDIR"])).get("XDG_RUNTIME_DIR")
 
     builtin = _toolchain_env(workspace, resolve_engine(None), cache_root)
     assert "CLAUDE_CONFIG_DIR" not in builtin
+    assert "CLAUDE_CODE_TMPDIR" not in builtin
     assert set(builtin) == {
         "npm_config_cache",
         "UV_CACHE_DIR",
         "CLANG_MODULE_CACHE_PATH",
-        "TMPDIR",
-        "TMPPREFIX",
+        *in_wall_tmp_env(Path(builtin["TMPDIR"])),
     }
+
+
+def test_the_runtime_dir_joins_the_in_wall_temp_env_on_macos(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """v127-A0 trial fix (V01): tools that put temp dirs under XDG_RUNTIME_DIR,
+    else /tmp (skep's own suite does) hit /tmp, outside the Seatbelt wall. On
+    Linux bubblewrap gives every run a private, writable /tmp, and an in-wall
+    runtime dir would push AF_UNIX socket paths past their 108-char cap — so
+    the runtime dir moves only on macOS."""
+    from skep.supervisor import sandbox
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert sandbox.in_wall_tmp_env(tmp_path)["XDG_RUNTIME_DIR"] == str(tmp_path)
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert "XDG_RUNTIME_DIR" not in sandbox.in_wall_tmp_env(tmp_path)
 
 
 def test_project_cache_roots_never_shared_across_projects_or_repos(
@@ -531,11 +555,24 @@ def test_sandbox_writable_roots_include_the_project_cache(
     repo: Path, config: SupervisorConfig
 ) -> None:
     """v109-F4: the per-project cache is mounted through the wall on every
-    backend — the recorded profile (SBPL subpath or bind argv) names it."""
+    backend — the recorded profile (SBPL subpath or bind argv) names it.
+    v127-A0 review (council round 3, I2/G10): only its worker/ half. uv
+    installs cached files without re-checking them, so a worker that could
+    write re-verify's cache could poison what G10 installs and confirm any
+    patch; the profile never names the root itself or reverify/."""
+    from skep.supervisor.policy_resolver import project_cache_root
+
     outcome = run_task(repo, "Fix the bug. MODE:happy", config=config)
     assert outcome.record.state == "completed"
     profile = (config.audit_dir / outcome.record.task_id / "sandbox.profile.sb").read_text()
-    assert str(config.home / "cache" / "projects") in profile
+    store = RunStore(config.db_path)
+    try:
+        root = project_cache_root(store, config, repo)
+    finally:
+        store.close()
+    assert str(root / "worker") in profile
+    assert str(root / "reverify") not in profile
+    assert f'"{root}"' not in profile
 
 
 def test_grandchildren_inherit_the_toolchain_env(repo: Path, config: SupervisorConfig) -> None:
@@ -557,6 +594,12 @@ def test_grandchildren_inherit_the_toolchain_env(repo: Path, config: SupervisorC
     assert f"{os.sep}.toolchain{os.sep}tmp" in tmpdir
     assert outcome.record.workspace in tmpdir
     assert grandchild_env.get("TMPPREFIX") == str(Path(tmpdir) / "zsh")  # v120-F1
+    # v127-A0 trial fix (V01): the runtime-dir fallback crosses the boundary too.
+    from skep.supervisor.sandbox import in_wall_tmp_env
+
+    assert grandchild_env.get("XDG_RUNTIME_DIR") == in_wall_tmp_env(Path(tmpdir)).get(
+        "XDG_RUNTIME_DIR"
+    )
     cache_prefix = str(config.home / "cache" / "projects")
     assert grandchild_env.get("UV_CACHE_DIR", "").startswith(cache_prefix)
     assert grandchild_env.get("npm_config_cache", "").startswith(cache_prefix)

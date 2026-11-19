@@ -1,0 +1,96 @@
+/* skep design tokens (plan §3.3). Moved from docs/site.css; pages use these, never raw values. */
+
+:root {
+  /* surfaces */
+  --bg: #07080a;
+  --bg-alt: #090b0c;
+  --bg-card: #0d1012;
+  --bg-card-2: #0c0f11;
+  --bg-panel: #0b0e10;
+  --bg-inset: #0e1113;
+  --bg-chip: #101416;
+  --bg-hover: #14181a;
+
+  /* lines */
+  --line-hair: #14181a;
+  --line-header: #191d1f;
+  --line-inner: #1a1e20;
+  --line-card: #1d2225;
+  --line-strong: #23282a;
+  --line-hover: #3a4245;
+
+  /* text. Contrast rule: text on any panel uses --text-faint (5.39:1) or brighter. */
+  --text-bright: #f6f8f7;
+  --text-hi: #f4f6f5;
+  --text: #eceeed;
+  --text-soft: #e4e8e6;
+  --text-mid: #c3cac7;
+  --text-muted: #98a19d;
+  --text-dim: #8a938f;
+  --text-faint: #7c8783;
+  /* Decoration only (borders, rules, dividers): 4.16-4.50:1 and 3.69:1 are below
+     AA for text, so a test forbids `color:` with either of these two. */
+  --text-ghost: #6f7a76;
+  --text-void: #626c69;
+
+  /* brand and meaning: orange = skep, green = verified, red = risk, yellow = limit */
+  --orange: #ff6b1f;
+  --orange-hover: #ff8038;
+  --orange-soft: #ff9b62;
+  --on-orange: #140803;
+  --green: #7be08c;
+  --green-dim: #4fa463;
+  --red: #f0605b;
+  --yellow: #f2b35e;
+
+  /* fonts: self-hosted by Astro's Fonts API (astro.config.mjs), no third-party request */
+  --sans: var(--font-geist), ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* type scale. These seven sizes are the whole scale: no other font-size on the site. */
+  --fs-display: clamp(2.875rem, 5.6vw, 5.125rem);
+  --fs-h2: clamp(1.875rem, 3.2vw, 2.75rem);
+  --fs-h3: 1.3125rem;
+  --fs-lead: 1.0625rem;
+  --fs-body: 0.9375rem;
+  --fs-small: 0.8125rem;
+  --fs-micro: 0.75rem;
+  --lh-display: 0.96;
+  --lh-h2: 1.05;
+  --lh-h3: 1.25;
+  --lh-lead: 1.55;
+  --lh-body: 1.62;
+  --lh-small: 1.5;
+
+  /* space: 4 8 12 16 24 32 48 64 96 */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --s-8: 64px;
+  --s-9: 96px;
+  --pad-x: clamp(16px, 3.5vw, 44px);
+  --pad-y: clamp(52px, 6vw, 88px);
+  --header-h: 68px;
+  --prose: 72ch;
+
+  /* radius */
+  --r-chip: 6px;
+  --r-card: 10px;
+  --r-panel: 12px;
+
+  /* motion */
+  --dur-1: 120ms; /* hover */
+  --dur-2: 240ms; /* state */
+  --dur-3: 480ms; /* reveal */
+  --dur-4: 900ms; /* hero step */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --stagger-char: 40ms;
+  --stagger-word: 80ms;
+  --stagger-row: 60ms;
+  --stagger-max: 12;
+}

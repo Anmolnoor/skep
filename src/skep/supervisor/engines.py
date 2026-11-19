@@ -88,7 +88,14 @@ class CodingEngine:
     auth_env: tuple[str, ...] = ()
     # True when the agent's own commands do NOT pass skep's capability layer.
     external: bool = True
-    summary: str = ""
+    about: str = ""
+    # v127-F12: never run in the field; never recommended (F9's hint skips it).
+    advanced: bool = False
+
+    @property
+    def summary(self) -> str:
+        """``about``, prefixed from the ``advanced`` flag (recorded once)."""
+        return f"Advanced (never recommended): {self.about}" if self.advanced else self.about
 
 
 CODING_ENGINES: dict[str, CodingEngine] = {
@@ -98,7 +105,7 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         binary=None,
         network_host=None,
         external=False,
-        summary="skep's own worker — every action passes the capability layer.",
+        about="skep's own worker — every action passes the capability layer.",
     ),
     "claude_code": CodingEngine(
         name="claude_code",
@@ -113,8 +120,12 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         # token. Names only (G2); unset vars are inert allowlist entries.
         env_vars=("USER", "LOGNAME", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
         auth_env=("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"),
-        toolchain_env=(("CLAUDE_CONFIG_DIR", "claude"),),
-        summary=(
+        # v127-T1 (trial V02): Claude Code's Bash tool ignores TMPDIR and makes
+        # its per-session dir under /tmp/claude-<uid>, outside the wall (EPERM
+        # on every shell command); CLAUDE_CODE_TMPDIR moves it into the run's
+        # in-wall tmp, the same dir as TMPDIR.
+        toolchain_env=(("CLAUDE_CONFIG_DIR", "claude"), ("CLAUDE_CODE_TMPDIR", "tmp")),
+        about=(
             "Claude Code, headless (--print). Confined by the sandbox, not the capability layer."
         ),
     ),
@@ -137,16 +148,17 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         env_vars=("USER", "LOGNAME", "OPENAI_API_KEY"),
         auth_env=("OPENAI_API_KEY",),
         toolchain_env=(("CODEX_HOME", "codex"),),
-        summary=("Codex CLI, headless. Confined by the sandbox, not the capability layer."),
+        about=("Codex CLI, headless. Confined by the sandbox, not the capability layer."),
     ),
     "aider": CodingEngine(
         name="aider",
         argv=(sys.executable, "-m", "skep.workers.aider"),
         binary="aider",
         network_host=None,  # provider depends on the operator's aider config
-        summary=(
+        about=(
             "Aider, pinned --no-auto-commit. Confined by the sandbox, not the capability layer."
         ),
+        advanced=True,
     ),
     "pi": CodingEngine(
         name="pi",
@@ -160,7 +172,8 @@ CODING_ENGINES: dict[str, CodingEngine] = {
         # makes only the workspace writable (v106-F1), and the redirect doubles
         # as evidence — the transcript survives with a kept worktree (v107-F1).
         toolchain_env=(("PI_CODING_AGENT_DIR", "pi"),),
-        summary=("pi, headless (-p). Confined by the sandbox, not the capability layer."),
+        about="pi, headless (-p). Confined by the sandbox, not the capability layer.",
+        advanced=True,
     ),
 }
 

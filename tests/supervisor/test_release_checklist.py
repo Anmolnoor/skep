@@ -44,6 +44,20 @@ def test_release_checklist_covers_landing_demo_assets() -> None:
         assert relpath in checklist
 
 
+def test_release_checklist_lists_the_site_build_gate() -> None:
+    """docs-site: the site is built, not hand-copied; its build is a gate and
+    its deploy is the Site workflow, not a manual upload of docs/."""
+    checklist = (ROOT / "docs" / "release-checklist.md").read_text(encoding="utf-8")
+
+    assert "(cd site && npm ci && npm run build && npm test && npm run check)" in checklist
+    assert "`check-links: ok` and `check-js-budget: ok`" in checklist
+    assert "`.github/workflows/site.yml`" in checklist
+    assert "on every push to `main`" in checklist
+    assert "Deploy `docs/`" not in checklist
+    assert "the sdist carries no `site/` entry" in checklist
+    assert "site/README.md" in checklist
+
+
 def test_release_checklist_covers_package_install_smoke() -> None:
     checklist = (ROOT / "docs" / "release-checklist.md").read_text(encoding="utf-8")
 
@@ -82,7 +96,12 @@ def test_public_doc_relative_links_exist() -> None:
         if not any(part.startswith(".") for part in path.relative_to(ROOT).parts)
     )
     for path in docs:
-        if any(part in {".git", ".venv", ".uv-cache"} for part in path.parts):
+        # node_modules / dist: the docs site (site/) holds third-party and
+        # generated markdown there once `npm ci` or a build has run (site/.astro
+        # is already skipped as a dot-directory).
+        if any(
+            part in {".git", ".venv", ".uv-cache", "node_modules", "dist"} for part in path.parts
+        ):
             continue
         text = path.read_text(encoding="utf-8")
         for pattern in DOC_LINK_PATTERNS:

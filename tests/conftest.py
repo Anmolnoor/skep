@@ -37,7 +37,7 @@ def _no_real_codex_login(
 @pytest.fixture(autouse=True)
 def _private_proxy_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """ES-F257 follow-up: proxy socket dirs (skep-nx-*) land under
-    XDG_RUNTIME_DIR, else /tmp (dispatch._proxy_socket_root). A test whose
+    XDG_RUNTIME_DIR, else /tmp (dispatch.proxy_socket_root). A test whose
     daemon thread or simulated crash skips the proxy's finally left them in
     the operator's real runtime dir. Each test gets its own dir beside the
     real one — short (AF_UNIX's 108-char cap) and never under the
@@ -47,3 +47,20 @@ def _private_proxy_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     monkeypatch.setenv("XDG_RUNTIME_DIR", root)
     yield
     rmtree(root, ignore_errors=True)  # bound at import: tests patch shutil.rmtree
+
+
+@pytest.fixture(autouse=True)
+def _new_projects_probe_no_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v127-F8 (ADR 0066): a new project's default mode follows this host's
+    sandbox probe. Pin it off so no test's expectations depend on the machine
+    it runs on; tests of the default itself patch it back."""
+    from skep.supervisor.sandbox import SandboxAvailability
+    from skep.supervisor.serve import registry
+
+    monkeypatch.setattr(
+        registry,
+        "new_project_sandbox_probe",
+        lambda backend=None: SandboxAvailability(
+            usable=False, reason="pinned_off", detail="tests pin the new-project probe"
+        ),
+    )

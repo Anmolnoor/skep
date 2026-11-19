@@ -71,6 +71,7 @@ _CHILD_ENV_PASSTHROUGH: tuple[str, ...] = (
     "npm_config_cache",
     "TMPDIR",
     "TMPPREFIX",  # v120-F1: zsh here-documents, else /tmp/zsh outside the wall
+    "XDG_RUNTIME_DIR",  # v127-A0 trial fix: macOS in-wall runtime dir, else /tmp
     "UV_CACHE_DIR",
 )
 
@@ -99,9 +100,14 @@ class CapabilityDenied(CapabilityError):
     tail reports honestly instead of blaming worker policy for a bad argument.
     """
 
-    def __init__(self, message: str, *, policy_blocked: bool = False) -> None:
+    def __init__(
+        self, message: str, *, policy_blocked: bool = False, hint: str | None = None
+    ) -> None:
         super().__init__(message)
         self.policy_blocked = policy_blocked
+        # v127-F2: file text that teaches the replan (a missed edit's window),
+        # kept out of the message so the message stays the short fact.
+        self.hint = hint
 
 
 class CapabilityApprovalRequired(CapabilityError):
@@ -491,6 +497,34 @@ def _child_process_env(
             if value is not None:
                 env[name] = value
     return env
+
+
+_EDIT_HINT_BYTES = 2_000
+
+
+def _edit_miss_hint(content: str, old: str) -> str:
+    """v127-F2 (I9): a 0-match ``old`` shows the closest window of the file
+    as it is now (difflib on the first non-blank line of ``old``), or the
+    file head when nothing is close, so the replan copies real text instead
+    of guessing again. Shown only — never applied (no fuzzy edit). Redacted
+    like the worker's failure details (ES-F260): the text lands in audit."""
+    import difflib
+
+    from skep.supervisor.policy_v3 import redact
+
+    lines = content.splitlines()
+    anchor = next((line for line in old.splitlines() if line.strip()), old)
+    match = difflib.get_close_matches(anchor, lines, n=1, cutoff=0.6)
+    if match:
+        at = lines.index(match[0])
+        start = max(0, at - 3)
+        end = at + len(old.splitlines()) + 3
+        label = f"closest lines in the file now ({start + 1}-{min(end, len(lines))})"
+        window = "\n".join(lines[start:end])
+    else:
+        label, window = "file head", content
+    window = redact(window).encode()[:_EDIT_HINT_BYTES].decode(errors="ignore")
+    return f"; copy old exactly from the file. {label}:\n{window}"
 
 
 class CapabilityRegistry:
@@ -1121,7 +1155,15 @@ class CapabilityRegistry:
             raise CapabilityDenied(str(exc)) from exc
         count = content.count(old)
         if count == 0:
-            raise CapabilityDenied(f"old text not found in {relative}")
+            # v127-F2 review (I4/I11): the hint is file content, so it obeys
+            # the read floor — a .env (or a path no read may follow) shows none.
+            readable = secret_floor_reason(target) is None and tracked_file_readable(
+                self._workspace, target
+            )
+            raise CapabilityDenied(
+                f"old text not found in {relative}",
+                hint=_edit_miss_hint(content, old) if readable else None,
+            )
         if count > 1 and not replace_all:
             raise CapabilityDenied(f"old text appears {count} times in {relative}")
         updated = content.replace(old, new, -1 if replace_all else 1)

@@ -462,7 +462,8 @@ _AUTO_APPROVAL_KEYS: tuple[PolicyKey, ...] = (
         default="off",
         layers=("dispatch",),
         invariant="I1",
-        doc="land a verified, re-verified, risk-free manifest-only patch (--auto-approve)",
+        doc="land a verified, re-verified, risk-free manifest-only patch (library callers "
+        "only: --auto-approve is retired and installs nothing)",
     ),
     PolicyKey(
         name="auto_approval.verified-patch",

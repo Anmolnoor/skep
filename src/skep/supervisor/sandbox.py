@@ -38,6 +38,7 @@ from urllib.parse import urlparse
 
 from .. import landlock
 from .secret_floor import HOME_SECRETS, SERVE_ENV, SKEP_SECRET_NAMES, other_homes
+from .store import RETIRED_STORE_FILES
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 BUBBLEWRAP = "bwrap"
@@ -342,10 +343,16 @@ def available() -> bool:
 # a worker whose caste calls the LLM reads ``llm-secret`` and the ACTIVE
 # profile's ``llm-secret-<id>`` (llm_plan.py) unless its run is relayed
 # (ADR 0062, ``provider_key_relay``): then the proxy holds the credential.
-# The store (supervisor.sqlite3) stays readable: that same worker reads its
-# provider settings from it. Checked when the profile is
+# The store (supervisor.sqlite3) stays readable for that same worker only: it
+# reads its provider settings from it. v127-F6: every other profile (external
+# engines, no-provider castes, relayed runs, re-verify, diagnose) has the store
+# and its WAL masked — it holds every chat and run instruction — and nobody
+# reads the backup dirs or a retired layout's store. Checked when the profile is
 # built, so a secret file created mid-run is not covered (relay-secret is
-# made before the list, ES-F264).
+# made before the list, ES-F264) — nor, under bwrap/podman, a store WAL/SHM
+# that appears after it (they mask only paths that exist; serve normally
+# holds them open). Seatbelt denies by literal path, so write_profile names
+# the live store and its WAL/SHM whether or not they exist yet.
 # W33: the engine logins (~/Library/Keychains, ~/.claude/.credentials.json,
 # ~/.codex/auth.json) are masked too — each external engine's config dir is
 # redirected per run and a dispatch without its auth env is refused (NO AUTH
@@ -461,6 +468,9 @@ def _refuse_home_inside(skep_home: Path, writable_roots: Iterable[Path]) -> None
             )
 
 
+_LIVE_STORE_FILES = ("supervisor.sqlite3", "supervisor.sqlite3-wal", "supervisor.sqlite3-shm")
+
+
 def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]:
     """The existing secret-floor paths to hide from a worker (resolved).
 
@@ -491,6 +501,18 @@ def secret_paths(skep_home: Path, *, worker_llm_key: bool = False) -> list[Path]
             for p in supervisor.iterdir()
             if p.name not in readable and any(fnmatch(p.name, pat) for pat in SKEP_SECRET_NAMES)
         )
+    # v127-F6: the store, its backups and the retired layouts' stores
+    live_store = set(_LIVE_STORE_FILES) if worker_llm_key else set()
+    candidates += [skep_home / "backups", skep_home / "archive"]
+    candidates += [skep_home / rel for rel in RETIRED_STORE_FILES]
+    for root in (skep_home, supervisor):
+        if root.is_dir():
+            candidates += sorted(
+                p
+                for p in root.iterdir()
+                if fnmatch(p.name, "supervisor*.sqlite3*")
+                and not (root == supervisor and p.name in live_store)
+            )
     # dict: the default ~/.codex/auth.json is already in HOME_SECRETS
     return list(dict.fromkeys(path.resolve() for path in candidates if _exists(path)))
 
@@ -949,8 +971,18 @@ def in_wall_tmp_env(tmp_dir: Path) -> dict[str, str]:
     under ``$TMPPREFIX`` (default ``/tmp/zsh``), and /tmp is outside the wall
     (ES-F5), so every ``zsh -c "... <<'PY'"`` died with "can't create temp
     file for here document". TMPPREFIX is a filename prefix, not a directory.
+
+    v127-A0 trial fix (V01): on macOS, XDG_RUNTIME_DIR too — tools that make
+    temp dirs under it, else /tmp (skep's own suite), hit /tmp outside the
+    Seatbelt wall, and re-verify failed a correct patch. Not on Linux: bwrap
+    gives every run a private writable /tmp, and a runtime dir this deep
+    would push AF_UNIX socket paths past their 108-char cap. Every POSIX
+    temp lookup (Python, Node, Go) reads TMPDIR before TEMP/TMP.
     """
-    return {"TMPDIR": str(tmp_dir), "TMPPREFIX": str(tmp_dir / "zsh")}
+    env = {"TMPDIR": str(tmp_dir), "TMPPREFIX": str(tmp_dir / "zsh")}
+    if sys.platform == "darwin":
+        env["XDG_RUNTIME_DIR"] = str(tmp_dir)
+    return env
 
 
 def write_profile(
@@ -1051,6 +1083,9 @@ def write_profile(
     # SKEP_HOME placed under $TMPDIR. Each run's TMPDIR is already private,
     # inside its workspace (dispatch/reverify/diagnose/fast lane set it).
     writable_roots = [workspace, *extra_writable]
+    if not worker_llm_key:  # v127-F6: a literal deny holds before the file exists
+        live = [(skep_home / "supervisor" / name).resolve() for name in _LIVE_STORE_FILES]
+        read_denied = list(dict.fromkeys([*read_denied, *live]))
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(
         build_profile(

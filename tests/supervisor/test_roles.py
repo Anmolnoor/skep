@@ -169,3 +169,21 @@ def test_a_file_named_like_a_shipped_role_replaces_it_and_every_reader_sees_it(
     assert list(all_roles(home)) == ["builder", "operator", "assistant"]
     hit = role_decision(role, "coding", "edit", "workspace")
     assert hit is not None and hit.decided_by == "role:operator/coding-denied"
+
+
+def test_a_stale_custom_role_naming_a_retired_caste_still_loads(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """v127-F11: `verifier` is retired. A roles/*.json written before that
+    must not break `all_roles` for every chat — the retired caste is dropped
+    with a warning; an unknown one still refuses."""
+    assert all("verifier" not in role.default_castes for role in SHIPPED_ROLES.values())
+    home = tmp_path / "skep" / "supervisor"
+    roles_dir(home).mkdir(parents=True)
+    (roles_dir(home) / "checker.json").write_text(
+        json.dumps({"name": "checker", "default_castes": ["coding", "verifier"]})
+    )
+    with caplog.at_level("WARNING"):
+        role = all_roles(home)["checker"]
+    assert role.default_castes == ("coding",)
+    assert "verifier" in caplog.text and "retired" in caplog.text

@@ -516,7 +516,9 @@ def _list_ollama_models(base_url: str, api_key: str | None, *, timeout: float) -
         response.raise_for_status()
         payload = response.json()
     except httpx.HTTPStatusError as exc:
-        raise OllamaError(f"{exc.response.status_code} from {base_url}") from exc
+        raise OllamaError(
+            f"{exc.response.status_code} from {base_url}", status=exc.response.status_code
+        ) from exc
     except (httpx.HTTPError, json.JSONDecodeError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
     names = [entry.get("name") or entry.get("model") for entry in payload.get("models", [])]
@@ -543,7 +545,9 @@ def _list_openai_models(base_url: str, api_key: str | None, *, timeout: float) -
         payload = response.json()
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
-        raise OllamaError(f"{status} from {base_url}" + _login_refused(base_url, status)) from exc
+        raise OllamaError(
+            f"{status} from {base_url}" + _login_refused(base_url, status), status=status
+        ) from exc
     except (httpx.HTTPError, json.JSONDecodeError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
     if codex:  # v118-F2: {"models": [{"slug": ...}]}
@@ -950,7 +954,9 @@ def _list_anthropic_models(base_url: str, api_key: str | None, *, timeout: float
         response.raise_for_status()
         payload = response.json()
     except httpx.HTTPStatusError as exc:
-        raise OllamaError(f"{exc.response.status_code} from {base_url}") from exc
+        raise OllamaError(
+            f"{exc.response.status_code} from {base_url}", status=exc.response.status_code
+        ) from exc
     except (httpx.HTTPError, json.JSONDecodeError) as exc:
         raise OllamaError(str(exc) or exc.__class__.__name__) from exc
     names = [entry.get("id") or entry.get("display_name") for entry in payload.get("data", [])]

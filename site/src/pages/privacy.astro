@@ -1,0 +1,152 @@
+---
+// Privacy: what this website loads, what the skep tool sends, where secrets live.
+// The outbound list is audit C part 2 claim 8, checked against src/skep.
+import Base from '../layouts/Base.astro';
+import Callout from '../components/Callout.astro';
+import Section from '../components/Section.astro';
+import Table from '../components/Table.astro';
+import { ISSUES_URL } from '../lib/site-nav.mjs';
+
+const outbound = [
+  ['The model provider’s API', 'Every assistant turn and every worker model call; a health probe of each configured provider about every five minutes; skep doctor.'],
+  ['chatgpt.com', 'Only when the assistant or a Codex project is set to use a ChatGPT plan login.'],
+  ['api.github.com and github.com', 'Only with the GitHub Copilot provider: the device login and its token exchange.'],
+  ['Telegram, Slack, Discord', 'Only for a messenger channel you configured.'],
+  ['Web search and page fetches', 'When the assistant uses its search or read-a-URL tools; each is decided by policy.'],
+  ['Remote MCP servers', 'Only for an HTTP MCP server you registered.'],
+  ['Your git remote and GitHub (git fetch, git push, gh)', 'Pushing a landing branch and opening or merging a pull request happen only through actions you confirm. A clone skep manages for you (under its own repos directory) is fetched, and its default branch fast-forwarded to origin, before each run; a directory of your own is never fetched for you.'],
+  ['The package index (uv sync)', 'Before re-verifying a uv project, to install its dependencies. The verify command itself then runs offline.'],
+  ['A cloud text-to-speech provider', 'Only if you choose one. The default is none.'],
+  ['Your mail server and calendar feed', 'Only if you configure the bundled mail or calendar MCP servers.'],
+  ['Hosts a worker is allowed to reach', 'A run with a network allowlist, through skep’s filtering proxy.'],
+  ['npm, for an ACP adapter', 'When you start skep acp govern with an npx command: that is the agent’s own start.'],
+];
+---
+
+<Base
+  title="Privacy"
+  description="What the skep website loads in your browser, what the skep tool sends over the network and when, and where it stores secrets."
+>
+  <section class="section">
+    <div class="wrap narrow stack">
+      <p class="eyebrow t-micro">Privacy</p>
+      <h1 class="t-h2">What this site loads and what skep sends</h1>
+      <p class="t-lead prose-width">
+        There is no skep account, no skep-operated service and no telemetry. This page lists every
+        network request the website and the tool can make, and where the tool keeps secrets.
+      </p>
+      <p class="t-small c-mut">Last updated 2026-11-18.</p>
+    </div>
+  </section>
+
+  <Section band narrow eyebrow="This website" title="What your browser loads">
+    <div class="prose prose-width">
+      <ul>
+        <li><strong>No cookies, no analytics, no trackers.</strong> The site is static files.</li>
+        <li>
+          <strong>Hosting.</strong> The site is served by GitHub Pages, so GitHub’s server logs apply
+          (see <a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub’s privacy statement</a>).
+        </li>
+        <li>
+          <strong>Fonts, icons and search come from this site.</strong> The two font files are
+          self-hosted, icons are inline SVG, and the search index is loaded from this site the first
+          time you open search. Your search terms stay in your browser.
+        </li>
+        <li>
+          <strong>Two requests go to other services.</strong> After a page loads, your browser asks
+          <code>api.github.com</code> for the repository’s public numbers and <code>pypi.org</code>
+          for the latest version. Those services see your browser’s request; this site receives
+          nothing. If either request fails, the page keeps the values it was built with.
+        </li>
+        <li>
+          <strong>One cache, in your browser.</strong> The two responses are kept in
+          <code>sessionStorage</code> for up to an hour so the next page does not ask again. It is
+          cleared when you close the tab and is never sent anywhere.
+        </li>
+      </ul>
+    </div>
+  </Section>
+
+  <Section narrow eyebrow="The skep tool" title="What stays on your machine">
+    <div class="prose prose-width">
+      <ul>
+        <li>
+          <strong>No account, no skep service, no telemetry.</strong> skep has no usage reporting,
+          no analytics client and no update check. <code>skep onboard</code> prints
+          <code>telemetry: none</code> and that is the whole of it.
+        </li>
+        <li>
+          <strong>State is local.</strong> Everything lives under <code>$SKEP_HOME</code>, or
+          <code>~/.skep</code> by default: a SQLite store (runs, events, approvals) and an audit
+          directory of files (patches, evidence, worker logs, the policy decision log).
+        </li>
+        <li>
+          <strong>The web UI listens on loopback by default.</strong> <code>skep serve</code> binds
+          <code>127.0.0.1</code> and requires its token. <code>--host</code> changes the address,
+          and the container image starts with <code>--host 0.0.0.0</code>.
+        </li>
+      </ul>
+    </div>
+  </Section>
+
+  <Section band narrow eyebrow="The skep tool" title="What skep sends, and when">
+    <div class="stack">
+      <p class="prose-width">
+        Every outbound call goes to a service you configured or follows an action you approved.
+        This is the complete list.
+      </p>
+      <Table
+        caption="Outbound calls skep itself can make"
+        head={['Goes to', 'When']}
+        rows={outbound}
+        rowHeaders
+      />
+      <Callout kind="limit" title="Your code leaves the machine with a hosted model">
+        With a hosted model provider, prompts go to that provider, and prompts include your code.
+        Nothing leaves only when the model is served by a daemon on your own machine. The default
+        Ollama preset, <code>glm-5.2</code>, is served through ollama.com, which is a hosted provider.
+      </Callout>
+      <Callout kind="note" title="Workers">
+        A sandboxed worker reaches its own model provider, plus the hosts its policy lists. A
+        project’s policy can carry a default list (the <code>builder</code> baseline allows the
+        common package registries), so a set-up project is not always network-free.
+      </Callout>
+    </div>
+  </Section>
+
+  <Section narrow eyebrow="Secrets" title="Where secrets are stored">
+    <div class="prose prose-width">
+      <ul>
+        <li>
+          <strong>In files, mode 0600, under the home. Never in the database.</strong> That covers
+          model provider keys saved with <code>skep provider set-key</code> or in Settings
+          (<code>llm-secret</code>, <code>llm-secret-&lt;id&gt;</code>), the serve token
+          (<code>serve-token</code>), <code>serve.env</code>, and messenger, webhook and mail
+          secrets (<code>*-secret</code>).
+        </li>
+        <li>
+          <strong>Workers get environment variables by name.</strong> Only names on the run’s
+          allowlist are passed to a worker.
+        </li>
+        <li>
+          <strong>Credential paths are hidden inside the sandbox.</strong> A fixed list
+          (<code>~/.ssh</code>, <code>~/.aws</code>, <code>~/.config/gh</code>, the agents’ own login
+          files, shell startup and history files, skep’s own secret files) is masked for every
+          sandboxed worker. Other reads outside the workspace are mostly open.
+        </li>
+        <li>
+          <strong>An external agent’s credential</strong> comes from the environment of the process
+          that starts it. With the opt-in Codex ChatGPT login, a run gets a copy that holds an
+          access token and no refresh token.
+        </li>
+      </ul>
+    </div>
+  </Section>
+
+  <Section band narrow eyebrow="Questions" title="Ask in the open, or privately">
+    <p class="prose-width">
+      Open an <a class="c-green" href={ISSUES_URL}>issue on GitHub</a>. For anything private, including
+      a security report, use the contact on <a class="c-green" href="/security.html">the security page</a>.
+    </p>
+  </Section>
+</Base>

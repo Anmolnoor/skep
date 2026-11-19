@@ -471,7 +471,7 @@ def test_an_adopted_run_lands_by_approval_never_by_auto_apply(
     store = RunStore(config.db_path)
     store.add_project_policy(
         project_id="auto", name="Auto", strategy="trusted_local_dev", phase="maintain",
-        policy={"auto_apply_verified_patch": True, "verify_command": "true"},
+        policy={"auto_apply_verified_patch": True, "verify_command": 'grep -q value existing.py'},
     )  # fmt: skip
     store.add_project_binding(
         project_id="auto", binding_kind="repo_path", binding_value=str(repo.resolve())

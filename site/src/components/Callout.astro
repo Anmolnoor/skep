@@ -1,0 +1,20 @@
+---
+// Callout: a boxed aside. `limit` (yellow) states what skep does not do; every
+// claim on a page that has a limit gets one.
+import Icon from './Icon.astro';
+
+interface Props {
+  kind?: 'limit' | 'risk' | 'ok' | 'note';
+  title?: string;
+}
+const { kind = 'limit', title } = Astro.props;
+const icons = { limit: 'triangle-alert', risk: 'octagon-alert', ok: 'circle-check', note: 'info' };
+---
+
+<aside class:list={['callout', `callout-${kind}`]}>
+  <Icon name={icons[kind]} size={18} />
+  <div class="callout-body">
+    {title && <p class="callout-title">{title}</p>}
+    <slot />
+  </div>
+</aside>

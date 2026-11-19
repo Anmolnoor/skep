@@ -1,0 +1,68 @@
+---
+// The docs hub, generated from the sections of docs/README.md (the curated
+// index a test pins as complete). Adding a doc to that README adds it here.
+import { getCollection } from 'astro:content';
+import Base from '../layouts/Base.astro';
+import DocsSidebar from '../components/DocsSidebar.astro';
+import Icon from '../components/Icon.astro';
+import Search from '../components/Search.astro';
+import { docTitle, inlineHtml, parseDocsIndex } from '../lib/nav.mjs';
+import { docUrl } from '../lib/slugs.mjs';
+
+const entries = await getCollection('docs');
+const byId = new Map(entries.map((entry) => [entry.id, entry]));
+const sections = parseDocsIndex(byId.get('readme')?.body ?? '');
+if (sections.length === 0) throw new Error('docs/README.md has no sections: the docs hub would be empty');
+const anchor = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+---
+
+<Base
+  title="Docs"
+  description="skep documentation: every guide, concept, reference and decision record."
+  active="docs"
+>
+  <div class="docs-layout">
+    <aside class="docs-rail left"><DocsSidebar /></aside>
+
+    <div class="docs-main">
+      <header class="stack" style="margin-bottom: var(--s-6)">
+        <p class="eyebrow t-micro">Documentation</p>
+        <h1 class="t-h2">skep documentation</h1>
+        <Search label="Search the documentation" wide />
+      </header>
+
+      {
+        sections.map((section) => (
+          <section class="hub-section" aria-labelledby={anchor(section.title)}>
+            <h2 class="t-h3" id={anchor(section.title)}>{section.title}</h2>
+            <ul class="hub-list">
+              {section.items.map((item) => {
+                const entry = item.id ? byId.get(item.id) : undefined;
+                return (
+                  <li>
+                    <a href={entry ? docUrl(entry.id) : item.href} rel={entry ? undefined : 'noopener'}>
+                      <div>
+                        <strong>{entry ? docTitle(entry.body, item.file) : item.file.replace(/^(\.\.\/)+/, '')}</strong>
+                        <span set:html={inlineHtml(item.description)} />
+                      </div>
+                      <Icon name={entry ? 'chevron-right' : 'arrow-up-right'} size={16} />
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ))
+      }
+    </div>
+
+    <aside class="docs-rail right">
+      <nav aria-label="On this page">
+        <div class="toc-title">On this page</div>
+        <ul class="toc">
+          {sections.map((section) => <li><a href={`#${anchor(section.title)}`}>{section.title}</a></li>)}
+        </ul>
+      </nav>
+    </aside>
+  </div>
+</Base>

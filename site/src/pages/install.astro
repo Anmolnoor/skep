@@ -1,0 +1,267 @@
+---
+// Install: the paths that exist, the sandbox each platform needs, upgrade, and
+// the first command. Every command here was run with --help on the release
+// this page is built from; the two transcripts are captured (see `captured`).
+import Base from '../layouts/Base.astro';
+import Button from '../components/Button.astro';
+import Callout from '../components/Callout.astro';
+import Card from '../components/Card.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Section from '../components/Section.astro';
+import Table from '../components/Table.astro';
+import Terminal from '../components/Terminal.astro';
+import { readRepoFile, siteFacts } from '../lib/repo.mjs';
+import { GH_URL, ISSUES_URL, PYPI_URL } from '../lib/site-nav.mjs';
+
+const { version, contract } = siteFacts();
+
+// The Python floor is the package's own, never typed here.
+const floor = /^requires-python\s*=\s*">=\s*([\d.]+)"/m.exec(readRepoFile('pyproject.toml'))?.[1];
+if (!floor) throw new Error('pyproject.toml has no requires-python floor');
+
+// Captured: `skep --version`. The two numbers are the build-time values.
+const versionOut = `
+$ skep --version
+skep ${version} (worker contract ${contract})
+`;
+
+// Captured: `skep doctor` on a home that has never been onboarded.
+const doctor = `
+$ skep doctor
+Skep: blocked
+
+Required checks:
+- profile: blocked - Personal profile is missing. Next step: run setup --personal
+
+Personal surface:
+- provider: unconfigured model=unconfigured
+- coding_worker: no worker provider configured
+- engine aider: MISSING — 'aider' not on PATH (sandbox-confined; needs verify_command)
+- engine builtin: ok — …/bin/python (skep's own worker)
+- engine claude_code: NO AUTH ENV — set one of CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY — …/bin/claude (sandbox-confined; needs verify_command)
+- engine codex: NO AUTH ENV — set one of OPENAI_API_KEY — …/bin/codex (sandbox-confined; needs verify_command)
+  ChatGPT login: none (no Codex login on this machine (\`codex login\`))
+- engine pi: MISSING — 'pi' not on PATH (sandbox-confined; needs verify_command)
+- provider key relay: off — builtin workers hold the provider key (set provider_key_relay to relay it); claude_code, codex, aider and pi authenticate from their own auth env (not relayed)
+- approvals: 0 pending
+- memory: blocked at ~/.skep/supervisor/supervisor.sqlite3
+
+Runtime checks:
+- sandbox: ready - bubblewrap backend is usable. Landlock ABI 10: a worker connects only to unix sockets in its own roots or ones it made itself.
+`;
+
+const pipx = `
+# Debian, Ubuntu (Fedora: sudo dnf install pipx)
+$ sudo apt install pipx
+# puts ~/.local/bin on PATH; open a new shell afterwards
+$ pipx ensurepath
+$ pipx install skep
+$ skep --version
+`;
+const uv = `
+# installed, on PATH
+$ uv tool install skep
+# or run one command without installing
+$ uvx skep --version
+`;
+const pip = `
+$ python3 -m venv .venv && . .venv/bin/activate
+$ pip install skep
+`;
+const source = `
+$ git clone ${GH_URL}.git
+$ cd skep
+$ uv sync --frozen
+$ uv run skep --version
+`;
+const bwrap = `
+# Debian, Ubuntu
+$ sudo apt install bubblewrap
+# Fedora
+$ sudo dnf install bubblewrap
+# the last line reports the sandbox
+$ skep doctor
+`;
+const compose = `
+$ git clone ${GH_URL}.git && cd skep
+$ docker compose up -d
+# the access token is printed in the log
+$ docker compose logs skep
+`;
+---
+
+<Base
+  title="Install"
+  description="Install skep from PyPI with pipx, uv or pip, or from source. The sandbox each platform needs, how to upgrade, and the first command to run."
+>
+  <Section eyebrow="Install" lead={`skep is a Python package for macOS and Linux. It needs Python ${floor} or newer and Git. Install it, check the sandbox, then let the guided first run do the rest.`}>
+    <h1 slot="heading" class="t-h2">Install skep</h1>
+    <div class="grid grid-2" style="align-items: start">
+      <div class="grid">
+        <CodeBlock code="$ pipx install skep && skep onboard" title="Install and first run" />
+        <p class="t-small c-mut">
+          <a class="link-arrow" href="/first-run.html">What skep onboard does</a>
+        </p>
+      </div>
+      <Terminal code={versionOut} title="check the install" captured="skep --version; the two numbers are filled in from this release's sources" />
+    </div>
+  </Section>
+
+  <Section id="paths" band eyebrow="Install paths" title="Four ways to get the package" lead="All four install the same package from PyPI or from the repository. Pick one.">
+    <div class="grid grid-2" style="align-items: start">
+      <div class="grid">
+        <h3 class="t-h3">pipx (recommended)</h3>
+        <div class="prose">
+          <p>
+            An isolated app with <code>skep</code> on your PATH. On Debian and Ubuntu the system
+            Python refuses a bare <code>pip install</code> (PEP 668); pipx is the way around it.
+            On macOS, install pipx as <a href="https://pipx.pypa.io/stable/installation/">its own guide</a> says.
+          </p>
+        </div>
+        <CodeBlock code={pipx} title="pipx" />
+      </div>
+      <div class="grid">
+        <h3 class="t-h3">uv</h3>
+        <div class="prose">
+          <p>
+            <code>uv tool install</code> does the same job as pipx. <code>uvx</code> runs one
+            command from a temporary environment; it needs a subcommand, because
+            <code>skep</code> alone only prints its usage.
+          </p>
+        </div>
+        <CodeBlock code={uv} title="uv" />
+      </div>
+      <div class="grid">
+        <h3 class="t-h3">pip, inside a virtual environment</h3>
+        <div class="prose">
+          <p>Fine when you manage the environment yourself. <code>skep</code> is on PATH only while that environment is active.</p>
+        </div>
+        <CodeBlock code={pip} title="pip" />
+      </div>
+      <div class="grid">
+        <h3 class="t-h3">From source</h3>
+        <div class="prose">
+          <p>
+            What contributors use. It needs <a href="https://docs.astral.sh/uv/getting-started/installation/">uv</a>,
+            and every command becomes <code>uv run skep …</code>.
+            <code>bash scripts/install.sh --dry-run</code> prints what the installer script would do
+            (sync, the bubblewrap reminder on Linux, the first commands) without doing it.
+          </p>
+        </div>
+        <CodeBlock code={source} title="source checkout" />
+      </div>
+    </div>
+  </Section>
+
+  <Section id="sandbox" eyebrow="Sandbox prerequisite" title="What each platform needs" lead="A sandbox-mode run needs an OS backend. skep probes it before every launch and refuses to start the worker when none can be applied.">
+    <div class="grid">
+      <div class="grid grid-2" style="align-items: start">
+        <Card title="Linux: bubblewrap" icon="box">
+          <p>Install the <code>bubblewrap</code> package. User namespaces must be allowed by the host, or the probe fails.</p>
+          <p>
+            Landlock is applied inside the sandbox when the kernel has it: abstract unix sockets
+            from ABI 6 (Linux 6.12), path sockets from ABI 9. On an older kernel that step is
+            skipped and <code>skep doctor</code> says so.
+          </p>
+        </Card>
+        <Card title="macOS: Seatbelt" icon="box">
+          <p>Nothing to install: <code>sandbox-exec</code> ships with macOS.</p>
+          <p>It is usable when the host process is allowed to apply sandbox profiles.</p>
+        </Card>
+        <Card title="Linux, opt-in: podman" icon="container">
+          <p>Chosen with <code>skep onboard --sandbox podman</code>. It is never picked automatically.</p>
+        </Card>
+        <Card title="Windows and others: none" icon="ban" tone="yellow">
+          <p>There is no backend, and skep is not built or tested for these platforms.</p>
+        </Card>
+      </div>
+      <div class="grid grid-2" style="align-items: start">
+        <CodeBlock code={bwrap} title="Linux: install bubblewrap" />
+        <Callout kind="limit" title="No sandbox is an answer skep accepts">
+          <p>
+            <code>skep onboard --sandbox none</code> works on a host with no usable backend. Nothing
+            then confines the worker process, so the policy baseline is locked with every write
+            turned into a question you answer.
+          </p>
+        </Callout>
+      </div>
+      <Terminal code={doctor} title="skep doctor, before onboarding" captured="skep doctor on a fresh throwaway SKEP_HOME, Fedora, 2026-11-18; paths shortened" />
+      <p class="prose-width t-small c-mut">
+        <code>blocked</code> is expected here: no profile exists until <code>skep onboard</code> creates one.
+        The engine lines show which agent binaries were found and whether their sign-in variables are set.
+      </p>
+    </div>
+  </Section>
+
+  <Section id="container" band eyebrow="Container" title="The container image" lead="The repository carries a Dockerfile and a compose file. This is what they do, read from the files themselves.">
+    <div class="grid grid-2" style="align-items: start">
+      <div class="grid">
+        <CodeBlock code={compose} title="docker compose" />
+        <div class="prose">
+          <ul>
+            <li>The image is <code>python:3.12-slim</code> with git, bubblewrap and the GitHub CLI, and it runs <code>skep serve</code> on port 8765.</li>
+            <li>Everything skep writes lives under <code>/data</code>, a named volume (<code>skep-data</code>). The container itself is disposable.</li>
+            <li>The compose file passes <code>ANTHROPIC_API_KEY</code> and <code>GH_TOKEN</code> through from your shell when they are set.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="grid">
+        <Callout kind="limit" title="Not verified for this page">
+          <p>
+            Two things were not checked by running them: that the image named in the compose file is
+            published in the registry (the file also has a build section for the checkout), and that
+            sandbox mode works inside the container. The compose file adds no extra capabilities,
+            and Claude Code, Codex, Aider and pi run only in sandbox mode. Read the sandbox line of
+            <code>docker compose exec skep skep doctor</code> before you rely on it.
+          </p>
+        </Callout>
+        <Callout kind="risk" title="The port is published on every interface">
+          <p>
+            The compose file maps <code>8765:8765</code>, so the API is reachable from your network
+            and the access token is the only gate. Change the mapping to
+            <code>127.0.0.1:8765:8765</code> unless you mean to share it.
+          </p>
+        </Callout>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="upgrade" eyebrow="Upgrade" title="Upgrading" lead="Upgrade with the tool you installed with, then restart the daemon.">
+    <div class="grid">
+      <Table caption="Upgrade commands">
+        <thead>
+          <tr><th scope="col">Installed with</th><th scope="col">Upgrade</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">pipx</th><td><code>pipx upgrade skep</code></td></tr>
+          <tr><th scope="row">uv</th><td><code>uv tool upgrade skep</code></td></tr>
+          <tr><th scope="row">pip</th><td><code>pip install --upgrade skep</code>, in the same environment</td></tr>
+          <tr><th scope="row">Source</th><td><code>git pull</code>, then <code>uv sync --frozen</code></td></tr>
+        </tbody>
+      </Table>
+      <div class="prose">
+        <ul>
+          <li>A running <code>skep serve</code> keeps the old code until you restart it.</li>
+          <li>Your home (<code>~/.skep</code>) is kept. A home from an earlier release keeps deciding as it did.</li>
+          <li>A home with no approved policy baseline asks before every governed action until you approve one. <code>skep onboard --check</code> shows where a home stands.</li>
+          <li>What changed in each release is in the <a href="/changelog.html">changelog</a>.</li>
+        </ul>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="next" band eyebrow="Next" title="The first command" lead="skep onboard connects a model, registers a work directory, records the sandbox, locks a policy baseline and opens the chat.">
+    <div class="grid">
+      <CodeBlock code="$ skep onboard" title="guided first run" />
+      <div class="row">
+        <Button href="/first-run.html" icon="arrow-right">First run, step by step</Button>
+        <Button href="/cli.html" variant="ghost">CLI reference</Button>
+        <Button href={PYPI_URL} variant="ghost">skep on PyPI</Button>
+      </div>
+      <p class="prose-width t-small c-mut">
+        Something broken? <a class="c-green" href={ISSUES_URL}>Open an issue</a> and paste your
+        <code>skep doctor</code> output. It prints variable names and paths, never a key.
+      </p>
+    </div>
+  </Section>
+</Base>

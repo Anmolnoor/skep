@@ -1,5 +1,13 @@
 # skep competitive analysis — v71 baseline
 
+> **Historical record, last graded at v71 (2026-07-20), before the public
+> release.** It is kept as written and is not maintained. Since then skep has
+> gained one policy engine, the Claude Code hook, the ACP governor, roles and
+> delegation, Landlock, and Claude Code, Codex, Aider and pi as engines it
+> dispatches; several statements below are out of date. The current
+> comparison is <https://skep.anmolnoor.com/why-skep.html>. (Note added
+> 2026-11-18.)
+
 ## The landscape: 4 categories
 
 | Category | What it is | Who's in it |

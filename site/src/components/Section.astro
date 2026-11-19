@@ -1,0 +1,36 @@
+---
+// Section: one band of a page. Sections alternate plain / `band`; each carries at
+// most one eyebrow + h2 + lead. Pass `title` for a plain h2, or fill the
+// `heading` slot when the h2 is an island (BlurText with tag="h2").
+import Eyebrow from './Eyebrow.astro';
+
+interface Props {
+  id?: string;
+  band?: boolean;
+  eyebrow?: string;
+  tone?: 'orange' | 'green' | 'red' | 'yellow';
+  title?: string;
+  lead?: string;
+  /** Narrower measure for text-first sections. */
+  narrow?: boolean;
+  /** CSS scroll reveal for the body (M5). Never on the first section of a page. */
+  reveal?: boolean;
+}
+const { id, band = false, eyebrow, tone, title, lead, narrow = false, reveal = false } = Astro.props;
+const hasHead = Boolean(eyebrow || title || lead || Astro.slots.has('heading'));
+---
+
+<section id={id} class:list={['section', band && 'band']}>
+  <div class:list={['wrap', narrow && 'narrow']}>
+    {
+      hasHead && (
+        <header class="section-head">
+          {eyebrow && <Eyebrow tone={tone}>{eyebrow}</Eyebrow>}
+          <slot name="heading">{title && <h2 class="t-h2">{title}</h2>}</slot>
+          {lead && <p class="t-lead">{lead}</p>}
+        </header>
+      )
+    }
+    <div class:list={[reveal && 'reveal']}><slot /></div>
+  </div>
+</section>

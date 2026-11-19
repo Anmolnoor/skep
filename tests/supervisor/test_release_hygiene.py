@@ -22,7 +22,7 @@ PLANTED_PATH = "/home/" + "anmolnoor" + "/x"
 PLANTED_EMAIL = "someone@" + "gmail" + ".com"
 CONTACT_EMAIL = "anmolnoor59@" + "gmail" + ".com"
 
-SCAN_DIRS = ["docs", "examples", "src/skep", "tests", ".github"]
+SCAN_DIRS = ["docs", "examples", "src/skep", "site/src", "tests", ".github"]
 SCAN_FILES = [
     "README.md",
     "CONTRIBUTING.md",
@@ -77,6 +77,11 @@ def test_scan_covers_personal_email_addresses() -> None:
     assert "-g '!docs/security.html'" in script
     assert "-g '!docs/code-of-conduct.html'" in script
     assert "-g '!docs/launch.md'" in script
+    # docs-site: the Astro sources are scanned like the pages they replace, and
+    # the same two private-channel pages carry the published contact.
+    assert "  site/src\n" in script
+    assert "-g '!site/src/pages/security.astro'" in script
+    assert "-g '!site/src/pages/code-of-conduct.astro'" in script
     assert "gitleaks" in script
     assert "agent-task-contract-spec-v0.1.md" in script
 
@@ -118,6 +123,44 @@ def test_namespace_identifiers_pass(tmp_path: Path) -> None:
         "https://github.com/Anmolnoor/skep and ghcr.io/anmolnoor/skep\n",
         encoding="utf-8",
     )
+
+    result = _run(tree)
+
+    assert result.returncode == 0, result.stderr
+    assert "RELEASE HYGIENE PASS" in result.stdout
+
+
+@needs_rg
+def test_planted_email_in_a_site_source_fails(tmp_path: Path) -> None:
+    tree = _make_tree(tmp_path)
+    page = tree / "site" / "src" / "pages" / "blog.astro"
+    page.parent.mkdir(parents=True)
+    page.write_text(f"<p>write to {PLANTED_EMAIL}</p>\n", encoding="utf-8")
+
+    result = _run(tree)
+
+    assert result.returncode != 0
+    assert "personal email addresses" in result.stderr
+
+
+@needs_rg
+def test_planted_path_in_a_site_source_fails(tmp_path: Path) -> None:
+    tree = _make_tree(tmp_path)
+    (tree / "site" / "src" / "note.mjs").write_text(f"// {PLANTED_PATH}\n", encoding="utf-8")
+
+    result = _run(tree)
+
+    assert result.returncode != 0
+    assert "personal machine paths" in result.stderr
+
+
+@needs_rg
+def test_contact_address_in_the_site_security_and_conduct_pages_passes(tmp_path: Path) -> None:
+    tree = _make_tree(tmp_path)
+    pages = tree / "site" / "src" / "pages"
+    pages.mkdir(parents=True)
+    for name in ("security.astro", "code-of-conduct.astro"):
+        (pages / name).write_text(f"<a>{CONTACT_EMAIL}</a>\n", encoding="utf-8")
 
     result = _run(tree)
 

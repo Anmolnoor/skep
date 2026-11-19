@@ -8,7 +8,7 @@ worker with `--worker-cmd` or `SKEP_WORKER_CMD`.
 
 | Worker | Status | Notes |
 | --- | --- | --- |
-| In-repo coding worker | Supported | Deterministic local worker for source-checkout runs. |
+| In-repo coding worker | Supported | skep's own worker: it plans with the configured model and runs each step through the capability layer. A deterministic hello-world path remains only as the no-provider fallback. |
 | Claude Code | Supported | Thin adapter around the local `claude` CLI. |
 | Generic shell worker | Supported | Prompt wrapper for local CLI agents configured with `SKEP_SHELL_WORKER_CMD`. |
 | Custom contract worker | Supported | Any command that reads Skep task JSON and writes Skep result JSON. |
@@ -242,3 +242,10 @@ Codex runs `exec --sandbox danger-full-access`, Claude Code gets
 `--settings '{"sandbox": {"enabled": false}}'`. Aider and pi start none.
 External engines always run in sandbox mode (v94-F4), and the codex, aider
 and pi workers refuse to start outside skep's sandbox. See `sandboxing.md`, Landlock.
+
+What skep records for an external engine: the evidence for every run — the
+command it launched, the patch, the sandbox profile and the G10 re-verify of
+the project's pinned check. Not each decision: the agent's own commands never
+reach skep's capability layer, so they write no decision-log rows (ADR 0047).
+Inside the sandbox, reads outside the workspace are open except the masked
+paths `sandboxing.md` lists; other runs' worktrees are readable.

@@ -34,7 +34,11 @@ writable roots back as writable:
 - any explicit extra writable roots from supervisor configuration
 
 Shared temp dirs (`/tmp`, `/var/folders`) are not writable, and a run whose
-skep home lies inside a writable root is refused.
+skep home lies inside a writable root is refused. So every temp variable a
+run's tools read points inside the workspace: `TMPDIR`, zsh's `TMPPREFIX`,
+`CLAUDE_CODE_TMPDIR` for the `claude_code` engine (Claude Code's Bash tool
+ignores `TMPDIR`), and on macOS `XDG_RUNTIME_DIR` (on Linux bubblewrap gives each run a private
+`/tmp` instead).
 
 This blocks writes outside the workspace/results boundary. Reads are open so
 the toolchain works, except the secret floor, which is hidden on every
@@ -71,6 +75,10 @@ copy that only that run's sandbox can read (it sits in the masked audit dir
 and is bound back for its own run) and that is deleted when it ends — the
 real `~/.codex/auth.json` stays masked and the refresh token never enters the
 sandbox ([`codex-chatgpt-login.md`](codex-chatgpt-login.md)).
+
+Everything else outside the workspace stays readable, including other runs'
+worktrees under the skep home: no profile masks them. Treat a sandboxed worker
+as able to read any file the lists above do not name.
 
 On Linux the worker also gets its own PID and IPC namespaces and an empty
 `/run` (no host D-Bus or systemd sockets).

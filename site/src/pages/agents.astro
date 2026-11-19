@@ -1,0 +1,430 @@
+---
+// Agents: the five engines of src/skep/supervisor/engines.py, how each signs
+// in, what skep does to an external agent, and the two ways to govern an agent
+// that runs in another tool. Transcripts were captured on 2026-11-18 (Fedora)
+// under a throwaway HOME; none used a key, a login or a model.
+//
+// No island: the engine names are a five-row table, and a rotating word would
+// cost this reference page a React runtime to say less than the table does.
+import Base from '../layouts/Base.astro';
+import Button from '../components/Button.astro';
+import Callout from '../components/Callout.astro';
+import Chip from '../components/Chip.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Section from '../components/Section.astro';
+import Table from '../components/Table.astro';
+import Terminal from '../components/Terminal.astro';
+import { siteFacts } from '../lib/repo.mjs';
+
+const { contract } = siteFacts();
+
+// Captured: the engine lines of `skep doctor` (the full output is on /install.html).
+const doctorEngines = `
+$ skep doctor
+# excerpt: the engine lines
+- engine aider: MISSING — 'aider' not on PATH (sandbox-confined; needs verify_command)
+- engine builtin: ok — …/bin/python (skep's own worker)
+- engine claude_code: NO AUTH ENV — set one of CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY — …/bin/claude (sandbox-confined; needs verify_command)
+- engine codex: NO AUTH ENV — set one of OPENAI_API_KEY — …/bin/codex (sandbox-confined; needs verify_command)
+  ChatGPT login: none (no Codex login on this machine (\`codex login\`))
+- engine pi: MISSING — 'pi' not on PATH (sandbox-confined; needs verify_command)
+`;
+
+// Captured: a dispatch with the engine pinned and no sign-in variable set.
+const refused = `
+$ skep run ~/other "fix the failing test" --execution-mode sandbox
+dispatching task against ~/other
+error: coding_engine 'claude_code': NO AUTH ENV — set one of CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY in the environment the worker inherits (the daemon reads <home>/serve.env at startup; \`skep run\` uses your shell) — the line \`skep doctor\` prints for this engine
+  next:     skep doctor  # engines, auth env, sandbox
+`;
+
+// Captured: two rows of the preset catalog.
+const presets = `
+$ skep provider presets
+preset               protocol          key env                      default model
+# excerpt: two of the rows
+ollama-cloud         ollama            OLLAMA_API_KEY               glm-5.2
+                     CLOUD (Ollama Cloud) — every assistant/worker prompt leaves this machine for ollama.com
+anthropic            anthropic         ANTHROPIC_API_KEY            claude-sonnet-4-5
+                     CLOUD (Anthropic) — every assistant/worker prompt leaves this machine for api.anthropic.com
+`;
+
+// Captured: with a baseline locked. The second block (codex-acp) is cut.
+const installHint = `
+$ skep acp install-hint
+baseline: builder approved 2026-11-19T00:23:26Z sha256 01db10ac4fc3
+Local ACP command — claude-agent-acp
+  executable: /home/you/.local/share/uv/tools/skep/bin/skep
+  arguments, one row each (B3-F1: a single row is one literal argument):
+    acp
+    govern
+    --
+    npx
+    -y
+    @agentclientprotocol/claude-agent-acp
+# cut here: the same block for codex-acp
+`;
+
+// Captured: four Claude Code sessions were open on the machine; skep had started none.
+const agentsOut = `
+$ skep agents
+4 agent(s) running: 0 governed by skep, 4 not
+ 938790  claude     idle     ungoverned
+ 946438  claude     idle     ungoverned
+ 948000  claude     idle     ungoverned
+ 949679  claude     idle     ungoverned
+blocked is read from output, which skep has only for processes it started; other agents show working/idle by CPU
+`;
+
+const pinEngine = `
+# a repository that is already a project
+$ skep project setup /path/to/repo --engine claude_code --verify-command "uv run pytest"
+
+# a repository skep has not seen yet: name a strategy the first time
+$ skep project setup /path/to/repo --strategy trusted_local_dev \\
+    --engine codex --verify-command "uv run pytest"
+`;
+const oneRun = `
+$ skep run /path/to/repo "fix the failing test" --engine codex --execution-mode sandbox
+`;
+const signIn = `
+# Claude Code: prints a long-lived token
+$ claude setup-token
+# or ANTHROPIC_API_KEY
+$ export CLAUDE_CODE_OAUTH_TOKEN=...
+# Codex
+$ export OPENAI_API_KEY=...
+# each engine line now shows its sign-in state
+$ skep doctor
+`;
+const plan = `
+$ codex login
+$ skep project setup /path/to/repo --codex-chatgpt-login
+`;
+const hook = `
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|WebSearch",
+        "hooks": [{ "type": "command", "command": "skep policy hook" }]
+      }
+    ]
+  }
+}
+`;
+const acp = `
+$ pipx install skep && skep onboard --template builder --yes
+$ skep acp doctor -- npx -y @agentclientprotocol/claude-agent-acp
+$ skep acp install-hint
+# afterwards: what the agent asked and did
+$ skep policy decisions --actor 'acp:*'
+`;
+---
+
+<Base
+  title="Agents"
+  description="The five engines skep can run a task with (its own worker, Claude Code, Codex, Aider, pi), how each signs in, and how to govern an agent you run in another tool."
+  active="agents"
+>
+  <Section eyebrow="Agents" lead="skep runs a coding task with one of five engines: its own worker, or Claude Code, Codex, Aider or pi. The four external agents always run inside skep's sandbox, and skep re-runs your project's verify command itself.">
+    <h1 slot="heading" class="t-h2">Agents and engines</h1>
+    <div class="row">
+      <a class="link-arrow" href="#engines">The five engines</a>
+      <a class="link-arrow" href="#sign-in">Signing in</a>
+      <a class="link-arrow" href="#external">What skep does to an external agent</a>
+      <a class="link-arrow" href="#models">Models</a>
+      <a class="link-arrow" href="#hook">Claude Code hook</a>
+      <a class="link-arrow" href="#acp">ACP governor</a>
+    </div>
+  </Section>
+
+  <Section id="engines" band eyebrow="Engines" title="The five engines" lead="An engine is the agent that does the work. The names in the first column are what the command line takes.">
+    <div class="grid">
+      <Table caption="The engine registry">
+        <thead>
+          <tr>
+            <th scope="col">Engine</th><th scope="col">What runs</th><th scope="col">Signs in from</th>
+            <th scope="col">Execution mode</th><th scope="col">Its actions pass skep's capability layer</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><code>builtin</code></th>
+            <td data-label="What runs">skep's own worker. It plans with the model the assistant is configured with and runs each step through the capability layer.</td>
+            <td data-label="Signs in from">The configured model provider</td>
+            <td data-label="Execution mode">sandbox or workspace</td>
+            <td data-label="Actions pass the capability layer"><Chip kind="ok">yes</Chip></td>
+          </tr>
+          <tr>
+            <th scope="row"><code>claude_code</code></th>
+            <td data-label="What runs">Claude Code, headless (<code>claude --print</code>)</td>
+            <td data-label="Signs in from"><code>CLAUDE_CODE_OAUTH_TOKEN</code> or <code>ANTHROPIC_API_KEY</code></td>
+            <td data-label="Execution mode">always sandbox</td>
+            <td data-label="Actions pass the capability layer"><Chip kind="limit">no</Chip></td>
+          </tr>
+          <tr>
+            <th scope="row"><code>codex</code></th>
+            <td data-label="What runs">Codex CLI, headless (<code>codex exec</code>)</td>
+            <td data-label="Signs in from"><code>OPENAI_API_KEY</code>, or the opt-in ChatGPT-plan login</td>
+            <td data-label="Execution mode">always sandbox</td>
+            <td data-label="Actions pass the capability layer"><Chip kind="limit">no</Chip></td>
+          </tr>
+          <tr>
+            <th scope="row"><code>aider</code></th>
+            <td data-label="What runs">Aider, with <code>--no-auto-commit</code></td>
+            <td data-label="Signs in from">Your Aider configuration; skep names no variable for it. Its model calls go to the provider endpoints skep is configured with; it has no API host of its own</td>
+            <td data-label="Execution mode">always sandbox</td>
+            <td data-label="Actions pass the capability layer"><Chip kind="limit">no</Chip></td>
+          </tr>
+          <tr>
+            <th scope="row"><code>pi</code></th>
+            <td data-label="What runs">pi, headless (<code>-p</code>)</td>
+            <td data-label="Signs in from">Whichever of <code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code> its model needs. Its model calls go to the provider endpoints skep is configured with; it has no API host of its own</td>
+            <td data-label="Execution mode">always sandbox</td>
+            <td data-label="Actions pass the capability layer"><Chip kind="limit">no</Chip></td>
+          </tr>
+        </tbody>
+      </Table>
+      <div class="grid grid-2" style="align-items: start">
+        <div class="grid">
+          <CodeBlock code={pinEngine} title="pin an engine for a project" />
+          <CodeBlock code={oneRun} title="or choose it for one run" />
+        </div>
+        <div class="prose">
+          <ul>
+            <li>An external engine needs a pinned verify command. Its own check is <code>git diff --check</code>, which looks for whitespace errors and says nothing about whether the work is right. Without a pin a project run is refused. A <code>--minimal</code> run, or a template with no project, skips project policy and this check with it: there re-verification can only re-run <code>git diff --check</code>.</li>
+            <li><code>skep doctor</code> looks for each agent's binary on your PATH and says whether its sign-in variable is set.</li>
+            <li>A worker command that names an external agent's module (<code>--worker-cmd</code> or <code>SKEP_WORKER_CMD</code>) is treated as that engine: sandbox, sign-in and pinned verify command included. A project pinned to an external engine refuses <code>--worker-cmd</code> unless you also pass <code>--engine builtin</code>.</li>
+            <li>The generic shell worker, which wraps any other command-line agent, gets the same treatment as an external engine.</li>
+            <li>With no model configured, skep's own worker falls back to a fixed routine that handles one Python hello-world task and fails anything else.</li>
+          </ul>
+        </div>
+      </div>
+      <Terminal code={doctorEngines} title="skep doctor: engines" captured="skep doctor on a fresh throwaway home, 2026-11-18; paths shortened" />
+    </div>
+  </Section>
+
+  <Section id="sign-in" eyebrow="Signing in" title="How each agent authenticates" lead="Inside the sandbox the keychain and the agents' own login files are hidden, so an external agent signs in from an environment variable.">
+    <div class="grid grid-2" style="align-items: start">
+      <div class="grid">
+        <h3 class="t-h3">With a token or an API key</h3>
+        <CodeBlock code={signIn} title="sign-in variables" />
+        <div class="prose">
+          <ul>
+            <li>The variable must be set where the worker is started: your shell for <code>skep run</code>, and for the daemon either its own environment or a <code>serve.env</code> file in the skep home, which <code>skep serve</code> loads at startup.</li>
+            <li>skep passes these variables to the agent by name. A <code>serve.env</code> file is one you write and protect yourself.</li>
+            <li>Without one, the run is refused before anything starts.</li>
+          </ul>
+        </div>
+        <Terminal code={refused} title="refused: no sign-in variable" captured="skep run on a project pinned to claude_code with no auth variable set, throwaway HOME shown as ~, 2026-11-18" />
+      </div>
+      <div class="grid">
+        <h3 class="t-h3">Codex on a ChatGPT plan</h3>
+        <CodeBlock code={plan} title="opt in, per project" />
+        <div class="prose">
+          <ul>
+            <li>For someone with a ChatGPT plan and no API key. It is off unless the project opts in, and it is used only when <code>OPENAI_API_KEY</code> is not set.</li>
+            <li>Each run gets a copy of the login that holds the access token only, never the refresh token.</li>
+            <li>Such a run talks to <code>chatgpt.com</code> where a key-based run talks to <code>api.openai.com</code>.</li>
+            <li><code>skep doctor</code> shows whether a Codex login exists. <code>--no-codex-chatgpt-login</code> turns it off again.</li>
+          </ul>
+          <p><a href="/docs/codex-chatgpt-login.html">How the plan login is handled</a></p>
+        </div>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="external" band eyebrow="External agents" title="What skep does to an external agent" lead="Claude Code, Codex, Aider and pi run their own commands, which skep's capability layer never sees. The sandbox is the wall around them.">
+    <div class="grid grid-2" style="align-items: start">
+      <div class="prose">
+        <ul>
+          <li><strong>Always in the sandbox.</strong> The run is forced into sandbox mode whatever the flag says, the adapters refuse to start outside it, and when no backend can be applied the run does not start.</li>
+          <li><strong>The patch still waits for you.</strong> skep captures the agent's changes as a diff, re-runs the pinned verify command on a clean checkout, and holds the patch for approval.</li>
+          <li><strong>Landing.</strong> Approval is needed by default. One opt-in lane lands a re-verified patch without a click, and only on a <code>skep/*</code> branch: the verified-patch lane, which is on for a project in the maintain phase or set <code>--unlocked</code>, and needs a pinned verify command. Your default branch moves only through actions you confirm.</li>
+        </ul>
+      </div>
+      <div class="grid">
+        <Callout kind="limit" title="skep turns the agent's own guard off">
+          <p>
+            Claude Code runs with its sandbox disabled and <code>--permission-mode bypassPermissions</code>;
+            Codex runs <code>exec --sandbox danger-full-access</code>. skep's sandbox replaces that
+            layer. It does not stack on top of it.
+          </p>
+        </Callout>
+        <Callout kind="limit" title="What the sandbox does and does not confine">
+          <p>
+            Writes are confined to the run's worktree and results. Reads outside the workspace are
+            mostly open, apart from a list of credential paths that is hidden. The default network
+            includes the agent's model provider and, for a trusted local project, four package registry hosts
+            (PyPI's two, npm and the Go proxy).
+          </p>
+        </Callout>
+        <Callout kind="limit" title="Tool calls are not logged one by one">
+          <p>
+            An external agent's individual tool calls are not policy decisions and are not recorded
+            singly. Its run, its patch, the re-verification and the approval are.
+          </p>
+        </Callout>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="models" eyebrow="Models" title="Ollama is a model provider, not an engine" lead="skep's own worker and the assistant use one configured model provider. Which agent does the work and which model answers are two separate choices.">
+    <div class="grid grid-2" style="align-items: start">
+      <div class="prose">
+        <ul>
+          <li>Five protocols: <code>ollama</code>, <code>openai_compat</code>, <code>anthropic</code>, <code>openai_responses</code> and <code>bedrock</code>.</li>
+          <li><code>skep provider presets</code> lists the built-in catalog. Each row says where prompts go.</li>
+          <li><strong>"Local" holds only with a local Ollama daemon.</strong> The <code>ollama-cloud</code> preset, with its default model, sends every prompt to ollama.com. With any hosted model, prompts, including your code, go to that provider.</li>
+          <li>The <code>openai-codex</code> preset runs the assistant on a ChatGPT plan through the Codex login. Workers never use it.</li>
+          <li>There is also an Ollama planner worker (<code>python -m skep.workers.ollama</code>, a <code>--worker-cmd</code> value). It uses the assistant's provider unless both <code>SKEP_OLLAMA_URL</code> and <code>SKEP_OLLAMA_MODEL</code> are set for it; the model variable alone is ignored.</li>
+        </ul>
+        <p><a href="/docs/brain.html">Choosing the assistant model</a></p>
+      </div>
+      <Terminal code={presets} title="skep provider presets" captured="skep provider presets, 2026-11-18; two of the catalog's rows" />
+    </div>
+  </Section>
+
+  <Section id="contract" band eyebrow="Your own worker" title="The worker contract" lead={`Anything that reads skep's task file and writes its result file can be a worker. The contract is at version ${contract}.`}>
+    <div class="prose">
+      <ul>
+        <li>skep starts the worker with <code>--headless --task-file &lt;path&gt; --out &lt;path&gt;</code>. The task is a JSON file, not standard input.</li>
+        <li>The worker appends events, one JSON object per line, to <code>.events/&lt;task_id&gt;.ndjson</code> in its workspace, and writes one result JSON whose <code>status</code> says how it ended and whose <code>artifacts</code> list the patch.</li>
+        <li>skep trusts only those files, and re-verifies the claimed result itself.</li>
+      </ul>
+      <p><a href="/docs/workers.html">Worker adapters and the custom contract worker</a></p>
+    </div>
+  </Section>
+
+  <Section id="hook" eyebrow="Govern an agent you run elsewhere" title="The Claude Code hook" lead="skep policy hook is a Claude Code PreToolUse hook. Claude Code asks skep before a gated tool call, and the answer comes from the same policy a skep run is held to.">
+    <div class="grid grid-2" style="align-items: start">
+      <div class="grid">
+        <CodeBlock code={hook} lang="json" title="~/.claude/settings.json" />
+        <Callout kind="limit" title="Limits">
+          <p>
+            Claude Code enforces the hook's verdict for Bash, file writes, WebFetch and WebSearch.
+            Every other tool falls through to Claude Code's own permissions. The hook judges the
+            text of the command. It is not a sandbox, and it runs only if you installed it.
+          </p>
+        </Callout>
+      </div>
+      <div class="grid">
+        <Table caption="How a tool call is judged">
+          <thead>
+            <tr><th scope="col">Claude Code tool</th><th scope="col">Decided as</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Bash</th><td><code>shell.run</code>, on the command</td></tr>
+            <tr><th scope="row">Edit, Write, MultiEdit, NotebookEdit</th><td><code>filesystem.write</code>: the workspace, or the literal path when it is outside</td></tr>
+            <tr><th scope="row">WebFetch</th><td><code>network.fetch</code>, on the host</td></tr>
+            <tr><th scope="row">WebSearch</th><td><code>network.search</code></td></tr>
+            <tr><th scope="row">Read, Glob, Grep and the rest</th><td>No opinion: Claude Code's own permissions decide</td></tr>
+          </tbody>
+        </Table>
+        <Table caption="What skep's verdict becomes">
+          <thead>
+            <tr><th scope="col">skep says</th><th scope="col">Claude Code does</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row"><Chip kind="allow" /></th><td>Runs the call</td></tr>
+            <tr><th scope="row"><Chip kind="deny" /></th><td>Refuses the call and names the rule or the floor</td></tr>
+            <tr><th scope="row"><Chip kind="ask" /></th><td>Asks you. Also the answer when no rule matched, when skep could not decide, and on a home with no approved baseline</td></tr>
+          </tbody>
+        </Table>
+        <div class="prose">
+          <p>
+            Every answer is a line in the decision log. The hook reads the skep home directly, so
+            the daemon need not be running. <a href="/docs/policy-hook.html">The policy hook doc</a>
+          </p>
+        </div>
+      </div>
+    </div>
+  </Section>
+
+  <Section id="acp" band eyebrow="Govern an agent you run elsewhere" title="The ACP governor" lead="skep acp govern is a process an ACP client, such as T3 Code or Zed, starts in place of the agent. It passes every message through except the agent's permission request, which it answers from policy.">
+    <div class="grid grid-2" style="align-items: start">
+      <div class="grid">
+        <CodeBlock code={acp} title="set it up" />
+        <div class="prose">
+          <ul>
+            <li>An allow or a deny is answered before the client sees it. What skep cannot decide is forwarded to you in the client.</li>
+            <li>Every verdict, every tool call the agent ran without asking, and every answer you gave is recorded.</li>
+            <li><code>skep acp doctor</code> prints the agent's modes and warns when its default mode never asks.</li>
+          </ul>
+          <p><a href="/docs/acp-governor.html">The ACP governor doc</a></p>
+        </div>
+        <Callout kind="limit" title="Limits">
+          <p>
+            The governor answers an ACP agent's permission requests from policy and records them.
+            It does not sandbox, and an agent in a mode that never asks is only observed.
+          </p>
+        </Callout>
+      </div>
+      <Terminal code={installHint} title="skep acp install-hint" captured="skep acp install-hint after onboarding, 2026-11-18; home directory renamed" />
+    </div>
+  </Section>
+
+  <Section id="running" eyebrow="See what is running" title="skep agents" lead="One view of the coding agents running on this machine right now, and whether skep governs each.">
+    <div class="grid grid-2" style="align-items: start">
+      <Terminal code={agentsOut} title="skep agents" captured="skep agents with four Claude Code sessions open that skep did not start, 2026-11-18" />
+      <div class="grid">
+        <div class="prose">
+          <p>
+            Agents are matched by process name. An agent counts as governed when it runs under a
+            skep worker. <code>blocked</code> is read from output, which skep has only for
+            processes it started.
+          </p>
+        </div>
+        <div class="row">
+          <Button href="/first-run.html" icon="arrow-right">First run</Button>
+          <Button href="/cli.html" variant="ghost">CLI reference</Button>
+          <Button href="/security.html" variant="ghost">Security</Button>
+        </div>
+      </div>
+    </div>
+  </Section>
+</Base>
+
+<style>
+  /* On a phone a table becomes a list: each row is a block, each cell a line
+     under its label. The kit's Table would otherwise squeeze every column. */
+  @media (max-width: 640px) {
+    thead {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+    tbody tr {
+      display: block;
+      padding: var(--s-3) var(--s-4);
+      border-bottom: 1px solid var(--line-inner);
+    }
+    tbody tr:last-child {
+      border-bottom: 0;
+    }
+    tbody tr > th,
+    tbody tr > td {
+      display: block;
+      width: auto;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+    }
+    tbody tr > td {
+      margin-top: var(--s-2);
+    }
+    tbody td[data-label]::before {
+      content: attr(data-label);
+      display: block;
+      margin-bottom: var(--s-1);
+      font-family: var(--mono);
+      font-size: var(--fs-micro);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--text-faint);
+    }
+  }
+</style>

@@ -162,6 +162,23 @@ def test_default_coding_worker_creates_python_hello_world(repo: Path, tmp_path: 
     _no_leftovers(repo, config.worktrees_root)
 
 
+def test_default_coding_worker_without_a_provider_names_the_missing_provider(
+    repo: Path, tmp_path: Path
+) -> None:
+    """v127-T5 (trial V15/V16): with no model provider the builtin worker
+    falls back to its hello-world path, and a real task failed with "minimal
+    coding worker only supports Python hello-world tasks" while doctor said
+    blocked. The summary names the cause and the way out (I8/I9)."""
+    config = build_config(tmp_path / "home", None)
+
+    outcome = run_task(repo, "Add a phone formatter test.", config=config)
+
+    assert outcome.record.state == "failed"
+    summary = outcome.record.summary or ""
+    assert "no real model provider is configured for the builtin worker" in summary
+    assert "skep onboard" in summary and "Settings" in summary
+
+
 def test_default_coding_worker_commit_request_stops_for_approval(
     repo: Path, tmp_path: Path
 ) -> None:
@@ -2919,6 +2936,41 @@ def test_react_deny_is_an_observation_the_loop_corrects_from(
         (config.audit_dir / outcome.record.task_id / "result.json").read_text(encoding="utf-8")
     )
     assert result["usage"]["provider_calls"] == 4
+
+
+def test_react_missed_edit_observation_carries_the_file_window(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v127-F2: a 0-match edit's window rides its own observation field."""
+    config = build_config(tmp_path / "home", None)
+    server = FakeOpenAI(api_key="sk-fake").start()
+    try:
+        permissions = _repair_test_setup(config, server, monkeypatch)
+        server.script_reply(
+            _react_reply(
+                {
+                    "action": {
+                        "tool": "filesystem.edit",
+                        "args": {"path": "existing.py", "old": "value = 9", "new": "v"},
+                    }
+                }
+            )
+        )
+        server.script_reply(_react_write_action())
+        server.script_reply(_react_verify_action())
+        server.script_reply(_react_done())
+        run_task(
+            repo,
+            "Create generated.py that prints ok.",
+            config=config,
+            permissions=permissions,
+            planning_protocol="react",
+        )
+    finally:
+        server.stop()
+    second = json.dumps(server.chat_bodies()[1]["messages"])
+    assert "old text not found in existing.py" in second
+    assert "closest lines in the file now" in second
 
 
 def test_react_hollow_trace_fails_honestly(

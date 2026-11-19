@@ -41,6 +41,7 @@
     "allow_git_mutation": false,
     "auto_dispatch_allowed": true,
     "auto_apply_verified_patch": true,
+    "verify_command": "uv run pytest",
     "trusted_workspace_roots": [
       "/tmp"
     ]

@@ -1,0 +1,147 @@
+/* PolicyTrace: the how-it-works island. Tokens only; the panel, the rows and
+   the chips are the kit's (.panel, .ledger-rows, .chip). */
+
+.pt {
+  margin: 0;
+}
+.pt .panel-head .chip {
+  flex: 0 0 auto;
+}
+
+/* ---- the command picker: three radios that look like tabs ---- */
+.pt-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-4);
+  border-bottom: 1px solid var(--line-inner);
+}
+.pt-pick-label {
+  flex: 1 0 100%;
+  color: var(--text-muted);
+}
+.pt-option {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 var(--s-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-chip);
+  background: var(--bg-inset);
+  font-family: var(--mono);
+  font-size: var(--fs-small);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-1) ease,
+    color var(--dur-1) ease;
+}
+.pt-option input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.pt-option:hover {
+  border-color: var(--line-hover);
+  color: var(--text-soft);
+}
+.pt-option:has(input:checked) {
+  border-color: var(--orange);
+  background: var(--bg-chip);
+  color: var(--text-bright);
+}
+.pt-option:has(input:focus-visible) {
+  outline: 2px solid var(--orange);
+  outline-offset: 2px;
+}
+
+/* ---- the traces: one grid cell, so the panel is as tall as the tallest ---- */
+.pt-stack {
+  display: grid;
+}
+.pt-trace {
+  min-width: 0;
+}
+.pt-trace + .pt-trace {
+  border-top: 1px solid var(--line-inner);
+}
+@supports selector(:has(*)) {
+  .pt-trace {
+    grid-area: 1 / 1;
+    visibility: hidden;
+  }
+  .pt-trace + .pt-trace {
+    border-top: 0;
+  }
+  .pt:has(#pt-pick-push:checked) [data-trace='push'],
+  .pt:has(#pt-pick-npm:checked) [data-trace='npm'],
+  .pt:has(#pt-pick-cat:checked) [data-trace='cat'] {
+    visibility: visible;
+  }
+}
+
+.pt-cmd {
+  padding: var(--s-4) var(--s-4) var(--s-3);
+  font-family: var(--mono);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--text-bright);
+  overflow-wrap: anywhere;
+}
+.pt-cmd::before {
+  content: '$ ';
+  color: var(--orange);
+}
+.pt-rows {
+  border-block: 1px solid var(--line-inner);
+}
+.pt-rows .ledger-when {
+  min-width: 9ch;
+  color: var(--text-muted);
+}
+.pt-rows small {
+  margin-top: var(--s-1);
+  font-family: var(--sans);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+}
+.pt-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-4);
+  color: var(--text-muted);
+}
+.pt-verdict code {
+  font-size: var(--fs-small);
+  color: var(--text-faint);
+}
+.pt-note {
+  max-width: var(--prose);
+  padding: 0 var(--s-4) var(--s-4);
+  font-size: var(--fs-small);
+  line-height: var(--lh-small);
+  color: var(--text-mid);
+}
+
+/* ---- the cursor (M3: only with JavaScript, never under reduced motion) ---- */
+@media (prefers-reduced-motion: no-preference) {
+  html.js .pt [data-state] {
+    transition:
+      opacity var(--dur-2) var(--ease-out),
+      box-shadow var(--dur-2) var(--ease-out);
+  }
+  html.js .pt [data-state='pending'] {
+    opacity: 0.3;
+  }
+  html.js .pt [data-state='active'] {
+    box-shadow: inset 2px 0 0 var(--orange);
+  }
+}

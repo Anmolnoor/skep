@@ -184,18 +184,17 @@ def test_completed_document_delivers_draft_to_the_workspace(tmp_path: Path) -> N
         store.close()
 
 
-def test_dispatch_run_offers_the_document_caste() -> None:
-    # The enum is the Queen's manual (I9): pin it against the registry.
+def test_dispatch_run_no_longer_offers_the_document_caste() -> None:
+    # v127-F12: `document` is an advanced caste (no field runs, O9) — the
+    # chat enum leaves it out and the description stops teaching its brief,
+    # which would point the small model at a caste it cannot pick (I9). It
+    # stays reachable from the CLI, templates and schedules.
     from skep.supervisor.serve.tools import TOOL_SPECS
 
     spec = next(t for t in TOOL_SPECS if t["function"]["name"] == "dispatch_run")
-    assert "document" in spec["function"]["parameters"]["properties"]["caste"]["enum"]
+    assert "document" not in spec["function"]["parameters"]["properties"]["caste"]["enum"]
     assert "start_research" in spec["function"]["description"]
-    # v73-F4: one example is worth three instructions (R4 lesson) — the
-    # literal shape is SHOWN, not described.
-    description = spec["function"]["description"]
-    assert "Must include: install; sandbox" in description
-    assert "Files: README.md" in description
+    assert "Must include:" not in spec["function"]["description"]
 
 
 def test_prose_only_must_include_names_the_unchecked_acceptance(tmp_path: Path) -> None:
