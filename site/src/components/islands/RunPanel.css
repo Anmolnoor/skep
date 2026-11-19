@@ -4,10 +4,19 @@
 .runpanel .term-dots {
   flex: 0 0 auto;
 }
-.rp-head-end {
+/* On a phone the window dots give their room to the panel's title. */
+@media (max-width: 480px) {
+  .runpanel .term-dots {
+    display: none;
+  }
+}
+.rp-foot {
   display: flex;
   align-items: center;
-  gap: var(--s-2);
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+.rp-replay {
   flex: 0 0 auto;
 }
 .rp-replay:disabled {
