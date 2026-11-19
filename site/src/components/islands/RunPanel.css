@@ -53,15 +53,19 @@
 .rp-nb {
   white-space: nowrap;
 }
-/* The highlight's targets that are not cards carry their own breathing room. */
-.rp-dispatch {
-  margin: calc(-1 * var(--s-2));
-  padding: var(--s-2);
+
+/* Three groups: the command that was typed, the claim beside its re-run, and
+   what is held for the reader. Each is a surface of its own. */
+.rp-dispatch,
+.rp-step {
+  min-width: 0;
+  padding: var(--s-4);
+  border: 1px solid var(--line-inner);
   border-radius: var(--r-card);
+  background-color: var(--bg-inset);
 }
-.rp-rows > .rp-row {
-  margin: calc(-1 * var(--s-1)) calc(-1 * var(--s-2));
-  padding: var(--s-1) var(--s-2);
+.rp-dispatch {
+  padding-block: var(--s-3);
 }
 /* One column, or claim and re-verify side by side when the panel body has room.
    A container query, so the progress links below turn with the columns. */
@@ -74,21 +78,124 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
-.rp-col,
-.rp-approval {
-  min-width: 0;
-  padding: var(--s-4);
-  border: 1px solid var(--line-inner);
-  border-radius: var(--r-card);
-  background: var(--bg-inset);
-}
 .rp-verify {
   --rp-key: 10ch;
   position: relative;
   border-color: color-mix(in srgb, var(--green) 28%, transparent);
 }
+.rp-approval {
+  display: grid;
+  gap: var(--s-2);
+  border-color: color-mix(in srgb, var(--orange) 45%, transparent);
+  background-color: var(--bg-card);
+}
 
-/* The progress line joining the numbered blocks: 1 to 2, then 2 to 3. Each link
+/* A step's head: its number, its name (the one sans line in the panel) and its status mark. */
+.rp-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-3);
+  font-family: var(--sans);
+  font-weight: 600;
+  color: var(--text-bright);
+}
+.rp-body .rp-label {
+  margin-bottom: var(--s-3);
+}
+.rp-body .rp-approval .rp-label {
+  margin-bottom: 0;
+}
+.rp-step-claim {
+  background-color: var(--bg-hover);
+  color: var(--text-muted);
+}
+.rp-step-approve {
+  background-color: color-mix(in srgb, var(--orange) 16%, transparent);
+  color: var(--orange-soft);
+}
+.rp-mark {
+  display: grid;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.rp-mark > svg {
+  grid-area: 1 / 1;
+  opacity: 0;
+}
+.rp-mark > .rp-mark-pending {
+  color: var(--text-faint);
+}
+.rp-mark > .rp-mark-active {
+  color: var(--orange);
+}
+.rp-mark > .rp-mark-done {
+  color: var(--green);
+  opacity: 1;
+}
+.rp-mark > .rp-mark-held {
+  color: var(--orange-soft);
+  opacity: 1;
+}
+
+/* The printed rows: key, value, a hairline between them. */
+.rp-rows > div {
+  display: grid;
+  grid-template-columns: var(--rp-key, 13ch) minmax(0, 1fr);
+  gap: var(--s-2);
+  padding-block: var(--s-2);
+}
+.rp-rows > div + div {
+  border-top: 1px solid var(--line-hair);
+}
+.rp-rows > div:last-child {
+  padding-bottom: 0;
+}
+/* A row the highlight visits carries the highlight's breathing room. */
+.rp-rows > .rp-row {
+  margin-inline: calc(-1 * var(--s-2));
+  padding: var(--s-2);
+}
+.rp-rows > .rp-row:last-child {
+  margin-bottom: calc(-1 * var(--s-2));
+  padding-bottom: var(--s-2);
+}
+.rp-rows dt {
+  color: var(--text-faint);
+}
+.rp-rows dd {
+  color: var(--text-soft);
+}
+.rp-next {
+  color: var(--text-bright);
+}
+
+/* The verdict is the kit's Chip, set in the line the code prints it in. */
+.rp-stamp {
+  position: relative;
+  display: inline-block;
+}
+.rp-verdict {
+  gap: 0;
+  font-weight: 600;
+}
+.rp-verdict::before {
+  margin-right: 6px;
+}
+.rp-ring {
+  position: absolute;
+  inset: -2px -6px;
+  border: 1px solid var(--green);
+  border-radius: var(--r-chip);
+  opacity: 0;
+  pointer-events: none;
+}
+.rp-label .chip {
+  transform-origin: 0 50%;
+}
+
+/* The progress line joining the numbered steps: 1 to 2, then 2 to 3. Each link
    spans the gap at the height (or the column) of the step badges, and fills as
    the run passes it. Server HTML: both filled. */
 .rp-link {
@@ -141,89 +248,169 @@
   opacity: 0;
   pointer-events: none;
 }
-.rp-stamp {
-  position: relative;
-  display: inline-block;
-}
-.rp-ring {
-  position: absolute;
-  inset: -2px -6px;
-  border: 1px solid var(--green);
-  border-radius: var(--r-chip);
-  opacity: 0;
-  pointer-events: none;
-}
-.rp-label .chip {
-  transform-origin: 100% 50%;
-}
-.rp-approval {
-  display: grid;
-  gap: var(--s-2);
-  border-color: color-mix(in srgb, var(--orange) 45%, transparent);
-  background: var(--bg-card);
-}
-.rp-label {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s-2);
-  margin: 0 0 var(--s-3);
-  color: var(--text-muted);
-}
-.rp-approval .rp-label {
-  margin-bottom: 0;
-}
-.rp-label .chip {
-  margin-left: auto;
-  letter-spacing: 0;
-  text-transform: none;
-}
-.rp-step-claim {
-  background: var(--bg-hover);
-  color: var(--text-muted);
-}
-.rp-step-approve {
-  background: color-mix(in srgb, var(--orange) 16%, transparent);
-  color: var(--orange-soft);
-}
-.rp-rows {
-  display: grid;
-  gap: var(--s-2);
-}
-.rp-rows > div {
-  display: grid;
-  grid-template-columns: var(--rp-key, 13ch) minmax(0, 1fr);
-  gap: var(--s-2);
-}
-.rp-rows dt {
-  color: var(--text-faint);
-}
-.rp-rows dd {
-  color: var(--text-soft);
-}
-.rp-next {
-  color: var(--text-bright);
-}
-.rp-verdict {
-  font-weight: 600;
-  color: var(--green);
-}
 
-/* M3: the run plays only under html.js and outside reduced motion. A block the
-   highlight has not reached is dimmed; nothing is ever hidden or removed. */
+/* ---- the run (M3: only under html.js and outside reduced motion) ----
+   Everything above is the finished panel. Below, a step the run has not reached
+   is PENDING: its surface is an outline, its mark is the dashed circle, its
+   chips are neutral and its text is --text-faint, which is still 5:1 or better
+   on these surfaces, so a pending line is as readable as a finished one.
+   Nothing is ever hidden or removed, except the verdict's text: until the
+   re-run reaches it the chip is an empty slot of its final size.
+
+   The pending look is written twice, and the two must match:
+   1. `data-run='wait'` (the server HTML, before the island hydrates): as the
+      `from` of an animation that waits 5s and then lets go, so a reader whose
+      script never arrives still gets the finished panel, without JavaScript.
+      WAIT_MS in RunPanel.tsx is this delay.
+   2. `armed` / `playing` (hydrated): as plain rules, so a step can ease out of
+      them when the run reaches it.
+   Transitions exist only while `playing` or `done`. At the hand-over from 1 to 2
+   no property can animate, so hydration never flashes the finished state. */
 @media (prefers-reduced-motion: reduce) {
   .rp-replay {
     display: none;
   }
 }
+@keyframes rp-wait-ink {
+  from {
+    color: var(--text-faint);
+  }
+}
+@keyframes rp-wait-step {
+  from {
+    border-color: var(--line-strong);
+    border-style: dashed;
+    background-color: transparent;
+    color: var(--text-faint);
+  }
+}
+@keyframes rp-wait-chip {
+  from {
+    border-color: var(--line-strong);
+    background-color: var(--bg-chip);
+    color: var(--text-faint);
+  }
+}
+@keyframes rp-wait-slot {
+  from {
+    border-color: var(--line-strong);
+    background-color: var(--bg-chip);
+    color: transparent;
+  }
+}
+@keyframes rp-wait-blank {
+  from {
+    color: transparent;
+  }
+}
+@keyframes rp-wait-badge {
+  from {
+    background-color: var(--bg-hover);
+    color: var(--text-faint);
+  }
+}
+@keyframes rp-wait-hide {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes rp-wait-show {
+  from {
+    opacity: 1;
+  }
+}
+@keyframes rp-wait-empty {
+  from {
+    transform: scale(0);
+  }
+}
+@keyframes rp-wait-caret {
+  from {
+    background-color: var(--line-hover);
+  }
+}
 @media (prefers-reduced-motion: no-preference) {
-  html.js .rp-block {
+  /* 1. before hydration */
+  html.js .runpanel[data-run='wait'] .rp-block[data-state='pending'],
+  html.js .runpanel[data-run='wait'] .rp-block[data-state='pending'] * {
+    animation: rp-wait-ink var(--dur-3) var(--ease-out) 5s backwards;
+  }
+  html.js .runpanel[data-run='wait'] .rp-step[data-step='pending'] {
+    animation: rp-wait-step var(--dur-3) var(--ease-out) 5s backwards;
+  }
+  html.js .runpanel[data-run='wait'] .rp-block[data-state='pending'] .chip {
+    animation-name: rp-wait-chip;
+  }
+  html.js .runpanel[data-run='wait'] .rp-block[data-state='pending'] .rp-verdict {
+    animation-name: rp-wait-slot;
+  }
+  html.js .runpanel[data-run='wait'] .rp-block[data-state='pending'] .rp-verdict * {
+    animation-name: rp-wait-blank;
+  }
+  html.js .runpanel[data-run='wait'] .rp-block[data-state='pending'] .step-no {
+    animation-name: rp-wait-badge;
+  }
+  html.js .runpanel[data-run='wait'] .rp-step[data-step='pending'] .rp-mark > svg {
+    animation-name: rp-wait-hide;
+  }
+  html.js .runpanel[data-run='wait'] .rp-step[data-step='pending'] .rp-mark > .rp-mark-pending {
+    animation-name: rp-wait-show;
+  }
+  html.js .runpanel[data-run='wait'] .rp-link[data-state='pending'] > span {
+    animation: rp-wait-empty var(--dur-3) var(--ease-out) 5s backwards;
+  }
+  html.js .runpanel[data-run='wait'] .rp-block[data-state='pending'] .caret::after {
+    animation:
+      skep-caret 1.1s steps(1) infinite,
+      rp-wait-caret var(--dur-3) var(--ease-out) 5s backwards;
+  }
+
+  /* 2. hydrated */
+  html.js .runpanel:not([data-run='wait']) .rp-block[data-state='pending'],
+  html.js .runpanel:not([data-run='wait']) .rp-block[data-state='pending'] * {
+    color: var(--text-faint);
+  }
+  html.js .runpanel:not([data-run='wait']) .rp-step[data-step='pending'] {
+    border-color: var(--line-strong);
+    border-style: dashed;
+    background-color: transparent;
+  }
+  html.js .runpanel:not([data-run='wait']) .rp-block[data-state='pending'] .chip {
+    border-color: var(--line-strong);
+    background-color: var(--bg-chip);
+  }
+  html.js .runpanel:not([data-run='wait']) .rp-block[data-state='pending'] .rp-verdict,
+  html.js .runpanel:not([data-run='wait']) .rp-block[data-state='pending'] .rp-verdict * {
+    color: transparent;
+  }
+  html.js .runpanel:not([data-run='wait']) .rp-block[data-state='pending'] .step-no {
+    background-color: var(--bg-hover);
+  }
+  html.js .runpanel:not([data-run='wait']) .rp-step:not([data-step='done']) .rp-mark > svg {
+    opacity: 0;
+  }
+  html.js .runpanel:not([data-run='wait']) .rp-step[data-step='pending'] .rp-mark > .rp-mark-pending,
+  html.js .runpanel:not([data-run='wait']) .rp-step[data-step='active'] .rp-mark > .rp-mark-active {
+    opacity: 1;
+  }
+  html.js .runpanel:not([data-run='wait']) .rp-link[data-state='pending'] > span {
+    transform: scale(0);
+  }
+  html.js .runpanel:not([data-run='wait']) .rp-block[data-state='pending'] .caret::after {
+    background-color: var(--line-hover);
+  }
+
+  /* a step eases out of pending only once the run is playing */
+  html.js .runpanel:is([data-run='playing'], [data-run='done']) :is(.rp-step, .rp-block, .rp-block *) {
+    transition:
+      color var(--dur-2) var(--ease-out),
+      border-color var(--dur-2) var(--ease-out),
+      background-color var(--dur-2) var(--ease-out);
+  }
+  html.js .runpanel:is([data-run='playing'], [data-run='done']) .rp-mark > svg {
     transition: opacity var(--dur-2) var(--ease-out);
   }
-  html.js .rp-block[data-state='pending'] {
-    opacity: 0.3;
-  }
-  html.js .rp-verdict-pending {
-    color: var(--text-faint);
+  html.js .runpanel:is([data-run='playing'], [data-run='done']) .rp-link > span {
+    transition: transform var(--dur-3) var(--ease-out);
   }
 }

@@ -7,13 +7,21 @@
 // its engine, with the verify command `skep project setup` printed for it.
 //
 // M3: the server HTML is the finished panel. M4: every row is always in the DOM
-// and the box never changes size. Hydration plays the run once, with motion:
-//   - a highlight glides from block to block (one persistent, absolutely
-//     positioned element whose box is animated to the active block's box);
-//   - the two links between the numbered blocks fill as the run passes them;
-//   - the verdict resolves (DecryptedText) and lands with a spring;
-//   - the approval card arms with a spring.
-// Reduced motion and no-JS keep the finished panel and never play.
+// and the box never changes size. The run plays once, and only ever forwards:
+// nothing on screen goes from a later state back to an earlier one.
+//   - `wait` is what the server renders. Without JavaScript or under reduced
+//     motion the CSS does nothing with it: the finished panel. With `html.js`
+//     the CSS paints the steps the run has not reached as pending from the
+//     first frame, and releases them by itself after WAIT_MS (the fallback for
+//     an island that never hydrates). See RunPanel.css.
+//   - hydration reads which of the two is on screen: still pending -> `armed`
+//     (the same look, held by plain rules, no timer) and then `playing` once the
+//     panel is in view; already released, or reduced motion -> `done`, no play.
+//   - playing: a highlight glides from block to block (one persistent,
+//     absolutely positioned element whose box is animated to the active block's
+//     box), the status marks and the two links between the numbered steps
+//     follow, the verdict resolves (DecryptedText) and lands with a spring, and
+//     the approval card arms with a spring.
 import { motion, useAnimate } from 'motion/react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import DecryptedText from '../reactbits/DecryptedText.tsx';
@@ -33,15 +41,18 @@ const RERUN = 2;
 const VERDICT = 3;
 const APPROVAL = 4;
 const STEP_MS = 900;
-// "confirmed" resolves one character per 40ms; the spring lands as the last one settles.
-const VERDICT_RESOLVE_MS = 400;
+// "confirmed" resolves one character per VERDICT_CHAR_MS; the spring lands as the last one settles.
+const VERDICT_CHAR_MS = 30;
+const VERDICT_RESOLVE_MS = 300;
+// The CSS fallback's delay: `5s` in RunPanel.css. Keep the two in step.
+const WAIT_MS = 5000;
 
 const GLIDE = { type: 'spring', visualDuration: 0.5, bounce: 0.16 } as const;
 const PLACE = { duration: 0, opacity: { duration: 0.24 } } as const;
-const LINK = { duration: 0.48, ease: [0.16, 1, 0.3, 1] } as const;
 const LAND = { type: 'spring', visualDuration: 0.4, bounce: 0.55 } as const;
 
-type Phase = 'rest' | 'playing' | 'done';
+type Phase = 'wait' | 'armed' | 'playing' | 'done';
+type State = 'pending' | 'active' | 'done';
 type Box = { x: number; y: number; width: number; height: number };
 
 // The block's box inside `root` (which is positioned, so it ends the offsetParent
@@ -56,21 +67,101 @@ function boxIn(node: HTMLElement, root: HTMLElement): Box {
   return { x, y, width: node.offsetWidth, height: node.offsetHeight };
 }
 
+// The status mark of a numbered step: pending, running, then done (or held, for
+// the step that waits on the reader). All three are always in the DOM, stacked;
+// the CSS shows one. Lucide, the kit's icon set (circle-dashed, circle-dot,
+// circle-check, circle-pause), copied from @lucide/astro because an Astro
+// component cannot render inside a React island.
+const MARKS = {
+  pending: (
+    <>
+      <path d="M10.1 2.182a10 10 0 0 1 3.8 0" />
+      <path d="M13.9 21.818a10 10 0 0 1-3.8 0" />
+      <path d="M17.609 3.721a10 10 0 0 1 2.69 2.7" />
+      <path d="M2.182 13.9a10 10 0 0 1 0-3.8" />
+      <path d="M20.279 17.609a10 10 0 0 1-2.7 2.69" />
+      <path d="M21.818 10.1a10 10 0 0 1 0 3.8" />
+      <path d="M3.721 6.391a10 10 0 0 1 2.7-2.69" />
+      <path d="M6.391 20.279a10 10 0 0 1-2.69-2.7" />
+    </>
+  ),
+  active: (
+    <>
+      <circle cx="12" cy="12" r="1" />
+      <circle cx="12" cy="12" r="10" />
+    </>
+  ),
+  done: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <path d="m16 9-5.5 5.5L8 12" />
+    </>
+  ),
+  held: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <line x1="10" x2="10" y1="15" y2="9" />
+      <line x1="14" x2="14" y1="15" y2="9" />
+    </>
+  ),
+};
+
+function Mark({ rest = 'done' }: { rest?: 'done' | 'held' }) {
+  return (
+    <span className="rp-mark" aria-hidden="true">
+      {(['pending', 'active', rest] as const).map((name) => (
+        <svg
+          key={name}
+          className={`rp-mark-${name}`}
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          {MARKS[name]}
+        </svg>
+      ))}
+    </span>
+  );
+}
+
 export default function RunPanel() {
   const [scope, animate] = useAnimate<HTMLElement>();
   const body = useRef<HTMLDivElement>(null);
   const blocks = useRef<(HTMLElement | null)[]>([]);
   const placed = useRef(false);
-  const [phase, setPhase] = useState<Phase>('rest');
+  const [phase, setPhase] = useState<Phase>('wait');
   const [step, setStep] = useState(DISPATCH);
   const [box, setBox] = useState<Box | null>(null);
   const playing = phase === 'playing';
 
+  // Hydration, before the next paint: take over from the CSS without changing a
+  // pixel. While the fallback is still counting down, the pending steps are what
+  // is on screen, so the run may start from them. Otherwise the finished panel
+  // is on screen (reduced motion, or the fallback already released it) and stays.
+  useLayoutEffect(() => {
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const waiting =
+      !reduced &&
+      typeof IntersectionObserver !== 'undefined' &&
+      scope.current
+        ?.getAnimations?.({ subtree: true })
+        .some(
+          (animation) =>
+            (animation as CSSAnimation).animationName?.startsWith('rp-wait') &&
+            Number(animation.currentTime ?? 0) < WAIT_MS,
+        );
+    setPhase(waiting ? 'armed' : 'done');
+  }, [scope]);
+
   // Play once, when the panel is on screen (on a phone it sits below the hero text).
   useEffect(() => {
     const node = scope.current;
-    if (!node || typeof IntersectionObserver === 'undefined') return;
-    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    if (phase !== 'armed' || !node) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (!entries.some((entry) => entry.isIntersecting)) return;
@@ -81,7 +172,7 @@ export default function RunPanel() {
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [scope]);
+  }, [phase, scope]);
 
   useEffect(() => {
     if (!playing) return;
@@ -134,22 +225,42 @@ export default function RunPanel() {
     setPhase('playing');
   };
 
-  const stateOf = (block: number) => (!playing ? undefined : block < step ? 'done' : block === step ? 'active' : 'pending');
+  // Before the run starts only the command is there; the rest is still to come.
+  const stateOf = (index: number): State =>
+    phase === 'done'
+      ? 'done'
+      : !playing
+        ? index === DISPATCH
+          ? 'done'
+          : 'pending'
+        : index < step
+          ? 'done'
+          : index === step
+            ? 'active'
+            : 'pending';
+  // A numbered step that spans more than one block.
+  const stepOf = (first: number, last = first): State =>
+    stateOf(last) === 'done' ? 'done' : stateOf(first) === 'pending' ? 'pending' : 'active';
   const block = (index: number) => ({
     ref: (node: HTMLElement | null) => {
       blocks.current[index] = node;
     },
     'data-state': stateOf(index),
   });
-  const linkScale = (reached: number) => ({ scale: !playing || step >= reached ? 1 : 0 });
 
-  // DecryptedText starts hidden for 'click' and 'view' and plays on 'view': at rest
-  // it shows the resolved text, while its row is pending it holds the scramble, and
-  // it resolves once when the highlight reaches the verdict.
-  const verdictTrigger = phase === 'rest' ? 'hover' : playing && step < VERDICT ? 'click' : 'view';
+  // DecryptedText shows the resolved text for 'hover' and plays once for 'view'.
+  // Until the run reaches the verdict its chip is an empty slot (CSS), so the
+  // only scramble a reader sees is the short one that resolves it.
+  const verdictTrigger = playing && step >= VERDICT ? 'view' : 'hover';
 
   return (
-    <figure className="panel runpanel" ref={scope} aria-label="Illustration of one skep run">
+    <figure
+      className="panel runpanel"
+      ref={scope}
+      data-run={phase}
+      aria-label="Illustration of one skep run"
+      data-pagefind-ignore
+    >
       <div className="panel-head">
         <div className="panel-title">
           <span className="term-dots" aria-hidden="true">
@@ -178,10 +289,12 @@ export default function RunPanel() {
         </div>
 
         <div className="rp-cols">
-          <section className="rp-col rp-block" {...block(CLAIM)}>
-            <h3 className="rp-label t-micro">
-              <span className="step-no rp-step-claim">1</span>The worker's claim
-            </h3>
+          <div className="rp-col rp-step rp-block" data-step={stepOf(CLAIM)} {...block(CLAIM)}>
+            <p className="rp-label">
+              <span className="step-no rp-step-claim">1</span>
+              <span>The worker's claim</span>
+              <Mark />
+            </p>
             <dl className="rp-rows">
               {/* src/skep/supervisor/cli_cmds.py:1304 */}
               <div>
@@ -201,19 +314,21 @@ export default function RunPanel() {
                 <dd>claude-code produced a verified patch.</dd>
               </div>
             </dl>
-          </section>
+          </div>
 
-          <section className="rp-col rp-verify">
-            {/* The progress line: block 1 to block 2, then block 2 to block 3. Decoration. */}
-            <span className="rp-link rp-link-claim" aria-hidden="true">
-              <motion.span initial={false} animate={linkScale(RERUN)} transition={LINK} />
+          <div className="rp-col rp-step rp-verify" data-step={stepOf(RERUN, VERDICT)}>
+            {/* The progress line: step 1 to step 2, then step 2 to step 3. Decoration. */}
+            <span className="rp-link rp-link-claim" data-state={stateOf(RERUN)} aria-hidden="true">
+              <span />
             </span>
-            <span className="rp-link rp-link-approve" aria-hidden="true">
-              <motion.span initial={false} animate={linkScale(APPROVAL)} transition={LINK} />
+            <span className="rp-link rp-link-approve" data-state={stateOf(APPROVAL)} aria-hidden="true">
+              <span />
             </span>
-            <h3 className="rp-label rp-block t-micro" data-state={stateOf(RERUN)}>
-              <span className="step-no">2</span>skep re-runs your command
-            </h3>
+            <p className="rp-label rp-block" data-state={stateOf(RERUN)}>
+              <span className="step-no">2</span>
+              <span>skep re-runs your command</span>
+              <Mark />
+            </p>
             <dl className="rp-rows">
               {/* src/skep/supervisor/cli_cmds.py:1341 */}
               <div className="rp-block rp-row" {...block(RERUN)}>
@@ -224,40 +339,39 @@ export default function RunPanel() {
               <div className="rp-block rp-row" {...block(VERDICT)}>
                 <dt>re-verify:</dt>
                 <dd>
-                  passed [
+                  passed{' '}
                   <span className="rp-stamp">
                     <span className="rp-ring" aria-hidden="true" />
-                    <DecryptedText
-                      text="confirmed"
-                      animateOn={verdictTrigger}
-                      sequential
-                      speed={40}
-                      className="rp-verdict"
-                      encryptedClassName="rp-verdict rp-verdict-pending"
-                    />
-                  </span>
-                  ] (G10):{' '}
+                    {/* The kit's Chip (`ok`), as classes: an Astro component cannot render in the island. */}
+                    <span className="chip chip-ok rp-verdict">
+                      [
+                      <DecryptedText text="confirmed" animateOn={verdictTrigger} sequential speed={VERDICT_CHAR_MS} />]
+                    </span>
+                  </span>{' '}
+                  (G10):{' '}
                   <span className="rp-dim">
                     re-ran clean: all exit 0 [command from the project's pinned verify_command]
                   </span>
                 </dd>
               </div>
             </dl>
-          </section>
+          </div>
         </div>
 
-        <section className="rp-approval rp-block" {...block(APPROVAL)}>
-          <h3 className="rp-label t-micro">
-            <span className="step-no rp-step-approve">3</span>Held for you
+        <div className="rp-approval rp-step rp-block" data-step={stepOf(APPROVAL)} {...block(APPROVAL)}>
+          <p className="rp-label">
+            <span className="step-no rp-step-approve">3</span>
+            <span>Held for you</span>
             <span className="chip chip-limit">awaiting approval</span>
-          </h3>
+            <Mark rest="held" />
+          </p>
           {/* src/skep/supervisor/cli_cmds.py:1370-1371 */}
           <p className="rp-next">
             <span className="rp-dim">next:</span> skep review &lt;task_id&gt; <span className="rp-nb">--approve</span>{' '}
             <span className="rp-dim"># applies the patch on branch skep/&lt;task_id&gt;</span>
           </p>
           <p className="rp-dim caret">main untouched </p>
-        </section>
+        </div>
 
         {/* The highlight. Always in the DOM, invisible at rest, on top and click-through. */}
         <motion.span
@@ -276,7 +390,7 @@ export default function RunPanel() {
           type="button"
           className="copy-btn rp-replay no-js-hide"
           onClick={replay}
-          disabled={playing}
+          disabled={phase !== 'done'}
           aria-label="Replay the illustration"
         >
           <svg

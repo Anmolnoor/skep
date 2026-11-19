@@ -37,8 +37,8 @@ const numbers = [
 
 // A section h2 that resolves once as it scrolls in (BlurText, never the h1). It
 // hydrates 200px before it is on screen; a heading already on screen when it
-// hydrates stays as the server rendered it (holdIfInView), so nothing flashes.
-const heading = { tag: 'h2', className: 't-h2', delay: 70, blur: 6, distance: 12, stepDuration: 0.3, holdIfInView: true } as const;
+// hydrates stays as the server rendered it (BlurText's default), so nothing flashes.
+const heading = { tag: 'h2', className: 't-h2', delay: 70, blur: 6, distance: 12, stepDuration: 0.3 } as const;
 const soon = { rootMargin: '200px' };
 
 // Captured 2026-11-18 from the real CLI under a throwaway SKEP_HOME, with an
@@ -165,7 +165,7 @@ const comparisons = [
     <div class="wrap hero-grid">
       <div class="hero-copy">
         <Eyebrow>Local supervisor for coding agents · <span data-version>v{version}</span></Eyebrow>
-        <h1 class="t-display">Unattended coding agents you don't have to trust.</h1>
+        <h1 class="t-display">Unattended coding agents you don't have <span class="accent">to trust.</span></h1>
         <p class="t-lead">
           Hand Claude Code or Codex a task and walk away. skep runs it inside an OS sandbox, re-runs your
           project's own test command on a clean checkout, and holds the patch on a branch for your approval.
@@ -598,6 +598,11 @@ $ skep review <task_id> --approve --pr`}
   /* the eyebrow is another component's element, so the scoped `* + *` above misses the h1 */
   .hero-copy .t-display {
     margin-top: var(--s-4);
+  }
+  /* The headline's last words carry the brand colour, as the old hero's did. Colour only: the h1 never animates (M1). */
+  .hero-copy .accent {
+    color: var(--orange);
+    white-space: nowrap;
   }
   .hero-copy .t-lead {
     max-width: 58ch;
