@@ -249,7 +249,10 @@ html:not(.js) .no-js-hide {
     }
     html.js .reveal:where(*) {
       animation-timeline: view();
-      animation-range: entry 0% entry 55%;
+      /* Fully opaque once a quarter of the block is in, and never later than
+         80px in: a tall block that rests low in the viewport must not sit
+         half-faded (a quarter of a 1000px block is 250px). */
+      animation-range: entry 0% entry min(25%, 80px);
     }
     /* Rows stage in one after another as the block scrolls into view (max 12 steps).
        Each row needs style="--i: <index>"; Diff and Ledger set it. */

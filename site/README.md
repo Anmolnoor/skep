@@ -427,7 +427,7 @@ specificity):
 
 ```css
 html.js .thing { animation: thing-in linear both; }
-html.js .thing:where(*) { animation-timeline: view(); animation-range: entry 0% entry 55%; }
+html.js .thing:where(*) { animation-timeline: view(); animation-range: entry 0% entry min(25%, 80px); }
 ```
 
 Written in one rule, the build's CSS minifier folds the timeline into the
