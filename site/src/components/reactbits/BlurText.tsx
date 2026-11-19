@@ -478,6 +478,8 @@ const BlurText = ({
         {groups.map((indices, w) => (
           <span
             key={`word-${w}`}
+            // skep: the visually hidden twin above is the text site search indexes; not these pieces too.
+            data-pagefind-ignore
             style={wordStyle(w)}
             onPointerEnter={focusOnHover ? () => setFocusWord(w) : undefined}
             onPointerLeave={focusOnHover ? () => setFocusWord(-1) : undefined}
