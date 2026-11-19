@@ -99,9 +99,14 @@ class CapabilityDenied(CapabilityError):
     tail reports honestly instead of blaming worker policy for a bad argument.
     """
 
-    def __init__(self, message: str, *, policy_blocked: bool = False) -> None:
+    def __init__(
+        self, message: str, *, policy_blocked: bool = False, hint: str | None = None
+    ) -> None:
         super().__init__(message)
         self.policy_blocked = policy_blocked
+        # v127-F2: file text that teaches the replan (a missed edit's window),
+        # kept out of the message so the message stays the short fact.
+        self.hint = hint
 
 
 class CapabilityApprovalRequired(CapabilityError):
@@ -1149,8 +1154,14 @@ class CapabilityRegistry:
             raise CapabilityDenied(str(exc)) from exc
         count = content.count(old)
         if count == 0:
+            # v127-F2 review (I4/I11): the hint is file content, so it obeys
+            # the read floor — a .env (or a path no read may follow) shows none.
+            readable = secret_floor_reason(target) is None and tracked_file_readable(
+                self._workspace, target
+            )
             raise CapabilityDenied(
-                f"old text not found in {relative}{_edit_miss_hint(content, old)}"
+                f"old text not found in {relative}",
+                hint=_edit_miss_hint(content, old) if readable else None,
             )
         if count > 1 and not replace_all:
             raise CapabilityDenied(f"old text appears {count} times in {relative}")

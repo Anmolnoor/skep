@@ -206,13 +206,13 @@ def test_a_missed_edit_shows_the_closest_window_redacted(repo: Path) -> None:
         _registry(repo).invoke(
             "filesystem.edit", {"path": "post.mdx", "old": "title: Skep is LIVE", "new": "t"}
         )
-    message = str(caught.value)
-    assert message.startswith("old text not found in post.mdx")
-    assert "title: Skep is live!" in message
-    assert "API_TOKEN=***" in message
-    assert "sk-" + "abcdefghijklmnopqrstuvwx" not in message
-    assert "line 0\n" not in message  # the window, not the whole file
-    assert len(message.encode()) < 2_400
+    assert str(caught.value) == "old text not found in post.mdx"  # the head alone
+    hint = caught.value.hint or ""
+    assert "title: Skep is live!" in hint
+    assert "API_TOKEN=***" in hint
+    assert "sk-" + "abcdefghijklmnopqrstuvwx" not in hint
+    assert "line 0\n" not in hint  # the window, not the whole file
+    assert len(hint.encode()) < 2_400
 
 
 def test_a_missed_edit_with_no_close_line_shows_the_file_head(repo: Path) -> None:
@@ -223,9 +223,43 @@ def test_a_missed_edit_with_no_close_line_shows_the_file_head(repo: Path) -> Non
         _registry(repo).invoke(
             "filesystem.edit", {"path": "big.txt", "old": "0123456789", "new": "t"}
         )
-    message = str(caught.value)
-    assert "file head" in message and "alpha" in message
-    assert len(message.encode()) < 2_400
+    hint = caught.value.hint or ""
+    assert "file head" in hint and "alpha" in hint
+    assert len(hint.encode()) < 2_400
+
+
+@pytest.mark.parametrize("name", [".env", "config/.env.production"])
+def test_a_missed_edit_on_a_secret_file_shows_nothing(repo: Path, name: str) -> None:
+    """v127-F2 review (I4/I11): the hint must not read through the secret
+    floor — a 0-match edit on a tracked .env once sent its head (a live
+    Stripe key redact() passed) to the provider and the audit trail."""
+    from skep.workers.capabilities import CapabilityDenied
+
+    path = repo / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("STRIPE=sk_live_51HxQabcdefghijklmnop\n", encoding="utf-8")
+    with pytest.raises(CapabilityDenied) as caught:
+        _registry(repo).invoke("filesystem.edit", {"path": name, "old": "STRIPE=x", "new": "t"})
+    assert str(caught.value) == f"old text not found in {name}"
+    assert caught.value.hint is None
+
+
+def test_the_replan_shows_the_window_once_and_reads_markers_from_the_head() -> None:
+    """The window rides its own field: the stderr line keeps the file name,
+    the window appears once, and repo text that happens to say "permission
+    denied" is not mistaken for the sandbox wall."""
+    rec = coding_worker._PlanRecoverable(
+        command="old text not found in notes.md",
+        exit_code=None,
+        stderr_tail="old text not found in notes.md",
+        completed_steps=0,
+        hint="; copy old exactly from the file. file head:\nerror: permission denied (doc)",
+    )
+    plan = plan_from_payload({"summary": "s", "steps": [{"tool": "git.status", "args": {}}]})
+    _old, message = coding_worker._recovery_repair_context(plan, rec)
+    assert "stderr: old text not found in notes.md" in message
+    assert message.count("error: permission denied (doc)") == 1
+    assert "sandbox wall" not in message
 
 
 def test_a_file_named_in_the_task_reaches_the_snapshot_even_when_large(repo: Path) -> None:

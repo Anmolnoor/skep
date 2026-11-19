@@ -2921,6 +2921,41 @@ def test_react_deny_is_an_observation_the_loop_corrects_from(
     assert result["usage"]["provider_calls"] == 4
 
 
+def test_react_missed_edit_observation_carries_the_file_window(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v127-F2: a 0-match edit's window rides its own observation field."""
+    config = build_config(tmp_path / "home", None)
+    server = FakeOpenAI(api_key="sk-fake").start()
+    try:
+        permissions = _repair_test_setup(config, server, monkeypatch)
+        server.script_reply(
+            _react_reply(
+                {
+                    "action": {
+                        "tool": "filesystem.edit",
+                        "args": {"path": "existing.py", "old": "value = 9", "new": "v"},
+                    }
+                }
+            )
+        )
+        server.script_reply(_react_write_action())
+        server.script_reply(_react_verify_action())
+        server.script_reply(_react_done())
+        run_task(
+            repo,
+            "Create generated.py that prints ok.",
+            config=config,
+            permissions=permissions,
+            planning_protocol="react",
+        )
+    finally:
+        server.stop()
+    second = json.dumps(server.chat_bodies()[1]["messages"])
+    assert "old text not found in existing.py" in second
+    assert "closest lines in the file now" in second
+
+
 def test_react_hollow_trace_fails_honestly(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
