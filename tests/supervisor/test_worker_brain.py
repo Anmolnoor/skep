@@ -174,14 +174,13 @@ def test_seeded_maintenance_text_points_at_the_pin() -> None:
     from skep.supervisor.packs import get_policy_pack
     from skep.supervisor.projects import first_party_schedule_seeds
 
-    wanted = (
-        "Verify with the project's pinned check if it has one; otherwise make no change and report."
-    )
+    wanted = "If it pins none, make no change and report what you found."
     (seed,) = first_party_schedule_seeds(
         project_id="p", strategy="trusted_local_dev", phase="maintain"
     )
     assert wanted in seed.instructions
     assert "normal verification commands" not in seed.instructions
+    assert "verify with exactly that check" in seed.instructions
     (template,) = get_policy_pack("trusted_local_dev").templates
     assert wanted in template.instructions
     assert "normal verification commands" not in template.instructions

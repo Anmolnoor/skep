@@ -559,13 +559,12 @@ def first_party_schedule_seeds(
                 name=f"{project_id}-maintain-weekly",
                 every="7d",
                 instructions=(
-                    "Review this trusted local project for low-risk maintenance work. "
-                    "Verify with the project's pinned check if it has one; otherwise make "
-                    "no change and report. Inspect dependency drift "
-                    "and obvious test or tooling breakage, then make the smallest justified "
-                    "fixes that stay within current project policy. Verify by re-running "
-                    "the repo's own checks (its SKEP.md briefing names them when present); "
-                    "a change without a passing check does not count as maintenance."
+                    "Review this trusted local project for low-risk maintenance work: inspect "
+                    "dependency drift and obvious test or tooling breakage. If the project pins a "
+                    "check, make the smallest justified fixes that stay within project policy and "
+                    "verify with exactly that check; a change without a passing check does not "
+                    "count as maintenance. If it pins none, make no change and report what "
+                    "you found."
                 ),
             ),
         )

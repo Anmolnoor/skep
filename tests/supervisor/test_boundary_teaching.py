@@ -63,11 +63,11 @@ def test_dispatch_framing_states_the_acceptance_check() -> None:
     from skep.supervisor.projects import first_party_schedule_seeds
 
     pack = builtin_policy_packs()["trusted_local_dev"]
-    assert "Verify by re-running" in pack.templates[0].instructions
+    assert "verify with exactly that check" in pack.templates[0].instructions
     (seed,) = first_party_schedule_seeds(
         project_id="p", strategy="trusted_local_dev", phase="maintain"
     )
-    assert "Verify by re-running" in seed.instructions
+    assert "verify with exactly that check" in seed.instructions
 
 
 def test_high_traffic_descriptions_carry_when_not_and_the_trap() -> None:
