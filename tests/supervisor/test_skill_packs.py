@@ -503,3 +503,30 @@ def test_an_oversize_pack_is_refused_by_name(tmp_path: Path) -> None:
     assert "KB packed" in message
     assert "self-test limit" in message
     assert "dropping its self_test" in message
+
+
+def test_a_real_self_test_trial_runs_the_pipeline_against_the_fake_worker(
+    tmp_path: Path, config: SupervisorConfig
+) -> None:
+    """v126-F12: every other trial test stubs dispatch.run_task. This one
+    runs the real resolver -> dispatch -> worker -> events -> trial_verdict
+    seam. The fake worker emits no FORGE_TRIAL line, so the honest outcome
+    is a refusal that keeps the pack sandboxed — and a real script run in
+    the store, sandboxed, with no network."""
+    directory = _self_test_pack(tmp_path, command="python scripts/check.py")
+    store = RunStore(config.db_path)
+    try:
+        draft_pack(store, directory)
+        with pytest.raises(SkillPackError, match="no evidence line"):
+            promote_pack(store, config, "checked-pack", human_action=True)
+        (run,) = store.recent_runs()
+        assert run.worker_kind == "script"
+        assert run.execution_mode == "sandbox"
+        assert "FORGE_TRIAL" in run.instructions  # the harness rode the run
+        stored = load_packs(store)["checked-pack"]
+        assert stored.state == "sandboxed"
+        assert stored.trial is not None and stored.trial["level"] == "self_test"
+        assert stored.trial["ok"] is False
+        assert store.get_template("checked-pack") is None
+    finally:
+        store.close()

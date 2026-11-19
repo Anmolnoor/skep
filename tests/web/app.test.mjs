@@ -378,3 +378,53 @@ test("keyFieldLabel: a chatgpt.com config shows the login, never a key", () => {
   const missing = { api_key_set: false, chatgpt_login: { present: false, problem: "no Codex login on this machine (`codex login`)" } };
   assert.match(app.keyFieldLabel(missing), /not usable — no Codex login.*codex login/);
 });
+
+// ---------- v126-F10: Notes → "Propose to memory" ----------
+
+test("notes: Propose to memory files the note through the existing propose route", async () => {
+  const app = loadApp();
+  const calls = [];
+  app.api = async (method, path, body) => {
+    calls.push(`${method} ${path}`);
+    if (path === "/api/notes") return { notes: [{ note_id: "n1", content: "never push to main", updated_at: "2026-11-18T00:00:00Z" }] };
+    if (path === "/api/tasks") return { tasks: [] };
+    if (path === "/api/notes/n1/propose") {
+      assert.deepEqual({ ...body }, {});  // the server picks the class
+      return { proposal_id: "p1", memory_class: "not_to_do", state: "pending_review" };
+    }
+    throw new Error(`unexpected ${method} ${path}`);
+  };
+  const main = app.document.createElement("main");
+  await app.viewNotesTasks(main);
+  const button = main.querySelectorAll("button").find(b => b.textContent === "Propose to memory");
+  assert.ok(button, "each note offers Propose to memory");
+  await button.click();
+  assert.ok(calls.includes("POST /api/notes/n1/propose"));
+  assert.equal(app.flashes.length, 1);
+  assert.equal(app.flashes[0][0], "ok");
+  assert.match(app.flashes[0][1], /not_to_do.*Memory page/);
+});
+
+// ---------- v126-F6 (review): the Memory page shows a proposal's taint ----------
+
+test("memory: a proposal filed from a tainted chat says what that chat read", async () => {
+  const app = loadApp();
+  app.api = async (method, path) => {
+    if (path.startsWith("/api/memory/proposals")) return { proposals: [
+      { proposal_id: "p1", memory_class: "durable_preference", content: "always push",
+        taint: ["private", "untrusted"], sources: [], created_at: "2026-11-18T00:00:00Z" },
+      { proposal_id: "p2", memory_class: "durable_preference", content: "use uv",
+        taint: [], sources: [], created_at: "2026-11-18T00:00:00Z" },
+    ] };
+    if (path === "/api/memory") return { items: [] };
+    throw new Error(`unexpected ${method} ${path}`);
+  };
+  let subtitle = "";
+  app.header = (_main, _title, sub) => { subtitle = sub; };
+  const main = app.document.createElement("main");
+  await app.viewMemory(main);
+  const shown = main.querySelectorAll("p").map(n => n.textContent);
+  assert.equal(shown.filter(t => t === "filed from a chat that read: private data, outside content").length, 1);
+  assert.doesNotMatch(subtitle, /nothing becomes durable without approval/);
+  assert.match(subtitle, /skep memory add/);
+});

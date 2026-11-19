@@ -256,11 +256,14 @@ def test_forge_lifecycle_end_to_end(
         assert suspended["state"] == "suspended"
         assert "forge-word-count" not in load_mcp_servers(store)
 
-        # Reactivation re-registers WITHOUT a new trial (the pause just ends).
-        def exploding_trial(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            raise AssertionError("a suspended plugin must not re-trial")
+        # v126-F1: reactivation writes fresh source, so it re-trials first.
+        retrials: list[str] = []
 
-        monkeypatch.setattr(tools_module, "_forge_trial", exploding_trial)
+        def counting_trial(*args: Any, source: str, **kwargs: Any) -> dict[str, Any]:
+            retrials.append(source)
+            return _run_harness(source, tmp_path)
+
+        monkeypatch.setattr(tools_module, "_forge_trial", counting_trial)
         reactivated = execute_mutation(
             "promote_tool",
             {"plugin_id": "word-count"},
@@ -270,6 +273,7 @@ def test_forge_lifecycle_end_to_end(
             actor="test",
         )
         assert reactivated["state"] == "active"
+        assert retrials == [ECHO_SERVER_SOURCE]
         assert "forge-word-count" in load_mcp_servers(store)
 
         # Rollback is terminal: deregistered, and promotion refuses forever.

@@ -1903,6 +1903,8 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                     interval_seconds=interval,
                     ref=args.ref,
                     role=args.role,
+                    start_at=args.start_at,  # v126-F11
+                    once=args.once,
                 )
             except (TemplateError, ValueError) as exc:
                 return _err(str(exc), next_command=f"skep template show {args.template}")
@@ -1921,17 +1923,22 @@ def cmd_schedule_add(args: argparse.Namespace) -> int:
                     next_command='skep schedule add NAME <repo> "..." --every 1d'
                     "  |  skep schedule add NAME <repo> --template T --every 1d",
                 )
-            schedule = make_schedule(
-                name=args.name,
-                repo=repo,
-                instructions=args.instructions,
-                interval_seconds=interval,
-                worker_kind=args.caste,
-                ref=args.ref,
-                network=args.network or [],
-                env_allowlist=args.env_allow or [],
-                role=args.role,
-            )
+            try:
+                schedule = make_schedule(
+                    name=args.name,
+                    repo=repo,
+                    instructions=args.instructions,
+                    interval_seconds=interval,
+                    worker_kind=args.caste,
+                    ref=args.ref,
+                    network=args.network or [],
+                    env_allowlist=args.env_allow or [],
+                    start_at=args.start_at,  # v126-F11
+                    once=args.once,
+                    role=args.role,
+                )
+            except ValueError as exc:
+                return _err(str(exc))
             refusal = _schedule_role_refusal(config, store, schedule)
             if refusal is not None:
                 return refusal
@@ -2321,7 +2328,15 @@ def cmd_template_add(args: argparse.Namespace) -> int:
     config = build_config(args.home, None)
     store = RunStore(config.db_path)
     try:
-        store.add_template(template)
+        # v126-F4: an existing name is refused unless --replace says so — a
+        # schedule bound to it picks up the new grants at its next tick.
+        if store.get_template(template.name) is not None and not getattr(args, "replace", False):
+            return _err(
+                f"a template named {template.name!r} already exists; pass --replace to "
+                "overwrite it (the old and new grants are recorded).",
+                next_command=f"skep template show {template.name}",
+            )
+        store.add_template(template, actor="cli-user")
     finally:
         store.close()
     required = [p.name for p in template.params if p.required]
@@ -2459,7 +2474,10 @@ def cmd_template_remove(args: argparse.Namespace) -> int:
         return _err(f"no template named {args.name!r}.")
     store = RunStore(config.db_path)
     try:
-        removed = store.remove_template(args.name)
+        in_use = store.template_in_use_error(args.name)
+        if in_use:
+            return _err(in_use + ".", next_command="skep schedule list")
+        removed = store.remove_template(args.name, actor="cli-user")
     finally:
         store.close()
     if not removed:
@@ -3595,6 +3613,14 @@ def register_supervisor_commands(
         help="hold this worker schedule's runs to a role: it narrows shell prefixes, "
         "hosts and workspace writes (v123)",
     )
+    sched_add.add_argument(
+        "--start-at",
+        default=None,
+        metavar="ISO",
+        help="first run, e.g. 2026-11-19T08:00:00Z (a naive time is UTC); "
+        "later runs keep this time of day (default: the next tick)",
+    )
+    sched_add.add_argument("--once", action="store_true", help="fire once, then disable")
     sched_add.set_defaults(func=cmd_schedule_add)
 
     sched_list = schedule_sub.add_parser("list", help="list schedules")
@@ -3745,6 +3771,11 @@ def register_supervisor_commands(
     tpl_add.add_argument("--budget-max-iterations", type=int, default=16)
     tpl_add.add_argument("--budget-max-actions", type=int, default=100)
     tpl_add.add_argument("--budget-max-provider-calls", type=int, default=64)
+    tpl_add.add_argument(
+        "--replace",
+        action="store_true",
+        help="v126-F4: overwrite an existing template of the same name (recorded)",
+    )
     tpl_add.set_defaults(func=cmd_template_add)
 
     tpl_list = template_sub.add_parser("list", help="list templates")

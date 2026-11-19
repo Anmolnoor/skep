@@ -294,3 +294,11 @@ def test_the_switch_is_operator_only() -> None:
 
     assert "transparency" not in json.dumps(TOOL_SPECS)
     assert not [name for name in COMMAND_TOOL_NAMES if "transparen" in name]
+
+
+def test_v126_f12_remember_is_not_said_to_ask() -> None:
+    """remember files an inert proposal in-turn: the why line never calls it
+    a tool that always asks."""
+    why = verdict_why(None, tool="remember")
+    assert "always asks" not in why and not why.startswith("asked")
+    assert "proposal" in why

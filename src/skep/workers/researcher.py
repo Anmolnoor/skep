@@ -343,6 +343,8 @@ def _task_start_payload(task: CodingWorkerTask) -> dict[str, object]:
         payload["project_context"] = task.project_context.model_dump(mode="json")
     if task.dispatch_decision is not None:
         payload["dispatch_decision"] = task.dispatch_decision.model_dump(mode="json")
+    # v126-F5: the researcher runs no model prompt, so memory has nowhere to go
+    payload["memory_delivered"] = "not delivered: the researcher runs no model prompt"
     return payload
 
 

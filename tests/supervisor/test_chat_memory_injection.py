@@ -148,34 +148,11 @@ def test_project_bound_chat_sees_its_project_memory(
     assert "an unrelated project's secret habit" not in system["content"]
 
 
-def test_d15_worker_memory_rides_wrapped_with_the_note_and_taints_no_chat(
+def test_v126_f3_worker_memory_never_rides_the_chat_prompt(
     config: SupervisorConfig, ollama: FakeOllama
 ) -> None:
-    from skep.supervisor.serve.chat import UNTRUSTED_NOTE
-
-    client, chat_id = chat_client(config, ollama)
-    store = RunStore(config.db_path)
-    try:
-        store.add_memory_item(
-            memory_class="observation", content="run 1 failed", actor="t", provenance="worker:t1"
-        )
-        ollama.script_reply("ok")
-        client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
-        system = ollama.chat_bodies()[-1]["messages"][0]["content"]
-        assert '- [observation] <untrusted source="worker:t1">run 1 failed</untrusted>' in system
-        assert system.endswith(UNTRUSTED_NOTE)
-        assert store.get_chat_taint(chat_id).bits() == []
-    finally:
-        store.close()
-
-
-def test_d15_worker_memory_in_a_memory_tool_result_rides_wrapped(
-    config: SupervisorConfig, ollama: FakeOllama
-) -> None:
-    """D15: list_memory / search_memory hand the Queen worker-written memory
-    wrapped as outside content too, with the note; still no taint bit."""
-    from skep.supervisor.serve.chat import UNTRUSTED_NOTE
-
+    """v126-F3: a worker-written observation stays out of the always-on memory
+    block, so an unattended turn is never steered by it untainted."""
     client, chat_id = chat_client(config, ollama)
     store = RunStore(config.db_path)
     try:
@@ -183,16 +160,52 @@ def test_d15_worker_memory_in_a_memory_tool_result_rides_wrapped(
             memory_class="observation", content="run 1 failed", actor="t", provenance="worker:t1"
         )
         store.add_memory_item(memory_class="durable_preference", content="use uv", actor="op")
-        for tool, args in (("list_memory", {}), ("search_memory", {"query": "run"})):
+        ollama.script_reply("ok")
+        client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
+        system = ollama.chat_bodies()[-1]["messages"][0]["content"]
+        assert "run 1 failed" not in system
+        assert "- [durable_preference] use uv" in system
+        assert store.get_chat_taint(chat_id).bits() == []
+    finally:
+        store.close()
+
+
+def test_v126_r2_memory_tools_leave_worker_items_out_and_stay_untainted(
+    config: SupervisorConfig, ollama: FakeOllama
+) -> None:
+    """v126-F3 (review): almost every live memory item is worker-written, so
+    returning them tainted nearly every list_memory / search_memory call. Both
+    tools now leave worker-provenance items out (the Queen reads run outcomes
+    through get_run / await_runs, which taint); the chat stays clean."""
+    client, chat_id = chat_client(config, ollama)
+    store = RunStore(config.db_path)
+    try:
+        store.add_memory_item(memory_class="durable_preference", content="use uv", actor="op")
+        store.add_memory_item(
+            memory_class="observation", content="run 1 used uv", actor="t", provenance="worker:t1"
+        )
+        for tool, args in (("list_memory", {}), ("search_memory", {"query": "uv"})):
             ollama.script_tool_call(tool, args)
             ollama.script_reply("ok")
             client.post(f"/api/chats/{chat_id}/messages", json={"content": "hi"})
-            body = ollama.chat_bodies()[-1]
-            result = json.loads(body["messages"][-1]["content"])
-            contents = {item["content"] for item in result["items"]}
-            assert '<untrusted source="worker:t1">run 1 failed</untrusted>' in contents
-            assert tool == "search_memory" or "use uv" in contents  # operator's: plain
-            assert body["messages"][0]["content"].endswith(UNTRUSTED_NOTE)
+            result = json.loads(ollama.chat_bodies()[-1]["messages"][-1]["content"])
+            assert [item["content"] for item in result["items"]] == ["use uv"]
         assert store.get_chat_taint(chat_id).bits() == []
+    finally:
+        store.close()
+
+
+def test_v126_r2_a_returned_worker_item_still_taints(config: SupervisorConfig) -> None:
+    """Defense kept: if a memory read ever returns a worker item, it taints."""
+    from skep.supervisor.serve.settings import ConfigHolder
+    from skep.supervisor.serve.taint import record_tool_taint
+
+    store = RunStore(config.db_path)
+    try:
+        chat_id = store.create_chat(title="t", model=None).chat_id
+        holder = ConfigHolder(config, store)
+        result = {"items": [{"content": "x", "provenance": "worker:t1"}]}
+        record_tool_taint(store, holder, chat_id, "list_memory", {}, result, 1)
+        assert store.get_chat_taint(chat_id).bits() == ["untrusted"]
     finally:
         store.close()

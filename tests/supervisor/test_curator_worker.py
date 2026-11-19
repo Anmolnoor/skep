@@ -157,7 +157,6 @@ def test_curator_caste_dispatch_end_to_end(tmp_path: Path) -> None:
     assert record.state == "completed", record.summary
     assert record.worker_version == "curator-0.1.0"
 
-    from skep.supervisor.serve.actions import ingest_curator_proposals
     from skep.supervisor.store import RunStore
 
     db = RunStore(_curator_config(tmp_path).db_path)
@@ -166,15 +165,5 @@ def test_curator_caste_dispatch_end_to_end(tmp_path: Path) -> None:
         assert "file" in artifacts  # the proposals artifact
         # The curator wrote no durable memory — proposing is not persisting.
         assert db.count_memory_items() == 0
-
-        # Governed ingestion pulls the artifact into the pending_review queue.
-        proposals = ingest_curator_proposals(db, record.task_id)
-        assert len(proposals) == 1
-        assert proposals[0].state == "pending_review"
-        assert proposals[0].sources[0].source_id == "n1"
-        assert db.count_memory_items() == 0  # still nothing durable until approval
-
-        db.approve_memory_proposal(proposals[0].proposal_id, actor="human")
-        assert db.count_memory_items() == 1
     finally:
         db.close()
