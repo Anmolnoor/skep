@@ -971,8 +971,18 @@ def in_wall_tmp_env(tmp_dir: Path) -> dict[str, str]:
     under ``$TMPPREFIX`` (default ``/tmp/zsh``), and /tmp is outside the wall
     (ES-F5), so every ``zsh -c "... <<'PY'"`` died with "can't create temp
     file for here document". TMPPREFIX is a filename prefix, not a directory.
+
+    v127-A0 trial fix (V01): on macOS, XDG_RUNTIME_DIR too — tools that make
+    temp dirs under it, else /tmp (skep's own suite), hit /tmp outside the
+    Seatbelt wall, and re-verify failed a correct patch. Not on Linux: bwrap
+    gives every run a private writable /tmp, and a runtime dir this deep
+    would push AF_UNIX socket paths past their 108-char cap. Every POSIX
+    temp lookup (Python, Node, Go) reads TMPDIR before TEMP/TMP.
     """
-    return {"TMPDIR": str(tmp_dir), "TMPPREFIX": str(tmp_dir / "zsh")}
+    env = {"TMPDIR": str(tmp_dir), "TMPPREFIX": str(tmp_dir / "zsh")}
+    if sys.platform == "darwin":
+        env["XDG_RUNTIME_DIR"] = str(tmp_dir)
+    return env
 
 
 def write_profile(

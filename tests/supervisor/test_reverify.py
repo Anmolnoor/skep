@@ -543,6 +543,11 @@ def test_reverify_timeout_is_the_budget_floored_at_the_default() -> None:
 def test_reverify_env_carries_a_worktree_local_tmpdir(repo: Path, config: SupervisorConfig) -> None:
     """v107-F3: the re-run's TMPDIR lives inside its own worktree — unset it
     fell back to /tmp, which a nested bwrap (skep's own suite) tmpfs-masks."""
+    from skep.supervisor.sandbox import in_wall_tmp_env
+
+    # v127-A0 trial fix (V01): the runtime-dir fallback is inside the wall too
+    # where the in-wall temp env names it (macOS: /tmp is outside Seatbelt).
+    runtime_dir = '"$TMPDIR"' if "XDG_RUNTIME_DIR" in in_wall_tmp_env(Path("t")) else "unset"
     happy = run_task(repo, "Fix the bug. MODE:happy", config=config)
     store = RunStore(config.db_path)
     try:
@@ -558,6 +563,7 @@ def test_reverify_env_carries_a_worktree_local_tmpdir(repo: Path, config: Superv
             verify_command=(
                 'sh -c \'case "$TMPDIR" in *".reverify-tmp") ;; *) exit 7;; esac; '
                 'case "$TMPPREFIX" in "$TMPDIR"/zsh) ;; *) exit 9;; esac; '
+                f'[ "${{XDG_RUNTIME_DIR-unset}}" = {runtime_dir} ] || exit 6; '
                 'case "$CLANG_MODULE_CACHE_PATH" in "$TMPDIR"/*) exit 0;; *) exit 8;; esac\''
             ),
         )

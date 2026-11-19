@@ -71,6 +71,7 @@ _CHILD_ENV_PASSTHROUGH: tuple[str, ...] = (
     "npm_config_cache",
     "TMPDIR",
     "TMPPREFIX",  # v120-F1: zsh here-documents, else /tmp/zsh outside the wall
+    "XDG_RUNTIME_DIR",  # v127-A0 trial fix: macOS in-wall runtime dir, else /tmp
     "UV_CACHE_DIR",
 )
 
