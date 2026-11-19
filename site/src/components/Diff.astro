@@ -25,7 +25,7 @@ const kind = (line: string) =>
         : undefined;
 ---
 
-<figure class="panel diff" style="margin:0">
+<figure class="panel diff">
   <div class="panel-head"><div class="panel-title"><span>{file}</span></div></div>
   <pre tabindex="0" class:list={[stage && 'stage-rows']}>{lines.map((line, index) => (
     <span class:list={['line', kind(line)]} style={`--i:${index}`}>{line || ' '}</span>
