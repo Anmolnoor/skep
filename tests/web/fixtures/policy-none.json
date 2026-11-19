@@ -789,7 +789,7 @@
    },
    {
     "default": "off",
-    "doc": "land a verified, re-verified, risk-free manifest-only patch (--auto-approve)",
+    "doc": "land a verified, re-verified, risk-free manifest-only patch (library callers only: --auto-approve is retired and installs nothing)",
     "enforced_at": null,
     "invariant": "I1",
     "kind": "rule",

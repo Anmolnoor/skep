@@ -264,15 +264,15 @@ but large enough for the expected task.
 
 ## Auto-Approval
 
-`--auto-approve` and the serve Settings auto-approve toggle enable Skep's safe
-verified-patch policy. Auto-approval still requires successful worker
-verification, successful supervisor re-verification, and the configured policy
-conditions. Every auto-landing rule, `--auto-approve` included, needs the
-re-verification to have re-run the project's pinned `verify_command` (never the
-command the worker chose for itself) and that pin must not be known-vacuous
-(see [`verification.md`](verification.md)). A bound project's phase decides
-whether anything auto-lands at all, so in practice `--auto-approve` lands only
-in a maintain-phase project with a real pin.
+A patch lands without a click only in a maintain-phase project with a pinned
+check (`auto_apply_verified_patch`). Auto-approval still requires successful
+worker verification, successful supervisor re-verification, and the project's
+policy conditions. Every auto-landing rule needs the re-verification to have
+re-run the project's pinned `verify_command` (never the command the worker
+chose for itself) and that pin must not be known-vacuous (see
+[`verification.md`](verification.md)). `--auto-approve` on `skep run`, `tick`
+and `serve` is retired: it is still accepted for one release, prints a note,
+and has no effect. The serve Settings auto-approve toggle is inert too.
 
 If re-verification is missing or disagrees with the worker, auto-approval does
 not apply.

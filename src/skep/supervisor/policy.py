@@ -65,7 +65,9 @@ MANIFEST_DIFF_SCOPE: tuple[str, ...] = (
 # The built-in rule that makes D3 active for U1: auto-apply a patch only when the
 # worker verified it, the supervisor re-verified it (G10), there are no risk flags
 # (e.g. a major-version bump files for review instead), and the diff touches only
-# manifest/lockfiles. Opt in per dispatch with `skep run/tick --auto-approve`.
+# manifest/lockfiles. v127-F5 round 3: library callers only — `--auto-approve`
+# no longer installs it (it could land only where a pinned maintain-phase
+# project's verified-patch rule lands anyway).
 # v127-F5 round 2 (I2): it needs the PROJECT's pin like every auto-landing rule
 # — a lockfile patch the worker "verified" with its own choice of command landed.
 SAFE_DEPENDENCY_RULE = AutoApprovalRule(

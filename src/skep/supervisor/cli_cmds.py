@@ -39,7 +39,6 @@ from .contracts_io import DEFAULT_BUDGET
 from .dispatch import run_task
 from .engines import engine_names
 from .github import default_pr_body, default_pr_title, open_pull_request
-from .policy import SAFE_DEPENDENCY_RULE
 from .policy_resolver import PolicyResolutionError, ResolvedRunPolicy, resolve_run_policy
 from .projects import (
     list_projects,
@@ -167,9 +166,22 @@ def _usage_summary(usage: UsageRecord) -> str:
     return ", ".join(parts)
 
 
-def build_config(
-    home: Path, worker_cmd: str | None, *, auto_approve: bool = False
-) -> SupervisorConfig:
+# v127-F5 round 3: `--auto-approve` installed deps-safe, which needs the
+# project's pin since round 2 — so it could only land where a pinned
+# maintain-phase project lands anyway. Accepted for one release, then removed.
+AUTO_APPROVE_RETIRED = (
+    "--auto-approve has no effect: a patch lands without a click only in a maintain-phase "
+    "project with a pinned check (auto_apply_verified_patch)"
+)
+AUTO_APPROVE_HELP = "no effect (retired): " + AUTO_APPROVE_RETIRED.split(": ", 1)[1]
+
+
+def note_retired_auto_approve(args: argparse.Namespace) -> None:
+    if getattr(args, "auto_approve", False):
+        print(AUTO_APPROVE_RETIRED, file=sys.stderr)
+
+
+def build_config(home: Path, worker_cmd: str | None) -> SupervisorConfig:
     home = home.expanduser().resolve()
     command = worker_cmd or os.environ.get("SKEP_WORKER_CMD") or DEFAULT_WORKER_CMD
     return SupervisorConfig(
@@ -180,8 +192,6 @@ def build_config(
         # that lived here is now castes.CASTES — five surfaces kept their own
         # copy of this roster and all five had diverged (ADR 0049).
         caste_worker_commands=caste_worker_commands(),
-        # D3 active: opt in to auto-applying safe manifest-only fixes (U1).
-        auto_approval_rules=(SAFE_DEPENDENCY_RULE,) if auto_approve else (),
         # ADR 0060 §6: the kill switch reaches CLI-started runs too (no keeper).
         readopt_workers=os.environ.get(READOPT_ENV) != "0",
     )
@@ -728,7 +738,8 @@ def _unique_template_name(store: RunStore, base: str) -> str:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    config = build_config(args.home, args.worker_cmd, auto_approve=args.auto_approve)
+    note_retired_auto_approve(args)
+    config = build_config(args.home, args.worker_cmd)
     matched_template: WorkflowTemplate | None = None
     if args.template and args.minimal:
         return _err("--minimal cannot be combined with --template.")
@@ -2269,9 +2280,8 @@ def cmd_provider_health(args: argparse.Namespace) -> int:
 
 
 def cmd_tick(args: argparse.Namespace) -> int:
-    config = build_config(
-        args.home, getattr(args, "worker_cmd", None), auto_approve=args.auto_approve
-    )
+    note_retired_auto_approve(args)
+    config = build_config(args.home, getattr(args, "worker_cmd", None))
     if not config.db_path.is_file():
         print("no schedules to run")
         return 0
@@ -3476,7 +3486,7 @@ def register_supervisor_commands(
     run.add_argument(
         "--auto-approve",
         action="store_true",
-        help="activate D3: auto-apply a verified, re-verified, risk-free manifest-only fix (U1)",
+        help=AUTO_APPROVE_HELP,
     )
     run.add_argument(
         "--planning-protocol",
@@ -3726,7 +3736,7 @@ def register_supervisor_commands(
     tick.add_argument(
         "--auto-approve",
         action="store_true",
-        help="activate D3: auto-apply safe manifest-only fixes from scheduled runs (U1)",
+        help=AUTO_APPROVE_HELP,
     )
     tick.set_defaults(func=cmd_tick)
 

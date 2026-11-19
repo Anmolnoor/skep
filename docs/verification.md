@@ -129,7 +129,7 @@ This catches common failures:
 
 - Re-verification is only as strong as the recorded command. If a worker records
   `true`, Skep can confirm only that `true` exits successfully. Such a run is
-  never auto-landed: every auto-landing rule (`--auto-approve` included) needs
+  never auto-landed: every auto-landing rule needs
   the project's pinned `verify_command`, never the worker's own choice, and
   refuses a replay whose commands
   are all known-vacuous (`true`, `:`, `exit 0`, `test`/`[`, `echo`, `printf`,

@@ -4,12 +4,13 @@ This is the v3 spine, proven deeply and deterministically (audit caste: no
 provider, no network, no external worker). It exercises every v3 piece at once:
 
   scheduled (Stage E) → audit caste (D2) → contract lifecycle (v0.2) →
-  G10 re-verification → D3 auto-approval, ACTIVE.
+  G10 re-verification → auto-landing by the maintain phase (v127-F5: the
+  one unattended ramp is a maintain-phase project with a pinned check).
 
 Two repos run on one tick:
   • SAFE  — a minor-version bump (requests 2.28 → 2.31). Verified, re-verified,
-    no risk flags, manifest-only diff ⇒ the deps-safe rule fires and the fix is
-    auto-landed on a branch (the U1 "auto-lands the safe ones").
+    no risk flags ⇒ the verified-patch rule fires and the fix is auto-landed on
+    the integration branch (the U1 "auto-lands the safe ones").
   • RISKY — a major-version bump (urllib3 1.x → 2.x). The audit risk-flags it, so
     the rule is blocked and the fix is left for a human (the U1 "files the rest").
 """
@@ -24,7 +25,6 @@ from pathlib import Path
 import pytest
 
 from skep.supervisor import SupervisorConfig
-from skep.supervisor.policy import SAFE_DEPENDENCY_RULE
 from skep.supervisor.scheduler import make_schedule, run_due
 from skep.supervisor.store import RunStore
 from tests.fixtures.toy_repo import AUDIT_REQUIREMENTS_MAJOR_BUMP, create_audit_toy_repo
@@ -37,7 +37,6 @@ def _u1_config(home: Path) -> SupervisorConfig:
         home=home / "supervisor",
         worker_command=("false",),
         caste_worker_commands={"audit": (sys.executable, "-m", "skep.workers.audit")},
-        auto_approval_rules=(SAFE_DEPENDENCY_RULE,),  # D3 ACTIVE
         grace_seconds=5.0,
         heartbeat_seconds=10.0,
         poll_seconds=0.02,
@@ -63,10 +62,9 @@ def test_u1_nightly_dependency_bot(tmp_path: Path) -> None:
     store = RunStore(config.db_path)
     try:
         for name, repo in (("safe-nightly", safe_repo), ("risky-nightly", risky_repo)):
-            # v127-F5 round 2: deps-safe lands only on the PROJECT's pin — here
-            # the audit worker's own real check, declared by the supervisor. A
-            # bound project's phase decides whether anything auto-lands
-            # (maintain lands on its integration branch, skep/maintain).
+            # v127-F5: a maintain-phase project lands on the PROJECT's pin —
+            # here the audit worker's own real check, declared by the
+            # supervisor — on its integration branch, skep/maintain.
             store.add_project_policy(
                 project_id=name,
                 name=name,
@@ -108,7 +106,7 @@ def test_u1_nightly_dependency_bot(tmp_path: Path) -> None:
         assert safe_id is not None
         safe_approvals = store.approvals_for(safe_id)
         assert any(
-            a.status == "approved" and (a.resolved_by or "").startswith("auto:deps-safe")
+            a.status == "approved" and a.resolved_by == "auto:verified-patch"
             for a in safe_approvals
         ), safe_approvals
         assert _branch_exists(safe_repo, "skep/maintain")

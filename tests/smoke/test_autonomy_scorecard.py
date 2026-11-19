@@ -25,7 +25,6 @@ import pytest
 from skep.profile import run_personal_setup
 from skep.supervisor import RunStore, SupervisorConfig
 from skep.supervisor.cli_cmds import build_config
-from skep.supervisor.policy import SAFE_DEPENDENCY_RULE
 from skep.supervisor.scheduler import make_schedule, run_due
 from skep.workers.capabilities import CapabilityRegistry, PluginToolSpec
 from tests.fixtures.toy_repo import create_audit_toy_repo
@@ -36,12 +35,11 @@ from tests.supervisor.fake_openai import FakeOpenAI
 pytestmark = pytest.mark.smoke
 
 
-def _audit_config(home: Path, *, auto_land: bool = True) -> SupervisorConfig:
+def _audit_config(home: Path) -> SupervisorConfig:
     return SupervisorConfig(
         home=home / "supervisor",
         worker_command=("false",),
         caste_worker_commands={"audit": (sys.executable, "-m", "skep.workers.audit")},
-        auto_approval_rules=(SAFE_DEPENDENCY_RULE,) if auto_land else (),
         grace_seconds=5.0,
         heartbeat_seconds=10.0,
         poll_seconds=0.02,
@@ -66,9 +64,9 @@ def test_scenario_1_dispatch_execute_verify_reverify_land(tmp_path: Path) -> Non
     config = _audit_config(tmp_path / "home")
     store = RunStore(config.db_path)
     try:
-        # v127-F5 round 2: --auto-approve (deps-safe) lands only on the
-        # PROJECT's pin, never the command the worker nominated — and a bound
-        # project's phase decides whether anything auto-lands, so maintain.
+        # v127-F5: the one unattended landing ramp is a maintain-phase project
+        # with a pinned check (its verified-patch rule); `--auto-approve` is
+        # retired.
         _bind_audit_project(store, repo, project_id="safe-proj", phase="maintain")
         store.add_schedule(
             make_schedule(
@@ -220,7 +218,7 @@ def test_scenario_4_phase_aware_landing(tmp_path: Path) -> None:
     maintain_repo = create_audit_toy_repo(tmp_path / "maintain")
     build_repo = create_audit_toy_repo(tmp_path / "build")
     # No config-level rule: landing must be governed by project phase policy only.
-    config = _audit_config(tmp_path / "home", auto_land=False)
+    config = _audit_config(tmp_path / "home")
     store = RunStore(config.db_path)
     try:
         _bind_audit_project(store, maintain_repo, project_id="maintain-proj", phase="maintain")

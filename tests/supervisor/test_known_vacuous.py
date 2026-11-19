@@ -45,6 +45,7 @@ def _plain(text: str) -> bool:
     internal = ("known-vacuous", "G10", "own test config", "cannot fail")
     return PLAIN in text and not any(word in text for word in internal)
 
+
 _VACUOUS = [
     "",
     "   ",
@@ -250,39 +251,45 @@ def test_scheduler_path_refuses_a_vacuous_pin(repo: Path, config: SupervisorConf
     assert _plain(_blocked_reason(config, result.task_id))
 
 
-@pytest.mark.parametrize(
-    ("pin", "reason"), [(None, "pins no verify_command"), ("true", PLAIN)]
+RETIRED = (
+    "--auto-approve has no effect: a patch lands without a click only in a maintain-phase "
+    "project with a pinned check (auto_apply_verified_patch)"
 )
-def test_cli_auto_approve_path_refuses_a_worker_nominated_or_vacuous_check(
-    repo: Path,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    pin: str | None,
-    reason: str,
+
+
+@pytest.mark.parametrize("command", ["run", "tick"])
+def test_auto_approve_is_retired_with_a_note(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
 ) -> None:
-    """`skep run --auto-approve` installs SAFE_DEPENDENCY_RULE: a lockfile
-    patch the worker 'verified' with `true` landed. Round 2: with no project
-    pin it is the worker's own nomination and never lands; a pinned `true`
-    is known-vacuous and never lands either."""
+    """Round 3: `--auto-approve` installed deps-safe, which — needing the
+    project's pin since round 2 — could only land where a maintain-phase
+    project with a pin lands anyway. The flag is accepted for one release,
+    installs nothing, and says so."""
     (repo / "uv.lock").write_text("value = 0\n")
     git(repo, "add", "uv.lock")
     git(repo, "commit", "-qm", "lock")
     home = tmp_path / "home"
-    config = build_config(home, None)
-    if pin is not None:
-        _bind(config, repo, {"verify_command": pin})
     worker = shlex.join([sys.executable, str(FAKE_WORKER)])
-    code = main(["--home", str(home), "run", str(repo), "Bump. MODE:vacuous FILE:uv.lock",
-                 "--worker-cmd", worker, "--auto-approve", "--execution-mode", "workspace",
-                 "--quiet"])  # fmt: skip
-    assert code == 0, capsys.readouterr()
-    store = RunStore(config.db_path)
-    try:
-        (run,) = store.recent_runs(10)
-    finally:
-        store.close()
-    _assert_not_landed(repo, run.task_id)
-    assert reason in _blocked_reason(config, run.task_id)
+    argv = (["run", str(repo), "Bump. MODE:happy FILE:uv.lock", "--worker-cmd", worker,
+             "--execution-mode", "workspace", "--quiet"]
+            if command == "run" else ["tick"])  # fmt: skip
+    assert main(["--home", str(home), *argv, "--auto-approve"]) == 0
+    assert RETIRED in capsys.readouterr().err
+    assert build_config(home, None).auto_approval_rules == ()
+    if command == "run":
+        store = RunStore(build_config(home, None).db_path)
+        try:
+            (run,) = store.recent_runs(10)
+            assert store.approvals_for(run.task_id) == []
+        finally:
+            store.close()
+        _assert_not_landed(repo, run.task_id)
+
+
+def test_run_help_says_auto_approve_has_no_effect(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        main(["run", "--help"])
+    assert "no effect" in " ".join(capsys.readouterr().out.split())
 
 
 def test_resume_path_refuses_a_vacuous_pin(repo: Path, config: SupervisorConfig) -> None:

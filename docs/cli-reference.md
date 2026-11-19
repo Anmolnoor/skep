@@ -86,7 +86,9 @@ Important options:
   outbound unless policy or a matched template grants more.
 - `--env-allow ENV` passes one environment variable; repeatable.
 - `--caste CASTE` selects the worker kind. The common launch path is `coding`.
-- `--auto-approve` enables configured safe auto-approval rules.
+- `--auto-approve` has no effect (retired; still accepted on `run`, `tick` and
+  `serve` for one release, with a note): a patch lands without a click only in
+  a maintain-phase project with a pinned check (`auto_apply_verified_patch`).
 - `--role NAME` gives the worker a role: its layer narrows the worker's grants
   (see Roles).
 - `--delegated-by ACTOR@ROLE` dispatches as that delegator (repeat, outermost
@@ -167,7 +169,7 @@ skep schedule add NAME REPO "instructions" --every 1d [options]
 skep schedule add NAME REPO --template TEMPLATE --every 1d [--param KEY=VALUE]
 skep schedule list
 skep schedule remove NAME
-skep tick [--worker-cmd COMMAND] [--auto-approve]
+skep tick [--worker-cmd COMMAND]
 ```
 
 - `schedule add` creates a recurring direct run or template-bound run.
@@ -214,7 +216,7 @@ exist because a *model* proposed the action, not a human.
 ## Serve
 
 ```sh
-skep serve [--host HOST] [--port PORT] [--worker-cmd COMMAND] [--auto-approve] [--no-readopt]
+skep serve [--host HOST] [--port PORT] [--worker-cmd COMMAND] [--no-readopt]
 ```
 
 `serve` starts the local HTTP API and browser dashboard. It prints the URL and
