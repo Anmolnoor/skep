@@ -4,10 +4,10 @@
 import { getCollection, render } from 'astro:content';
 import Doc from '../../layouts/Doc.astro';
 import { docTitle, neighbours, parseDocsIndex } from '../../lib/nav.mjs';
-import { docUrl } from '../../lib/slugs.mjs';
+import { docUrl, isMaintainerDoc } from '../../lib/slugs.mjs';
 
 export async function getStaticPaths() {
-  const entries = await getCollection('docs');
+  const entries = (await getCollection('docs')).filter((entry) => !isMaintainerDoc(entry.id));
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const title = (id: string) => docTitle(byId.get(id)?.body, id);
   const indexed = parseDocsIndex(byId.get('readme')?.body ?? '')

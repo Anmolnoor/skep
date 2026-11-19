@@ -32,6 +32,10 @@ BANNED_PHRASINGS = (
     "tamper proof",
     "fully sandboxed",
     "planned adapters",
+    "100% local",
+    "default-deny",
+    "only path to a commit",
+    "group policy for agents",
     "github.com/Anmolnoor/skep/discussions",
 )
 
@@ -343,4 +347,4 @@ def test_site_workflow_checks_pull_requests_and_deploys_main() -> None:
     assert '"build": "astro build && pagefind --site dist"' in package
     assert "scripts/check-links.mjs" in package
     assert "scripts/check-js-budget.mjs" in package
-    assert "120 * 1024" in (SITE / "scripts" / "check-js-budget.mjs").read_text(encoding="utf-8")
+    assert "160 * 1024" in (SITE / "scripts" / "check-js-budget.mjs").read_text(encoding="utf-8")

@@ -39,7 +39,7 @@ caches them under `node_modules/.astro`), so the first build needs the network.
 - a page of the old site (`agents.html`, `docs.html`, …) is missing from `dist/`;
 - an old `doc.html?d=<slug>` no longer resolves;
 - a page links GitHub Discussions (disabled on the repository: link Issues);
-- the home page loads more than 120 KB of JavaScript, gzipped.
+- the home page loads more than 160 KB of JavaScript, gzipped.
 
 ## Layout
 
@@ -408,7 +408,7 @@ scrolls in with `client:visible={{ rootMargin: '200px' }}`.
 
 ### JavaScript budget
 
-The home page may load at most **120 KB** of JavaScript (gzip); `npm run check`
+The home page may load at most **160 KB** of JavaScript (gzip); `npm run check`
 fails above it. Other pages have no check, but ship no React unless they carry
 an island. Measured on this toolchain, per page:
 
@@ -420,11 +420,11 @@ an island. Measured on this toolchain, per page:
 | `CountUp` (pulls motion's `animate` and `useInView`) | + 31 KB |
 | anything that imports the `motion` component from `motion/react` (`BlurText`, `RotatingText`, your own `motion.div`) | + 47 KB or more |
 
-So on the home page: `DecryptedText` + `CountUp` is 106 KB and leaves about
-14 KB for the island's own code. `BlurText` alone is 120.5 KB and
-`RotatingText` alone is 129 KB: neither fits on the home page, and a home
-island cannot use `motion.div`. Animate a home island with CSS transitions
-driven by state, or with `animate` / `useInView` from `motion/react`.
+So on the home page a hero island may import the `motion` component from
+`motion/react` (about 120 KB with the React runtime) and still has about 40 KB
+for its own code and `DecryptedText`. Do not add a second motion-based text
+component to the home page on top of that. The server HTML is the final state
+(M3), so none of this JavaScript blocks reading.
 
 ## Markdown
 

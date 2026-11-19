@@ -21,6 +21,13 @@ test('subdirectories resolve in both directions', () => {
   assert.equal(rewriteHref('0049-y.md', 'adr/0050-x.md'), '/docs/adr/0049-y.html');
 });
 
+test('maintainer records link to GitHub, not to a site page', () => {
+  assert.equal(rewriteHref('launch.md', 'README.md'), `${BLOB}docs/launch.md`);
+  assert.equal(rewriteHref('competitive-analysis.md#notes', 'README.md'), `${BLOB}docs/competitive-analysis.md#notes`);
+  assert.equal(rewriteHref('releases/README.md', 'README.md'), `${BLOB}docs/releases/README.md`);
+  assert.equal(rewriteHref('../release-checklist.md', 'releases/README.md'), `${BLOB}docs/release-checklist.md`);
+});
+
 test('anything that leaves docs/ goes to GitHub', () => {
   assert.equal(rewriteHref('../SKILL.md', 'README.md'), `${BLOB}SKILL.md`);
   assert.equal(rewriteHref('../CONTRIBUTING.md#gates', 'README.md'), `${BLOB}CONTRIBUTING.md#gates`);

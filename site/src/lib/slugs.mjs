@@ -5,6 +5,22 @@ export function docId(relPath) {
   return relPath.replace(/\.md$/i, '').toLowerCase();
 }
 
+// Maintainer records: public on GitHub, not pages of the site and not in its search
+// (letter grades for other products, launch playbooks, release runbooks).
+const MAINTAINER_DOCS = new Set([
+  'competitive-analysis',
+  'launch',
+  'post-launch',
+  'release-checklist',
+  'demo-gif',
+]);
+
+/** True for a docs-collection id (or `docs/`-relative path) the site does not render. */
+export function isMaintainerDoc(idOrPath) {
+  const id = docId(idOrPath);
+  return MAINTAINER_DOCS.has(id) || id.startsWith('releases/');
+}
+
 /** Collection id -> the page URL (`build.format: 'file'`). */
 export function docUrl(id) {
   return `/docs/${id}.html`;
