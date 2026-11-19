@@ -103,6 +103,33 @@ class FakeResponses:
             ]
         )
 
+    def script_parallel_calls(self, calls: list[tuple[str, dict[str, Any]]]) -> None:
+        """chatgpt.com's shape for parallel calls: no argument deltas, only
+        ``function_call_arguments.done`` carrying the whole string."""
+        events: list[dict[str, Any]] = [{"type": "response.created", "response": {}}]
+        for index, (name, arguments) in enumerate(calls):
+            item = {"type": "function_call", "call_id": f"call_{index}", "name": name}
+            encoded = json.dumps(arguments)
+            events += [
+                {
+                    "type": "response.output_item.added",
+                    "output_index": index,
+                    "item": {**item, "arguments": ""},
+                },
+                {
+                    "type": "response.function_call_arguments.done",
+                    "output_index": index,
+                    "arguments": encoded,
+                },
+                {
+                    "type": "response.output_item.done",
+                    "output_index": index,
+                    "item": {**item, "arguments": encoded},
+                },
+            ]
+        events.append(_completed())
+        self.chat_scripts.append(events)
+
     def script_failure(self, message: str) -> None:
         self.chat_scripts.append(
             [

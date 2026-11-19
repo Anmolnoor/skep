@@ -208,6 +208,24 @@ def test_stream_normalizes_a_split_tool_call(responses: FakeResponses) -> None:
     assert call["function"]["arguments"] == {"limit": 2}
 
 
+def test_stream_keeps_parallel_call_arguments_sent_only_on_done(
+    responses: FakeResponses,
+) -> None:
+    # Field test 2026-11-19: every parallel call reached its tool as {}.
+    responses.script_parallel_calls([("git_log", {"repo": "calc"}), ("list_runs", {"limit": 2})])
+    chunks = list(
+        chat_stream(
+            responses.base_url,
+            "sk-openai",
+            model="gpt-5.2",
+            messages=[{"role": "user", "content": "both"}],
+            protocol="openai-responses",
+        )
+    )
+    (calls,) = [c["message"]["tool_calls"] for c in chunks if c["message"].get("tool_calls")]
+    assert [c["function"]["arguments"] for c in calls] == [{"repo": "calc"}, {"limit": 2}]
+
+
 def test_stream_failure_event_raises(responses: FakeResponses) -> None:
     responses.script_failure("context window exceeded")
     with pytest.raises(OllamaError) as err:
