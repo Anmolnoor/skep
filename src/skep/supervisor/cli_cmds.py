@@ -1029,8 +1029,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     elapsed = time.monotonic() - started
     print(f"task {record.task_id}")
     print(f"  state:        {record.state} ({elapsed:.1f}s)")
-    print(f"  verification: {record.verification_outcome or '-'}")
-    print(f"  summary:      {record.summary or '-'}")
+    print("\n".join(_verification_lines(config, record)))
     print(f"  evidence:     {config.audit_dir / record.task_id}")
     if record.state == "pending_approval":
         inline_code = _prompt_inline_approval(config, record)
@@ -1040,6 +1039,34 @@ def cmd_run(args: argparse.Namespace) -> int:
     elif record.state == "completed":
         print(f"  next:         skep review {record.task_id}")
     return STATE_EXIT_CODES.get(record.state, 3)
+
+
+def _verification_lines(config: SupervisorConfig, record: RunRecord) -> list[str]:
+    """v127-T3 (I8, trial V01/V13): once G10 re-ran the patch its verdict is
+    the verification line; the worker's own check (`git diff --check` for an
+    external engine) is shown as the worker's claim, never as the verdict."""
+    store = RunStore(config.db_path)
+    try:
+        rv = store.reverification_for(record.task_id)
+    finally:
+        store.close()
+    claim = f"{record.verification_outcome or '-'} — {record.summary or '-'}"
+    if rv is None or rv.outcome == "not_applicable":
+        return [
+            f"  verification: {record.verification_outcome or '-'}",
+            f"  summary:      {record.summary or '-'}",
+        ]
+    if rv.confirmed:
+        verdict = "confirmed by re-verify (G10)"
+    elif rv.outcome == "unavailable":
+        verdict = "unavailable — re-verify (G10) could not run, NOT CONFIRMED"
+    else:
+        verdict = "NOT CONFIRMED by re-verify (G10)"
+    if rv.exit_codes:
+        how = f"re-ran {'; '.join(rv.commands)} → exit {', '.join(map(str, rv.exit_codes))}"
+    else:
+        how = rv.detail.splitlines()[0] if rv.detail else "no command re-ran"
+    return [f"  verification: {verdict} — {how}", f"  worker claim: {claim}"]
 
 
 def _answer_hosts(
@@ -1818,7 +1845,7 @@ def _resume_claimed_gate(
         )
     print(f"resumed: {record.task_id} -> {new.task_id}")
     print(f"  state:        {new.state}")
-    print(f"  verification: {new.verification_outcome or '-'}")
+    print("\n".join(_verification_lines(config, new)))
     print(f"  evidence:     {config.audit_dir / new.task_id}")
     if remembered_template is not None:
         action, name = remembered_template

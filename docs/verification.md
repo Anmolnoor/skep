@@ -89,6 +89,18 @@ one it is `unavailable`, never `failed`.
 A run is `confirmed` only when the worker reported verification `passed` and
 Skep's replay outcome is also `passed`.
 
+## What Run Shows
+
+`skep run` (and a resumed run) prints Skep's replay verdict as its
+verification line once the replay ran, and the worker's own check below it
+as the worker's claim (v127-T3) — an external engine's own check is only
+`git diff --check`, so its "passed" is never shown as the verdict:
+
+```text
+  verification: NOT CONFIRMED by re-verify (G10) — re-ran npm test → exit 1
+  worker claim: passed — codex produced a verified patch.
+```
+
 ## What Review Shows
 
 `skep review <task_id>` includes the worker claim and the independent replay:
