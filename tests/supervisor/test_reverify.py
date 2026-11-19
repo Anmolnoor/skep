@@ -690,12 +690,12 @@ def test_es_f3_landing_builds_on_the_exact_base_g10_verified(
 
 
 def _node_stubs(tmp_path: Path) -> tuple[Path, Path]:
-    """Fake `npm`/`pnpm`/`yarn` that log each call (tool, argv, whether the
+    """Fake `npm`/`pnpm`/`yarn`/`node` that log each call (tool, argv, whether the
     patch had landed, the npm cache) — no network, like `_uv_stub`."""
     bin_dir = tmp_path / "nodebin"
     bin_dir.mkdir()
     log = tmp_path / "node.log"
-    for tool in ("npm", "pnpm", "yarn"):
+    for tool in ("npm", "pnpm", "yarn", "node"):
         stub = bin_dir / tool
         stub.write_text(
             "#!/bin/sh\n"
@@ -784,6 +784,22 @@ def test_a_node_pin_primes_from_the_baseline_lockfile_then_verifies_offline(
     assert lines[1].startswith(f"{pin} ") and "patched=yes" in lines[1]
     assert "primed from the baseline" in outcome.detail
     assert len(lines) == 2  # no lockfile change, no second install
+
+
+def test_a_bare_node_pin_in_a_repo_with_dependencies_is_primed_too(
+    repo: Path, config: SupervisorConfig, tmp_path: Path
+) -> None:
+    """v127-A0 review: `node --test tests/*.test.mjs` is the pin setup and the
+    trial repos use; its tests import the repo's dependencies just like
+    `npm test` does, so it primes from the baseline lockfile the same way."""
+    _node_project(repo, "package-lock.json")
+    bin_dir, log = _node_stubs(tmp_path)
+    pin = "node --test tests/a.test.mjs"
+    outcome = _node_reverify(repo, config, _patch_adding_marker(tmp_path), bin_dir, log, pin)
+    assert outcome.outcome == "passed", outcome.detail
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert lines[0].startswith("npm ci --ignore-scripts ") and "patched=no" in lines[0]
+    assert lines[1].startswith(f"{pin} ") and "patched=yes" in lines[1]
 
 
 def test_a_node_lockfile_patch_is_primed_again_after_it_applies(

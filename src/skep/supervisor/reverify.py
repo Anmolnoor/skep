@@ -107,7 +107,8 @@ def _needs_uv_priming(worktree: Path, commands: list[str]) -> bool:
 # ponytail: yarn 2+ (berry) rejects --frozen-lockfile/--ignore-scripts, so its
 # prime fails and re-verify says unavailable; add `--immutable --mode=skip-build`
 # when a berry repo is pinned.
-_NODE_TOOLS = frozenset({"npm", "npx", "pnpm", "yarn"})
+# `node` too: a `node --test` pin imports the same dependencies `npm test` does.
+_NODE_TOOLS = frozenset({"node", "npm", "npx", "pnpm", "yarn"})
 _NODE_INSTALLS = (
     ("pnpm-lock.yaml", "pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile"),
     ("yarn.lock", "yarn install --frozen-lockfile --ignore-scripts"),

@@ -34,7 +34,7 @@ and writes confined to the clean worktree.
 Because the replay has no network, Skep first installs the project's
 dependencies from the baseline's lockfile under a network-allowed profile, then
 again from the patched lockfile when the patch changes it: `uv` projects
-(`uv.lock`) and Node projects (`package-lock.json`, `pnpm-lock.yaml`,
+(`uv.lock`) and Node projects whose pin starts with `node`, `npm`, `npx`, `pnpm` or `yarn` (`package-lock.json`, `pnpm-lock.yaml`,
 `yarn.lock`, lifecycle scripts off). Other ecosystems are not primed: their pin
 re-runs only with what the host already has.
 
