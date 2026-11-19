@@ -27,6 +27,13 @@ SKEP_DOCKER_IMAGE=skep:release-local scripts/docker-image-smoke.sh
 SKEP_DOCKER_IMAGE=skep:linux-sandbox-smoke scripts/linux-sandbox-docker-smoke.sh
 ```
 
+The docs site is its own gate (it needs Node 24 and npm; the Site workflow runs
+the same four commands on every pull request and before every deploy):
+
+```sh
+(cd site && npm ci && npm run build && npm test && npm run check)
+```
+
 If a public-image pull hangs in Docker credential lookup, run the Docker gate
 with an empty config:
 
@@ -49,12 +56,14 @@ Expected results:
   `dist/skep-<version>-py3-none-any.whl`.
 - `twine check`: wheel and sdist pass.
 - `scripts/package-install-smoke.sh`: installed wheel exposes a working `skep --version`
-  in a disposable virtualenv.
+  in a disposable virtualenv, and the sdist carries no `site/` entry.
 - `scripts/docker-image-smoke.sh`: image builds, serves the UI, rejects
   unauthenticated API status, prints an access token, and accepts authenticated
   status/runs requests.
 - `scripts/linux-sandbox-docker-smoke.sh`: the Skep image runs the real
   `scripts/linux-sandbox-smoke.sh` path with Linux bubblewrap available.
+- site: `npm run build` builds every page and the search index, `npm test`
+  passes, and `npm run check` prints `check-links: ok` and `check-js-budget: ok`.
 
 ## Hygiene Scans
 
@@ -104,6 +113,7 @@ Check that these files exist and are current:
 - `docs/site.css`
 - `docs/site.js`
 - `docs/assets/skep-demo.gif`
+- `site/README.md`
 - `examples/skep-demo/README.md`
 - `scripts/package-install-smoke.sh`
 
@@ -129,7 +139,9 @@ These require account or hosting access and cannot be proven by local tests:
 3. Confirm the release workflow publishes to PyPI and creates the GitHub release.
 4. Confirm the GHCR image is available if container publishing is enabled.
 5. Publish or mirror `examples/skep-demo` as the public `skep-demo` repo.
-6. Deploy `docs/` to `https://skep.anmolnoor.com`.
+6. The Site workflow (`.github/workflows/site.yml`) deploys the site to
+   `https://skep.anmolnoor.com` on every push to `main`; confirm its run for the
+   release commit is green.
 7. Verify DNS, HTTPS, landing-page links, and the demo GIF in a browser.
 8. Install from PyPI on a fresh machine and run the quickstart.
 9. Test at least one real Claude Code run through the adapter:

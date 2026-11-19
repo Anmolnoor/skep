@@ -46,3 +46,20 @@ def test_ruff_includes_launch_scripts() -> None:
     )
 
     assert "scripts/**/*.py" in pyproject["tool"]["ruff"]["include"]
+
+
+def test_sdist_leaves_the_docs_site_out() -> None:
+    """docs-site: site/ holds React Bits copies (MIT + Commons Clause) that may
+    be used in the website but not redistributed, so the sdist excludes it.
+    The wheel is `packages = ["src/skep"]` and never saw it. pytest cannot
+    build an sdist offline; the release gate lists the real one."""
+    root = Path(__file__).parents[2]
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    targets = pyproject["tool"]["hatch"]["build"]["targets"]
+
+    assert targets["sdist"]["exclude"] == ["site"]
+    assert targets["wheel"]["packages"] == ["src/skep"]
+
+    smoke = (root / "scripts" / "package-install-smoke.sh").read_text(encoding="utf-8")
+    assert 'for sdist in "$ROOT"/dist/skep-*.tar.gz' in smoke
+    assert "sdist carries site/" in smoke

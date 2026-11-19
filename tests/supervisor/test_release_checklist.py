@@ -44,6 +44,20 @@ def test_release_checklist_covers_landing_demo_assets() -> None:
         assert relpath in checklist
 
 
+def test_release_checklist_lists_the_site_build_gate() -> None:
+    """docs-site: the site is built, not hand-copied; its build is a gate and
+    its deploy is the Site workflow, not a manual upload of docs/."""
+    checklist = (ROOT / "docs" / "release-checklist.md").read_text(encoding="utf-8")
+
+    assert "(cd site && npm ci && npm run build && npm test && npm run check)" in checklist
+    assert "`check-links: ok` and `check-js-budget: ok`" in checklist
+    assert "`.github/workflows/site.yml`" in checklist
+    assert "on every push to `main`" in checklist
+    assert "Deploy `docs/`" not in checklist
+    assert "the sdist carries no `site/` entry" in checklist
+    assert "site/README.md" in checklist
+
+
 def test_release_checklist_covers_package_install_smoke() -> None:
     checklist = (ROOT / "docs" / "release-checklist.md").read_text(encoding="utf-8")
 
