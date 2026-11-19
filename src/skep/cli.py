@@ -123,7 +123,9 @@ def _parser() -> argparse.ArgumentParser:
     # first-run O4 (ADR 0056 D6): the why-lines under every verdict card.
     loudness = onboard.add_mutually_exclusive_group()
     loudness.add_argument(
-        "--quiet", action="store_true", help="turn the first-run why-lines and tally off"
+        "--quiet",
+        action="store_true",
+        help="turn the first-run why-lines and tally off (every other flag still applies)",
     )
     loudness.add_argument(
         "--verbose", action="store_true", help="turn the first-run why-lines and tally back on"
@@ -354,7 +356,14 @@ def _onboard(args: argparse.Namespace) -> int:
         onboard.onboard_transparency(config.home, verbose=args.verbose)
         state = "on — a why-line under every verdict card" if args.verbose else "off"
         print(f"first-run why-lines: {state} (flip with skep onboard --quiet | --verbose)")
-        return 0
+        # v127-T2 (trial V15/V16): alone they only flip the why-lines; beside
+        # any other onboard flag every step still runs — `--quiet` once ate
+        # --provider/--template/--yes and exited 0 having configured nothing.
+        steps = ("provider", "model", "endpoint", "api_key_env", "workdir", "sandbox")
+        if not (args.check or args.yes) and all(
+            getattr(args, key) is None for key in (*steps, "template", "role")
+        ):
+            return 0
     if args.check:
         result = onboard.onboard_check(config.home)
         print(result["report"], end="")

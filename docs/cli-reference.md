@@ -45,7 +45,8 @@ skep status [--personal] [--json]
 - `onboard --quiet | --verbose` (first-run O4) turns the first-session
   `why:` line under every chat verdict card, and the per-turn tally, off or
   back on (`~/.skep/first_run.json` `dismissed`; REST:
-  `POST /api/onboard/transparency {"verbose": bool}`).
+  `POST /api/onboard/transparency {"verbose": bool}`). Beside any other
+  onboard flag they only set the why-lines: every step still runs (v127-T2).
   Exits 0 only when every check is ready.
 - `setup --personal` creates or updates the personal profile.
 - `doctor` reports readiness and exits non-zero when the profile is not ready.

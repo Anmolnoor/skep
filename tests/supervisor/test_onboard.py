@@ -879,3 +879,31 @@ def test_a_failed_first_switch_leaves_no_setting_rows(tmp_path: Path) -> None:
         assert not (home / "profile.json").exists()
     finally:
         broken.stop()
+
+
+def test_quiet_onboard_still_applies_every_setup_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """v127-T2 (trial V15/V16): --quiet beside setup flags used to flip the
+    why-lines, exit 0 and configure nothing — the trial homes had no provider
+    and both builtin runs fell back to the stub. --quiet only quiets."""
+    from functools import partial
+
+    from skep.supervisor import onboard
+    from skep.supervisor.onboard import transparency_active
+
+    monkeypatch.setattr(onboard, "onboard_sandbox", partial(onboard.onboard_sandbox, probe=_usable))
+    home, work = tmp_path / "home", tmp_path / "work"
+    argv = [
+        *("--home", str(home), "onboard", "--template", "builder", "--role", "builder"),
+        *("--sandbox", "auto", "--workdir", str(work), "--yes", "--no-chat", "--quiet"),
+        *("--provider", "mock"),
+    ]
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "why-lines: off" in out
+    assert "onboarded" in out
+    assert not transparency_active(home)
+    assert onboard_status(home / "supervisor")["done"]
+    assert json.loads((home / "onboard.json").read_text())["model"]["provider"] == "mock"
+    assert isinstance(verify(home / "supervisor"), Ok)
