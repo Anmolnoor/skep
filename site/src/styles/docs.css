@@ -211,6 +211,17 @@
   color: var(--text-mid);
   overflow-wrap: break-word;
 }
+/* A doc page: running text is about 68 characters of real text a line (33rem at
+   this size; `72ch` measures the digit 0, which is wider than the average
+   letter, and came to about 93). Code blocks, tables and images keep the whole
+   column, so a wide table or a long command is not squeezed into the measure. */
+.docs-main .prose {
+  --doc-measure: 33rem;
+  max-width: none;
+}
+.docs-main .prose > :not(pre, table, .table-scroll, figure, img, hr) {
+  max-width: var(--doc-measure);
+}
 .prose > :first-child {
   margin-top: 0;
 }
