@@ -72,13 +72,9 @@ def test_scan_covers_personal_email_addresses() -> None:
     # The published contact addresses are deliberate; the scanner must not
     # teach the operator to ignore it.
     assert '"$scan_path" == "SECURITY.md"' in script
-    # LAUNCH-2: the site's private-channel pages (security, conduct) carry
-    # the published contact; the rest of the site must stay address-free.
-    assert "-g '!docs/security.html'" in script
-    assert "-g '!docs/code-of-conduct.html'" in script
     assert "-g '!docs/launch.md'" in script
-    # docs-site: the Astro sources are scanned like the pages they replace, and
-    # the same two private-channel pages carry the published contact.
+    # docs-site: the site's private-channel pages (security, conduct) carry the
+    # published contact; the rest of the site must stay address-free.
     assert "  site/src\n" in script
     assert "-g '!site/src/pages/security.astro'" in script
     assert "-g '!site/src/pages/code-of-conduct.astro'" in script

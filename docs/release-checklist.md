@@ -109,9 +109,8 @@ Check that these files exist and are current:
 - `docs/launch.md`
 - `docs/post-launch.md`
 - `docs/version-history.md`
-- `docs/index.html`
-- `docs/site.css`
-- `docs/site.js`
+- `site/src/pages/index.astro`
+- `site/src/styles/tokens.css`
 - `docs/assets/skep-demo.gif`
 - `site/README.md`
 - `examples/skep-demo/README.md`

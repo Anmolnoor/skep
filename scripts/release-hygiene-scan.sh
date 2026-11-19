@@ -77,7 +77,7 @@ for scan_path in "${all_scan_paths[@]}"; do
   [[ "$scan_path" == "SECURITY.md" ]] || scan_paths+=("$scan_path")
 done
 scan_pattern "personal email addresses" "$personal_emails" \
-  -g '!docs/security.html' -g '!docs/code-of-conduct.html' -g '!docs/launch.md' \
+  -g '!docs/launch.md' \
   -g '!site/src/pages/security.astro' -g '!site/src/pages/code-of-conduct.astro'
 scan_paths=("${all_scan_paths[@]}")
 
